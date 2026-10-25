@@ -5,7 +5,7 @@
 //! directly. That forks the platform hash chain: two concurrent writers can
 //! both link onto the same `previous_hash`, and the canonical sequencer
 //! (`audit_chain_head`, migration 105, advanced by api-server/billing) never
-//! sees the worker's rows — chain verification against the head table cannot
+//! sees the worker's rows, chain verification against the head table cannot
 //! validate them. Migration 105 replaced exactly that pattern with a single
 //! `INSERT ... ON CONFLICT (chain_id) DO UPDATE ... RETURNING prev_hash`
 //! statement.
@@ -141,7 +141,7 @@ fn audit_signing_key() -> Result<zeroize::Zeroizing<String>, sqlx::Error> {
         ))),
         Ok(_) | Err(_) => {
             tracing::warn!(
-                "AUDIT_SIGNING_KEY not set — using the development fallback for worker audit \
+                "AUDIT_SIGNING_KEY not set, using the development fallback for worker audit \
                  signatures"
             );
             Ok(zeroize::Zeroizing::new(

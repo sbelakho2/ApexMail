@@ -155,7 +155,7 @@ pub struct SandboxResult {
 /// Whitespace-sensitive elements whose content must never be minified.
 const WHITESPACE_SENSITIVE_TAGS: &[&str] = &["pre", "textarea", "code"];
 
-/// Basic HTML minification — removes excess whitespace between tags.
+/// Basic HTML minification, removes excess whitespace between tags.
 ///
 /// Content inside `<pre>`, `<textarea>`, and `<code>` is copied verbatim:
 /// collapsing whitespace there corrupts code samples and preformatted email
@@ -201,7 +201,7 @@ fn minify_html_within(
                 rest = &rest[close_end..];
             }
             None => {
-                // Unbalanced — copy the remainder verbatim (fail safe).
+                // Unbalanced, copy the remainder verbatim (fail safe).
                 result.push_str(rest);
                 return Ok(result);
             }
@@ -542,7 +542,7 @@ mod tests {
     }
 
     /// 5 000 nested `<div>`s (~25KB) is far past the nesting limit and must
-    /// return a sandbox error — not abort the tokio worker thread with a
+    /// return a sandbox error, not abort the tokio worker thread with a
     /// stack overflow. Runs on this test thread's default stack: unbounded
     /// recursion would abort the process before the assert is reached.
     #[test]

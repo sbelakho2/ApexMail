@@ -1,8 +1,8 @@
-{# ── Interactive Pricing Calculator (Rust-only) — plain apex-panel ──── #}
+{# ── Interactive Pricing Calculator (Rust-only), plain apex-panel ──── #}
 {# POSTs a standard HTML form to the Rust api-server's               #}
 {# /explorer/calculate endpoint, which computes the result using      #}
 {# the billing-service plan tables (the invoicing source of truth)   #}
-{# and renders a full result page. Zero JavaScript — the browser     #}
+{# and renders a full result page. Zero JavaScript, the browser     #}
 {# does a normal form submission and the Rust server does all the    #}
 {# math.                                                              #}
 
@@ -16,7 +16,7 @@
       <span class="apex-section-aside">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_pricing_island"] and i18n_data[l]["home_pricing_island"]["pricing_island_eyebrow"] %}{{ i18n_data[l]["home_pricing_island"]["pricing_island_eyebrow"] }}{% else %}Calculator{% endif %}</span>
     </div>
     <p class="apex-meta max-w-2xl">
-      {% if i18n_data and i18n_data[l] and i18n_data[l]["home_pricing_island"] and i18n_data[l]["home_pricing_island"]["pricing_island_subtitle"] %}{{ i18n_data[l]["home_pricing_island"]["pricing_island_subtitle"] }}{% else %}Enter your volumes — the calculator uses the same pricing rules used for billing, so the estimate matches your invoice.{% endif %}
+      {% if i18n_data and i18n_data[l] and i18n_data[l]["home_pricing_island"] and i18n_data[l]["home_pricing_island"]["pricing_island_subtitle"] %}{{ i18n_data[l]["home_pricing_island"]["pricing_island_subtitle"] }}{% else %}Enter your volumes, the calculator uses the same pricing rules used for billing, so the estimate matches your invoice.{% endif %}
     </p>
 
     <div class="apex-panel mt-6">
@@ -25,7 +25,7 @@
         <form method="POST" action="https://api.apexmail.ee/explorer/calculate"
               class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-x-6 gap-y-2">
 
-          {# volume — the primary input #}
+          {# volume, the primary input #}
           <div class="apex-field">
             <label for="calc-volume">
               {% if i18n_data and i18n_data[l] and i18n_data[l]["calculator"] and i18n_data[l]["calculator"]["volume"] %}{{ i18n_data[l]["calculator"]["volume"] }}{% else %}Emails / month{% endif %}
@@ -84,7 +84,7 @@
             </div>
           </div>
 
-          {# submit — the Rust backend does the rest #}
+          {# submit, the Rust backend does the rest #}
           <div class="sm:col-span-2 lg:col-span-3 flex flex-col items-start gap-3 pt-4">
             <button type="submit" class="apex-mkt-cta--primary">
               {% if i18n_data and i18n_data[l] and i18n_data[l]["calculator"] and i18n_data[l]["calculator"]["compute"] %}{{ i18n_data[l]["calculator"]["compute"] }}{% else %}Compute my price{% endif %}

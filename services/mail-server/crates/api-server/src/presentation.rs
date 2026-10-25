@@ -73,7 +73,7 @@ pub mod json_buffer {
         /// Serialize `value` into the internal buffer and return a reference
         /// to the serialized bytes.  The buffer is cleared before each call.
         ///
-        /// This avoids allocating a new `Vec` per serialization — only the
+        /// This avoids allocating a new `Vec` per serialization, only the
         /// internal buffer grows if the serialized output is larger than any
         /// previous call.
         pub fn serialize<T: Serialize>(&mut self, value: &T) -> Result<&[u8], serde_json::Error> {

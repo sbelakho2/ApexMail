@@ -7,12 +7,12 @@
 //!
 //! | Adapter | Event source (file:line at time of writing) |
 //! |---|---|
-//! | [`post_invoice_issued`] | invoice finalization — `billing-service/src/overage.rs:1966` (`finalize_collection`, draft→paid/pending) and `billing-service/src/mollie_webhooks.rs:1608` (`handle_invoice_paid`) |
-//! | [`post_payment_allocation`] | Mollie settlement / wallet settlement — allocation rows written at `billing-service/src/mollie_webhooks.rs:1741` and `billing-service/src/overage.rs:1918` (`invoice_payment_allocations`) |
-//! | [`post_credit_note`] | credit notes / refunds — `billing-service/src/credit_notes.rs:172` (`create_credit_note`, `credit_notes` rows) |
-//! | [`post_operating_cost`] | expenses — deployment-optional `operating_costs`, read by `compliance/src/estonia_ou.rs:973` (there is no canonical expense table; the adapter reports `SourceTableMissing` when absent). NO production writer exists: [`crate::sweeps::sweep_unposted_expenses`] posts any row a future expense feature (or psql) creates. |
-//! | [`post_payroll_record`] | payroll — `payroll_records` (migration `199_payroll_tax_inputs.sql:26`, read by `compliance/src/estonia_ou.rs:1026`). NO production writer exists: no payroll-run/admin path inserts rows; [`crate::sweeps::sweep_unposted_payroll`] posts every unposted record once the payroll-run feature (or psql) creates one. |
-//! | [`post_bank_statement_line`] | bank receipts/payments — `bank_statement_lines` (created by migration 220; no bank feed/import writer exists in the repo). [`crate::sweeps::sweep_unposted_bank_statement_lines`] posts any line a future feed creates. |
+//! | [`post_invoice_issued`] | invoice finalization, `billing-service/src/overage.rs:1966` (`finalize_collection`, draft→paid/pending) and `billing-service/src/mollie_webhooks.rs:1608` (`handle_invoice_paid`) |
+//! | [`post_payment_allocation`] | Mollie settlement / wallet settlement, allocation rows written at `billing-service/src/mollie_webhooks.rs:1741` and `billing-service/src/overage.rs:1918` (`invoice_payment_allocations`) |
+//! | [`post_credit_note`] | credit notes / refunds, `billing-service/src/credit_notes.rs:172` (`create_credit_note`, `credit_notes` rows) |
+//! | [`post_operating_cost`] | expenses, deployment-optional `operating_costs`, read by `compliance/src/estonia_ou.rs:973` (there is no canonical expense table; the adapter reports `SourceTableMissing` when absent). NO production writer exists: [`crate::sweeps::sweep_unposted_expenses`] posts any row a future expense feature (or psql) creates. |
+//! | [`post_payroll_record`] | payroll, `payroll_records` (migration `199_payroll_tax_inputs.sql:26`, read by `compliance/src/estonia_ou.rs:1026`). NO production writer exists: no payroll-run/admin path inserts rows; [`crate::sweeps::sweep_unposted_payroll`] posts every unposted record once the payroll-run feature (or psql) creates one. |
+//! | [`post_bank_statement_line`] | bank receipts/payments, `bank_statement_lines` (created by migration 220; no bank feed/import writer exists in the repo). [`crate::sweeps::sweep_unposted_bank_statement_lines`] posts any line a future feed creates. |
 //!
 //! `invoices` also carries rows inserted directly as paid by
 //! `mollie_webhooks.rs:1875` (`insert_paid_invoice_from_mollie`); that path
@@ -143,7 +143,7 @@ pub async fn post_invoice_issued_in(
         return Ok(PostOutcome::skipped());
     }
 
-    // SM7 F1: the posting path provisions its own preconditions — a fresh
+    // SM7 F1: the posting path provisions its own preconditions, a fresh
     // unprovisioned deployment gets the default entity + chart + open period
     // created here (idempotently) instead of skipping every posting forever.
     let legal_entity_id = crate::provisioning::ensure_default_entity_in(conn).await?;
@@ -193,7 +193,7 @@ pub async fn post_invoice_issued_in(
         );
     }
 
-    // NOTE: `status` is deliberately NOT part of the evidence hash — an
+    // NOTE: `status` is deliberately NOT part of the evidence hash, an
     // invoice may be finalized as `pending` and later read as `paid`; the
     // financial identity (amounts, currency, issue date) is what must stay
     // stable for the idempotent replay.
@@ -329,7 +329,7 @@ struct PaymentAllocationRow {
 }
 
 /// Post a settlement: Dr processor clearing / wallet liability / bank,
-/// Cr AR. Idempotency key `settlement:<operation_id>` — the allocation's own
+/// Cr AR. Idempotency key `settlement:<operation_id>`, the allocation's own
 /// unique operation id, so a replayed Mollie webhook posts once.
 pub async fn post_payment_allocation(pool: &PgPool, operation_id: &str) -> Result<PostOutcome> {
     let mut tx = pool.begin().await?;
@@ -566,26 +566,26 @@ pub async fn post_credit_note_in(
 
     let mut outcomes = Vec::with_capacity(2);
 
-    // Part 1: debt reduction — Dr revenue, Dr output VAT, Cr AR.
+    // Part 1: debt reduction, Dr revenue, Dr output VAT, Cr AR.
     if debt_reduction > 0 {
         let (net, vat) = split_vat_proportional(debt_reduction, invoice_total, invoice_vat);
         let mut lines = Vec::with_capacity(3);
         if net > 0 {
             lines.push(
                 JournalLine::debit(revenue, net, &currency)
-                    .with_description("Credit note — revenue reversal"),
+                    .with_description("Credit note, revenue reversal"),
             );
         }
         if vat > 0 {
             lines.push(
                 JournalLine::debit(vat_account, vat, &currency)
                     .with_vat(net, vat, None, Some("OUTPUT".to_string()))
-                    .with_description("Credit note — output VAT reversal"),
+                    .with_description("Credit note, output VAT reversal"),
             );
         }
         lines.push(
             JournalLine::credit(ar, debt_reduction, &currency)
-                .with_description("Credit note — debt reduction"),
+                .with_description("Credit note, debt reduction"),
         );
 
         let payload = serde_json::json!({
@@ -602,7 +602,7 @@ pub async fn post_credit_note_in(
             fiscal_period_id,
             entry_date: document_date,
             entry_type: EntryType::Standard,
-            memo: format!("Credit note {} — debt reduction", note.id),
+            memo: format!("Credit note {}, debt reduction", note.id),
             posted_by: "adapter:credit-note".to_string(),
             idempotency_key: format!("credit_note:{}:debt", note.id),
             source: Some(SourceIdentity::new(
@@ -622,7 +622,7 @@ pub async fn post_credit_note_in(
         outcomes.push(PostOutcome::skipped());
     }
 
-    // Part 2: refund — Dr refunds (contra revenue), Dr output VAT,
+    // Part 2: refund, Dr refunds (contra revenue), Dr output VAT,
     // Cr wallet liability.
     if refunded > 0 {
         let (net, vat) = split_vat_proportional(refunded, invoice_total, invoice_vat);
@@ -633,19 +633,19 @@ pub async fn post_credit_note_in(
         if net > 0 {
             lines.push(
                 JournalLine::debit(refunds, net, &currency)
-                    .with_description("Refund — revenue reversal"),
+                    .with_description("Refund, revenue reversal"),
             );
         }
         if vat > 0 {
             lines.push(
                 JournalLine::debit(vat_account, vat, &currency)
                     .with_vat(net, vat, None, Some("OUTPUT".to_string()))
-                    .with_description("Refund — output VAT reversal"),
+                    .with_description("Refund, output VAT reversal"),
             );
         }
         lines.push(
             JournalLine::credit(wallet, refunded, &currency)
-                .with_description("Refund — customer wallet liability"),
+                .with_description("Refund, customer wallet liability"),
         );
 
         let payload = serde_json::json!({
@@ -661,7 +661,7 @@ pub async fn post_credit_note_in(
             fiscal_period_id,
             entry_date: document_date,
             entry_type: EntryType::Standard,
-            memo: format!("Credit note {} — refund to wallet", note.id),
+            memo: format!("Credit note {}, refund to wallet", note.id),
             posted_by: "adapter:credit-note".to_string(),
             idempotency_key: format!("credit_note:{}:refund", note.id),
             source: Some(SourceIdentity::new(
@@ -1038,10 +1038,10 @@ pub async fn post_payroll_record_in(
 /// (`bank_reconciliations`) to reclassify.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BankLineClassification {
-    /// Payroll settlement (salaries, wages, payroll run) — routes to the
+    /// Payroll settlement (salaries, wages, payroll run), routes to the
     /// net-wages payable account when the chart defines one.
     Payroll,
-    /// Tax payment (income tax, VAT, the tax authority) — routes to the
+    /// Tax payment (income tax, VAT, the tax authority), routes to the
     /// income-tax payable account when the chart defines one.
     Tax,
     /// Unmatched: suspense, pending human review. Never silently AR or
@@ -1056,14 +1056,14 @@ const BANK_PAYROLL_KEYWORDS: &[&str] = &[
 ];
 
 /// Lowercased substring keywords that identify a tax payment (the Estonian
-/// tax authority is Maksu- ja Tolliamet — "emta"; "maks" is its root). VAT
+/// tax authority is Maksu- ja Tolliamet, "emta"; "maks" is its root). VAT
 /// settlement ("kmd", "käibemaks") is deliberately NOT routed here: the tax
 /// account below is income-tax payable, and re-classifying a VAT payment into
-/// it would trade the old misclassification for a new one — such lines stay
+/// it would trade the old misclassification for a new one, such lines stay
 /// in suspense for the reconciliation workflow.
 const BANK_TAX_KEYWORDS: &[&str] = &["tax", "emta", "maksu", "maks"];
 
-/// Classify one line by its reference + counterparty text (pure — pinned by
+/// Classify one line by its reference + counterparty text (pure, pinned by
 /// unit tests). Payroll is checked first: "payroll tax" context names the
 /// payroll relationship, and the payroll keyword set is the more specific.
 pub fn classify_bank_line(
@@ -1148,7 +1148,7 @@ async fn resolve_counterparty_account(
 
 /// Post a bank statement line: the amount's SIGN picks the bank side
 /// (receipts debit the bank, payments credit it) and the line's
-/// reference/counterparty text picks the counterparty account — payroll/tax
+/// reference/counterparty text picks the counterparty account, payroll/tax
 /// routes to their payable accounts when the chart defines them, everything
 /// else lands in `ROLE_SUSPENSE` for human review (audit SM7 F6; the old
 /// blanket receipt→AR / payment→operating-expense classification misstated
@@ -1317,7 +1317,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // Audit SM7 F6 — bank lines are classified, not force-classified.
+    // Audit SM7 F6, bank lines are classified, not force-classified.
     // ------------------------------------------------------------------
 
     #[test]
@@ -1338,9 +1338,9 @@ mod tests {
         );
         assert_eq!(classify_bank_line(Some("income tax Q3"), None), Tax);
         // VAT settlement deliberately stays in suspense (income-tax payable
-        // would be the wrong account — see BANK_TAX_KEYWORDS docs).
+        // would be the wrong account, see BANK_TAX_KEYWORDS docs).
         assert_eq!(classify_bank_line(Some("KMD settlement"), None), Suspense);
-        // Everything else — an owner capital injection, an unknown transfer —
+        // Everything else, an owner capital injection, an unknown transfer —
         // is UNMATCHED: suspense, never AR or operating expense (SM7 F6).
         assert_eq!(classify_bank_line(Some("INV-2026-042"), None), Suspense);
         assert_eq!(classify_bank_line(None, Some("owner capital"),), Suspense);
@@ -1354,7 +1354,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // Audit SM7 F10 — i64::MIN has no representable magnitude.
+    // Audit SM7 F10, i64::MIN has no representable magnitude.
     // ------------------------------------------------------------------
 
     #[test]

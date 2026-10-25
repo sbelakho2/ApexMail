@@ -1,13 +1,13 @@
 +++
 title = "Acceptable Use Policy"
-description = "ApexMail Acceptable Use Policy — rules governing how the email service may be used, organized by message category."
+description = "ApexMail Acceptable Use Policy, rules governing how the email service may be used, organized by message category."
 template = "prose.html"
 
 [extra]
 last_updated = "2026-07-30"
 +++
 
-This Acceptable Use Policy ("AUP") defines prohibited and acceptable uses of the ApexMail email infrastructure. Violation may result in suspension or termination. This AUP distinguishes between Marketing and Promotional Email and Transactional and Service Email — each category carries different consent, unsubscribe, and sending obligations as described below.
+This Acceptable Use Policy ("AUP") defines prohibited and acceptable uses of the ApexMail email infrastructure. Violation may result in suspension or termination. This AUP distinguishes between Marketing and Promotional Email and Transactional and Service Email, each category carries different consent, unsubscribe, and sending obligations as described below.
 
 ## Which rules apply to your message?
 

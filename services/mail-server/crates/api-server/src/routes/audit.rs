@@ -8,20 +8,20 @@
 //!
 //! Every handler enforces BOTH gates:
 //!
-//! * scope **`audit:read`** — an API key or session without it is refused
+//! * scope **`audit:read`**, an API key or session without it is refused
 //!   `403` before a row is read (RBAC);
-//! * entitlement **`FeatureKey::AuditLogs`** — resolved from the tenant's
+//! * entitlement **`FeatureKey::AuditLogs`**, resolved from the tenant's
 //!   effective plan (override-aware) and refused `403` naming the plan and
 //!   the capability when the plan does not sell it.
 //!
 //! ## Endpoints
 //!
-//! * `GET /v1/audit` — keyset-paginated rows, newest first. The tenant is
+//! * `GET /v1/audit`, keyset-paginated rows, newest first. The tenant is
 //!   ALWAYS the authenticated tenant; there is deliberately no `tenantId`
 //!   filter, so no request shape can widen the scope. The body is a bare
 //!   JSON array (matching the operator viewer) with `x-has-more` and
 //!   `x-next-cursor` continuation headers; `?cursor=` wins over `?offset=`.
-//! * `GET /v1/audit/export?format=csv|jsonl` — streamed export of the same
+//! * `GET /v1/audit/export?format=csv|jsonl`, streamed export of the same
 //!   tenant-scoped rows, bounded to a 90-day window and 50,000 rows. The
 //!   export is itself audited (`audit.trail.exported`).
 //!
@@ -348,7 +348,7 @@ fn build_audit_list_plan(
         )
     };
 
-    // The tenant bind is the FIRST value bound (asserted by tests) — it is
+    // The tenant bind is the FIRST value bound (asserted by tests), it is
     // never caller-supplied.
     let _ = tenant_id;
     Ok(AuditListPlan {
@@ -419,7 +419,7 @@ async fn list_audit_logs(
                 .map_err(|e| ApiError::Internal(format!("cursor encoding error: {e}")))?,
         );
     }
-    // An empty trail is a 200 with [] — honest, not a 404.
+    // An empty trail is a 200 with [], honest, not a 404.
     Ok((headers, Json(entries)))
 }
 
@@ -428,7 +428,7 @@ async fn list_audit_logs(
 /// Stream the tenant's audit rows as CSV or JSONL.
 ///
 /// The body is produced in bounded 1,000-row chunks (`futures::stream::unfold`
-/// owns the async block across polls — a hand-rolled Stream here once hung on
+/// owns the async block across polls, a hand-rolled Stream here once hung on
 /// the first chunk, see `admin/audit_search.rs`). A mid-stream database error
 /// terminates the body instead of hanging it.
 async fn export_audit_logs(
@@ -442,7 +442,7 @@ async fn export_audit_logs(
         resolve_audit_window(params.from.as_deref(), params.to.as_deref(), Utc::now())?;
     let limit = params.limit.clamp(1, MAX_EXPORT_ROWS);
 
-    // An export is exactly the read the trail exists to record — audit it.
+    // An export is exactly the read the trail exists to record, audit it.
     crate::audit_log::insert_audit_log_best_effort_with_env(
         &state.db,
         state.config.environment.is_production(),
@@ -1052,7 +1052,7 @@ mod tests {
 
     /// Entitlement: a plan without `audit_logs` is refused naming the
     /// capability; the entitled plan passes. The scope is held in both cases,
-    /// so the entitlement — not the scope — decides.
+    /// so the entitlement, not the scope, decides.
     #[tokio::test]
     async fn list_gates_on_the_plan_entitlement() {
         let Some(pool) = crate::test_db::canonical_pool("audit_list_entitlement").await else {
@@ -1086,7 +1086,7 @@ mod tests {
     }
 
     /// The cursor walk reproduces the database order exactly even when every
-    /// row shares one timestamp — no skips, no duplicates.
+    /// row shares one timestamp, no skips, no duplicates.
     #[tokio::test]
     async fn cursor_walk_is_stable_with_tied_timestamps() {
         let Some(pool) = crate::test_db::canonical_pool("audit_cursor_walk").await else {

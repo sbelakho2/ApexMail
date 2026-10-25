@@ -1,7 +1,7 @@
 //! A tiny scriptable SMTP server for the relay tests.
 //!
 //! Supports exactly what the relay speaks: greeting, EHLO/HELO, STARTTLS
-//! (advertisement only — a real handshake is never attempted in tests),
+//! (advertisement only, a real handshake is never attempted in tests),
 //! MAIL FROM, RCPT TO, DATA and QUIT. Every reply is scriptable so a test can
 //! say "the first RCPT is 450, then 250".
 
@@ -340,7 +340,7 @@ async fn handle_connection(
             .next();
             if reply.code == 0 {
                 // A scripted code 0 means "drop the connection without a
-                // reply" — models a peer that dies mid-RCPT.
+                // reply", models a peer that dies mid-RCPT.
                 break;
             }
             if (200..300).contains(&reply.code) {

@@ -12,7 +12,7 @@
 //! [`EntitlementSnapshot::require_feature`] or
 //! [`EntitlementSnapshot::require_capacity`] and refuse the request when the
 //! check fails. UI/console surfaces may serialize
-//! [`EntitlementSnapshot::presentation`] for display only — the same
+//! [`EntitlementSnapshot::presentation`] for display only, the same
 //! snapshot, never a second source of truth.
 
 use serde::{Deserialize, Serialize};
@@ -65,7 +65,7 @@ impl EntitlementSnapshot {
     /// Build a snapshot from a serialized `PlanFeatures` JSON object.
     ///
     /// Missing booleans deny (fail closed); missing capacities are `0`
-    /// (deny) — resolution never silently invents an entitlement.
+    /// (deny), resolution never silently invents an entitlement.
     pub fn from_plan_features_json(
         tenant_id: impl Into<String>,
         plan: impl Into<String>,
@@ -160,7 +160,7 @@ impl EntitlementSnapshot {
     /// Authoritative access gate for a capability.
     ///
     /// Refuses (a) capabilities the plan does not include and (b) every
-    /// field whose classification is not `RuntimeEnforced` — an
+    /// field whose classification is not `RuntimeEnforced`, an
     /// implementation bug if it happens, which is why it is a distinct
     /// error.
     pub fn require_feature(&self, key: FeatureKey) -> Result<(), EntitlementError> {
@@ -351,7 +351,7 @@ mod tests {
     }
 
     /// EU-only routing: RuntimeEnforced, denied unless the plan includes it
-    /// (Enterprise Cloud / the Compliance contract line) — and the
+    /// (Enterprise Cloud / the Compliance contract line), and the
     /// per-tenant override channel grants it, which is how the API expresses
     /// the purchased self-serve `eu_only_routing` add-on.
     #[test]
@@ -444,7 +444,7 @@ mod tests {
     }
 
     /// Capability wave 2: `custom_retention`/`max_retention_days` are REAL
-    /// gates now — the Growth ceiling (90) passes at 90 and refuses 91 by
+    /// gates now, the Growth ceiling (90) passes at 90 and refuses 91 by
     /// name, and Enterprise's 730 behaves the same.
     #[test]
     fn retention_capacity_is_runtime_enforced() {

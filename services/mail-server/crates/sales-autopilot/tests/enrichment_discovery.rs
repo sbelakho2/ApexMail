@@ -128,7 +128,7 @@ fn fixture(
 }
 
 // ---------------------------------------------------------------------------
-// §9 — waterfall persistence, provenance, partial failure
+// §9, waterfall persistence, provenance, partial failure
 // ---------------------------------------------------------------------------
 
 /// Facts are the source of truth: each persisted row names the provider that
@@ -285,7 +285,7 @@ async fn live_partial_failure_is_survivable_and_recorded() {
 }
 
 // ---------------------------------------------------------------------------
-// §10 — routing from real statistics
+// §10, routing from real statistics
 // ---------------------------------------------------------------------------
 
 /// Cold start (no stats) explores; after enough failures the dead provider is
@@ -474,7 +474,7 @@ async fn live_routing_cost_example_matches_section_10() {
 }
 
 // ---------------------------------------------------------------------------
-// §6 — discovery dedupe / jurisdiction / promotion / hostile input / cost
+// §6, discovery dedupe / jurisdiction / promotion / hostile input / cost
 // ---------------------------------------------------------------------------
 
 /// Running the same query twice creates one candidate row (partial unique

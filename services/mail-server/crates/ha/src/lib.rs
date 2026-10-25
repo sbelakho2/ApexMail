@@ -1,4 +1,4 @@
-//! High Availability service — health checks, failover, backup, replication,
+//! High Availability service, health checks, failover, backup, replication,
 //! multi-region routing, circuit breakers, and chaos engineering.
 
 #![deny(unsafe_code)]
@@ -7,7 +7,7 @@ pub mod chaos;
 pub mod circuit_breaker;
 pub mod config;
 pub mod failover;
-/// SM10 F4: data-plane STONITH fence machinery — the pub helper api-server /
+/// SM10 F4: data-plane STONITH fence machinery, the pub helper api-server /
 /// worker / mta consume to enforce the fence where writes happen. See the
 /// module docs for the Redis key layout and integration contract.
 pub mod fence;

@@ -1,27 +1,27 @@
 //! Tenant entitlement snapshot derived from the authoritative billing
-//! model — the same tables api-server and billing-service compute with:
+//! model, the same tables api-server and billing-service compute with:
 //!
 //! - effective plan: `tenants.plan`, overridden by an active, unexpired
 //!   `plan_overrides` row, joined to `plans` for limits/features
 //!   (mirrors billing-service `TENANT_PLAN_LIMITS_SQL`, migrations
-//!   069/093/098 — producers: api-server billing admin routes);
+//!   069/093/098, producers: api-server billing admin routes);
 //! - contract window: `enterprise_contracts` active period
-//!   (migration 022 — producers: enterprise contracts + billing admin);
+//!   (migration 022, producers: enterprise contracts + billing admin);
 //! - subscription state: `mollie_subscriptions` (producer: billing-service
 //!   mollie webhooks);
 //! - monthly usage: `metering_events` `emails_sent` aggregated over the
-//!   SAME window quota enforcement charges — the tenant's anchored billing
+//!   SAME window quota enforcement charges, the tenant's anchored billing
 //!   cycle when a Mollie subscription defines one, the UTC calendar month
 //!   otherwise (F61: mirroring billing-service `check_quota`'s
 //!   Redis-outage DB fallback exactly, so a tenant whose cycle starts on
 //!   the 15th gets identical usage/remaining from enforcement and here).
 //!
 //! F61: the previous version joined `subscription_contracts` and
-//! `plan_discounts`, which have no migration and no producer — the helper
+//! `plan_discounts`, which have no migration and no producer, the helper
 //! could never answer a request. Every table read here has a producer.
 //!
 //! F61 (limits parity): batch/attachment limits are no longer an
-//! independent hardcoded ladder — they are exposed from the versioned
+//! independent hardcoded ladder, they are exposed from the versioned
 //! [`EnforcedSendLimits`] contract that reads the same environment
 //! variables (and defaults) the send API enforces. The email allowance also
 //! mirrors enforcement's free-plan launch allowance.
@@ -95,7 +95,7 @@ struct TenantEntitlementRow {
     has_override: bool,
     override_expires_at: Option<DateTime<Utc>>,
     status: String,
-    /// `tenants.created_at` — drives the free-plan launch allowance exactly
+    /// `tenants.created_at`, drives the free-plan launch allowance exactly
     /// as enforcement's `free_launch_allowance_applies` computes it (F61).
     tenant_created_at: Option<DateTime<Utc>>,
     email_limit: Option<i64>,
@@ -161,7 +161,7 @@ const TENANT_ENTITLEMENT_SQL: &str = r#"
 
 /// `emails_sent` usage over the ENFORCED window (F61): $1 = tenant,
 /// $2 = period start (the tenant's anchored billing-cycle start, or the UTC
-/// calendar month for tenants without a subscription — the identical window
+/// calendar month for tenants without a subscription, the identical window
 /// `check_quota`'s DB fallback aggregates, so the helper and the quota gate
 /// can never disagree about which events belong to the current period).
 const TENANT_USAGE_SQL: &str = r#"
@@ -172,7 +172,7 @@ const TENANT_USAGE_SQL: &str = r#"
           AND timestamp >= $2
         "#;
 
-/// The tenant's billing-cycle anchor (F61) — the most recent
+/// The tenant's billing-cycle anchor (F61), the most recent
 /// `billing_cycle_start` of an active/trialing/past-due subscription.
 /// Mirrors billing-service `tenant_cycle_anchor` (usage.rs) verbatim so
 /// both paths resolve the same anchor for the same tenant.
@@ -189,7 +189,7 @@ const TENANT_CYCLE_ANCHOR_SQL: &str = r#"
         LIMIT 1
         "#;
 
-/// The most recent anchored billing-cycle start at or before `at` — the
+/// The most recent anchored billing-cycle start at or before `at`, the
 /// same day-of-month walk (clamped to month length, Mollie-style) as
 /// billing-service `most_recent_anchored_cycle`/`anchored_date` (usage.rs),
 /// mirrored here because the compliance crate does not depend on
@@ -230,7 +230,7 @@ fn anchored_date(year: i32, month: u32, day: u32) -> NaiveDate {
     NaiveDate::from_ymd_opt(year, month, day.min(last_day)).expect("clamped day is always valid")
 }
 
-/// F61: the usage window start for `current_usage` — the enforced window.
+/// F61: the usage window start for `current_usage`, the enforced window.
 /// Anchored tenants aggregate from their billing-cycle start (a cycle that
 /// starts on the 15th must NOT reset on the 1st); everyone else from the
 /// UTC calendar month. Same rule as `check_quota`'s DB fallback.
@@ -254,16 +254,16 @@ fn enforced_usage_window_start(at: DateTime<Utc>, anchor: Option<NaiveDate>) -> 
 pub const SEND_LIMITS_CONTRACT_VERSION: u32 = 2;
 
 /// F61: the send limits ACTUALLY enforced by the API surface
-/// (api-server routes/messages.rs). One versioned contract — the helper no
+/// (api-server routes/messages.rs). One versioned contract, the helper no
 /// longer maintains an independent plan ladder for these dimensions.
 ///
 /// * `batch_limit` reads the SAME environment variable
 ///   (`API_MESSAGES_MAX_BATCH_SIZE`) with the SAME default (100) the send
-///   API's `MAX_BATCH_SIZE` uses — the previous hardcoded ladder (Developer
+///   API's `MAX_BATCH_SIZE` uses, the previous hardcoded ladder (Developer
 ///   500 / Pro 1 000 / …) advertised batch sizes the API rejects.
 /// * `attachment_limit_mb` is the enforced PER-ATTACHMENT decoded ceiling
 ///   (10 MiB, `MAX_ATTACHMENT_BYTES`). The previous ladder advertised
-///   50/100 MB on higher plans — values no accepted request body can carry
+///   50/100 MB on higher plans, values no accepted request body can carry
 ///   (the route body limit is 10 MiB).
 /// * `aggregate_attachment_limit_mb` / `max_attachments` mirror
 ///   `MAX_TOTAL_ATTACHMENT_BYTES` / `MAX_ATTACHMENTS`.
@@ -327,7 +327,7 @@ fn effective_email_allowance(row: &TenantEntitlementRow) -> i64 {
 }
 
 /// Map the active contract's annual-prepay discount onto the response
-/// fields. Only real, producer-backed discounts surface here — the legacy
+/// fields. Only real, producer-backed discounts surface here, the legacy
 /// `plan_discounts` notions (founding customer, startup program) have no
 /// source and report `false` rather than invented values.
 fn contract_discount(annual_prepay_discount: Option<i32>) -> (Option<String>, Option<f64>) {
@@ -355,7 +355,7 @@ pub async fn get_tenant_entitlements(
     // Computed before `features` is moved out of the row.
     let effective_allowance = effective_email_allowance(&row);
 
-    // F61: aggregate usage over the SAME window enforcement charges — the
+    // F61: aggregate usage over the SAME window enforcement charges, the
     // anchored billing cycle when a subscription defines one, the UTC
     // calendar month otherwise (mirror of `check_quota`'s DB fallback).
     let now = Utc::now();
@@ -463,7 +463,7 @@ pub async fn get_tenant_entitlements(
     let (discount_type, discount_percentage) = contract_discount(row.annual_prepay_discount);
 
     // F61: batch/attachment limits come from the ONE versioned enforced
-    // contract — no independent plan ladder (the previous Developer-500
+    // contract, no independent plan ladder (the previous Developer-500
     // batch / 50-100 MB attachment values advertised limits the API's
     // route/body limits reject).
     let send_limits = enforced_send_limits();
@@ -477,7 +477,7 @@ pub async fn get_tenant_entitlements(
         contract_start: row.contract_start,
         contract_end: row.contract_end,
         // Authoritative allowance: the effective plan's email limit with
-        // enforcement's free-plan launch allowance applied (F61) — the
+        // enforcement's free-plan launch allowance applied (F61), the
         // override path swaps the plan rather than patching the number.
         monthly_message_allowance: effective_allowance,
         current_usage: usage.0,
@@ -599,7 +599,7 @@ mod tests {
             .with_timezone(&Utc);
         let anchor = NaiveDate::from_ymd_opt(2026, 3, 15).unwrap();
         // September's 15th is still in the future at Sept 10, so the
-        // current cycle started on August 15th — NOT the calendar Sept 1st
+        // current cycle started on August 15th, NOT the calendar Sept 1st
         // (which would hand the tenant a fresh quota window mid-cycle).
         let start = enforced_usage_window_start(at, Some(anchor));
         assert_eq!(start.to_rfc3339(), "2026-08-15T00:00:00+00:00");
@@ -638,7 +638,7 @@ mod tests {
         );
     }
 
-    /// The environment override the API reads is honoured here too — one
+    /// The environment override the API reads is honoured here too, one
     /// contract, one knob (invalid values keep the default, like the API).
     #[test]
     fn batch_limit_follows_the_shared_env_override() {
@@ -652,7 +652,7 @@ mod tests {
     }
 
     /// Attachment limits are the enforced transport ceilings (10 MiB per
-    /// attachment / 25 MiB aggregate / 50 items) — never a plan ladder that
+    /// attachment / 25 MiB aggregate / 50 items), never a plan ladder that
     /// advertises bodies the 10 MiB route limit cannot carry.
     #[test]
     fn attachment_limits_match_enforced_ceilings() {

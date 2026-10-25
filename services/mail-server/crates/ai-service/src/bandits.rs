@@ -1,4 +1,4 @@
-//! Multi-armed bandit optimiser — epsilon-greedy with Thompson sampling.
+//! Multi-armed bandit optimiser, epsilon-greedy with Thompson sampling.
 //!
 //! # Security (O-10.1)
 //! Bandit state is encrypted at rest using AES-256-GCM when an encryption key
@@ -46,7 +46,7 @@ impl BanditOptimizer {
 
     /// Create an optimiser backed by a JSON snapshot file.
     ///
-    /// `encryption_key_hex` — optional hex-encoded 32-byte AES-256 key.
+    /// `encryption_key_hex`, optional hex-encoded 32-byte AES-256 key.
     /// Pass an empty string or `None` for plaintext persistence.
     pub fn with_state_path(
         epsilon: f64,
@@ -379,7 +379,7 @@ mod tests {
         for _ in 0..80 {
             b.record_reward(&id, 0.0).await.unwrap();
         }
-        // Sample multiple times — all should be in [0,1]
+        // Sample multiple times, all should be in [0,1]
         for _ in 0..50 {
             let s = b.thompson_sample(&id).unwrap();
             assert!((0.0..=1.0).contains(&s), "sample {s} out of range");
@@ -389,7 +389,7 @@ mod tests {
     #[tokio::test]
     async fn test_persisted_state_survives_restart() {
         let state_path =
-            std::env::temp_dir().join(format!("apexmail-bandits-{}.json", uuid::Uuid::new_v4())); // nosemgrep: rust.lang.security.temp-dir.temp-dir — test fixture under a unique pid/uuid path — no predictable-name temp collision
+            std::env::temp_dir().join(format!("apexmail-bandits-{}.json", uuid::Uuid::new_v4())); // nosemgrep: rust.lang.security.temp-dir.temp-dir, test fixture under a unique pid/uuid path, no predictable-name temp collision
 
         let optimizer = BanditOptimizer::with_state_path(0.0, &state_path, None).unwrap();
         let arm_id = optimizer.add_arm("persisted-variant").await.unwrap();
@@ -446,7 +446,7 @@ mod tests {
         assert!(!raw.is_empty(), "encrypted state file is empty");
         assert!(
             !raw.starts_with(b"{"),
-            "file starts with '{{' — possible plaintext leak"
+            "file starts with '{{', possible plaintext leak"
         );
 
         // Restore with the same key

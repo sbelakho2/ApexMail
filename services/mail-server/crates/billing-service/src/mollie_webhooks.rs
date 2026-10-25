@@ -58,7 +58,7 @@ const DEADLETTER_MAX_RETRIES: u32 = 5;
 /// Maximum stored webhook body size (4 KiB). Larger bodies are truncated
 /// before the Redis SET so a single oversized Mollie payload cannot bloat
 /// every deadletter entry. Truncated bodies are kept for debugging but are
-/// never replayed — the retry scheduler skips entries whose body was cut.
+/// never replayed, the retry scheduler skips entries whose body was cut.
 const DEADLETTER_MAX_BODY_BYTES: usize = 4 * 1024;
 /// Poll interval for the deadletter retry worker.
 const DEADLETTER_RETRY_POLL_INTERVAL_SECS: u64 = 60;
@@ -96,7 +96,7 @@ static DUNNING_CONFIG_TABLE_ENSURED: OnceLock<()> = OnceLock::new();
 
 /// The Mollie webhook ingest route. Mounted by the billing-service binary
 /// AND by api-server (which nests it on the public rate-limited stack when
-/// `MOLLIE_API_KEY` is configured) — the billing-service binary has
+/// `MOLLIE_API_KEY` is configured), the billing-service binary has
 /// no container in any deployed topology, so api-server is the live ingest
 /// surface (dogfood finding A, 2026-10-05).
 pub fn router() -> Router<Arc<AppState>> {
@@ -146,8 +146,8 @@ fn json_error(status: StatusCode, message: &str) -> Response {
 // The normalized provider event
 // ---------------------------------------------------------------------------
 //
-// Mollie's webhook posts ONE parameter — `id=tr_…` (a payment) or `id=re_…`
-// (a refund) — with no status, no signature and no event type. Everything
+// Mollie's webhook posts ONE parameter, `id=tr_…` (a payment) or `id=re_…`
+// (a refund), with no status, no signature and no event type. Everything
 // below is what this module KNOWS only after fetching the object with the
 // secret key. The struct is provider-neutral on purpose: settlement, tax
 // snapshots, dunning and the dead letter queue consume facts, not a wire
@@ -170,7 +170,7 @@ struct ProviderNotification {
     #[serde(default)]
     amount: Option<ProviderAmount>,
     /// AUTHORISATION | REFUND | REFUND_FAILED | CHARGEBACK |
-    /// CHARGEBACK_REVERSED | RECURRING_CONTRACT — normalized from the
+    /// CHARGEBACK_REVERSED | RECURRING_CONTRACT, normalized from the
     /// Mollie payment/refund status.
     #[serde(default)]
     event_code: String,
@@ -190,7 +190,7 @@ struct ProviderNotification {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ProviderAmount {
-    /// Integer MINOR UNITS (cents). Absent is absent — never coerced to 0.
+    /// Integer MINOR UNITS (cents). Absent is absent, never coerced to 0.
     #[serde(default)]
     value: Option<i64>,
     #[serde(default)]
@@ -209,7 +209,7 @@ struct ProviderAdditionalData {
     /// The Mollie subscription (`sub_…`) that created the payment, when any.
     #[serde(default)]
     subscription_id: Option<String>,
-    /// `first` / `recurring` / `oneoff` — Mollie's sequenceType.
+    /// `first` / `recurring` / `oneoff`, Mollie's sequenceType.
     #[serde(default)]
     sequence_type: Option<String>,
     /// The provider status verbatim (`paid`, `refunded`, `charged_back`, …).
@@ -569,7 +569,7 @@ fn stable_event_id(
 // Event-code dispatch
 // ---------------------------------------------------------------------------
 
-/// Which handler an item routes to. Pure — the dispatch matrix is unit
+/// Which handler an item routes to. Pure, the dispatch matrix is unit
 /// tested without a database.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum NotificationArm {
@@ -655,7 +655,7 @@ async fn handle_notification(state: &AppState, item: &ProviderNotification) -> R
             warn!(
                 event_code = %item.event_code,
                 provider_payment_id = %item.provider_payment_id,
-                "unhandled mollie notification event code — acknowledged without effect"
+                "unhandled mollie notification event code, acknowledged without effect"
             );
             Ok(())
         }
@@ -688,20 +688,20 @@ async fn handle_checkout_activation(
 ) -> Result<(), String> {
     let Some(tenant_id) = item.metadata_tenant_id() else {
         return Err(format!(
-            "CHECKOUT_ACTIVATION {} carries no tenant metadata — refusing to grant access",
+            "CHECKOUT_ACTIVATION {} carries no tenant metadata, refusing to grant access",
             item.provider_payment_id
         ));
     };
     let Some(plan_name) = item.metadata_plan_name() else {
         return Err(format!(
-            "CHECKOUT_ACTIVATION {} carries no plan metadata — refusing to grant access",
+            "CHECKOUT_ACTIVATION {} carries no plan metadata, refusing to grant access",
             item.provider_payment_id
         ));
     };
     let interval = item.metadata_interval().unwrap_or("monthly");
     let Some(amount_cents) = item.amount_value() else {
         return Err(format!(
-            "CHECKOUT_ACTIVATION {} carries no amount — refusing to grant access",
+            "CHECKOUT_ACTIVATION {} carries no amount, refusing to grant access",
             item.provider_payment_id
         ));
     };
@@ -799,7 +799,7 @@ async fn handle_checkout_authorisation(
         None => warn!(
             provider_payment_id = %item.provider_payment_id,
             reference = %item.reference,
-            "a checkout authorisation carries neither a Mollie customer nor tenant metadata — acknowledged without effect"
+            "a checkout authorisation carries neither a Mollie customer nor tenant metadata, acknowledged without effect"
         ),
     }
     Ok(())
@@ -807,12 +807,12 @@ async fn handle_checkout_authorisation(
 
 /// The tenant an event belongs to.
 ///
-/// Mollie's customer id (`cst_…`) is NOT the tenant id — an earlier provider
+/// Mollie's customer id (`cst_…`) is NOT the tenant id, an earlier provider
 /// used the tenant id as its shopper reference, and treating the customer id
 /// that way here would bind a mandate to the wrong tenant. The authoritative
 /// sources are, in order:
 ///
-/// 1. `metadata.tenant_id` — written by every payment this platform creates;
+/// 1. `metadata.tenant_id`, written by every payment this platform creates;
 /// 2. the `mollie_customers` mapping from the provider customer id.
 ///
 /// `None` means the event cannot be attributed; callers acknowledge it
@@ -874,7 +874,7 @@ async fn load_local_invoice_for_settlement(
 /// The tenant that owns the settlement/refusal: the invoice's own tenant.
 ///
 /// The event's resolved tenant (metadata or the customer mapping) must agree
-/// when it is known — a payment attributed to a different tenant is a
+/// when it is known, a payment attributed to a different tenant is a
 /// cross-tenant event and is refused, never settled into someone else's
 /// ledger.
 async fn settlement_tenant(
@@ -887,7 +887,7 @@ async fn settlement_tenant(
         if resolved != invoice_tenant {
             return Err(format!(
                 "AUTHORISATION for invoice {invoice_id} belongs to tenant {invoice_tenant} but the \
-                 notification attributes it to tenant {resolved} — cross-tenant event refused"
+                 notification attributes it to tenant {resolved}, cross-tenant event refused"
             ));
         }
     }
@@ -904,7 +904,7 @@ fn allocation_cents(charged_cents: i64, outstanding_cents: i64) -> i64 {
     charged_cents.min(outstanding_cents).max(0)
 }
 
-/// The allocation's unique operation id — the settlement's idempotency key.
+/// The allocation's unique operation id, the settlement's idempotency key.
 fn settlement_operation_id(item: &ProviderNotification) -> String {
     format!("mollie:{}", item.provider_payment_id.trim())
 }
@@ -935,13 +935,13 @@ async fn handle_recurring_authorisation(
     let Some(local_invoice_id) = parse_merchant_reference_invoice_id(&item.reference) else {
         return Err(format!(
             "AUTHORISATION {} reference {:?} does not name a local invoice (expected \
-             `invoice:{{uuid}}` or a bare uuid) — refusing to settle an unidentifiable obligation",
+             `invoice:{{uuid}}` or a bare uuid), refusing to settle an unidentifiable obligation",
             item.provider_payment_id, item.reference
         ));
     };
     let Some(charged_cents) = item.amount_value() else {
         return Err(format!(
-            "AUTHORISATION {} for {local_invoice_id} carries no amount.value — refusing to \
+            "AUTHORISATION {} for {local_invoice_id} carries no amount.value, refusing to \
              settle an unverifiable charge",
             item.provider_payment_id
         ));
@@ -949,7 +949,7 @@ async fn handle_recurring_authorisation(
     let Some(local) = load_local_invoice_for_settlement(state, local_invoice_id).await? else {
         return Err(format!(
             "AUTHORISATION {} references local invoice {local_invoice_id} which does not exist \
-             — refusing to settle an unknown obligation",
+            , refusing to settle an unknown obligation",
             item.provider_payment_id
         ));
     };
@@ -966,14 +966,14 @@ async fn handle_recurring_authorisation(
 
     // TAX-TRUTH GATE (P0): persist an immutable snapshot of the charge and
     // validate the charged total against the local invoice's computed total
-    // BEFORE settling. A mismatch returns Err here — no local invoice is
-    // marked paid, no allocation runs — and a durable finance incident is
+    // BEFORE settling. A mismatch returns Err here, no local invoice is
+    // marked paid, no allocation runs, and a durable finance incident is
     // raised for operators.
     let tax_snapshot_id =
         validate_and_snapshot_mollie_tax(state, item, &local, charged_cents).await?;
 
     // Settlement: the pre-Mollie CTE behaviour, now against the locked local
-    // row — mark paid and record the VERIFIED charged amount (amount.value)
+    // row, mark paid and record the VERIFIED charged amount (amount.value)
     // as the allocation, capped against the authoritative remaining
     // obligation in the matching currency. Idempotent through the
     // allocation's unique operation id.
@@ -1014,7 +1014,7 @@ async fn handle_recurring_authorisation(
             mollie_payment_id = %item.provider_payment_id,
             payment_cents,
             outstanding,
-            "mollie payment exceeds the remaining obligation — allocating only the \
+            "mollie payment exceeds the remaining obligation, allocating only the \
              authoritative remainder (over-allocation rejected)"
         );
     }
@@ -1092,7 +1092,7 @@ async fn handle_recurring_authorisation(
 
     // Recognition ledger: reflect the settlement in `vat_recognition_entries`
     // (general-scheme supplies were recognised at issue; cash-accounting
-    // supplies recognise on payment). Idempotent, best-effort — a failure is
+    // supplies recognise on payment). Idempotent, best-effort, a failure is
     // logged, never allowed to fake or skip the ledger.
     if let Err(error) = crate::vat_recognition::materialize_invoice_recognition_by_id(
         &state.db,
@@ -1128,7 +1128,7 @@ async fn handle_recurring_authorisation(
                 invoice_id = %invoice_row_id,
                 snapshot_id = %snapshot_id,
                 error = %error,
-                "failed to link mollie tax snapshot onto the local invoice — snapshot remains authoritative"
+                "failed to link mollie tax snapshot onto the local invoice, snapshot remains authoritative"
             );
         }
     }
@@ -1146,7 +1146,7 @@ async fn handle_recurring_authorisation(
     // to spawn this once a subscription became active; under Mollie our own
     // settled recurring charge is that moment. The spawn is idempotent
     // (pending-request upsert + active-count check) and failures are recorded
-    // on the request row — the same contract the old call site documented.
+    // on the request row, the same contract the old call site documented.
     let provision_state = state.clone();
     let provision_tenant = tenant_id.to_string();
     tokio::spawn(async move {
@@ -1180,7 +1180,7 @@ async fn handle_authorisation_refused(
         info!(
             reference = %item.reference,
             payment_id = %item.provider_payment_id,
-            "mollie checkout payment refused by the provider — acknowledged (no local obligation)"
+            "mollie checkout payment refused by the provider, acknowledged (no local obligation)"
         );
         return Ok(());
     }
@@ -1190,7 +1190,7 @@ async fn handle_authorisation_refused(
         info!(
             reference = %item.reference,
             payment_id = %item.provider_payment_id,
-            "mollie add-on charge refused — the add-on billing sweep owns the retry"
+            "mollie add-on charge refused, the add-on billing sweep owns the retry"
         );
         return Ok(());
     }
@@ -1198,7 +1198,7 @@ async fn handle_authorisation_refused(
     let Some(local_invoice_id) = parse_merchant_reference_invoice_id(&item.reference) else {
         return Err(format!(
             "refused AUTHORISATION {} reference {:?} does not name a local invoice (expected \
-             `invoice:{{uuid}}` or a bare uuid) — refusing to drop the refusal",
+             `invoice:{{uuid}}` or a bare uuid), refusing to drop the refusal",
             item.provider_payment_id, item.reference
         ));
     };
@@ -1213,7 +1213,7 @@ async fn handle_authorisation_refused(
     let Some(invoice_tenant) = invoice_tenant else {
         return Err(format!(
             "refused AUTHORISATION {} references local invoice {local_invoice_id} which does not \
-             exist — deadlettered for replay once the invoice exists",
+             exist, deadlettered for replay once the invoice exists",
             item.provider_payment_id
         ));
     };
@@ -1250,25 +1250,25 @@ async fn handle_authorisation_refused(
         invoice_id = %local_invoice_id,
         provider_payment_id = %item.provider_payment_id,
         reason = %item.reason.as_deref().unwrap_or(""),
-        "mollie authorisation refused — dunning state recorded and the customer notified"
+        "mollie authorisation refused, dunning state recorded and the customer notified"
     );
     Ok(())
 }
 
 /// `RECURRING_CONTRACT`: the first payment minted a mandate. Bind the token (and the processing model when present) to
-/// every `mollie_subscriptions` row of the shopper's tenant — the token is
+/// every `mollie_subscriptions` row of the shopper's tenant, the token is
 /// shopper-scoped, and the dunning auto-pay path reads it per tenant
 /// regardless of the row's status. A missing token or tenant is an Err.
 async fn handle_token_created(state: &AppState, item: &ProviderNotification) -> Result<(), String> {
     let Some(token) = item.mandate_id() else {
         return Err(format!(
-            "RECURRING_CONTRACT {} carries no mandate id — nothing to bind",
+            "RECURRING_CONTRACT {} carries no mandate id, nothing to bind",
             item.provider_payment_id
         ));
     };
     let Some(tenant_id) = tenant_for_event(state, item).await? else {
         return Err(format!(
-            "RECURRING_CONTRACT {} carries no tenant attribution — refusing to \
+            "RECURRING_CONTRACT {} carries no tenant attribution, refusing to \
              bind a mandate to an unknown tenant",
             item.provider_payment_id
         ));
@@ -1295,7 +1295,7 @@ async fn handle_token_created(state: &AppState, item: &ProviderNotification) -> 
     if bound.is_empty() {
         // No local row to bind yet. The row itself is created by the same
         // payment's `CHECKOUT_ACTIVATION` arm (catalog amount checked, plan
-        // and interval from metadata, idempotent on the payment id) — a
+        // and interval from metadata, idempotent on the payment id), a
         // contract event never grants entitlement on its own. A mandate with
         // no plan metadata is a one-off payment, not a subscription; Mollie
         // keeps it on the customer, so it is recoverable at
@@ -1393,7 +1393,7 @@ async fn record_money_event(state: &AppState, item: &ProviderNotification, event
             provider_payment_id = %item.provider_payment_id,
             kind = event.kind(),
             detail = %detail,
-            "mollie money event without a resolvable local invoice — recorded in the notification \
+            "mollie money event without a resolvable local invoice, recorded in the notification \
              ledger and logs for reconciliation"
         );
         return;
@@ -1559,7 +1559,7 @@ fn tax_validation_status(validation: &Result<(), TaxTotalDiscrepancy>) -> &'stat
 
 /// ApexMail's expectation for a charge: the LOCAL invoice's own computed
 /// totals and provenance. Mollie carries no tax fields, so no wire value is
-/// consulted — the local row is the only tax decision (pure).
+/// consulted, the local row is the only tax decision (pure).
 fn expected_tax_from_local_invoice(local: &LocalInvoiceSettlement) -> ExpectedTax {
     ExpectedTax {
         subtotal_cents: local.subtotal_cents,
@@ -1608,7 +1608,7 @@ async fn load_existing_tax_snapshot(
 ///
 /// `observed` is `(subtotal, vat, charged total)`: Mollie transmits only the
 /// charged TOTAL, so the itemisation columns carry the local invoice's own
-/// split and `total_cents`/`amount_paid_cents` carry the charge — the
+/// split and `total_cents`/`amount_paid_cents` carry the charge, the
 /// comparison below is therefore exactly "charged total vs local total".
 #[allow(clippy::too_many_arguments)]
 async fn persist_tax_snapshot(
@@ -1868,7 +1868,7 @@ async fn validate_and_snapshot_mollie_tax(
             expected_total_cents = expected.total_cents,
             delta_cents = discrepancy.delta_cents,
             "BLOCKED invoice finalization: Mollie charged a total that disagrees with ApexMail's \
-             computation — finance incident raised"
+             computation, finance incident raised"
         );
         return Err(format!(
             "AUTHORISATION for {} blocked: {}",
@@ -2094,7 +2094,7 @@ async fn process_webhook(
         let Some(payment_id) = refund_payment_lookup(state, &object_id).await? else {
             // Mollie's own guidance: acknowledge unknown ids with 200 so a
             // probe cannot use the endpoint as an oracle.
-            warn!(refund_id = %object_id, "refund webhook for an unknown refund — acknowledged");
+            warn!(refund_id = %object_id, "refund webhook for an unknown refund, acknowledged");
             return Ok(ProcessWebhookResult {
                 items_processed: 0,
                 items_duplicate: 0,
@@ -2109,7 +2109,7 @@ async fn process_webhook(
             .await
             .map_err(|error| provider_fetch_error(&object_id, error))?;
         let Some(refund) = refunds.iter().find(|refund| refund.id == object_id) else {
-            warn!(refund_id = %object_id, payment_id = %payment_id, "refund webhook does not match any refund on the payment — acknowledged");
+            warn!(refund_id = %object_id, payment_id = %payment_id, "refund webhook does not match any refund on the payment, acknowledged");
             return Ok(ProcessWebhookResult {
                 items_processed: 0,
                 items_duplicate: 0,
@@ -2315,7 +2315,7 @@ fn prepare_deadletter(
     // The timestamp alone is NOT unique: several refused webhooks can land in
     // the same millisecond (and every unparseable body sanitizes to the same
     // event word), so a key of `<id>:<ms>` silently overwrote one dead letter
-    // with the next — losing exactly the evidence an operator needs. The uuid
+    // with the next, losing exactly the evidence an operator needs. The uuid
     // suffix keeps every entry addressable; the ZSET score still orders them.
     let event_key = format!(
         "{}{}:{}:{}",
@@ -2812,11 +2812,11 @@ async fn record_failed_payment(
         .await
         .map_err(|error| format!("Failed to begin payment failure transaction: {error}"))?;
 
-    // Fix H — single UPSERT with SQL-side increment. The counter increment
+    // Fix H, single UPSERT with SQL-side increment. The counter increment
     // and first_failed_at=LEAST(existing, now) happen atomically inside the
     // statement, eliminating the read-compute-write race that lost
     // increments under concurrent refusal events.
-    // dunning_records.id is VARCHAR(26) (migrations 087/093) — a 36-char
+    // dunning_records.id is VARCHAR(26) (migrations 087/093), a 36-char
     // gen_random_uuid() string would overflow the column. Generate the id
     // in Rust with the shared 26-char generator instead.
     let dunning_record_id = generate_audit_log_id();
@@ -2854,7 +2854,7 @@ async fn record_failed_payment(
         &config,
     );
 
-    // Audit item 3g — emit a distinct event when the tenant *transitions*
+    // Audit item 3g, emit a distinct event when the tenant *transitions*
     // into soft/hard suspension (not on every repeated failure), so
     // webhook consumers and internal automations can key off the lifecycle
     // change instead of diffing payment_failed rows.
@@ -3065,10 +3065,10 @@ async fn ensure_dunning_config_table(state: &AppState) -> Result<(), String> {
 
     if !table_exists {
         tracing::error!(
-            "dunning_config table does not exist — migration 045 has not been applied. \
+            "dunning_config table does not exist, migration 045 has not been applied. \
              Dunning features will use hardcoded defaults."
         );
-        return Err("dunning_config table not found — run migrations".to_string());
+        return Err("dunning_config table not found, run migrations".to_string());
     }
 
     let _ = DUNNING_CONFIG_TABLE_ENSURED.set(());
@@ -3249,7 +3249,7 @@ async fn process_deadletter_retries(state: &AppState) -> Result<(), String> {
         "retrying deadlettered webhook events"
     );
 
-    // P3 fix 4 — read every due entry in ONE MGET per chunk instead of one
+    // P3 fix 4, read every due entry in ONE MGET per chunk instead of one
     // GET per key (the per-key GET/DEL loop was O(batch) round trips). The
     // connection is released before replay: each replay does DB work and
     // must not pin a Redis connection for the whole batch.
@@ -3277,7 +3277,7 @@ async fn process_deadletter_retries(state: &AppState) -> Result<(), String> {
 
     for (event_key, entry_json) in batch.iter().zip(entry_jsons) {
         let Some(entry_json) = entry_json else {
-            // Entry already evicted — remove stale retry index member.
+            // Entry already evicted, remove stale retry index member.
             remove_from_index.push(event_key.clone());
             continue;
         };
@@ -3300,7 +3300,7 @@ async fn process_deadletter_retries(state: &AppState) -> Result<(), String> {
 
         match replay_deadletter(state, &entry).await {
             Ok(()) => {
-                // Success — remove from retry index (deadletter remains for audit).
+                // Success, remove from retry index (deadletter remains for audit).
                 remove_from_index.push(event_key.clone());
                 info!(
                     event_id = ?entry.event_id,
@@ -3318,7 +3318,7 @@ async fn process_deadletter_retries(state: &AppState) -> Result<(), String> {
                 );
 
                 if next_count >= DEADLETTER_MAX_RETRIES {
-                    // Exhausted — remove from retry index but keep the deadletter entry
+                    // Exhausted, remove from retry index but keep the deadletter entry
                     // for manual inspection (with a shorter 7-day TTL).
                     warn!(
                         event_id = ?entry.event_id,
@@ -3462,7 +3462,7 @@ fn auto_provision_request_body() -> serde_json::Value {
 /// tenant whose subscription became entitled.
 ///
 /// Public because the subscription-state owners (outside the webhook layer
-/// after the Mollie conversion — Mollie sends no subscription-status
+/// after the Mollie conversion, Mollie sends no subscription-status
 /// notifications) are the legitimate callers. There is no maintenance retry
 /// consumer: failures are logged and the
 /// `dedicated_ip_provisioning_requests` row is finalized as
@@ -7107,7 +7107,7 @@ mod coverage_adversarial {
             assert_eq!(country, None);
             assert_eq!(
                 automatic, None,
-                "Mollie transmits no tax object — nothing is invented"
+                "Mollie transmits no tax object, nothing is invented"
             );
         }
     );

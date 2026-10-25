@@ -1,11 +1,11 @@
-//! Reply handler — inbound email classification and sequence locking.
+//! Reply handler, inbound email classification and sequence locking.
 //!
 //! The classifier is split into three honest layers:
 //!
-//! - [`deterministic`] — header/syntax-proven cases only, with exact evidence;
-//! - [`ai`] — provider-agnostic semantic classification with a never-guessing
+//! - [`deterministic`], header/syntax-proven cases only, with exact evidence;
+//! - [`ai`], provider-agnostic semantic classification with a never-guessing
 //!   fallback on outage;
-//! - [`policy`] — the single decision table turning a classification into an
+//! - [`policy`], the single decision table turning a classification into an
 //!   enrollment state, suppression, rescheduling and queue cancellation.
 //!
 //! [`processor`] wires those layers to the `inbound_messages` claim loop and

@@ -15,7 +15,7 @@ pub struct InboxPollResult {
     /// The IMAP folder where the message was found (e.g. `"INBOX"`, `"[Gmail]/Spam"`).
     pub folder: Option<String>,
     /// Approximate response time in milliseconds (time until the message
-    /// appeared). `None` when the message was not delivered — absent
+    /// appeared). `None` when the message was not delivered, absent
     /// deliveries carry no latency, otherwise they poison the per-provider
     /// average delivery time.
     pub response_time_ms: Option<i64>,
@@ -223,7 +223,7 @@ impl ImapPoller {
                     });
                 }
                 Ok(None) => {
-                    // Message not yet visible — wait and retry
+                    // Message not yet visible, wait and retry
                     if attempt < max_attempts {
                         tokio::time::sleep(Duration::from_secs(self.config.polling_interval_secs))
                             .await;
@@ -474,7 +474,7 @@ fn is_spam_like(folder: &str) -> bool {
 
 /// Derive the folder search list from a `LIST` response.
 ///
-/// Order matters — the poller returns on the first folder containing the
+/// Order matters, the poller returns on the first folder containing the
 /// message, so folders are searched in classification priority:
 ///
 /// 1. `INBOX` (canonical, always first),
@@ -487,7 +487,7 @@ fn select_folders_from_list(listed: &[String]) -> Vec<String> {
     let mut folders: Vec<String> = vec!["INBOX".to_string()];
     let mut others: Vec<String> = Vec::new();
     for name in listed {
-        // Skip duplicates of folders already queued (case-insensitive — IMAP
+        // Skip duplicates of folders already queued (case-insensitive, IMAP
         // folder names are case-sensitive but INBOX is matched case-insensitively
         // by every provider).
         if folders.iter().any(|f| f.eq_ignore_ascii_case(name))
@@ -609,7 +609,7 @@ mod tests {
         fetch_error: Option<String>,
     }
 
-    // `Result` has no `Default` impl — the derive cannot express "no
+    // `Result` has no `Default` impl, the derive cannot express "no
     // folders listed yet" (Ok(empty)), so the default is spelled out.
     impl Default for Script {
         fn default() -> Self {
@@ -887,7 +887,7 @@ mod tests {
     #[tokio::test]
     async fn poll_with_zero_timeout_reports_the_timeout_honestly() {
         // The connector parks inside connect (spawn_blocking) so the zero
-        // deadline CANNOT be met — without the park the stub can win the race
+        // deadline CANNOT be met, without the park the stub can win the race
         // and the assertion would depend on thread scheduling.
         let (started_tx, mut started_rx) = tokio::sync::mpsc::channel::<()>(1);
         let (gate_tx, gate_rx) = std::sync::mpsc::channel::<()>();
@@ -963,7 +963,7 @@ mod tests {
         assert!(error.contains("SELECT INBOX failed"), "{error}");
 
         // Zero timeout reports the timeout. The connector parks inside
-        // connect so the zero deadline cannot be met — a free-running stub
+        // connect so the zero deadline cannot be met, a free-running stub
         // could win the race and make this arm scheduling-dependent.
         let (started_tx, mut started_rx) = tokio::sync::mpsc::channel::<()>(1);
         let (gate_tx, gate_rx) = std::sync::mpsc::channel::<()>();

@@ -296,7 +296,7 @@ mod tests {
             assert_eq!(items[0]["title"], "First post");
             assert_eq!(items[0]["author"], "alice");
 
-            // type filter — via the camelCase name and the `type` alias.
+            // type filter, via the camelCase name and the `type` alias.
             for uri in [
                 "/v1/admin/content?contentType=docs",
                 "/v1/admin/content?type=docs",
@@ -379,7 +379,7 @@ mod debug_probe {
 
     /// Schema-honesty probe: the exact SQL build_list_content_sql emits must
     /// decode against the CANONICAL content_items shape (UUID ids, no
-    /// slug/status columns, view_count present) — the adversarial route test
+    /// slug/status columns, view_count present), the adversarial route test
     /// depends on it and this pins the column mapping at the unit level.
     #[tokio::test]
     async fn probe_list_content_error() {

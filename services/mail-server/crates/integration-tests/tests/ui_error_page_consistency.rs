@@ -1,12 +1,12 @@
-//! GATE G [GREEN] — error-page consistency across every rendered error /
+//! GATE G [GREEN], error-page consistency across every rendered error /
 //! not-found surface (batch 1, W2).
 //!
 //! Collects the renderable error/not-found pages exactly as they are SERVED:
 //!
-//! * web 404 — `ui-foundation::leptos_views::web_not_found_page()` wrapped in
+//! * web 404, `ui-foundation::leptos_views::web_not_found_page()` wrapped in
 //!   `web_root_layout` (the same wrap `api-server::branded_not_found` and
 //!   `ui-foundation::axum_router` apply before the bytes hit the browser);
-//! * control-plane 404 — `control_plane_not_found_page()` wrapped in
+//! * control-plane 404, `control_plane_not_found_page()` wrapped in
 //!   `control_plane_root_layout`;
 //! * tracking-service `render_error_page(...)` / `render_success_page(...)`
 //!   with the exact copy the unsubscribe handlers pass today;
@@ -35,7 +35,7 @@ const LEAK_MARKERS: [&str; 7] = [
 ];
 
 /// The renderable error/not-found pages that are reachable from this crate.
-/// The sales-autopilot page is pinned same-crate (private fn — see module
+/// The sales-autopilot page is pinned same-crate (private fn, see module
 /// docs).
 fn error_pages() -> Vec<(&'static str, String)> {
     use ui_foundation::leptos_views::{
@@ -48,7 +48,7 @@ fn error_pages() -> Vec<(&'static str, String)> {
         // document title (the not-found wrap carries the not-found title).
         (
             "web 404 (root layout + not-found view)",
-            web_root_layout(&web_not_found_page(), "Page not found — ApexMail"),
+            web_root_layout(&web_not_found_page(), "Page not found | ApexMail"),
         ),
         (
             "control-plane 404 (root layout + not-found view)",
@@ -119,7 +119,7 @@ fn is_complete_sentence(text: &str) -> bool {
 }
 
 /// GATE G [GREEN]: every renderable error/not-found page shares the same
-/// minimum shell — HTML5 doctype, `lang="en"`, a non-empty `<title>` — and
+/// minimum shell, HTML5 doctype, `lang="en"`, a non-empty `<title>`, and
 /// never leaks internal implementation details. Where a page carries prose
 /// copy in its main paragraph, that copy must be a complete sentence.
 #[test]
@@ -159,7 +159,7 @@ fn error_pages_never_leak_internal_details() {
         if name.contains("404") {
             // The documented short labels: the customer/console surfaces say
             // "Page not found"; the control plane names its own scope
-            // ("That control-plane page does not exist." — the UI-review
+            // ("That control-plane page does not exist.", the UI-review
             // wave made the CP copy destination-explicit on purpose).
             const NOT_FOUND_LABELS: &[&str] =
                 &["Page not found", "That control-plane page does not exist."];
@@ -183,7 +183,7 @@ fn error_pages_never_leak_internal_details() {
 // until batch 2 adds one to `render_error_page` / `render_success_page`
 // (and, same-crate, to sales-autopilot's `unsubscribed_page`).
 /// GATE G [ASPIRATIONAL-RED until batch 2]: every error/not-found page must
-/// offer the reader a navigation way out — a link back to a safe path
+/// offer the reader a navigation way out, a link back to a safe path
 /// (`/` or `/login`). The two 404 views already render `href="/"`; the
 /// tracking-service terminal pages currently render no anchor at all, so
 /// this test runs RED until batch 2 adds the back-link.

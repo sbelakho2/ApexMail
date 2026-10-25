@@ -92,7 +92,7 @@ pub struct ComplaintInfo {
 
 // Well‑known FBL sender domains are now registry rows
 // (`fbl_provider_registry`, seeded from the pre-existing
-// `TRUSTED_FBL_SENDERS` list) — see `super::fbl_registry`. Trust is no
+// `TRUSTED_FBL_SENDERS` list), see `super::fbl_registry`. Trust is no
 // longer a compile-time suffix list: only a provider entry matching the
 // source's rDNS AND its registered expectations can authorize suppression.
 
@@ -109,7 +109,7 @@ pub(crate) enum FblSourceCheck {
     /// mismatch, or FCrDNS failure. The complaint may be recorded as a
     /// non-authoritative observation but must NEVER suppress.
     NonAuthoritative { reason: String },
-    /// The resolver itself failed transiently — callers tempfail (451) and
+    /// The resolver itself failed transiently, callers tempfail (451) and
     /// the outcome is never cached.
     Transient,
 }
@@ -132,7 +132,7 @@ pub struct FeedbackLoopServer {
     registry: RwLock<FblRegistry>,
     /// #149:Bounded rDNS cache with 10-minute TTL (replaces unbounded DashMap).
     rdns_cache: Cache<IpAddr, FblSourceCheck>,
-    /// Active connections per IP — enforces `max_connections_per_ip`.
+    /// Active connections per IP, enforces `max_connections_per_ip`.
     connections: Arc<DashMap<IpAddr, u32>>,
     shutdown: Arc<Notify>,
     /// #148:Shared DNS resolver for source verification (interior mutability
@@ -192,7 +192,7 @@ impl FeedbackLoopServer {
             }
             Ok(_) => {
                 warn!(
-                    "fbl_provider_registry is empty — using the compiled seed providers; \
+                    "fbl_provider_registry is empty, using the compiled seed providers; \
                      configure the registry to add source networks/validation methods"
                 );
                 Ok(0)
@@ -200,7 +200,7 @@ impl FeedbackLoopServer {
             Err(error) => {
                 warn!(
                     error = %error,
-                    "failed to load fbl_provider_registry — using the compiled seed providers"
+                    "failed to load fbl_provider_registry, using the compiled seed providers"
                 );
                 Err(error)
             }
@@ -414,7 +414,7 @@ impl FeedbackLoopServer {
                 let _ = write_line(&mut stream, &caps).await;
             } else if verb == "MAIL" && is_mail_from_arg(arg) {
                 // ARF reports from ISP FBL sources are regular mail with a
-                // real envelope sender — the rDNS/FCrDNS verification is the
+                // real envelope sender, the rDNS/FCrDNS verification is the
                 // source of trust here, not a null sender. We only enforce
                 // the MAIL → RCPT ordering.
                 mail_from_seen = true;
@@ -478,7 +478,7 @@ impl FeedbackLoopServer {
                     line.clear();
                     // Clamping the per-line timeout to the remaining total
                     // enforces the whole-payload deadline with this single
-                    // timer — no redundant pre-check needed.
+                    // timer, no redundant pre-check needed.
                     let remaining = deadline
                         .checked_duration_since(tokio::time::Instant::now())
                         .unwrap_or(Duration::ZERO);
@@ -581,7 +581,7 @@ impl FeedbackLoopServer {
                     }
                 }
                 msgs_this_conn += 1;
-                // RFC 5321 §4.1.1.4: end-of-DATA ends the transaction — the
+                // RFC 5321 §4.1.1.4: end-of-DATA ends the transaction, the
                 // next report must start with a fresh MAIL FROM (the
                 // recipient state used to be cleared here but not the
                 // reverse-path flag, so a follow-up transaction could skip
@@ -751,7 +751,7 @@ impl FeedbackLoopServer {
                                 }
                             }
                             // A failing FORWARD lookup is as transient as a
-                            // failing PTR lookup — tempfail, never a permanent
+                            // failing PTR lookup, tempfail, never a permanent
                             // non-authoritative verdict.
                             Err(e) => {
                                 debug!(ip = %ip, hostname = %matched_hostname, error = %e, "FCrDNS forward lookup failed");
@@ -794,7 +794,7 @@ impl FeedbackLoopServer {
         authoritative_provider: Option<&str>,
         raw: &[u8],
     ) -> anyhow::Result<String> {
-        // complaint_events.id is a UUID column (migration 093) — bind the
+        // complaint_events.id is a UUID column (migration 093), bind the
         // Uuid itself, not its String form.
         let complaint_id = Uuid::new_v4();
         let authoritative = authoritative_provider.is_some();
@@ -823,7 +823,7 @@ impl FeedbackLoopServer {
         // dedupe/suppression linkage in the authoritative branch.
         let original_id = complaint.original_message_id.clone();
 
-        // complaint_events.arrival_date is TIMESTAMPTZ (migration 093) — the
+        // complaint_events.arrival_date is TIMESTAMPTZ (migration 093), the
         // raw ARF header string (RFC 5322 date) must be parsed before binding.
         // Unparseable dates are stored as NULL rather than failing the insert.
         let arrival_date: Option<chrono::DateTime<chrono::Utc>> = complaint
@@ -894,7 +894,7 @@ impl FeedbackLoopServer {
         }
 
         // Non-authoritative: RECORDED only. No suppression, no reputation,
-        // no webhook — those are all trust-bearing side effects.
+        // no webhook, those are all trust-bearing side effects.
         if !authoritative {
             warn!(
                 complaint_id = %complaint_id,
@@ -908,12 +908,12 @@ impl FeedbackLoopServer {
         // Only act on complaints referencing a message this system sent:
         // resolve the tenant before touching suppression. The FBL source is
         // authoritative, so reputation counting and webhooks still run for
-        // unknown messages (e.g. pruned from email_queue) — only the
+        // unknown messages (e.g. pruned from email_queue), only the
         // suppression is gated on the queue lookup.
         let suppression_target: Option<(String, String)> = match original_id.as_deref() {
             Some(mid) => match self.lookup_sent_message(mid).await? {
                 None => {
-                    warn!(msg_id = %mid, "Complaint references unknown message — skipping suppression");
+                    warn!(msg_id = %mid, "Complaint references unknown message, skipping suppression");
                     None
                 }
                 Some((tenant_id, queued_recipient)) => match &complaint.original_recipient {
@@ -925,7 +925,7 @@ impl FeedbackLoopServer {
                             reported_recipient = %reported,
                             queued_recipient = %queued_recipient,
                             msg_id = %mid,
-                            "Complaint recipient does not match queued recipient — dropping forged complaint"
+                            "Complaint recipient does not match queued recipient, dropping forged complaint"
                         );
                         None
                     }
@@ -933,7 +933,7 @@ impl FeedbackLoopServer {
                 },
             },
             None => {
-                warn!("Complaint carries no original message id — skipping suppression");
+                warn!("Complaint carries no original message id, skipping suppression");
                 None
             }
         };
@@ -964,7 +964,7 @@ impl FeedbackLoopServer {
         // `message.complained` reaches the tenant webhooks through the
         // canonical queue. Webhooks are tenant-scoped, so a complaint whose
         // original message cannot be resolved to a tenant has no endpoint to
-        // deliver to — the durable reputation/suppression side still ran.
+        // deliver to, the durable reputation/suppression side still ran.
         if let Some((tenant_id, _)) = suppression_target.as_ref() {
             super::util::queue_tenant_webhook_event(
                 &self.pool,
@@ -1003,7 +1003,7 @@ impl FeedbackLoopServer {
         // Typed comparisons keep the PK (id) and message_id index usable:
         // the previous `id::text = $1 OR message_id::text = $1` cast both
         // sides to text, forcing a full scan of every email_queue partition
-        // for every inbound complaint — an attacker-supplied report chooses
+        // for every inbound complaint, an attacker-supplied report chooses
         // the message-id string. A malformed reference is simply unknown.
         let Ok(id) = uuid::Uuid::parse_str(message_id.trim()) else {
             return Ok(None);
@@ -1286,10 +1286,10 @@ pub fn parse_arf_report(message: &str) -> ComplaintInfo {
 /// ARF address/message-id fields are conventionally wrapped in angle brackets
 /// (`Original-Rcpt-To: <user@example.com>`, `Original-Mail-From:
 /// <sender@domain>`); the brackets are not part of the addr-spec. Leaving
-/// them in broke the suppression identity check — the reported
+/// them in broke the suppression identity check, the reported
 /// `<user@example.com>` never equals the queued `user@example.com`, so every
 /// complaint from a conforming reporter was dropped as "forged" and the
-/// recipient was never suppressed — and produced a `sender_reputation`
+/// recipient was never suppressed, and produced a `sender_reputation`
 /// domain with a trailing `>`.
 fn normalize_arf_addr(value: &str) -> String {
     value
@@ -1578,7 +1578,7 @@ Original-Message-ID: <original@example.com>\r\n";
     /// bound far beyond every server timer: under `start_paused` the
     /// client's timer participates in tokio's auto-advance, and a short
     /// bound Elapses whenever the runtime goes idle before the real-socket
-    /// reply bytes land — under load the clock can jump to this timer
+    /// reply bytes land, under load the clock can jump to this timer
     /// before the peer task ever got scheduled to write. 3600s is safely
     /// beyond the server's own 30s/120s timers, which always win the
     /// auto-advance race and drive the session; a genuinely wedged session
@@ -1635,7 +1635,7 @@ Original-Message-ID: <original@example.com>\r\n";
         let tcp = TcpStream::connect(addr).await.unwrap();
         let (reader, mut writer) = tcp.into_split();
         let mut reader = tokio::io::BufReader::new(reader);
-        // Greeting is the normal 220 — no 554 rejection any more.
+        // Greeting is the normal 220, no 554 rejection any more.
         assert!(
             fbl_read_reply(&mut reader).await.starts_with("220"),
             "non-authoritative sources are accepted so their reports can be recorded"
@@ -1967,7 +1967,7 @@ Original-Message-ID: <original@example.com>\r\n";
     #[test]
     fn webhook_events_go_to_the_canonical_consumer_queue() {
         // Events used to be LPUSHed onto the `mta:webhook_queue` Redis list,
-        // which NO component ever consumed — every inbound/bounce/complaint
+        // which NO component ever consumed, every inbound/bounce/complaint
         // webhook was silently dropped. They now enter the canonical
         // `webhook_queue` table the worker's webhook processor drains
         // (retries, circuit breaker, SSRF guard). Pinned against the
@@ -2066,7 +2066,7 @@ mod adversarial_db_tests {
     }
 
     /// Seed a sent message the complaint can reference: returns (queue id,
-    /// message_id) — both must be resolvable by `lookup_sent_message`.
+    /// message_id), both must be resolvable by `lookup_sent_message`.
     async fn seed_sent_message(pool: &PgPool, tenant: &str, recipient: &str) -> (String, String) {
         seed_tenant(pool, tenant).await;
         let id = Uuid::new_v4();
@@ -3325,20 +3325,20 @@ mod verify_source_wire_tests {
     /// Task-join bound for the virtual-time wire tests (audit 2026-10-02
     /// #12b): far beyond every server timer (120s command idle, 300s DATA
     /// line, 600s DATA total, 1800s session deadline). Only used for joins
-    /// on an already-finishing session task — the completion is queued, so
-    /// the runtime never parks into an advance here — and as a loud bound on
+    /// on an already-finishing session task, the completion is queued, so
+    /// the runtime never parks into an advance here, and as a loud bound on
     /// a genuinely wedged session. Reply reads use
     /// [`FBL_HEARTBEAT_READ_BOUND`]: an idle park under `start_paused`
     /// advances the clock to the EARLIEST armed timer regardless of
     /// in-flight bytes, so a bound above a server timer lets that server
-    /// timer fire mid-request — the exact race the removed nextest
+    /// timer fire mid-request, the exact race the removed nextest
     /// `retries = 2` stanza used to absorb.
     const FBL_VIRTUAL_READ_BOUND: Duration = Duration::from_secs(3600);
 
     /// Heartbeat-loop bound: deliberately SMALLER than the server's 120s
     /// command-idle budget. Tokio's current-thread auto-advance jumps the
-    /// paused clock to the EARLIEST armed timer on every idle park — even
-    /// with in-flight socket bytes — so a read bound at or above a server
+    /// paused clock to the EARLIEST armed timer on every idle park, even
+    /// with in-flight socket bytes, so a read bound at or above a server
     /// timer makes the SERVER's timer fire mid-request (the wrong 421). A
     /// 30s bound keeps every advance on the client's own timer; the reply
     /// bytes are already queued (the write completed), so the read's
@@ -3347,7 +3347,7 @@ mod verify_source_wire_tests {
 
     /// One reply line under [`FBL_HEARTBEAT_READ_BOUND`]. A bound elapse
     /// means that park advanced the clock without the peer's readiness being
-    /// dispatched — the bytes are queued (the write completed) or a server
+    /// dispatched, the bytes are queued (the write completed) or a server
     /// timer is still armed further out, so the next bounded park either
     /// observes them or walks the clock toward the armed server deadline.
     async fn fbl_heartbeat_read_line(
@@ -3363,7 +3363,7 @@ mod verify_source_wire_tests {
                 Ok(Err(e)) => panic!("reply read failed: {e}"),
             }
         }
-        panic!("no reply within 30 bounded parks — the session is wedged");
+        panic!("no reply within 30 bounded parks, the session is wedged");
     }
 
     /// A complete (possibly multi-line) SMTP reply, line by line under
@@ -3412,7 +3412,7 @@ mod verify_source_wire_tests {
         // Every reply read keeps the CLIENT's timer the runtime's earliest
         // (30s bound + bounded retry): an auto-advance must never be able to
         // fast-forward the server's 120s command-idle timer while the batch
-        // is still being delivered — the idle 421 it produces would pre-empt
+        // is still being delivered, the idle 421 it produces would pre-empt
         // the queued 250s and the choreography would die on `starts_with('2')`
         // (observed once per ~15 solo runs before this was tightened).
         for _ in 0..3 {
@@ -3421,7 +3421,7 @@ mod verify_source_wire_tests {
         }
         let reply = fbl_heartbeat_read_full_reply(&mut reader).await;
         assert!(reply.starts_with("354"), "{reply:?}");
-        // Nothing more will arrive via I/O — the server is parked on ITS
+        // Nothing more will arrive via I/O, the server is parked on ITS
         // DATA deadline (per-line 300s, clamped inside the 600s total), and
         // the client sent nothing after DATA, so there is no in-flight byte
         // to lose a race against. Each bounded park advances the clock +30s
@@ -3441,17 +3441,17 @@ mod verify_source_wire_tests {
     #[tokio::test(start_paused = true)]
     async fn fbl_session_deadline_closes_with_421_under_virtual_time() {
         // Heartbeat NOOPs drive the session to its 30-minute deadline
-        // (audit 2026-10-02 #12b — replaces the flaky sleep-before-read
+        // (audit 2026-10-02 #12b, replaces the flaky sleep-before-read
         // loop whose `retries = 2` stanza was removed).
         //
         // Why the 30s read bound BELOW is load-bearing: on tokio's
         // current-thread runtime, auto-advance jumps the paused clock to
-        // the EARLIEST armed timer on every idle park — regardless of
+        // the EARLIEST armed timer on every idle park, regardless of
         // in-flight socket bytes (the cross-thread `did_wake` guard never
         // fires here). A client read bound ≥ the server's 120s command-idle
         // budget therefore lets the runtime fast-forward the SERVER's idle
         // timer while the NOOP is still being delivered, and the session
-        // closes with the WRONG 421 (idle, not deadline) — the exact race
+        // closes with the WRONG 421 (idle, not deadline), the exact race
         // the removed retry stanza used to absorb. With a 30s bound every
         // advance lands on the CLIENT's own timer (+30s per park), the
         // server's idle budget is never outrun (it re-arms +120s per reply
@@ -3495,7 +3495,7 @@ mod verify_source_wire_tests {
             // Read the reply BEFORE advancing the clock: the write already
             // completed, so the reply is queued; if this park advanced the
             // clock past the bound without the readiness being dispatched
-            // (at most once — the edge is latched and the next park observes
+            // (at most once, the edge is latched and the next park observes
             // it), the bounded retry re-parks and reads it.
             let reply = loop {
                 let mut line = String::new();

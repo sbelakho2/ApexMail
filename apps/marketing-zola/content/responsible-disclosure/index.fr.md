@@ -1,6 +1,6 @@
 +++
 title = "Divulgation responsable"
-description = "Politique de divulgation responsable d'ApexMail — comment signaler les vulnérabilités de sécurité."
+description = "Politique de divulgation responsable d'ApexMail, comment signaler les vulnérabilités de sécurité."
 template = "prose.html"
 
 [extra]

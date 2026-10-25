@@ -67,7 +67,7 @@ impl ReputationScore {
 
     /// Create a reputation entry starting at a configured initial score
     /// (audit SM5 F13): `ProtectorConfig::initial_reputation` was
-    /// previously inert — every entry hardcoded the neutral 50. Operators
+    /// previously inert, every entry hardcoded the neutral 50. Operators
     /// raising the initial score (e.g. to reduce false challenges for
     /// prosumer CGNAT addresses) now get what they configured.
     pub fn with_initial_reputation(score: u8) -> Self {

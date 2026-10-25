@@ -1,4 +1,4 @@
-//! Retention classes — the legal buckets behind the operational RET-001..023
+//! Retention classes, the legal buckets behind the operational RET-001..023
 //! registry.
 //!
 //! [`crate::retention`] answers "how long may the platform keep this by
@@ -6,7 +6,7 @@
 //! The distinction matters at erasure time: a statutory class (Estonian
 //! accounting evidence, seven years) has an independent legal-retention
 //! obligation, so an ordinary Art. 17 erasure must NOT delete records in that
-//! class — it moves them to the legally-restricted archive
+//! class, it moves them to the legally-restricted archive
 //! ([`crate::legal_archive`]) and discloses what was retained, why and until
 //! when.
 //!
@@ -96,7 +96,7 @@ pub fn seeded_retention_classes() -> Vec<RetentionClass> {
             maximum_days: None,
             retention_days: 2555,
             legal_basis_reference: Some(
-                "Estonian Accounting Act (Raamatupidamise seadus) — accounting evidence \
+                "Estonian Accounting Act (Raamatupidamise seadus), accounting evidence \
                  retention, seven years. Wording to be confirmed by Legal."
                     .into(),
             ),
@@ -324,14 +324,14 @@ pub async fn list(db: &PgPool) -> Result<Vec<RetentionClass>, String> {
 }
 
 /// Read the statutory accounting class, failing loudly when the registry has
-/// not been seeded — an erasure must never silently treat a statutory record
+/// not been seeded, an erasure must never silently treat a statutory record
 /// as deletable because a lookup returned nothing.
 pub async fn statutory_accounting_class(db: &PgPool) -> Result<RetentionClass, String> {
     get(db, STATUTORY_ACCOUNTING_CLASS_ID)
         .await?
         .ok_or_else(|| {
             format!(
-                "retention class {STATUTORY_ACCOUNTING_CLASS_ID} is not seeded — refusing to \
+                "retention class {STATUTORY_ACCOUNTING_CLASS_ID} is not seeded, refusing to \
                  decide statutory retention on an empty registry (run ensure_seeded)"
             )
         })

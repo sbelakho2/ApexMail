@@ -1,4 +1,4 @@
-//! Canonical GDPR governance registry — records of processing (ROPA, Art. 30),
+//! Canonical GDPR governance registry, records of processing (ROPA, Art. 30),
 //! lawful-basis records (Art. 6/9), DPIAs (Art. 35), processor contracts
 //! (Art. 28) and international-transfer evidence (Chapter V: TIA / SCC /
 //! adequacy).
@@ -17,11 +17,11 @@
 //! categories, recipients, controller/processor role, retention class and the
 //! `source_location` proving it. It does NOT invent:
 //!
-//! * **lawful bases** — every seeded `lawful_basis_records` row has
+//! * **lawful bases**, every seeded `lawful_basis_records` row has
 //!   `basis = NULL` and `basis_status = 'requires_legal_input'`;
-//! * **DPIA outcomes** — the seeded assessment is `status = 'required'` with
+//! * **DPIA outcomes**, the seeded assessment is `status = 'required'` with
 //!   no risk acceptance;
-//! * **transfer mechanisms / adequacy** — seeded transfer assessments are
+//! * **transfer mechanisms / adequacy**, seeded transfer assessments are
 //!   `transfer_mechanism = 'undetermined'` and
 //!   `status = 'legal_input_required'`; SCC records and adequacy evidence are
 //!   not seeded at all.
@@ -239,7 +239,7 @@ pub async fn register_activity(
         .await?
         .ok_or_else(|| {
             format!(
-                "unknown retention class {} — a store cannot be registered without a real class",
+                "unknown retention class {}, a store cannot be registered without a real class",
                 input.retention_class_id
             )
         })?;
@@ -404,7 +404,7 @@ pub async fn record_lawful_basis(
     Ok(row)
 }
 
-/// Approve an activity. Refuses while its lawful basis is unresolved — an
+/// Approve an activity. Refuses while its lawful basis is unresolved, an
 /// approved ROPA entry without a basis would be a false record.
 pub async fn approve_activity(db: &PgPool, activity_id: &str) -> Result<(), String> {
     let activity = get_activity(db, activity_id)
@@ -885,7 +885,7 @@ pub async fn seed_registry(db: &PgPool) -> Result<SeedSummary, String> {
 
     // One DPIA screening record: the platform-wide processing (profiling,
     // analytics, large-scale event tracking) needs a DPIA decision. The
-    // assessment itself is NOT written — status `required` until Legal/DPO
+    // assessment itself is NOT written, status `required` until Legal/DPO
     // completes it.
     let dpia_inserted = sqlx::query(
         "INSERT INTO dpia_assessments

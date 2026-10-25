@@ -33,7 +33,7 @@ use crate::{
 /// Maximum connections in the shared docs pool (chat retrieval + audit,
 /// indexer, draft-only email agent, first-response poller). Pinned to the
 /// documented chat concurrency budget (16 concurrent conversations): see the
-/// dogfood note at the pool construction site — 4 was enough for indexing +
+/// dogfood note at the pool construction site, 4 was enough for indexing +
 /// point reads but starved chat under combined load (64 x 500).
 pub const DOCS_POOL_MAX_CONNECTIONS: u32 = 16;
 
@@ -329,7 +329,7 @@ async fn optimize_time_handler(
     }
 
     // `find_optimal_time` returns None exactly for empty input, so the None
-    // arm IS the empty-input rejection — one source of truth, no dead arm.
+    // arm IS the empty-input rejection, one source of truth, no dead arm.
     let slot = match state.sto.find_optimal_time(&request.engagement_data) {
         Some(slot) => slot,
         None => {
@@ -394,20 +394,20 @@ async fn list_models_handler(State(state): State<Arc<AppState>>) -> Response {
 /// as an inference rate-limit key.
 const MAX_TENANT_RATE_KEY_LEN: usize = 64;
 
-/// Rate-limit bucket used when no tenant identity is forwarded at all — i.e.
+/// Rate-limit bucket used when no tenant identity is forwarded at all, i.e.
 /// genuinely tenant-less internal calls from the authenticated control plane
 /// (batch jobs, health probes) hitting the INFERENCE route `/predict`, which
 /// touches no tenant data. A header that is PRESENT but invalid is rejected
 /// instead of landing here (see [`tenant_rate_key_from_headers`]). Tenant-
 /// SCOPED routes (`/chat`, `/admin/chat/history`) must never use this
-/// fallback — they require the header ([`required_tenant_identity`]).
+/// fallback, they require the header ([`required_tenant_identity`]).
 const CONTROL_PLANE_RATE_KEY: &str = "_control-plane";
 
 /// Resolve the inference rate-limit key for a request.
 ///
 /// Auth-context note: `require_service_token` authenticates the upstream
 /// control plane with ONE shared internal service token and exposes no
-/// per-caller identity — nothing about the tenant is bound to the token.
+/// per-caller identity, nothing about the tenant is bound to the token.
 /// The tenant identity therefore arrives only via the `x-apexmail-tenant-id`
 /// header the control plane forwards after its own authorization, so the key
 /// must at least be bounded: length and charset are validated (UUID/ULID
@@ -433,7 +433,7 @@ fn tenant_rate_key_from_headers(headers: &HeaderMap) -> Result<String, &'static 
 
 /// Why a tenant-scoped route refused to resolve a tenant identity.
 pub(crate) enum TenantIdentityError {
-    /// Header absent or blank — the caller asserted no tenant at all.
+    /// Header absent or blank, the caller asserted no tenant at all.
     Missing,
     /// Header present but not a valid bounded identity.
     Invalid(&'static str),
@@ -470,7 +470,7 @@ pub(crate) fn required_tenant_identity(headers: &HeaderMap) -> Result<String, Te
 /// used to return every `user_id` in the tenant, so any same-tenant
 /// credential read its teammates' conversations. The console surface is
 /// per-user and `docs/user-guide/assistant.md` documents that conversations
-/// are "visible only to the user they belong to" — so this route now REQUIRES
+/// are "visible only to the user they belong to", so this route now REQUIRES
 /// the caller's user identity and filters on it, exactly like the tenant
 /// header: a caller that omits it gets no data, never the tenant-wide view.
 pub(crate) fn required_user_identity(headers: &HeaderMap) -> Result<String, TenantIdentityError> {
@@ -517,7 +517,7 @@ async fn predict_handler(
 
     // Enforce the configured inference rate limit per tenant. The upstream
     // control plane is authenticated by the service-token middleware (which
-    // carries no per-caller identity — see `tenant_rate_key_from_headers`);
+    // carries no per-caller identity, see `tenant_rate_key_from_headers`);
     // the tenant header is accepted only in validated, bounded form, and the
     // `_control-plane` fallback applies only when it is absent.
     let rate_key = match tenant_rate_key_from_headers(&headers) {
@@ -622,7 +622,7 @@ async fn domain_dns_handler(
 
 // ── Grounded chat ─────────────────────────────────────────────────────────
 
-/// POST /chat — called by the authenticated control plane (api-server) with
+/// POST /chat, called by the authenticated control plane (api-server) with
 /// the END USER's tenant/user identity. This service never authenticates the
 /// end user itself; the token-authenticated caller asserts identity via the
 /// REQUIRED tenant header, and the caller assembles the account context from
@@ -693,7 +693,7 @@ async fn chat_handler(
     }
 }
 
-/// POST /admin/reindex — rebuild the docs index from AI_DOCS_DIR. Safe to
+/// POST /admin/reindex, rebuild the docs index from AI_DOCS_DIR. Safe to
 /// call repeatedly (idempotent upsert; prunes superseded versions).
 async fn reindex_handler(State(state): State<Arc<AppState>>) -> Response {
     let Some(pool) = &state.docs_pool else {
@@ -714,8 +714,8 @@ async fn reindex_handler(State(state): State<Arc<AppState>>) -> Response {
 }
 
 /// Body of POST /admin/chat/history. P1-SECURITY: the target tenant is NO
-/// LONGER accepted from the body at all — `deny_unknown_fields` rejects any
-/// `tenant_id` key — so the read is scoped exclusively to the REQUIRED
+/// LONGER accepted from the body at all, `deny_unknown_fields` rejects any
+/// `tenant_id` key, so the read is scoped exclusively to the REQUIRED
 /// forwarded tenant header.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -723,14 +723,14 @@ pub struct ChatHistoryRequest {
     pub limit: Option<i64>,
 }
 
-/// POST /admin/chat/history — ONE USER's chat audit rows (newest first),
+/// POST /admin/chat/history, ONE USER's chat audit rows (newest first),
 /// scoped to the REQUIRED `x-apexmail-tenant-id` AND `x-apexmail-user-id`
 /// headers. P1-SECURITY: the old body-carried `tenant_id` was a
 /// cross-tenant confidentiality breach protected only by the universal
 /// internal token; the body can no longer select a tenant (and a missing
 /// header is a 401, never a default bucket). P2-SECURITY (dogfood
 /// 2026-10-06): the tenant header alone returned every teammate's turns, so
-/// the user header is now required too and the query filters on it — the
+/// the user header is now required too and the query filters on it, the
 /// console session surface and `docs/user-guide/assistant.md` define history
 /// as per-user.
 async fn chat_history_handler(
@@ -760,7 +760,7 @@ async fn chat_history_handler(
         }
     };
     // P2-SECURITY: require the caller's own user identity and scope the read
-    // to it — the tenant header alone must never return teammates' turns.
+    // to it, the tenant header alone must never return teammates' turns.
     let user = match required_user_identity(&headers) {
         Ok(user) => user,
         Err(TenantIdentityError::Missing) => {
@@ -887,7 +887,7 @@ async fn require_service_token(
 }
 
 /// P1-SECURITY: AI-control routes authenticate with the dedicated
-/// `AI_ADMIN_TOKEN` credential — never the universal `INTERNAL_SERVICE_TOKEN`
+/// `AI_ADMIN_TOKEN` credential, never the universal `INTERNAL_SERVICE_TOKEN`
 /// (a lateral-movement domain: anyone holding the shared internal token could
 /// otherwise start training jobs or rebuild the docs index). An empty
 /// configured credential fails closed: nobody is authorized.
@@ -921,7 +921,7 @@ mod tests {
     use tower::ServiceExt;
 
     /// P1-SECURITY: the dedicated AI-control credential used by the test
-    /// apps — deliberately distinct from the universal "test-key".
+    /// apps, deliberately distinct from the universal "test-key".
     const ADMIN_TOKEN: &str = "admin-key";
 
     async fn app() -> Router {
@@ -1023,7 +1023,7 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
 
-        // P1-SECURITY: /train is an AI-control route — it needs the dedicated
+        // P1-SECURITY: /train is an AI-control route, it needs the dedicated
         // admin credential, and even with it a missing runner fails closed.
         let app = app_with(admin_capable_config(), "test-key").await;
         let response = app
@@ -1136,7 +1136,7 @@ mod tests {
         );
 
         // Matching identities proceed (escalation answer: no model runtime
-        // in tests) — and the ABSENT header is a 401, never a `_control-
+        // in tests), and the ABSENT header is a 401, never a `_control-
         // plane` default (P1-SECURITY fix: the old fallback let a holder of
         // the universal token omit the header and act as any body tenant).
         let response = app
@@ -1219,7 +1219,7 @@ mod tests {
     }
 
     /// Malformed / oversized tenant headers must never become rate-limit
-    /// identities — they are rejected with 400 before the governor sees them.
+    /// identities, they are rejected with 400 before the governor sees them.
     #[tokio::test]
     async fn predict_rejects_malformed_tenant_rate_key_headers() {
         let app = app().await;
@@ -1755,7 +1755,7 @@ mod tests {
         );
     }
 
-    /// A chat against an unreachable runtime surfaces as 503 — never as a
+    /// A chat against an unreachable runtime surfaces as 503, never as a
     /// fabricated answer.
     #[tokio::test]
     async fn chat_route_with_dead_runtime_is_unavailable() {
@@ -1847,7 +1847,7 @@ mod tests {
 
         // ── /admin/chat/history reads them back, scoped to the REQUIRED ──
         // tenant header (P1-SECURITY: the body can no longer carry a
-        // tenant_id at all — the old body-carried tenant was a cross-tenant
+        // tenant_id at all, the old body-carried tenant was a cross-tenant
         // confidentiality breach behind the universal token).
         let app = app_with(
             AiConfig {
@@ -1858,7 +1858,7 @@ mod tests {
         )
         .await;
         // P2-SECURITY (dogfood 2026-10-06): the read is scoped to the
-        // caller's own user too — the user header is REQUIRED alongside the
+        // caller's own user too, the user header is REQUIRED alongside the
         // tenant header, so the helper always sends `u1` unless a case is
         // exercising the missing-header refusal.
         let history_request = |tenant_header: Option<&str>, body: serde_json::Value| {
@@ -1892,13 +1892,13 @@ mod tests {
         assert!(messages.iter().all(|m| m["user_id"] == "u1"));
         assert_eq!(history["tenant_id"], tenant.as_str());
 
-        // History WITHOUT the tenant header is a 401 — P1-SECURITY: the old
+        // History WITHOUT the tenant header is a 401, P1-SECURITY: the old
         // body-carried tenant_id (and its 400 for absence) is gone.
         assert_eq!(
             status_of(&app, history_request(None, serde_json::json!({"limit": 5}))).await,
             StatusCode::UNAUTHORIZED
         );
-        // P2-SECURITY: WITHOUT the user header it is likewise a 401 — the
+        // P2-SECURITY: WITHOUT the user header it is likewise a 401, the
         // tenant header alone must not return teammates' turns.
         let tenant_only = {
             let mut request =
@@ -2096,7 +2096,7 @@ mod tests {
             .await
             .unwrap();
 
-        let dir = std::env::temp_dir().join(format!("ai-route-docs-{}", uuid::Uuid::new_v4())); // nosemgrep: rust.lang.security.temp-dir.temp-dir — test fixture under a unique pid/uuid path — no predictable-name temp collision
+        let dir = std::env::temp_dir().join(format!("ai-route-docs-{}", uuid::Uuid::new_v4())); // nosemgrep: rust.lang.security.temp-dir.temp-dir, test fixture under a unique pid/uuid path, no predictable-name temp collision
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             dir.join("guide.md"),
@@ -2247,7 +2247,7 @@ mod tests {
             "the selector record must be present: {body}"
         );
 
-        // A domain the tenant does not own is 404 — never another
+        // A domain the tenant does not own is 404, never another
         // tenant's records.
         assert_eq!(
             status_of(
@@ -2279,7 +2279,7 @@ mod tests {
     #[tokio::test]
     async fn train_route_starts_a_governed_job_readable_by_id() {
         let scratch =
-            std::env::temp_dir().join(format!("ai-routes-train-{}", uuid::Uuid::new_v4())); // nosemgrep: rust.lang.security.temp-dir.temp-dir — test fixture under a unique pid/uuid path — no predictable-name temp collision
+            std::env::temp_dir().join(format!("ai-routes-train-{}", uuid::Uuid::new_v4())); // nosemgrep: rust.lang.security.temp-dir.temp-dir, test fixture under a unique pid/uuid path, no predictable-name temp collision
         std::fs::create_dir_all(&scratch).unwrap();
         let config = AiConfig {
             training_runner: "/bin/echo".into(),
@@ -2315,7 +2315,7 @@ mod tests {
         );
 
         // The job is readable while it runs or after the runner exits
-        // (AI-control credential — P1-SECURITY).
+        // (AI-control credential, P1-SECURITY).
         assert_eq!(
             status_of(
                 &app,
@@ -2360,7 +2360,7 @@ mod tests {
     }
 
     /// A malformed tenant header on /chat is a 400 before any rate bucket or
-    /// model call — opaque bytes can never masquerade as tenant-less calls.
+    /// model call, opaque bytes can never masquerade as tenant-less calls.
     #[tokio::test]
     async fn chat_route_rejects_malformed_tenant_headers() {
         let app = app().await;
@@ -2395,7 +2395,7 @@ mod tests {
 
     /// The oversize-data guard is directly exercisable at the handler (HTTP
     /// bodies are already capped at 64 KiB by the frame, which cannot carry
-    /// 10,001 entries — the guard defends the handler, not the wire).
+    /// 10,001 entries, the guard defends the handler, not the wire).
     #[tokio::test]
     async fn optimize_time_handler_rejects_more_than_ten_thousand_entries() {
         let state = Arc::new(
@@ -2411,12 +2411,12 @@ mod tests {
     }
 
     /// State can be built from the deployment environment. P1-SECURITY: the
-    /// environment now also carries AI_ADMIN_TOKEN — production boots (the
+    /// environment now also carries AI_ADMIN_TOKEN, production boots (the
     /// default when APP_ENV is unset) refuse without it.
     #[tokio::test]
     async fn state_builds_from_environment() {
         let _serial = ENV_SERIAL.lock().await;
-        let scratch = std::env::temp_dir().join(format!("ai-routes-env-{}", uuid::Uuid::new_v4())); // nosemgrep: rust.lang.security.temp-dir.temp-dir — test fixture under a unique pid/uuid path — no predictable-name temp collision
+        let scratch = std::env::temp_dir().join(format!("ai-routes-env-{}", uuid::Uuid::new_v4())); // nosemgrep: rust.lang.security.temp-dir.temp-dir, test fixture under a unique pid/uuid path, no predictable-name temp collision
         std::fs::create_dir_all(&scratch).unwrap();
         let checkpoint = scratch.display().to_string();
         let _guard = EnvGuard::with(&[
@@ -2434,7 +2434,7 @@ mod tests {
 
     /// P2-SECURITY (dogfood 2026-10-06, live-confirmed): /admin/chat/history
     /// returns ONLY the forwarded user's turns, and a request that omits the
-    /// user header is refused — the tenant-wide read returned every
+    /// user header is refused, the tenant-wide read returned every
     /// teammate's conversation to any same-tenant credential.
     #[tokio::test]
     async fn chat_history_is_scoped_to_the_forwarded_user() {
@@ -2524,7 +2524,7 @@ mod tests {
     /// waiting for an open connection" and 64 x 500 under a 16-conversation
     /// perf run with mailbot probes active. Pinned so a future "small pool"
     /// revert has to explain itself. The size pin is COMPILE-TIME (a runtime
-    /// assert on constants is vacuous — clippy::assertions_on_constants);
+    /// assert on constants is vacuous, clippy::assertions_on_constants);
     /// the timeout pin asserts the documented floor at runtime.
     const _: () = assert!(DOCS_POOL_MAX_CONNECTIONS >= 16);
     #[test]

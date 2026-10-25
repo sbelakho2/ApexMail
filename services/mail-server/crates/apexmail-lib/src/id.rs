@@ -1,4 +1,4 @@
-//! ID generation — nanoid, API key prefixes.
+//! ID generation, nanoid, API key prefixes.
 
 use nanoid::nanoid;
 use rand::rngs::OsRng;
@@ -58,7 +58,7 @@ pub fn generate_request_id() -> String {
 
 /// F: generate `len` characters from `alphabet` using OsRng with rejection
 /// sampling (no modulo bias). Shared by the security-sensitive generators
-/// (webhook secrets, verification tokens) — the nanoid path is NOT used for
+/// (webhook secrets, verification tokens), the nanoid path is NOT used for
 /// secrets because its PRNG is not cryptographically secure.
 fn generate_secure_from_alphabet(alphabet: &[u8], len: usize) -> Result<String, String> {
     use rand::rngs::OsRng;
@@ -69,7 +69,7 @@ fn generate_secure_from_alphabet(alphabet: &[u8], len: usize) -> Result<String, 
     }
     // Largest multiple of alphabet.len() that fits in one byte. Kept in
     // usize: for alphabet lengths that divide 256 exactly (e.g. 128 or
-    // 256) the bound IS 256, which does not fit u8 — the previous
+    // 256) the bound IS 256, which does not fit u8, the previous
     // `as u8` cast wrapped it to 0, the rejection test then rejected every
     // byte, and the loop spun forever. In usize the comparison is correct
     // for every alphabet length 1..=256 and can never yield 0.

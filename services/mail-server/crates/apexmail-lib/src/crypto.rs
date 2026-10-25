@@ -1,4 +1,4 @@
-//! Cryptographic utilities — HMAC, hashing, passwords, timing-safe comparison.
+//! Cryptographic utilities, HMAC, hashing, passwords, timing-safe comparison.
 
 use argon2::password_hash::SaltString;
 use argon2::{Algorithm, Argon2, Params, PasswordHash, PasswordHasher, PasswordVerifier, Version};
@@ -27,12 +27,12 @@ pub enum PasswordVerificationError {
     UnsupportedScheme,
 }
 
-/// Fallible HMAC-SHA256 signature as hex — the canonical constructor.
+/// Fallible HMAC-SHA256 signature as hex, the canonical constructor.
 ///
 /// `new_from_slice` only fails on key-length errors, which are structurally
 /// unreachable for HMAC (any key length, including empty, is accepted), so
 /// callers of the [`create_hmac_signature`] wrapper may treat failure as an
-/// invariant violation — but this form makes the (theoretical) failure
+/// invariant violation, but this form makes the (theoretical) failure
 /// explicit instead of silently yielding an empty signature string.
 pub fn try_create_hmac_signature(
     key: &[u8],
@@ -48,13 +48,13 @@ pub fn try_create_hmac_signature(
 /// Delegates to [`try_create_hmac_signature`]. The error branch is
 /// unreachable for HMAC (any key length is valid), so it panics loudly on
 /// the invariant instead of the previous behavior of returning `String::new()`
-/// — an empty string that callers could not distinguish from a real
+///, an empty string that callers could not distinguish from a real
 /// signature and that silently disabled signature checks downstream.
 pub fn create_hmac_signature(key: &[u8], data: &[u8]) -> String {
     try_create_hmac_signature(key, data).expect("HMAC-SHA256 accepts keys of any length")
 }
 
-/// Fallible HMAC-SHA256 signature as base64 — see
+/// Fallible HMAC-SHA256 signature as base64, see
 /// [`try_create_hmac_signature`] for why the fallible form exists.
 pub fn try_create_hmac_signature_base64(
     key: &[u8],
@@ -75,7 +75,7 @@ pub fn create_hmac_signature_base64(key: &[u8], data: &[u8]) -> String {
 }
 
 /// Timing-safe comparison of two strings (constant-time).
-/// Does NOT short-circuit on length difference — we use a dummy comparison
+/// Does NOT short-circuit on length difference, we use a dummy comparison
 /// to avoid leaking the length of the expected value.
 pub fn timing_safe_compare(a: &str, b: &str) -> bool {
     let a_bytes = a.as_bytes();
@@ -104,7 +104,7 @@ pub fn hash_api_key(key: &str) -> String {
 }
 
 /// Hash an API key using HMAC-SHA256 with a secret.
-/// This is the preferred method — the secret prevents offline brute-force
+/// This is the preferred method, the secret prevents offline brute-force
 /// even if the database is leaked.
 pub fn hash_api_key_with_secret(key: &str, secret: &str) -> String {
     create_hmac_signature(secret.as_bytes(), key.as_bytes())
@@ -129,7 +129,7 @@ pub fn hash_api_key_argon2(key: &str) -> Result<String, argon2::password_hash::E
 }
 
 /// Verify an API key against a stored hash (supports both Argon2id and
-/// HMAC-SHA256 — the two actively-used schemes).  Returns `Ok(true)` if
+/// HMAC-SHA256, the two actively-used schemes).  Returns `Ok(true)` if
 /// the key matches, `Ok(false)` otherwise.
 ///
 /// For plain SHA-256 legacy hashes, use [`hash_api_key`] and compare directly.
@@ -152,7 +152,7 @@ pub fn verify_api_key_hash(
         // Legacy bcrypt-encoded API keys (rare, but handle gracefully)
         Ok(bcrypt::verify(key, stored_hash).unwrap_or(false))
     } else {
-        // Assume HMAC-SHA256 or plain SHA-256 — caller must compare externally
+        // Assume HMAC-SHA256 or plain SHA-256, caller must compare externally
         Err(argon2::password_hash::Error::Crypto)
     }
 }
@@ -160,7 +160,7 @@ pub fn verify_api_key_hash(
 /// Detect the API key hash algorithm version from the stored hash string.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ApiKeyHashVersion {
-    /// Plain SHA-256 (legacy, weak — must migrate)
+    /// Plain SHA-256 (legacy, weak, must migrate)
     Sha256,
     /// HMAC-SHA256 with a server secret
     HmacSha256,
@@ -181,7 +181,7 @@ impl std::fmt::Display for ApiKeyHashVersion {
     }
 }
 
-/// Determine the hash version used for a stored API key hash — a
+/// Determine the hash version used for a stored API key hash, a
 /// **shape-based heuristic**, not a definitive identification.
 ///
 /// # Limitations
@@ -189,7 +189,7 @@ impl std::fmt::Display for ApiKeyHashVersion {
 /// [`ApiKeyHashVersion::HmacSha256`], but plain SHA-256 and HMAC-SHA256
 /// digests have exactly the same shape and are indistinguishable by
 /// inspection: both are 64 hex characters with no algorithm tag. Callers
-/// must not treat this result as proof of scheme — use it only to decide
+/// must not treat this result as proof of scheme, use it only to decide
 /// which *verification* strategy to attempt (try HMAC first, then plain
 /// SHA-256), and never to conclude that a legacy plain-SHA-256 hash has
 /// already been migrated. The unambiguous cases are the self-describing
@@ -199,7 +199,7 @@ pub fn detect_api_key_hash_version(stored_hash: &str) -> ApiKeyHashVersion {
         ApiKeyHashVersion::Argon2id
     } else if stored_hash.len() == 64 && stored_hash.chars().all(|c| c.is_ascii_hexdigit()) {
         // 64-char hex: SHA-256 and HMAC-SHA256 are indistinguishable by
-        // shape — reported as HmacSha256 (the actively-written scheme), see
+        // shape, reported as HmacSha256 (the actively-written scheme), see
         // the function-level limitation note above.
         ApiKeyHashVersion::HmacSha256
     } else {
@@ -220,7 +220,7 @@ const OWASP_P_COST: u32 = 1;
 /// Construct an [`Argon2`] context with the OWASP-recommended parameters.
 ///
 /// # Panics
-/// Panics only if the parameters are invalid for the platform — this is a
+/// Panics only if the parameters are invalid for the platform, this is a
 /// compile-time constant set that should always be valid. A panic indicates
 /// a fundamental issue with the `argon2` crate or the underlying platform.
 fn argon2_default() -> Argon2<'static> {
@@ -239,7 +239,7 @@ fn argon2_default() -> Argon2<'static> {
 /// reject it at verification time. A weak-but-parseable Argon2id hash is
 /// still verified against its OWN embedded params and transparently
 /// migrated by [`verify_password_for_login`] / flagged by
-/// [`argon2_params_below_owasp`] — a hard failure here used to permanently
+/// [`argon2_params_below_owasp`], a hard failure here used to permanently
 /// lock out any pre-OWASP account.
 fn validate_argon2_params(hash: &PasswordHash) -> Result<(), argon2::password_hash::Error> {
     // Verify the algorithm is Argon2id
@@ -252,7 +252,7 @@ fn validate_argon2_params(hash: &PasswordHash) -> Result<(), argon2::password_ha
 }
 
 /// True when a parsed (already algorithm-validated) Argon2id hash carries
-/// parameters below the OWASP recommendations — i.e. it should be re-hashed
+/// parameters below the OWASP recommendations, i.e. it should be re-hashed
 /// with [`hash_password`] after the next successful login.
 fn argon2_params_below_owasp(hash: &PasswordHash) -> bool {
     let params = &hash.params;
@@ -296,7 +296,7 @@ pub fn hash_password(password: &str) -> Result<String, argon2::password_hash::Er
 /// Verifies that the stored hash uses the Argon2id algorithm (not argon2i or
 /// argon2d). A hash with WEAK but valid parameters (audit F11: e.g. a
 /// pre-OWASP `m<19456` / `t<2` row) is still verified against its own
-/// embedded parameters — the previous hard failure turned a weak hash into
+/// embedded parameters, the previous hard failure turned a weak hash into
 /// a permanent login lockout with no migration path. Use
 /// [`verify_password_for_login`] to obtain an upgraded hash.
 pub fn verify_password(password: &str, hash: &str) -> Result<bool, argon2::password_hash::Error> {
@@ -408,8 +408,8 @@ mod tests {
     #[test]
     fn hmac_signatures_never_silently_empty() {
         // Regression: the constructors used to return "" on (unreachable)
-        // key-length errors. HMAC accepts any key length — including empty
-        // — so every input must produce a full-length signature.
+        // key-length errors. HMAC accepts any key length, including empty
+        //, so every input must produce a full-length signature.
         for key in [&b""[..], b"k", b"secret", &[0u8; 256][..]] {
             let hex_sig = create_hmac_signature(key, b"payload");
             assert_eq!(hex_sig.len(), 64, "hex signature is 64 chars");
@@ -436,7 +436,7 @@ mod tests {
             ApiKeyHashVersion::Unknown
         );
         // 64-hex is reported as HmacSha256 even though a plain SHA-256
-        // digest has the identical shape — documented limitation.
+        // digest has the identical shape, documented limitation.
         assert_eq!(
             detect_api_key_hash_version(&hash_api_key("am_live_x")),
             ApiKeyHashVersion::HmacSha256

@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 
 /// First `n` characters of `s`. Byte slicing here (`&s[..n]`) can split a
-/// multi-byte character — CJK, emoji — and panic on attacker-controlled
+/// multi-byte character, CJK, emoji, and panic on attacker-controlled
 /// tokens, so the cut always walks to a char boundary.
 fn first_chars(s: &str, n: usize) -> &str {
     match s.char_indices().nth(n) {
@@ -388,7 +388,7 @@ mod tests {
 
     #[test]
     fn test_detect_env_style_secret_assignments() {
-        let text = "DATABASE_URL=postgres://user:sk_live_4eC39HqLyjWDarjtT1zdp7dc@host/db\nAPI_KEY=very_secret_key_12345"; // nosemgrep: generic.secrets.security.detected-stripe-api-key.detected-stripe-api-key — the payment provider's public documentation example key (Stripe-shaped corpus, kept for multi-vendor DLP coverage) used as DLP detection-test corpus — the code that FINDS such keys
+        let text = "DATABASE_URL=postgres://user:sk_live_4eC39HqLyjWDarjtT1zdp7dc@host/db\nAPI_KEY=very_secret_key_12345"; // nosemgrep: generic.secrets.security.detected-stripe-api-key.detected-stripe-api-key, the payment provider's public documentation example key (Stripe-shaped corpus, kept for multi-vendor DLP coverage) used as DLP detection-test corpus, the code that FINDS such keys
         let result = scan_entropy(text, 4.5, 20);
         assert!(
             !result.findings.is_empty(),

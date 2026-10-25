@@ -18,7 +18,7 @@
 //!   is taxed so that the NET amount and the tax form the gross. Until
 //!   2024-12-31 the split is 80/20 (20% of gross); from 2025-01-01 it is
 //!   78/22 (22% of gross). For a NET distribution N the tax is therefore
-//!   N × 20/80 before 2025 and N × 22/78 from 2025 — the NET-TO-TAX
+//!   N × 20/80 before 2025 and N × 22/78 from 2025, the NET-TO-TAX
 //!   fraction; applying 0.22 to a net amount would over-tax it.
 //! * Withheld income tax (tulumaks): 20% until 2023-12-31; 22% from
 //!   2024-01-01 (2024–2025 included a temporary 2% "security tax"
@@ -113,12 +113,12 @@ pub fn social_tax_rate(_date: NaiveDate) -> f64 {
     0.33
 }
 
-/// Unemployment insurance — employer share.
+/// Unemployment insurance, employer share.
 pub fn unemployment_insurance_employer_rate(_date: NaiveDate) -> f64 {
     0.008
 }
 
-/// Unemployment insurance — employee share.
+/// Unemployment insurance, employee share.
 pub fn unemployment_insurance_employee_rate(_date: NaiveDate) -> f64 {
     0.016
 }
@@ -126,7 +126,7 @@ pub fn unemployment_insurance_employee_rate(_date: NaiveDate) -> f64 {
 /// The allowed funded-pension (II pillar) participation choices as fractions
 /// of gross salary. The applicable rate is an EMPLOYEE-SPECIFIC input
 /// recorded per payment period (payroll_records.funded_pension_rate,
-/// migration 199) — `0.0` covers non-participation and legal exemption.
+/// migration 199), `0.0` covers non-participation and legal exemption.
 pub fn funded_pension_allowed_rates() -> [f64; 4] {
     [0.00, 0.02, 0.04, 0.06]
 }

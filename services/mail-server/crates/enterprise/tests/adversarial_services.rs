@@ -1045,7 +1045,7 @@ db_test!(
         seed_tenant(&pool, &tenant).await;
 
         // Unconfigured tenant: every mutation reports NOT_FOUND, reads report
-        // configured:false — never a phantom success.
+        // configured:false, never a phantom success.
         let (_, code) = err(svc.get_config(tenant.clone()).await);
         assert_eq!(code, "NOT_FOUND");
         let (_, code) = err(svc.sign_baa(tenant.clone(), "N", "T", "n@x.example").await);
@@ -1166,7 +1166,7 @@ db_test!(
 
 db_test!(template_approval_spam_gate_review_and_stats, pool, {
     // Reject threshold 40: a spammy template is rejected automatically, never
-    // silently approved. (There is no auto-approve threshold — audit M-01 —
+    // silently approved. (There is no auto-approve threshold, audit M-01 —
     // so the constructor carries only the auto-REJECT score.)
     let svc = TemplateApprovalService::new(pool.clone(), 40);
     let tenant = t26();
@@ -1229,7 +1229,7 @@ db_test!(template_approval_spam_gate_review_and_stats, pool, {
     let approved = ok(svc.approve(clean.id, "rev", Some("lgtm")).await);
     assert_eq!(approved.status, "approved");
     assert_eq!(approved.reviewed_by.as_deref(), Some("rev"));
-    // State transition is an update, not a state machine — a rejected
+    // State transition is an update, not a state machine, a rejected
     // submission can be re-reviewed, but the audit trail keeps the reviewer.
     let rejected = ok(svc.reject(spammy_id(&submission), "rev2", "spam").await);
     assert_eq!(rejected.status, "rejected");
@@ -2013,7 +2013,7 @@ db_test!(
 
         // The wave-1 gate itself stays covered: a FREE-plan tenant is refused
         // 403 naming the capability (the entitled fixture above is what admits
-        // the flows — the gate is the plan flag, not a weakened check).
+        // the flows, the gate is the plan flag, not a weakened check).
         let free_tenant = t26();
         seed_tenant(&pool, &free_tenant).await;
         let (_, free_token) = build_router(&pool, &free_tenant).await;

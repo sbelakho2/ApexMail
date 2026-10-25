@@ -219,7 +219,7 @@ mod tests {
     /// with an INDEPENDENTLY extracted route inventory. The marketing routes
     /// are extracted from the renderer source's include sites (what the
     /// build actually embeds), and every marketing manifest route must be in
-    /// that set — a manifest entry that ships no built page fails here
+    /// that set, a manifest entry that ships no built page fails here
     /// instead of 404ing in production. The served set is deliberately larger
     /// than the manifest (the manifest is the gate baseline, not the route
     /// authority); the size difference is asserted so a build that suddenly

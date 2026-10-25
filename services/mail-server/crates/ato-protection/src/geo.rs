@@ -1,4 +1,4 @@
-//! Geographic analysis — Haversine distance and impossible travel detection
+//! Geographic analysis, Haversine distance and impossible travel detection
 
 use std::f64::consts::PI;
 
@@ -144,7 +144,7 @@ mod tests {
             lat: 35.6762,
             lon: 139.6503,
         };
-        // 1 hour between NYC and Tokyo (≈10,800 km) — impossible
+        // 1 hour between NYC and Tokyo (≈10,800 km), impossible
         let (impossible, speed, dist) = check_impossible_travel(&nyc, &tokyo, 3600.0, 900.0);
         assert!(
             impossible,
@@ -163,7 +163,7 @@ mod tests {
             lat: 51.5074,
             lon: -0.1278,
         };
-        // 8 hours between NYC and London (≈5,570 km at ≈696 km/h) — plausible by plane
+        // 8 hours between NYC and London (≈5,570 km at ≈696 km/h), plausible by plane
         let (impossible, speed, _) = check_impossible_travel(&nyc, &london, 8.0 * 3600.0, 900.0);
         assert!(!impossible, "Should be plausible: speed={:.0} km/h", speed);
     }
@@ -206,7 +206,7 @@ mod tests {
     fn test_short_gap_not_impossible() {
         // Fail-first: 30s / 500km was reported as impossible travel.
         // Sub-two-minute gaps are mobile-network PoP bounces and clock
-        // skew, not travel — they must not fire.
+        // skew, not travel, they must not fire.
         let a = GeoPoint {
             lat: 40.7128,
             lon: -74.006,
@@ -224,7 +224,7 @@ mod tests {
     #[test]
     fn test_short_distance_not_impossible() {
         // GeoIP PoP jitter: two resolutions of the same user can be ~50km
-        // apart within seconds — under 100 km never counts as travel.
+        // apart within seconds, under 100 km never counts as travel.
         let a = GeoPoint {
             lat: 40.7128,
             lon: -74.006,
@@ -239,7 +239,7 @@ mod tests {
 
     #[test]
     fn test_long_haul_impossible_travel_still_fires() {
-        // 8000 km in 30 min ≈ 16000 km/h — genuinely impossible.
+        // 8000 km in 30 min ≈ 16000 km/h, genuinely impossible.
         let a = GeoPoint {
             lat: 40.7128,
             lon: -74.006,

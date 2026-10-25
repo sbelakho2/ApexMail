@@ -29,7 +29,7 @@ Navigate to [app.apexmail.ee/signup](https://app.apexmail.ee/signup).
 
 **Error cases:**
 - **`Email already registered`**: Use the password reset flow at [app.apexmail.ee/reset-password](https://app.apexmail.ee/reset-password).
-- **`Password too weak`**: Use 15+ characters (longer passphrases are fine — no symbol or digit mix is required). Avoid common passwords and simple repeat/sequence patterns.
+- **`Password too weak`**: Use 15+ characters (longer passphrases are fine, no symbol or digit mix is required). Avoid common passwords and simple repeat/sequence patterns.
 
 ---
 
@@ -71,7 +71,7 @@ In the dashboard sidebar, navigate to **Settings → API Keys**.
 
 **What happens:** A new API key is generated and displayed once.
 
-**Security warning:** Copy the key immediately. It will not be shown again. Store it in a password manager or environment variable — never commit it to source control.
+**Security warning:** Copy the key immediately. It will not be shown again. Store it in a password manager or environment variable, never commit it to source control.
 
 ```bash
 export APEXMAIL_API_KEY="am_live_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
@@ -169,29 +169,29 @@ Choose your integration method:
 
 ### Option A: SDK (build from source)
 
-> **Not yet on public registries.** The ApexMail SDKs are **not yet published to PyPI, pkg.go.dev, Packagist, RubyGems, or Maven Central** — `pip install apexmail`, `go get github.com/apexmail/apexmail-go`, and `composer require apexmail/apexmail-php` will fail until the first stable release. Until then, install from the monorepo source and pin to a specific commit, and **verify the source you vendor** before shipping it. See [SDKs](/docs/sdks/) for the per-language status.
+> **Not yet on public registries.** The ApexMail SDKs are **not yet published to PyPI, pkg.go.dev, Packagist, RubyGems, or Maven Central**, `pip install apexmail`, `go get github.com/apexmail/apexmail-go`, and `composer require apexmail/apexmail-php` will fail until the first stable release. Until then, install from the monorepo source and pin to a specific commit, and **verify the source you vendor** before shipping it. See [SDKs](/docs/sdks/) for the per-language status.
 
 SDK source is currently private and available to approved preview customers while the packages are being
-prepared for their first public registry release — email
+prepared for their first public registry release, email
 [support@apexmail.ee](mailto:support@apexmail.ee) (or your account manager)
 and you will receive the pinned source drop for your language, with a
 checksum, under the SDK license. Each SDK directory carries its own build
 and test instructions.
 
-**Python** (`packages/sdk-python` — install from the local path, or vendor the directory):
+**Python** (`packages/sdk-python`, install from the local path, or vendor the directory):
 
 ```bash
 pip install ./packages/sdk-python
 ```
 
-**Go** (`packages/sdk-go` — pin the module to the vendored source with a `replace` directive):
+**Go** (`packages/sdk-go`, pin the module to the vendored source with a `replace` directive):
 
 ```bash
 go mod edit -replace github.com/apexmail/apexmail-go=./packages/sdk-go
 go mod tidy
 ```
 
-**PHP** (`packages/sdk-php` — point Composer at the local directory):
+**PHP** (`packages/sdk-php`, point Composer at the local directory):
 
 ```bash
 composer config repositories.apexmail path ./packages/sdk-php
@@ -202,7 +202,7 @@ composer require apexmail/apexmail-php:@dev
 
 ### Option B: cURL (quick test)
 
-No installation required — use the terminal:
+No installation required, use the terminal:
 
 ```bash
 # Verify your key works
@@ -319,7 +319,7 @@ Navigate to **Settings → Webhooks** in the dashboard.
 **Fields:**
 - **URL:** Your webhook receiver URL (e.g., `https://your-app.example.com/webhooks/apexmail`)
 - **Events:** Select `message.delivered`, `message.bounced`, `message.complained` at minimum
-- **Secret:** Generate a signing secret — store this securely
+- **Secret:** Generate a signing secret, store this securely
 
 **What happens:** ApexMail begins delivering matching events to your URL with HMAC-SHA256 signatures.
 
@@ -358,9 +358,9 @@ Before moving to production:
 1. **Upgrade from Free plan** if you exceed 3,000 emails/month recurring (or your one-time 30,000-email launch allowance). See [Pricing](/pricing/).
 3. **Configure DMARC** for your sending domain with a policy of at least `p=none` initially, progressing to `p=quarantine` or `p=reject`.
 4. **Set up SPF alignment** by ensuring your `Return-Path` domain matches your `From` domain.
-5. **Rotate API keys** — create production-specific keys with minimal scopes and expiry dates.
-6. **Set up monitoring** — configure alerts for bounce rates above 2% and complaint rates above 0.1%.
-7. **Test webhook idempotency** — verify your handler correctly deduplicates events using the `event_id` field.
+5. **Rotate API keys**, create production-specific keys with minimal scopes and expiry dates.
+6. **Set up monitoring**, configure alerts for bounce rates above 2% and complaint rates above 0.1%.
+7. **Test webhook idempotency**, verify your handler correctly deduplicates events using the `event_id` field.
 8. **Review the [API Reference](/docs/api/)** for batch sending, templates, and advanced features.
 
 ### Production Readiness Checklist
@@ -379,8 +379,8 @@ Before moving to production:
 
 ## Next Steps
 
-- [API Reference](/docs/api/) — complete endpoint documentation with request/response schemas
-- [Webhooks](/docs/webhooks/) — full event catalog, security, and delivery documentation
-- [SDKs](/docs/sdks/) — SDK installation, authentication, and usage examples
-- [Analytics](/docs/analytics/) — delivery metrics, bounce classification, and reporting
-- [API Explorer](/api-explorer/) — run real requests against the isolated live sandbox
+- [API Reference](/docs/api/), complete endpoint documentation with request/response schemas
+- [Webhooks](/docs/webhooks/), full event catalog, security, and delivery documentation
+- [SDKs](/docs/sdks/), SDK installation, authentication, and usage examples
+- [Analytics](/docs/analytics/), delivery metrics, bounce classification, and reporting
+- [API Explorer](/api-explorer/), run real requests against the isolated live sandbox

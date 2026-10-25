@@ -160,12 +160,12 @@ impl SignatureSet {
         // Phase 1:find AC content-pattern matches and map each back to its sig.
         // Using find_overlapping_iter (requires MatchKind::Standard) ensures
         // that two signatures sharing an identical byte string both receive a
-        // match notification — LeftmostFirst + find_iter would suppress the
+        // match notification, LeftmostFirst + find_iter would suppress the
         // second hit, causing the later sig to never fire.
         let mut ac_matched_sigs = std::collections::HashSet::new();
         // Per-signature hit specificity:(number of DISTINCT content
         // patterns that matched, length of the longest matched pattern).
-        // Audit SM5 F11: occurrences are not distinctness — `cmd=` twice
+        // Audit SM5 F11: occurrences are not distinctness, `cmd=` twice
         // in one payload must not satisfy the "≥2 distinct matched
         // tokens" guard, so per-signature pattern indices are tracked in
         // a set and counted by size.
@@ -235,7 +235,7 @@ impl SignatureSet {
                     self.any_regex_match(sig_idx, payload)
                 }
                 (false, false) => {
-                    // No content/regex patterns — only signatures with a
+                    // No content/regex patterns, only signatures with a
                     // dedicated structural check (see
                     // `structural_signature_fires`) can still fire. Before
                     // this, such signatures were dead: they could never
@@ -359,7 +359,7 @@ const HTTP2_CLIENT_PREFACE: &[u8] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
 
 /// Whether the payload is an HTTP/2 frame stream (anchored by the client
 /// connection preface) containing at least one RST_STREAM frame
-/// (frame type 0x03) — the Rapid Reset attack pattern.
+/// (frame type 0x03), the Rapid Reset attack pattern.
 ///
 /// Frames are `length:u24 | type:u8 | flags:u8 | stream_id:u32` (RFC 9113
 /// §4.1). The walk stops at the first impossible header: a TCP segment
@@ -621,7 +621,7 @@ pub fn builtin_mail_signatures() -> Vec<Signature> {
             sid: 2000051,
             rev: 2,
             message: "HTTP: HTTP/2 RST_STREAM flood (Rapid Reset pattern, CVE-2023-44487)".into(),
-            // Audit SM5 F12: HTTP/2 is binary-framed — the frame type is
+            // Audit SM5 F12: HTTP/2 is binary-framed, the frame type is
             // the single byte 0x03 and the ASCII string "RST_STREAM" never
             // appears on the wire, so the old content pattern could never
             // match real traffic (dead coverage). Detection is now a
@@ -725,7 +725,7 @@ pub fn builtin_mail_signatures() -> Vec<Signature> {
         Signature {
             sid: 2000058,
             rev: 1,
-            message: "SMTP: PIPELINING abuse — multiple commands in single packet".into(),
+            message: "SMTP: PIPELINING abuse, multiple commands in single packet".into(),
             content_patterns: vec![
                 b"\r\nMAIL FROM:".to_vec(),
             ],
@@ -998,7 +998,7 @@ pub fn builtin_mail_signatures() -> Vec<Signature> {
             message: "SMTP: Encoded script payload in body".into(),
 // Hybrid sig:fast-filter on the base64 transfer-encoding header,
 // then confirm with a regex so that "powershell" must actually appear
-// in the message body — prevents false positives from any base64-
+// in the message body, prevents false positives from any base64-
 // encoded attachment that doesn't contain a script payload.
             content_patterns: vec![b"Content-Transfer-Encoding: base64".to_vec()],
             action: SignatureAction::Alert,
@@ -1218,10 +1218,10 @@ mod tests {
 
     #[test]
     fn test_tls_legacy_version_below_tls12_fires() {
-        // Fail-first: 2000030 had empty pattern lists — never fired.
+        // Fail-first: 2000030 had empty pattern lists, never fired.
         let sigs = builtin_mail_signatures();
         let set = SignatureSet::new(sigs).expect("compile sigs");
-        // TLS 1.0 legacy_version (0x0301) — insecure.
+        // TLS 1.0 legacy_version (0x0301), insecure.
         let old = tls_client_hello(0x0301);
         let matches = set.scan_with_protocol(&old, "tls");
         assert!(
@@ -1229,13 +1229,13 @@ mod tests {
             "pre-TLS1.2 ClientHello must fire 2000030, got {:?}",
             matches.iter().map(|m| m.sid).collect::<Vec<_>>()
         );
-        // Modern legacy_version (0x0303) — not fired.
+        // Modern legacy_version (0x0303), not fired.
         let modern = tls_client_hello(0x0303);
         assert!(!set
             .scan_with_protocol(&modern, "tls")
             .iter()
             .any(|m| m.sid == 2000030));
-        // SSLv2-shaped hello (0x80 | length) — fired.
+        // SSLv2-shaped hello (0x80 | length), fired.
         let sslv2 = [0x80, 0x40, 0x01, 0x00, 0x02, 0x00, 0x30];
         assert!(
             set.scan_with_protocol(&sslv2, "tls")
@@ -1268,10 +1268,10 @@ mod tests {
     fn test_nop_sled_does_not_trigger_on_literal_string() {
         let sigs = builtin_mail_signatures();
         let set = SignatureSet::new(sigs).expect("compile sigs");
-        // The old broken pattern matched THIS text string — not real 0x90 bytes
+        // The old broken pattern matched THIS text string, not real 0x90 bytes
         let payload = b"\\x90\\x90\\x90\\x90 (this is just the text literal)";
         let matches = set.scan_with_protocol(payload, "");
-        // This text payload has NO actual 0x90 bytes — should NOT match NOP sled sig
+        // This text payload has NO actual 0x90 bytes, should NOT match NOP sled sig
         assert!(
             !matches.iter().any(|m| m.sid == 2000002),
             "Text backslash-x90 must NOT trigger the binary NOP sled signature"
@@ -1434,7 +1434,7 @@ mod tests {
     fn test_regex_hybrid_no_content_pattern_no_fire() {
         let sigs = builtin_mail_signatures();
         let set = SignatureSet::new(sigs).expect("compile sigs");
-        // Regex matches but content pattern doesn't — should NOT fire
+        // Regex matches but content pattern doesn't, should NOT fire
         let payload = b"some data cG93ZXJzaGVsbA here but no base64 header";
         let matches = set.scan_with_protocol(payload, "");
         assert!(

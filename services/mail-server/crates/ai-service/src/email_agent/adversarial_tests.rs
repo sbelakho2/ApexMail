@@ -1,11 +1,11 @@
 //! Adversarial tests for the AI email-answering agent
 //! (`src/email_agent.rs`), driven against the shared canonical database and
-//! a one-shot mock model endpoint (no real network egress — localhost only).
+//! a one-shot mock model endpoint (no real network egress, localhost only).
 //!
 //! Invariants proven here, at RUNTIME (the unit tests pin the SQL strings):
 //! - DRAFT-ONLY: the single success write marks the message processed with
 //!   `pending_approval = true`; declines and quarantines always write
-//!   `pending_approval = false` — nothing on this path can ever send.
+//!   `pending_approval = false`, nothing on this path can ever send.
 //! - Loop guards (self/robot senders, auto-submitted headers, per-sender
 //!   reply cap, per-tenant daily cap) decline WITHOUT consuming the LLM.
 //! - Attacker-controlled content (prompt injection, behavior directives)
@@ -151,7 +151,7 @@ async fn spawn_mock_llm(content: &'static str) -> u16 {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         // Serve EVERY request, not just the first: `process_batch` claims up
         // to 10 rows from the SHARED table, and an interrupted earlier run
-        // can leave unprocessed rows behind — so the test's own row is not
+        // can leave unprocessed rows behind, so the test's own row is not
         // guaranteed to be this mock's first (or only) caller. A one-shot
         // mock would fail every LLM call after the first and turn a clean
         // scenario into spurious retries/quarantines.
@@ -285,7 +285,7 @@ const GOOD_REPLY: &str = "Hello John,\n\nThanks for reaching out. Your SPF recor
 
 #[test]
 fn from_env_reads_overrides_and_defaults() {
-    // Sync test outside any runtime — take the shared env lock blocking.
+    // Sync test outside any runtime, take the shared env lock blocking.
     let _serial = ENV_SERIAL.blocking_lock();
     let guard = EnvGuard::with(&[
         ("AI_EMAIL_AGENT_ENABLED", Some("true")),
@@ -426,7 +426,7 @@ async fn processed_message_becomes_a_pending_approval_draft_exactly_once() {
 
 /// The worker reply handler and this agent claim the same rows with
 /// independent markers. The worker marks `processed_at` on EVERY row it
-/// classifies — including the reply-shaped ones the mailbot must draft — so a
+/// classifies, including the reply-shaped ones the mailbot must draft, so a
 /// claim predicate keyed on `processed_at IS NULL` loses the race (the worker
 /// polls every second, the agent every 30) and the review queue stays empty
 /// (live mailbot dogfood 2026-10-06: a canary row classified
@@ -710,7 +710,7 @@ async fn loop_guard_declines_senders_at_the_reply_cap() {
         let prior_id = unique("em_prior");
         // The reply cap counts drafts by `from_email` (the original
         // sender): prior drafts MUST carry the sender or the gate counts
-        // zero and the message gets drafted instead of declined — the
+        // zero and the message gets drafted instead of declined, the
         // fixture bug this test exposed.
         sqlx::query(
             "INSERT INTO inbound_messages (id, from_email, raw_message, is_verp_reply, processed, \
@@ -1045,7 +1045,7 @@ async fn manual_reply_generation_sanitizes_and_fails_closed() {
     // SM9 #7d: a failed generation is an ERROR, never a 200-shaped canned
     // response a consumer could mistake for a real (fabricated) answer.
     // The dead endpoint is EXPLICIT: `InferenceConfig::default()` reads the
-    // env, which still points at this test's live mock — so point it away.
+    // env, which still points at this test's live mock, so point it away.
     let _dead_env = EnvGuard::with(&[("AI_MODEL_ENDPOINT", Some("http://127.0.0.1:1/v1"))]);
     let dead = LlmClient::new(crate::inference::InferenceConfig::default());
     let result = generate_email_reply(&dead, "s", "a@b.com", "s", "b", 16).await;
@@ -1146,7 +1146,7 @@ fn prompt_builder_sanitizes_hostile_fields() {
     );
     // The sanitizer strips the CONTROL characters (CR) that make header
     // injection work at any protocol layer; what remains is inert prompt
-    // prose — nothing downstream parses the prompt as a header block, and
+    // prose, nothing downstream parses the prompt as a header block, and
     // the agent can never send mail on its own (draft-only rule).
     assert!(!prompt.contains('\r'), "CR stripped: {prompt:?}");
     assert!(!prompt.contains('\u{7f}'), "control bytes stripped");
@@ -1158,7 +1158,7 @@ fn prompt_builder_sanitizes_hostile_fields() {
 
 /// The first-response lane end-to-end: a pending request becomes a real
 /// inbound row, a grounded pending-approval draft, and a terminal request
-/// state — the plan's "instant response" chain, draft-only.
+/// state, the plan's "instant response" chain, draft-only.
 #[tokio::test]
 async fn first_response_request_becomes_a_pending_approval_draft() {
     let Some(db_url) = crate::test_support::test_db_url() else {

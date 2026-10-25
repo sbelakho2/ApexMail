@@ -49,7 +49,7 @@ pub(crate) mod test_db {
     ///  * the default provider chain probes the EC2 instance metadata service
     ///    (with retries) unless it is disabled, so tests paid the timeout;
     ///  * the SDK's rustls trust store was built from the platform "native
-    ///    roots" — on macOS that reads the keychain through the Security
+    ///    roots", on macOS that reads the keychain through the Security
     ///    framework, which under load can come back empty and aborts the
     ///    client with `TrustStore configured to enable native roots but no
     ///    valid root certificates parsed!`. Pointing `AWS_CA_BUNDLE` at the
@@ -99,7 +99,7 @@ pub(crate) mod test_db {
     /// api-server unit tests run against the CANONICAL production schema:
     /// the bootstrap applies the full `services/mail-server/migrations` chain
     /// through the REAL production migrator (`migrator::MIGRATIONS`, the same
-    /// embedded set every deploy applies before `up`) — never a test-only
+    /// embedded set every deploy applies before `up`), never a test-only
     /// schema or the archived `tools/migrations` tree (audit F01).
     ///
     /// The schema lives in a dedicated database derived by appending `_api`
@@ -113,13 +113,13 @@ pub(crate) mod test_db {
     /// in its own process, so a "drop + recreate once per test-binary run"
     /// bootstrap would `DROP DATABASE ... WITH (FORCE)` the shared `<db>_api`
     /// database while other concurrently-running test processes hold open
-    /// connections to it — those connections are terminated with
+    /// connections to it, those connections are terminated with
     /// `57P01 terminating connection due to administrator command`, which
     /// used to fail a rotating handful of admin tests under parallel load.
     /// The bootstrap instead:
     ///   1. takes a session-level `pg_advisory_lock` on the admin database,
     ///      keyed by the isolated db name, so only ONE process bootstrap at a
-    ///      time (the lock releases when the admin connection closes) — this
+    ///      time (the lock releases when the admin connection closes), this
     ///      also serializes the canonical migration apply itself;
     ///   2. REUSES an existing healthy `<db>_api` database instead of
     ///      dropping it (tests seed unique rows and scope assertions to them,
@@ -129,7 +129,7 @@ pub(crate) mod test_db {
     ///   3. only drops + recreates when the database is missing, carries no
     ///      api-server marker table (a name collision with a foreign
     ///      database), or its `_sqlx_migrations` ledger disagrees with the
-    ///      embedded canonical chain — a dirty row (a previously
+    ///      embedded canonical chain, a dirty row (a previously
     ///      crashed/failed apply) or a foreign lineage (e.g. the legacy
     ///      `tools/migrations` bootstrap this database carried before audit
     ///      F01, or a chain from a newer build) would poison every subsequent
@@ -203,13 +203,13 @@ pub(crate) mod test_db {
                 // committed dirty migration row, or a `_sqlx_migrations`
                 // ledger from a different lineage) justifies a drop; a
                 // failed probe (e.g. transient connection exhaustion under
-                // a parallel nextest run) must NOT — dropping on it is what
+                // a parallel nextest run) must NOT, dropping on it is what
                 // massacred concurrent test processes with 57P01.
                 //
                 // The marker check consults pg_catalog only until it passes;
                 // `canonical_lineage` then verifies the applied (version,
                 // checksum, success) rows against the embedded canonical
-                // chain — the audit-F01 self-heal: a `<db>_api` last
+                // chain, the audit-F01 self-heal: a `<db>_api` last
                 // provisioned from the archived `tools/migrations` tree is
                 // POSITIVELY unusable for canonical tests and is recreated.
                 // sqlx applies each migration inside a transaction, so a
@@ -236,7 +236,7 @@ pub(crate) mod test_db {
                                     .await
                                     .ok()?;
                                     if !marked {
-                                        // Never created by this bootstrap — a
+                                        // Never created by this bootstrap, a
                                         // foreign database on our name.
                                         return Some(false);
                                     }
@@ -255,7 +255,7 @@ pub(crate) mod test_db {
                             }
                             Err(_) => {
                                 if attempt == 2 {
-                                    // Unreachable right now — do NOT drop; the
+                                    // Unreachable right now, do NOT drop; the
                                     // caller's own connect below retries and
                                     // fails loudly if the database is truly
                                     // gone.
@@ -287,7 +287,7 @@ pub(crate) mod test_db {
                     {
                         eprintln!(
                             "api-server test DB bootstrap: could not drop {isolated_db}: {error} \
-                             (continuing — the marker + migration apply below will converge it)"
+                             (continuing, the marker + migration apply below will converge it)"
                         );
                     }
                     if let Err(error) = sqlx::query(&format!("CREATE DATABASE \"{isolated_db}\""))
@@ -306,7 +306,7 @@ pub(crate) mod test_db {
                 // test infrastructure (guards against reusing a
                 // name-colliding foreign database forever), and the
                 // production migrator brings the database to the full
-                // canonical chain (no-op when already up to date — the
+                // canonical chain (no-op when already up to date, the
                 // reuse path just picks up newly added migrations).
                 if let Ok(pool) = PgPoolOptions::new()
                     .max_connections(1)
@@ -358,11 +358,11 @@ pub(crate) mod test_db {
     /// A per-test isolated database carrying the REAL canonical production
     /// schema: the full `services/mail-server/migrations` chain applied by
     /// the production migrator (`migrator::test_support::fresh_canonical_pool`
-    /// — audit F01), not a distilled fixture DDL. The canonical lineage has:
+    ///, audit F01), not a distilled fixture DDL. The canonical lineage has:
     ///
-    ///   * `users.id` UUID (migration 052) — user ids are UUIDs;
+    ///   * `users.id` UUID (migration 052), user ids are UUIDs;
     ///   * `tenants.id` / every `*_tenant_id`/`tenant_id` column
-    ///     VARCHAR(26) (migration 064 standardization) — tenant ids are
+    ///     VARCHAR(26) (migration 064 standardization), tenant ids are
     ///     26-char ULID-style text;
     ///   * campaigns/lists/domains/contacts/messages/email_queue/
     ///     system_alerts ids UUID; templates/gdpr_requests/ip_pools ids
@@ -375,7 +375,7 @@ pub(crate) mod test_db {
     /// The suffix must be unique per test so parallel tests never share the
     /// database (it is dropped + recreated + re-migrated on every call).
     /// Soft-skips without `TEST_DATABASE_URL` (workspace convention); a
-    /// CONFIGURED provisioning failure PANICS — the F01 contract: an
+    /// CONFIGURED provisioning failure PANICS, the F01 contract: an
     /// infrastructure failure must fail the test, never read as a skip.
     pub(crate) async fn canonical_pool(db_suffix: &str) -> Option<PgPool> {
         ensure_aws_test_env();

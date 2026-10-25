@@ -6,7 +6,7 @@
 //!
 //! The validated schema is the CANONICAL production lineage: the full
 //! `services/mail-server/migrations` chain applied through the REAL
-//! production migrator (`migrator::test_support` — audit F01), never the
+//! production migrator (`migrator::test_support`, audit F01), never the
 //! archived `tools/migrations` tree whose identifier/column shapes diverged
 //! from what every deploy installs.
 //!
@@ -31,7 +31,7 @@ use tower::ServiceExt;
 use uuid::Uuid;
 
 /// Apply the canonical production migrations against the test database via
-/// the production migrator (`migrator::MIGRATIONS` — the same embedded set
+/// the production migrator (`migrator::MIGRATIONS`, the same embedded set
 /// the deploy gate applies; audit F01).
 ///
 /// # Security note
@@ -40,7 +40,7 @@ use uuid::Uuid;
 async fn apply_canonical_migrations(pool: &PgPool) {
     // Every schema-contract test owns a PRIVATE database (see
     // `optional_pg_pool`), so no advisory lock is needed to serialize the
-    // apply — the migrator itself is idempotent.
+    // apply, the migrator itself is idempotent.
     migrator::test_support::apply_canonical_migrations(pool)
         .await
         .expect("failed to apply canonical migrations");
@@ -48,13 +48,13 @@ async fn apply_canonical_migrations(pool: &PgPool) {
 
 /// Schema-contract tests each get a PRIVATE canonical database carrying the
 /// full production chain: `cargo test` runs tests in parallel threads of one
-/// process and `cargo nextest` runs every test in its own process — a
+/// process and `cargo nextest` runs every test in its own process, a
 /// per-test name gives both a freshly migrated, uncontended database (no
 /// cross-test seeding interference, and no DROP-during-use races).
 ///
 /// SM12c harness dedup: this is now the shared `migrator::test_support`
 /// helper (per-call template clone; `None` only when TEST_DATABASE_URL is
-/// unset — soft-skip — and a configured provisioning failure PANICS with the
+/// unset, soft-skip, and a configured provisioning failure PANICS with the
 /// F01 message), replacing the copy-pasted block this suite used to carry.
 async fn optional_pg_pool(test_name: &str) -> Option<PgPool> {
     // The suffix embeds the test name (restoring this suite's original
@@ -243,7 +243,7 @@ async fn seed_system_sender_domain(pool: &sqlx::PgPool) {
 }
 
 /// AWS SDK env (AppState builds an SES client): installed exactly ONCE
-/// under this lock — concurrent `set_var` is a data race (SM12 F17 rule).
+/// under this lock, concurrent `set_var` is a data race (SM12 F17 rule).
 static AWS_ENV_LOCK: Mutex<()> = Mutex::new(());
 
 fn ensure_aws_test_env() {
@@ -261,11 +261,11 @@ fn ensure_aws_test_env() {
 }
 
 /// The REAL `build_app` router over a dedicated canonical register database
-/// (provisioned through the production migrator — audit F01) whose system
+/// (provisioned through the production migrator, audit F01) whose system
 /// sender is dkim-ready. Returns `(app, pool)`; `None` only when
 /// TEST_DATABASE_URL is unset (the caller applies the soft-skip gate).
 ///
-/// SM12 F18: this harness was 250 lines of `#[allow(dead_code)]` — it is
+/// SM12 F18: this harness was 250 lines of `#[allow(dead_code)]`, it is
 /// now the fixture of `register_http_ceremony_...` below, which drives the
 /// full register HTTP ceremony through the production router.
 async fn registration_test_app() -> Option<(Router, PgPool)> {
@@ -298,7 +298,7 @@ async fn registration_test_app() -> Option<(Router, PgPool)> {
         Err(error) => panic!("{}", error.panic_message()),
     };
     // The register flow queues its verification email through the SYSTEM
-    // sender — seeded in the SAME database the app's pools target.
+    // sender, seeded in the SAME database the app's pools target.
     seed_system_sender_domain(&pool).await;
 
     let database_url = migrator::test_support::database_url_for(&base_url, &register_db);
@@ -344,7 +344,7 @@ async fn registration_test_app() -> Option<(Router, PgPool)> {
     ))
 }
 
-/// SM12 F18 — the register HTTP ceremony through the REAL router: a CSRF'd
+/// SM12 F18, the register HTTP ceremony through the REAL router: a CSRF'd
 /// `POST /v1/auth/register` must persist a UUID users row + pending tenant,
 /// and queue the verification email through the dkim-ready system sender.
 /// This is the port of the api-server suite's reference ceremony onto this
@@ -424,7 +424,7 @@ async fn register_http_ceremony_persists_tenant_user_and_queue() {
     assert_eq!(tenant_status, "pending", "signup persists a pending tenant");
 
     // The verification email was queued through the system sender.
-    // `query_scalar` yields the scalar itself — destructuring it into a
+    // `query_scalar` yields the scalar itself, destructuring it into a
     // 1-tuple makes sqlx decode the INT8 column as a composite RECORD.
     let queued: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM email_queue WHERE to_addresses = ARRAY[$1]::text[]",
@@ -460,7 +460,7 @@ async fn insert_test_tenant(pool: &PgPool, suffix: &str) -> String {
 /// Helper:create a test user and return its ID.
 ///
 /// Canonical contract (migration 052): users.id is UUID and users.email is
-/// globally UNIQUE — the register flow relies on exactly-one-row-per-email
+/// globally UNIQUE, the register flow relies on exactly-one-row-per-email
 /// across tenants.
 async fn insert_test_user(pool: &PgPool, tenant_id: &str, email: &str) -> Uuid {
     let id = Uuid::new_v4();
@@ -607,7 +607,7 @@ async fn sessions_table_exists_for_password_reset() {
     assert!(
         result.is_ok(),
         "DELETE FROM sessions failed: {:?}. \
-        The sessions table does not exist — password reset/change will crash.",
+        The sessions table does not exist, password reset/change will crash.",
         result.err()
     );
 }
@@ -689,7 +689,7 @@ async fn metering_events_table_exists() {
 
     // usage.rs INSERTs into metering_events. Canonical contract (migration
     // 050): the table is RANGE-partitioned by "timestamp" with PRIMARY KEY
-    // (id, timestamp) — on a partitioned table the ON CONFLICT arbiter must
+    // (id, timestamp), on a partitioned table the ON CONFLICT arbiter must
     // include the partition key, so the arbiter is (id, "timestamp").
     // usage.rs specifies this canonical arbiter; its id-keyed replay
     // recognition is an existence pre-check (retries re-derive the
@@ -712,7 +712,7 @@ async fn metering_events_table_exists() {
     assert!(
         result.is_ok(),
         "INSERT INTO metering_events failed: {:?}. \
-        The metering_events table does not exist — billing is completely broken.",
+        The metering_events table does not exist, billing is completely broken.",
         result.err()
     );
 }
@@ -897,7 +897,7 @@ async fn api_keys_table_uses_canonical_key_prefix_column() {
     assert!(
         result.is_ok(),
         "SELECT key_prefix FROM api_keys failed: {:?}. \
-        The column must be 'key_prefix' — the canonical + production shape.",
+        The column must be 'key_prefix', the canonical + production shape.",
         result.err()
     );
 }
@@ -954,7 +954,7 @@ async fn invoices_table_exists() {
     assert!(
         result.is_ok(),
         "SELECT FROM invoices failed: {:?}. \
-        The invoices table does not exist — billing invoice endpoints are broken.",
+        The invoices table does not exist, billing invoice endpoints are broken.",
         result.err()
     );
 }
@@ -1033,7 +1033,7 @@ async fn users_table_has_all_user_row_columns() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Registration atomicity — concurrent same-email registrations
+// Registration atomicity, concurrent same-email registrations
 // ═══════════════════════════════════════════════════════════════════════════
 
 #[tokio::test]
@@ -1044,7 +1044,7 @@ async fn concurrent_registration_same_email_no_orphaned_tenant() {
     // api-server suite against a canonical-chain database. What THIS test
     // guards is the database invariant its name states: two concurrent
     // registrations of the same email produce exactly one user and never an
-    // orphaned tenant — exercised directly against the canonical chain
+    // orphaned tenant, exercised directly against the canonical chain
     // (users.id is UUID there; the tools/initdb lineage's VARCHAR(26) ids
     // cannot host the production register writer).
     let Some(_pool) =
@@ -1062,7 +1062,7 @@ async fn concurrent_registration_same_email_no_orphaned_tenant() {
         "{db_only}_reg_{}",
         &uuid::Uuid::new_v4().simple().to_string()[..10]
     );
-    // Provision through the REAL production migrator (audit F01) — the same
+    // Provision through the REAL production migrator (audit F01), the same
     // embedded canonical chain the deploy gate applies. F01 contract: a
     // configured failure panics instead of skipping.
     match migrator::test_support::fresh_canonical_db(&raw, &register_db).await {
@@ -1141,7 +1141,7 @@ async fn concurrent_registration_same_email_no_orphaned_tenant() {
     );
 
     // Exactly one registration wins; the loser's transaction (including its
-    // tenant row) rolled back — no orphaned tenants, exactly one user.
+    // tenant row) rolled back, no orphaned tenants, exactly one user.
     assert!(a ^ b, "exactly one concurrent registration must win");
     let user_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE email = $1")
         .bind(&email)
@@ -1175,7 +1175,7 @@ async fn tenant_deletion_removes_seeded_rows_across_tenant_scoped_tables() {
     // The purge helper writes its (non-optional) deletion audit entry through
     // the hash-chained audit writer. The canonical chain installs the exact
     // audit_logs/audit_chain_head shape that writer targets (migrations
-    // 038/055) — the legacy tools-lineage reconciliation DDL this test used
+    // 038/055), the legacy tools-lineage reconciliation DDL this test used
     // to carry is gone (audit F01).
 
     let tenant_id = insert_test_tenant(&pool, "delete-coverage").await;
@@ -1202,7 +1202,7 @@ async fn tenant_deletion_removes_seeded_rows_across_tenant_scoped_tables() {
     .expect("failed to seed support_tickets row");
 
     // Canonical feature_flags shape (features.rs writer): UUID id, `name` is
-    // the flag key — the tools lineage's `key` column does not exist.
+    // the flag key, the tools lineage's `key` column does not exist.
     sqlx::query(
         "INSERT INTO feature_flags (id, name, description, enabled)
          VALUES ($1, $2, 'schema contract coverage', true)",
@@ -1224,7 +1224,7 @@ async fn tenant_deletion_removes_seeded_rows_across_tenant_scoped_tables() {
     .expect("failed to seed feature_flag_overrides row");
 
     // Canonical idempotency ledger (migration 153, F10): idempotency_records
-    // with the messages.rs writer's column set — the tools lineage's
+    // with the messages.rs writer's column set, the tools lineage's
     // idempotency_keys table does not exist on the canonical chain.
     sqlx::query(
         "INSERT INTO idempotency_records (
@@ -1309,7 +1309,7 @@ async fn incident_advice_query_validates_against_canonical_audit_schema() {
     let sql = investigation["parameterized_sql"].as_str().expect("sql");
     assert!(!sql.contains("api_key_id"), "no absent-column reference");
 
-    // The window is derived, not fixed — and the endpoint carries it.
+    // The window is derived, not fixed, and the endpoint carries it.
     let endpoint = investigation["apexmail_investigation_endpoint"]
         .as_str()
         .expect("endpoint");

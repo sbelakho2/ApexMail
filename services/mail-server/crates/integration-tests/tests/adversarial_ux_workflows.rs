@@ -3,13 +3,13 @@
 //! `perfect_contract_tests.rs` pins the happy-path "perfect" matrix. THIS
 //! suite is the hostile re-derivation: it re-walks the same persona journeys
 //! looking for the failure modes that only appear when workflows are
-//! combined — dead-end empty states, create/edit action bleed, schedule copy
+//! combined, dead-end empty states, create/edit action bleed, schedule copy
 //! that lies about auto-send, lifecycle states that collapse into one
 //! another, destructive actions reachable by plain GET, bulk forms swallowing
 //! row forms, and marketing claims that contradict the billing authority.
 //!
 //! Every assertion is either rendered from the public `ui_foundation` /
-//! `api-server` APIs or read from FILES ON DISK — nothing is a tautological
+//! `api-server` APIs or read from FILES ON DISK, nothing is a tautological
 //! string match against a constant defined in this file. A drift in the
 //! product surfaces must turn these red.
 //!
@@ -141,7 +141,7 @@ fn section_headings(body: &str) -> Vec<String> {
 // ─── 1. Workflow matrix: every terminal empty state offers a next action ──
 
 /// GATE: for EACH terminal empty state the journey can land on, the rendered
-/// surface must expose a real next-action (href or POST form) — never a dead
+/// surface must expose a real next-action (href or POST form), never a dead
 /// button and never a bare "nothing here".
 #[test]
 fn workflow_matrix_every_terminal_empty_state_offers_a_next_action() {
@@ -223,7 +223,7 @@ fn workflow_matrix_every_terminal_empty_state_offers_a_next_action() {
         "/inbox-placement",
     ));
 
-    // Sender: dedicated IPs empty — the CTA may live in the header form
+    // Sender: dedicated IPs empty, the CTA may live in the header form
     // rather than inside the EmptyState block, so the PAGE must act.
     matrix.push((
         "sender/dedicated-ips-empty",
@@ -433,7 +433,7 @@ fn edit_vs_create_action_matrix_campaign_and_template() {
 
 /// GATE: every surface that lets a user arm a schedule must state the
 /// auto-send truth. Copy that claims the schedule is inert is a safety
-/// defect — the worker claims `status='scheduled'` rows with no human click.
+/// defect, the worker claims `status='scheduled'` rows with no human click.
 #[test]
 fn schedule_authorization_copy_matrix_matches_auto_send_truth() {
     use ui_foundation::view_data::CampaignEditData;
@@ -506,7 +506,7 @@ fn schedule_authorization_copy_matrix_matches_auto_send_truth() {
 // ─── 4. Distinct lifecycle states (placement detail) ──────────────────
 
 /// GATE: empty ≠ unavailable ≠ restricted ≠ failed ≠ running. Placement
-/// detail is the reference lifecycle surface — completed/failed/empty/running
+/// detail is the reference lifecycle surface, completed/failed/empty/running
 /// must render four different recovery stories.
 #[test]
 fn placement_lifecycle_states_are_distinct_and_actionable() {
@@ -552,7 +552,7 @@ fn placement_lifecycle_states_are_distinct_and_actionable() {
         },
     );
 
-    // Distinct copy — the four stories must not collapse into one string.
+    // Distinct copy, the four stories must not collapse into one string.
     assert!(
         completed_results.contains("Per-provider results"),
         "{completed_results}"
@@ -649,7 +649,7 @@ fn destructive_actions_route_through_confirm_not_plain_get_delete() {
     }
 
     // Static campaigns list: row Delete is an /confirm link, bulk delete is
-    // a POST formaction — never a GET mutation.
+    // a POST formaction, never a GET mutation.
     let campaigns = ui_foundation::leptos_views::web_campaigns_page();
     assert!(
         campaigns.contains("href=\"/confirm?intent=delete-campaign"),
@@ -792,7 +792,7 @@ fn pricing_claim_scan_rejects_stale_quota_and_discount_copy() {
     collect_marketing_files(&root.join("templates"), &mut files);
     assert!(
         files.len() > 10,
-        "marketing scan found almost no source files — walker broken? ({})",
+        "marketing scan found almost no source files, walker broken? ({})",
         files.len()
     );
 
@@ -879,7 +879,7 @@ fn pricing_claim_scan_rejects_stale_quota_and_discount_copy() {
 
 // ─── 8. SLA / quickstart DE·ES·FR section parity ──────────────────────
 
-/// GATE: localized SLA + quickstart bodies are real translations — non-empty,
+/// GATE: localized SLA + quickstart bodies are real translations, non-empty,
 /// same section SET as EN (not a stub that keeps only the title).
 #[test]
 fn sla_and_quickstart_locales_match_en_section_set() {
@@ -956,7 +956,7 @@ fn sla_and_quickstart_locales_match_en_section_set() {
     let en_step_ids: Vec<String> = en_qs
         .iter()
         .filter_map(|h| {
-            // "Step 12: …" / "Step 1: …" — the numeric id is stable.
+            // "Step 12: …" / "Step 1: …", the numeric id is stable.
             let lower = h.to_ascii_lowercase();
             if !lower.starts_with("step ") {
                 return None;
@@ -1014,7 +1014,7 @@ fn sla_and_quickstart_locales_match_en_section_set() {
 
 /// GATE: a failed POST round-trips through the signed FormFieldMap cookie
 /// and the renderer re-populates the SAME form with the SAME values and
-/// linked field errors — never a sibling form, never dropped input.
+/// linked field errors, never a sibling form, never dropped input.
 #[test]
 fn form_replay_keeps_form_id_values_and_linked_errors() {
     use api_server::routes::web::{
@@ -1112,7 +1112,7 @@ fn form_replay_keeps_form_id_values_and_linked_errors() {
         "the failed control must be marked invalid: {html}"
     );
 
-    // Combination: the map is form-scoped — replaying into a different form
+    // Combination: the map is form-scoped, replaying into a different form
     // must NOT leak values (same-form invariant).
     let foreign = ui_foundation::axum_router::render_route_with_form_fields(
         "web",

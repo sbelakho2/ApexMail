@@ -62,7 +62,7 @@ async fn main() -> anyhow::Result<()> {
 
     // P1 #6: per-workload credentials. When PDF_RENDERER_AUTH_TOKEN is set
     // it is the ONLY accepted secret; when it is unset production boots
-    // REFUSE (the per-workload pattern is complete for this service — the
+    // REFUSE (the per-workload pattern is complete for this service, the
     // api-server caller sends the dedicated token and the compose stacks
     // bridge it as a Docker secret) and non-production boots fall back to
     // the universal token with a required-soon warning.
@@ -94,8 +94,8 @@ async fn main() -> anyhow::Result<()> {
         #[cfg(not(unix))]
         let terminate = std::future::pending::<()>();
         tokio::select! {
-            _ = ctrl_c => info!("received Ctrl+C — shutting down"),
-            _ = terminate => info!("received SIGTERM — shutting down"),
+            _ = ctrl_c => info!("received Ctrl+C, shutting down"),
+            _ = terminate => info!("received SIGTERM, shutting down"),
         }
     };
     axum::serve(listener, app)

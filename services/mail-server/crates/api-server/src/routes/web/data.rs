@@ -9,7 +9,7 @@
 //! - Only real tables are queried; a missing optional relation yields an
 //!   empty dataset (rendered as an honest empty state), never demo rows.
 //! - Search / filter / sort / page query parameters are parsed and applied
-//!   server-side — the GET forms in the views serialize into them.
+//!   server-side, the GET forms in the views serialize into them.
 //! - A failed query is NOT an empty dataset: loaders surface
 //!   [`LoadState::Unavailable`] and the page renders an explicit
 //!   "data unavailable" state so required financial and operational data
@@ -27,7 +27,7 @@ use crate::state::AppState;
 
 /// Rows per page on every data-backed list page.
 const PER_PAGE: usize = 20;
-/// Hard cap on the `page` parameter — hostile values must not create giant
+/// Hard cap on the `page` parameter, hostile values must not create giant
 /// offsets.
 const MAX_PAGE: usize = 500;
 /// The tenant the sales-autopilot control surface reads (and the web replay
@@ -46,7 +46,7 @@ pub(crate) struct ListQuery {
     pub page: usize,
     /// Optional recency window (days) for the audit list + export.
     pub days: Option<i64>,
-    /// `?edit=<id>` — the alert-rules page's edit target.
+    /// `?edit=<id>`, the alert-rules page's edit target.
     pub edit: String,
 }
 
@@ -136,21 +136,21 @@ fn is_schema_error(error: &sqlx::Error) -> bool {
 /// canonical relation (campaigns, contacts, lists, templates, domains,
 /// events, placement_tests, api_keys, webhooks, users, invoices, …): a
 /// deployment where one of those tables/columns is missing is a MISDEPLOYED
-/// SCHEMA, and the page must say "data unavailable" — rendering an empty
+/// SCHEMA, and the page must say "data unavailable", rendering an empty
 /// list or a zero KPI would fabricate data.
 ///
 /// `OptionalDataset` exists for datasets backed by separately-deployable
 /// components that can be deliberately DISABLED in a deployment: only those
 /// may map a 42P01/42703 "relation does not exist" to an honest empty state
 /// (the component is not deployed, not broken). No dataset in this module
-/// currently qualifies — they are all required — so every
+/// currently qualifies, they are all required, so every
 /// [`load_query`]/[`loaded_count`] call takes the required path. New
 /// datasets must choose explicitly; adding an optional dataset requires
 /// naming the disabled component here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DatasetRequirement {
-    /// Required relation: EVERY query/decoding error — including
-    /// 42P01/42703 — maps to [`LoadState::Unavailable`].
+    /// Required relation: EVERY query/decoding error, including
+    /// 42P01/42703, maps to [`LoadState::Unavailable`].
     Required,
     /// Optional relation tied to a deliberately disabled, separately
     /// deployable component: a missing schema (42P01/42703) is an honest
@@ -160,7 +160,7 @@ pub(crate) enum DatasetRequirement {
 
 /// Typed outcome of one console-data query (audit F14).
 ///
-/// A dataset that loaded — possibly genuinely empty — must stay
+/// A dataset that loaded, possibly genuinely empty, must stay
 /// distinguishable from a dataset that could NOT be read. Failures
 /// previously collapsed into empty lists and zero counts, so a database
 /// outage rendered as successful empty states with false zeroes.
@@ -168,7 +168,7 @@ pub(crate) enum DatasetRequirement {
 enum LoadState<T> {
     /// The query succeeded. An empty payload is an honest empty state.
     Loaded(T),
-    /// The query failed: the data is unknown — not empty, not zero.
+    /// The query failed: the data is unknown, not empty, not zero.
     Unavailable,
 }
 
@@ -179,7 +179,7 @@ impl<T> LoadState<T> {
 }
 
 impl<T: Default> LoadState<T> {
-    /// Value with unknowns degraded to the default — capture
+    /// Value with unknowns degraded to the default, capture
     /// [`LoadState::is_unavailable`] BEFORE calling so "unknown" is not
     /// silently rendered as the default (audit F14).
     fn unwrap_or_default(self) -> T {
@@ -224,7 +224,7 @@ impl LoadState<i64> {
 
 /// Monotonic per-process correlation id shared by every loader log line of
 /// one page render (audit F14). Binds (tenant ids, search terms) are never
-/// logged — only the stable query identity and this id.
+/// logged, only the stable query identity and this id.
 ///
 /// The sequence is zero-padded so the id stays lexicographically ordered for
 /// its whole range: the plain `web-data-{n}` form made `web-data-10` sort
@@ -239,7 +239,7 @@ fn next_correlation_id() -> String {
 /// Run one console-data query, preserving failure as uncertainty (audit
 /// F14).
 ///
-/// For REQUIRED datasets (the default — see [`DatasetRequirement`]) EVERY
+/// For REQUIRED datasets (the default, see [`DatasetRequirement`]) EVERY
 /// query/decoding error, explicitly including a missing table/column
 /// (42P01/42703, a misdeployed schema), maps to [`LoadState::Unavailable`]:
 /// the page renders the explicit unavailable state and never fabricates an
@@ -300,8 +300,8 @@ where
     }
 }
 
-/// COUNT(*) with the page's filters (audit F14): any failure — including a
-/// missing required relation — surfaces as [`LoadState::Unavailable`] so
+/// COUNT(*) with the page's filters (audit F14): any failure, including a
+/// missing required relation, surfaces as [`LoadState::Unavailable`] so
 /// counts never report false zeroes.
 async fn loaded_count(
     state: &AppState,
@@ -325,7 +325,7 @@ async fn loaded_count(
 fn mark_rows_unavailable(data: &mut ListPageData, what: &str, correlation_id: &str) {
     data.empty_title = "Data unavailable".into();
     data.empty_description = format!(
-        "{what} could not be loaded — the query failed. This is not an empty list; \
+        "{what} could not be loaded, the query failed. This is not an empty list; \
          figures shown as \"unavailable\" are unknown, not zero. \
          Reference: {correlation_id}."
     );
@@ -411,7 +411,7 @@ const REQUIRED_CONSOLE_SCHEMA: &[(&str, &[&str])] = &[
 /// Probe the required console schema (F14). Column names are the CANONICAL
 /// production names (cross-checked against a fully-migrated database —
 /// `invoices.total`/`dedicated_ips.ip_address`/`ip_pool_addresses.pool_id`
-/// — not the historical aliases the loaders also alias at query time).
+///, not the historical aliases the loaders also alias at query time).
 /// Returns the missing pieces as
 /// `table.column` / `table` strings; empty means the schema is complete.
 /// Readiness (routes/health.rs) fails the deployment when this is non-empty
@@ -484,7 +484,7 @@ impl WhereBuilder {
     /// Whitelisted equality filter on an arbitrary column: unknown values
     /// never reach SQL. `status_in` is the `status`-column shorthand; the
     /// alerts loader filters `severity` through this (the column that
-    /// actually exists — `system_alerts` has no `status`).
+    /// actually exists, `system_alerts` has no `status`).
     fn in_values(&mut self, column: &str, allowed: &[&str], value: &str) -> &mut Self {
         if !value.is_empty() && allowed.contains(&value) {
             self.eq(column, value);
@@ -591,7 +591,7 @@ pub(crate) fn time_cell(timestamp: Option<chrono::DateTime<chrono::Utc>>) -> Dat
 
 /// MFA enrollment state for people tables (Operators, Team). Review §7:
 /// the reused sent/draft campaign vocabulary must become
-/// Enabled/Not configured — a person's second factor is not a message.
+/// Enabled/Not configured, a person's second factor is not a message.
 /// The wire vocabulary (`enabled` / `not_configured`) renders through the
 /// shared status badge (`primitives::status_indicator_config`), so people
 /// tables get the same indicator treatment as every other status column.
@@ -761,7 +761,7 @@ async fn load_assistant(
     // Dogfood P1: the per-tenant capability flag is the FIRST piece of page
     // state. The JSON route has always refused a disabled workspace; the
     // console page rendered a working-looking conversation whose every
-    // message was refused — contradicting docs/user-guide/assistant.md
+    // message was refused, contradicting docs/user-guide/assistant.md
     // ("the page reports that the capability is not enabled"). A flag lookup
     // FAILURE is the unavailable state: never a silent empty conversation,
     // and never a rendered form for a capability whose state is unknown.
@@ -895,7 +895,7 @@ pub(crate) async fn load_ai_drafts_page(
         // the flag was hardcoded `false` in the row mapping, so the badge
         // could never render no matter what the row said.
         // F-6 (live mailbot dogfood 2026-10-06): the review page rendered the
-        // raw tenant id as "Workspace <id>" — an internal identifier in
+        // raw tenant id as "Workspace <id>", an internal identifier in
         // operator-facing copy. The workspace NAME (falling back to its slug)
         // is the human label; a deleted/unknown tenant degrades to a short
         // marker, never the full id.
@@ -1277,7 +1277,7 @@ pub(crate) async fn load_template_edit(
 }
 
 /// Load `/inbox-placement/{id}` detail: the test row's real status plus
-/// per-provider results. `None` means no row (or a storage failure) — the
+/// per-provider results. `None` means no row (or a storage failure), the
 /// view then renders the no-data fallback instead of inventing results.
 async fn load_placement_detail(
     state: &AppState,
@@ -1361,11 +1361,11 @@ async fn load_placement_detail(
     })
 }
 
-/// The dashboard's "Contacts — Active addressable" tile.
+/// The dashboard's "Contacts, Active addressable" tile.
 ///
 /// "Addressable" must mean what it says: a contact we would actually send
 /// to. Counting `status <> 'deleted'` included bounced and unsubscribed
-/// contacts — the very addresses the suppressions page exists to withhold —
+/// contacts, the very addresses the suppressions page exists to withhold —
 /// so the tile overstated reach by exactly the audience the operator had
 /// already lost (live run 2026-10-22: 12 shown against 10 subscribed, the
 /// other two being one bounce and one unsubscribe).
@@ -1433,7 +1433,7 @@ async fn web_campaigns(state: &AppState, tenant: &str, q: &ListQuery, cid: &str)
     let mut where_sql = WhereBuilder::new();
     where_sql.eq("tenant_id", tenant);
     // `scheduled` is a first-class lifecycle status (the worker claims
-    // status='scheduled' rows when due) — the filter must include it or
+    // status='scheduled' rows when due), the filter must include it or
     // filtering by it would quietly return everything (review §6.2).
     where_sql.status_in(
         &[
@@ -1572,7 +1572,7 @@ async fn web_campaigns(state: &AppState, tenant: &str, q: &ListQuery, cid: &str)
 
 /// Full-fidelity editor loader: the tenant's lists + segments plus every
 /// prefilled campaign field (including html_body, which the previous loader
-/// never selected — the editor rendered an EMPTY body for existing rows).
+/// never selected, the editor rendered an EMPTY body for existing rows).
 async fn load_campaign_editor(
     state: &AppState,
     tenant: &str,
@@ -1686,7 +1686,7 @@ async fn load_campaign_editor(
         Ok(row) => row,
         Err(error) => {
             // Audit #16: a failed audience read must not render as "no
-            // audience selected" — that is a fabricated value.
+            // audience selected", that is a fabricated value.
             tracing::error!(error = %error, "campaign editor: audience lookup failed");
             editor.unavailable = true;
             (String::new(), Vec::new())
@@ -1887,7 +1887,7 @@ async fn web_contacts(state: &AppState, tenant: &str, q: &ListQuery, cid: &str) 
     data.primary_action = Some(("Add Contact".into(), "/contacts/new".into()));
     // Review §6.2: the CSV export lives in the live header again, and the
     // bulk bar keeps the export-selected affordance the handwritten page
-    // had — the export handler was always mounted.
+    // had, the export handler was always mounted.
     data.secondary_actions = vec![SecondaryActionData::get(
         "Export CSV",
         "/web/contacts/export.csv",
@@ -1972,7 +1972,7 @@ async fn web_lists(state: &AppState, tenant: &str, q: &ListQuery, cid: &str) -> 
 
     let mut data = base_list(
         "Lists",
-        "Audience segments — rows come from the lists table.",
+        "Audience segments, rows come from the lists table.",
         "/lists",
     );
     data.search_label = "Search lists".into();
@@ -2026,7 +2026,7 @@ async fn web_templates(state: &AppState, tenant: &str, q: &ListQuery, cid: &str)
     .await;
     let (page, total_pages, offset) = paging(total.total_or_zero(), q.page);
 
-    // templates.id is VARCHAR (migration 075) — decoded as String natively.
+    // templates.id is VARCHAR (migration 075), decoded as String natively.
     let rows =
         load_query(
             "web.templates.list",
@@ -2059,7 +2059,7 @@ async fn web_templates(state: &AppState, tenant: &str, q: &ListQuery, cid: &str)
 
     let mut data = base_list(
         "Templates",
-        "Reusable email bodies — rows come from the templates table.",
+        "Reusable email bodies, rows come from the templates table.",
         "/templates",
     );
     data.search_label = "Search templates".into();
@@ -2074,7 +2074,7 @@ async fn web_templates(state: &AppState, tenant: &str, q: &ListQuery, cid: &str)
     };
     data.filter_query = filter_query(q);
     data.primary_action = Some(("New Template".into(), "/templates/new".into()));
-    // Review §6.3: live rows carry the actual editor navigation — the
+    // Review §6.3: live rows carry the actual editor navigation, the
     // editor route exists and round-trips, so the list must link to it.
     data.edit_path_prefix = Some("/templates/".into());
     data.empty_title = "No templates yet".into();
@@ -2235,7 +2235,7 @@ async fn web_events(state: &AppState, tenant: &str, q: &ListQuery, cid: &str) ->
     .await;
     let (page, total_pages, offset) = paging(total.total_or_zero(), q.page);
 
-    // events.id is VARCHAR (migration 075) — decoded as String natively.
+    // events.id is VARCHAR (migration 075), decoded as String natively.
     let rows =
         load_query(
             "web.events.list",
@@ -2322,7 +2322,7 @@ async fn web_events(state: &AppState, tenant: &str, q: &ListQuery, cid: &str) ->
                     DataCell::status(&event_type),
                     DataCell::text(recipient.unwrap_or_default()),
                     // The message cell is the console doorway into the
-                    // time-travel timeline (`/messages/{id}/timeline`) — the
+                    // time-travel timeline (`/messages/{id}/timeline`), the
                     // delivery-debugging surface docs/api/endpoints/events.md
                     // points at. Only real message ids link.
                     match message_id {
@@ -2461,7 +2461,7 @@ async fn web_reports(state: &AppState, tenant: &str, cid: &str) -> ListPageData 
 
     let mut data = base_list(
         "Reports",
-        "Cross-campaign reporting — every row links into the campaign record.",
+        "Cross-campaign reporting, every row links into the campaign record.",
         "/reports",
     );
     data.kpis = vec![
@@ -2716,14 +2716,14 @@ async fn web_inbox_placement(
 }
 
 /// /settings/api-keys list query (audit F03). The schema column is
-/// `key_prefix` (`prefix` never existed — the old query failed with 42703
+/// `key_prefix` (`prefix` never existed, the old query failed with 42703
 /// on any populated database); `id` is a UUID, decoded as text; and
 /// `expires_at` is selected so the view model can distinguish active,
 /// expired, and revoked keys.
 const API_KEYS_SQL: &str = "SELECT id::text AS id, name, key_prefix AS prefix, created_at, revoked_at, expires_at FROM api_keys WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT 100";
 
 /// API-key lifecycle state for the console (audit F03). Revocation wins
-/// over expiry — it is the irreversible operator action; a key whose
+/// over expiry, it is the irreversible operator action; a key whose
 /// `expires_at` has passed is "expired", never "active".
 fn api_key_state(
     revoked_at: Option<chrono::DateTime<chrono::Utc>>,
@@ -2805,7 +2805,7 @@ async fn web_api_keys(state: &AppState, tenant: &str, cid: &str) -> ListPageData
 }
 
 async fn web_webhooks(state: &AppState, tenant: &str, cid: &str) -> ListPageData {
-    // webhooks.id is VARCHAR (migration 075) — decoded as String natively.
+    // webhooks.id is VARCHAR (migration 075), decoded as String natively.
     let rows = load_query(
         "web.webhooks.list",
         cid,
@@ -2918,7 +2918,7 @@ async fn web_team(state: &AppState, tenant: &str, cid: &str) -> ListPageData {
 
 /// /settings/billing invoice-list query (audit F04). The canonical
 /// invoices schema (migrations 052 + 076) has NO `amount_cents` column —
-/// 069's CREATE TABLE is a no-op after 052 — so the old query failed with
+/// 069's CREATE TABLE is a no-op after 052, so the old query failed with
 /// 42703 on any populated database and rendered as an empty list. The
 /// canonical amount is `total` (nullable, written by billing-service
 /// invoice creation), with the legacy NOT NULL `amount` as fallback for
@@ -2926,7 +2926,7 @@ async fn web_team(state: &AppState, tenant: &str, cid: &str) -> ListPageData {
 const BILLING_INVOICES_SQL: &str = "SELECT id::text AS id, COALESCE(total, amount, 0)::bigint AS total, currency, status::text AS status, created_at FROM invoices WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT 50";
 
 /// Collectible outstanding per currency (audits F04/F60/F73), aggregated
-/// over the FULL eligible invoice set — not the 50-row visible window.
+/// over the FULL eligible invoice set, not the 50-row visible window.
 ///
 /// The summary consults the ALLOCATION LEDGER through the ONE shared
 /// authoritative balance (`billing_service::invoices::
@@ -3127,7 +3127,7 @@ async fn web_dedicated_ips(state: &AppState, tenant: &str, cid: &str) -> ListPag
         rows.len() as i64
     };
     data.empty_title = "No dedicated IPs yet".into();
-    data.empty_description = "Request an allocation — the provisioner completes it.".into();
+    data.empty_description = "Request an allocation, the provisioner completes it.".into();
     data.action_form_html = ui_foundation::leptos_views::dedicated_ip_request_form_html();
     if rows_unavailable {
         mark_rows_unavailable(&mut data, "Dedicated IPs", cid);
@@ -3188,7 +3188,7 @@ async fn web_suppressions(
     .await;
     let (page, total_pages, offset) = paging(total.total_or_zero(), q.page);
 
-    // suppressions.id is VARCHAR(26) (canonical migration 088/115) — String.
+    // suppressions.id is VARCHAR(26) (canonical migration 088/115), String.
     let rows = load_query(
         "web.suppressions.list",
         cid,
@@ -3219,7 +3219,7 @@ async fn web_suppressions(
 
     let mut data = base_list(
         "Suppressions",
-        "Addresses withheld from sending — recorded by bounces, complaints, and unsubscribes.",
+        "Addresses withheld from sending, recorded by bounces, complaints, and unsubscribes.",
         "/settings/suppressions",
     );
     data.search_label = "Search suppressions".into();
@@ -3236,7 +3236,7 @@ async fn web_suppressions(
     // Read-only: no bulk action, no delete intent, no primary write action.
     data.empty_title = "No suppressions".into();
     data.empty_description =
-        "Nothing is withheld yet — bounces, complaints, and unsubscribes land here.".into();
+        "Nothing is withheld yet, bounces, complaints, and unsubscribes land here.".into();
     if rows_unavailable {
         mark_rows_unavailable(&mut data, "Suppressions", cid);
     }
@@ -3263,12 +3263,12 @@ async fn web_suppressions(
     data
 }
 
-/// `/settings/journal` — the Mailboxes archive + journaling list.
+/// `/settings/journal`, the Mailboxes archive + journaling list.
 ///
 /// Tenant-admin only (the same `*` scope the tenant-admin API requires);
 /// a non-admin member gets an honest "administrators only" empty state
 /// rather than rows. The list is newest-first by `journaled_at` and carries
-/// metadata only — the per-row action links to the raw download
+/// metadata only, the per-row action links to the raw download
 /// (`GET /v1/journal/:id/raw`), never inline body markup.
 async fn web_journal(
     state: &AppState,
@@ -3443,7 +3443,7 @@ async fn control_plane_route_data(
         None
     };
     // F11: the create form's plan select binds to the ACTIVE billing
-    // catalog — the same source the handler validates against.
+    // catalog, the same source the handler validates against.
     let tenant_new = if path == "/tenants/new" {
         Some(cp_tenant_new(state).await)
     } else {
@@ -3496,7 +3496,7 @@ async fn control_plane_route_data(
 /// ([`sales_autopilot::control_read`]).
 ///
 /// This page used to issue its own queries against the canonical sales tables
-/// while the admin read/mutation APIs proxied the control surface — two read
+/// while the admin read/mutation APIs proxied the control surface, two read
 /// contracts for one question, free to drift. It now consumes the shared
 /// snapshot: one engine, one read model, identical answers. Every section is
 /// independently `None`-able so a single failing table degrades to the page's
@@ -3511,7 +3511,7 @@ async fn cp_sales_autopilot(state: &AppState) -> ui_foundation::view_data::Sales
 
     const TENANT: &str = SALES_AUTOPILOT_TENANT;
 
-    // One shared load for the whole page — exactly the read path the control
+    // One shared load for the whole page, exactly the read path the control
     // API's handlers use.
     let snapshot = control_read::load_sales_control_snapshot(&state.db, TENANT).await;
 
@@ -3580,7 +3580,7 @@ async fn cp_sales_autopilot(state: &AppState) -> ui_foundation::view_data::Sales
 }
 
 /// The first-response KPI: pending depth, closed-in-window count and the
-/// p50/p95 of (queued_at - created_at). `None` when the query fails — the
+/// p50/p95 of (queued_at - created_at). `None` when the query fails, the
 /// tile then says unknown, never zero.
 async fn load_first_response_kpi(
     state: &AppState,
@@ -4133,7 +4133,7 @@ async fn cp_operators(state: &AppState, q: &ListQuery, cid: &str) -> ListPageDat
 ///
 /// Identity and status come from the canonical contact/account/enrollment
 /// model; `sales_leads` is only the bridge providing the row id and the
-/// lead-only fields (`source`, `score`, timestamps — `notes`/`tags`/
+/// lead-only fields (`source`, `score`, timestamps, `notes`/`tags`/
 /// `deal_value` exist there too and stay available to the API surface).
 /// The derived `status` is the same mapping the admin API uses, expressed in
 /// the legacy label set the UI already renders, so the page shape does not
@@ -4206,13 +4206,13 @@ const CP_LEADS_CANONICAL_CTE: &str = r#"
 
 async fn cp_audit(state: &AppState, q: &ListQuery, cid: &str) -> ListPageData {
     // Item M: the search widens to (action ILIKE OR user_id ILIKE OR
-    // resource ILIKE), with an optional recency window in days — the SAME
+    // resource ILIKE), with an optional recency window in days, the SAME
     // clause the CSV export applies.
     //
     // Live audit_logs columns are created_at, action, resource, user_id:
     // the canonical writer (audit_log.rs) inserts `resource`, and the
     // legacy `resource_type` spelling was renamed by the fix migrations
-    // (it fails at runtime — see the export in web.rs). The query below
+    // (it fails at runtime, see the export in web.rs). The query below
     // must stay on the canonical column or the whole page degrades to
     // "data unavailable".
     let mut clauses: Vec<String> = Vec::new();
@@ -4421,7 +4421,7 @@ async fn cp_jobs(state: &AppState, cid: &str) -> ListPageData {
 /// `/jobs` control state (F13): recent queue_jobs rows the retry/cancel
 /// controls act on, plus the status counters the header shows.
 ///
-/// A read failure is `unavailable` — the page then hides the controls
+/// A read failure is `unavailable`, the page then hides the controls
 /// instead of offering a retry/cancel button against unknown queue state.
 async fn cp_jobs_controls(state: &AppState) -> ui_foundation::view_data::JobsPageData {
     use ui_foundation::view_data::{JobRowData, JobsPageData};
@@ -4496,9 +4496,9 @@ async fn cp_jobs_controls(state: &AppState) -> ui_foundation::view_data::JobsPag
 
 /// /infrastructure/nodes query (audit F58). The table behind this route is
 /// the OUTBOUND IP POOL (`ip_pool_addresses`), not an MTA-node heartbeat
-/// registry — no node registry exists in the schema, so the page is titled
+/// registry, no node registry exists in the schema, so the page is titled
 /// "IP Pool". ip_pool_addresses.id is a UUID and ip_address is INET
-/// (migration 093); both must be decoded as text — `id::text` for the row id
+/// (migration 093); both must be decoded as text, `id::text` for the row id
 /// and `host(ip_address)` for the bare address (INET never decodes as a
 /// String).
 const NODES_SQL: &str = "SELECT id::text AS id, host(ip_address) AS ip_address, pool_id, status, warmup_day FROM ip_pool_addresses ORDER BY ip_address LIMIT 100";
@@ -4581,11 +4581,11 @@ async fn cp_nodes(state: &AppState, cid: &str) -> ListPageData {
 /// so they are named constants here; each queue is classified by its pending
 /// backlog depth and the age of its oldest pending job:
 ///
-/// - `healthy` — depth < [`WARNING_QUEUE_DEPTH`] and no pending job older
+/// - `healthy`, depth < [`WARNING_QUEUE_DEPTH`] and no pending job older
 ///   than [`WARNING_QUEUE_AGE_SECS`];
-/// - `warning` — depth >= [`WARNING_QUEUE_DEPTH`] OR oldest pending job at
+/// - `warning`, depth >= [`WARNING_QUEUE_DEPTH`] OR oldest pending job at
 ///   least [`WARNING_QUEUE_AGE_SECS`] old;
-/// - `critical` — depth >= [`CRITICAL_QUEUE_DEPTH`] OR oldest pending job at
+/// - `critical`, depth >= [`CRITICAL_QUEUE_DEPTH`] OR oldest pending job at
 ///   least [`CRITICAL_QUEUE_AGE_SECS`] old.
 const WARNING_QUEUE_DEPTH: i64 = 250;
 const CRITICAL_QUEUE_DEPTH: i64 = 1_000;
@@ -4595,7 +4595,7 @@ const WARNING_QUEUE_AGE_SECS: i64 = 5 * 60;
 const CRITICAL_QUEUE_AGE_SECS: i64 = 30 * 60;
 
 /// Classify one queue's health. Replaces the previous `depth > 1000 ?
-/// "sending" : "active"` fabrication — a deep backlog is a HEALTH signal,
+/// "sending" : "active"` fabrication, a deep backlog is a HEALTH signal,
 /// not evidence that the queue is sending. `None` age means the queue has no
 /// pending jobs (nothing is waiting), which cannot itself be unhealthy.
 fn queue_health(depth: i64, oldest_pending_age_secs: Option<i64>) -> &'static str {
@@ -4797,7 +4797,7 @@ async fn cp_alerts(state: &AppState, q: &ListQuery, cid: &str) -> ListPageData {
                         DataCell::status(&severity),
                         DataCell::text(alert_type),
                         DataCell::text(message),
-                        // Item H: honest state — acknowledged rows surface
+                        // Item H: honest state, acknowledged rows surface
                         // "acknowledged"; unacknowledged rows are still
                         // "active" work (the previous mapping inverted this).
                         DataCell::status(if acknowledged {
@@ -4815,8 +4815,8 @@ async fn cp_alerts(state: &AppState, q: &ListQuery, cid: &str) -> ListPageData {
 }
 
 /// Alert-rules page data: the EXISTING evaluated store
-/// (`usage_alert_configs`, migrations 024 + 246) — the same rows the
-/// billing-service maintenance sweep resolves — plus the tenant choices for
+/// (`usage_alert_configs`, migrations 024 + 246), the same rows the
+/// billing-service maintenance sweep resolves, plus the tenant choices for
 /// the create form and the `?edit=<id>` target.
 ///
 /// Every dataset is loaded with the honest-failure contract: a failed query
@@ -4965,7 +4965,7 @@ async fn cp_domains(state: &AppState, q: &ListQuery, cid: &str) -> ListPageData 
     let (page, total_pages, offset) = paging(total.total_or_zero(), q.page);
 
     // domains.status may be NULL on legacy deployments (verified flags
-    // instead) — the status cell degrades to "pending" rather than failing,
+    // instead), the status cell degrades to "pending" rather than failing,
     // but the column is always SELECTed and rendered because the page
     // filters on it. domains.id and domains.tenant_id are UUIDs (migration
     // 052): decode both as text.
@@ -5124,7 +5124,7 @@ async fn cp_plans(state: &AppState, cid: &str) -> ListPageData {
 /// validates against, cheapest first with a deterministic tiebreak (parallel
 /// test runs seed their own catalog rows into the shared database).
 ///
-/// A read failure is `unavailable` — the page then refuses to render a
+/// A read failure is `unavailable`, the page then refuses to render a
 /// submit button rather than inventing an empty plan list, because a tenant
 /// created without a verifiable plan silently lands on `free`.
 async fn cp_tenant_new(state: &AppState) -> ui_foundation::view_data::TenantNewPageData {
@@ -5157,8 +5157,8 @@ async fn cp_tenant_new(state: &AppState) -> ui_foundation::view_data::TenantNewP
 
 /// The ACTIVE billing catalog, cheapest first with a deterministic tiebreak
 /// (parallel test runs seed their own catalog rows into the shared
-/// database). ONE query serves both catalog-bound selects — the create form
-/// (`/tenants/new`) and the tenant-detail plan change — so the two surfaces
+/// database). ONE query serves both catalog-bound selects, the create form
+/// (`/tenants/new`) and the tenant-detail plan change, so the two surfaces
 /// can never disagree about what is selectable.
 async fn active_plan_catalog(state: &AppState) -> Result<Vec<(String, String, i64)>, sqlx::Error> {
     sqlx::query_as::<_, (String, String, i64)>(
@@ -5173,9 +5173,9 @@ async fn active_plan_catalog(state: &AppState) -> Result<Vec<(String, String, i6
 /// `/tenants/{id}` detail data (lane C C1): the tenant row plus the ACTIVE
 /// plan catalog the plan-change handler validates against.
 ///
-/// The preselected plan is the tenant's EFFECTIVE plan — an active
+/// The preselected plan is the tenant's EFFECTIVE plan, an active
 /// `plan_overrides` row wins over `tenants.plan`, the same precedence the
-/// entitlement resolver applies — so the select shows the plan actually in
+/// entitlement resolver applies, so the select shows the plan actually in
 /// force, not a stale column.
 async fn cp_tenant_detail(
     state: &AppState,
@@ -5254,8 +5254,8 @@ async fn cp_tenant_detail(
     };
 
     // The catalog select is bounded (LIMIT 50, cheapest first). On an
-    // installation with more active rows than the bound — or a shared
-    // database carrying other waves' fixtures — the tenant's own plan can
+    // installation with more active rows than the bound, or a shared
+    // database carrying other waves' fixtures, the tenant's own plan can
     // fall outside the slice, leaving the select without its preselection.
     // The plan the tenant is ON must always be selectable: read it directly
     // and prepend it when the bounded catalog omitted it.
@@ -5332,7 +5332,7 @@ async fn cp_compliance(state: &AppState, cid: &str) -> ListPageData {
     )
     .await;
 
-    // gdpr_requests.id is VARCHAR (migration 069) — decoded as String.
+    // gdpr_requests.id is VARCHAR (migration 069), decoded as String.
     let rows = load_query(
         "cp.compliance.list",
         cid,
@@ -5525,7 +5525,7 @@ async fn cp_discovery(state: &AppState, cid: &str) -> ListPageData {
 
     let mut data = base_list(
         // Review §7: this surface lists the canonical leads and their
-        // sources — "Lead Sources" is the honest name ("service discovery"
+        // sources, "Lead Sources" is the honest name ("service discovery"
         // is a different concept).
         "Lead Sources",
         "Canonical leads and the source that registered them.",
@@ -5578,7 +5578,7 @@ async fn cp_analytics(state: &AppState, cid: &str) -> ListPageData {
     // F12: the delivery-analytics read model had no product surface consuming
     // it (the module IS mounted at /v1/admin/analytics/delivery/*, but the
     // page showed none of its numbers). The page now renders the SAME
-    // snapshot the API serves — one implementation, no drift.
+    // snapshot the API serves, one implementation, no drift.
     match crate::routes::admin::delivery_analytics::delivery_analytics_snapshot(state, "7d").await {
         Ok(snapshot) => {
             data.kpis.push(
@@ -5624,7 +5624,7 @@ async fn cp_analytics(state: &AppState, cid: &str) -> ListPageData {
         }
         Err(error) => {
             // Honest degradation: the volume KPIs stay, the delivery section
-            // says it could not be read — never zero-filled numbers.
+            // says it could not be read, never zero-filled numbers.
             tracing::error!(
                 error = %error,
                 "delivery analytics snapshot failed; /analytics delivery section unavailable"
@@ -5653,12 +5653,12 @@ fn fraction_kpi(value: Option<f64>) -> String {
 /// with the SAME generated DKIM/SPF/DMARC record set the JSON
 /// GET /v1/domains/:id/dns-records endpoint returns (record building is
 /// reused from `routes::domains`, never duplicated). Records render as
-/// data rows with mono cells — the view layer lays them out.
+/// data rows with mono cells, the view layer lays them out.
 /// Per-record verification state for the domain detail table: the host
 /// prefix decides which check a record belongs to, and any future record
 /// shape without a verification semantic stays honestly "pending" (never
-/// green by accident). Pure so every arm — including the unknown-host
-/// default — is directly assertable.
+/// green by accident). Pure so every arm, including the unknown-host
+/// default, is directly assertable.
 pub(crate) fn record_verification_state(
     hostname: &str,
     dmarc_verified: bool,
@@ -5796,7 +5796,7 @@ pub(crate) async fn load_domain_detail(
     } else {
         data.empty_title = "DNS records are not generated yet".into();
         data.empty_description =
-            "DKIM keys are provisioned on the first verification run — use the Verify action to generate the full record set."
+            "DKIM keys are provisioned on the first verification run, use the Verify action to generate the full record set."
                 .into();
         data.table = Some(TableData {
             columns: vec!["Type".into(), "Host".into(), "Value".into()],
@@ -5820,13 +5820,13 @@ pub(crate) struct CampaignDetailData {
     pub list_id: Option<String>,
     pub list_name: Option<String>,
     pub recipient_count: i64,
-    /// (label, POST target, available) — the pure campaign_actions rule
+    /// (label, POST target, available), the pure campaign_actions rule
     /// from web.rs decides availability from the live status.
     pub actions: Vec<(String, String, bool)>,
     /// The tenant's lists for the recipients select: (id, name, selected).
     pub lists: Vec<(String, String, bool)>,
     /// Deferred-feature 5: THIS campaign's send statistics, counted from the
-    /// same events table `/reports` and `/analytics` aggregate — scoped by
+    /// same events table `/reports` and `/analytics` aggregate, scoped by
     /// campaign_id, never a tenant-wide number.
     pub stats: CampaignSendStats,
 }
@@ -5856,7 +5856,7 @@ impl CampaignSendStats {
 }
 
 /// Count THIS campaign's events (sent/delivered/opened/clicked) from the
-/// same events source `/reports` and `/analytics` aggregate — scoped to the
+/// same events source `/reports` and `/analytics` aggregate, scoped to the
 /// caller's tenant AND the campaign id (events.campaign_id is TEXT; the
 /// campaign's UUID travels as its canonical text form). Any query failure
 /// degrades to the honest `unavailable` stats, never a zero.
@@ -5895,7 +5895,7 @@ pub(crate) async fn load_campaign_send_stats(
 }
 
 impl CampaignDetailData {
-    /// Render through the generic list-page machinery (stub path — the
+    /// Render through the generic list-page machinery (stub path, the
     /// view layer replaces this with a dedicated detail page).
     pub(crate) fn to_list_page(&self) -> ListPageData {
         let mut data = base_list(
@@ -5911,8 +5911,8 @@ impl CampaignDetailData {
             KpiCardData::new(
                 "Audience",
                 match (&self.list_name, self.recipient_count) {
-                    (Some(name), count) if count > 0 => format!("{count} — {name}"),
-                    (Some(name), _) => format!("wired — {name} (0 subscribed)"),
+                    (Some(name), count) if count > 0 => format!("{count}, {name}"),
+                    (Some(name), _) => format!("wired, {name} (0 subscribed)"),
                     (None, _) => "no recipients wired".to_string(),
                 },
             )
@@ -5930,7 +5930,7 @@ impl CampaignDetailData {
                 "Scheduled time"
             }),
         ];
-        // Deferred-feature 5: THIS campaign's send statistics — the same
+        // Deferred-feature 5: THIS campaign's send statistics, the same
         // sent/delivered/opened/clicked vocabulary /reports and /analytics
         // use, scoped to this campaign's events. A failed events query
         // renders "unavailable"; an honest zero-send campaign renders zeros
@@ -6022,7 +6022,7 @@ impl CampaignDetailData {
         }
         data.empty_title = "No actions available".into();
         data.empty_description =
-            "This campaign's status has no lifecycle actions — completed and failed campaigns are terminal."
+            "This campaign's status has no lifecycle actions, completed and failed campaigns are terminal."
                 .into();
         data.table = Some(TableData {
             columns: vec!["Action".into(), "Posts to".into(), "Available".into()],
@@ -6045,12 +6045,12 @@ impl CampaignDetailData {
 
 /// Load `/lists/{id}` detail data (batch-2 list-detail fix): the real list
 /// name plus its subscriber counts. `Ok(None)` when the row does not exist
-/// in this workspace (the handler flashes the honest not-found) — never a
+/// in this workspace (the handler flashes the honest not-found), never a
 /// demo list. A count query failure renders "unavailable", not zero.
 ///
 /// Storage failures are RETURNED (outage-honesty audit #16): the handler
 /// answers `Ok(None)` with its genuine not-found copy and `Err` with the
-/// temporary-unavailable flash — a database outage must not read as
+/// temporary-unavailable flash, a database outage must not read as
 /// "list not found".
 pub(crate) async fn load_list_detail(
     db: &sqlx::PgPool,
@@ -6080,7 +6080,7 @@ pub(crate) async fn load_list_detail(
     .await?;
     // Unknown ≠ zero: the page must say the figure is unavailable. A COUNT
     // aggregate always yields one row, so `None` here can only mean the
-    // list row vanished between the two queries — render the figures as
+    // list row vanished between the two queries, render the figures as
     // unavailable, never as a fabricated zero.
     let (subscribers, subscribed, unsubscribed) = match counts {
         Some(counts) => (
@@ -6107,7 +6107,7 @@ pub(crate) async fn load_list_detail(
 /// subscriber with a readable identity, membership status and added date.
 /// `Ok(None)` when the LIST does not exist in this workspace (the handler
 /// flashes the honest not-found); an existing list with no subscribers
-/// returns an empty `members` vector — the view's honest empty state, never
+/// returns an empty `members` vector, the view's honest empty state, never
 /// a fabricated row. Storage failures are RETURNED, exactly like
 /// [`load_list_detail`]: an outage must not read as "list not found".
 pub(crate) async fn load_list_members(
@@ -6129,7 +6129,7 @@ pub(crate) async fn load_list_members(
 
     // Readable identity first: the contact's name when recorded, else the
     // address. `contacts.id` is UUID and `list_subscribers.contact_id`
-    // references it (migration 068 lineage) — the join keeps list and
+    // references it (migration 068 lineage), the join keeps list and
     // contact ownership in one statement.
     let rows: Vec<(
         Option<String>,
@@ -6172,7 +6172,7 @@ pub(crate) async fn load_list_members(
 ///
 /// Storage failures are RETURNED (outage-honesty audit #16): the handler
 /// answers `Ok(None)` with its genuine not-found copy and `Err` with the
-/// temporary-unavailable flash — an outage must not read as "campaign not
+/// temporary-unavailable flash, an outage must not read as "campaign not
 /// found", and a failed recipient count must not fabricate a zero.
 pub(crate) async fn load_campaign_detail(
     db: &sqlx::PgPool,
@@ -6233,7 +6233,7 @@ pub(crate) async fn load_campaign_detail(
         .map(|(label, target, available)| (label.to_string(), target, available))
         .collect();
     // Outage honesty (audit #16): a failed lists select fails the whole
-    // detail load closed — never an empty audience select.
+    // detail load closed, never an empty audience select.
     let lists = tenant_lists_for_select(db, tenant).await?;
     // Deferred-feature 5: per-campaign send statistics ride the detail data.
     let stats = load_campaign_send_stats(db, tenant, &id).await;
@@ -6301,7 +6301,7 @@ pub(crate) async fn count_list_recipients_filtered(
 /// The tenant's lists for the campaign-recipients select: (id, name,
 /// selected). Storage failures are RETURNED (outage-honesty audit #16):
 /// degrading to an empty select used to render the campaign detail page as
-/// if the workspace had no lists — a fabricated negative an operator could
+/// if the workspace had no lists, a fabricated negative an operator could
 /// act on. The detail loader now fails closed to the temporary-unavailable
 /// state instead, so this helper bypasses [`load_query`] (which folds the
 /// error into `LoadState::Unavailable`) to keep the actual `sqlx::Error`.
@@ -6333,7 +6333,7 @@ pub(crate) async fn tenant_lists_for_select(
     })
 }
 
-/// Plan names from the billing catalog (item I) — the tenant-create
+/// Plan names from the billing catalog (item I), the tenant-create
 /// form's plan select is validated against this exact set.
 ///
 /// Storage failures are RETURNED (outage-honesty audit #16): an unreadable
@@ -6601,10 +6601,10 @@ mod tests {
     /// `ip_pool_addresses.address`) do not exist in the canonical chain. The
     /// manifest must name exactly what the migrations create:
     ///
-    /// - `dedicated_ips.ip_address` — migrations/003_dedicated_ips.sql:43
+    /// - `dedicated_ips.ip_address`, migrations/003_dedicated_ips.sql:43
     ///   (also migrations/021_hybrid_infrastructure.sql:18);
-    /// - `ip_pool_addresses.pool_id` — migrations/093_deep_schema_convergence.sql:394;
-    /// - `ip_pool_addresses.ip_address` — migrations/093_deep_schema_convergence.sql:395.
+    /// - `ip_pool_addresses.pool_id`, migrations/093_deep_schema_convergence.sql:394;
+    /// - `ip_pool_addresses.ip_address`, migrations/093_deep_schema_convergence.sql:395.
     #[test]
     fn required_schema_names_match_the_canonical_migrations() {
         const DEDICATED_IPS_MIGRATION: &str =
@@ -6713,7 +6713,7 @@ mod tests {
         assert_eq!(first_page.rows.len(), PER_PAGE);
         assert_eq!(first_page.rows[0].id, "operator-0");
 
-        // Page 2 offsets by PER_PAGE — the table is navigable past 100.
+        // Page 2 offsets by PER_PAGE, the table is navigable past 100.
         let data = load_page_data(
             &state,
             "control-plane",
@@ -6833,7 +6833,7 @@ mod tests {
 
         assert_eq!(api_key_state(None, None, now), "active");
         assert_eq!(api_key_state(None, Some(future), now), "active");
-        // expires_at exactly now has passed — expired, never active.
+        // expires_at exactly now has passed, expired, never active.
         assert_eq!(api_key_state(None, Some(now), now), "expired");
         assert_eq!(api_key_state(None, Some(past), now), "expired");
         // Revocation wins over expiry (irreversible operator action).
@@ -6858,7 +6858,7 @@ mod tests {
     #[test]
     fn outstanding_summary_consults_the_shared_allocation_aware_balance() {
         // Audit F04: the console's outstanding no longer sums full invoice
-        // totals — it delegates to the ONE authoritative balance
+        // totals, it delegates to the ONE authoritative balance
         // (billing_service::invoices::tenant_outstanding_by_currency),
         // which subtracts confirmed payment allocations and
         // debt-reduction credits per currency bucket over the whole
@@ -6868,7 +6868,7 @@ mod tests {
         assert!(source_file.contains("pub async fn tenant_outstanding_by_currency"));
         assert!(source_file.contains("TENANT_OUTSTANDING_SQL"));
         // The shared derivation subtracts allocations and debt-reduction
-        // credits — never a bare SUM of invoice totals.
+        // credits, never a bare SUM of invoice totals.
         assert!(source_file.contains("invoice_payment_allocations"));
         assert!(source_file.contains("debt_reduction_cents"));
     }
@@ -7001,8 +7001,8 @@ mod tests {
         sqlx::Error::Database(Box::new(FakeSqlStateError(sqlstate)))
     }
 
-    /// F14 core requirement: a REQUIRED dataset maps EVERY error — including
-    /// missing-table (42P01) and missing-column (42703) — to Unavailable.
+    /// F14 core requirement: a REQUIRED dataset maps EVERY error, including
+    /// missing-table (42P01) and missing-column (42703), to Unavailable.
     /// A misdeployed invoices/api_keys schema must never render as an empty
     /// page or a zero KPI.
     #[tokio::test]
@@ -7034,7 +7034,7 @@ mod tests {
 
     /// F14: only an EXPLICITLY optional dataset (tied to a deliberately
     /// disabled component) may treat a missing relation as an honest empty
-    /// dataset — and only 42P01/42703; every other error stays Unavailable.
+    /// dataset, and only 42P01/42703; every other error stays Unavailable.
     #[tokio::test]
     async fn optional_datasets_tolerate_only_missing_schema() {
         let state = load_query_with_requirement(
@@ -7069,7 +7069,7 @@ mod tests {
         }
         // The invoice probe covers the canonical columns the
         // outstanding-balance summary reads (total, not the old
-        // total_cents alias — the probe must name what the migration
+        // total_cents alias, the probe must name what the migration
         // chain actually creates).
         let (_, invoice_columns) = REQUIRED_CONSOLE_SCHEMA
             .iter()
@@ -7106,7 +7106,7 @@ mod tests {
     // ─── One CP read contract: SSR consumes the shared control read model ──
 
     /// The SSR page must go through the shared typed read model
-    /// (`sales_autopilot::control_read`), never its own sales queries — that
+    /// (`sales_autopilot::control_read`), never its own sales queries, that
     /// duplication is exactly what the finding removed. Pinned in source
     /// because a reintroduced inline query could return coincidentally equal
     /// values at runtime while silently forking the contract again.
@@ -7457,7 +7457,7 @@ mod tests {
     }
 
     /// R6 (review §7): the LIVE control-plane sales page renders the native
-    /// approve/reject form for a pending-approval decision — posting to the
+    /// approve/reject form for a pending-approval decision, posting to the
     /// mounted console route with the seeded decision id, not to an API
     /// client. The dead-end "not available in this console yet" copy is
     /// gone.
@@ -7878,7 +7878,7 @@ pub(crate) mod coverage_support {
         .expect("seed invoice");
 
         // The active-IP unique index means the address must be unique across
-        // the whole shared test database — derive it from a fresh UUID.
+        // the whole shared test database, derive it from a fresh UUID.
         let ip_bytes = uuid::Uuid::new_v4().into_bytes();
         let dedicated_ip = format!("10.{}.{}.{}", ip_bytes[0], ip_bytes[1], ip_bytes[2]);
         sqlx::query(
@@ -8027,7 +8027,7 @@ pub(crate) mod coverage_support {
         sqlx::query(
             // sales_leads is a VIEW over sales_contacts' legacy_* columns
             // (the discovery CTE joins it), so the lead row is created by
-            // populating those columns here — never by INSERTing the view.
+            // populating those columns here, never by INSERTing the view.
             "INSERT INTO sales_contacts (id, tenant_id, account_id, full_name, lifecycle,
                                          legacy_lead_id, legacy_lead_email, lead_source, lead_score,
                                          created_at, updated_at)
@@ -8383,8 +8383,8 @@ mod coverage_loader_tests {
 
     /// Native tenant-id binding across the settings loaders (P2): `tenants.id`
     /// and `dedicated_ips.tenant_id` are VARCHAR(26), compared directly
-    /// (`= $1`). An id string that names no row must degrade honestly — the
-    /// plan default, zero allocations — rather than turning the bind into a
+    /// (`= $1`). An id string that names no row must degrade honestly, the
+    /// plan default, zero allocations, rather than turning the bind into a
     /// read failure.
     #[tokio::test]
     async fn settings_loaders_bind_tenant_ids_natively_for_existing_and_unknown_tenants() {
@@ -8441,8 +8441,8 @@ mod coverage_loader_tests {
         // KPI-only overviews: exact tenant-scoped counts.
         let dashboard = web(&app, "/dashboard", None, &user_a).await;
         assert_eq!(kpi(&dashboard, "Campaigns"), "28");
-        // The fixture seeds one contact per status — subscribed, unsubscribed,
-        // bounced — and the tile is "Active addressable", so exactly ONE of
+        // The fixture seeds one contact per status, subscribed, unsubscribed,
+        // bounced, and the tile is "Active addressable", so exactly ONE of
         // the three counts. Asserting 3 here pinned the old definition, which
         // counted every non-deleted row and so claimed reach over an
         // unsubscribe and a bounce (live run 2026-10-22).
@@ -8692,7 +8692,7 @@ mod coverage_loader_tests {
             }
         }
         // Detail loaders FAIL CLOSED (outage-honesty audit #16): a dead
-        // database is `Err` — never a fabricated page. (Malformed ids are
+        // database is `Err`, never a fabricated page. (Malformed ids are
         // pre-validated by the handlers, so `Err` here means storage.)
         assert!(load_domain_detail(
             &app.db,
@@ -8707,7 +8707,7 @@ mod coverage_loader_tests {
                 .await
                 .is_err()
         );
-        // Select helpers propagate the failure — never an invented empty
+        // Select helpers propagate the failure, never an invented empty
         // list or zero count (outage-honesty audit #16).
         assert!(tenant_lists_for_select(&app.db, "t").await.is_err());
         assert!(tenant_plan_names(&app.db).await.is_err());
@@ -8763,7 +8763,7 @@ mod coverage_loader_tests {
         assert_eq!(operators.total_count, 1);
         assert!(has(&operators, &tag));
 
-        // cp_audit reads the CANONICAL audit_logs.resource column — the
+        // cp_audit reads the CANONICAL audit_logs.resource column, the
         // legacy resource_type spelling does not exist (see web.rs export).
         let audit = cp(&app, "/cp/audit", None, &operator).await;
         assert!(
@@ -8835,7 +8835,7 @@ mod coverage_loader_tests {
     }
 
     /// Review register R1: the live composition must not lose the
-    /// handwritten affordances/labels — exports in the live header, the
+    /// handwritten affordances/labels, exports in the live header, the
     /// editor navigation on template rows, the Scheduled filter, MFA labels,
     /// the filter-preserving audit export, and the Lead Sources naming.
     #[tokio::test]
@@ -8899,7 +8899,7 @@ mod coverage_loader_tests {
         assert_eq!(scheduled.total_count, 1, "{scheduled:?}");
         assert!(has(&scheduled, &format!("Scheduled {tag}")));
 
-        // Team and Operators state MFA as Enabled / Not configured — never
+        // Team and Operators state MFA as Enabled / Not configured, never
         // the reused campaign sent/draft vocabulary (review §7). The cells
         // are status badges now (wire vocabulary `enabled`/`not_configured`),
         // so the human label is pinned through the shared badge renderer.
@@ -8965,7 +8965,7 @@ mod coverage_loader_tests {
         assert_eq!(discovery.title, "Lead Sources");
 
         // P1-4: every POPULATED bulk table renders its row forms as siblings
-        // of the bulk form — never nested (browsers drop the inner form).
+        // of the bulk form, never nested (browsers drop the inner form).
         let operator_all = user("system");
         for (surface, path, list) in [
             (
@@ -9101,7 +9101,7 @@ mod coverage_loader_tests {
         assert_eq!(kpi(&detail, "Domain"), format!("{tag_a}.example.test"));
         assert!(table(&detail).rows.len() >= 4, "DNS records must render");
         // Cross-tenant and malformed ids are refused. The malformed id makes
-        // the `$1::uuid` cast fail at Postgres — the loaders are only ever
+        // the `$1::uuid` cast fail at Postgres, the loaders are only ever
         // handed handler-pre-validated ids, so `Err` there is expected.
         assert!(
             load_domain_detail(&app.db, &tenant_b, &seeded.domain_id, "us-east-1")
@@ -9153,7 +9153,7 @@ mod coverage_loader_tests {
             .expect("plans catalog query succeeds")
             .iter()
             .any(|name| !name.is_empty()));
-        // Audit #16: counts are `Ok(i64)` now — a cross-tenant list is a
+        // Audit #16: counts are `Ok(i64)` now, a cross-tenant list is a
         // genuine (empty) count, not an error.
         assert_eq!(
             count_list_recipients_filtered(&app.db, &tenant_a, &seeded.list_id, "all")
@@ -9400,7 +9400,7 @@ mod coverage_residual_tests {
             .iter()
             .find(|k| k.label == "Audience")
             .expect("audience kpi");
-        assert_eq!(audience.value, "wired — Newsletter (0 subscribed)");
+        assert_eq!(audience.value, "wired, Newsletter (0 subscribed)");
         assert!(!page.filters.is_empty(), "the list select renders");
         assert_eq!(
             page.primary_action.as_ref().map(|a| a.0.clone()),
@@ -9456,7 +9456,7 @@ mod coverage_residual_tests {
     }
 
     /// F12 (live dogfood 2026-10-08): the delivery-analytics read model has
-    /// a UI claimant — the control-plane `/analytics` page renders the SAME
+    /// a UI claimant, the control-plane `/analytics` page renders the SAME
     /// snapshot the JSON endpoints serve, so the numbers are reachable
     /// without the admin API. This test drives the real DB -> loader path.
     #[tokio::test]
@@ -9559,7 +9559,7 @@ mod coverage_residual_tests {
     }
 
     /// F13: the `/jobs` page's OWN data (the retry/cancel controls' rows)
-    /// rides `RouteData::jobs` — rows with real statuses plus the counters.
+    /// rides `RouteData::jobs`, rows with real statuses plus the counters.
     #[tokio::test]
     async fn cp_jobs_page_data_carries_rows_and_status_counters() {
         let Some(app) = coverage_support::state("cov_cp_jobs_controls").await else {
@@ -9625,12 +9625,12 @@ mod coverage_residual_tests {
         );
     }
 
-    /// The dashboard's "Contacts — Active addressable" tile counts the
+    /// The dashboard's "Contacts, Active addressable" tile counts the
     /// audience we would actually send to: subscribed AND not suppressed.
     ///
     /// It used to count `status <> 'deleted'`, which swept in bounced and
-    /// unsubscribed contacts — the addresses the suppressions page exists to
-    /// withhold — so the tile claimed more reach than the product had (live
+    /// unsubscribed contacts, the addresses the suppressions page exists to
+    /// withhold, so the tile claimed more reach than the product had (live
     /// run 2026-10-22). The label and the number must agree.
     #[test]
     fn dashboard_contacts_kpi_counts_only_addressable_contacts() {
@@ -9645,7 +9645,7 @@ mod coverage_residual_tests {
         );
         assert!(
             sql.contains("lower(s.email) = lower(c.email)"),
-            "suppression matching must be case-insensitive — addresses are not case-sensitive: {sql}"
+            "suppression matching must be case-insensitive, addresses are not case-sensitive: {sql}"
         );
         assert!(
             !sql.contains("status <> 'deleted'"),

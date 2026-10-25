@@ -211,7 +211,7 @@ pub fn check_account_state(inputs: &RiskInputs) -> AccountAssessment {
             "{} similar suspended account(s) found.",
             inputs.similar_suspended_accounts
         ));
-        required_actions.push("Account linked to prior suspensions — manual review required.".into());
+        required_actions.push("Account linked to prior suspensions, manual review required.".into());
     }
     if matches!(inputs.payment_risk, PaymentRisk::High | PaymentRisk::Fraudulent) {
         reasons.push("High payment risk detected.".into());

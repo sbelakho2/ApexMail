@@ -1,4 +1,4 @@
-//! Release gates — audit item 27: gates that drive the REAL architecture.
+//! Release gates, audit item 27: gates that drive the REAL architecture.
 //!
 //! The previous suite asserted mostly at the data layer (column presence,
 //! CHECK constraints, hand-written SQL). Those tests prove the schema is
@@ -17,7 +17,7 @@
 //! (`experiments::record_reward`) and sender health (`sender_health`).
 //!
 //! A gate that only inspects schema is still useful, but it is labelled as
-//! such in its doc comment — it is never dressed up as a call-path gate.
+//! such in its doc comment, it is never dressed up as a call-path gate.
 //!
 //! # Gates covered elsewhere (index)
 //!
@@ -25,7 +25,7 @@
 //! named test is the authoritative coverage; it is cited so this suite stays
 //! reviewable as a whole.
 //!
-//! * **12 — Discovery concurrency** (two runners on one job; the provider is
+//! * **12, Discovery concurrency** (two runners on one job; the provider is
 //!   called once per logical page). Covered by the live concurrency test
 //!   `sales_autopilot::discovery::job::tests::concurrent_run_job_claims_once_and_calls_provider_once_per_page`
 //!   (`crates/sales-autopilot/src/discovery/job.rs`): two `DiscoveryJobRunner`
@@ -33,7 +33,7 @@
 //!   the provider is called exactly once, the loser gets the documented
 //!   leased outcome, and exactly one `sales_source_runs` row exists. It is a
 //!   real test, not a recipe, so this file does not duplicate it.
-//! * **13 — Analytics boundary** (a send just before the window + an open
+//! * **13, Analytics boundary** (a send just before the window + an open
 //!   inside it must not inflate the current-period open rate). Covered by
 //!   `api_server::analytics_metrics::tests::cohort_boundaries_repeats_and_hostile_recipients`
 //!   (`crates/api-server/src/analytics_metrics.rs`), which seeds exactly that
@@ -41,13 +41,13 @@
 //!   in `api-server` because the cohort SQL is `api-server`'s; reaching it
 //!   from this crate would mean duplicating the query, which is the defect
 //!   the gate exists to prevent.
-//! * **14 — Previous-period freeze** (a send in the prior period + an open
+//! * **14, Previous-period freeze** (a send in the prior period + an open
 //!   now must not retroactively alter the prior-period comparison). Covered by
 //!   `api_server::analytics_metrics::tests::previous_period_is_frozen_at_its_own_end`
 //!   (`crates/api-server/src/analytics_metrics.rs`), which asserts
 //!   `previous.sent == 1`, `previous.opened == 0`, `open_rate == 0.0` through
 //!   the real `send_cohort_counts_previous` query. Same crate boundary as 13.
-//! * **15 — Dedicated delivery route** (selected IP A + receipt IP A
+//! * **15, Dedicated delivery route** (selected IP A + receipt IP A
 //!   succeeds; selected IP A + receipt IP B hard-fails). Covered in
 //!   `worker-processors`:
 //!   `worker_processors::email::processor::tests::route_verification_asymmetry_shared_ignores_dedicated_enforces`
@@ -56,13 +56,13 @@
 //!   drives `EmailProcessor::settle_delivery_route` end to end and proves the
 //!   mismatched receipt errors and releases the reserved capacity. The
 //!   processor is not reachable from this crate's public API.
-//! * **16 — Feature-flag live behaviour** (flip a real flag; behaviour
+//! * **16, Feature-flag live behaviour** (flip a real flag; behaviour
 //!   changes with no restart). Covered by
 //!   `api_server::feature_flags::tests::disabled_route_rejects_until_admin_patch_enables_it`
 //!   (`crates/api-server/src/feature_flags.rs`): the real AI-assistant route
 //!   is rejected while the flag is off, an admin PATCH flips it, and the SAME
 //!   `AppState` (same process) then permits the route.
-//! * **17 — No runtime DDL** (a DML-only role can run the worker/reply
+//! * **17, No runtime DDL** (a DML-only role can run the worker/reply
 //!   processor). The real coverage is the source-scan test
 //!   `worker_processors::reply_handler::processor::tests::reply_handler_issues_no_runtime_schema_ddl`
 //!   (`crates/worker-processors/src/reply_handler/processor.rs`, item 23),
@@ -71,7 +71,7 @@
 //!   not a live run under a `NOINHERIT`/DML-only role; no live DML-only
 //!   recipe or test was found anywhere in the workspace. The behaviour is
 //!   only partially covered.
-//! * **19 — System-health INET** (canonical-DB endpoint test). Covered by
+//! * **19, System-health INET** (canonical-DB endpoint test). Covered by
 //!   `api_server::routes::admin::system_health::tests::ip_pool_inet_column_serializes_as_dotted_quad`
 //!   (`crates/api-server/src/routes/admin/system_health.rs`), which seeds a
 //!   real `INET` row and drives the real `system_health` handler against the
@@ -283,17 +283,17 @@ fn hex_encode(bytes: &[u8]) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Gate 1 — legal bypass
+// Gate 1, legal bypass
 // ---------------------------------------------------------------------------
 
-/// Gate 1: "Legal bypass — a prohibited contact is never mailed, whichever
+/// Gate 1: "Legal bypass, a prohibited contact is never mailed, whichever
 /// sales route is used."
 ///
 /// Drives the three real entry points in order:
-/// 1. `enrollments::start_outreach` (the `/enrollments` command) — rejected
+/// 1. `enrollments::start_outreach` (the `/enrollments` command), rejected
 ///    with the `legal_policy` reason;
 /// 2. `CampaignManager::start_campaign_with_outreach` (the legacy
-///    `/campaigns/:id/start` route) — the prohibited contact is rejected by
+///    `/campaigns/:id/start` route), the prohibited contact is rejected by
 ///    the per-contact canonical gate and the campaign is NOT activated
 ///    (zero accepted parks it in `verification_pending`);
 /// 3. the durable worker (`SequenceStepHandler`) over a queued step action —
@@ -336,7 +336,7 @@ async fn gate_01_prohibited_contact_is_refused_by_every_route_and_by_the_worker(
     // A FRESH contact on the same (prohibited) account: the fixture's own
     // contact is already enrolled (Route 3 needs its step execution), and an
     // already-enrolled contact is correctly reported as `already_enrolled`
-    // before the legal ladder — which would mask the gate under test here.
+    // before the legal ladder, which would mask the gate under test here.
     let fresh_contact_id = Uuid::new_v4();
     sqlx::query(
         "INSERT INTO sales_contacts (id, tenant_id, account_id, full_name, country) \
@@ -410,7 +410,7 @@ async fn gate_01_prohibited_contact_is_refused_by_every_route_and_by_the_worker(
         .await
         .expect("add the prohibited recipient");
     // Per-contact legal resolution: the prohibited contact is rejected by the
-    // canonical gate (`legal_policy`), and the campaign is NOT activated — it
+    // canonical gate (`legal_policy`), and the campaign is NOT activated, it
     // parks in verification_pending because zero contacts were accepted.
     let (started, outreach) = manager
         .start_campaign_with_outreach(&tenant_id, campaign.id)
@@ -488,7 +488,7 @@ async fn gate_01_prohibited_contact_is_refused_by_every_route_and_by_the_worker(
 }
 
 // ---------------------------------------------------------------------------
-// Gate 2 — decision coverage
+// Gate 2, decision coverage
 // ---------------------------------------------------------------------------
 
 /// Gate 2: "Every `email_queue` row tagged `sales-sequence` carries the full
@@ -546,7 +546,7 @@ async fn gate_02_every_sequence_email_queue_row_carries_full_decision_provenance
 }
 
 // ---------------------------------------------------------------------------
-// Gate 3 — transactional-pool isolation
+// Gate 3, transactional-pool isolation
 // ---------------------------------------------------------------------------
 
 /// Gate 3: "A sequence send never selects a transactional/customer sender."
@@ -567,7 +567,7 @@ async fn gate_03_sequence_send_never_selects_the_transactional_sender() {
     };
     let step_execution_id = seq.step_execution_id.expect("fixture enrolls");
 
-    // A transactional sender is present and active — it must simply never be
+    // A transactional sender is present and active, it must simply never be
     // selected by a sales action.
     let transactional_email = "billing@customer.example";
     common::insert_sender_identity(
@@ -633,14 +633,14 @@ async fn gate_03_sequence_send_never_selects_the_transactional_sender() {
 }
 
 // ---------------------------------------------------------------------------
-// Gate 4 — no sender available
+// Gate 4, no sender available
 // ---------------------------------------------------------------------------
 
 /// Gate 4: "With no sales sender, the action retries and writes nothing."
 ///
 /// Only a transactional sender exists. The documented outcome is a RETRY
-/// (the send resumes once a sales identity is provisioned) — never a silent
-/// success — and no external effect is produced.
+/// (the send resumes once a sales identity is provisioned), never a silent
+/// success, and no external effect is produced.
 #[tokio::test]
 async fn gate_04_missing_sales_sender_is_a_retry_with_no_external_effect() {
     let Some((db, tenant_id, seq, dispatcher)) = fixture(
@@ -706,7 +706,7 @@ async fn gate_04_missing_sales_sender_is_a_retry_with_no_external_effect() {
 }
 
 // ---------------------------------------------------------------------------
-// Gate 5 — approval flow
+// Gate 5, approval flow
 // ---------------------------------------------------------------------------
 
 /// Gate 5 (approve): "await_approval → no mail; after approval → exactly one
@@ -862,10 +862,10 @@ async fn gate_05_rejection_cancels_the_work_and_sends_nothing() {
 }
 
 // ---------------------------------------------------------------------------
-// Gate 6 — approval race
+// Gate 6, approval race
 // ---------------------------------------------------------------------------
 
-/// Gate 6: "Approval is not a bypass — approve, THEN unsubscribe, THEN let the
+/// Gate 6: "Approval is not a bypass, approve, THEN unsubscribe, THEN let the
 /// worker execute → zero mail."
 ///
 /// The kill switch / suppression must win even over a human approval that
@@ -942,7 +942,7 @@ async fn gate_06_approval_does_not_bypass_a_later_unsubscribe() {
 }
 
 // ---------------------------------------------------------------------------
-// Gate 7 — lease expiry chaos
+// Gate 7, lease expiry chaos
 // ---------------------------------------------------------------------------
 
 /// Gate 7: "Worker A sleeps past its lease; worker B recovers; A's stale token
@@ -982,7 +982,7 @@ async fn gate_07_expired_lease_recovery_fences_the_stale_worker_to_one_message()
     // Worker B recovers the expired work.
     // The sweep is deployment-global (it recovers expired leases for every
     // tenant), so its return value is a property of the whole database, not of
-    // this test — asserting on it made this gate flaky. A concurrent test's
+    // this test, asserting on it made this gate flaky. A concurrent test's
     // sweep can legitimately have recovered OUR action first. Assert on the
     // action's own resulting state instead: that is the invariant under test.
     sales_autopilot::actions::requeue_expired_leases(&db)
@@ -1126,15 +1126,15 @@ async fn gate_07_expired_lease_recovery_fences_the_stale_worker_to_one_message()
 }
 
 // ---------------------------------------------------------------------------
-// Gate 8 — replica IDs
+// Gate 8, replica IDs
 // ---------------------------------------------------------------------------
 
 /// Gate 8: "Two simulated PID-1 replicas produce distinct worker identities."
 ///
 /// GAP: `bin/server.rs::unique_worker_id` is PRIVATE, so the exact string
 /// cannot be produced from this crate. The gate therefore asserts the
-/// property the id exists for — owner strings must be per-process unique and a
-/// worker must never complete another worker's claim — on the real
+/// property the id exists for, owner strings must be per-process unique and a
+/// worker must never complete another worker's claim, on the real
 /// `ActionQueue` owner/fence handling, and pins the generator's ingredients by
 /// source scan (hostname + PID + random UUID).
 #[tokio::test]
@@ -1175,7 +1175,7 @@ async fn gate_08_replica_worker_identities_are_distinct_and_fences_are_per_claim
         .expect("enqueue second");
 
     // Simulate two replicas that share a hostname and PID (separate containers
-    // routinely do) but carry different random suffixes — exactly what
+    // routinely do) but carry different random suffixes, exactly what
     // `unique_worker_id` composes.
     let owner_a = format!("gate-host:1:{}", Uuid::new_v4());
     let owner_b = format!("gate-host:1:{}", Uuid::new_v4());
@@ -1263,7 +1263,7 @@ async fn gate_08_replica_worker_identities_are_distinct_and_fences_are_per_claim
 }
 
 // ---------------------------------------------------------------------------
-// Gate 9 — no-dispatcher preservation
+// Gate 9, no-dispatcher preservation
 // ---------------------------------------------------------------------------
 
 /// Leased `sales_actions` row read back to prove the queue was untouched.
@@ -1338,7 +1338,7 @@ async fn gate_09_without_a_dispatcher_queued_work_is_preserved() {
 }
 
 // ---------------------------------------------------------------------------
-// Gate 10 — reward loop
+// Gate 10, reward loop
 // ---------------------------------------------------------------------------
 
 /// Gate 10: "A real send chooses a variant; the outcome projector moves that
@@ -1525,7 +1525,7 @@ async fn gate_10_reward_projection_moves_the_posterior_once_and_replay_is_a_noop
 }
 
 // ---------------------------------------------------------------------------
-// Gate 11 — sender-health loop
+// Gate 11, sender-health loop
 // ---------------------------------------------------------------------------
 
 /// Gate 11: "Hard-bounce events cross the threshold → the sender is paused and
@@ -1645,7 +1645,7 @@ async fn gate_11_bounce_breaker_pauses_the_sender_and_denies_the_next_decision()
 }
 
 // ---------------------------------------------------------------------------
-// Gate 18 — opaque unsubscribe token
+// Gate 18, opaque unsubscribe token
 // ---------------------------------------------------------------------------
 
 /// Gate 18: "The delivered unsubscribe token carries neither the recipient nor
@@ -1732,15 +1732,15 @@ async fn gate_18_delivered_unsubscribe_token_carries_no_identity_encoding() {
 }
 
 // ---------------------------------------------------------------------------
-// Gate 20 — lead indexes
+// Gate 20, lead indexes
 // ---------------------------------------------------------------------------
 
 /// Gate 20: "lead uniqueness and the FTS search index are schema-owned, on
 /// the canonical tables."
 ///
 /// SCHEMA/DEPLOY-CONTRACT GATE (not a call-path gate): migration 223 retired
-/// the stored `sales_leads` table — and with it `idx_sales_leads_tenant_email`
-/// and `idx_sales_leads_fts_gin` — in favor of the canonical account/contact
+/// the stored `sales_leads` table, and with it `idx_sales_leads_tenant_email`
+/// and `idx_sales_leads_fts_gin`, in favor of the canonical account/contact
 /// model. A deploy that predates/omits 223 (or a database where `sales_leads`
 /// is still a table) must go red here. The probes prove the canonical
 /// uniqueness and the GIN index actually enforce, not merely exist.
@@ -1803,7 +1803,7 @@ async fn gate_20_lead_uniqueness_and_search_indexes_are_schema_owned() {
     );
 
     // Enforcement probe 1: the canonical contact point uniqueness must reject
-    // a second lead address for the same tenant — the guarantee that replaced
+    // a second lead address for the same tenant, the guarantee that replaced
     // the old (tenant, lower(email)) unique index.
     let suffix = Uuid::new_v4().simple().to_string();
     let tenant = format!("gate20-{suffix}");
@@ -1937,7 +1937,7 @@ async fn deploy_contract_schema_guard_refuses_a_drifted_database() {
         .await
         .expect("a canonically migrated database must pass the schema guard");
 
-    // An empty database — as a deployment would be before the migrator runs —
+    // An empty database, as a deployment would be before the migrator runs —
     // must be refused, and the error must name what is missing.
     let base = std::env::var("SALES_TEST_DATABASE_URL")
         .or_else(|_| std::env::var("TEST_DATABASE_URL"))
@@ -1989,20 +1989,20 @@ async fn deploy_contract_schema_guard_refuses_a_drifted_database() {
     admin.close().await;
 }
 
-/// PERF #24 gate — bounded HTTP clients, always.
+/// PERF #24 gate, bounded HTTP clients, always.
 ///
 /// Sales-autopilot builds every outbound HTTP integration (calendar,
 /// discovery, enrichment, sales intelligence) on
 /// `reqwest::Client::builder()` so the client carries the integration's
 /// timeout (and, where security-relevant, the no-redirect policy and user
 /// agent). A construction failure must make the integration UNAVAILABLE —
-/// a typed error / `None` / skipped source — never a silent fall back to
+/// a typed error / `None` / skipped source, never a silent fall back to
 /// `Client::new()`, the process-default client with NO timeout, which turns
 /// every call site into an unbounded wait.
 ///
 /// This is a source-scan gate in the style of
 /// `worker_has_no_warmup_settlement_path`: everything after a file's FIRST
-/// `#[cfg(test)]` marker is test code (the crate's convention — test modules
+/// `#[cfg(test)]` marker is test code (the crate's convention, test modules
 /// live at the end of each file); the production prefix of every `src/` file
 /// must not construct the default client at all.
 #[test]
@@ -2040,7 +2040,7 @@ fn perf_24_no_bare_unbounded_client_construction_in_non_test_src() {
     );
     assert!(
         offenders.is_empty(),
-        "bare unbounded client construction found outside test code: {offenders:?} — \
+        "bare unbounded client construction found outside test code: {offenders:?}, \
          client-build failure must make the integration UNAVAILABLE (typed error / None / \
          skipped source), never fall back to the process-default client (PERF #24)"
     );

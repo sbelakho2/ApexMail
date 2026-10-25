@@ -44,7 +44,7 @@ This document serves as Annex 1 to the [Data Processing Agreement (DPA)](../lega
 - Cipher restrictions: only strong, modern cipher suites accepted.
 - HSTS with preload and `includeSubDomains`.
 - Secure cookie attributes: `Secure`, `HttpOnly`, `SameSite=Lax`.
-- SMTP connections require STARTTLS (port 587) — plaintext rejected.
+- SMTP connections require STARTTLS (port 587), plaintext rejected.
 
 ## 3. Network Security
 

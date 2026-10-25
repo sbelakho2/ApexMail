@@ -1,5 +1,5 @@
-//! TOTP (Time-based One-Time Password) verification — RFC 6238 with HMAC-SHA256.
-//! Recovery/backup codes — cryptographically random one-time-use codes for MFA fallback.
+//! TOTP (Time-based One-Time Password) verification, RFC 6238 with HMAC-SHA256.
+//! Recovery/backup codes, cryptographically random one-time-use codes for MFA fallback.
 //!
 //! # Security hardening (Phase 3 audit findings)
 //!
@@ -54,7 +54,7 @@ const LOCKOUT_DURATION: Duration = Duration::from_secs(300); // 5 minutes
 /// This lockout store is **per-process memory**. With N replicas an attacker
 /// gets `MAX_FAILED_ATTEMPTS` guesses per window *per pod*, and a restart
 /// wipes all lockouts. Production login flows MUST therefore layer this
-/// primitive behind a shared (Redis) guard — the api-server does exactly that
+/// primitive behind a shared (Redis) guard, the api-server does exactly that
 /// (`verify_totp_code_guarded`), and that path is the primary enforcement.
 /// Do not expose `TOTPVerifier::verify` as the ONLY brake on a multi-replica
 /// route.
@@ -129,7 +129,7 @@ impl TOTPVerifier {
     /// An expired lock RE-ARMS the failure counter: the stale
     /// `locked_until` used to keep the `locked_until.is_none()` guard
     /// false forever, so after one historical lockout a secret could never
-    /// lock again — unlimited 6-digit guessing afterwards. When the
+    /// lock again, unlimited 6-digit guessing afterwards. When the
     /// recorded lockout is in the past the entry is treated as unlocked
     /// and the count restarts from zero, so a fresh threshold of failures
     /// triggers a fresh lockout.
@@ -175,7 +175,7 @@ impl TOTPVerifier {
     ///
     /// Returns `true` only if the code is valid, the secret is not locked
     /// out, and the code's time-step has not been used before (per this
-    /// process — see the type-level SCOPE note).
+    /// process, see the type-level SCOPE note).
     pub fn verify(&self, secret_base32: &str, code: &str) -> bool {
         self.verify_matched(secret_base32, code).is_some()
     }
@@ -184,14 +184,14 @@ impl TOTPVerifier {
     ///
     /// Callers that layer a shared (Redis) replay guard behind this
     /// in-process one need the matched counter so the cross-pod claim marks
-    /// exactly the window that was consumed — see the api-server's
+    /// exactly the window that was consumed, see the api-server's
     /// `verify_totp_code_guarded`. Semantics are identical to `verify`
     /// (lockout, in-process replay, failure recording all applied); only the
     /// matched counter is surfaced.
     pub fn verify_matched(&self, secret_base32: &str, code: &str) -> Option<u64> {
         // Reject if locked
         if self.is_locked(secret_base32) {
-            warn!("TOTP verification rejected — secret is locked out");
+            warn!("TOTP verification rejected, secret is locked out");
             return None;
         }
 
@@ -202,7 +202,7 @@ impl TOTPVerifier {
                 {
                     let mut used = self.last_used_counter.lock();
                     if used.get(secret_base32).is_some_and(|&last| counter <= last) {
-                        warn!("TOTP verification rejected — replayed time-step {counter}");
+                        warn!("TOTP verification rejected, replayed time-step {counter}");
                         drop(used);
                         self.record_failure(secret_base32);
                         return None;
@@ -616,7 +616,7 @@ mod tests {
         assert!(consume_recovery_code(code, &mut hashes));
         assert!(hashes.is_empty());
 
-        // Second use fails — code was consumed
+        // Second use fails, code was consumed
         assert!(!consume_recovery_code(code, &mut hashes));
     }
 
@@ -675,7 +675,7 @@ mod tests {
         let verifier = TOTPVerifier::new();
         let secret = "JBSWY3DPEHPK3PXP";
 
-        // 3 failures — not yet locked
+        // 3 failures, not yet locked
         verifier.record_failure(secret);
         verifier.record_failure(secret);
         verifier.record_failure(secret);
@@ -731,7 +731,7 @@ mod tests {
     fn test_totp_verifier_verify_passes_through_when_not_locked() {
         let verifier = TOTPVerifier::new();
         // An invalid code on an unlocked secret should return false
-        // but not because of lockout — it should also not lock after 1 failure
+        // but not because of lockout, it should also not lock after 1 failure
         assert!(!verifier.verify("JBSWY3DPEHPK3PXP", "000000"));
         assert!(!verifier.is_locked("JBSWY3DPEHPK3PXP"));
     }
@@ -770,7 +770,7 @@ mod tests {
         assert!(!verifier.is_locked_at(secret, t_after_lockout));
 
         // Failures after expiry re-arm the counter and lock again at the
-        // threshold — not on the first failure, not never.
+        // threshold, not on the first failure, not never.
         for i in 0..MAX_FAILED_ATTEMPTS {
             let locked = verifier.record_failure_at(secret, t_after_lockout);
             assert_eq!(
@@ -826,7 +826,7 @@ mod tests {
 
     #[test]
     fn test_totp_verifier_reset_clears_expired_lock_state() {
-        // reset() drops the entry entirely — expiry bookkeeping included.
+        // reset() drops the entry entirely, expiry bookkeeping included.
         let verifier = TOTPVerifier::new();
         let secret = "JBSWY3DPEHPK3PXP";
         let t0 = Instant::now();
@@ -918,7 +918,7 @@ mod tests {
     #[test]
     fn totp_replay_guard_survives_reset() {
         // reset() (called internally on every success) must not wipe the
-        // replay guard — otherwise the just-used code would verify again.
+        // replay guard, otherwise the just-used code would verify again.
         let verifier = TOTPVerifier::new();
         let secret = "JBSWY3DPEHPK3PXP";
         let code = current_window_code(secret);
@@ -931,7 +931,7 @@ mod tests {
     fn stale_counter_entries_are_pruned_but_fresh_ones_kept() {
         // Pruning hygiene (audit F9: the maps must never grow unbounded):
         // once the map exceeds the threshold, entries whose counter is more
-        // than two windows old are dropped — they can never satisfy
+        // than two windows old are dropped, they can never satisfy
         // `counter <= last` for a currently-valid code (offsets 0/±1) —
         // while recent entries survive.
         let mut used: HashMap<String, u64> = (0..ATTEMPT_MAP_PRUNE_THRESHOLD)

@@ -1,4 +1,4 @@
-//! Adversarial security contract — the "perfect security" invariants attacked
+//! Adversarial security contract, the "perfect security" invariants attacked
 //! from every surface a hostile client can reach.
 //!
 //! Invariants (each test names the one it enforces):
@@ -25,7 +25,7 @@
 // ── Provisioning ────────────────────────────────────────────────────────
 
 /// Provision a private canonical database for one test and return BOTH the
-/// pool and the URL of THAT database — `create_pool_pair` in the app harness
+/// pool and the URL of THAT database, `create_pool_pair` in the app harness
 /// must target the same per-test database as `pool`, never the base
 /// `TEST_DATABASE_URL` (which would silently point AppState at the wrong DB).
 async fn pool_for(_test: &str) -> Option<(sqlx::PgPool, String)> {
@@ -79,12 +79,12 @@ macro_rules! db_test {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// 3. CSRF — token forging / expiry / secret binding
+// 3. CSRF, token forging / expiry / secret binding
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// Invariant 3: every state-changing POST rejects missing/wrong/replayed
 /// tokens. These pure cases attack the token verifier itself
-/// (`api_server::routes::csrf::validate_csrf_token`) — the same function the
+/// (`api_server::routes::csrf::validate_csrf_token`), the same function the
 /// JSON surface and the `/web/*` form twin call.
 mod csrf_token_contract {
     use api_server::routes::csrf::validate_csrf_token;
@@ -194,7 +194,7 @@ mod csrf_token_contract {
 
     #[test]
     fn expired_token_is_rejected() {
-        // Two hours old — past the 1-hour window.
+        // Two hours old, past the 1-hour window.
         let stale = format!(
             "{}:{}",
             chrono::Utc::now().timestamp_millis() - 2 * 3600 * 1000,
@@ -243,7 +243,7 @@ mod csrf_token_contract {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// 5. SSRF — URL / host / IP refusal shapes
+// 5. SSRF, URL / host / IP refusal shapes
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// Invariant 5: webhook/test URLs refuse loopback, link-local, metadata IPs
@@ -292,7 +292,7 @@ mod ssrf_url_contract {
         ),
         ("http://service.internal/hook", "internal hostname suffix"),
         ("http://printer.local/hook", "mDNS suffix"),
-        // Decimal IPv4 form of 127.0.0.1 — WHATWG URL parsing normalises
+        // Decimal IPv4 form of 127.0.0.1, WHATWG URL parsing normalises
         // this to the loopback address before the host check runs.
         ("http://2130706433/hook", "decimal-encoded loopback"),
         // Octal / hex encoded loopback shapes.
@@ -355,7 +355,7 @@ mod ssrf_url_contract {
         ] {
             assert!(
                 is_private_ip(&ip(ip_str)),
-                "{ip_str} ({why}) must be blocked — a dropped range is an SSRF hole"
+                "{ip_str} ({why}) must be blocked, a dropped range is an SSRF hole"
             );
         }
         // Over-blocking breaks legitimate outbound webhooks.
@@ -369,7 +369,7 @@ mod ssrf_url_contract {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// 4. Injection — XSS sinks, header injection, open redirect
+// 4. Injection, XSS sinks, header injection, open redirect
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// Invariant 4: XSS payloads must be escaped or stripped in every renderer
@@ -394,7 +394,7 @@ mod xss_sink_contract {
     #[test]
     fn template_props_are_html_escaped_in_every_interpolation() {
         for payload in PAYLOADS {
-            let html = "<p>Hello {{ name }} — {{ subject }}</p>";
+            let html = "<p>Hello {{ name }}, {{ subject }}</p>";
             let props = serde_json::json!({
                 "name": payload,
                 "subject": payload,
@@ -528,7 +528,7 @@ mod header_and_redirect_contract {
             "Hello World",
             "clean text must be untouched"
         );
-        // CRLF becomes spaces — the visible text stays, the injection dies.
+        // CRLF becomes spaces, the visible text stays, the injection dies.
         let mixed = strip_header_control_chars("Hello\r\nWorld");
         assert!(
             !mixed.contains('\r') && !mixed.contains('\n'),
@@ -570,7 +570,7 @@ mod header_and_redirect_contract {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// 2. AuthZ — scope fail-closed + Free-plan entitlement
+// 2. AuthZ, scope fail-closed + Free-plan entitlement
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// Invariant 2: role and scope checks fail closed. A `messages:read` key
@@ -658,7 +658,7 @@ mod authz_scope_contract {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// 6. Secrets — constant-time compare + reveal-once DTO shapes
+// 6. Secrets, constant-time compare + reveal-once DTO shapes
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// Invariant 6: secret material is compared in constant time where required,
@@ -683,7 +683,7 @@ mod secrets_contract {
 
     #[test]
     fn api_key_list_dto_cannot_serialize_a_secret() {
-        // `ApiKeyInfo` has no `key` field at all — serialize and assert the
+        // `ApiKeyInfo` has no `key` field at all, serialize and assert the
         // raw-secret shape is structurally absent from the list/get surface.
         let info = ApiKeyInfo {
             id: "key-1".into(),
@@ -730,7 +730,7 @@ mod secrets_contract {
             json.contains("am_live_REDACTED_FOR_TEST"),
             "create receipt must carry the once-shown secret: {json}"
         );
-        // And the list DTO — serializing a sibling — must not.
+        // And the list DTO, serializing a sibling, must not.
         let list_item = ApiKeyInfo {
             id: "key-1".into(),
             name: "prod".into(),
@@ -918,7 +918,7 @@ mod db_harness {
 
     /// Soft-skip gate for behaviours whose production guarantee is
     /// Redis-backed (idempotency cache). Unset/unreachable `TEST_REDIS_URL`
-    /// returns false and the caller early-returns — the same contract the
+    /// returns false and the caller early-returns, the same contract the
     /// session env harness uses. A configured-but-broken Redis is still a
     /// soft skip here (the middleware itself fails open when Redis is down;
     /// the durable send-ledger is the other arm of that contract).
@@ -1140,7 +1140,7 @@ mod cross_tenant_and_ids {
 
     // A token from tenant A + a resource id from tenant B must never return
 
-    // B's data. 403/404 only — never 200 with foreign bytes.
+    // B's data. 403/404 only, never 200 with foreign bytes.
 
     db_test!(cross_tenant_reads_are_404_never_200, pool, db_url, {
         let (app, pool, key_a, _ten_a, key_b, ten_b) = two_tenant_app(pool.clone(), &db_url).await;
@@ -1207,7 +1207,7 @@ mod cross_tenant_and_ids {
             let tpl_b = seed_template(&pool, &ten_b, "untouchable").await;
 
             // A tries to overwrite B's template (PUT /v1/templates/:id is the
-            // update verb — see templates::router).
+            // update verb, see templates::router).
             let resp = app
                 .clone()
                 .oneshot(
@@ -1274,7 +1274,7 @@ mod cross_tenant_and_ids {
             "cross-tenant API key revoke must be 404"
         );
 
-        // The key still authenticates — the revoke did not land.
+        // The key still authenticates, the revoke did not land.
         let resp = app
             .clone()
             .oneshot(get("/v1/contacts", &key_b))
@@ -1289,7 +1289,7 @@ mod cross_tenant_and_ids {
 
     // Crafted path IDs: `../`, `..%2f`, NUL, 10k-char, UUID case variants,
 
-    // unicode homoglyphs. Every one must be a controlled 400/404 — never a
+    // unicode homoglyphs. Every one must be a controlled 400/404, never a
 
     // 500 (that is a parse-bug signal) and never another tenant's row.
 
@@ -1305,7 +1305,7 @@ mod cross_tenant_and_ids {
             // A RAW `\u{0}` id is not representable in an HTTP request target
             // (the URI parser refuses the control character before anything
             // could be sent), so the sendable NUL shape is the `%00` entry
-            // above — which the null-byte middleware rejects as 400.
+            // above, which the null-byte middleware rejects as 400.
             "a".repeat(10_000),
             // UUID case variants of a syntactically valid id.
             "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE".into(),
@@ -1604,7 +1604,7 @@ mod authz_http {
                 resp.status()
             );
             let text = body_text(resp).await;
-            // Honest refusal — not a silent empty list.
+            // Honest refusal, not a silent empty list.
             assert!(
                 text.contains("authentication") || text.contains("missing") || text.contains("401"),
                 "unauthenticated {path} must explain the refusal: {text}"
@@ -1638,7 +1638,7 @@ mod injection_http {
             // Live filter parameters: contacts.tag (jsonb containment),
             // messages.status / sort_by (allowlisted column), messages.cursor
             // (keyset decode). A hostile value must be a controlled 4xx or an
-            // empty page — never 500, never a widened result set.
+            // empty page, never 500, never a widened result set.
             for path in [
                 format!("/v1/contacts?tag={}", urlencoding_lite(payload)),
                 format!("/v1/messages?status={}", urlencoding_lite(payload)),
@@ -1654,7 +1654,7 @@ mod injection_http {
                 );
                 let text = body_text(resp).await;
                 // The rejected value may be ECHOED inside a named 400 (normal
-                // validation UX) — strip the attacker's own input first, so
+                // validation UX), strip the attacker's own input first, so
                 // the leak check only ever judges SERVER data.
                 let encoded = urlencoding_lite(payload);
                 let cleaned = text.replace(payload, "").replace(&encoded, "");
@@ -1689,10 +1689,10 @@ mod injection_http {
         {
             let (app, pool, _key_a, ten_a, _key_b, _ten_b) =
                 two_tenant_app(pool.clone(), &db_url).await;
-            // Free plan cannot CREATE templates — seed one directly so the test
+            // Free plan cannot CREATE templates, seed one directly so the test
             // targets the render sink, not the entitlement gate.
-            let tpl_id = seed_template(&pool, &ten_a, "Hello {{name}} — {{subject}}").await;
-            // seed_template writes name='Hello {{name}} — {{subject}}' into the
+            let tpl_id = seed_template(&pool, &ten_a, "Hello {{name}}, {{subject}}").await;
+            // seed_template writes name='Hello {{name}}, {{subject}}' into the
             // name column and html_body='<p>ok</p>'. Re-point html_body/subject
             // at the placeholder template the render path substitutes.
             sqlx::query("UPDATE templates SET subject = $1, html_body = $2 WHERE id = $3")
@@ -1921,7 +1921,7 @@ mod reveal_once_http {
     );
 }
 
-// ─── Invariant 7: idempotency — double-submit applies once ──────────────
+// ─── Invariant 7: idempotency, double-submit applies once ──────────────
 
 mod idempotency_http {
     use super::db_harness::*;
@@ -1971,7 +1971,7 @@ mod idempotency_http {
             let second_text = body_text(second).await;
 
             // Replay is either the cached first response (same id) or an explicit
-            // conflict — never a second resource. (Without Redis the (tenant,email)
+            // conflict, never a second resource. (Without Redis the (tenant,email)
             // unique index still caps the row count; the cached-same-id arm needs
             // the Redis accelerator.)
             let count: i64 = sqlx::query_scalar(

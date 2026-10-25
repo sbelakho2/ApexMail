@@ -1,11 +1,11 @@
-//! GATE A — golden skeletons.
+//! GATE A, golden skeletons.
 //!
 //! The full rendered document of every `web` and `control-plane` manifest
 //! route is compared against a checked-in golden file under
 //! `crates/ui-foundation/goldens/{surface}/{route-stem}.html`. The golden
 //! captures the whole page SKELETON (doctype, chrome, landmarks, forms,
-//! links) so any structural drift — not just the divergences the other gates
-//! target — fails review with a diff.
+//! links) so any structural drift, not just the divergences the other gates
+//! target, fails review with a diff.
 //!
 //! Non-deterministic render artifacts (the minted CSRF token, the HMAC
 //! confirmation-signature timestamps, the live-metrics "Updated" render
@@ -88,11 +88,11 @@ fn replace_until(owned: &mut String, needle: &str, terminators: &[char], replace
 ///   `<confirm-signature>`;
 /// - the live-metrics auto-refresh pill's SSR render time becomes
 ///   `<render-time>` (the pill only renders for `?refresh=…` requests;
-///   goldens render without query — the normalization keeps
+///   goldens render without query, the normalization keeps
 ///   [`normalize_for_golden`] total for any future golden with query).
 ///
 /// Render inputs are fixed (no query, fixed secret), so two renders
-/// normalize to byte-identical output — asserted by the suites.
+/// normalize to byte-identical output, asserted by the suites.
 pub(crate) fn normalize_for_golden(html: &str, csrf_token: &str) -> String {
     let mut normalized = html.replace(csrf_token, "<csrf-token>");
     // The stylesheet link carries a content hash: normalize the VERSION so a
@@ -100,7 +100,7 @@ pub(crate) fn normalize_for_golden(html: &str, csrf_token: &str) -> String {
     // class-integrity/lib tests, not by 100+ golden files).
     //
     // `replace_until` keeps the needle in the prefix, so the replacement is
-    // the BARE value — passing a needle-including string doubled the token in
+    // the BARE value, passing a needle-including string doubled the token in
     // every golden (`?v=/assets/globals.css?v=…`, review §14.1: the golden
     // normalizer was broken; regenerating goldens never hid it).
     replace_until(
@@ -128,7 +128,7 @@ pub(crate) fn normalize_for_golden(html: &str, csrf_token: &str) -> String {
         );
     }
     // The auto-refresh pill: <time datetime="RFC3339" title="RFC3339 UTC">
-    // Updated HH:MM:SS</time> — scoped to the <time> element so other
+    // Updated HH:MM:SS</time>, scoped to the <time> element so other
     // title="…" attributes in the document keep their real content. The
     // cursor advances past each replacement (the replacement itself starts
     // with the needle, so a from-scratch re-find would loop forever).
@@ -179,7 +179,7 @@ fn deterministic_golden(surface: &str, path: &str) -> String {
 
 /// The COMMITTED content of a golden file.
 ///
-/// The gate's subject is the checked-in fixture, i.e. the commit — on the
+/// The gate's subject is the checked-in fixture, i.e. the commit, on the
 /// deploy host the working tree is legitimately churned by other lanes (the
 /// fixtures export regenerates files; the pre-commit fixer hooks add
 /// trailing newlines), and comparing the working tree made this gate fail on
@@ -235,7 +235,7 @@ fn golden_suite_for_surface(surface: &str) {
                 }
             }
             Err(_) => failures.push(format!(
-                "{} MISSING — regenerate with UPDATE_GOLDENS=1 cargo nextest run -p ui-foundation golden_",
+                "{} MISSING, regenerate with UPDATE_GOLDENS=1 cargo nextest run -p ui-foundation golden_",
                 file.display(),
             )),
         }
@@ -248,7 +248,7 @@ fn golden_suite_for_surface(surface: &str) {
 }
 
 /// Minimal unified diff (common prefix/suffix trimmed) capped to `max_lines`
-/// — enough to show exactly which part of the skeleton drifted without a
+///, enough to show exactly which part of the skeleton drifted without a
 /// diff dependency.
 fn unified_diff(expected: &str, actual: &str, max_lines: usize) -> String {
     let expected_lines: Vec<&str> = expected.lines().collect();
@@ -320,7 +320,7 @@ fn golden_manifest_covers_every_route() {
             }
             assert!(
                 file.exists(),
-                "no golden for [{surface}] {} — regenerate with UPDATE_GOLDENS=1 cargo nextest run -p ui-foundation golden_",
+                "no golden for [{surface}] {}, regenerate with UPDATE_GOLDENS=1 cargo nextest run -p ui-foundation golden_",
                 route.path,
             );
         }
@@ -353,7 +353,7 @@ fn golden_files_map_to_manifest_routes() {
     }
     assert!(
         stale.is_empty(),
-        "stale goldens for routes no longer in the manifest — delete them:\n{}",
+        "stale goldens for routes no longer in the manifest, delete them:\n{}",
         stale.join("\n"),
     );
 }

@@ -1,6 +1,6 @@
 //! DB-backed integration tests for the compliance crate.
 //!
-//! Gated on `TEST_DATABASE_URL` (workspace convention — see
+//! Gated on `TEST_DATABASE_URL` (workspace convention, see
 //! `api-server/src/lib.rs`). Each test provisions its OWN throwaway database
 //! cloned from the canonical template carrying the REAL production migration
 //! chain (`migrator::test_support::fresh_canonical_pool`, audits F01/F76/F77),
@@ -60,7 +60,7 @@ async fn make_events_undeletable(pool: &PgPool) {
     .expect("inject non-deletable events view");
 }
 
-/// Fake Redis pool — connection attempts fail at use time; the GDPR retry
+/// Fake Redis pool, connection attempts fail at use time; the GDPR retry
 /// path tolerates this (the request state is recorded before re-enqueue).
 fn dummy_redis() -> deadpool_redis::Pool {
     let cfg = deadpool_redis::Config::from_url("redis://127.0.0.1:1/99");
@@ -82,7 +82,7 @@ fn test_gdpr_config() -> GdprConfig {
         system_from_address: "noreply@apexmail.ee".into(),
         outbox_flush_batch: 25,
         outbox_flush_max_attempts: 5,
-        // ClickHouse erasure step disabled in tests — the certificate then
+        // ClickHouse erasure step disabled in tests, the certificate then
         // honestly reports skipped_not_configured.
         clickhouse_erasure_enabled: false,
         clickhouse_url: "http://clickhouse.test.invalid:8123".into(),
@@ -355,7 +355,7 @@ async fn erasure_is_scoped_to_the_data_subject() {
 
     // … including the subject's session (via users.email lookup), while the
     // other user's session survives. (Sessions are deleted BEFORE the users
-    // row is tombstoned — the lookup still resolves.)
+    // row is tombstoned, the lookup still resolves.)
     let subject_session: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM sessions s JOIN users u ON u.id = s.user_id WHERE u.email = $1 OR u.email LIKE 'erased+%'",
     )
@@ -527,7 +527,7 @@ async fn erasure_missing_table_is_reported_as_skipped() {
 }
 
 /// B: a genuine store failure never completes the request and never issues a
-/// certificate — it retries, then fails with the error recorded.
+/// certificate, it retries, then fails with the error recorded.
 #[tokio::test]
 async fn erasure_store_failure_fails_the_request_after_retries() {
     let Some(pool) = test_pool("failing").await else {
@@ -635,7 +635,7 @@ async fn consent_reconsent_updates_the_same_row() {
     assert!(first.granted);
     assert!(first.proof_document.is_some());
 
-    // Withdraw, then grant again — must update the SAME row.
+    // Withdraw, then grant again, must update the SAME row.
     gdpr.record_consent(
         &tenant,
         "sub-1",
@@ -824,7 +824,7 @@ async fn access_export_covers_all_stores_and_downloads() {
     );
     assert!(!users_json.contains("mfa_secret"), "mfa secret stripped");
 
-    // Invoice PII is anonymized in the export — INCLUDING the mixed-case
+    // Invoice PII is anonymized in the export, INCLUDING the mixed-case
     // copy (F9: case-insensitive matching on both the query and the
     // redaction).
     let invoices = serde_json::to_string(&data["invoices"]).unwrap();
@@ -1227,7 +1227,7 @@ async fn audit_chain_survives_concurrent_appends_from_independent_loggers() {
     }
 
     // Exactly ONE linear chain: seed + 2×PER_LOGGER entries, no fork, no
-    // gap — verified through a fresh logger that re-reads everything.
+    // gap, verified through a fresh logger that re-reads everything.
     let verifier = make_logger();
     let result = verifier
         .verify_chain(Some(&tenant), None, None)
@@ -1543,7 +1543,7 @@ async fn queue_recovery_sweep_requeues_stuck_entries() {
 // ── H-6: retention sweep enforcement ───────────────────────────────────────
 
 /// The sweep writes `retention_report` and reads `tenants` /
-/// `legal_retention_archive` / `ent_compliance_configs` — all canonical.
+/// `legal_retention_archive` / `ent_compliance_configs`, all canonical.
 async fn sweep_pool(test_name: &str) -> Option<PgPool> {
     test_pool(test_name).await
 }
@@ -1573,7 +1573,7 @@ async fn retention_sweep_enforces_durations_and_respects_legal_holds() {
     }
 
     // Expired and fresh rows per tenant in every canonical sweep store.
-    // events: 30d default cutoff; messages: 7d default cutoff — 40d rows are
+    // events: 30d default cutoff; messages: 7d default cutoff, 40d rows are
     // expired for both, 5d rows fresh for both.
     for tenant in [&tenant_a, &tenant_b] {
         let email = format!("u-{}@x.com", &tenant[..6]);
@@ -1654,7 +1654,7 @@ async fn retention_sweep_enforces_durations_and_respects_legal_holds() {
     let report = sweeper.run_sweep(&audit).await.expect("sweep runs");
 
     // Expired rows for tenant_a deleted; tenant_b (legal hold) retained;
-    // fresh rows for both retained — in BOTH canonical stores.
+    // fresh rows for both retained, in BOTH canonical stores.
     let expected = [("events", 30u32), ("messages", 7u32)];
     for (store, default_days) in expected {
         let remaining_a: i64 = sqlx::query_scalar(&format!(
@@ -1741,7 +1741,7 @@ async fn retention_sweep_enforces_durations_and_respects_legal_holds() {
     assert_eq!(ran_rows, 1, "one retention_report row per run");
     assert_eq!(
         tier, "default",
-        "no overrides configured — flat default tier"
+        "no overrides configured, flat default tier"
     );
     let persisted: serde_json::Value = sqlx::query_scalar("SELECT report FROM retention_report")
         .fetch_one(&pool)
@@ -1758,7 +1758,7 @@ async fn retention_sweep_honors_per_tenant_retention_and_zero_retention() {
     let Some(pool) = sweep_pool("sweep_tiers").await else {
         return;
     };
-    // free plan, override 40d — REJECTED for events (free caps RET-007 at
+    // free plan, override 40d, REJECTED for events (free caps RET-007 at
     // 7d), so events fall back to the 30d default; 40d-old rows survive.
     let tenant_override = short_tenant();
     // zero-retention tenant: everything is purged immediately, even a row
@@ -1819,7 +1819,7 @@ async fn retention_sweep_honors_per_tenant_retention_and_zero_retention() {
         .iter()
         .find(|c| c.store == "events")
         .unwrap();
-    // The 40d override exceeds the free plan's RET-007 cap (7d) — the sweep
+    // The 40d override exceeds the free plan's RET-007 cap (7d), the sweep
     // must NOT honor it; rows older than the 30d default are deleted anyway,
     // so both tenants' 35d rows go.
     assert_eq!(
@@ -1878,11 +1878,11 @@ async fn retention_sweep_honors_per_tenant_retention_and_zero_retention() {
     assert_eq!(events2.deleted, 1, "the 6d-old row is past the 5d override");
     assert_eq!(
         report2.plan_tier, "per-tenant",
-        "overrides participated — the report says so"
+        "overrides participated, the report says so"
     );
 }
 
-/// F5: audit trim under legal hold — a held tenant's rows stay LIVE (not
+/// F5: audit trim under legal hold, a held tenant's rows stay LIVE (not
 /// archived away), and NULL-tenant rows are kept while any hold is active.
 #[tokio::test]
 async fn audit_archive_respects_legal_holds() {
@@ -1961,7 +1961,7 @@ async fn audit_archive_respects_legal_holds() {
     assert_eq!(archived, 1);
 }
 
-/// Missing canonical stores are reported as skipped — never silently counted.
+/// Missing canonical stores are reported as skipped, never silently counted.
 #[tokio::test]
 async fn retention_sweep_reports_missing_stores() {
     // The canonical chain has events; DROP messages simulates a deployment
@@ -2051,7 +2051,7 @@ async fn dsr_submit_writes_verification_outbox() {
     );
 
     // The queued token is the one that verifies the request (its SHA-256
-    // matches the stored verification_token_hash — checked in SQL to avoid
+    // matches the stored verification_token_hash, checked in SQL to avoid
     // the Redis enqueue path inside verify_request).
     let hash_matches: bool = sqlx::query_scalar(
         "SELECT verification_token_hash = encode(sha256($2::bytea), 'hex') \
@@ -2080,10 +2080,10 @@ async fn dsr_submit_writes_verification_outbox() {
     assert_eq!(status, "sent");
 }
 
-// ── D: DSR outbox flush — pending rows become real system email ────────────
+// ── D: DSR outbox flush, pending rows become real system email ────────────
 
 /// The flush job writes through the canonical mail pipeline (`domains`,
-/// `messages`, `email_queue`) — all present in the canonical chain.
+/// `messages`, `email_queue`), all present in the canonical chain.
 async fn flush_pool(test_name: &str) -> Option<PgPool> {
     test_pool(test_name).await
 }
@@ -2393,7 +2393,7 @@ async fn invoice_export_survives_live_address_change() {
 
 /// An invoice whose snapshot carries a DIFFERENT email (e.g. a company
 /// bookkeeping address) and no subject-user relation stays out of the
-/// subject's export — the mapping is explicit, not whole-tenant.
+/// subject's export, the mapping is explicit, not whole-tenant.
 #[tokio::test]
 async fn invoice_export_excludes_non_subject_snapshots() {
     let Some(pool) = test_pool("f82_exclusion").await else {
@@ -2670,7 +2670,7 @@ async fn access_export_manifest_is_complete_and_counts_are_honest() {
             .await
             .unwrap();
     let manifest = &data["manifest"];
-    // Every registered store is named in the manifest — no silent omission.
+    // Every registered store is named in the manifest, no silent omission.
     for store in compliance::gdpr_automation::export_store_names() {
         assert!(
             manifest["stores"].get(store).is_some(),
@@ -2940,7 +2940,7 @@ async fn clickhouse_best_effort_failure_is_partial_and_never_certifies_completio
 }
 
 /// Per-store row counts in the erasure certificate equal the rows actually
-/// deleted/anonymized — an inflated "records_deleted" would be a false
+/// deleted/anonymized, an inflated "records_deleted" would be a false
 /// attestation.
 #[tokio::test]
 async fn erasure_certificate_row_counts_equal_the_rows_deleted() {
@@ -3301,7 +3301,7 @@ async fn statutory_clock_and_outbox_guards() {
 
 /// A DSR is scoped to ONE data subject in ONE tenant: an identical address
 /// in another tenant is not exported and not erased. This is the hostile
-/// "unauthorised tenant id" case — a tenant-scoping slip would cross
+/// "unauthorised tenant id" case, a tenant-scoping slip would cross
 /// customer boundaries.
 #[tokio::test]
 async fn dsr_never_crosses_tenant_boundaries_for_the_same_address() {
@@ -3556,7 +3556,7 @@ async fn held_erasure_defers_the_mirror_too() {
         .submit_request(&tenant, DataSubjectRequestType::Erasure, &subject)
         .await
         .expect("DSR submit");
-    // The mirror is linked by the verification token hash — the completion
+    // The mirror is linked by the verification token hash, the completion
     // path keys its advance on it.
     let (dsr_hash, mirror_hash): (String, String) = sqlx::query_as(
         "SELECT (SELECT verification_token_hash FROM data_subject_requests WHERE id = $1),
@@ -3620,7 +3620,7 @@ async fn held_erasure_defers_the_mirror_too() {
 
 // ── P3: set-based statutory-expiry sweep, per-row legal accounting ──────────
 
-/// P3 item 9: `advance_due_archives` is set-based per source table — one
+/// P3 item 9: `advance_due_archives` is set-based per source table, one
 /// `DELETE … WHERE id = ANY($1::uuid[]) RETURNING id` and one archive
 /// transition per table (the pre-fix sweep ran `DELETE … WHERE id::text = $1`
 /// plus a three-statement state advance PER ROW). The legal accounting is
@@ -3781,7 +3781,7 @@ async fn archive_sweep_is_set_based_and_accounts_failing_rows() {
     // Fail-before evidence, computed in-test against the pre-fix per-row
     // shape: `DELETE … WHERE id::text = $1` matches NOTHING for a source id
     // that is not a UUID, and the old sweep advanced the archive row
-    // UNCONDITIONALLY — certifying a record that never existed as deleted.
+    // UNCONDITIONALLY, certifying a record that never existed as deleted.
     let legacy_row = archive_row(&pool, &tenant, "invoices", "legacy-not-a-uuid", expired_at).await;
     sqlx::query(
         "UPDATE legal_retention_archive
@@ -3821,7 +3821,7 @@ async fn archive_sweep_is_set_based_and_accounts_failing_rows() {
 
 /// P3 item 10: the invoice-snapshot rewrite is one set-based
 /// `UPDATE … FROM unnest($1::uuid[], $2::text[])` per chunk (the pre-fix path
-/// ran one `UPDATE … WHERE id::text = $1` per invoice — a sequential scan and
+/// ran one `UPDATE … WHERE id::text = $1` per invoice, a sequential scan and
 /// a round trip each). The post-erasure snapshots must be byte-identical to
 /// what the per-row path produced: only rows addressed to the subject are
 /// rewritten, every other key is preserved, and unrelated/malformed/NULL
@@ -3868,11 +3868,11 @@ async fn invoice_snapshot_redaction_is_set_based_and_byte_identical() {
         serde_json::json!({"email": subject.to_uppercase(), "country": "FI"}).to_string(),
     ))
     .await;
-    // C: another subject — must stay byte-identical.
+    // C: another subject, must stay byte-identical.
     let other_snapshot =
         serde_json::json!({"email": "someone-else@x.com", "country": "LV"}).to_string();
     let unrelated = insert_invoice(Some(other_snapshot.clone())).await;
-    // D: malformed legacy snapshot — skipped, never a SQL JSON-cast abort.
+    // D: malformed legacy snapshot, skipped, never a SQL JSON-cast abort.
     let malformed = insert_invoice(Some("not-json-at-all".to_string())).await;
     // E: no snapshot at all.
     let empty = insert_invoice(None).await;
@@ -3939,7 +3939,7 @@ async fn invoice_snapshot_redaction_is_set_based_and_byte_identical() {
     // Garbage / absent ids behave as before: * binding a non-existent (but
     // well-formed) UUID is a 0-row no-op, exactly like the old text
     // comparison, and * the new predicate never binds garbage because the id
-    // is fetched as a UUID — a garbage string can no longer reach the
+    // is fetched as a UUID, a garbage string can no longer reach the
     // comparison at all (the old `id::text = 'garbage'` silently matched
     // nothing).
     let affected =

@@ -1,4 +1,4 @@
-{# ── Feature Grid — ARK marketing revision (law 11/12) ────────── #}
+{# ── Feature Grid, ARK marketing revision (law 11/12) ────────── #}
 {# The 38-card icon grid became the indexed ledger: continuous 01–37
    numbers, six category groups, one ink operational-proof section,
    soft field for the last stretch. All copy and i18n keys preserved
@@ -132,7 +132,7 @@
       <div>
         {# This figure is an SLA TARGET from data/canonical.json
            (claims.api_latency_target: "P95 ≤ 500ms measured at gateway"),
-           not a measured result — the label says so beside the number. #}
+           not a measured result, the label says so beside the number. #}
         <div class="apex-factrow__n">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["stat_latency_value"] %}{{ i18n_data[l]["features"]["stat_latency_value"] }}{% else %}P95 &le; 500ms{% endif %}</div>
         <div class="apex-factrow__l">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["stat_api_latency"] %}{{ i18n_data[l]["features"]["stat_api_latency"] }}{% else %}API latency SLA target (gateway){% endif %} <a href="/performance-methodology/" class="apex-link">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["stat_latency_link"] %}{{ i18n_data[l]["features"]["stat_latency_link"] }}{% else %}Target definition and methodology{% endif %}</a></div>
       </div>

@@ -312,7 +312,7 @@ impl std::fmt::Display for SuppressionViolation {
 /// Returns the matching suppression or None if the recipient is clear.
 ///
 /// Scope precedence: a broader-scoped suppression applies to sends in finer
-/// scopes without requiring exact `scope_id` equality — a Global record blocks
+/// scopes without requiring exact `scope_id` equality, a Global record blocks
 /// everything, and a Domain record blocks every recipient in that domain.
 /// Exact (scope, scope_id) matching still applies to the intermediate scopes
 /// (Stream, Subaccount, Workspace, Organization).
@@ -335,12 +335,12 @@ pub fn check_suppression(
         if let Some(rec) = records.iter().find(|r| {
             r.scope == *check_scope && r.is_active() && {
                 match r.scope {
-                    // Global blocks everything — no scope_id linkage
+                    // Global blocks everything, no scope_id linkage
                     // required, but the record still names the recipient.
                     SuppressionScope::Global => r.recipient == recipient,
                     // Domain blocks domain sends: the record's scope_id
                     // is the domain, matched against the RECIPIENT's
-                    // domain — the record's own (representative) local
+                    // domain, the record's own (representative) local
                     // part is deliberately not compared, or a domain
                     // suppression could never block another mailbox in
                     // the domain.
@@ -430,7 +430,7 @@ pub fn parse_reason(value: &str) -> Option<SuppressionReason> {
     })
 }
 
-/// The removal POLICY, expressed over the row's reason — the decision the API
+/// The removal POLICY, expressed over the row's reason, the decision the API
 /// layer needs, without constructing a full record.
 pub fn removal_allowed(
     reason: SuppressionReason,
@@ -668,7 +668,7 @@ mod tests {
         rec
     }
 
-    /// Global suppressions must block sends in any finer scope — the old code
+    /// Global suppressions must block sends in any finer scope, the old code
     /// required scope_id equality on every branch, so a Global record never
     /// matched a Stream/Workspace/... send.
     #[test]
@@ -709,7 +709,7 @@ mod tests {
             SuppressionScope::Domain,
             "evil.com",
         );
-        // Different local part, finer send scope — still blocked.
+        // Different local part, finer send scope, still blocked.
         assert!(check_suppression(
             "other-user@evil.com",
             SuppressionScope::Stream,
@@ -725,7 +725,7 @@ mod tests {
             std::slice::from_ref(&rec)
         )
         .is_some());
-        // Different domain — not blocked.
+        // Different domain, not blocked.
         assert!(check_suppression(
             "user@good.com",
             SuppressionScope::Stream,

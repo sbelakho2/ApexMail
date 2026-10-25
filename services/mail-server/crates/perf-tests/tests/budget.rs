@@ -3,7 +3,7 @@
 //! # Budget model
 //!
 //! These tests gate ABSOLUTE throughput on an idle host, but the CI lane
-//! runs the whole workspace's tests in parallel — under that load a
+//! runs the whole workspace's tests in parallel, under that load a
 //! scheduler hiccup can double a wall-clock measurement without anything
 //! being slower. The budget therefore scales with the one-minute load
 //! average: the strict bound on an idle machine, up to 3× under load.
@@ -28,7 +28,7 @@
 //!
 //! In RELEASE builds (`cargo test --release`) the tests additionally gate
 //! against the committed baseline values from
-//! `docs/evaluation/baselines/v1.0.json` — a release run must sustain at
+//! `docs/evaluation/baselines/v1.0.json`, a release run must sustain at
 //! least [`RELEASE_BASELINE_FRACTION`] of the recorded Apple-Silicon
 //! throughput. Debug builds (the default `cargo test`) only apply the
 //! wall-clock budgets: debug-mode throughput is 10–50× below the
@@ -67,7 +67,7 @@ pub const RELEASE_BASELINE_FRACTION: f64 = 0.1;
 /// Committed throughput baselines (ops/sec), transcribed from
 /// `docs/evaluation/baselines/v1.0.json` (source: load-tests ::
 /// load_throughput, Apple M-series, release mode). Keep in sync with that
-/// file — the file remains the authoritative record.
+/// file, the file remains the authoritative record.
 #[allow(dead_code)]
 pub mod baseline_ops_per_sec {
     pub const ID_GENERATION: f64 = 389_718.0;
@@ -95,7 +95,7 @@ pub fn emit_baseline_metric(section: &str, field: &str, value: f64) {
 }
 
 /// Gate a measured throughput against the committed baseline in release
-/// builds (no-op in debug — see the module doc).
+/// builds (no-op in debug, see the module doc).
 #[allow(dead_code)]
 pub fn assert_release_throughput(measured_ops_per_sec: f64, baseline: f64, label: &str) {
     if cfg!(debug_assertions) {
@@ -105,7 +105,7 @@ pub fn assert_release_throughput(measured_ops_per_sec: f64, baseline: f64, label
     assert!(
         measured_ops_per_sec >= floor,
         "{label}: release throughput {measured_ops_per_sec:.0} ops/s is below {}% of the \
-         committed baseline {baseline:.0} ops/s (floor {floor:.0}) — performance regression",
+         committed baseline {baseline:.0} ops/s (floor {floor:.0}), performance regression",
         (RELEASE_BASELINE_FRACTION * 100.0) as u32
     );
 }

@@ -37,12 +37,12 @@ use api_server::{
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Harness — canonical DB per test + the real api-server router
+// Harness, canonical DB per test + the real api-server router
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// The AWS SDK env: `aws_config::defaults(..).load()` in the AppState reads
 /// the process environment, so the dummy test credentials are installed
-/// exactly ONCE under this lock (concurrent `set_var` is a data race — the
+/// exactly ONCE under this lock (concurrent `set_var` is a data race, the
 /// same reason audit SM12 F17 removed per-test env writes).
 static AWS_ENV_LOCK: Mutex<()> = Mutex::new(());
 
@@ -63,9 +63,9 @@ fn ensure_aws_test_env() {
 async fn optional_canonical_pool(test_name: &str) -> Option<PgPool> {
     // SM12c harness dedup: the shared per-call isolated template clone
     // (soft-skip on unset TEST_DATABASE_URL, F01 panic on configured
-    // breakage) — replaces this suite's former hand-rolled DROP/CREATE
+    // breakage), replaces this suite's former hand-rolled DROP/CREATE
     // block, which never applied the canonical migration chain at all.
-    // The suffix MUST be unique per test (workspace convention — see
+    // The suffix MUST be unique per test (workspace convention, see
     // tracking-service's `fresh_canonical_pool(test_name, test_name)`):
     // `optional_pg_pool` derives the database name from the suffix alone,
     // so a constant suffix would funnel every parallel test into ONE
@@ -263,7 +263,7 @@ async fn seed_api_key_for(pool: &PgPool, tenant_id: &str, scopes: &[&str]) -> St
 }
 
 /// The control-plane machine credential: a `system`-tenant wildcard API key
-/// (no user identity) — the carve-out that passes require_auth, the
+/// (no user identity), the carve-out that passes require_auth, the
 /// system-tenant gate AND the CP session gate on /v1/admin/* routes.
 async fn seed_system_admin_key(pool: &PgPool) -> String {
     seed_api_key_for(pool, "system", &["*"]).await
@@ -293,7 +293,7 @@ async fn require_reachable_redis(test_name: &str) -> () {
     };
     assert!(
         reachable,
-        "{test_name}: TEST_REDIS_URL is configured but Redis is unreachable — \
+        "{test_name}: TEST_REDIS_URL is configured but Redis is unreachable, \
          start the test Redis (the admin-credit idempotency claim fails closed without it)"
     );
 }
@@ -331,13 +331,13 @@ async fn dispatch(
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// RC-TEST-01 (SM12 F3 + F16b): admin wallet credit idempotency — REAL handler
+// RC-TEST-01 (SM12 F3 + F16b): admin wallet credit idempotency, REAL handler
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// Two concurrent admin credits with the SAME Idempotency-Key must apply
 /// exactly one credit. This drives `admin_apply_credit` (the Redis SET NX
 /// claim + the `ON CONFLICT (reference)` ledger insert) through the real
-/// CP-authenticated route — deleting either production clause fails here.
+/// CP-authenticated route, deleting either production clause fails here.
 #[tokio::test]
 async fn rc01_admin_wallet_credit_idempotency_replay_and_race() {
     let Some(pool) = optional_canonical_pool("rc01_admin_wallet_credit").await else {
@@ -368,7 +368,7 @@ async fn rc01_admin_wallet_credit_idempotency_replay_and_race() {
 
     // ── Sequential replay: the idempotency MIDDLEWARE (which sits in front
     // of the handler) caches the first response and serves the replay from
-    // it — either way, the ledger and balance must show EXACTLY ONE credit.
+    // it, either way, the ledger and balance must show EXACTLY ONE credit.
     let key1 = format!("rc01-{}", Uuid::new_v4());
     let (status_first, body_first) = credit(key1.clone()).await;
     assert!(
@@ -430,7 +430,7 @@ async fn rc01_admin_wallet_credit_idempotency_replay_and_race() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// RC-TEST-02: webhook URL uniqueness — REAL create_webhook handler
+// RC-TEST-02: webhook URL uniqueness, REAL create_webhook handler
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// Two concurrent `POST /v1/webhooks` for the same (tenant, url) must
@@ -477,7 +477,7 @@ async fn rc02_concurrent_webhook_creation_same_url_is_unique() {
     assert_eq!(
         created.len(),
         1,
-        "exactly one of two racing same-URL creates may succeed — got {created:?}; \
+        "exactly one of two racing same-URL creates may succeed, got {created:?}; \
          a duplicate webhook means the (tenant_id, url) uniqueness is gone"
     );
     let (rows,): (i64,) =
@@ -489,7 +489,7 @@ async fn rc02_concurrent_webhook_creation_same_url_is_unique() {
             .unwrap();
     assert_eq!(rows, 1, "duplicate webhook rows for the same (tenant, url)");
 
-    // Different tenants may register the SAME url — the constraint is per
+    // Different tenants may register the SAME url, the constraint is per
     // tenant, and both creates must succeed.
     let (other_tenant, other_key) =
         seed_tenant_with_key(&pool, "starter", &["webhooks:write"]).await;
@@ -511,7 +511,7 @@ async fn rc02_concurrent_webhook_creation_same_url_is_unique() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// RC-TEST-03: subscription status override serialization — REAL handler
+// RC-TEST-03: subscription status override serialization, REAL handler
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// Two concurrent `admin_force_subscription_status` calls (row-lock UPDATE)
@@ -582,7 +582,7 @@ async fn rc03_subscription_status_override_concurrent_is_serialized() {
         "both overrides must be audited exactly once"
     );
 
-    // The surviving status is one of the two writes — never anything else.
+    // The surviving status is one of the two writes, never anything else.
     let (final_status,): (String,) =
         sqlx::query_as("SELECT status FROM mollie_subscriptions WHERE tenant_id = $1")
             .bind(&tenant_id)
@@ -608,7 +608,7 @@ async fn rc03_subscription_status_override_concurrent_is_serialized() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// RC-TEST-04: webhook deletion is tenant-scoped — REAL delete_webhook
+// RC-TEST-04: webhook deletion is tenant-scoped, REAL delete_webhook
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// `DELETE /v1/webhooks/:id` must only delete the OWNING tenant's webhook:
@@ -642,7 +642,7 @@ async fn rc04_webhook_deletion_is_tenant_scoped() {
         .await
         .unwrap();
 
-    // A foreign tenant CANNOT delete it — the tenant-scoped WHERE holds.
+    // A foreign tenant CANNOT delete it, the tenant-scoped WHERE holds.
     let (status_foreign, body_foreign) = dispatch(
         &app,
         Method::DELETE,
@@ -684,7 +684,7 @@ async fn rc04_webhook_deletion_is_tenant_scoped() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// RC-TEST-05: domain delete serialization — REAL delete_domain handler
+// RC-TEST-05: domain delete serialization, REAL delete_domain handler
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// Two concurrent `DELETE /v1/domains/:id` calls (the handler takes the
@@ -759,14 +759,14 @@ async fn rc05_concurrent_domain_delete_is_serialized_and_tenant_scoped() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// RC-TEST-06 + SM12 F14: plan override — last COMMITTER's value wins
+// RC-TEST-06 + SM12 F14: plan override, last COMMITTER's value wins
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// The vacuous `plan == "pro" || plan == "enterprise"` assertion is gone.
 /// Commit order is now CAPTURED and correlated with the stored value:
 /// - sequentially (deterministic), the LAST committer's override is what
 ///   `plan_overrides` stores and the audit trail records the writes in
-///   commit order — a "first write sticks" regression fails;
+///   commit order, a "first write sticks" regression fails;
 /// - concurrently, the stored (plan_id, reason) pair must be a CONSISTENT
 ///   pair from exactly one request (never a mix) and every override must
 ///   be audited exactly once (the audit commits in the same transaction).
@@ -832,7 +832,7 @@ async fn rc06_plan_override_last_committer_value_wins() {
         "the stored override must be the last writer's CONSISTENT pair"
     );
     let _ = admin_id;
-    // Sequential commit-order correlation (deterministic — each request
+    // Sequential commit-order correlation (deterministic, each request
     // completes before the next starts): the SECOND audit entry must carry
     // the second override's plan, i.e. commit order is observable and the
     // stored value is the last committer's.
@@ -871,12 +871,12 @@ async fn rc06_plan_override_last_committer_value_wins() {
     assert!(
         consistent_pairs.contains(&(plan_id.as_str(), reason.as_str())),
         "the stored override must be one request's CONSISTENT (plan, reason) pair, \
-         got (\"{plan_id}\", \"{reason}\") — a mixed pair means the atomic upsert broke"
+         got (\"{plan_id}\", \"{reason}\"), a mixed pair means the atomic upsert broke"
     );
 
     // Audit completeness: each override (2 sequential + 2 racing) audited
     // exactly once, and the stored plan is one of the audited plans (audit
-    // + override commit in ONE transaction — a detached audit fails here).
+    // + override commit in ONE transaction, a detached audit fails here).
     // NOTE: audit rows are timestamped with their transaction's NOW(), so
     // under the race the audit ORDER can invert vs. commit order; the
     // order-sensitive last-writer check above ran in the SEQUENTIAL phase.
@@ -901,7 +901,7 @@ async fn rc06_plan_override_last_committer_value_wins() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// RC-TEST-07: idempotency middleware atomic claim — REAL middleware+route
+// RC-TEST-07: idempotency middleware atomic claim, REAL middleware+route
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// The idempotency middleware's Redis SET-NX claim: a sequential replay
@@ -1022,7 +1022,7 @@ async fn rc07_idempotency_middleware_claim_is_atomic() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// SM12 F16b: admin invoice creation over HTTP — per-period dedupe
+// SM12 F16b: admin invoice creation over HTTP, per-period dedupe
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// `POST /v1/admin/tenants/:id/invoices` creates an invoice for a period
@@ -1048,10 +1048,10 @@ async fn f16b_admin_invoice_creation_is_deduplicated_per_period() {
     // The invoice writer snapshots the tenant's billing address, whose
     // `email` column feeds the e-invoice buyer contact. Migration 132 allows
     // a NULL email at the schema level, but production's snapshot query
-    // decodes it as a non-optional String — a NULL here surfaces as a 500
+    // decodes it as a non-optional String, a NULL here surfaces as a 500
     // (escalated to the api-server owner; see the SM12 verification report).
     // A real invoiceable tenant carries a billing email, so the fixture does
-    // too — keeping this test pinning the PERIOD DEDUP, not that decode.
+    // too, keeping this test pinning the PERIOD DEDUP, not that decode.
     sqlx::query(
         "INSERT INTO billing_addresses (tenant_id, company_name, address_line1, city, postal_code, country, email)
          VALUES ($1, 'Concurrency Fixture OÜ', 'Tänav 1', 'Tallinn', '10111', 'EE', 'billing@concurrency-fixture.example')",
@@ -1103,7 +1103,7 @@ async fn f16b_admin_invoice_creation_is_deduplicated_per_period() {
         "a second invoice for the SAME period must 409, got {dup_status}: {dup_body:?}"
     );
     // The SHIPPED conflict envelope is the generic ApiError naming the
-    // period in `error.message` — the same contract api-server's in-crate
+    // period in `error.message`, the same contract api-server's in-crate
     // suite pins (api-server/src/routes/billing.rs, "Duplicate period ->
     // 409"). (The advisory-locked helper's richer `existingInvoiceId` body
     // is remapped into ApiError before it reaches the wire.)

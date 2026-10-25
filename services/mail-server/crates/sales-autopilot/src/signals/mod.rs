@@ -1,17 +1,17 @@
-//! §7/§11 — always-on account change detection.
+//! §7/§11, always-on account change detection.
 //!
 //! The audit's point is blunt: *"Don't merely find companies that fit. Detect
 //! when an already-good company has just become unusually likely to buy."*
 //! This module owns:
 //!
-//! * the [`SignalType`] registry — every change class the engine watches,
+//! * the [`SignalType`] registry, every change class the engine watches,
 //!   each with a documented half-life and default strength;
-//! * [`record_signal`] / [`active_signals`] — the canonical `sales_signals`
+//! * [`record_signal`] / [`active_signals`], the canonical `sales_signals`
 //!   persistence path, honouring `expires_at`;
-//! * [`signal_urgency`] — a pure exponential-decay function so a stale signal
-//!   contributes less, and [`combined_urgency`] — a noisy-OR combination of
+//! * [`signal_urgency`], a pure exponential-decay function so a stale signal
+//!   contributes less, and [`combined_urgency`], a noisy-OR combination of
 //!   several signals;
-//! * [`email_stack`] — passive, lawful email-infrastructure signals.
+//! * [`email_stack`], passive, lawful email-infrastructure signals.
 //!
 //! Opens and clicks are deliberately not signal types here: they are recorded
 //! in `sales_outcomes` but must never become a purchase-intent input (Apple
@@ -77,7 +77,7 @@ impl SignalType {
     pub const FIRST_PARTY_PRODUCT_INTENT: &'static str = "first_party_product_intent";
     /// Trial or signup event.
     pub const TRIAL_SIGNUP: &'static str = "trial_signup";
-    /// A visit to ApexMail's migration/replatforming page — the strongest
+    /// A visit to ApexMail's migration/replatforming page, the strongest
     /// first-party intent signal we can lawfully observe.
     pub const APEXMAIL_MIGRATION_PAGE_VISIT: &'static str = "apexmail_migration_page_visit";
 

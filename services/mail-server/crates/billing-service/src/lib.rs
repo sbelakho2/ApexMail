@@ -4,7 +4,7 @@
 //! keeping, rate-limit tier management and billing event processing.
 
 #![deny(unsafe_code)]
-/// **DEPRECATED** — Dedicated IP provisioning now lives in `api-server::ip_provider`.
+/// **DEPRECATED**, Dedicated IP provisioning now lives in `api-server::ip_provider`.
 /// This module is retained for backward compatibility only. All new code should
 /// use `api_server::ip_provider::DedicatedIpProvider`.
 pub mod accounting_export;

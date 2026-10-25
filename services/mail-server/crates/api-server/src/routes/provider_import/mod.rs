@@ -1,17 +1,17 @@
-//! Provider-export importer — SendGrid, Mailgun, Postmark, Resend.
+//! Provider-export importer, SendGrid, Mailgun, Postmark, Resend.
 //!
 //! The switching story in one surface: a customer arrives with an export from
 //! their previous provider and needs the four artifacts of a real migration in
-//! — **suppressions**, **contacts**, **templates** and a **domains DNS
+//!, **suppressions**, **contacts**, **templates** and a **domains DNS
 //! report**. This module reads each provider's own export format and writes
 //! through the EXISTING canonical paths:
 //!
 //! | kind | canonical path this importer writes through |
 //! |------|----------------------------------------------|
 //! | suppressions | the `suppressions` table, with `source = "<provider>_import"` provenance and the SAME `ON CONFLICT (tenant_id, email) DO NOTHING` semantics `routes::suppressions::bulk_suppress` uses |
-//! | contacts | [`crate::routes::contacts::import_contact_rows`] — the very validation + chunked upsert `POST /v1/contacts/import` runs, with provider preset column mapping |
-//! | templates | [`crate::routes::templates::create_template`] — the canonical create handler (validation, entitlement gate, v1 snapshot, audit row) |
-//! | domains | [`crate::routes::domains::required_sender_dns_records`] — the exact record set `GET /v1/domains/:id/dns-records` serves |
+//! | contacts | [`crate::routes::contacts::import_contact_rows`], the very validation + chunked upsert `POST /v1/contacts/import` runs, with provider preset column mapping |
+//! | templates | [`crate::routes::templates::create_template`], the canonical create handler (validation, entitlement gate, v1 snapshot, audit row) |
+//! | domains | [`crate::routes::domains::required_sender_dns_records`], the exact record set `GET /v1/domains/:id/dns-records` serves |
 //!
 //! Nothing here re-implements a writer: an import can never take a shortcut
 //! past the gates the canonical routes enforce.
@@ -54,7 +54,7 @@
 //!
 //! The inline bulk endpoints cap at 10,000 entries each. An import is not
 //! bound by those caps: suppressions and contacts are parsed as an incremental
-//! cursor (one 500-row chunk in memory at a time — the JSON reader walks the
+//! cursor (one 500-row chunk in memory at a time, the JSON reader walks the
 //! array without ever building the whole document) and written in chunked
 //! statements, so a 100k-row file streams through in bounded memory. The one
 //! hard limit is [`MAX_PROVIDER_IMPORT_ROWS`], enforced mid-stream with a
@@ -63,7 +63,7 @@
 //! # Idempotency
 //!
 //! Replaying the same file is safe: suppression and contact rows dedupe on
-//! `(tenant_id, email)` (existing rows are never overwritten — counted as
+//! `(tenant_id, email)` (existing rows are never overwritten, counted as
 //! `duplicates`/conflicts), templates dedupe on `(name)` within the tenant
 //! (existing names are counted `skipped_existing`), and the domains report is
 //! pure output.
@@ -171,7 +171,7 @@ impl ImportKind {
         }
     }
 
-    /// The write scope the canonical surface for this kind requires — the
+    /// The write scope the canonical surface for this kind requires, the
     /// import adds no new scope vocabulary, it follows the surface it writes
     /// through.
     pub(crate) fn write_scope(self) -> &'static str {
@@ -242,7 +242,7 @@ impl ImportFormat {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ImportQuery {
-    /// `dry_run` (default — writes nothing) or `commit`.
+    /// `dry_run` (default, writes nothing) or `commit`.
     #[serde(default)]
     pub mode: Option<String>,
     /// Provider sub-type of a suppression export (`source_type=bounces` …);
@@ -268,7 +268,7 @@ const MAX_NOTES_LIMIT: usize = 500;
 /// Hard row bound for a single import file, enforced mid-stream with a named
 /// refusal. Far beyond any real export a switcher has (the 40 MiB platform
 /// body limit binds far earlier for CSV), so it exists to keep a hostile
-/// pathological file from pinning a connection for minutes — not to cap real
+/// pathological file from pinning a connection for minutes, not to cap real
 /// migrations.
 pub(crate) const MAX_PROVIDER_IMPORT_ROWS: usize = 1_000_000;
 
@@ -278,7 +278,7 @@ pub(crate) const IMPORT_CHUNK_SIZE: usize = 500;
 // ─── Report types ──────────────────────────────────────────────
 
 /// One named example: a source row and what happened to it. Emails are NOT
-/// echoed (matching the contacts import's "Row N: …" style) — the caller maps
+/// echoed (matching the contacts import's "Row N: …" style), the caller maps
 /// the number back to their own file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RowNote {
@@ -324,7 +324,7 @@ pub struct SuppressionReportSection {
 }
 
 /// One template's import row: the conversion is named, the original body is
-/// kept, and anything left unconverted is listed — never silently mangled.
+/// kept, and anything left unconverted is listed, never silently mangled.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TemplateImportRow {
     /// 1-based index in the export.
@@ -542,7 +542,7 @@ async fn import_file(
     if mode == ImportMode::Commit {
         // The receipt is best-effort AFTER the writes committed: an import
         // that landed must never be reported as a failure because its report
-        // row could not be stored — the response itself still carries the
+        // row could not be stored, the response itself still carries the
         // full report (the caller can keep it), and the loss is logged loudly
         // and stated in the report's warnings.
         let id = apexmail_lib::id::generate_id("imp", 22);
@@ -553,7 +553,7 @@ async fn import_file(
                 report.report_id = None;
                 report.warnings.push(
                     "the import completed but its receipt could not be stored (database error); \
-                     keep this response — GET /v1/import/reports will not list it"
+                     keep this response, GET /v1/import/reports will not list it"
                         .to_string(),
                 );
                 tracing::error!(
@@ -603,7 +603,7 @@ fn sniff_format(
     let first = body.iter().find(|byte| !byte.is_ascii_whitespace());
     match first {
         Some(b'{') | Some(b'[') => Ok(ImportFormat::Json),
-        // XLSX/XLS are zip/OLE containers — the importer reads CSV/JSON
+        // XLSX/XLS are zip/OLE containers, the importer reads CSV/JSON
         // exports only (a spreadsheet's zip magic would otherwise be parsed as
         // binary CSV and produce a sea of row errors).
         Some(b'P') if body.starts_with(b"PK\x03\x04") => Err(ApiError::BadRequest(
@@ -766,7 +766,7 @@ async fn get_import_report(
 
 /// The one CSV reader every kind shares, with the SAME settings
 /// `routes::contacts::parse_csv_rows` uses (`has_headers(true)`,
-/// `flexible(true)`) — provider presets differ in their column mapping, never
+/// `flexible(true)`), provider presets differ in their column mapping, never
 /// in the engine.
 pub(crate) fn csv_reader(data: &[u8]) -> csv::Reader<&[u8]> {
     csv::ReaderBuilder::new()
@@ -861,7 +861,7 @@ pub(crate) fn parse_timestamp(text: &str) -> Option<DateTime<Utc>> {
         return Some(parsed.with_timezone(&Utc));
     }
     // Provider exports commonly use "2026-01-31 12:00:00" (Space-separated,
-    // no zone) — UTC is the documented reading for those.
+    // no zone), UTC is the documented reading for those.
     for format in ["%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"] {
         if let Ok(naive) = chrono::NaiveDateTime::parse_from_str(trimmed, format) {
             return Some(naive.and_utc());
@@ -999,7 +999,7 @@ fn find_first_array(bytes: &[u8]) -> Result<usize, String> {
 }
 
 /// The `"key"` immediately preceding the array (`{"items": [ …`), when there
-/// is one — purely for the report's transparency.
+/// is one, purely for the report's transparency.
 fn preceding_key(bytes: &[u8], array_start: usize) -> Option<String> {
     let mut index = array_start;
     loop {

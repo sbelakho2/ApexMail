@@ -1,16 +1,16 @@
 //! Platform-admin domain remediation (audit M-9: domain squatting).
 //!
 //! Because a domain name is globally unique in `domains`, the first tenant
-//! to register a name claims it forever — a squatter can lock out the real
+//! to register a name claims it forever, a squatter can lock out the real
 //! owner. These endpoints give the platform admin (system tenant) a
 //! remediation path:
 //!
-//! - `GET  /transfer-suggestion?domain=victim.com` — checks whether the
+//! - `GET  /transfer-suggestion?domain=victim.com`, checks whether the
 //!   tenant of record ever verified the domain while somebody clearly
 //!   controls its DNS (platform DKIM/DMARC records are published). That
 //!   combination suggests the row is squatted and is surfaced as an
 //!   explicit transfer suggestion.
-//! - `POST /transfer` — force-transfers a domain to another tenant. The
+//! - `POST /transfer`, force-transfers a domain to another tenant. The
 //!   request carries a typed confirmation (`"transfer <domain>"`) so the
 //!   action cannot be triggered by a stray click or missing field.
 //!
@@ -158,7 +158,7 @@ pub(crate) async fn get_transfer_suggestion(
         transfer_suggested: suggestion,
         note: if suggestion {
             "The tenant of record never verified this domain, yet its DNS \
-             publishes this platform's records — the row is likely squatted. \
+             publishes this platform's records, the row is likely squatted. \
              Use POST /v1/admin/tenants/domains/transfer to remediate."
                 .into()
         } else {
@@ -518,7 +518,7 @@ mod tests {
         // Squatted-looking: owner never verified, DNS holder published ours.
         assert!(transfer_suggestion(false, &proven));
 
-        // Owner verified at some point — no suggestion, whatever DNS says.
+        // Owner verified at some point, no suggestion, whatever DNS says.
         assert!(!transfer_suggestion(true, &proven));
 
         // Owner never verified but nobody proved DNS control either.
@@ -550,7 +550,7 @@ mod tests {
     #[test]
     fn rebind_requires_complete_material() {
         let _guard = dkim_env_guard();
-        // 32 bytes of hex — key envelope encryption requires the env key.
+        // 32 bytes of hex, key envelope encryption requires the env key.
         let had_key = std::env::var("DKIM_PRIVATE_KEY_ENCRYPTION_KEY").ok();
         std::env::set_var(
             "DKIM_PRIVATE_KEY_ENCRYPTION_KEY",
@@ -651,7 +651,7 @@ mod tests {
         // Multi-statement DDL needs the simple query protocol: a prepared
         // `sqlx::query` rejects a batch with "cannot insert multiple
         // commands into a prepared statement", which the `.ok()?` below
-        // used to swallow — silently skipping this whole test.
+        // used to swallow, silently skipping this whole test.
         sqlx::raw_sql(
             r#"
             CREATE TABLE tenants (
@@ -819,7 +819,7 @@ mod tests {
                 .unwrap();
         assert_eq!(row.0, "tenant-b", "domain moved to the verified owner");
         assert_eq!(row.1, "pending");
-        assert!(!row.2, "verification resets — new owner re-verifies");
+        assert!(!row.2, "verification resets, new owner re-verifies");
 
         // The carried-over private key decrypts under the NEW tenant AAD.
         let stored: String =

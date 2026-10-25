@@ -7,12 +7,12 @@
 //! `bandwidth_gb` were structurally zero. This module closes that gap
 //! without any cross-crate edits:
 //!
-//! * [`ingest_usage_batch`] — a service-authenticated batch ingest endpoint
+//! * [`ingest_usage_batch`], a service-authenticated batch ingest endpoint
 //!   (`POST /usage/ingest`) the edge / worker-processors can call for any
 //!   event type (notably `api_calls`, which has no platform source table —
 //!   see the api-server middleware handoff in the module docs of
 //!   [`sweep_derived_usage`]).
-//! * [`sweep_derived_usage`] — a maintenance sweep that derives per-tenant
+//! * [`sweep_derived_usage`], a maintenance sweep that derives per-tenant
 //!   per-day aggregates from the platform's own state tables:
 //!
 //! | event_type           | source table(s)                     | derivation                                    |
@@ -34,7 +34,7 @@
 //! `FLOOR(cumulative source total through the day) − already-metered whole
 //! units from this source` (see [`sweep_tenant_cost_quantities`]), so
 //! sub-unit usage like 0.4 GB/day accumulates instead of being rounded away
-//! — while every stored quantity stays a whole unit (consumers such as the
+//!, while every stored quantity stays a whole unit (consumers such as the
 //! `/usage` report display `SUM(quantity)` verbatim). `dedicated_ip_hours`
 //! keeps the per-day half-up SQL `ROUND` (lifecycle-interval overlap in
 //! hours).
@@ -143,7 +143,7 @@ pub async fn ingest_usage_batch(
     // the clock per event).
     let now = Utc::now();
 
-    // 1. Reject invalid quantities before any I/O — identical error text to
+    // 1. Reject invalid quantities before any I/O, identical error text to
     //    `UsageError::InvalidQuantity`.
     let mut candidates: Vec<usize> = Vec::with_capacity(events.len());
     for (index, event) in events.iter().enumerate() {
@@ -360,7 +360,7 @@ pub async fn ingest_usage_batch(
             Err(error) => {
                 // A pipeline reports one error for the chunk: per-command
                 // success cannot be attributed. Compensate the whole chunk
-                // (counter decrement + dedup delete — the same compensation
+                // (counter decrement + dedup delete, the same compensation
                 // `record_usage` performs on EVAL failure) and reject it.
                 let mut compensation = redis::pipe();
                 for event in chunk {
@@ -401,7 +401,7 @@ const INGEST_REDIS_PIPELINE_CHUNK: usize = 500;
 const INGEST_METERING_CHUNK_ROWS: usize = 5_000;
 /// Rows per multi-row `audit_logs` INSERT (12 binds/row; 48,000 binds).
 const INGEST_AUDIT_CHUNK_ROWS: usize = 4_000;
-/// Dedup/counter TTL — identical to `usage::DEDUP_TTL_SECS`.
+/// Dedup/counter TTL, identical to `usage::DEDUP_TTL_SECS`.
 const INGEST_DEDUP_TTL_SECS: i64 = 40 * 86_400;
 
 /// The dedup+counter Lua script: byte-identical to
@@ -833,7 +833,7 @@ fn ingest_audit_signing_key() -> String {
         Ok(key) if !key.trim().is_empty() => key,
         _ => {
             tracing::warn!(
-                "AUDIT_SIGNING_KEY is not configured — signing with the documented development fallback key"
+                "AUDIT_SIGNING_KEY is not configured, signing with the documented development fallback key"
             );
             "apexmail-audit-fallback-key".to_string()
         }
@@ -1030,7 +1030,7 @@ const MULTI_ROW_INSERT_CHUNK_ROWS: usize = 5_000;
 ///    tenant with a positive quantity (deterministic ids; `ON CONFLICT` is the
 ///    belt to the marker's braces).
 /// 3. One audit entry per newly-metered aggregate, appended INSIDE the same
-///    transaction — the audit trail is a global hash chain and cannot be
+///    transaction, the audit trail is a global hash chain and cannot be
 ///    set-based without changing its ordering contract, so this is the only
 ///    remaining per-row statement (2: chain-head UPDATE + INSERT).
 ///
@@ -1075,7 +1075,7 @@ async fn record_tenant_counts_chunked(
 
     let mut tx = pool.begin().await?;
 
-    // 1. Markers first — UNIQUE(tenant, event_type, day, source) makes this
+    // 1. Markers first, UNIQUE(tenant, event_type, day, source) makes this
     //    the idempotency gate for every aggregate. Zero-quantity days still
     //    get a marker so the sweep does not re-derive emptiness. Chunked: a
     //    source sweep can carry one row per tenant and blow the 65,535-bind
@@ -1178,7 +1178,7 @@ fn is_missing_table(error: &sqlx::Error) -> bool {
 /// `email_delivery_log` (by `attempted_at` day, tenant attributed via the
 /// queue). The UNION deduplicates per email, so a delivery present in both
 /// tables counts exactly once. When the delivery log does not exist in
-/// this deployment, the derivation falls back to the queue alone — under
+/// this deployment, the derivation falls back to the queue alone, under
 /// the SAME marker source, so a day can only ever be recorded once.
 async fn sweep_emails_delivered(
     pool: &PgPool,
@@ -1334,9 +1334,9 @@ async fn sweep_dedicated_ip_hours(
 /// `day` from the platform's own cost-tracking table (`tenant_costs`,
 /// migration 022).
 ///
-/// Fix F9 — sub-unit accumulation. Rounding each day independently
+/// Fix F9, sub-unit accumulation. Rounding each day independently
 /// (`ROUND(storage_gb * 24)`, `ROUND(bandwidth_gb)`) discarded fractional
-/// usage forever: a tenant burning 0.4 GB/day metered 0 — every day,
+/// usage forever: a tenant burning 0.4 GB/day metered 0, every day,
 /// forever. Consumers were traced before choosing the mechanism: nothing
 /// multiplies these quantities back (invoice PAYG pricing reads
 /// `tenant_costs`' cost columns, enterprise contracts sum `emails_sent`,
@@ -1453,7 +1453,7 @@ async fn sweep_tenant_cost_quantities(
 ///
 /// `api_calls` is deliberately NOT derived here: the platform has no
 /// request-log table. The edge must POST counts to `POST /usage/ingest`
-/// with `{tenantId, eventType: "api_calls", quantity, eventId}` — the
+/// with `{tenantId, eventType: "api_calls", quantity, eventId}`, the
 /// api-server middleware handoff is documented in this crate's report.
 pub async fn sweep_derived_usage(
     pool: &PgPool,
@@ -1544,12 +1544,12 @@ struct ReconComplaintRow {
 pub const RECON_ABSOLUTE_SLACK: i64 = 25;
 pub const RECON_RELATIVE_SLACK_PERCENT: i64 = 5;
 
-/// Classify one tenant-day comparison. Pure — unit-tested.
+/// Classify one tenant-day comparison. Pure, unit-tested.
 ///
 /// `unaccounted` = reserved − delivered − bounced (may be negative when
 /// delivered/bounced reporting overshoots; only positive gaps can flag).
 /// A day is an overage candidate when the unaccounted volume exceeds BOTH
-/// the absolute slack and the relative slack — i.e. reserved ≫ delivered
+/// the absolute slack and the relative slack, i.e. reserved ≫ delivered
 /// with no bounce explanation means either a quota leak or a delivery
 /// failure, and both need a human.
 pub fn classify_reconciliation(reserved: i64, delivered: i64, bounced: i64) -> (i64, bool) {
@@ -1566,7 +1566,7 @@ pub fn classify_reconciliation(reserved: i64, delivered: i64, bounced: i64) -> (
 /// (idempotent on `(tenant_id, period_start, period_end)`).
 ///
 /// Report-only by design: systematically reserved≫delivered means either
-/// quota leaks or delivery failures — a human decides, this job never
+/// quota leaks or delivery failures, a human decides, this job never
 /// refunds. Bounced/complaint sends are reported distinctly so
 /// reserved-but-bounced delivery failures are not mistaken for leaks.
 pub async fn reconcile_daily_deliveries(
@@ -1593,7 +1593,7 @@ async fn reconcile_daily_deliveries_chunked(
     };
 
     // 1. Reserved vs delivered from the metering tables. SUM(bigint) yields
-    //    NUMERIC in PostgreSQL, which cannot decode into Option<i64> — the
+    //    NUMERIC in PostgreSQL, which cannot decode into Option<i64>, the
     //    reconciliation sweep failed on every day that actually had usage.
     //    Cast each aggregate back to bigint.
     #[cfg(test)]
@@ -1629,7 +1629,7 @@ async fn reconcile_daily_deliveries_chunked(
         Err(error) => return Err(format!("bounce collection failed: {error}")),
     };
 
-    // 3. Complaints (FBL) for the day — reported distinctly, NOT deducted
+    // 3. Complaints (FBL) for the day, reported distinctly, NOT deducted
     //    from delivered (a complaint implies the message was delivered).
     let complained_by_tenant: HashMap<String, i64> =
         match collect_complaint_counts(pool, day_start, day_end).await {
@@ -1643,7 +1643,7 @@ async fn reconcile_daily_deliveries_chunked(
 
     summary.tenants_compared = i64::try_from(usage_rows.len()).unwrap_or(i64::MAX);
 
-    // P3 fix 2 — the report writes are multi-row INSERTs (per-row INSERT was
+    // P3 fix 2, the report writes are multi-row INSERTs (per-row INSERT was
     // the last O(tenants) statement in this sweep), one statement per
     // `MULTI_ROW_INSERT_CHUNK_ROWS` chunk so an unbounded tenant count cannot
     // exceed PostgreSQL's 65,535 bound-parameter ceiling. `ON CONFLICT DO
@@ -1933,11 +1933,11 @@ mod tests {
 
     #[test]
     fn classify_reconciliation_relative_slack_scales() {
-        // 100 unaccounted of 1 000 000 (0.01 %) — within relative slack.
+        // 100 unaccounted of 1 000 000 (0.01 %), within relative slack.
         let (_, candidate_small) = classify_reconciliation(1_000_000, 999_900, 0);
         assert!(!candidate_small);
 
-        // 60 000 unaccounted of 1 000 000 (6 %) — beyond 5 % relative slack.
+        // 60 000 unaccounted of 1 000 000 (6 %), beyond 5 % relative slack.
         let (unaccounted, candidate_large) = classify_reconciliation(1_000_000, 940_000, 0);
         assert_eq!(unaccounted, 60_000);
         assert!(candidate_large);
@@ -1962,7 +1962,7 @@ mod tests {
     #[test]
     fn classify_reconciliation_absolute_floor_applies_to_small_tenants() {
         // 20 unaccounted of 30 reserved is > 5 % but within the absolute
-        // floor of 25 — small tenants are not flagged for in-flight sends.
+        // floor of 25, small tenants are not flagged for in-flight sends.
         let (_, candidate) = classify_reconciliation(30, 10, 0);
         assert!(!candidate, "absolute slack floor must apply");
 
@@ -2023,7 +2023,7 @@ mod tests {
 
     // ─── Batched ingest (P2) ─────────────────────────────────────
     //
-    // Fail-before: `ingest_usage_batch` was a micro-batch — it called
+    // Fail-before: `ingest_usage_batch` was a micro-batch, it called
     // `record_usage` per event, so every statement family below scaled with
     // the event count (the cfg(test) proxy bumps in the old loop expose it).
     // Pass-after: one preload query for subscription contexts, one for cycle
@@ -2539,7 +2539,7 @@ mod tests {
         owned.finish().await;
     }
 
-    // P3 item 7 — the derived-aggregate writer was per-tenant (one
+    // P3 item 7, the derived-aggregate writer was per-tenant (one
     // transaction + marker + event + audit per row). Markers and events are
     // now ONE multi-row statement per source; only the hash-chained audit
     // append stays per newly metered row. Three tenants must cost ONE marker
@@ -2887,7 +2887,7 @@ mod tests {
         owned.finish().await;
     }
 
-    /// P3 fix 2 — reconciliation must not scale DB statements with the
+    /// P3 fix 2, reconciliation must not scale DB statements with the
     /// tenant count. Before the fix each tenant-day issued its own
     /// `billing_reconciliation_reports` INSERT (the reads were already
     /// grouped); now one multi-row INSERT with `RETURNING` preserves the
@@ -2995,7 +2995,7 @@ mod tests {
         let day = yesterday(Utc::now());
         let (day_start, day_end) = day_bounds(day);
 
-        // Phase 1: complaints missing, self-hosted feed present — the
+        // Phase 1: complaints missing, self-hosted feed present, the
         // complaint collector falls back to self_hosted_complaints.
         rename_table(pool, "complaints", "complaints_gone").await;
         sqlx::query(
@@ -3015,7 +3015,7 @@ mod tests {
         assert_eq!(complaints.get(&t_degrade), Some(&1));
 
         // Phase 2: the bounce aggregate table is present but EMPTY for the
-        // day — the collector falls back to terminal-bounced queue rows.
+        // day, the collector falls back to terminal-bounced queue rows.
         sqlx::query(
             r#"
             INSERT INTO email_queue (tenant_id, from_address, to_addresses, subject, status, created_at, updated_at)
@@ -3073,7 +3073,7 @@ mod tests {
 
         // Recreate the aggregated tables with the WRONG shape: queries now
         // fail with a non-42P01 error, which must NOT be swallowed as a
-        // skip — the sweep fails loudly instead.
+        // skip, the sweep fails loudly instead.
         rename_table(
             pool,
             "bounce_analytics_daily",

@@ -1,6 +1,6 @@
 +++
 title = "Data Processing Agreement"
-description = "ApexMail DPA — Article 28 data-processing terms."
+description = "ApexMail DPA, Article 28 data-processing terms."
 template = "prose.html"
 
 [extra]
@@ -73,7 +73,7 @@ The supplied deployment configuration targets EU/EEA regions for core infrastruc
 - Argon2id password hashing
 - Audit logging with hash-chain integrity
 - Access control with multi-factor authentication
-- Weekly automated vulnerability scanning; first external penetration test planned — results to be published after completion and remediation
+- Weekly automated vulnerability scanning; first external penetration test planned, results to be published after completion and remediation
 
 ## 8. Data Breach Notification
 

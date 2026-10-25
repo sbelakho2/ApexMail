@@ -11,7 +11,7 @@
 //!     link) and re-ingesting the same statement is a no-op (line count
 //!     unchanged);
 //!  2. malformed rows are refused with per-row errors and NOTHING is written
-//!     — unparseable dates/amounts, currency disagreeing with the account,
+//!    , unparseable dates/amounts, currency disagreeing with the account,
 //!     unknown accounts, duplicates in the file, dates outside the declared
 //!     period, and lines already stored (re-issued file → conflict);
 //!  3. the sweep posts the ingested non-zero lines exactly once (journal
@@ -30,7 +30,7 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 /// `(external_id, statement_date, value_date, amount_cents, currency,
-///   bank_account_id, import_id)` — named so the test row shape reads.
+///   bank_account_id, import_id)`, named so the test row shape reads.
 type BankLineRow = (
     String,
     NaiveDate,
@@ -610,12 +610,12 @@ async fn ingested_lines_sweep_into_the_posted_ledger_once() {
     assert_eq!(
         posted_role_movement(&pool, entity, period_id, "net_wages_payable").await,
         (0, 0),
-        "no fixture line names payroll — none may route to the wages-payable account"
+        "no fixture line names payroll, none may route to the wages-payable account"
     );
     assert_eq!(
         posted_role_movement(&pool, entity, period_id, "income_tax_payable").await,
         (0, 0),
-        "no fixture line names tax — none may route to the tax-payable account"
+        "no fixture line names tax, none may route to the tax-payable account"
     );
     assert_eq!(outcome.line_count, 4);
 }
@@ -626,7 +626,7 @@ async fn ingested_lines_sweep_into_the_posted_ledger_once() {
 
 /// Every request-level problem is a typed refusal (never a partial import),
 /// and the per-row `bank_account` column is validated against the statement
-/// account — unknown, ambiguous, and foreign accounts are reported, not
+/// account, unknown, ambiguous, and foreign accounts are reported, not
 /// silently accepted.
 #[tokio::test]
 async fn ingest_request_level_refusals_and_account_resolution_edges() {
@@ -756,7 +756,7 @@ async fn ingest_request_level_refusals_and_account_resolution_edges() {
     match ingest_bank_statement(&pool, &malformed).await {
         Err(IngestError::Rejected { errors }) => {
             // The unterminated quoted field swallows the rest of the line,
-            // so the row surfaces as per-column errors on its own line — a
+            // so the row surfaces as per-column errors on its own line, a
             // malformed record is reported, never silently dropped or
             // partially imported. (The reader runs in flexible mode, so a
             // length mismatch is not an error; the defensive csv::Error arm

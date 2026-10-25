@@ -6,7 +6,7 @@
 //! the database this process connected to is the schema this build expects,
 //! and to refuse startup when it is not.
 //!
-//! It deliberately does not create or alter anything — no `CREATE TABLE IF
+//! It deliberately does not create or alter anything, no `CREATE TABLE IF
 //! NOT EXISTS`, no `ALTER TABLE`. Runtime DDL previously made the effective
 //! schema depend on service start order, which meant a deployment could serve
 //! traffic against a schema no migration ever described.
@@ -28,7 +28,7 @@ pub const REQUIRED_TABLES: &[&str] = &[
     "sales_settings",
     // Tables that previously existed only through runtime DDL. They are
     // required here so this guard fails loudly if the bootstrap removal ever
-    // outruns the migration again — that gap shipped once and broke
+    // outruns the migration again, that gap shipped once and broke
     // enrichment, calendar, inbox and conversion storage on a fresh database.
     "enriched_companies",
     "sales_calendar_events",
@@ -52,7 +52,7 @@ pub const REQUIRED_TABLES: &[&str] = &[
     // Work queue and decisions.
     "sales_actions",
     "sales_decisions",
-    // Campaign execution (the canonical pair — NOT drip_campaigns).
+    // Campaign execution (the canonical pair, NOT drip_campaigns).
     "sales_campaigns",
     "sales_campaign_recipients",
     // Sender reputation isolation.
@@ -205,7 +205,7 @@ pub async fn verify(pool: &PgPool) -> Result<(), SalesError> {
 
     for retired in &still_there {
         problems.push(format!(
-            "retired table `{retired}` still present — the sales unification migration \
+            "retired table `{retired}` still present, the sales unification migration \
              (200_sales_autopilot_v2_unification) is not fully applied"
         ));
     }

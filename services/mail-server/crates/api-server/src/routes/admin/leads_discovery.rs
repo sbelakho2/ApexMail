@@ -1,4 +1,4 @@
-//! Lead discovery endpoint — sources and discovered leads.
+//! Lead discovery endpoint, sources and discovered leads.
 //!
 
 use axum::extract::State;
@@ -13,7 +13,7 @@ use crate::state::AppState;
 
 /// The discovery import read, as one named function.
 ///
-/// Named so a test executes exactly what the handler executes — the previous
+/// Named so a test executes exactly what the handler executes, the previous
 /// version selected `stage`/`industry`, which do not exist on the canonical
 /// `sales_leads`, so the endpoint failed on every call unnoticed.
 fn discovered_leads_sql() -> String {
@@ -128,7 +128,7 @@ async fn get_discovery(
         // `stage` and `industry` DO NOT EXIST on the canonical `sales_leads`
         // (the legacy lineage had them), so this query failed with 42703 on
         // every call. `category` is now the canonical status derivation and
-        // `description` is the account's industry — which is where industry
+        // `description` is the account's industry, which is where industry
         // actually lives in the canonical model, and is why the old
         // "industry on the lead" assumption was wrong in the first place.
         &discovered_leads_sql(),
@@ -267,7 +267,7 @@ mod tests {
         assert_eq!(
             row.5.as_deref(),
             Some("Email Infrastructure"),
-            "description is the ACCOUNT industry — industry never lived on the lead"
+            "description is the ACCOUNT industry, industry never lived on the lead"
         );
 
         // The discovery insert is visible in the CP list immediately.

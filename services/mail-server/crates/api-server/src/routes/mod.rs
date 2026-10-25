@@ -12,7 +12,7 @@ pub mod campaigns;
 pub mod client_errors;
 /// Provider compatibility surface (SendGrid / Mailgun / Postmark / Resend):
 /// a pure mapping layer that translates each provider's send syntax onto the
-/// EXISTING canonical send path (`routes::messages` — the same handler
+/// EXISTING canonical send path (`routes::messages`, the same handler
 /// `POST /v1/messages` uses). No send logic lives here.
 pub mod compat;
 pub mod contact;
@@ -34,8 +34,8 @@ pub mod notification_drain;
 pub mod pagination;
 /// Provider-export importer (SendGrid / Mailgun / Postmark / Resend): reads a
 /// switching customer's export and writes through the EXISTING canonical
-/// paths — suppressions table, `routes::contacts::import_contact_rows`,
-/// `routes::templates::create_template` — plus the read-only domains DNS
+/// paths, suppressions table, `routes::contacts::import_contact_rows`,
+/// `routes::templates::create_template`, plus the read-only domains DNS
 /// report. No writer is re-implemented here.
 pub mod provider_import;
 pub mod retention;
@@ -47,7 +47,7 @@ pub mod ses_notifications;
 pub mod support;
 pub mod suppressions;
 pub(crate) mod system_sender;
-/// The canonical system tenant id (migration 072) — a public contract for
+/// The canonical system tenant id (migration 072), a public contract for
 /// callers outside the crate (integration suites seed operators on it).
 pub use system_sender::SYSTEM_TENANT_ID;
 pub mod templates;
@@ -64,7 +64,7 @@ pub mod telemetry;
 
 pub mod admin;
 
-// KiwiCaptcha — native Rust proof-of-work CAPTCHA
+// KiwiCaptcha, native Rust proof-of-work CAPTCHA
 pub mod kiwicaptcha;
 
 // Real-time SSE stream token issuance

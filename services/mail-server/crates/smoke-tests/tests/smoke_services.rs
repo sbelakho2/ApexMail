@@ -4,7 +4,7 @@
 //! Smoke tests verify that every public API type can be **instantiated**,
 //! **serialised**/deserialised, and that key functions return `Ok` / `Some`
 //! on trivial inputs.  They deliberately do **not** exercise runtime
-//! behaviour, data-flow correctness, or concurrent access — those concerns
+//! behaviour, data-flow correctness, or concurrent access, those concerns
 //! are covered by the `functional-tests`, `integration-tests`, and
 //! `load-tests` crates respectively.
 //!
@@ -79,7 +79,7 @@ mod apexmail_db_tests {
     fn test_db_types_serialize() {
         let tenant = apexmail_db::Tenant {
             // tenants.id is the 26-char canonical type (migration 064 /
-            // apexmail-db contract test) — not a UUID.
+            // apexmail-db contract test), not a UUID.
             id: "01JSMOKETESTTENANT000000A".into(),
             name: "Acme Corp".into(),
             slug: "acme".into(),
@@ -120,7 +120,7 @@ mod apexmail_db_tests {
         // absent, the pool creation is still expected to return `Ok` because
         // `connect_lazy` defers the actual connection.
         if std::env::var("DATABASE_URL").is_err() {
-            eprintln!("INFO: DATABASE_URL not set — pool will use fallback URL");
+            eprintln!("INFO: DATABASE_URL not set, pool will use fallback URL");
         }
         let pool = apexmail_db::pool::create_lazy_pool("postgres://localhost/smoke_test");
         assert!(
@@ -231,7 +231,7 @@ mod billing_tests {
         assert_eq!(total, email_cost);
     }
 
-    // Audit F13: the smoke `test_billing_vat_calculation` was deleted — it
+    // Audit F13: the smoke `test_billing_vat_calculation` was deleted, it
     // re-ran a subset of the VAT cases that `functional-tests`'s
     // `functional_billing.rs` owns (EE 24%, EU-B2B-without-evidence 19%,
     // non-EU 0%, plus FR B2C, negative/zero/overflow guards). One suite must
@@ -511,7 +511,7 @@ mod compliance_tests {
 
     #[test]
     fn test_compliance_risk_level_type_exists() {
-        // Compile-only existence check — the name now says exactly that
+        // Compile-only existence check, the name now says exactly that
         // (audit F13). Behavior lives in the compliance crate's own tests
         // and `test_compliance_risk_level` above.
         let _ = std::any::type_name::<compliance::types::RiskLevel>();
@@ -526,7 +526,7 @@ mod compliance_tests {
 mod enterprise_tests {
     #[test]
     fn test_enterprise_sso_type_exists() {
-        // Compile-only existence check — the name now says exactly that
+        // Compile-only existence check, the name now says exactly that
         // (audit F13).
         let _ = std::any::type_name::<enterprise::types::SSOConfiguration>();
         let _ = std::any::type_name::<enterprise::types::SSOSession>();
@@ -536,7 +536,7 @@ mod enterprise_tests {
     fn test_enterprise_module_type_exists() {
         // Compile-only existence check (audit F13): each enterprise module's
         // service type must RESOLVE as a path. The previous body asserted
-        // `modules.len() >= 5` on a hardcoded 5-element string array — an
+        // `modules.len() >= 5` on a hardcoded 5-element string array, an
         // assertion that could never fail and proved nothing about the
         // crate.
         let _ = std::any::type_name::<enterprise::sso::SSOService>();
@@ -619,7 +619,7 @@ mod mta_tests {
 mod edge_cases_tests {
     #[test]
     fn test_edge_cases_config_type_exists() {
-        // Compile-only existence check — the name now says exactly that
+        // Compile-only existence check, the name now says exactly that
         // (audit F13).
         let _ = std::any::type_name::<edge_cases::config::EdgeCasesConfig>();
     }
@@ -633,7 +633,7 @@ mod edge_cases_tests {
 mod worker_processors_tests {
     #[test]
     fn test_worker_processors_type_exists() {
-        // Compile-only existence check — the name now says exactly that
+        // Compile-only existence check, the name now says exactly that
         // (audit F13).
         let _ = std::any::type_name::<worker_processors::ProcessorConfig>();
         let _ = std::any::type_name::<worker_processors::ProcessorError>();
@@ -664,7 +664,7 @@ mod template_renderer_tests {
 mod ai_embeddings_tests {
     #[test]
     fn test_ai_embeddings_type_exists() {
-        // Compile-only existence check (audit F13) — plus one REAL
+        // Compile-only existence check (audit F13), plus one REAL
         // behavior assertion kept from the previous body: the error
         // variant's user-facing message.
         let _ = std::any::type_name::<ai_embeddings::types::EmbeddingVector>();
@@ -684,7 +684,7 @@ mod ai_embeddings_tests {
 mod pattern_matcher_tests {
     #[test]
     fn test_pattern_matcher_type_exists() {
-        // Compile-only existence check (audit F13 — the previous name
+        // Compile-only existence check (audit F13, the previous name
         // claimed a `match` that never ran; real matching behavior is
         // covered by `functional-tests`' `functional_pattern.rs`).
         let _ = std::any::type_name::<pattern_matcher::PatternMatcher>();
@@ -735,7 +735,7 @@ mod dns_resolver_tests {
     }
 
     /// REAL behavior (audit F13): record parsing and the cache round-trip
-    /// the resolver's lookup path depends on — no network, no services.
+    /// the resolver's lookup path depends on, no network, no services.
     #[test]
     fn test_dns_resolver_parses_records_and_caches() {
         use apexmail_dns_resolver::cache::CachedResult;

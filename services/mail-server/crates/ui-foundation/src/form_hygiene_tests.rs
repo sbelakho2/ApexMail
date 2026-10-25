@@ -1,4 +1,4 @@
-//! GATE D — form hygiene for the zero-JS console (Rust-rendered surfaces).
+//! GATE D, form hygiene for the zero-JS console (Rust-rendered surfaces).
 //!
 //! Two contracts:
 //!
@@ -12,8 +12,8 @@
 //!    `aria-label`/`aria-labelledby` on the control, a `<label for=…>` bound
 //!    to the control's `id`, or a wrapping `<label>` element. Hidden and
 //!    submit/button controls are exempt. Controls that fail today are
-//!    allowlisted per document in [`UNLABELED_CONTROL_EXEMPT`] — the batch-2
-//!    a11y worklist — with a hard cap and a no-regression baseline.
+//!    allowlisted per document in [`UNLABELED_CONTROL_EXEMPT`], the batch-2
+//!    a11y worklist, with a hard cap and a no-regression baseline.
 
 use crate::gate_support::{
     attribute_value, element_blocks, form_elements, manifest_route_set,
@@ -216,7 +216,7 @@ fn every_form_input_has_label_or_aria_label_or_is_hidden() {
 fn form_input_allowlist_is_capped_and_baseline_documented() {
     assert!(
         UNLABELED_CONTROL_EXEMPT.len() <= UNLABELED_CONTROL_CAP,
-        "UNLABELED_CONTROL_EXEMPT has {} entries (cap {UNLABELED_CONTROL_CAP}) — label the controls instead of allowlisting more documents",
+        "UNLABELED_CONTROL_EXEMPT has {} entries (cap {UNLABELED_CONTROL_CAP}), label the controls instead of allowlisting more documents",
         UNLABELED_CONTROL_EXEMPT.len(),
     );
     let mut seen: Vec<(&str, &str)> = Vec::new();
@@ -230,7 +230,7 @@ fn form_input_allowlist_is_capped_and_baseline_documented() {
             .any(|route| route.path == *path);
         assert!(
             known,
-            "exempt path [{surface}] {path} is not a manifest route — delete the stale entry",
+            "exempt path [{surface}] {path} is not a manifest route, delete the stale entry",
         );
         assert!(
             !seen.contains(&(*surface, *path)),
@@ -243,7 +243,7 @@ fn form_input_allowlist_is_capped_and_baseline_documented() {
         let unlabeled = unlabeled_controls(surface, path, &html);
         assert!(
             !unlabeled.is_empty(),
-            "UNLABELED_CONTROL_EXEMPT entry [{surface}] {path} is dead — every control is labelled now. Delete the entry.",
+            "UNLABELED_CONTROL_EXEMPT entry [{surface}] {path} is dead, every control is labelled now. Delete the entry.",
         );
     }
 }
@@ -267,7 +267,7 @@ fn form_events(html: &str) -> Vec<(usize, bool)> {
 
 /// Nested `<form>` elements in one document. The HTML parser DISCARDS a
 /// form start tag inside another form, merging both control sets into the
-/// outer form — which then fails constraint validation whenever either
+/// outer form, which then fails constraint validation whenever either
 /// half's `required` inputs are empty, leaving the form permanently
 /// unsubmittable in every browser with no server-side trace.
 fn nested_form_violations(surface: &str, path: &str, html: &str) -> Vec<String> {
@@ -278,7 +278,7 @@ fn nested_form_violations(surface: &str, path: &str, html: &str) -> Vec<String> 
             if depth > 0 {
                 let snippet: String = html[at..].chars().take(140).collect();
                 violations.push(format!(
-                    "[{surface}] {path}: <form> nested inside another <form> — the parser merges them and required inputs from both halves must then all be filled: {snippet}",
+                    "[{surface}] {path}: <form> nested inside another <form>, the parser merges them and required inputs from both halves must then all be filled: {snippet}",
                 ));
             }
             depth += 1;
@@ -298,11 +298,11 @@ fn nested_form_violations(surface: &str, path: &str, html: &str) -> Vec<String> 
 /// `<form>` inside another `<form>`. Found by dogfood 2026-10-06: the SSR MFA
 /// challenge page embedded the recovery-code form inside the authenticator
 /// form, so the browser collapsed them into one form whose `required`
-/// recovery input was empty and invisible — "Verify and sign in" produced no
+/// recovery input was empty and invisible, "Verify and sign in" produced no
 /// request at all and every MFA-enrolled console login was stuck.
 ///
 /// The variants from [`crate::gate_support::STATEFUL_RENDER_VARIANTS`] are
-/// rendered too — the original bug lived only on `/login?mfa=1`, invisible to
+/// rendered too, the original bug lived only on `/login?mfa=1`, invisible to
 /// a manifest-only sweep.
 #[test]
 fn no_rendered_document_nests_a_form_inside_another_form() {
@@ -391,7 +391,7 @@ fn csrf_field_state(form_element: &str) -> (bool, bool) {
 /// `<input type="hidden" name="_csrf" value="{csrf}" />` from a page-data
 /// field their loaders never populated. The render pipeline injects a
 /// correctly-valued token only into forms that LACK one (`inject_csrf_and_
-/// sign_confirms`) — so the explicit empty field blocked the injection and
+/// sign_confirms`), so the explicit empty field blocked the injection and
 /// the browser posted `_csrf=` , which the form-CSRF bridge correctly
 /// refused. The form then could not be submitted by any user, with only a
 /// raw JSON 403 at the end (demo session advance). Views must not render
@@ -416,7 +416,7 @@ fn every_rendered_post_form_carries_a_non_empty_csrf_token() {
                     ));
                 } else if !has_value {
                     violations.push(format!(
-                        "[{surface}] {document}: POST {action} form carries an EMPTY `_csrf` value — the pipeline only injects a token into forms that lack the field, so this form can never be submitted",
+                        "[{surface}] {document}: POST {action} form carries an EMPTY `_csrf` value, the pipeline only injects a token into forms that lack the field, so this form can never be submitted",
                     ));
                 }
             }

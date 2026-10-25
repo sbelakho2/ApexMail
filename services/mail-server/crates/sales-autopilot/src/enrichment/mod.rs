@@ -6,10 +6,10 @@
 //! flattened its answer straight into a `Company`. That made three audit
 //! problems structural rather than fixable in a handler:
 //!
-//! 1. no fallback — when the one provider failed, enrichment failed;
-//! 2. no provenance — a field's origin provider was lost the moment it was
+//! 1. no fallback, when the one provider failed, enrichment failed;
+//! 2. no provenance, a field's origin provider was lost the moment it was
 //!    written to `enriched_companies`;
-//! 3. no cost control — every lookup used the same provider regardless of
+//! 3. no cost control, every lookup used the same provider regardless of
 //!    observed fill rate or price.
 //!
 //! This module replaces it with an ordered waterfall:
@@ -53,7 +53,7 @@ pub mod router;
 pub use providers::{HttpEnrichmentProvider, MockEnrichmentProvider, ResearchEnrichmentProvider};
 
 // ---------------------------------------------------------------------------
-// Field inventory — the single place field names are declared.
+// Field inventory, the single place field names are declared.
 // ---------------------------------------------------------------------------
 
 /// Canonical field names produced by enrichment providers.
@@ -76,7 +76,7 @@ pub mod fields {
     // Tech stack and current ESP evidence.
     pub const TECHNOLOGIES: &str = "technologies";
     /// Current email service provider observed for the account (ESP evidence,
-    /// never asserted as an eternal fact — it carries an expiry).
+    /// never asserted as an eternal fact, it carries an expiry).
     pub const EMAIL_PROVIDER: &str = "email_provider";
 
     // People and deliverability.
@@ -558,7 +558,7 @@ impl EnrichmentService {
     }
 
     /// Run the waterfall with cost-aware routing and `sales_provider_stats`
-    /// recording. Facts are not persisted here — call
+    /// recording. Facts are not persisted here, call
     /// [`enrich_persisted`](Self::enrich_persisted) for the full durable path.
     pub async fn run_waterfall_routed(
         &self,
@@ -654,7 +654,7 @@ impl EnrichmentService {
     ) -> EnrichmentOutcome {
         let requested = self.requested_fields(request);
 
-        // Phase 1 — assign each field to exactly one provider. This is what
+        // Phase 1, assign each field to exactly one provider. This is what
         // guarantees a field filled by a higher-priority provider is never
         // requested from a lower one: a provider is only called when it owns
         // at least one still-missing field.
@@ -688,7 +688,7 @@ impl EnrichmentService {
                         tracing::warn!(
                             field = %field,
                             error = %error,
-                            "provider routing failed — falling back to waterfall priority order"
+                            "provider routing failed, falling back to waterfall priority order"
                         );
                         declaring[0]
                     }
@@ -699,7 +699,7 @@ impl EnrichmentService {
             assigned[chosen].push(field.clone());
         }
 
-        // Phase 2 — call every selected provider concurrently. Calls are
+        // Phase 2, call every selected provider concurrently. Calls are
         // independent: each one is responsible for a disjoint field set.
         let calls =
             self.providers
@@ -720,7 +720,7 @@ impl EnrichmentService {
                 });
         let results = futures::future::join_all(calls).await;
 
-        // Phase 3 — apply results (concurrent completion order is irrelevant:
+        // Phase 3, apply results (concurrent completion order is irrelevant:
         // each field has exactly one owner).
         let mut facts: Vec<NamedFact> = Vec::new();
         let mut missing: Vec<String> = requested.clone();
@@ -1281,7 +1281,7 @@ mod tests {
     }
 
     /// Waterfall rule: a field already filled by provider 1 is never requested
-    /// from provider 2 — and a provider with nothing left to do is not called
+    /// from provider 2, and a provider with nothing left to do is not called
     /// at all.
     #[tokio::test]
     async fn waterfall_does_not_refetch_filled_fields() {
@@ -1855,7 +1855,7 @@ mod residual_tests {
     }
 
     /// Facts are persisted by ONE INSERT per table (pre-fix: one evidence +
-    /// one fact insert per field — up to 64 fields per waterfall).
+    /// one fact insert per field, up to 64 fields per waterfall).
     #[tokio::test]
     async fn persisted_facts_use_one_statement_per_table() {
         let Some(pool) =

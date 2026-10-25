@@ -1,6 +1,6 @@
 +++
 title = "Servicelevel-Vereinbarung (SLA)"
-description = "ApexMail-SLA — vertragliche Betriebszeitverpflichtungen für Business- und Enterprise-Tarifkunden."
+description = "ApexMail-SLA, vertragliche Betriebszeitverpflichtungen für Business- und Enterprise-Tarifkunden."
 template = "prose.html"
 
 [extra]
@@ -37,7 +37,7 @@ Die Betriebszeit wird von unserem externen Überwachungssystem (Blackbox exporte
 
 ## 5. Servicegutschriften
 
-Berechtigte Tarife tragen eine monatliche Verfügbarkeitsverpflichtung von 99,9 %. Fällt die gemessene monatliche Betriebszeit darunter, gilt eine Servicegutschrift gemäß der tarifspezifischen Matrix unten — der Gutschriftsprozentsatz entspricht den monatlich wiederkehrenden Gebühren des Mandanten für den betroffenen Monat.
+Berechtigte Tarife tragen eine monatliche Verfügbarkeitsverpflichtung von 99,9 %. Fällt die gemessene monatliche Betriebszeit darunter, gilt eine Servicegutschrift gemäß der tarifspezifischen Matrix unten, der Gutschriftsprozentsatz entspricht den monatlich wiederkehrenden Gebühren des Mandanten für den betroffenen Monat.
 
 | Gemessene monatliche Verfügbarkeit | Business | Enterprise Cloud / vertraglich |
 |---|---:|---:|
@@ -48,8 +48,8 @@ Berechtigte Tarife tragen eine monatliche Verfügbarkeitsverpflichtung von 99,9 
 
 **Tarifhinweise:**
 
-- **Business** — gestaffelte Prozentsätze wie angegeben; keine pauschale Obergrenze unterhalb der Stufen.
-- **Enterprise Cloud und vertragliche Bereitstellungen** — Prozentsätze wie angegeben, gedeckelt bei 25 % (oder dem vertraglichen Wert, sofern ein Bestellformular einen solchen vorsieht).
+- **Business**, gestaffelte Prozentsätze wie angegeben; keine pauschale Obergrenze unterhalb der Stufen.
+- **Enterprise Cloud und vertragliche Bereitstellungen**, Prozentsätze wie angegeben, gedeckelt bei 25 % (oder dem vertraglichen Wert, sofern ein Bestellformular einen solchen vorsieht).
 
 Gutschriften werden aus der gemessenen monatlichen Betriebszeit unterhalb der Verpflichtung berechnet und durch den Tarif des Kunden gedeckelt.
 

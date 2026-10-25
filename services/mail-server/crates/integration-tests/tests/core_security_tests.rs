@@ -5,7 +5,7 @@
 //! All tests are fail-first:they must detect the bug before the fix.
 
 // ═══════════════════════════════════════════════════════════════════════════
-// UI Foundation — XSS Escaping
+// UI Foundation, XSS Escaping
 // ═══════════════════════════════════════════════════════════════════════════
 
 mod ui_xss {
@@ -124,7 +124,7 @@ mod ui_xss {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// RBAC — Scope Enforcement
+// RBAC, Scope Enforcement
 // ═══════════════════════════════════════════════════════════════════════════
 
 mod rbac {
@@ -193,7 +193,7 @@ mod rbac {
     #[test]
     fn partial_match_insufficient() {
         let user = user_with_scopes(vec!["messages:read"]);
-        // User has read but not send — requiring both must fail
+        // User has read but not send, requiring both must fail
         assert!(require_scopes(&user, &["messages:read", "messages:send"]).is_err());
     }
 
@@ -357,7 +357,7 @@ mod webhook_security {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Auth — Password & Token Security
+// Auth, Password & Token Security
 // ═══════════════════════════════════════════════════════════════════════════
 
 mod auth_security {
@@ -433,7 +433,7 @@ mod auth_security {
         // Argon2 verify_password must return Err, not a false positive
         let bcrypt_hash = "$2b$12$LJ3m4ys8Rp9gXPfBH9J9KuW5Eky0Zxy7v1X8X9X0X0X0X0X0X0X0";
         let result = crypto::verify_password("test", bcrypt_hash);
-        // Must either error or return false — never panic or return true
+        // Must either error or return false, never panic or return true
         if let Ok(verified) = result {
             assert!(!verified, "bcrypt hash must not verify as Argon2")
         }
@@ -449,7 +449,7 @@ mod ssrf_protection {
 
     // The REAL predicate used by the production webhook tester
     // (devex-service::webhook_tester::is_private_ip). The previous version of
-    // this module asserted on a local copy that "mirrored" the logic — a
+    // this module asserted on a local copy that "mirrored" the logic, a
     // regression that dropped, say, cloud-metadata coverage there stayed
     // green here. Now the production function itself is under test: if its
     // range coverage shrinks, these tests fail.
@@ -518,7 +518,7 @@ mod ssrf_protection {
         ] {
             assert!(
                 is_private_ip(&ip(ip_str)),
-                "{ip_str} must be blocked ({why}) — a dropped range is an SSRF hole"
+                "{ip_str} must be blocked ({why}), a dropped range is an SSRF hole"
             );
         }
     }
@@ -545,7 +545,7 @@ mod ssrf_protection {
         for ip_str in ["8.8.8.8", "1.1.1.1", "151.101.1.140", "104.18.32.7"] {
             assert!(
                 !is_private_ip(&ip(ip_str)),
-                "{ip_str} must be allowed as public — over-blocking breaks outbound webhooks"
+                "{ip_str} must be allowed as public, over-blocking breaks outbound webhooks"
             );
         }
         assert!(

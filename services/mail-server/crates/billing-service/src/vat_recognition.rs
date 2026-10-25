@@ -6,7 +6,7 @@
 //! 1. resolves the tenant's accounting basis from the dated
 //!    `vat_accounting_bases` rows (delegating the pure precedence/timing
 //!    logic to [`billing_common::vat_recognition`]);
-//! 2. materializes the CURRENT recognition event for an invoice — under the
+//! 2. materializes the CURRENT recognition event for an invoice, under the
 //!    general scheme the supply event, under `cash_special` the payment
 //!    event or the third-month fallback, whichever is earlier;
 //! 3. exposes the aggregation the KMD return uses.
@@ -80,7 +80,7 @@ pub(crate) const KMD_RECOGNITION_RATES_SQL: &str = r#"
 
 /// Map raw recognition-ledger rate rows into KMD buckets (pure, unit-tested).
 /// Rows already carry the stored rate and reason, so no re-derivation from
-/// the tenant's current address happens — the ledger is the consumed truth.
+/// the tenant's current address happens, the ledger is the consumed truth.
 pub(crate) fn buckets_from_recognition_rows(
     rows: &[(f64, Option<String>, i64, i64, i64)],
 ) -> Vec<VatRateBucket> {
@@ -151,7 +151,7 @@ fn tallinn_date(instant: DateTime<Utc>) -> NaiveDate {
     instant.with_timezone(&Tallinn).date_naive()
 }
 
-/// Tallinn midnight of `date` as UTC — the instant a cash-accounting
+/// Tallinn midnight of `date` as UTC, the instant a cash-accounting
 /// fallback becomes taxable (same convention as the KMD period bounds).
 fn tallinn_midnight_utc(date: NaiveDate) -> Result<DateTime<Utc>, String> {
     match Tallinn.with_ymd_and_hms(date.year(), date.month(), date.day(), 0, 0, 0) {
@@ -180,7 +180,7 @@ pub struct InvoiceRecognitionInput {
 
 /// Compute the ledger entry for an invoice, if any is recognized as of
 /// `now`. Returns `None` when a cash-accounting supply is still unpaid and
-/// its third-month fallback has not arrived — correctly recognising nothing
+/// its third-month fallback has not arrived, correctly recognising nothing
 /// yet, rather than recognising early.
 pub fn plan_recognition_entry(
     input: &InvoiceRecognitionInput,
@@ -437,7 +437,7 @@ pub async fn materialize_invoice_recognition_by_id(
 ///
 /// Scheduled (audit F7): `maintenance::start_periodic_jobs` runs this in the
 /// KMD loop, BEFORE the return generation, so the `cash_special_due` output
-/// VAT is in the period being filed — the mollie-webhook comment that "the
+/// VAT is in the period being filed, the mollie-webhook comment that "the
 /// sweep" handles the fallback is now true. Also exposed so operations can
 /// run it one-shot.
 pub async fn materialize_due_cash_special(db: &PgPool, now: DateTime<Utc>) -> Result<u64, String> {

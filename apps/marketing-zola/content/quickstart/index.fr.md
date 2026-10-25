@@ -32,7 +32,7 @@ Accédez à [app.apexmail.ee/signup](https://app.apexmail.ee/signup).
 
 **Cas d'erreur :**
 - **`Email already registered`** : Utilisez le flux de réinitialisation de mot de passe sur [app.apexmail.ee/reset-password](https://app.apexmail.ee/reset-password).
-- **`Password too weak`** : Utilisez 15+ caractères (les phrases de passe plus longues conviennent — aucun mélange de symboles ou de chiffres n'est requis). Évitez les mots de passe courants et les motifs simples de répétition/séquence.
+- **`Password too weak`** : Utilisez 15+ caractères (les phrases de passe plus longues conviennent, aucun mélange de symboles ou de chiffres n'est requis). Évitez les mots de passe courants et les motifs simples de répétition/séquence.
 
 ---
 
@@ -74,7 +74,7 @@ Dans la barre latérale du tableau de bord, accédez à **Settings → API Keys*
 
 **Ce qui se passe :** Une nouvelle clé API est générée et affichée une seule fois.
 
-**Avertissement de sécurité :** Copiez la clé immédiatement. Elle ne sera plus affichée. Stockez-la dans un gestionnaire de mots de passe ou une variable d'environnement — ne la commitez jamais dans le contrôle de version.
+**Avertissement de sécurité :** Copiez la clé immédiatement. Elle ne sera plus affichée. Stockez-la dans un gestionnaire de mots de passe ou une variable d'environnement, ne la commitez jamais dans le contrôle de version.
 
 ```bash
 export APEXMAIL_API_KEY="am_live_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
@@ -160,24 +160,24 @@ Choisissez votre méthode d'intégration :
 
 ### Option A : SDK (compiler depuis les sources)
 
-> **Pas encore sur les registres publics.** Les SDK ApexMail **ne sont pas encore publiés sur PyPI, pkg.go.dev, Packagist, RubyGems ni Maven Central** — `pip install apexmail`, `go get github.com/apexmail/apexmail-go` et `composer require apexmail/apexmail-php` échoueront jusqu'à la première version stable. D'ici là, installez depuis les sources du monorepo et épinglez un commit spécifique, et **vérifiez la source que vous intégrez** avant de livrer. Voir [SDKs](/docs/sdks/) pour l'état par langage.
+> **Pas encore sur les registres publics.** Les SDK ApexMail **ne sont pas encore publiés sur PyPI, pkg.go.dev, Packagist, RubyGems ni Maven Central**, `pip install apexmail`, `go get github.com/apexmail/apexmail-go` et `composer require apexmail/apexmail-php` échoueront jusqu'à la première version stable. D'ici là, installez depuis les sources du monorepo et épinglez un commit spécifique, et **vérifiez la source que vous intégrez** avant de livrer. Voir [SDKs](/docs/sdks/) pour l'état par langage.
 
-Le code source du SDK est actuellement privé et disponible pour les clients d'aperçu approuvés pendant que les paquets sont préparés pour leur première publication sur un registre public — écrivez à [support@apexmail.ee](mailto:support@apexmail.ee) (ou à votre responsable de compte) et vous recevrez le dépôt de code source épinglé pour votre langage, avec une somme de contrôle, sous la licence du SDK. Chaque répertoire de SDK contient ses propres instructions de compilation et de test.
+Le code source du SDK est actuellement privé et disponible pour les clients d'aperçu approuvés pendant que les paquets sont préparés pour leur première publication sur un registre public, écrivez à [support@apexmail.ee](mailto:support@apexmail.ee) (ou à votre responsable de compte) et vous recevrez le dépôt de code source épinglé pour votre langage, avec une somme de contrôle, sous la licence du SDK. Chaque répertoire de SDK contient ses propres instructions de compilation et de test.
 
-**Python** (`packages/sdk-python` — installez depuis le chemin local, ou intégrez le répertoire) :
+**Python** (`packages/sdk-python`, installez depuis le chemin local, ou intégrez le répertoire) :
 
 ```bash
 pip install ./packages/sdk-python
 ```
 
-**Go** (`packages/sdk-go` — épinglez le module aux sources intégrées avec une directive `replace`) :
+**Go** (`packages/sdk-go`, épinglez le module aux sources intégrées avec une directive `replace`) :
 
 ```bash
 go mod edit -replace github.com/apexmail/apexmail-go=./packages/sdk-go
 go mod tidy
 ```
 
-**PHP** (`packages/sdk-php` — pointez Composer vers le répertoire local) :
+**PHP** (`packages/sdk-php`, pointez Composer vers le répertoire local) :
 
 ```bash
 composer config repositories.apexmail path ./packages/sdk-php
@@ -188,7 +188,7 @@ composer require apexmail/apexmail-php:@dev
 
 ### Option B : cURL (test rapide)
 
-Aucune installation requise — utilisez le terminal :
+Aucune installation requise, utilisez le terminal :
 
 ```bash
 # Verify your key works
@@ -305,7 +305,7 @@ Accédez à **Settings → Webhooks** dans le tableau de bord.
 **Champs :**
 - **URL :** L'URL réceptrice de votre webhook (p. ex. `https://your-app.example.com/webhooks/apexmail`)
 - **Events :** Sélectionnez au minimum `message.delivered`, `message.bounced`, `message.complained`
-- **Secret :** Générez un secret de signature — stockez-le de manière sécurisée
+- **Secret :** Générez un secret de signature, stockez-le de manière sécurisée
 
 **Ce qui se passe :** ApexMail commence à livrer les événements correspondants à votre URL avec des signatures HMAC-SHA256.
 
@@ -344,9 +344,9 @@ Avant de passer en production :
 1. **Passez du forfait Free** si vous dépassez 3 000 emails/mois récurrents (ou votre allocation de lancement unique de 30 000 emails). Voir [Tarifs](/fr/pricing/).
 3. **Configurez DMARC** pour votre domaine d'envoi avec une politique d'au moins `p=none` initialement, puis `p=quarantine` ou `p=reject`.
 4. **Configurez l'alignement SPF** en vous assurant que votre domaine `Return-Path` correspond à votre domaine `From`.
-5. **Faites tourner les clés API** — créez des clés spécifiques à la production avec des scopes minimaux et des dates d'expiration.
-6. **Mettez en place le monitoring** — configurez des alertes pour les taux de rebond supérieurs à 2 % et les taux de plainte supérieurs à 0,1 %.
-7. **Testez l'idempotence du webhook** — vérifiez que votre gestionnaire déduplique correctement les événements via le champ `event_id`.
+5. **Faites tourner les clés API**, créez des clés spécifiques à la production avec des scopes minimaux et des dates d'expiration.
+6. **Mettez en place le monitoring**, configurez des alertes pour les taux de rebond supérieurs à 2 % et les taux de plainte supérieurs à 0,1 %.
+7. **Testez l'idempotence du webhook**, vérifiez que votre gestionnaire déduplique correctement les événements via le champ `event_id`.
 8. **Consultez la [Référence API](/docs/api/)** pour l'envoi par lots, les modèles et les fonctions avancées.
 
 ### Liste de contrôle de préparation à la production
@@ -365,8 +365,8 @@ Avant de passer en production :
 
 ## Prochaines étapes
 
-- [Référence API](/docs/api/) — documentation complète des points de terminaison avec schémas requête/réponse
-- [Webhooks](/docs/webhooks/) — catalogue complet des événements, sécurité et documentation de livraison
-- [SDKs](/docs/sdks/) — installation du SDK, authentification et exemples d'utilisation
-- [Analytics](/docs/analytics/) — métriques de livraison, classification des rebonds et rapports
-- [API Explorer](/api-explorer/) — exécutez de vraies requêtes contre le bac à sable live isolé
+- [Référence API](/docs/api/), documentation complète des points de terminaison avec schémas requête/réponse
+- [Webhooks](/docs/webhooks/), catalogue complet des événements, sécurité et documentation de livraison
+- [SDKs](/docs/sdks/), installation du SDK, authentification et exemples d'utilisation
+- [Analytics](/docs/analytics/), métriques de livraison, classification des rebonds et rapports
+- [API Explorer](/api-explorer/), exécutez de vraies requêtes contre le bac à sable live isolé

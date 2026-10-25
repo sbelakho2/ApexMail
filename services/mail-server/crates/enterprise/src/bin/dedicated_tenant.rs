@@ -1,13 +1,13 @@
-//! `dedicated-tenant` — operator CLI for the Dedicated Tenant workflow.
+//! `dedicated-tenant`, operator CLI for the Dedicated Tenant workflow.
 //!
 //! Three subcommands, all thin wrappers over `enterprise::dedicated_tenant`
 //! (no logic lives here):
 //!
-//! * `validate` — fail-closed validation of a deployment record against the
+//! * `validate`, fail-closed validation of a deployment record against the
 //!   plan (exit 1 on any refusal, printing the report JSON);
-//! * `bundle`   — render the deterministic deployment bundle for a record
+//! * `bundle`  , render the deterministic deployment bundle for a record
 //!   (and write it with `--write`), printing the bundle sha256 + path;
-//! * `review`   — generate the per-tenant monthly review packet from repo
+//! * `review`  , generate the per-tenant monthly review packet from repo
 //!   data (JSON or the compact markdown render).
 //!
 //! Usage:

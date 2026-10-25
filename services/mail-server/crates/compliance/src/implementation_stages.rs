@@ -186,7 +186,7 @@ impl ImplementationStage {
             Self::Migration => "Production traffic migrated. Verification confirms parity. Rollback plan available.",
             Self::GoLive => "Production DNS switched. Monitoring confirms normal operation for 24+ hours.",
             Self::Stabilization => "No critical issues for 7 consecutive days. Performance within targets.",
-            Self::OngoingOperations => "Not applicable — continuous operations.",
+            Self::OngoingOperations => "Not applicable, continuous operations.",
         }
     }
 

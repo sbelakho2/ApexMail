@@ -10,7 +10,7 @@ og_image = "/images/og-image.png"
 ## Un placement en boîte de réception adossé aux fournisseurs de messagerie eux-mêmes
 
 La plupart des « tableaux de bord de délivrabilité » relèvent du théâtre des listes témoins. ApexMail lit le
-signal **réel** que Gmail et Outlook publient sur votre domaine — et agit
+signal **réel** que Gmail et Outlook publient sur votre domaine, et agit
 en conséquence.
 
 ## Ce que nous mesurons
@@ -50,7 +50,7 @@ Toutes les six heures, le planificateur de réputation d'ApexMail :
    - Vert → bridage de 0 % (vitesse maximale)
    - Ambre → bridage de 50 % (report probabiliste)
    - Rouge → bridage de 90 % (quasi-arrêt, alerte envoyée)
-5. **Alerte** les bonnes personnes — webhook, email ou Slack — lorsqu'un palier se dégrade.
+5. **Alerte** les bonnes personnes, webhook, email ou Slack, lorsqu'un palier se dégrade.
 
 Quand votre réputation remonte, le bridage se relâche sans intervention humaine.
 
@@ -58,7 +58,7 @@ Quand votre réputation remonte, le bridage se relâche sans intervention humain
 
 Un seul mauvais envoi massif peut placer un domaine émetteur sur la liste BAD de Gmail pendant 30 jours ou plus.
 La plupart des ESP vous annoncent la mauvaise nouvelle au prochain bilan trimestriel.
-ApexMail limite le rayon d'impact **au quart de tour** — vos tenants à fort volume
+ApexMail limite le rayon d'impact **au quart de tour**, vos tenants à fort volume
 continuent de livrer via des voies propres pendant que le domaine touché refroidit.
 
 ## Dérogations de bridage par fournisseur
@@ -69,5 +69,5 @@ fins d'audit et de transparence vis-à-vis des clients.
 
 ## Obtenez un instantané de réputation
 
-Nous pouvons auditer votre domaine existant en moins d'une heure — en utilisant les mêmes flux de données
+Nous pouvons auditer votre domaine existant en moins d'une heure, en utilisant les mêmes flux de données
 Google et Microsoft que ceux que nous exploitons en production. [Réservez une revue de délivrabilité](/fr/contact/).

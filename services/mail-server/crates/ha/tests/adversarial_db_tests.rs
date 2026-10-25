@@ -94,7 +94,7 @@ async fn build_harness() -> Option<Harness> {
     std::env::set_var("HA_CHAOS_SAFETY_INTERVAL_MS", "25");
     // `shared_canonical_db`, NOT `fresh_canonical_pool`: this suite shares ONE
     // database for the whole process (the `SHARED` OnceCell), and the
-    // destructive variant DROPs and re-creates its database on every call — a
+    // destructive variant DROPs and re-creates its database on every call, a
     // clone can then race a concurrent template top-up (or another binary's
     // clone) and fail with `clone-connect: database "…_ha_core" does not
     // exist`, which is exactly what a fully parallel instrumented run hit. The
@@ -103,7 +103,7 @@ async fn build_harness() -> Option<Harness> {
     // A PRIVATE database PER PROCESS: these tests assert things like "the
     // routing rule picks THIS region" and "the backup contains exactly these
     // rows", which are only true when nothing else is writing. Under nextest
-    // every test is its own process, so the suffix includes the pid — each
+    // every test is its own process, so the suffix includes the pid, each
     // process drops and re-creates only its own database, which is race-free
     // (a shared name would be dropped under a sibling's feet) and keeps the
     // exclusivity the assertions need.
@@ -127,7 +127,7 @@ async fn build_harness() -> Option<Harness> {
     config.redis.port = port;
     config.redis.db = red_db;
     // Honor the URL's password: CI's ephemeral Redis is passwordless
-    // (None either way), while the dev compose Redis requires auth — the
+    // (None either way), while the dev compose Redis requires auth, the
     // previous hardcoded None made every fence-status read fail NOAUTH.
     config.redis.password = red_password;
     config.multi_region.node_id = format!("node-{}", Uuid::new_v4().simple());
@@ -144,7 +144,7 @@ fn parse_redis_url(url: &str) -> (String, u16, u8, Option<String>) {
         Some((userinfo, hostpart)) => (Some(userinfo), hostpart),
         None => (None, rest),
     };
-    // `redis://:password@host` — the password is the userinfo after ':'.
+    // `redis://:password@host`, the password is the userinfo after ':'.
     let password = userinfo
         .and_then(|info| info.split_once(':').map(|(_, p)| p.to_string()))
         .filter(|p| !p.is_empty());
@@ -220,7 +220,7 @@ fn unique(prefix: &str) -> String {
 
 /// Mutating requests pass the STONITH fence guard, which fails CLOSED with a
 /// 503 when the fence status cannot be read (e.g. a transient Redis hiccup).
-/// That is correct production behaviour, so retry such a call once — the
+/// That is correct production behaviour, so retry such a call once, the
 /// assertion under test is the auth gate, not the fence guard's availability.
 async fn auth_call(
     app: &Router,
@@ -276,7 +276,7 @@ async fn wait_for_setting(db: &sqlx::PgPool, expected: &str) -> String {
 
 /// External audit #2: a REAL `pg_stat_replication` row cannot exist in the
 /// single-node test topology, so the guard's success path shadows the view
-/// with a same-named table in a private schema — the service pool's
+/// with a same-named table in a private schema, the service pool's
 /// `search_path` resolves the unqualified view to the shadow (a DB test
 /// seam, not a code seam). Returns the shadow-configured pool and the
 /// schema to drop afterwards.
@@ -1078,7 +1078,7 @@ fn failover_lock_state_and_split_brain_are_consistent() {
         assert!(lock.is_none(), "the failover lock must be released");
 
         // A configured replica that is not replicating (no
-        // pg_stat_replication row) is skipped — never promoted.
+        // pg_stat_replication row) is skipped, never promoted.
         let cfg = config_with(|config| {
             config.database.replica_hosts = vec!["replica-not-replicating".into()];
         })
@@ -1484,7 +1484,7 @@ fn replication_reports_empty_topology_honestly_and_guards_slot_names() {
         // A well-formed-LOOKING slot name is attempted: `unique()` yields a
         // dashed suffix, which the slot-name validator rejects before any
         // SQL runs (a `-` is neither alphanumeric nor `_`). The outcome is
-        // therefore validator-driven and role-independent — never a silent
+        // therefore validator-driven and role-independent, never a silent
         // success.
         let slot = unique("advslot");
         let created = replication.create_slot(&slot, "physical").await;
@@ -1498,8 +1498,8 @@ fn replication_reports_empty_topology_honestly_and_guards_slot_names() {
         // Sync-mode transitions (external audits #2/#10): the '*' wildcard
         // form is refused outright, and synchronous=true needs a NAMED
         // standby that is configured AND currently streaming. Both
-        // refusals below are DETERMINISTIC — the guard runs before any
-        // SQL/Redis mutation — so they hold for every role.
+        // refusals below are DETERMINISTIC, the guard runs before any
+        // SQL/Redis mutation, so they hold for every role.
         let wildcard = replication
             .set_sync_mode(true, vec![])
             .await
@@ -1539,7 +1539,7 @@ fn replication_reports_empty_topology_honestly_and_guards_slot_names() {
         );
 
         // The async direction carries no standby requirement, but applying
-        // it needs ALTER SYSTEM privilege — assert the honest outcome FOR
+        // it needs ALTER SYSTEM privilege, assert the honest outcome FOR
         // THE ROLE WE ACTUALLY HAVE, and never leave the shared server
         // with a non-empty synchronous_standby_names.
         let superuser: bool =
@@ -1556,7 +1556,7 @@ fn replication_reports_empty_topology_honestly_and_guards_slot_names() {
             let error = applied_async.expect_err("a non-superuser role must be refused loudly");
             assert!(
                 matches!(error, SetSyncModeError::Failed(_)),
-                "async carries no standby requirement — the refusal must be the \
+                "async carries no standby requirement, the refusal must be the \
                  honest privilege error, not a policy refusal: {error}"
             );
         }
@@ -1609,7 +1609,7 @@ fn replication_reports_empty_topology_honestly_and_guards_slot_names() {
         .await;
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
         // The sync-mode route is ADMIN-only (external audit #2): the
-        // universal internal key is 401 — the same privilege class as
+        // universal internal key is 401, the same privilege class as
         // promote.
         let (status, _) = call(
             &app,
@@ -1671,7 +1671,7 @@ fn multi_region_routing_is_deterministic_and_fencing_excludes_regions() {
         let primary_info = service.get_region(&primary).await.unwrap().unwrap();
         assert_eq!(primary_info.endpoint, "https://updated.example.com");
         // The routing contract in ActivePassive mode is "a PRIMARY region,
-        // chosen deterministically" — NOT "the primary this test happens to
+        // chosen deterministically", NOT "the primary this test happens to
         // have registered". The fixture database is SHARED (all tests in this
         // binary reuse it, and under nextest each test is its own process), so
         // other tests' primaries are present and may legitimately win the
@@ -1910,7 +1910,7 @@ fn multi_region_routing_is_deterministic_and_fencing_excludes_regions() {
         .await;
         assert_eq!(json["status"], "inactive");
         // SM10 F11 (adversarial pass): region fence/unfence place and lift
-        // the STONITH keys — ADMIN-only, like initiate/promote. The
+        // the STONITH keys, ADMIN-only, like initiate/promote. The
         // internal key is refused; the admin key reaches the handlers.
         let (status, _) = call(
             &app,
@@ -2195,7 +2195,7 @@ fn chaos_experiments_validate_abort_and_never_corrupt_state() {
         // ENABLED (the default is off, which is itself pinned above).
         let chaos_cfg = config_with(|config| config.chaos.enabled = true).await;
         let app = build_router(h.state_with(chaos_cfg));
-        // SM10 F11: chaos-experiment START is ADMIN-only — the universal
+        // SM10 F11: chaos-experiment START is ADMIN-only, the universal
         // internal key is 401 before any handler/extractor runs.
         let (status, _) = call(
             &app,
@@ -2545,7 +2545,7 @@ fn backup_service_validation_and_table_enumeration() {
         assert!(error.contains("Invalid table name"), "{error}");
 
         // An EMPTY table still produces a valid backup whose compression
-        // ratio degrades to exactly 1.0 (no data to compress — never a
+        // ratio degrades to exactly 1.0 (no data to compress, never a
         // divide-by-zero or NaN). `ip_pools` exists in the canonical schema
         // and is empty in the harness clone.
         let empty = backup
@@ -2731,7 +2731,7 @@ fn backup_download_gates_and_storage_schemes() {
         assert!(failed.contains("S3 download returned status"), "{failed}");
 
         // (c) A 200 response carrying garbage bytes gets to the decompressor,
-        // which must refuse it — corrupt objects never reach the database.
+        // which must refuse it, corrupt objects never reach the database.
         statuses
             .lock()
             .expect("config")
@@ -2823,7 +2823,7 @@ fn restore_and_pitr_reject_hostile_tables_and_checksum_drift() {
             .expect("backup");
 
         // A catalog table smuggled into the recorded table list is refused
-        // by the restore path too — not only at creation.
+        // by the restore path too, not only at creation.
         sqlx::query(
             "UPDATE ha_backups SET tables_included = '[\"pg_class\"]'::jsonb WHERE id = $1",
         )
@@ -2947,7 +2947,7 @@ fn retention_removes_storage_objects_and_tolerates_storage_errors() {
         );
 
         // DELETE 500: catalog cleanup still proceeds (the row is past
-        // retention either way) — the storage failure is logged, not fatal.
+        // retention either way), the storage failure is logged, not fatal.
         statuses
             .lock()
             .expect("config")
@@ -2963,7 +2963,7 @@ fn retention_removes_storage_objects_and_tolerates_storage_errors() {
                 .expect("rows");
         assert_eq!(remaining, 0, "a storage outage does not keep dead rows");
 
-        // DELETE 404: the object is already gone — success.
+        // DELETE 404: the object is already gone, success.
         statuses
             .lock()
             .expect("config")
@@ -2998,7 +2998,7 @@ fn failover_reports_failures_and_refuses_unsafe_targets() {
         assert_eq!(auto.get_config_info().await.mode, "automatic");
 
         // UNREACHABLE coordination: writes fail closed, lock acquisition
-        // fails, claim refresh errors, split-brain detection errors — and
+        // fails, claim refresh errors, split-brain detection errors, and
         // none of it wedges the state machine.
         let mut dead = (*h.config).clone();
         dead.redis.host = "127.0.0.1".into();
@@ -3020,7 +3020,7 @@ fn failover_reports_failures_and_refuses_unsafe_targets() {
 
         // A LIVE coordinator with a configured replica: the automatic
         // failover acquires the lock, probes the candidate, finds it
-        // verifiably NOT replicating and aborts — the state machine returns
+        // verifiably NOT replicating and aborts, the state machine returns
         // to Normal and the lock is released.
         let cfg = config_with(|config| {
             config.failover.threshold = 1;
@@ -3086,7 +3086,7 @@ fn routes_exercise_every_authorized_mutating_surface() {
         let app = h.app();
 
         // SM10 F11: initiation, failback, restore and promotion are
-        // ADMIN-only — the universal internal key is 401, and the admin key
+        // ADMIN-only, the universal internal key is 401, and the admin key
         // reaches the handler.
         for (method, path, body) in [
             (
@@ -3113,7 +3113,7 @@ fn routes_exercise_every_authorized_mutating_surface() {
             );
         }
 
-        // Failover initiation without replicas is an honest 500 — the
+        // Failover initiation without replicas is an honest 500, the
         // handler ran, the coordinator refused.
         let (status, _) = call(
             &app,
@@ -3251,7 +3251,7 @@ fn routes_exercise_every_authorized_mutating_surface() {
         assert_eq!(deleted["deleted"], true);
 
         // Replication control surface: slot create/drop (the database may
-        // refuse the privilege — a 500 IS the handler reporting honestly),
+        // refuse the privilege, a 500 IS the handler reporting honestly),
         // promotion of a non-standby, sync-mode flips and lag history.
         let slot_name = format!("w6c_slot_{}", Uuid::new_v4().simple());
         let (status, _) = call(
@@ -3392,7 +3392,7 @@ fn sync_mode_route_privilege_matrix_matches_standby_reality() {
         let path = "/api/v1/replication/sync-mode";
 
         // The universal internal key (and no key at all) must NOT authorize
-        // a commit-durability change — 401 regardless of direction.
+        // a commit-durability change, 401 regardless of direction.
         for body in [
             serde_json::json!({"synchronous": false}),
             serde_json::json!({"synchronous": true, "standbys": ["db-replica-1"]}),
@@ -3524,10 +3524,10 @@ fn admin_key_with_connected_standby_enables_named_synchronous_commit() {
                 .unwrap_or(false);
 
         if superuser {
-            // Normalize the shared server to the async default first — the
+            // Normalize the shared server to the async default first, the
             // suite must never start from (or end in) a leaked sync state.
             if sync_standby_setting(&shadow_pool).await.is_empty() {
-                // already async — nothing to do
+                // already async, nothing to do
             } else {
                 sqlx::query("ALTER SYSTEM SET synchronous_standby_names = ''")
                     .execute(&shadow_pool)
@@ -3547,7 +3547,7 @@ fn admin_key_with_connected_standby_enables_named_synchronous_commit() {
             .await;
         if superuser {
             outcome.expect("admin + a valid streaming standby enables synchronous commit");
-            // The applied value is the NAMED list — never the '*' wildcard.
+            // The applied value is the NAMED list, never the '*' wildcard.
             let applied = wait_for_setting(&shadow_pool, "FIRST 1 (\"shadow-standby\")").await;
             assert_eq!(applied, "FIRST 1 (\"shadow-standby\")");
 
@@ -3561,7 +3561,7 @@ fn admin_key_with_connected_standby_enables_named_synchronous_commit() {
             assert_eq!(stats.desired_sync_mode.as_deref(), Some("sync"));
             assert!(
                 !stats.desired_drift,
-                "the durable intent is applied — no drift: {stats:?}"
+                "the durable intent is applied, no drift: {stats:?}"
             );
             // …and the topology is healthy: the shadow standby counts.
             assert_eq!(stats.expected_replicas, 1);
@@ -3583,7 +3583,7 @@ fn admin_key_with_connected_standby_enables_named_synchronous_commit() {
             assert!(!stats.desired_drift);
         } else {
             // The guard PASSED (the standby was proven streaming in the
-            // shadow view) — the error is the honest ALTER SYSTEM
+            // shadow view), the error is the honest ALTER SYSTEM
             // privilege refusal, never a policy refusal, and it leaves no
             // durable intent behind.
             let error = outcome.expect_err("a non-superuser role is refused loudly");
@@ -3606,7 +3606,7 @@ fn admin_key_with_connected_standby_enables_named_synchronous_commit() {
     });
 }
 
-/// Audit #10: the desired mode is durable configuration — it survives a
+/// Audit #10: the desired mode is durable configuration, it survives a
 /// simulated restart of the service object, the status endpoint exposes
 /// drift, the reconcile loop repairs it, and the rollback is idempotent.
 /// The apply-dependent halves need ALTER SYSTEM privilege (the canonical

@@ -1,7 +1,7 @@
 //! Configuration loading from environment variables.
 //!
 //! Every parse helper below falls back to a caller-supplied default when a
-//! variable is unset OR fails to parse — but a parse failure is never
+//! variable is unset OR fails to parse, but a parse failure is never
 //! silent: it emits a `tracing::warn!` naming the key, the offending
 //! value, and the default in effect, so a typo like
 //! `PORT=3O00` surfaces in logs instead of quietly binding a different
@@ -61,8 +61,8 @@ pub fn env_u64(key: &str, default: u64) -> u64 {
 
 /// Parse an env var as bool.
 ///
-/// Accepts explicit truthy values case-insensitively — `true`, `1`,
-/// `yes`, `on` — and explicit falsy values — `false`, `0`, `no`, `off`.
+/// Accepts explicit truthy values case-insensitively, `true`, `1`,
+/// `yes`, `on`, and explicit falsy values, `false`, `0`, `no`, `off`.
 /// Anything else (including an unset variable) falls back to `default`
 /// with a warning: previously `TRUE` and `on` were silently treated as
 /// false, flipping features off without any trace in the logs.

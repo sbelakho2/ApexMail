@@ -56,7 +56,7 @@ mod email_pipeline {
             waf_result.total_score
         );
 
-        // Step 2:Threat-intel check — the verdicts are ASSERTED, not bound
+        // Step 2:Threat-intel check, the verdicts are ASSERTED, not bound
         // and dropped (audit SM12 F15): a clean IP and domain must classify
         // exactly Allow by the production reputation scorer.
         let ti_ip = threat_intel.check_ip("8.8.8.8");
@@ -98,7 +98,7 @@ mod email_pipeline {
             spam_verdict.classification
         );
 
-        // Step 4:DLP scan — clean content must be an exact Allow with zero
+        // Step 4:DLP scan, clean content must be an exact Allow with zero
         // findings, not merely "a low number".
         let dlp_verdict = dlp.scan(
             "Let's meet tomorrow at 10am. Best regards, John.",
@@ -152,7 +152,7 @@ mod email_pipeline {
         };
         let result = waf.inspect(&req);
         // Exact-category assertion (SM12 F15): a single low-value rule from
-        // ANY category must not satisfy this test — the SQLi classifier
+        // ANY category must not satisfy this test, the SQLi classifier
         // itself must fire with a meaningful score.
         let sqli = result
             .matches
@@ -210,7 +210,7 @@ mod email_pipeline {
         let body = "Customer SSN: 123-45-6789, Credit card: 4111-1111-1111-1111";
         let verdict = dlp.scan(body, Some("external.com"));
         // Exact-category assertions (SM12 F15): both detector types must
-        // fire — an OR-composite let a single finding pass for both.
+        // fire, an OR-composite let a single finding pass for both.
         let types: Vec<_> = verdict.pii_findings.iter().map(|f| f.pii_type).collect();
         assert!(
             types.contains(&dlp_engine::pii::PiiType::Ssn),
@@ -344,11 +344,11 @@ mod login_pipeline {
         let nyc_event = make_login("user_travel", "1.2.3.4", 40.7128, -74.0060, true);
         ato.evaluate(&nyc_event);
 
-        // Login from Tokyo 30 minutes later — ~10,850 km in half an hour is
+        // Login from Tokyo 30 minutes later, ~10,850 km in half an hour is
         // physically impossible. (A ~0s gap is deliberately NOT flagged: the
         // engine's tolerance floors skip sub-2-minute gaps because mobile/
         // CGNAT GeoIP resolves to distant PoPs and clock skew produces
-        // non-monotonic timestamps — see ato-protection geo.rs.)
+        // non-monotonic timestamps, see ato-protection geo.rs.)
         let mut tokyo_event = make_login("user_travel", "5.6.7.8", 35.6762, 139.6503, true);
         tokyo_event.timestamp = Utc::now() + chrono::Duration::minutes(30);
         let verdict = ato.evaluate(&tokyo_event);
@@ -446,7 +446,7 @@ mod network_pipeline {
         };
         let waf_result = waf.inspect(&req);
 
-        // SM12 F15: this used to be `waf > 0 || !alerts.is_empty()` — a
+        // SM12 F15: this used to be `waf > 0 || !alerts.is_empty()`, a
         // single low-value WAF rule could mask a dead IDS (and vice versa).
         // Each engine is asserted on its OWN classification now.
         assert!(
@@ -588,7 +588,7 @@ mod full_stack {
         let spam = SpamEngine::new();
         let dlp = DlpEngine::new();
 
-        // Run 500 iterations — this exercises the engines under moderate
+        // Run 500 iterations, this exercises the engines under moderate
         // repetitive load.  No explicit resource-cleanup assertion is performed
         // because each iteration processes independent, ephemeral data and the
         // engines are pure stateless analyzers (no cross-iteration state leaks).
@@ -609,7 +609,7 @@ mod full_stack {
     }
 
     /// Verify that a WAF engine with a pared-down config (all feature flags
-    /// disabled) still processes a request without panicking — this serves as
+    /// disabled) still processes a request without panicking, this serves as
     /// an invariant-violation regression test proving the engine handles the
     /// degenerate case gracefully.
     #[test]
@@ -638,7 +638,7 @@ mod full_stack {
     }
 
     /// Verify that an IDS engine created with extreme configuration values
-    /// (zero-length thresholds) does not panic — confirming the engine's
+    /// (zero-length thresholds) does not panic, confirming the engine's
     /// parameter validation is robust against degenerate inputs.
     #[test]
     fn test_ids_extreme_config_does_not_panic() {
@@ -679,7 +679,7 @@ mod full_stack {
 /// The module doc always claimed "verdicts propagate correctly", but nothing
 /// pipelined: every engine was fed independently and the intermediate verdicts
 /// were dropped. This module chains ONE message through the production stack
-/// in delivery order — WAF → threat-intel → spam → DLP → sandbox — aggregates
+/// in delivery order, WAF → threat-intel → spam → DLP → sandbox, aggregates
 /// the per-stage verdicts the way the platform's rejection policy does (ANY
 /// hard-reject vote rejects the message), and asserts each engine's exact
 /// classification. `A > 0 || B` composites are banned by construction: every
@@ -732,8 +732,8 @@ mod chained_pipeline {
     const TEST_FEED: &str = "integration-test-feed";
 
     /// A TI engine whose config declares this suite's feed as a trusted
-    /// (9.5) ENFORCE feed — the same posture production blocklist feeds run
-    /// under — so the fed entries can drive a hard Block.
+    /// (9.5) ENFORCE feed, the same posture production blocklist feeds run
+    /// under, so the fed entries can drive a hard Block.
     fn block_capable_threat_intel() -> ThreatIntelEngine {
         let mut config = threat_intel::config::ThreatIntelConfig::default();
         config.feeds.insert(
@@ -775,7 +775,7 @@ mod chained_pipeline {
         );
         assert!(
             applied,
-            "the test feed refresh must be applied — without it the TI stage is untested"
+            "the test feed refresh must be applied, without it the TI stage is untested"
         );
     }
 
@@ -899,7 +899,7 @@ mod chained_pipeline {
             "a message with injection + blocklisted sender + PII must be rejected end-to-end"
         );
 
-        // Per-engine minimums — every stage must independently classify:
+        // Per-engine minimums, every stage must independently classify:
         let waf = WafEngine::new(WafConfig::default());
         let waf_result = waf.inspect(&HttpRequest {
             client_ip: BAD_SENDER_IP.parse().unwrap(),
@@ -972,7 +972,7 @@ mod chained_pipeline {
 
     #[test]
     fn malicious_attachment_rejects_an_otherwise_clean_message() {
-        // Propagation check: ONLY the sandbox stage votes — the verdict must
+        // Propagation check: ONLY the sandbox stage votes, the verdict must
         // still flip to Reject, proving stage output reaches the decision.
         let body = "Please find the requested document attached.";
         let verdict = run_pipeline(

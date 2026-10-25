@@ -28,7 +28,7 @@
 //! the lease-protocol section of `job.rs`): one runner owns a job at a time,
 //! a crashed runner's lease expires and the job is recoverable, and a
 //! superseded runner cannot write. Requesting a source that is not configured
-//! is [`SalesError::InvalidInput`](crate::types::SalesError) — there is no
+//! is [`SalesError::InvalidInput`](crate::types::SalesError), there is no
 //! fallback to running every configured (possibly paid) provider.
 
 pub mod blocked;
@@ -68,17 +68,17 @@ use std::sync::OnceLock;
 
 /// Build the production discovery source set.
 ///
-/// * `provider_api` — the configured discovery/company-data gateway. URL and
+/// * `provider_api`, the configured discovery/company-data gateway. URL and
 ///   token come from the existing `SalesConfig` (`enrichment_api_url` /
 ///   `enrichment_api_key`); `SALES_DISCOVERY_API_URL` /
 ///   `SALES_DISCOVERY_API_KEY` override them when a separate discovery
 ///   endpoint exists. The provider API is only included when a base URL is
 ///   configured.
-/// * `public_web` — operator-approved public pages (`SALES_SCRAPE_PUBLIC_URLS`,
+/// * `public_web`, operator-approved public pages (`SALES_SCRAPE_PUBLIC_URLS`,
 ///   comma-separated). Only listed URLs are fetched, only through the
 ///   hardened [`fetch::ScrapeClient`], and the source is not registered at
-///   all when the allowlist is unset — there is no default crawler.
-/// * `first_party` — ApexMail's own accounts for the tenant (no external
+///   all when the allowlist is unset, there is no default crawler.
+/// * `first_party` | ApexMail's own accounts for the tenant (no external
 ///   call; no jurisdiction restriction, it is our own data).
 ///
 /// Jurisdiction restrictions for the provider API are operator-configured
@@ -102,7 +102,7 @@ pub fn default_sources(
 
     if !api_url.trim().is_empty() {
         // PERF #24: a failed client construction makes the provider-API
-        // source UNAVAILABLE — it is skipped with an alert-grade log (the
+        // source UNAVAILABLE, it is skipped with an alert-grade log (the
         // first-party source still answers), never registered on an
         // unbounded default client.
         match HttpDiscoverySource::try_new(
@@ -115,7 +115,7 @@ pub fn default_sources(
             Err(error) => tracing::error!(
                 error = %error,
                 "provider-API discovery source is UNAVAILABLE: its HTTP client could not be \
-                 constructed — discovery degrades to the first-party source only (PERF #24)"
+                 constructed, discovery degrades to the first-party source only (PERF #24)"
             ),
         }
     }
@@ -129,7 +129,7 @@ pub fn default_sources(
         Ok(None) => {}
         Err(error) => tracing::error!(
             error = %error,
-            "public-web discovery source is UNAVAILABLE: it was configured but could not be registered — no public page will be fetched"
+            "public-web discovery source is UNAVAILABLE: it was configured but could not be registered, no public page will be fetched"
         ),
     }
 

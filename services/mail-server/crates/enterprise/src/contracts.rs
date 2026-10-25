@@ -524,7 +524,7 @@ impl ContractService {
         .bind(contract_id)
         .bind(signed_at)
         .bind(format!(
-            "{} ({}) — counter-signed by platform",
+            "{} ({}), counter-signed by platform",
             signer_name, signer_title
         ))
         .bind(now)

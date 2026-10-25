@@ -32,7 +32,7 @@ fn hash_ep(s: &str) -> u64 {
 }
 
 // ============================================================================
-// MODULE 1:SMTP Protection — Realistic Attack Scenarios
+// MODULE 1:SMTP Protection, Realistic Attack Scenarios
 // ============================================================================
 
 mod smtp_attacks {
@@ -51,7 +51,7 @@ mod smtp_attacks {
         };
         let mut prot = SmtpConnectionProtection::new(ip(1), 50, config);
 
-        // Send 3 invalid commands — at threshold, no tarpit yet
+        // Send 3 invalid commands, at threshold, no tarpit yet
         for i in 0..3 {
             let cmd = format!("GARBAGE{}", i);
             let action = prot.process_command(&cmd).unwrap();
@@ -65,7 +65,7 @@ mod smtp_attacks {
         assert_eq!(prot.invalid_commands(), 3);
         assert!(
             prot.should_tarpit().is_none(),
-            "At max_invalid, not over — no tarpit"
+            "At max_invalid, not over, no tarpit"
         );
 
         // 4th invalid:1 over limit → 1 * 2s = 2s
@@ -114,7 +114,7 @@ mod smtp_attacks {
         };
         let prot = SmtpConnectionProtection::new(ip(2), 50, config);
 
-        // 100 bytes in 1.99 seconds = 50.25 bps real rate — should FAIL
+        // 100 bytes in 1.99 seconds = 50.25 bps real rate, should FAIL
         // Old code:100 / as_secs(1.99) = 100 / 1 = 100 bps → PASS (bug!)
         // Fixed code:100 / 1.99 = 50.25 bps → FAIL (correct)
         let result = prot.check_data_rate(100, Duration::from_millis(1990));
@@ -123,7 +123,7 @@ mod smtp_attacks {
             "100 bytes in 1.99s = 50 bps, should fail 100 bps minimum"
         );
 
-        // 200 bytes in 1.99 seconds = 100.5 bps — should PASS
+        // 200 bytes in 1.99 seconds = 100.5 bps, should PASS
         let result = prot.check_data_rate(200, Duration::from_millis(1990));
         assert!(
             result.is_ok(),
@@ -170,7 +170,7 @@ mod smtp_attacks {
     }
 
     /// QUIT always disconnects immediately, even under tarpit.
-    /// This is correct — holding an attacker who wants to leave wastes OUR resources.
+    /// This is correct, holding an attacker who wants to leave wastes OUR resources.
     #[test]
     fn quit_bypasses_tarpit_even_after_many_invalids() {
         let config = SmtpProtectionConfig {
@@ -211,7 +211,7 @@ mod smtp_attacks {
         tracker.unregister_connection(&addr);
         assert_eq!(tracker.active_count(&addr), 0);
 
-        // Double unregister — should NOT underflow to u64::MAX
+        // Double unregister, should NOT underflow to u64::MAX
         tracker.unregister_connection(&addr);
         assert_eq!(
             tracker.active_count(&addr),
@@ -292,7 +292,7 @@ mod smtp_attacks {
 }
 
 // ============================================================================
-// MODULE 2:Adaptive Rate Limiter — Realistic Attack Scenarios
+// MODULE 2:Adaptive Rate Limiter, Realistic Attack Scenarios
 // ============================================================================
 
 mod adaptive_attacks {
@@ -330,7 +330,7 @@ mod adaptive_attacks {
         );
         assert!(!limiter.is_under_attack());
 
-        // Spike to 10x — must be detected even though std = 0
+        // Spike to 10x, must be detected even though std = 0
         limiter.update(TrafficObservation {
             timestamp: Instant::now(),
             requests_per_second: 1000.0,
@@ -484,7 +484,7 @@ mod adaptive_attacks {
 }
 
 // ============================================================================
-// MODULE 3:Bot Detection — Realistic Attack Scenarios
+// MODULE 3:Bot Detection, Realistic Attack Scenarios
 // ============================================================================
 
 mod bot_attacks {
@@ -496,7 +496,7 @@ mod bot_attacks {
     fn first_request_does_not_pollute_timing_analysis() {
         let mut behavior = SessionBehavior::new(100);
 
-        // Simulate real bot:requests exactly 5ms apart — via EXPLICIT
+        // Simulate real bot:requests exactly 5ms apart, via EXPLICIT
         // timestamps, not sleeps: scheduler jitter under a loaded host made
         // the wall-clock version measure irregular and flake the 0.7
         // regularity floor (deploy 2026-10-11). With the old code, the first
@@ -686,7 +686,7 @@ mod bot_attacks {
 }
 
 // ============================================================================
-// MODULE 4:Cost-Based Rate Limiting — Realistic Attack Scenarios
+// MODULE 4:Cost-Based Rate Limiting, Realistic Attack Scenarios
 // ============================================================================
 
 mod cost_attacks {
@@ -747,7 +747,7 @@ mod cost_attacks {
         );
     }
 
-    /// Attack:tenant exhaustion — one tenant shouldn't affect another
+    /// Attack:tenant exhaustion, one tenant shouldn't affect another
     #[test]
     fn tenant_isolation_under_exhaustion() {
         let config = CostLimiterConfig {
@@ -834,7 +834,7 @@ mod cost_attacks {
 }
 
 // ============================================================================
-// MODULE 5:Reputation System — Realistic Scenarios
+// MODULE 5:Reputation System, Realistic Scenarios
 // ============================================================================
 
 mod reputation_attacks {
@@ -931,7 +931,7 @@ mod reputation_attacks {
 }
 
 // ============================================================================
-// MODULE 6:Middleware — IP Extraction & Integration
+// MODULE 6:Middleware, IP Extraction & Integration
 // ============================================================================
 
 mod middleware_tests {
@@ -1099,7 +1099,7 @@ mod middleware_tests {
 }
 
 // ============================================================================
-// MODULE 7:Cross-Module Integration — Realistic Multi-Layer Attack Scenarios
+// MODULE 7:Cross-Module Integration, Realistic Multi-Layer Attack Scenarios
 // ============================================================================
 
 mod integration_attacks {
@@ -1409,7 +1409,7 @@ mod invariant_tests {
         let tracker = SmtpConnectionTracker::new(config);
         let addr = ip(30);
 
-        // Register 5, unregister 10 — count should stay at 0
+        // Register 5, unregister 10, count should stay at 0
         for _ in 0..5 {
             tracker.register_connection(addr).unwrap();
         }

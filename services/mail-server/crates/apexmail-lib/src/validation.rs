@@ -1,4 +1,4 @@
-//! Input validation utilities — RFC 5322 email validation, domain, UUID.
+//! Input validation utilities, RFC 5322 email validation, domain, UUID.
 //!
 //! # RFC 5322 / RFC 6531 Compliance (RS-M-07)
 //!
@@ -14,7 +14,7 @@
 //! - **Dot-sequence validation**: No consecutive or leading/trailing dots
 //!
 //! Limitations (acceptable for practical use):
-//! - No CFWS (comment folding whitespace) — `(comment)` in addresses
+//! - No CFWS (comment folding whitespace), `(comment)` in addresses
 //! - No obs-local-part / obs-domain (obsolete formats)
 //! - No explicit MX or DNS validation (separate concern)
 
@@ -33,7 +33,7 @@ static STANDARD_LOCAL_RE: LazyLock<Option<Regex>> =
 /// # Security (CRLF injection)
 /// Both the literal (first alternative) and escaped (second alternative)
 /// character classes exclude all control characters (`\x00-\x1F`, `\x7F`),
-/// so CR/LF/NUL can never appear inside a quoted local part — not even as a
+/// so CR/LF/NUL can never appear inside a quoted local part, not even as a
 /// `\<CR>` quoted-pair, which downstream unescaping would turn back into a
 /// raw header separator.
 static QUOTED_LOCAL_RE: LazyLock<Option<Regex>> =
@@ -74,7 +74,7 @@ static IDN_DOMAIN_RE: LazyLock<Option<Regex>> = LazyLock::new(|| {
 
 /// Domain literal: `[` ... `]` containing IPv4, IPv6, or other text.
 ///
-/// # Security (CRLF injection — SM12 escalation)
+/// # Security (CRLF injection, SM12 escalation)
 /// The bracket-literal class excludes the `]` terminator AND every control
 /// character (`\x00-\x1f`, DEL, C1 `\x80-\x9f`) plus all whitespace. The
 /// former `[^]]+` accepted CR/LF inside a "valid" domain (`[a\nb]` passed),
@@ -284,7 +284,7 @@ mod tests {
     #[test]
     fn test_quoted_local_part_rejects_control_characters() {
         // CR/LF inside a quoted local part enables header injection
-        // ("x\nBcc: ..." smuggling) — must be rejected.
+        // ("x\nBcc: ..." smuggling), must be rejected.
         assert!(!is_valid_email("\"x\nBcc: a@b.c\"@example.com"));
         assert!(!is_valid_email("\"x\r\nBcc: a@b.c\"@example.com"));
         assert!(!is_valid_email("\"x\rBcc: a@b.c\"@example.com"));
@@ -316,7 +316,7 @@ mod tests {
     /// still validate (pinned in `test_valid_domain_literals`).
     #[test]
     fn test_domain_literal_rejects_control_characters_and_whitespace() {
-        // CR/LF — the header/SMTP-injection payload.
+        // CR/LF, the header/SMTP-injection payload.
         assert!(!is_valid_domain("[a\nb]"), "LF inside a literal");
         assert!(!is_valid_domain("[a\rb]"), "CR inside a literal");
         assert!(!is_valid_domain("[a\r\nb]"), "CRLF inside a literal");

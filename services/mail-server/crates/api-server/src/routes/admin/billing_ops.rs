@@ -7,7 +7,7 @@
 //! webhook health and provider settlements.
 //!
 //! Every number comes from a table or the provider itself; a source that
-//! cannot be read is reported as unavailable in `notes` — never as a
+//! cannot be read is reported as unavailable in `notes`, never as a
 //! fabricated zero. The same snapshot feeds `GET /v1/admin/billing/*` and the
 //! SSR `/billing` page, so the two can never disagree.
 
@@ -47,7 +47,7 @@ pub struct BillingOverview {
     pub arr_cents: i64,
     /// Average revenue per billable subscription (MRR / billable subscriptions).
     pub arpa_cents: i64,
-    /// Subscriptions with status `active` — the ONLY status that grants the
+    /// Subscriptions with status `active`, the ONLY status that grants the
     /// plan (see `docs/architecture/billing-lifecycle.md`).
     pub active_subscriptions: i64,
     /// Subscriptions whose MRR is counted: active + trialing + past_due.
@@ -669,7 +669,7 @@ async fn load_movement(state: &AppState, now: DateTime<Utc>) -> Result<Vec<Movem
     }
 
     // Cancellation audits are keyed by the subscription row id, which is
-    // retained after cancellation — so the plan/interval that produced the
+    // retained after cancellation, so the plan/interval that produced the
     // churned MRR is still readable. The regex guard keeps a non-uuid resource
     // id from failing the cast.
     let cancellations: Vec<(DateTime<Utc>, String, String, i64, i64)> = sqlx::query_as(

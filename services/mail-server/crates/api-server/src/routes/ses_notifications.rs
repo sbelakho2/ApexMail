@@ -13,7 +13,7 @@
 //!
 //! ## Endpoint
 //!
-//! `POST /v1/ses/notifications` — public (no auth), validated via SNS message signature.
+//! `POST /v1/ses/notifications`, public (no auth), validated via SNS message signature.
 //!
 //! ## Setup
 //!
@@ -47,7 +47,7 @@ use x509_parser::prelude::FromDer;
 use crate::error::ApiError;
 use crate::state::AppState;
 
-/// Router for SES notification handling (public — no auth middleware).
+/// Router for SES notification handling (public, no auth middleware).
 pub fn router() -> Router<AppState> {
     Router::new().route("/notifications", post(handle_sns_notification))
 }
@@ -60,7 +60,7 @@ struct SnsMessage {
     /// "Notification", "SubscriptionConfirmation", "UnsubscribeConfirmation"
     #[serde(rename = "Type")]
     message_type: String,
-    /// For SubscriptionConfirmation — URL to GET to confirm.
+    /// For SubscriptionConfirmation, URL to GET to confirm.
     #[serde(alias = "SubscribeURL")]
     subscribe_url: Option<String>,
     /// JSON-encoded SES event payload (for Notification type).
@@ -225,7 +225,7 @@ async fn handle_sns_notification(
 
     // PP-006/L-07: Deduplicate SNS notifications with a Redis marker keyed
     // by (SNS message id + notification type). F75: the marker is now
-    // claimed AFTER successful processing, not before — a processing
+    // claimed AFTER successful processing, not before, a processing
     // failure returns 5xx, SNS retries, and the retry must find NO marker
     // blocking the reprocessing (the pre-claim order permanently lost
     // events whose processing failed after the marker was set). All state
@@ -233,7 +233,7 @@ async fn handle_sns_notification(
     // guarded timestamps, ON CONFLICT upserts), so a retry after a lost
     // marker is safe.
     //
-    // Audit G(3): a Redis error is never coerced to "duplicate" — it
+    // Audit G(3): a Redis error is never coerced to "duplicate", it
     // returns 5xx so SNS retries the delivery.
     let notification_type = sns_msg.message_type.as_str();
     let dedup_key = sns_msg
@@ -241,12 +241,12 @@ async fn handle_sns_notification(
         .as_deref()
         .map(|msg_id| format!("apexmail:dedup:sns:{}:{}", msg_id, notification_type));
     let Some(dedup_key) = dedup_key else {
-        warn!("SNS notification missing message_id — cannot deduplicate");
+        warn!("SNS notification missing message_id, cannot deduplicate");
         return Err(ApiError::Validation(vec![
             "SNS notification missing MessageId".into(),
         ]));
     };
-    let ttl_secs = 300; // 5 minutes — SNS retries within a few minutes at most.
+    let ttl_secs = 300; // 5 minutes, SNS retries within a few minutes at most.
 
     // Fast path: already processed within the dedup window?
     {
@@ -259,7 +259,7 @@ async fn handle_sns_notification(
             .query_async(&mut *conn)
             .await
             .map_err(|e| {
-                warn!(error = %e, "Redis GET failed for SNS dedup — returning 5xx so SNS retries");
+                warn!(error = %e, "Redis GET failed for SNS dedup, returning 5xx so SNS retries");
                 ApiError::ServiceUnavailable("Redis unavailable".into())
             })?;
         if seen.is_some() {
@@ -268,7 +268,7 @@ async fn handle_sns_notification(
         }
     }
 
-    // Process FIRST — every effect is durably committed before the SNS
+    // Process FIRST, every effect is durably committed before the SNS
     // acknowledgement (F75).
     let outcome: Result<(), ApiError> = match sns_msg.message_type.as_str() {
         "SubscriptionConfirmation" => handle_subscription_confirmation(&state, &sns_msg)
@@ -302,7 +302,7 @@ async fn handle_sns_notification(
         .query_async(&mut *conn)
         .await
         .map_err(|e| {
-            warn!(error = %e, "Redis SET NX failed for SNS dedup — returning 5xx so SNS retries");
+            warn!(error = %e, "Redis SET NX failed for SNS dedup, returning 5xx so SNS retries");
             ApiError::ServiceUnavailable("Redis unavailable".into())
         })?;
 
@@ -328,7 +328,7 @@ async fn handle_subscription_confirmation(
     let is_aws_sns = parsed.scheme() == "https"
         && (host.ends_with(".amazonaws.com") || host.ends_with(".amazonaws.com.cn"));
     if !is_aws_sns {
-        warn!(url = %url, host = %host, "Rejected non-AWS SubscribeURL — possible SSRF attempt");
+        warn!(url = %url, host = %host, "Rejected non-AWS SubscribeURL, possible SSRF attempt");
         return Err(ApiError::Validation(vec![
             "SubscribeURL must be an AWS SNS endpoint".into(),
         ]));
@@ -358,7 +358,7 @@ async fn validate_sns_message(
     match dev_signing_key_pem {
         // Dev trust anchor (FINDING-5): verify against the LOCAL public key.
         // No outbound fetch happens, so the AWS-only SigningCertURL
-        // allowlist — an SSRF guard for the fetch — has nothing to protect
+        // allowlist, an SSRF guard for the fetch, has nothing to protect
         // here; the signature is still cryptographically verified, so a
         // wrong or tampered signature is refused exactly as in production.
         Some(pem) => {
@@ -372,7 +372,7 @@ async fn validate_sns_message(
         }
         None => validate_sns_signature(http_client, msg).await?,
     }
-    // Audit G(2): replay freshness — the signature check above proves the
+    // Audit G(2): replay freshness, the signature check above proves the
     // message was signed by AWS (or, in dev, by the local anchor), but not
     // that it is recent. Reject captured notifications older than 1 hour
     // (SNS retries span at most ~1h including the initial attempt) and
@@ -389,7 +389,7 @@ async fn validate_sns_message(
 /// `SNS_DEV_SIGNING_KEY_PEM` carries an RSA public key PEM (single-line with
 /// `\n` escapes, per the repo's PEM env convention) and, when the
 /// environment is NOT production, signatures are verified against that key.
-/// In production the variable is IGNORED with an error log — the AWS path is
+/// In production the variable is IGNORED with an error log, the AWS path is
 /// untouched.
 fn dev_signing_key(environment: crate::config::Environment, raw: Option<&str>) -> Option<String> {
     let pem = raw
@@ -397,7 +397,7 @@ fn dev_signing_key(environment: crate::config::Environment, raw: Option<&str>) -
         .filter(|value| !value.trim().is_empty())?;
     if environment.is_production() {
         error!(
-            "SNS_DEV_SIGNING_KEY_PEM is set but IGNORED in production — \
+            "SNS_DEV_SIGNING_KEY_PEM is set but IGNORED in production, \
              the AWS SNS signature path is authoritative"
         );
         return None;
@@ -507,7 +507,7 @@ static SNS_SIGNING_KEY_CACHE: Mutex<Option<HashMap<String, (RsaPublicKey, Instan
 /// hour keeps rotation pickup prompt while collapsing per-request traffic).
 const SNS_SIGNING_KEY_CACHE_TTL: Duration = Duration::from_secs(3600);
 /// Upper bound on cached cert URLs (defense against a caller spoofing many
-/// cert URLs — validate_signing_cert_url already restricts hosts to AWS SNS,
+/// cert URLs, validate_signing_cert_url already restricts hosts to AWS SNS,
 /// so the cap is pure defense-in-depth).
 const SNS_SIGNING_KEY_CACHE_MAX_ENTRIES: usize = 16;
 
@@ -516,7 +516,7 @@ fn cache_get_sns_signing_key(cert_url: &str) -> Option<RsaPublicKey> {
     let cache = guard.as_ref()?;
     let (key, fetched_at) = cache.get(cert_url)?;
     if fetched_at.elapsed() > SNS_SIGNING_KEY_CACHE_TTL {
-        return None; // expired — caller refetches and re-inserts
+        return None; // expired, caller refetches and re-inserts
     }
     Some(key.clone())
 }
@@ -719,7 +719,7 @@ async fn handle_notification(state: &AppState, msg: &SnsMessage) -> Result<(), A
 //
 // SES bounce/complaint/delivery/open/click events used to trust the
 // X-ApexMail-* headers ECHOED BY SES for tenant/message authority. Those
-// headers originate from the submitted message — a caller could set the
+// headers originate from the submitted message, a caller could set the
 // legacy aliases (X-ApexMail-TenantId) through custom headers and have its
 // bounces attributed (and its complaints suppress) ANOTHER tenant. A valid
 // SNS provider signature proves the event came from SES, not that the
@@ -732,7 +732,7 @@ async fn handle_notification(state: &AppState, msg: &SnsMessage) -> Result<(), A
 // recipient matches that row's stored envelope recipient, and takes
 // tenant/message/recipient from the STORED record. Echoed identity headers
 // are parsed case-insensitively purely for diagnostic correlation, with
-// ambiguous duplicates rejected (logged) — never for authorization.
+// ambiguous duplicates rejected (logged), never for authorization.
 
 /// The stored delivery record a provider event resolves to.
 struct SesAttribution {
@@ -747,7 +747,7 @@ struct SesAttribution {
 /// F74: the provider-message → stored delivery record resolution, BATCHED
 /// over every callback recipient of one event. The tenant/message/recipient
 /// authority comes EXCLUSIVELY from the stored `email_queue` row that accepted
-/// the SES message id — never from the echoed X-ApexMail-* headers. A callback
+/// the SES message id, never from the echoed X-ApexMail-* headers. A callback
 /// recipient matches only against the row's stored envelope (ownership
 /// verification): its `"to"` value or its `to_addresses` array.
 const SES_ATTRIBUTION_BATCH_SQL: &str = r#"
@@ -774,7 +774,7 @@ const SES_ATTRIBUTION_BATCH_SQL: &str = r#"
 /// Resolve the authoritative tenant/message/recipient for one provider
 /// event: the queue row that accepted `ses_message_id`, additionally
 /// verified to own `callback_recipient` in its envelope. `Ok(None)` when no
-/// stored row matches — the caller surfaces that as an unattributed,
+/// stored row matches, the caller surfaces that as an unattributed,
 /// retryable outcome (the acceptance mapping may still be committing).
 async fn resolve_ses_attribution(
     db: &sqlx::PgPool,
@@ -795,7 +795,7 @@ async fn resolve_ses_attribution(
 /// query, keyed by the lowercased callback address.
 ///
 /// An SES event can carry hundreds of recipients (a campaign fan-out), and the
-/// per-recipient form ran one attribution SELECT per recipient — one round
+/// per-recipient form ran one attribution SELECT per recipient, one round
 /// trip each, inside the SNS delivery window. Semantics are those of
 /// [`resolve_ses_attribution`] applied per recipient:
 ///
@@ -845,7 +845,7 @@ async fn resolve_ses_attributions(
 }
 
 /// The FIRST callback recipient of the event with no stored attribution, in
-/// event order — the recipient the old per-recipient loop failed on.
+/// event order, the recipient the old per-recipient loop failed on.
 ///
 /// The handler does NOT call this before writing: the pre-batching contract
 /// was partial progress (recipients before the unattributed one had already
@@ -884,7 +884,7 @@ fn attributed_recipients<'a>(
 }
 
 /// Deterministic analytics-event id for one (SNS notification, event,
-/// recipient) triple — SNS retries after a lost dedup marker re-INSERT the
+/// recipient) triple, SNS retries after a lost dedup marker re-INSERT the
 /// same id, and the ON CONFLICT DO NOTHING turns the replay into a no-op
 /// (F75 event deduplication). `evt_` + 32 hex chars fits events.id
 /// VARCHAR(64).
@@ -942,7 +942,7 @@ fn diagnostic_identity_headers(mail: &SesMail) -> (Option<String>, Option<String
 }
 
 /// Extract our internal message_id from SES mail headers. F74: retained
-/// TEST-ONLY — production code never reads identity authority from raw
+/// TEST-ONLY, production code never reads identity authority from raw
 /// headers.
 #[cfg(test)]
 fn extract_apexmail_header(mail: &SesMail, header_name: &str) -> Option<String> {
@@ -954,7 +954,7 @@ fn extract_apexmail_header(mail: &SesMail, header_name: &str) -> Option<String> 
 }
 
 /// Strip any "msg_" prefix from an X-ApexMail-MessageId header value.
-/// F74: retained TEST-ONLY — production attribution resolves through the
+/// F74: retained TEST-ONLY, production attribution resolves through the
 /// stored provider-message mapping.
 #[cfg(test)]
 fn normalize_message_id(msg_id: &str) -> &str {
@@ -970,10 +970,10 @@ fn unattributed_ses_event(ses_message_id: Option<&str>, recipient: &str) -> ApiE
     warn!(
         ses_message_id = ?ses_message_id,
         recipient = %apexmail_lib::pii::redact_email(recipient),
-        "SES event cannot be attributed to a stored provider-message mapping — retrying"
+        "SES event cannot be attributed to a stored provider-message mapping, retrying"
     );
     ApiError::ServiceUnavailable(
-        "SES event attribution pending — notification will be retried".into(),
+        "SES event attribution pending, notification will be retried".into(),
     )
 }
 
@@ -1417,7 +1417,7 @@ async fn process_bounce(
         // (and webhook) are committed; the first unattributed recipient still
         // makes the notification a retryable 5xx, exactly like HEAD.
         if let Some(recipient) = unattributed {
-            // Unattributed — observable + retryable, never guessed from the
+            // Unattributed, observable + retryable, never guessed from the
             // echoed headers (which may carry another tenant's id).
             debug!(
                 diagnostic_header_message_id = ?diagnostic_message_id,
@@ -1472,7 +1472,7 @@ async fn process_complaint(
         let resolved = resolve_ses_attributions(&state.db, ses_message_id, &callback_recipients)
             .await
             .map_err(|e| ses_db_error("storage", e))?;
-        // F-audit P2: partial progress — write every attributable recipient
+        // F-audit P2: partial progress, write every attributable recipient
         // and only then surface the first unattributed one as a retryable 5xx
         // (HEAD committed the recipients preceding the missing one).
         let unattributed = first_unattributed_recipient(&callback_recipients, &resolved);
@@ -1481,7 +1481,7 @@ async fn process_complaint(
         if !attributed.is_empty() {
             let reason = format!("ses_complaint:{feedback_type}");
 
-            // Always suppress — complaints are serious. STORED tenant id,
+            // Always suppress, complaints are serious. STORED tenant id,
             // committed before the SNS ack, idempotent under replay.
             let mut tx = state
                 .db
@@ -1505,7 +1505,7 @@ async fn process_complaint(
                 info!(email = %apexmail_lib::pii::redact_email(&attribution.recipient), reason = %reason, "Auto-suppressed complained address");
             }
 
-            // Analytics events — one 'complained' row per complained
+            // Analytics events, one 'complained' row per complained
             // recipient (delivery_analytics' complaint rate reads these),
             // deterministic ids for replay dedup, one statement.
             let analytics: Vec<BatchedAnalyticsEvent> = attributed
@@ -1528,7 +1528,7 @@ async fn process_complaint(
 
         // Queue webhooks (post-commit, best-effort). The payload keeps its
         // singular `recipient` key, so every payload of ONE complaint event
-        // shares one deterministic queue id — exactly why the per-recipient
+        // shares one deterministic queue id, exactly why the per-recipient
         // loop inserted one row and no-op'd the rest.
         let mut grouped: std::collections::HashMap<&str, Vec<serde_json::Value>> =
             std::collections::HashMap::new();
@@ -1586,7 +1586,7 @@ async fn process_delivery(
     );
 
     // F75: persist the confirmation on the MATCHING RECIPIENT DELIVERY
-    // RECORD (`email_queue.delivered_at`, migration 186) — the previous
+    // RECORD (`email_queue.delivered_at`, migration 186), the previous
     // handler wrote `messages.delivered_at`, a column that does not exist
     // (SQLSTATE 42703), and set the whole parent delivered for ONE
     // recipient. The parent aggregate is now derived by the shared F25
@@ -1604,7 +1604,7 @@ async fn process_delivery(
     let resolved = resolve_ses_attributions(&state.db, ses_message_id, &callback_recipients)
         .await
         .map_err(|e| ses_db_error("storage", e))?;
-    // F-audit P2: partial progress — stamp/record every attributable recipient
+    // F-audit P2: partial progress, stamp/record every attributable recipient
     // first, then return the retryable 5xx HEAD returned after committing the
     // recipients that preceded the unattributed one.
     let unattributed = first_unattributed_recipient(&callback_recipients, &resolved);
@@ -1626,7 +1626,7 @@ async fn process_delivery(
             .map_err(|e| ses_db_error("failed to record delivery", e))?;
 
         // F25/F75: the shared parent reconciliation after the confirmed
-        // recipient transitions — once per DISTINCT message (the per-recipient
+        // recipient transitions, once per DISTINCT message (the per-recipient
         // loop ran the same statement with the same arguments per recipient).
         let mut reconciled: Vec<(&str, &str)> = Vec::new();
         for attribution in &attributed {
@@ -1728,7 +1728,7 @@ async fn resolve_engagement_attribution(
 }
 
 /// Process an SES Open notification: record an 'opened' analytics event and
-/// increment the message's open counters — mirroring the tracking-service
+/// increment the message's open counters, mirroring the tracking-service
 /// processor.rs messages update (open_count +1, first_opened_at backfill).
 async fn process_open(
     state: &AppState,
@@ -1792,7 +1792,7 @@ async fn process_open(
     } else {
         debug!(
             message_id = %attribution.message_id,
-            "SES open event replay — counter increment skipped"
+            "SES open event replay, counter increment skipped"
         );
     }
 
@@ -1871,7 +1871,7 @@ async fn process_click(
     } else {
         debug!(
             message_id = %attribution.message_id,
-            "SES click event replay — counter increment skipped"
+            "SES click event replay, counter increment skipped"
         );
     }
 
@@ -1895,10 +1895,10 @@ async fn process_click(
 /// Queue a webhook event for delivery to the tenant's registered endpoints.
 /// Uses Redis list as a lightweight queue (same pattern as MTA webhook_queue).
 /// Enqueue one SES feedback event for every subscribed, enabled webhook of
-/// the tenant — into the CANONICAL `webhook_queue` table the worker webhook
+/// the tenant, into the CANONICAL `webhook_queue` table the worker webhook
 /// processor drains. (This previously LPUSHed onto a Redis list
 /// `ses:webhook_queue` that NOTHING consumed: every SES-driven delivery —
-/// message.delivered / bounced / complained / opened / clicked — was
+/// message.delivered / bounced / complained / opened / clicked, was
 /// silently dropped. The table is the one delivery path with retries, the
 /// circuit breaker and the SSRF guard.)
 ///
@@ -1926,7 +1926,7 @@ const SES_WEBHOOK_QUEUE_NAMESPACE: uuid::Uuid = uuid::Uuid::from_bytes([
 /// granularity in the dedup key: an SNS redelivery of the SAME feedback shares
 /// the provider timestamp; genuinely distinct events a second apart stay
 /// distinct. The key MUST be the provider timestamp (payload `timestamp`, set
-/// by every caller from the SES record) — the previous local `Utc::now()`
+/// by every caller from the SES record), the previous local `Utc::now()`
 /// made an SNS replay retried across a second boundary insert a SECOND queue
 /// row (caught as the 2026-10-12 full-suite flake "2 queue rows under load":
 /// under fsync latency the test's replay calls straddled a second boundary). A
@@ -1956,7 +1956,7 @@ fn ses_webhook_queue_id(
     let dedup_stamp = if provider_timestamp.is_empty() {
         warn!(
             event_type,
-            "SES webhook event carries no provider timestamp — dedup key falls back to a call-unique stamp"
+            "SES webhook event carries no provider timestamp, dedup key falls back to a call-unique stamp"
         );
         format!(
             "local:{}",
@@ -2076,7 +2076,7 @@ mod tests {
     fn attribution_resolves_through_the_stored_mapping_only() {
         // F74: the resolution keys on the stored provider message id
         // (smtp_message_id) and verifies every callback recipient against the
-        // row's stored envelope (`"to"` plus `to_addresses`) — no
+        // row's stored envelope (`"to"` plus `to_addresses`), no
         // X-ApexMail-* header is consulted. The batched form must keep every
         // one of those guarantees.
         assert!(
@@ -2126,7 +2126,7 @@ mod tests {
 
     #[test]
     fn delivery_persistence_targets_the_recipient_record_not_a_missing_column() {
-        // F75: the exact 42703 regression — the delivery callback wrote
+        // F75: the exact 42703 regression, the delivery callback wrote
         // messages.delivered_at (absent). The recipient-delivery write must
         // go to email_queue.delivered_at (migration 186) and the parent
         // aggregate must be derived by the shared reconciliation.
@@ -2447,7 +2447,7 @@ mod tests {
         let now = chrono::Utc::now().to_rfc3339();
         assert!(validate_sns_timestamp_freshness(&message_with_timestamp(&now)).is_ok());
 
-        // 30 minutes old — still inside the 1h retry window.
+        // 30 minutes old, still inside the 1h retry window.
         let half_hour_ago = (chrono::Utc::now() - chrono::Duration::minutes(30)).to_rfc3339();
         assert!(validate_sns_timestamp_freshness(&message_with_timestamp(&half_hour_ago)).is_ok());
 
@@ -2470,7 +2470,7 @@ mod tests {
             validate_sns_timestamp_freshness(&message_with_timestamp(&sixty_one_minutes)).is_err()
         );
 
-        // More than 10 minutes in the future — clock-skew abuse.
+        // More than 10 minutes in the future, clock-skew abuse.
         let far_future = (chrono::Utc::now() + chrono::Duration::minutes(30)).to_rfc3339();
         let err = validate_sns_timestamp_freshness(&message_with_timestamp(&far_future))
             .expect_err("far-future notification must be rejected");
@@ -3020,7 +3020,7 @@ mod adversarial_handler_tests {
     }
 
     /// Wiring pin: the handler must consult `SNS_DEV_SIGNING_KEY_PEM`
-    /// through [`dev_signing_key`] (and thereby the production gate) — the
+    /// through [`dev_signing_key`] (and thereby the production gate), the
     /// defect class is "the knob exists but nothing reads it".
     #[test]
     fn handler_reads_the_dev_signing_key_through_the_production_gate() {
@@ -3203,7 +3203,7 @@ mod adversarial_handler_tests {
             .unwrap_or(None);
         assert!(
             marker.is_none(),
-            "a 5xx must not claim the marker — SNS retries must reprocess"
+            "a 5xx must not claim the marker, SNS retries must reprocess"
         );
     }
 
@@ -3475,7 +3475,7 @@ mod adversarial_handler_tests {
     /// recipient under the STORED tenant, one deterministic `bounced`
     /// analytics event per recipient, every queue row terminalized with its
     /// pending set emptied and the bounce reason recorded, the parent
-    /// reconciled once, and the subscribed webhook queued (one row — the
+    /// reconciled once, and the subscribed webhook queued (one row, the
     /// bounce payload's identity has no per-recipient component, so the old
     /// loop inserted one and no-op'd the rest).
     ///
@@ -3611,7 +3611,7 @@ mod adversarial_handler_tests {
 
         // The shared parent reconciliation ran (all recipients bounced).
         // With every recipient copy terminal, the shared reconciliation
-        // derives 'partial' (some copies bounced) — the same aggregate the
+        // derives 'partial' (some copies bounced), the same aggregate the
         // per-recipient reconciliations converged to.
         let parent_status: String = sqlx::query_scalar("SELECT status FROM messages WHERE id = $1")
             .bind(message_id)
@@ -3710,7 +3710,7 @@ mod adversarial_handler_tests {
         assert_eq!(event_row.1, "bounced");
         assert_eq!(event_row.2, fixture.recipient);
 
-        // Webhook queued for a SUBSCRIBED webhook of the stored tenant — on
+        // Webhook queued for a SUBSCRIBED webhook of the stored tenant, on
         // the CANONICAL webhook_queue table the worker processor drains (the
         // previous Redis-list target had no consumer at all). Subscription
         // is the filter: tenants without a subscribed webhook get nothing.
@@ -3776,8 +3776,8 @@ mod adversarial_handler_tests {
         // Regression for the 2026-10-12 full-suite flake "2 queue rows under
         // load". The dedup key used the PROCESSING clock (Utc::now, second
         // granularity), so a replay processed more than a second after the
-        // first delivery — retries and load-latency make that the normal
-        // case — derived a different queue id and inserted a SECOND customer
+        // first delivery, retries and load-latency make that the normal
+        // case, derived a different queue id and inserted a SECOND customer
         // webhook row. The key now uses the provider timestamp from the
         // payload; this test replays the SAME SNS event across a real second
         // boundary and requires the row count to collapse to one. Against

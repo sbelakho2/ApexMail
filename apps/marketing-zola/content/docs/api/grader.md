@@ -7,12 +7,12 @@ weight = 5
 
 The Email Grader scores deliverability across five deterministic dimensions:
 
-- **DNS health** — MX redundancy, A records, SPF/DKIM/DMARC presence.
-- **Authentication** — SPF strictness, DKIM key sizes, DMARC enforcement.
-- **Spam likelihood** — Bayesian, header, content, and URL signals from the
+- **DNS health**, MX redundancy, A records, SPF/DKIM/DMARC presence.
+- **Authentication**, SPF strictness, DKIM key sizes, DMARC enforcement.
+- **Spam likelihood**, Bayesian, header, content, and URL signals from the
   shared spam-filter engine.
-- **Content quality** — Trigger phrases, ratio of links, HTML hygiene.
-- **Reputation** — Lookups against the curated domain blocklist.
+- **Content quality**, Trigger phrases, ratio of links, HTML hygiene.
+- **Reputation**, Lookups against the curated domain blocklist.
 
 Every score is computed from observable signals; there is no opaque ML model
 in the grading path.
@@ -54,10 +54,10 @@ Response (truncated):
     "reputation": { "score": 100, "max": 100 }
   },
   "findings": [
-    { "severity": "info", "category": "dns", "message": "Only one MX record — add a backup MX for redundancy" }
+    { "severity": "info", "category": "dns", "message": "Only one MX record, add a backup MX for redundancy" }
   ],
   "recommendations": [
-    "Email authentication is well configured — consider adding BIMI and MTA-STS for enhanced security"
+    "Email authentication is well configured, consider adding BIMI and MTA-STS for enhanced security"
   ]
 }
 ```
@@ -99,7 +99,7 @@ curl https://api.apexmail.ee/v1/grader/results/{id} \
   -H "X-API-Key: $APEXMAIL_API_KEY"
 ```
 
-Returns 404 if the result does not belong to the calling tenant — results are
+Returns 404 if the result does not belong to the calling tenant, results are
 strictly scoped per-tenant at the database layer.
 
 ## List recent results

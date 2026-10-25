@@ -1,7 +1,7 @@
 //! Health-check and readiness-probe endpoints.
 //!
-//! GET `/health` — liveness probe; returns 200 normally, 503 when shutting down.
-//! GET `/ready` — readiness probe; checks DB + Redis connectivity in parallel.
+//! GET `/health`, liveness probe; returns 200 normally, 503 when shutting down.
+//! GET `/ready`, readiness probe; checks DB + Redis connectivity in parallel.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 

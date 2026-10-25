@@ -241,7 +241,7 @@ impl FingerprintDb {
     ///
     /// Every seed key is a JA4_a component in this crate's own format
     /// (`protocol + sni + cipher_count + ext_count + alpn`, see
-    /// [`crate::ja4::is_valid_ja4_a`]) — the previous hardcoded keys had
+    /// [`crate::ja4::is_valid_ja4_a`]), the previous hardcoded keys had
     /// wrong lengths/alphabets ("t130613h2", "d100200", …) and could never
     /// match a fingerprint produced by [`crate::ja4::Ja4Fingerprint::compute`].
     /// A unit test validates the entire seed table against the crate's own

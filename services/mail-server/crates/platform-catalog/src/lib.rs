@@ -1,4 +1,4 @@
-//! The canonical platform catalog — the SINGLE source of truth for plan
+//! The canonical platform catalog, the SINGLE source of truth for plan
 //! facts (names, prices, limits) consumed by billing-service (the runtime
 //! seed), ai-service (knowledge + verifier tables), the sales knowledge
 //! base, and the docs generation. Every consumer derives from this module;
@@ -24,7 +24,7 @@ pub struct PlanRow {
     /// Annual price in euro CENTS (12 months at the effective annual rate).
     pub price_yearly_cents: i64,
     /// Monthly price in US dollar CENTS (the published USD list; the
-    /// checkout still charges EUR — this is the display/quote price).
+    /// checkout still charges EUR, this is the display/quote price).
     pub price_monthly_usd_cents: i64,
     /// Annual price in US dollar CENTS (10 monthly payments, same rule as
     /// the EUR ladder).
@@ -41,29 +41,29 @@ pub struct PlanRow {
     /// volume (None = no automatic overage: Free's quota gate blocks, PAYG
     /// is usage-priced, Enterprise is contractual).
     pub overage_millicents_per_email: Option<i64>,
-    /// `audit_logs` — customer read/export of the tenant audit trail.
+    /// `audit_logs`, customer read/export of the tenant audit trail.
     /// Sold on Growth and above (docs/pricing.md "Included feature gates").
     pub audit_logs: bool,
-    /// `ab_testing` — campaign experiment execution + results API.
+    /// `ab_testing`, campaign experiment execution + results API.
     /// Sold on Growth and above.
     pub ab_testing: bool,
-    /// `time_travel_debugging` — historical message-state replay.
+    /// `time_travel_debugging`, historical message-state replay.
     /// Sold on Growth and above.
     pub time_travel_debugging: bool,
-    /// `template_approval_workflow` — maker/checker template publishing.
+    /// `template_approval_workflow`, maker/checker template publishing.
     /// Sold on Business and Enterprise Cloud.
     pub template_approval_workflow: bool,
-    /// `subaccounts` — child workspaces with isolated quotas/keys.
+    /// `subaccounts`, child workspaces with isolated quotas/keys.
     /// Sold on Business and Enterprise Cloud.
     pub subaccounts: bool,
-    /// `max_subaccounts` — child-workspace ceiling (-1 = unlimited).
+    /// `max_subaccounts`, child-workspace ceiling (-1 = unlimited).
     pub max_subaccounts: i64,
 }
 
 /// The canonical catalog, ordered by sort order. Mirrors the deployed
-/// billing runtime exactly — the 2026-10-15 owner price table
+/// billing runtime exactly, the 2026-10-15 owner price table
 /// (Developer €20 / Pro €89 / Growth €229 / Business €699 / Enterprise
-/// Cloud from €1,750 — with the published USD list $20/$99/$249/$749/$1,950;
+/// Cloud from €1,750, with the published USD list $20/$99/$249/$749/$1,950;
 /// the 2026-09-08 review had Developer at €29 and EUR-only prices).
 /// Free 3,000/mo + a one-time 30,000-email launch allowance.
 pub const PLANS: &[PlanRow] = &[
@@ -223,7 +223,7 @@ pub const FREE_LAUNCH_WINDOW_DAYS: i64 = 30;
 // self-serve plans; 2026-10-15 owner price table). These are NOT `PlanRow`s:
 // the billing `plans` table serves self-serve subscriptions, these lines are
 // contracted by sales (same reasons the DedicatedTenant struct stays in
-// `compliance/src/deployment_products.rs` — this block only adds the catalog
+// `compliance/src/deployment_products.rs`, this block only adds the catalog
 // rows/constants the plan names).
 // ─────────────────────────────────────────────────────────────────────────
 
@@ -297,7 +297,7 @@ pub const PLATFORM_SUBACCOUNT_MONTHLY_USD_CENTS: i64 = 100;
 /// Dedicated Tenant: one-time setup floor in euro CENTS (€10,000).
 ///
 /// The structured DedicatedTenant product (setup range, SLA entitlements)
-/// stays in `compliance/src/deployment_products.rs` — this constant only
+/// stays in `compliance/src/deployment_products.rs`, this constant only
 /// mirrors its floor into the canonical catalog.
 pub const DEDICATED_TENANT_SETUP_MIN_CENTS: i64 = 1_000_000;
 
@@ -491,7 +491,7 @@ mod tests {
         }
     }
 
-    /// Annual billing is TEN monthly payments in BOTH currencies — a yearly
+    /// Annual billing is TEN monthly payments in BOTH currencies, a yearly
     /// price is never 12× or a 10% discount of the monthly price.
     #[test]
     fn annual_price_is_ten_monthly_payments_in_both_currencies() {

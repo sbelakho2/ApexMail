@@ -1,4 +1,4 @@
-//! Concurrent access tests — tokio tasks sharing data structures via Arc.
+//! Concurrent access tests, tokio tasks sharing data structures via Arc.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -10,7 +10,7 @@ use pattern_matcher::matcher::build_matcher;
 use sales_autopilot::crm::CrmService;
 
 // ---------------------------------------------------------------------------
-// 1. Concurrent ID generation — 100 tasks × 100 IDs, all unique
+// 1. Concurrent ID generation, 100 tasks × 100 IDs, all unique
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -40,7 +40,7 @@ async fn test_concurrent_id_generation() {
 }
 
 // ---------------------------------------------------------------------------
-// 2. Concurrent email validation — 1 000 tasks
+// 2. Concurrent email validation, 1 000 tasks
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -60,7 +60,7 @@ async fn test_concurrent_email_validation() {
 }
 
 // ---------------------------------------------------------------------------
-// 3. Concurrent HMAC — 100 tasks, same key, same result
+// 3. Concurrent HMAC, 100 tasks, same key, same result
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -83,7 +83,7 @@ async fn test_concurrent_hmac() {
 }
 
 // ---------------------------------------------------------------------------
-// 4. Concurrent lead scoring — 100 tasks on shared CrmService
+// 4. Concurrent lead scoring, 100 tasks on shared CrmService
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -119,7 +119,7 @@ async fn test_concurrent_lead_scoring() {
 }
 
 // ---------------------------------------------------------------------------
-// 5. Concurrent metric recording — 100 tasks on shared MetricsCollector
+// 5. Concurrent metric recording, 100 tasks on shared MetricsCollector
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -152,7 +152,7 @@ async fn test_concurrent_metric_recording() {
 }
 
 // ---------------------------------------------------------------------------
-// 7. Concurrent pattern matching — 50 tasks on shared PatternMatcher
+// 7. Concurrent pattern matching, 50 tasks on shared PatternMatcher
 // ---------------------------------------------------------------------------
 
 #[tokio::test]

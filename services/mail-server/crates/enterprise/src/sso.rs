@@ -118,8 +118,8 @@ fn spki_der_from_certificate_der(cert_der: &[u8]) -> Result<&[u8], String> {
     let (_issuer, next) = expect_tlv(tbs, next, 0x30, "issuer")?;
     let (_validity, next) = expect_tlv(tbs, next, 0x30, "validity")?;
     let (_subject, next) = expect_tlv(tbs, next, 0x30, "subject")?;
-    // The PUBLIC KEY PEM must carry the full SPKI element — tag and length
-    // header included — not just its contents.
+    // The PUBLIC KEY PEM must carry the full SPKI element, tag and length
+    // header included, not just its contents.
     let spki_start = next;
     let (_spki_contents, spki_end) = expect_tlv(tbs, next, 0x30, "subjectPublicKeyInfo")?;
     Ok(&tbs[spki_start..spki_end])
@@ -194,7 +194,7 @@ fn public_key_pem_from_certificate(cert: &str) -> Result<String, String> {
 /// The SAML wrapping defense is therefore strict:
 ///
 /// * exactly ONE `<ds:Reference>` in `<SignedInfo>`, and
-/// * that Reference must be the whole-document reference `URI=""` — with the
+/// * that Reference must be the whole-document reference `URI=""`, with the
 ///   enveloped-signature transform, the digest then covers every byte of the
 ///   document except the `<ds:Signature>` itself, so every claim parsed
 ///   below is cryptographically bound to the verified signature.
@@ -254,7 +254,7 @@ fn verify_saml_document_signature(saml_xml: &str, cert_pem: &str) -> Result<(), 
 
 /// Configure-time half of the federation guard: an OIDC issuer the tenant
 /// configures must be HTTPS unless its host is explicitly allowlisted
-/// (`SSO_FEDERATION_ALLOWLIST`) — the same predicate the resolving guard
+/// (`SSO_FEDERATION_ALLOWLIST`), the same predicate the resolving guard
 /// enforces at login begin (`federation_guard_resolved`), minus DNS.
 /// Validating here turns a misconfigured issuer into an honest 400 at
 /// configure time instead of a 500 every time a user opens the login page.
@@ -323,7 +323,7 @@ fn decrypt_oidc_client_secret(stored: &str, config: &Config) -> Result<String, S
 //      mixed/rebinding-style answer with one private address is refused),
 //   3. the resolved address is pinned into the returned client, closing the
 //      validate-then-request DNS TOCTOU,
-//   4. redirects are disabled — a guarded URL cannot bounce somewhere the
+//   4. redirects are disabled, a guarded URL cannot bounce somewhere the
 //      policy never evaluated,
 //   5. the discovery document's `issuer` must exactly match the configured
 //      issuer, and every endpoint URL it advertises is guarded the same way.
@@ -387,7 +387,7 @@ pub fn federation_guard_resolved(
     })
 }
 
-/// Resolving federation guard — see the module-level documentation above.
+/// Resolving federation guard, see the module-level documentation above.
 pub async fn federation_guard_url(url: &str) -> Result<FederationEndpoint, String> {
     let parsed = reqwest::Url::parse(url).map_err(|e| format!("Invalid URL: {e}"))?;
     let host = parsed
@@ -504,7 +504,7 @@ pub struct FederationIdentity<'a> {
     pub attributes: Option<serde_json::Value>,
 }
 
-/// The canonical-session JWT claim shape — byte-compatible with
+/// The canonical-session JWT claim shape, byte-compatible with
 /// `crate::middleware::auth::JwtClaims` in the api-server, which is what
 /// decodes `am_session` cookies.
 #[derive(Debug, serde::Serialize)]
@@ -518,7 +518,7 @@ struct CanonicalJwtClaims {
     typ: Option<String>,
 }
 
-/// Canonical scopes per role — mirrors the api-server web login's
+/// Canonical scopes per role, mirrors the api-server web login's
 /// `scopes_for_role` so an SSO session carries the same authority a password
 /// session of the same role would.
 fn canonical_scopes_for_role(role: &str) -> Vec<String> {
@@ -639,14 +639,14 @@ pub(crate) fn email_belongs_to_sso_domain(email: &str, config: &SSOConfiguration
         .unwrap_or(false)
 }
 
-/// The ONE identity-trust bar for a federation-asserted email — the exact
+/// The ONE identity-trust bar for a federation-asserted email, the exact
 /// gate the OIDC callback has enforced since audit P3-12, now (audit F2)
 /// also applied by the SAML ACS: a syntactically valid email that belongs to
 /// the SSO configuration's own domain (or an explicit `allowed_domains`
 /// mapping). Both federations resolve sessions through
 /// [`SSOService::resolve_or_provision_sso_user`], whose first-link fallback
 /// binds the IdP-asserted email to an EXISTING same-tenant account and
-/// inherits its role — an unassured email is a JIT account-linking hijack.
+/// inherits its role, an unassured email is a JIT account-linking hijack.
 ///
 /// `Err(reason)` is a policy refusal (HTTP 401), never an infrastructure
 /// failure. An opaque SAML NameID (`abc123`, no `@`) can never pass: it is
@@ -689,20 +689,20 @@ async fn fetch_oidc_discovery(issuer: &str) -> Result<serde_json::Value, String>
 /// auth gate.
 ///
 /// `SELECT COALESCE(bool_or(enabled AND enforce_sso), FALSE) FROM
-/// ent_sso_configurations WHERE tenant_id = $1` — deterministic by
+/// ent_sso_configurations WHERE tenant_id = $1`, deterministic by
 /// construction (audit P1-2): a tenant may hold a configuration row PER
 /// DOMAIN, and the previous `LIMIT 1` pick was an arbitrary one of them. The
 /// aggregate answers the policy question directly: SSO is enforced when ANY
 /// enabled configuration row for the tenant demands it.
 ///
 /// Contract:
-/// * `Ok(true)`  — an enabled configuration row sets `enforce_sso = true`;
+/// * `Ok(true)` , an enabled configuration row sets `enforce_sso = true`;
 ///   password logins for this tenant must be rejected.
-/// * `Ok(false)` — no row, or no enabled row with `enforce_sso = true`:
+/// * `Ok(false)`, no row, or no enabled row with `enforce_sso = true`:
 ///   password logins allowed.
-/// * `Ok(false)` — the table itself is absent (`42P01`, migrations not yet
+/// * `Ok(false)`, the table itself is absent (`42P01`, migrations not yet
 ///   applied): the gate degrades open rather than locking every tenant out.
-/// * `Err`       — any other database failure (surfaced so the caller can
+/// * `Err`      , any other database failure (surfaced so the caller can
 ///   fail closed on infrastructure errors).
 pub async fn tenant_enforces_sso(db: &PgPool, tenant_id: &str) -> Result<bool, String> {
     match sqlx::query_scalar::<_, bool>(
@@ -730,7 +730,7 @@ impl SSOService {
         }
     }
 
-    /// F7: per-tenant SSO enforcement via this service's pool — see
+    /// F7: per-tenant SSO enforcement via this service's pool, see
     /// [`tenant_enforces_sso`] for the exact semantics.
     pub async fn tenant_enforces_sso(&self, tenant_id: &str) -> Result<bool, String> {
         tenant_enforces_sso(&self.db, tenant_id).await
@@ -801,7 +801,7 @@ impl SSOService {
     ///
     /// Audit F11: the lookup is case-INSENSITIVE. Configurations are saved
     /// verbatim, while RelayState / path domains arrive from browsers and IdP
-    /// redirects — an `Example.com` row was unreachable via `example.com`,
+    /// redirects, an `Example.com` row was unreachable via `example.com`,
     /// silently breaking the login flow.
     pub async fn get_config_by_domain(
         &self,
@@ -822,14 +822,14 @@ impl SSOService {
         }
     }
 
-    /// Initiate SAML login — returns redirect URL.
+    /// Initiate SAML login, returns redirect URL.
     ///
     /// Audit P2-4: the AuthnRequest `<saml:Issuer>` identifies APEXMAIL (the
-    /// SP — `SAML_ENTITY_ID`), never the IdP; the configured `idp_entity_id`
+    /// SP, `SAML_ENTITY_ID`), never the IdP; the configured `idp_entity_id`
     /// is what we ACCEPT on responses, not what we send. Audit P2-6: the
     /// freshly minted request id is durably staged in
     /// `ent_saml_authn_requests` so the ACS can correlate (and atomically
-    /// consume) the response's `InResponseTo` — unsolicited responses are
+    /// consume) the response's `InResponseTo`, unsolicited responses are
     /// refused unless the tenant allows IdP-initiated logins.
     pub async fn initiate_saml_login(
         &self,
@@ -903,7 +903,7 @@ impl SSOService {
         }))
     }
 
-    /// Handle SAML callback — validate assertion and create session.
+    /// Handle SAML callback, validate assertion and create session.
     ///
     /// The tenant's SSO configuration row is passed in by the ACS handler
     /// (audit P1-2): the session lifetime comes from THAT row's
@@ -919,12 +919,12 @@ impl SSOService {
             .await
     }
 
-    /// Initiate OIDC login — returns authorization redirect URL.
+    /// Initiate OIDC login, returns authorization redirect URL.
     ///
     /// Audit P3-10: the authorize URL comes from the IdP's DISCOVERY document
     /// (`authorization_endpoint`), not a hardcoded `{issuer}/authorize`, and
     /// is fetched through the outbound federation guard (audit P3-9). The
-    /// query string is assembled with the URL API's typed pair writer — never
+    /// query string is assembled with the URL API's typed pair writer, never
     /// string concatenation. A single-use `state` (with the PKCE verifier and
     /// the post-login redirect target) is staged in Redis with GETDEL-backed
     /// consumption, or the durable table when Redis is absent.
@@ -1032,7 +1032,7 @@ impl SSOService {
 
     /// Validate and retrieve OIDC state for token exchange.
     ///
-    /// Audit P3-11: the Redis path consumes the state with GETDEL — the
+    /// Audit P3-11: the Redis path consumes the state with GETDEL, the
     /// read-and-delete is ONE atomic server operation, so two concurrent
     /// callbacks racing the same state can never both observe it.
     pub async fn validate_oidc_state(&self, state: &str) -> Result<Option<OidcStateData>, String> {
@@ -1129,15 +1129,15 @@ impl SSOService {
     ///    RS256 only, with the configured issuer, the configured client id as
     ///    audience, and the standard expiry checks.
     /// 6. Email assurance (audit P3-12): `sub` NEVER silently becomes the
-    ///    email — a valid `email` claim is required, `email_verified` must be
+    ///    email, a valid `email` claim is required, `email_verified` must be
     ///    true when present, and the validated email must belong to the
     ///    configured SSO domain (or an explicit `allowed_domains` mapping on
     ///    the configuration's attribute_mapping).
     /// 7. Issue an SSO session via [`Self::handle_oidc_callback`].
     ///
-    /// `Ok(Ok(session))` — a session was issued. `Ok(Err(reason))` — the flow
+    /// `Ok(Ok(session))`, a session was issued. `Ok(Err(reason))`, the flow
     /// is refused (state, domain, or id_token rejected; the HTTP layer answers
-    /// 401). `Err(error)` — infrastructure or upstream IdP failure (500).
+    /// 401). `Err(error)`, infrastructure or upstream IdP failure (500).
     pub async fn complete_oidc_callback(
         &self,
         domain: Option<&str>,
@@ -1366,13 +1366,13 @@ impl SSOService {
 
     /// Issue an SSO session for a validated federation identity.
     ///
-    /// Audit P1-3 — canonical session integration: the federation identity is
+    /// Audit P1-3, canonical session integration: the federation identity is
     /// resolved (or provisioned) onto the CANONICAL `users` table through the
     /// durable `ent_sso_identities` binding, and the same `am_session`
     /// JWT/cookie the web login issues is minted for it, so a successful SSO
     /// callback produces a REAL logged-in console session instead of only an
     /// enterprise bearer token. `ent_sso_sessions` remains as SSO audit
-    /// metadata keyed to the canonical user — and stores ONLY a SHA-256
+    /// metadata keyed to the canonical user, and stores ONLY a SHA-256
     /// digest of its bearer token (audit P1-3 hardening).
     ///
     /// `is_new_user` is identity-based: it is true exactly when no
@@ -1446,7 +1446,7 @@ impl SSOService {
             "SSO session created"
         );
 
-        // Audit F7: the enterprise service writes its own audit trail — a
+        // Audit F7: the enterprise service writes its own audit trail, a
         // federated session issuance is a security-relevant event that must
         // not depend on the client remembering to POST /compliance/audit.
         // Best-effort: an audit-write failure is logged, never blocks the
@@ -1495,7 +1495,7 @@ impl SSOService {
     /// table (audit P1-3), binding it durably in `ent_sso_identities`.
     ///
     /// Resolution order:
-    /// 1. the `(sso_config_id, external_user_id)` identity link — the only
+    /// 1. the `(sso_config_id, external_user_id)` identity link, the only
     ///    binding the IdP account holder cannot re-point,
     /// 2. an existing canonical user with the same tenant + email
     ///    (first-link fallback; SAML/OIDC emails are IdP-asserted),
@@ -1568,7 +1568,7 @@ impl SSOService {
                             // users.email is UNIQUE across ALL tenants: the
                             // IdP-asserted email may exist under a DIFFERENT
                             // organization. That is a policy refusal, not an
-                            // infrastructure failure — fail the login with a
+                            // infrastructure failure, fail the login with a
                             // clear reason instead of a 500 (and never link
                             // across tenants).
                             if matches!(&error, sqlx::Error::Database(db_error)
@@ -1639,13 +1639,13 @@ impl SSOService {
     }
 
     /// Mint the canonical console session (`am_session`) for a resolved SSO
-    /// user — the identical JWT claim shape and cookie attributes the web
+    /// user, the identical JWT claim shape and cookie attributes the web
     /// login (`session_cookie_for_user`) issues, signed with the deployment's
     /// shared RS256 key (`JWT_PRIVATE_KEY_PEM`).
     ///
     /// `session_hours` is the tenant's configured `session_duration_hours`
     /// (audit F6): the cookie and JWT expiry derive from the SAME policy the
-    /// enterprise SSO session row uses, instead of a hardcoded 8 hours — a
+    /// enterprise SSO session row uses, instead of a hardcoded 8 hours, a
     /// 1-hour configuration used to mint 8-hour console cookies (an 8× wider
     /// privilege window than policy), and a 24-hour one was silently cut to
     /// 8. Values below 1 are clamped to 1 hour (a zero/negative Max-Age would
@@ -1654,7 +1654,7 @@ impl SSOService {
     ///
     /// `None` when the deployment has not configured the shared signing key:
     /// the enterprise session record still exists, but no console cookie can
-    /// be minted (logged loudly — deployments wanting console SSO must set
+    /// be minted (logged loudly, deployments wanting console SSO must set
     /// the key).
     fn mint_canonical_session(
         &self,
@@ -1715,7 +1715,7 @@ impl SSOService {
     /// Validate session token.
     ///
     /// The presented token is hashed and matched against
-    /// `session_token_digest` — the database never holds the raw bearer
+    /// `session_token_digest`, the database never holds the raw bearer
     /// value (audit P1-3), so a database read cannot leak usable tokens.
     pub async fn validate_session(
         &self,
@@ -1773,7 +1773,7 @@ impl SSOService {
     ///
     /// Full validation order, all fail-closed:
     /// 1. XML-DSig signature verification with SIGNED-NODE BINDING (audit
-    ///    P2-7): exactly one whole-document `ds:Reference` — every claim
+    ///    P2-7): exactly one whole-document `ds:Reference`, every claim
     ///    parsed below is cryptographically bound to the verified signature.
     /// 2. InResponseTo CORRELATION (audit P2-6): the response's
     ///    `InResponseTo` is atomically consumed from the staged
@@ -1802,7 +1802,7 @@ impl SSOService {
         let cert_raw = config.certificate.as_deref().ok_or_else(|| {
             tracing::warn!(
                 domain = domain,
-                "SAML: No IdP certificate configured — signature verification not possible"
+                "SAML: No IdP certificate configured, signature verification not possible"
             );
             "SAML IdP certificate is not configured; cannot verify XML signature".to_string()
         })?;
@@ -1850,7 +1850,7 @@ impl SSOService {
         };
         let validated = validate_parsed_saml_document(&parsed, &ctx)?;
 
-        // 5. Replay guard — only reached after every signature and claim
+        // 5. Replay guard, only reached after every signature and claim
         //    check above has passed, so an invalid assertion cannot burn an
         //    assertion id.
         self.validate_saml_assertion_claims(
@@ -2125,7 +2125,7 @@ pub struct ValidatedSamlResponse {
     pub name_id: String,
     /// List of (attribute_name, sanitized_value) pairs.
     pub attributes: Vec<(String, String)>,
-    /// The (single) Assertion ID — the replay-protection key.
+    /// The (single) Assertion ID, the replay-protection key.
     pub assertion_id: String,
     /// Parsed `Conditions/@NotBefore` (optional).
     pub not_before: Option<DateTime<Utc>>,
@@ -2318,7 +2318,7 @@ pub(crate) fn parse_saml_document(xml: &str) -> Result<ParsedSamlDocument, Strin
                     }
                 } else if tag == "SubjectConfirmationData" {
                     // A self-closing SubjectConfirmationData carries its
-                    // attributes identically — count and parse them.
+                    // attributes identically, count and parse them.
                     parsed.subject_confirmation_data.push(Default::default());
                     let entry = parsed
                         .subject_confirmation_data
@@ -2385,7 +2385,7 @@ pub(crate) fn validate_parsed_saml_document(
 
     // 3. Issuer == configured IdP entity id, on BOTH the Response and the
     //    Assertion, each present exactly once (a duplicated Issuer element
-    //    at either level is malformed and refused — issuer-confusion
+    //    at either level is malformed and refused, issuer-confusion
     //    defense).
     fn clean(value: &Option<String>) -> Option<&str> {
         value
@@ -2565,7 +2565,7 @@ pub(crate) fn validate_parsed_saml_document(
     })
 }
 
-/// Signature-free claim validation against an explicit context — the unit
+/// Signature-free claim validation against an explicit context, the unit
 /// test seam for the deconflation matrix (each ground truth mutated
 /// independently; only correct semantics pass).
 pub fn validate_saml_document_claims(
@@ -4215,7 +4215,7 @@ pub(crate) mod tests {
                 b64(&digest)
             );
             // The verifier canonicalises the SignedInfo SUBTREE with its
-            // declared exclusive C14N — canonicalising the same bytes
+            // declared exclusive C14N, canonicalising the same bytes
             // standalone produces the identical octets.
             let exc = C14nAlgorithm::new(C14nMode::Exclusive1_0, false);
             let canonical_signed_info =
@@ -4228,7 +4228,7 @@ pub(crate) mod tests {
             )
         }
 
-        /// Sign a JOSE JWT with RS256 — the same RSASSA-PKCS1-v1_5/SHA-256
+        /// Sign a JOSE JWT with RS256, the same RSASSA-PKCS1-v1_5/SHA-256
         /// primitive `seal` uses for XML-DSig, applied to the base64url
         /// signing input. Exercises the production JWKS verification path in
         /// `validate_oidc_id_token` end-to-end.
@@ -4288,11 +4288,11 @@ pub(crate) mod tests {
     /// The properties of one IdP response fixture; every refusal arm of the
     /// parser is a small mutation of this struct.
     pub(crate) struct SamlFixture {
-        /// The IdP entity id — BOTH Issuer elements.
+        /// The IdP entity id, BOTH Issuer elements.
         pub issuer: String,
-        /// The SP entity id — the Assertion Audience (audit P2-5).
+        /// The SP entity id, the Assertion Audience (audit P2-5).
         pub audience: String,
-        /// The ACS URL — the Response Destination and the
+        /// The ACS URL, the Response Destination and the
         /// SubjectConfirmationData Recipient (audit P2-5).
         pub acs_url: String,
         /// The staged AuthnRequest id echoed in InResponseTo (audit P2-6).
@@ -4564,7 +4564,7 @@ pub(crate) mod tests {
     #[test]
     fn assertion_audience_is_checked_against_the_sp_entity_not_the_acs() {
         // Mutate ONLY the Audience: the ACS URL (the pre-fix conflation) must
-        // NOT be accepted as an Audience — the Audience names the SP entity.
+        // NOT be accepted as an Audience, the Audience names the SP entity.
         let document = deconflation_fixture().unsigned_document().replace(
             &format!("<saml:Audience>{DECONFL_SP}</saml:Audience>"),
             &format!("<saml:Audience>{DECONFL_ACS}</saml:Audience>"),
@@ -4664,7 +4664,7 @@ pub(crate) mod tests {
         );
         // ...and SIGNED-LEGITIMATE-but-tampered: the attacker appends the
         // sibling to a genuinely signed document AFTER signing, so the
-        // whole-document digest no longer matches — the signature gate
+        // whole-document digest no longer matches, the signature gate
         // refuses it before any claim is read.
         let split = legit_unsigned
             .rfind("</samlp:Response>")
@@ -4680,7 +4680,7 @@ pub(crate) mod tests {
             "the injected sibling must fail the signature gate: {error}"
         );
 
-        // Duplicate Assertion IDs (two Assertions sharing one ID) — refused.
+        // Duplicate Assertion IDs (two Assertions sharing one ID), refused.
         // The injected sibling carries no Issuer element so the refusal
         // demonstrably comes from the Assertion-count check.
         let document = deconflation_fixture()
@@ -4693,7 +4693,7 @@ pub(crate) mod tests {
             "unexpected: {error}"
         );
 
-        // Two NameIDs — refused.
+        // Two NameIDs, refused.
         let document = deconflation_fixture().unsigned_document().replace(
             "</saml:NameID>",
             "</saml:NameID><saml:NameID>second@evil.example.com</saml:NameID>",
@@ -4702,7 +4702,7 @@ pub(crate) mod tests {
             .expect_err("a second NameID is refused");
         assert!(error.contains("exactly one NameID"), "unexpected: {error}");
 
-        // A duplicated Issuer element at the response level — refused.
+        // A duplicated Issuer element at the response level, refused.
         let document = deconflation_fixture().unsigned_document().replacen(
             "<samlp:Status>",
             "<saml:Issuer>https://evil.example.com</saml:Issuer><samlp:Status>",
@@ -4715,7 +4715,7 @@ pub(crate) mod tests {
             "unexpected: {error}"
         );
 
-        // A missing SubjectConfirmationData — refused.
+        // A missing SubjectConfirmationData, refused.
         let mut fixture = deconflation_fixture();
         fixture.include_scd = false;
         let error =
@@ -4731,7 +4731,7 @@ pub(crate) mod tests {
     fn a_signature_scoped_to_a_subnode_is_refused_even_when_valid() {
         // Audit P2-7: a VALID signature whose ds:Reference targets a
         // sub-node (`URI="#_resp_cov"`) is refused by the signed-node
-        // binding — claims parse only from whole-document signatures.
+        // binding, claims parse only from whole-document signatures.
         let key = IDP_KEY.get_or_init(|| idp::RsaPrivateKey::from_pkcs8_pem(IDP_PRIVATE_KEY_PEM));
         let document = deconflation_fixture().unsigned_document();
         let split = document
@@ -4801,7 +4801,7 @@ pub(crate) mod tests {
         clear_federation_allowlist();
         // Loopback, RFC1918, link-local (the cloud metadata endpoint), the
         // unspecified address, carrier-grade NAT, IPv6 loopback / ULA /
-        // link-local, and an IPv4-mapped loopback — EVERY resolved address
+        // link-local, and an IPv4-mapped loopback, EVERY resolved address
         // must be public.
         let blocked: &[&str] = &[
             "127.0.0.1",
@@ -4827,7 +4827,7 @@ pub(crate) mod tests {
             );
         }
 
-        // A MIXED answer — one public, one private — is refused (DNS
+        // A MIXED answer, one public, one private, is refused (DNS
         // rebinding shape).
         let mixed = [
             "93.184.216.34".parse::<std::net::IpAddr>().unwrap(),
@@ -4854,7 +4854,7 @@ pub(crate) mod tests {
         assert!(error.contains("HTTPS"), "unexpected: {error}");
 
         // With the loopback host allowlisted, the local mock IdP shape is
-        // admitted — for THAT host only.
+        // admitted, for THAT host only.
         std::env::set_var("SSO_FEDERATION_ALLOWLIST", "127.0.0.1");
         let loopback = "127.0.0.1".parse::<std::net::IpAddr>().unwrap();
         let endpoint = federation_guard_resolved("http://127.0.0.1:8080/discovery", &[loopback])
@@ -5065,7 +5065,7 @@ pub(crate) mod tests {
         parse_fixture_unstaged(service, domain, fixture).await
     }
 
-    /// Parse WITHOUT staging the fixture's InResponseTo — for the cases the
+    /// Parse WITHOUT staging the fixture's InResponseTo, for the cases the
     /// correlation gate itself is the subject (a consumed or foreign stage).
     async fn parse_fixture_unstaged(
         service: &SSOService,
@@ -5121,7 +5121,7 @@ pub(crate) mod tests {
         .await;
         let mut other_fixture = SamlFixture::valid(&other_idp, &other_sp, &other_acs);
         other_fixture.assertion_id = fixture.assertion_id.clone();
-        // ...the replay guard is per-tenant, so this is accepted — but a
+        // ...the replay guard is per-tenant, so this is accepted, but a
         // second use for the OTHER tenant is still a replay.
         let _ = parse_fixture(&service, "signed-ok2.coverage.example.com", &other_fixture)
             .await
@@ -5247,7 +5247,7 @@ pub(crate) mod tests {
         );
 
         // Tampered: text inserted into the digest value AFTER signing
-        // breaks the reference digest — the DsigStatus::Invalid arm.
+        // breaks the reference digest, the DsigStatus::Invalid arm.
         let key = IDP_KEY.get_or_init(|| idp::RsaPrivateKey::from_pkcs8_pem(IDP_PRIVATE_KEY_PEM));
         let mut signed_case = SamlFixture::valid(&idp_entity_id, &sp_entity_id, &acs_url);
         signed_case.name_id = "tamper-check@example.com".into();
@@ -5272,7 +5272,7 @@ pub(crate) mod tests {
             tampered_error.contains("signature verification failed"),
             "tampered digest must be Invalid: {tampered_error}"
         );
-        // The untouched document still validates (the gate is exact) — its
+        // The untouched document still validates (the gate is exact), its
         // InResponseTo correlates against a fresh stage (audit P2-6).
         stage_saml_authn_request(
             &service,
@@ -5354,7 +5354,7 @@ pub(crate) mod tests {
         assert_eq!(remaining, 0, "the consumed stage is gone");
 
         // 3. A second response re-using the CONSUMED request id is refused
-        //    (unsolicited again — the stage is gone).
+        //    (unsolicited again, the stage is gone).
         let mut replayed_request = SamlFixture::valid(&idp_entity_id, &sp_entity_id, &acs_url);
         replayed_request.in_response_to = Some(request_id.clone());
         replayed_request.assertion_id = format!("_assertion_{}", Uuid::new_v4());
@@ -5579,7 +5579,7 @@ pub(crate) mod tests {
         );
     }
 
-    /// Audit P3-11: the Redis state consumption is GETDEL — ONE atomic
+    /// Audit P3-11: the Redis state consumption is GETDEL, ONE atomic
     /// server operation. Twenty concurrent callbacks race the same state:
     /// EXACTLY ONE sees it, the other nineteen are refused.
     #[tokio::test]
@@ -5720,7 +5720,7 @@ pub(crate) mod tests {
             .expect("live session");
         assert_eq!(session.email, "carol@example.com");
 
-        // Second login for the same external id: not a new user — the
+        // Second login for the same external id: not a new user, the
         // durable ent_sso_identities binding decides, never session history.
         let second = service
             .handle_saml_callback(
@@ -5835,7 +5835,7 @@ pub(crate) mod tests {
         assert!(!service.tenant_enforces_sso(&relaxed).await.expect("lookup"));
 
         // Audit P1-2: MULTIPLE configuration rows per tenant (one per
-        // domain) — the bool_or aggregate is deterministic where the old
+        // domain), the bool_or aggregate is deterministic where the old
         // `LIMIT 1` pick was arbitrary. A relaxed domain cannot hide an
         // enforcing one, and an enforcing domain cannot hide behind a
         // relaxed one.
@@ -6054,7 +6054,7 @@ pub(crate) mod tests {
             .expect("lazy pool");
         let mut config = new_sso_config();
 
-        // Without the shared signing key the mint degrades to None — the
+        // Without the shared signing key the mint degrades to None, the
         // enterprise bearer session still exists, no console cookie is
         // claimed.
         config.jwt_private_key_pem = String::new();
@@ -6195,7 +6195,7 @@ pub(crate) mod tests {
 
     // ═══════════════════════════════════════════════════════════════════
     // Audit F2: the SAML ACS applies the same email assurance as OIDC via
-    // `validate_asserted_email` — the single identity-trust bar both
+    // `validate_asserted_email`, the single identity-trust bar both
     // federations resolve sessions through.
     // ═══════════════════════════════════════════════════════════════════
 

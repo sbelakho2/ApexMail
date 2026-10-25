@@ -1,4 +1,4 @@
-//! HA service binary — HTTP server on port 4300, background cron jobs.
+//! HA service binary, HTTP server on port 4300, background cron jobs.
 
 use ha::backup::BackupService;
 use ha::chaos::ChaosEngineeringService;
@@ -57,7 +57,7 @@ fn init_tracing() -> Option<TracingGuard> {
 async fn main() -> Result<(), Box<dyn Error>> {
     let _guard = init_tracing();
 
-    // SEC fix: from_env is fallible now — production REFUSES missing
+    // SEC fix: from_env is fallible now, production REFUSES missing
     // INTERNAL_API_KEY / ADMIN_API_KEY / DB_PASSWORD instead of generating
     // synthetic credentials (EX_CONFIG, mirroring the isolation crate's
     // exit-78 convention).
@@ -65,7 +65,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Ok(config) => Arc::new(config),
         Err(error) => {
             error!(
-                "SECURITY: HA configuration refused to load: {error} — set the required \
+                "SECURITY: HA configuration refused to load: {error}, set the required \
                  environment variables and restart (exit 78 / EX_CONFIG)"
             );
             std::process::exit(78); // EX_CONFIG
@@ -91,13 +91,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .await?;
 
     // Fix #14: the HA tables (ha_failover_events, ha_replication_lag_history)
-    // are written by this service but exist in NO migration — ensure them
+    // are written by this service but exist in NO migration, ensure them
     // idempotently at startup. LOUD failure: abort startup rather than run
     // with inserts that would fail at runtime.
     if let Err(e) = ha::failover::bootstrap_tables(&pool).await {
         error!(
             error = %e,
-            "Failed to ensure HA tables (ha_failover_events, ha_replication_lag_history) — aborting startup"
+            "Failed to ensure HA tables (ha_failover_events, ha_replication_lag_history), aborting startup"
         );
         return Err(format!("HA table bootstrap failed: {e}").into());
     }
@@ -110,7 +110,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let health_service = HealthCheckService::new(pool.clone(), Arc::clone(&config));
     if !health_service.persistence_ready().await {
         error!(
-            "ha_health_checks relation missing — canonical migration 194 not applied; \
+            "ha_health_checks relation missing, canonical migration 194 not applied; \
              aborting startup (health results could not be persisted)"
         );
         return Err("HA health-check schema missing (migration 194)".into());
@@ -139,7 +139,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(std::time::Duration::from_millis(interval));
             // SM10 F2: this cron is now WIRED to the automatic-failover
-            // pipeline — previously it only logged, so `report_failure` had
+            // pipeline, previously it only logged, so `report_failure` had
             // zero production callers and nothing was ever failed over
             // automatically. Each per-component sample goes through the
             // flap-damped gate: an `Unhealthy` component is forwarded to
@@ -188,7 +188,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                             info!(
                                 component = %component.name,
                                 samples = ha::failover::FLAP_DAMPING_SAMPLES,
-                                "component persistently unhealthy — forwarding to the \
+                                "component persistently unhealthy, forwarding to the \
                                  automatic-failover pipeline"
                             );
                             if let Err(e) = s.failover.report_failure(&component.name).await {
@@ -202,7 +202,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         ha::failover::HealthObservation::ResetFailures => {
                             s.failover.reset_failures_for(&component.name).await;
                         }
-                        // Damped (inside the damping window) / Hold — take
+                        // Damped (inside the damping window) / Hold, take
                         // no failover-pipeline action this tick.
                         ha::failover::HealthObservation::Damped
                         | ha::failover::HealthObservation::Hold => {}
@@ -228,7 +228,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     // Background cron:replication sync-mode reconciliation (external audit
     // #10). The desired mode persisted by set_sync_mode is durable
-    // configuration — this bounded loop repairs drift between that intent
+    // configuration, this bounded loop repairs drift between that intent
     // and the live synchronous_standby_names (e.g. after a crash between
     // persisting the intent and applying it).
     {
@@ -287,7 +287,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }
 
     // Background cron:health-check history retention cleanup (daily, F63).
-    // ha_health_checks is append-only per observation — without this the
+    // ha_health_checks is append-only per observation, without this the
     // relation grows forever.
     {
         let s = state.clone();
@@ -326,8 +326,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
         #[cfg(not(unix))]
         let terminate = std::future::pending::<()>();
         tokio::select! {
-            _ = ctrl_c => info!("received Ctrl+C — shutting down"),
-            _ = terminate => info!("received SIGTERM — shutting down"),
+            _ = ctrl_c => info!("received Ctrl+C, shutting down"),
+            _ = terminate => info!("received SIGTERM, shutting down"),
         }
     };
     axum::serve(listener, app)

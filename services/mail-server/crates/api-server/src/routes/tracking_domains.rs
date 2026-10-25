@@ -4,18 +4,18 @@
 //! half of the capability (the serving half lives in
 //! `tracking-service/src/routes/custom_host.rs`):
 //!
-//! * `POST /v1/tracking-domains` — create (requires `domains:write` scope and
+//! * `POST /v1/tracking-domains`, create (requires `domains:write` scope and
 //!   the `custom_tracking_domain` entitlement). The tracking host must be a
 //!   strict subdomain of a VERIFIED domain already in the tenant's account
 //!   (docs/domains/tracking-domain.md), one per verified domain, with the
 //!   first label not a reserved mail/web role.
-//! * `GET /v1/tracking-domains` / `GET /v1/tracking-domains/:id` — read.
-//! * `GET /v1/tracking-domains/:id/dns-records` — the exact CNAME the
+//! * `GET /v1/tracking-domains` / `GET /v1/tracking-domains/:id`, read.
+//! * `GET /v1/tracking-domains/:id/dns-records`, the exact CNAME the
 //!   customer must publish (`host` → the platform tracking host).
-//! * `POST /v1/tracking-domains/:id/verify` — a real DNS check: the custom
+//! * `POST /v1/tracking-domains/:id/verify`, a real DNS check: the custom
 //!   host's addresses must include an address of the CNAME target. Outcomes
 //!   are PENDING/VERIFIED/FAILED with the named reason, never a silent state.
-//! * `DELETE /v1/tracking-domains/:id` — remove (and the tracking service
+//! * `DELETE /v1/tracking-domains/:id`, remove (and the tracking service
 //!   stops serving the host: resolution is an explicit verified-row lookup,
 //!   never a cached guess).
 //!
@@ -44,7 +44,7 @@ use crate::state::AppState;
 const DEFAULT_TRACKING_HOST: &str = "track.apexmail.ee";
 
 /// First labels that collide with the mail/web roles every domain already
-/// uses — docs/domains/tracking-domain.md: "The CNAME host must not conflict
+/// uses, docs/domains/tracking-domain.md: "The CNAME host must not conflict
 /// with existing records (don't use `www`, `mail`, etc.)".
 const RESERVED_TRACKING_LABELS: &[&str] = &[
     "www", "mail", "smtp", "mta", "mx", "bounce", "api", "app", "cpanel", "webmail",
@@ -149,7 +149,7 @@ pub(crate) fn default_cname_target() -> String {
 }
 
 /// Extract the host from a base URL (`https://track.apexmail.ee` →
-/// `track.apexmail.ee`). `None` for a missing host — the caller falls back.
+/// `track.apexmail.ee`). `None` for a missing host, the caller falls back.
 pub(crate) fn cname_target_from_base_url(base_url: &str) -> Option<String> {
     let parsed = base_url.trim().parse::<url::Url>().ok()?;
     let host = parsed
@@ -293,7 +293,7 @@ pub(crate) async fn create_tracking_domain_with_target(
 
     // The owning verified parent (item-11 owned-domain logic): the longest
     // owned domain the host is a strict subdomain of. An apex of an owned
-    // domain is NOT accepted — docs require a subdomain so mail/web records
+    // domain is NOT accepted, docs require a subdomain so mail/web records
     // on the apex are never touched.
     let parent: Option<(String,)> = sqlx::query_as(
         "SELECT lower(name) FROM domains \
@@ -309,7 +309,7 @@ pub(crate) async fn create_tracking_domain_with_target(
     .await?;
     let Some((parent_domain,)) = parent else {
         return Err(ApiError::BadRequest(format!(
-            "`{domain}` is not a subdomain of a verified domain in this workspace — \
+            "`{domain}` is not a subdomain of a verified domain in this workspace, \
              add and verify the parent domain first, then configure a tracking subdomain"
         )));
     };
@@ -324,7 +324,7 @@ pub(crate) async fn create_tracking_domain_with_target(
     .await?;
     if let Some((existing_domain, _status)) = existing_parent {
         return Err(ApiError::Conflict(format!(
-            "`{parent_domain}` already has the tracking domain `{existing_domain}` — \
+            "`{parent_domain}` already has the tracking domain `{existing_domain}`, \
              remove it before configuring another"
         )));
     }
@@ -504,14 +504,14 @@ pub(crate) async fn verify_tracking_domain_with_dns<D: TrackingDomainDns>(
     let custom = dns.resolve(&row.domain).await.map_err(|error| {
         warn!(domain = %row.domain, error = %error, "tracking domain DNS lookup failed");
         ApiError::ServiceUnavailable(format!(
-            "DNS lookup for `{}` is temporarily unavailable; the tracking domain state is unchanged — retry shortly",
+            "DNS lookup for `{}` is temporarily unavailable; the tracking domain state is unchanged, retry shortly",
             row.domain
         ))
     })?;
     let target = dns.resolve(&row.cname_target).await.map_err(|error| {
         warn!(target = %row.cname_target, error = %error, "tracking CNAME target DNS lookup failed");
         ApiError::ServiceUnavailable(format!(
-            "DNS lookup for the tracking target `{}` is temporarily unavailable; the tracking domain state is unchanged — retry shortly",
+            "DNS lookup for the tracking target `{}` is temporarily unavailable; the tracking domain state is unchanged, retry shortly",
             row.cname_target
         ))
     })?;
@@ -525,7 +525,7 @@ pub(crate) async fn verify_tracking_domain_with_dns<D: TrackingDomainDns>(
         (
                 "failed",
                 Some(format!(
-                    "`{}` resolves to [{}], which does not include any address of `{}` ([{}]) — publish the CNAME record exactly as shown by /dns-records, then verify again",
+                    "`{}` resolves to [{}], which does not include any address of `{}` ([{}]), publish the CNAME record exactly as shown by /dns-records, then verify again",
                     row.domain,
                     join_ips(&custom),
                     row.cname_target,
@@ -633,7 +633,7 @@ mod tests {
         IpAddr::V4(Ipv4Addr::new(203, 0, 113, last))
     }
 
-    /// Put the tenant on the REAL builtin `plan` row — the canonical
+    /// Put the tenant on the REAL builtin `plan` row, the canonical
     /// RuntimeEnforced row the entitlement gate reads (`pro` grants
     /// `custom_tracking_domain`). PlanFeatures has no per-field serde
     /// default: a partial features object is corruption and would 500 by
@@ -905,7 +905,7 @@ mod tests {
     }
 
     /// The documented policy: strict subdomain of a VERIFIED domain, one per
-    /// parent and host, reserved labels refused — every refusal named.
+    /// parent and host, reserved labels refused, every refusal named.
     #[tokio::test]
     async fn tracking_domain_policy_refusals_are_named() {
         let Some(pool) = crate::test_db::canonical_pool("td_policy").await else {

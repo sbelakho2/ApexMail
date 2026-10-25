@@ -758,7 +758,7 @@ fn memory_resolver_rules() {
     }
 }
 
-/// A resolver that loads fine but refuses every cross-reference — proves the
+/// A resolver that loads fine but refuses every cross-reference, proves the
 /// loader maps `UnsupportedLocation` from RESOLVE to `UnresolvableReference`.
 struct RefusingResolver;
 
@@ -923,7 +923,7 @@ fn missing_include_and_missing_linkbase_describe_their_reference_kind() {
     }
 
     // link:linkbaseRef to a missing document (the entry itself is a
-    // linkbase — a valid root).
+    // linkbase, a valid root).
     let entry = linkbase("<link:linkbaseRef xlink:href=\"ghost-lb.xml\"/>");
     let error = expect_error(load_memory(
         "memory://desc/lb.xml",
@@ -1319,7 +1319,7 @@ fn concepts_schema() -> String {
     concepts_schema_with("pres.xml")
 }
 
-/// The concepts schema plus a linkbaseRef to `href` — the loader only loads
+/// The concepts schema plus a linkbaseRef to `href`, the loader only loads
 /// documents the entry point actually references.
 fn concepts_schema_with(href: &str) -> String {
     let mut body = format!("<link:linkbaseRef xlink:href=\"{href}\"/>");
@@ -1502,7 +1502,7 @@ fn labels_resolve_through_label_arcs_with_roles_and_cdata() {
         Some("Assets <raw>"),
         "CDATA text is decoded verbatim"
     );
-    // A labelArc to a missing resource is silently ignored — no crash, no
+    // A labelArc to a missing resource is silently ignored, no crash, no
     // fabricated label.
     assert_eq!(
         taxonomy.label(&QName::new(NS, "Cash"), "http://r/labels2"),
@@ -2032,7 +2032,7 @@ fn fact_level_failures_name_the_concept_and_context() {
         measures: vec!["m".into()],
     });
 
-    // Duplicate fact: same concept/context/unit twice — and a third copy so
+    // Duplicate fact: same concept/context/unit twice, and a third copy so
     // the dedup logic must collapse identical reports.
     document.facts.push(fact_numeric("Assets", "c", 100));
     document.facts.push(fact_numeric("Assets", "c", 100));

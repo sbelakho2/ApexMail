@@ -1,7 +1,7 @@
 //! MTA‑STS – SMTP MTA Strict Transport Security (RFC 8461) + TLSRPT (RFC 8460).
 //!
 //! MAINTAINED-BUT-NOT-WIRED (F-16): nothing in the inbound SMTP path calls
-//! into this module — it is exercised only by its own unit tests. MTA-STS
+//! into this module, it is exercised only by its own unit tests. MTA-STS
 //! policy enforcement belongs on the OUTBOUND direct-MX sender (a sending
 //! MTA fetching the recipient domain's policy before connecting), which is
 //! tracked as finding F-16; the inbound receiver role only publishes DNS.
@@ -639,7 +639,7 @@ mod verify_wire_tests {
 
     /// A policy host that LIES about its content-length: it claims 100
     /// bytes, sends a fragment, and closes. The body read must surface as a
-    /// hard error — a truncated policy is never parsed as a real one.
+    /// hard error, a truncated policy is never parsed as a real one.
     #[tokio::test]
     async fn a_truncated_policy_body_is_a_reported_error_never_a_policy() {
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))

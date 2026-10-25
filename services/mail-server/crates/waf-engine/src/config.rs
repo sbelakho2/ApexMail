@@ -86,7 +86,7 @@ impl WafConfig {
     pub fn validate(&self) -> Result<(), String> {
         if !(1..=4).contains(&self.paranoia_level) {
             return Err(format!(
-                "paranoia_level must be within 1..=4, got {} — 0 disarms every rule",
+                "paranoia_level must be within 1..=4, got {}, 0 disarms every rule",
                 self.paranoia_level
             ));
         }

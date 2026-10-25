@@ -25,7 +25,7 @@ use std::time::Instant;
 /// unless an explicit bucket distribution is configured: without this, the
 /// exported series had no `_bucket` samples while `deploy/alerting-rules.yml`
 /// and every `deploy/grafana/dashboards/api-performance.json` latency panel
-/// query `..._bucket` with `histogram_quantile()` — all of them were
+/// query `..._bucket` with `histogram_quantile()`, all of them were
 /// mathematically dead (empty result, no alert could fire; dogfood
 /// 2026-10-08). The rack spans sub-millisecond health probes up to the
 /// 30s query timeout.
@@ -162,7 +162,7 @@ mod tests {
 
     /// Production wiring pin: `bin/server.rs` must install the recorder
     /// through [`configure_request_duration_buckets`]. Reading the source is
-    /// deliberate — the defect was exactly "the test exercised the metric
+    /// deliberate, the defect was exactly "the test exercised the metric
     /// facade while the binary installed an unconfigured recorder".
     #[test]
     fn server_binary_configures_the_request_duration_buckets() {

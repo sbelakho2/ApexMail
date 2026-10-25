@@ -106,7 +106,7 @@ pub struct GdprConfig {
     pub access_request_max_messages: i64,
     /// Envelope sender for DSR verification emails queued by the outbox
     /// flush job (`dsr_outbox_flush`). MUST live on the platform's system
-    /// domain (apexmail.ee) — the worker rejects rows whose sender does not
+    /// domain (apexmail.ee), the worker rejects rows whose sender does not
     /// match the verified system `domains` row.
     /// Env: `COMPLIANCE_SYSTEM_FROM` (default `noreply@apexmail.ee`).
     pub system_from_address: String,
@@ -124,7 +124,7 @@ pub struct GdprConfig {
     /// instead of a silent gap.
     /// Env: `GDPR_CLICKHOUSE_ERASURE_ENABLED` (default "false").
     pub clickhouse_erasure_enabled: bool,
-    /// Env: `CLICKHOUSE_URL` (default "http://clickhouse:8123" — the
+    /// Env: `CLICKHOUSE_URL` (default "http://clickhouse:8123", the
     /// workspace-wide convention, same as the analytics/tracking crates).
     pub clickhouse_url: String,
     /// Env: `CLICKHOUSE_DATABASE` (default "apexmail").
@@ -248,8 +248,8 @@ impl ComplianceConfig {
                 audit_signing_key,
             )
         } else {
-            // Development/test: ephemeral values are acceptable — every
-            // restart rotates them — but they must be loud.
+            // Development/test: ephemeral values are acceptable, every
+            // restart rotates them, but they must be loud.
             let auth_token = if raw_auth_token.trim().is_empty() {
                 tracing::warn!(
                     "SECURITY: COMPLIANCE_AUTH_TOKEN missing in development; generated an ephemeral runtime token (redacted)"
@@ -338,7 +338,7 @@ impl ComplianceConfig {
                 request_expiration_days: env_i64("GDPR_REQUEST_EXPIRATION_DAYS", 30),
                 export_expiration_days: env_i64("GDPR_EXPORT_EXPIRATION_DAYS", 7),
                 // G: default to the compliance service's own host (same as
-                // verify_base_url) — exports are served by this crate's
+                // verify_base_url), exports are served by this crate's
                 // GET /gdpr/exports/{id} route, not a third-party bucket.
                 // Both URLs must ALWAYS be absolute: an empty env value
                 // (compose default) falls back to the documented default.
@@ -355,7 +355,7 @@ impl ComplianceConfig {
                 system_from_address: env_or("COMPLIANCE_SYSTEM_FROM", "noreply@apexmail.ee"),
                 outbox_flush_batch: env_i64("COMPLIANCE_DSR_FLUSH_BATCH", 25),
                 outbox_flush_max_attempts: env_i64("COMPLIANCE_DSR_FLUSH_MAX_ATTEMPTS", 5),
-                // F1: ClickHouse erasure step — same env names as the
+                // F1: ClickHouse erasure step, same env names as the
                 // analytics/tracking crates' ClickHouse clients.
                 clickhouse_erasure_enabled: env_or("GDPR_CLICKHOUSE_ERASURE_ENABLED", "false")
                     == "true",
@@ -407,7 +407,7 @@ fn env_or(key: &str, default: &str) -> String {
 /// The shipped compose passes `GDPR_VERIFY_BASE_URL=` / `GDPR_EXPORT_BASE_URL=`
 /// through as empty strings. `env_or` returned them verbatim, so every DSR
 /// verification email carried a RELATIVE `/gdpr/verify/{id}` link and
-/// `gdpr_exports.export_url` a relative `/gdpr/exports/{id}` path — links the
+/// `gdpr_exports.export_url` a relative `/gdpr/exports/{id}` path, links the
 /// tracking service (correctly) refuses as an invalid redirect target, so the
 /// printed link in the delivered mail is unclickable (dogfood 2026-10-08). An
 /// empty value must fall back to the documented default, never produce a
@@ -515,13 +515,13 @@ mod tests {
     // ── I-4: audit signing key persistence ─────────────────────
 
     fn temp_key_file(name: &str) -> std::path::PathBuf {
-        let mut path = std::env::temp_dir(); // nosemgrep: rust.lang.security.temp-dir.temp-dir — test fixture under a unique pid/uuid path — no predictable-name temp collision
+        let mut path = std::env::temp_dir(); // nosemgrep: rust.lang.security.temp-dir.temp-dir, test fixture under a unique pid/uuid path, no predictable-name temp collision
         path.push(format!("{}-{}", name, std::process::id()));
         let _ = std::fs::remove_file(&path);
         path
     }
 
-    /// A generated key is persisted and REUSED on the next start — the key
+    /// A generated key is persisted and REUSED on the next start, the key
     /// must be stable across restarts for archived chain signatures to stay
     /// verifiable.
     #[test]
@@ -564,7 +564,7 @@ mod tests {
     }
 
     /// Captures `tracing` output emitted inside `f` with a SCOPED subscriber
-    /// (no global default installed — deterministic under nextest and plain
+    /// (no global default installed, deterministic under nextest and plain
     /// `cargo test` alike).
     struct TestLogSink(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
 
@@ -673,7 +673,7 @@ mod tests {
     /// and `GDPR_EXPORT_BASE_URL=` (SET but EMPTY). `env_or` returned the
     /// empty string verbatim, so the DSR verification email carried a
     /// RELATIVE `/gdpr/verify/{id}` link (and exports a relative
-    /// `/gdpr/exports/{id}` path) — the tracking service (correctly) refuses
+    /// `/gdpr/exports/{id}` path), the tracking service (correctly) refuses
     /// those as invalid targets, making the printed link unclickable. Empty
     /// or whitespace-only must mean "unset": the documented absolute default
     /// applies, never a relative link.

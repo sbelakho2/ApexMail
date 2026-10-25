@@ -1,4 +1,4 @@
-//! Semantic reply classification — layer 2 of 3.
+//! Semantic reply classification, layer 2 of 3.
 //!
 //! Everything the deterministic layer ([`super::deterministic`]) could not
 //! prove is decided here. The layer is provider-agnostic: it defines the
@@ -123,7 +123,7 @@ impl ReplyClassifier for StaticFallbackClassifier {
     async fn classify(&self, _input: &ReplyInput) -> Result<AiClassification, ClassifyError> {
         Ok(AiClassification::unknown_outage(format!(
             "{AI_OUTAGE_REASON_PREFIX}: no ai classifier is configured; \
-             deterministic parsing found nothing provable — refusing to guess"
+             deterministic parsing found nothing provable, refusing to guess"
         )))
     }
 
@@ -278,7 +278,7 @@ impl HttpReplyClassifier {
 
         // Additive per plan §5.5: only the two dispositions that carry
         // objections accept a sub-label, and only from the six-value
-        // taxonomy — anything else is dropped rather than trusted.
+        // taxonomy, anything else is dropped rather than trusted.
         let objection_class = payload
             .get("objection_class")
             .and_then(|value| value.as_str())
@@ -319,7 +319,7 @@ impl ReplyClassifier for HttpReplyClassifier {
         }
         // The AI service rate-governs per tenant (`/reply/classify` requires
         // the header, exactly like `/chat`); a NULL-tenant row classifies
-        // headerless and the service refuses it — which is the audited
+        // headerless and the service refuses it, which is the audited
         // fallback, never a guess.
         if let Some(tenant) = input.tenant_id.as_deref() {
             builder = builder.header("x-apexmail-tenant-id", tenant);
@@ -398,7 +398,7 @@ pub struct ClassifyResponseWire {
 mod tests {
     use super::*;
 
-    /// A classifier that always errors — the outage case.
+    /// A classifier that always errors, the outage case.
     struct ErroringClassifier;
     #[async_trait]
     impl ReplyClassifier for ErroringClassifier {
@@ -410,7 +410,7 @@ mod tests {
         }
     }
 
-    /// A classifier that always returns the naive guess — used to prove the
+    /// A classifier that always returns the naive guess, used to prove the
     /// fallback is what protects positive categories.
     struct NaivelyPositiveClassifier;
     #[async_trait]
@@ -455,7 +455,7 @@ mod tests {
         // as Positive. With the AI down there is no verified interpretation.
         let input = ReplyInput::new(
             "Re: your proposal",
-            "Thanks — sounds interesting, maybe we should talk sometime?",
+            "Thanks, sounds interesting, maybe we should talk sometime?",
         );
         let result = classify_or_fallback(&ErroringClassifier, &input).await;
         assert_eq!(result.disposition, ReplyDisposition::Unknown);

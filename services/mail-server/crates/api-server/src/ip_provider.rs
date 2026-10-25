@@ -1,8 +1,8 @@
-//! Dedicated IP provider — provisions IPs exclusively via Hetzner Cloud.
+//! Dedicated IP provider, provisions IPs exclusively via Hetzner Cloud.
 //!
 //! In ApexMail's architecture, dedicated IPs are **always** Hetzner floating
 //! IPs, routed through self-hosted MTA servers. There is no SES dedicated IP
-//! path — SES is used exclusively for shared-pool sending.
+//! path, SES is used exclusively for shared-pool sending.
 //!
 //! ## Architecture
 //!
@@ -73,11 +73,11 @@
 //! legitimate and each owns a distinct floating IP. `run_provisioning`
 //! serializes attempts inside the process and, when an attempt loses (DB
 //! write refused after the provider resource exists), it deletes its own
-//! resource — it never leaves an unrecorded, promotable IP. Stale in-flight
+//! resource, it never leaves an unrecorded, promotable IP. Stale in-flight
 //! rows (`created`/`attached`/`rdns_ready` with an old `updated_at`) and
 //! `cleanup_failed` rows are the documented reconciliation worklist; see
 //! migration 207. For the crash window between the provider create and the
-//! first DB write — where no row can exist yet — the floating IP is created
+//! first DB write, where no row can exist yet, the floating IP is created
 //! with the labels `service=apexmail` and `tenant_id=<tenant>`, so
 //! `GET /floating_ips?label_selector=service=apexmail` on the provider lists
 //! every resource that can then be matched against `dedicated_ips`.
@@ -99,13 +99,13 @@ use uuid::Uuid;
 /// Hetzner Cloud API base URL.
 const HETZNER_API_BASE: &str = "https://api.hetzner.cloud/v1";
 
-/// Dedicated IP add-on price in cents/month — the canonical catalog's
+/// Dedicated IP add-on price in cents/month, the canonical catalog's
 /// first-address price (owner price table 2026-10-15: €49/mo = 4,900 cents;
 /// USD $55). Read from `platform-catalog` so the API can never quote the
 /// retired $30 flat add-on.
 pub const ADD_ON_PRICE_CENTS: i32 = platform_catalog::DEDICATED_IP_FIRST_CENTS as i32;
 
-/// Each additional dedicated IP in cents/month — the catalog's additional
+/// Each additional dedicated IP in cents/month, the catalog's additional
 /// address price (€69/mo = 6,900 cents; USD $75).
 pub const ADD_ON_ADDITIONAL_PRICE_CENTS: i32 =
     platform_catalog::DEDICATED_IP_ADDITIONAL_CENTS as i32;
@@ -188,7 +188,7 @@ pub enum IpProviderError {
     #[error("plan does not include dedicated IP access")]
     PlanNotEligible,
 
-    #[error("Hetzner not configured — set HETZNER_API_TOKEN")]
+    #[error("Hetzner not configured, set HETZNER_API_TOKEN")]
     NotConfigured,
 
     /// The state machine refused a step (skipped or out-of-order transition).
@@ -197,7 +197,7 @@ pub enum IpProviderError {
 
     /// No verified domain exists, so no rDNS hostname can be set. Failing
     /// here avoids creating a provider resource that can never be published.
-    #[error("tenant {tenant_id} has no verified domain — cannot configure rDNS")]
+    #[error("tenant {tenant_id} has no verified domain, cannot configure rDNS")]
     NoVerifiedDomain { tenant_id: String },
 
     /// The floating IP could not be attached to an MTA server.
@@ -205,7 +205,7 @@ pub enum IpProviderError {
     AttachFailed(String),
 
     /// No MTA server is configured for attachment.
-    #[error("no MTA server configured for floating-IP attachment — set HETZNER_MTA_SERVER_ID")]
+    #[error("no MTA server configured for floating-IP attachment, set HETZNER_MTA_SERVER_ID")]
     AttachTargetUnavailable,
 
     /// The provider set rDNS, but the PTR record did not confirm it.
@@ -217,7 +217,7 @@ pub enum IpProviderError {
     EmptyProviderIp,
 
     /// Provider cleanup (delete) failed after a provisioning failure. The
-    /// resource may still exist — the row is recorded as `cleanup_failed`.
+    /// resource may still exist, the row is recorded as `cleanup_failed`.
     #[error("provider cleanup failed for {ip} (resource {provider_resource_id:?}): {reason}")]
     CompensationFailed {
         ip: String,
@@ -307,7 +307,7 @@ impl DedicatedIpState {
         }
     }
 
-    /// Parse a status value. Unknown/hostile values return `None` — callers
+    /// Parse a status value. Unknown/hostile values return `None`, callers
     /// must fail closed, never guess.
     pub fn parse(value: &str) -> Option<Self> {
         Self::ALL.iter().copied().find(|s| s.as_str() == value)
@@ -385,8 +385,8 @@ pub enum StateTransitionError {
 /// * happy path advances exactly one step;
 /// * an in-flight state may fail to `failed`/`cleanup_failed`;
 /// * same-state is an idempotent no-op (resume);
-/// * everything else — skipped steps, terminal resurrection, unknown
-///   statuses (already rejected by [`DedicatedIpState::parse`]) — is refused.
+/// * everything else, skipped steps, terminal resurrection, unknown
+///   statuses (already rejected by [`DedicatedIpState::parse`]), is refused.
 pub fn transition(
     from: DedicatedIpState,
     to: DedicatedIpState,
@@ -1162,7 +1162,7 @@ where
                 cleanup_failed = (status == DedicatedIpState::CleanupFailed),
                 record_error = %record_err,
                 error = %detail,
-                "COULD NOT RECORD dedicated IP provisioning failure state — search logs for this tenant and provider id"
+                "COULD NOT RECORD dedicated IP provisioning failure state, search logs for this tenant and provider id"
             );
         }
     }
@@ -1671,7 +1671,7 @@ impl DedicatedIpProvider {
     ///
     /// Promotion to `warming` requires verified rDNS (`rdns_ready`); resuming
     /// an existing `warming` row requires its warmup anchor. Every other
-    /// status is refused — the state machine is the single authority.
+    /// status is refused, the state machine is the single authority.
     pub async fn start_warmup(
         &self,
         dedicated_ip_id: Uuid,
@@ -1958,7 +1958,7 @@ mod tests {
                     resource_id,
                     server_id,
                 });
-                // NOTE: no `fail_all` arm — `fail_all` makes create_floating_ip
+                // NOTE: no `fail_all` arm, `fail_all` makes create_floating_ip
                 // (always the FIRST provider call) fail first, and a failed
                 // create exits run_provisioning without compensation, so
                 // this method can never observe it.
@@ -1981,7 +1981,7 @@ mod tests {
                     resource_id,
                     hostname: hostname.to_string(),
                 });
-                // NOTE: no `fail_all` arm — unreachable for the same reason
+                // NOTE: no `fail_all` arm, unreachable for the same reason
                 // as assign_floating_ip above.
                 if let Some(reason) = state.fail_set_rdns.clone() {
                     return Err(IpProviderError::HetznerApi(reason));
@@ -1997,7 +1997,7 @@ mod tests {
             Box::pin(async move {
                 let mut state = self.state.lock().unwrap();
                 state.calls.push(ProviderCall::Delete { resource_id });
-                // NOTE: no `fail_all` arm — unreachable for the same reason
+                // NOTE: no `fail_all` arm, unreachable for the same reason
                 // as assign_floating_ip above.
                 if let Some(reason) = state.fail_delete.clone() {
                     return Err(IpProviderError::HetznerApi(reason));
@@ -2408,7 +2408,7 @@ mod tests {
 
     /// Required adversarial #4, query-shaped: seed one row per status
     /// (including a state outside the vocabulary and a warming row without
-    /// its anchor) and select with the production predicate — only genuinely
+    /// its anchor) and select with the production predicate, only genuinely
     /// warming/active rows come back.
     #[test]
     fn test_selection_over_all_statuses_returns_only_selectable_rows() {
@@ -3128,7 +3128,7 @@ mod tests {
         // Day 44 must still be capped before the extended ramp tiers start.
         assert!(
             limit_for_day(44) < u64::MAX,
-            "Day 44 must not be unlimited — IP is still warming"
+            "Day 44 must not be unlimited, IP is still warming"
         );
         assert_eq!(limit_for_day(44), 50_000);
     }
@@ -3188,7 +3188,7 @@ mod tests {
     fn test_allocating_ip_add_on_price_consistency() {
         // The price constants are the CANONICAL catalog ladder (owner price
         // table 2026-10-15): €49 = 4,900 cents for the first address and
-        // €69 = 6,900 cents for each additional — the retired flat $30
+        // €69 = 6,900 cents for each additional, the retired flat $30
         // (3,000 cents) add-on is gone, and the dedicated_ips route quotes
         // the same constants.
         assert_eq!(
@@ -4198,7 +4198,7 @@ mod db_tests {
         assert_eq!(normalize_ptr("."), "");
     }
     /// record_failure: a NON-unique database error surfaces as Database
-    /// (here: a region longer than the column) — no silent swallowing.
+    /// (here: a region longer than the column), no silent swallowing.
     #[tokio::test]
     async fn adversarial_record_failure_plain_db_error_is_honest() {
         if let Some(pool) = pool_for("record_failure_plain_error").await {
@@ -4251,7 +4251,7 @@ mod db_tests {
             let store = PgProvisioningStore { db: &pool };
 
             // First attempt: hetzner id 7001 is already linked (unique
-            // violation). Retry drops the link — but the failure record's
+            // violation). Retry drops the link, but the failure record's
             // ip_address is held by a live row (the partial unique index
             // on active ip_address), so the RETRY fails too.
             let ghost_tenant = unique_id();
@@ -4465,7 +4465,7 @@ mod mock_hetzner_tests {
 
     /// A raw-TCP endpoint that answers the FIRST `healthy_responses`
     /// connections with a valid create response and drops every later
-    /// connection — deterministically turning later calls into transport
+    /// connection, deterministically turning later calls into transport
     /// errors (connection closed before the response).
     async fn start_flaky_hetzner(
         healthy_responses: usize,
@@ -4853,7 +4853,7 @@ mod mock_hetzner_tests {
     }
 
     /// Transport-level failures (connection dropped / refused) map to
-    /// HetznerApi/CompensationFailed — never a panic, never a partial row.
+    /// HetznerApi/CompensationFailed, never a panic, never a partial row.
     #[tokio::test]
     async fn hetzner_transport_failures_fail_closed() {
         if let Some(pool) = crate::test_db::canonical_pool("mock_hetz_transport").await {
@@ -4963,7 +4963,7 @@ mod mock_hetzner_tests {
     #[tokio::test]
     async fn dns_verifier_covers_lookup_arms_without_external_dns() {
         // 127.0.0.1's PTR is served from the local hosts file ("localhost")
-        // — no external resolver is contacted for the reverse query.
+        //, no external resolver is contacted for the reverse query.
         let verifier = DnsRdnsVerifier::new();
         let verified = verifier.verify("127.0.0.1", "localhost").await;
         assert!(

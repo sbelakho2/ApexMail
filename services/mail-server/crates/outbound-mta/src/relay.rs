@@ -11,11 +11,11 @@
 //! Idempotency is anchored on the durable ledger's primary key:
 //!
 //! * a repeated `send_unit` whose row is `accepted` returns the STORED
-//!   record — no second delivery (the acceptance record is the contract);
+//!   record, no second delivery (the acceptance record is the contract);
 //! * a repeated `send_unit` while an attempt is in flight returns
 //!   [`RelayError::InFlight`];
 //! * a repeated `send_unit` while a retry is queued returns
-//!   [`RelayError::AlreadyQueued`] — retries belong to the queue processor,
+//!   [`RelayError::AlreadyQueued`], retries belong to the queue processor,
 //!   never to a duplicate submit call;
 //! * a repeated `send_unit` after a permanent failure returns
 //!   [`RelayError::Permanent`]; a terminal failure is never silently retried.
@@ -39,8 +39,8 @@
 //! # Partial acceptance
 //!
 //! When a domain accepts the message (post-DATA 250) but some recipients were
-//! only temporarily deferred — a per-recipient 4xx, or an unsettled domain
-//! while another accepted — the unit is pinned `accepted`: a whole-unit retry
+//! only temporarily deferred, a per-recipient 4xx, or an unsettled domain
+//! while another accepted, the unit is pinned `accepted`: a whole-unit retry
 //! would duplicate the accepted copies. The deferred recipients are never
 //! dropped: they continue on their OWN follow-up unit
 //! (`{send_unit}#deferred{attempt}`, see [`deferred_retry_unit`]), carrying
@@ -233,7 +233,7 @@ pub struct AcceptanceRecord {
     /// deferral while the unit itself was accepted (partial acceptance).
     ///
     /// The unit is pinned `accepted` the moment ANY recipient gets the
-    /// post-DATA 250 — a whole-unit retry would duplicate the accepted
+    /// post-DATA 250, a whole-unit retry would duplicate the accepted
     /// copies. The deferred recipients are therefore retried as their OWN
     /// ledger row, carrying only them, the ORIGINAL envelope and message,
     /// and the inherited attempt counter. The ledger commits that row in
@@ -249,7 +249,7 @@ pub struct AcceptanceRecord {
 /// recipients (see [`AcceptanceRecord::deferred_retry`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeferredRetryPlan {
-    /// Deterministic child id: `{parent}#deferred{attempt}` — stable across
+    /// Deterministic child id: `{parent}#deferred{attempt}`, stable across
     /// replays so the child is enqueued exactly once.
     pub send_unit: String,
     /// Only the recipients whose verdict was a temporary deferral.
@@ -337,7 +337,7 @@ pub struct Relay {
     dsn: DsnGenerator,
     /// Warmup admission at the SMTP-effect boundary (P0): when installed,
     /// EVERY delivery attempt on a warming requested IP is admitted here —
-    /// inline submissions and daemon retries alike — so a durable retry can
+    /// inline submissions and daemon retries alike, so a durable retry can
     /// never bypass the IP's daily cap. Absent = a caller-side authority
     /// owns admission.
     warmup: crate::warmup::WarmupGate,
@@ -370,7 +370,7 @@ impl Relay {
 
     /// [`Self::with_warmup_gate`] plus the provider throttle. Production
     /// callers with a Postgres pool install a [`throttle::ProviderThrottle`]
-    /// so every claim — inline or daemon retry — passes the reputation gate
+    /// so every claim, inline or daemon retry, passes the reputation gate
     /// before a connection is opened.
     pub fn with_warmup_gate_and_throttle(
         ledger: Arc<dyn RelayLedger>,
@@ -409,7 +409,7 @@ impl Relay {
         hasher.update(request.envelope_from.as_deref().unwrap_or("\0"));
         hasher.update(b"\n");
         // Canonical recipients: sorted, deduplicated, NUL-free (a recipient
-        // address cannot contain NUL — SMTP forbids it).
+        // address cannot contain NUL, SMTP forbids it).
         let mut recipients = request.recipients.clone();
         recipients.sort();
         recipients.dedup();
@@ -577,7 +577,7 @@ impl Relay {
 
         // ── Provider reputation/operator throttle (see crate::throttle) ────
         // BEFORE any connection is opened and beside the warmup admission
-        // gate: every claimed row — inline or daemon retry — passes the
+        // gate: every claimed row, inline or daemon retry, passes the
         // deterministic reputation/override gate. A throttled row is
         // REQUEUED with the bounded throttle window; it is never marked
         // permanent and never consumes a permanent attempt. One submission
@@ -632,7 +632,7 @@ impl Relay {
         // BEFORE any connection is opened: when this relay owns warmup
         // accounting, a warming requested IP must be admitted for the day
         // on EVERY attempt. A refusal or an admission-store outage defers
-        // the send — nothing has hit the wire, so the durable retry
+        // the send, nothing has hit the wire, so the durable retry
         // schedule applies with a named reason. This is what makes a daemon
         // retry unable to bypass the IP's daily cap after the inline
         // attempt deferred.
@@ -649,7 +649,7 @@ impl Relay {
                 Ok(None | Some(crate::warmup::WarmupAdmission::Admitted)) => {}
                 Ok(Some(crate::warmup::WarmupAdmission::AtCap)) => {
                     let reason = format!(
-                        "warming IP {} is at its canonical daily cap — deferring before any \
+                        "warming IP {} is at its canonical daily cap, deferring before any \
                          connection is opened",
                         row.requested_source_ip
                             .map(|ip| ip.to_string())
@@ -874,7 +874,7 @@ impl Relay {
             // Post-DATA 250 recorded: pin the unit accepted. The deferred
             // recipients cannot be retried as part of THIS unit (a retry
             // would duplicate the accepted copies), so they continue on a
-            // follow-up unit of their own — never dropped. When the retry
+            // follow-up unit of their own, never dropped. When the retry
             // budget is already exhausted they are DSN'd (4.4.7) instead.
             // One ledger statement for the whole rejected subset.
             let dsn_submissions: Vec<NewSubmission> = rejected_results
@@ -900,7 +900,7 @@ impl Relay {
                     }),
                     None => {
                         // Budget exhausted for the deferred subset: delivery
-                        // has expired for them, which is a DSN — not a silent
+                        // has expired for them, which is a DSN, not a silent
                         // drop. Build the whole subset and enqueue it in one
                         // ledger statement.
                         let expired: Vec<NewSubmission> = deferred_recipients
@@ -1133,8 +1133,8 @@ impl Relay {
             // before we send a byte: transmitting anyway burns the full
             // bandwidth and connect time only to be answered 552 after
             // end-of-DATA. Skip this target BEFORE MAIL FROM; the MX walk
-            // takes the next one. (`Some(0)` is a bare `SIZE` — no fixed
-            // limit — and never skips.)
+            // takes the next one. (`Some(0)` is a bare `SIZE`, no fixed
+            // limit, and never skips.)
             if peer_size_rejects(capabilities.size, message.len()) {
                 let advertised = capabilities.size.unwrap_or_default();
                 last_transient = Some(DeliveryFailure::Transient {
@@ -1244,7 +1244,7 @@ impl Relay {
                 // A transport failure (timeout, reset, unparseable reply)
                 // interrupted the RCPT loop after at least one acceptance:
                 // recipients after the failure point were never attempted,
-                // yet the session can still complete DATA with a 250 — and
+                // yet the session can still complete DATA with a 250, and
                 // the unit is then pinned accepted below. Every recipient
                 // without a verdict must be classified NOW or it would be
                 // silently lost: absent from the acceptance record, with no
@@ -1388,7 +1388,7 @@ impl Relay {
                 // A permanent greeting refusal (5xx before ANY command) is
                 // the peer closing the door: this MX cannot carry the
                 // message. Retrying it to the ceiling would report a
-                // permanent refusal as a delivery timeout — classify it as
+                // permanent refusal as a delivery timeout, classify it as
                 // the session-level refusal it is (try the next MX, then
                 // permanent).
                 if let Some((stage, reply)) = other.reply() {
@@ -1702,8 +1702,8 @@ fn validate_request(request: &SubmitRequest, config: &RelayConfig) -> Result<(),
         )));
     }
     // The source-IP allowlist: a dedicated tenant's relay may bind ONLY the
-    // tenant's managed addresses. Refusing here — before a connection, not
-    // at bind time — makes the restriction a configuration fact rather than
+    // tenant's managed addresses. Refusing here, before a connection, not
+    // at bind time, makes the restriction a configuration fact rather than
     // a kernel error, and keeps the refusal pre-DATA like every other
     // source-IP failure.
     if let (Some(allowed), Some(requested)) =
@@ -1772,7 +1772,7 @@ fn reply_results(
 }
 
 /// RFC 1870: a peer that advertises a nonzero SIZE has told us the message
-/// will not fit — the client is expected to skip the target instead of
+/// will not fit, the client is expected to skip the target instead of
 /// transmitting the full body to be answered 552 after end-of-DATA.
 /// `None` is "not advertised"; `Some(0)` is a bare `SIZE` (no fixed limit).
 /// Pure step, exposed for tests.
@@ -2160,7 +2160,7 @@ mod tests {
     async fn source_ip_outside_the_configured_allowlist_is_refused_before_any_connection() {
         // The dedicated-tenant host group pins the relay to the tenant's
         // managed IPs via OUTBOUND_MTA_ALLOWED_SOURCE_IPS. A submission
-        // naming any other address must be refused at validation — before
+        // naming any other address must be refused at validation, before
         // DNS, before a socket, before DATA.
         let mut config = relay_config();
         config.allowed_source_ips = Some(vec![
@@ -2436,7 +2436,7 @@ mod tests {
                     recipients: seeded.recipients.clone(),
                     message: seeded.message.clone(),
                     requested_source_ip: seeded.requested_source_ip,
-                    // The row's OWN budget — deliberately far below the
+                    // The row's OWN budget, deliberately far below the
                     // process ceiling.
                     max_attempts: 1,
                 },
@@ -2556,7 +2556,7 @@ mod tests {
         }
 
         // NOTE: an unquoted multi-`@` local part is deliberately out of
-        // scope here — validate_address follows rsplit_once, so a quoted
+        // scope here, validate_address follows rsplit_once, so a quoted
         // local part containing '@' keeps working.
         for sender in ["no-at", "user@", "a b@example.com", "user@-bad.example"] {
             let mut hostile = request();
@@ -3355,14 +3355,14 @@ mod tests {
     /// protocol-confused multiline reply whose lines carry mismatched codes)
     /// aborts the RCPT loop. When at least one recipient was already
     /// accepted, the relay used to proceed to DATA anyway, and recipients
-    /// after the failure point landed in NO list — no verdict, no follow-up
-    /// unit, no DSN — while the unit was pinned accepted: silent mail loss.
+    /// after the failure point landed in NO list, no verdict, no follow-up
+    /// unit, no DSN, while the unit was pinned accepted: silent mail loss.
     /// They must be classified Deferred and continue on the follow-up unit.
     #[tokio::test]
     async fn rcpt_transport_abort_after_an_accept_defers_the_unattempted_recipients() {
         // Recipient b gets a hostile reply: the client's RCPT read fails as
         // a transport error (unparseable multiline reply), while the
-        // connection itself stays open and in sync — DATA still completes.
+        // connection itself stays open and in sync, DATA still completes.
         let server_config = FakeSmtpConfig {
             raw_rcpt: Some((
                 "b@example.com".to_string(),
@@ -3450,7 +3450,7 @@ mod tests {
     }
 
     /// The audit regression: a peer-advertised SIZE below the message length
-    /// was parsed but never enforced — the full body was transmitted only to
+    /// was parsed but never enforced, the full body was transmitted only to
     /// be answered 552 after end-of-DATA. The relay must skip the target
     /// BEFORE MAIL FROM and take the next MX (RFC 1870).
     #[tokio::test]
@@ -3523,7 +3523,7 @@ mod tests {
 
     /// The audit regression: a multi-recipient send pinned `accepted` as soon
     /// as ANY recipient got the post-DATA 250, and recipients that received a
-    /// temporary deferral were deliberately never retried — silently dropped
+    /// temporary deferral were deliberately never retried, silently dropped
     /// mail with only a ledger note. The deferred subset must continue on its
     /// own follow-up unit, and the accepted copies must never be re-sent.
     #[tokio::test]
@@ -3598,7 +3598,7 @@ mod tests {
             "the follow-up is not due before its backoff"
         );
 
-        // After the backoff the child delivers b — and only b.
+        // After the backoff the child delivers b, and only b.
         let report = harness
             .relay
             .process_due(plan.next_attempt_at + chrono::Duration::seconds(1), 10)
@@ -3752,7 +3752,7 @@ mod tests {
         assert!(!record.warmup_capacity_consumed());
 
         // A transient domain-level failure instead becomes Deferred (never a
-        // retry — the unit is already accepted for A).
+        // retry, the unit is already accepted for A).
         let accepting2 = FakeSmtpServer::start(FakeSmtpConfig::default()).await;
         let ledger2 = Arc::new(MemoryLedger::new());
         let resolver2 = Arc::new(
@@ -3779,7 +3779,7 @@ mod tests {
         assert!(record2.dsn_send_units.is_empty());
         assert_eq!(accepting2.messages().len(), 1);
         // The transiently-failed domain's recipient is retried on a follow-up
-        // unit of their own — never dropped.
+        // unit of their own, never dropped.
         let plan = record2
             .deferred_retry
             .as_ref()

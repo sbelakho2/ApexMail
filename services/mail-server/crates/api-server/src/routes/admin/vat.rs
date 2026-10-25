@@ -1,11 +1,11 @@
-//! VAT / KMD return endpoints — control-plane access to Estonia VAT returns.
+//! VAT / KMD return endpoints, control-plane access to Estonia VAT returns.
 //!
 //! Provides:
-//! - GET /v1/admin/vat/kmd — list all KMD returns (paginated)
-//! - GET /v1/admin/vat/kmd/latest — latest KMD return
-//! - GET /v1/admin/vat/kmd/current — live current-month VAT summary
-//! - POST /v1/admin/vat/kmd/generate — manually trigger KMD generation for a period
-//! - GET /v1/admin/vat/kmd/:year/:month — specific period KMD return
+//! - GET /v1/admin/vat/kmd, list all KMD returns (paginated)
+//! - GET /v1/admin/vat/kmd/latest, latest KMD return
+//! - GET /v1/admin/vat/kmd/current, live current-month VAT summary
+//! - POST /v1/admin/vat/kmd/generate, manually trigger KMD generation for a period
+//! - GET /v1/admin/vat/kmd/:year/:month, specific period KMD return
 
 use axum::extract::{Path, Query, State};
 use axum::routing::{get, post};
@@ -125,7 +125,7 @@ fn map_kmd_row(
 
 /// Check if the `vat_kmd_returns` table exists.
 ///
-/// Fix (P1 swallowed outages): the probe's storage failure propagates — a
+/// Fix (P1 swallowed outages): the probe's storage failure propagates, a
 /// degraded database is a 5xx from the caller, never a fabricated "no KMD
 /// read model" empty state.
 async fn kmd_table_exists(db: &sqlx::PgPool) -> Result<bool, sqlx::Error> {
@@ -134,7 +134,7 @@ async fn kmd_table_exists(db: &sqlx::PgPool) -> Result<bool, sqlx::Error> {
 
 /// Slug-aware system-tenant membership (audit F1): human operators belong
 /// to the seeded `system_internal_tenant01` tenant, not the literal
-/// `system` sentinel only static API keys carry — the literal comparison
+/// `system` sentinel only static API keys carry, the literal comparison
 /// hard-403'd every human operator from the KMD console.
 async fn is_system_admin(state: &AppState, auth: &AuthUser) -> Result<bool, ApiError> {
     Ok(crate::routes::web::is_system_tenant(state, &auth.tenant_id).await?)
@@ -154,7 +154,7 @@ async fn require_system_kmd_access(state: &AppState, auth: &AuthUser) -> Result<
 // Handlers
 // ---------------------------------------------------------------------------
 
-/// GET /v1/admin/vat/kmd — list KMD returns, ordered by period descending.
+/// GET /v1/admin/vat/kmd, list KMD returns, ordered by period descending.
 async fn list_kmd_returns(
     State(state): State<AppState>,
     auth: AuthUser,
@@ -225,7 +225,7 @@ async fn list_kmd_returns(
     })))
 }
 
-/// GET /v1/admin/vat/kmd/latest — most recent KMD return.
+/// GET /v1/admin/vat/kmd/latest, most recent KMD return.
 async fn get_latest_kmd(
     State(state): State<AppState>,
     auth: AuthUser,
@@ -277,7 +277,7 @@ async fn get_latest_kmd(
     }
 }
 
-/// GET /v1/admin/vat/kmd/current — live current-month VAT summary.
+/// GET /v1/admin/vat/kmd/current, live current-month VAT summary.
 async fn get_current_vat_summary(
     State(state): State<AppState>,
     auth: AuthUser,
@@ -398,7 +398,7 @@ async fn get_current_vat_summary(
         let country_up = country.to_uppercase();
         let is_eu = vat_rates::is_eu_country(&country_up);
         // Reverse-charge classification must use the same validity gate as
-        // calculate_vat — a merely *present* VAT number that fails structural
+        // calculate_vat, a merely *present* VAT number that fails structural
         // validation was charged destination VAT on the invoice and must not
         // be summarized as reverse charge here.
         let has_valid_vat = vat_number
@@ -448,7 +448,7 @@ async fn get_current_vat_summary(
     }))
 }
 
-/// POST /v1/admin/vat/kmd/generate — manually trigger KMD generation.
+/// POST /v1/admin/vat/kmd/generate, manually trigger KMD generation.
 async fn trigger_kmd_generation(
     State(state): State<AppState>,
     auth: AuthUser,
@@ -469,7 +469,7 @@ async fn trigger_kmd_generation(
         billing_service::vat_kmd::generate_kmd_return(&state.db, body.tax_year, body.tax_month)
             .await;
 
-    // Manual KMD generation is a fiscal-control-plane mutation — it must be
+    // Manual KMD generation is a fiscal-control-plane mutation, it must be
     // audited with full actor attribution (P2-2) on BOTH outcomes; a
     // best-effort entry never fails the request.
     let is_production = state.config.environment.is_production();
@@ -522,7 +522,7 @@ async fn trigger_kmd_generation(
     }
 }
 
-/// GET /v1/admin/vat/kmd/:year/:month — get KMD return for a specific period.
+/// GET /v1/admin/vat/kmd/:year/:month, get KMD return for a specific period.
 async fn get_kmd_by_period(
     State(state): State<AppState>,
     auth: AuthUser,

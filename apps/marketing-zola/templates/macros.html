@@ -34,12 +34,12 @@
      tie        → <span class="">{tie_label}</span>
      none       → <span class="">—</span>
    (The bare "—" with no span from amazon-ses/mailgun normalizes to the
-   spanned "—" variant — semantically identical, now structurally consistent.)
+   spanned "—" variant, semantically identical, now structurally consistent.)
 
    Localization contract: Tera macros cannot read i18n_data, so callers pass
    the localized `tie_label` / `unavailable_label` (compare/table.html does).
    The unavailable em dash is aria-hidden with its meaning exposed through an
-   accessible label — a bare "—" said nothing to a screen reader. #}
+   accessible label, a bare "—" said nothing to a screen reader. #}
 {%- macro winner_badge(winner, competitor_name, tie_label, unavailable_label) -%}
 {%- set tie_text = tie_label | default(value="Tie") -%}
 {%- set none_text = unavailable_label | default(value="Not available") -%}
@@ -72,7 +72,7 @@
 {%- endmacro sources_block -%}
 
 {# methodology_note(text): trailing methodology paragraph (postmark style).
-   text is raw HTML — typically contains <strong>Methodology:</strong> plus
+   text is raw HTML, typically contains <strong>Methodology:</strong> plus
    a link to /compare/methodology/. #}
 {%- macro methodology_note(text) -%}
 <div class="apex-notice mt-12">

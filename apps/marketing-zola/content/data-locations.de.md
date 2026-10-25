@@ -1,6 +1,6 @@
 +++
 title = "Datenstandorte"
-description = "ApexMail-Datenstandort-Matrix — wo jede Kategorie von Kundendaten gespeichert und verarbeitet wird."
+description = "ApexMail-Datenstandort-Matrix, wo jede Kategorie von Kundendaten gespeichert und verarbeitet wird."
 template = "prose.html"
 
 [extra]
@@ -15,18 +15,18 @@ Die unten genannten Einträge zu Dedicated Tenant und BYOC beschreiben ein Model
 
 | # | Datenkategorie | Standardmäßiger primärer Standort | Standard-Backup / Replikat | Standard-Verarbeitungsregion | Übertragungsgarantie |
 |---|---|---|---|---|---|
-| 1 | Kontodaten (Name, E-Mail, Unternehmen, Adresse) | EU-Rechenzentrum — Finnland | EU-Rechenzentrum — Finnland (Sekundärstandort) | EWR (keine Drittlandübermittlung) | Übermittlung innerhalb der EEA; die Kapitel-V-Regeln der DSGVO finden keine Anwendung |
-| 2 | API-Schlüssel (gehasht) | EU-Rechenzentrum — Finnland | EU-Rechenzentrum — Finnland (Sekundärstandort) | EWR (keine Drittlandübermittlung) | Übermittlung innerhalb der EEA; die Kapitel-V-Regeln der DSGVO finden keine Anwendung |
-| 3 | Absender- und Empfängeradressen | EU-Rechenzentrum — Finnland | EU-Rechenzentrum — Finnland (Sekundärstandort) | EWR (keine Drittlandübermittlung) | Übermittlung innerhalb der EEA; die Kapitel-V-Regeln der DSGVO finden keine Anwendung |
-| 4 | Nachrichteninhalt (Betreff, Text, Header) | EU-Rechenzentrum — Finnland | EU-Rechenzentrum — Finnland (Sekundärstandort) | EWR (keine Drittlandübermittlung) | Übermittlung innerhalb der EEA; die Kapitel-V-Regeln der DSGVO finden keine Anwendung |
-| 5 | Anhänge | EU-Rechenzentrum — Finnland | EU-Rechenzentrum — Finnland (Sekundärstandort) | EWR (keine Drittlandübermittlung) | Übermittlung innerhalb der EEA; die Kapitel-V-Regeln der DSGVO finden keine Anwendung |
-| 6 | Ereignisse und Protokolle (Zustellung, Öffnung, Klick, Bounce) | EU-Rechenzentrum — Finnland | EU-Rechenzentrum — Finnland (Sekundärstandort) | EWR (keine Drittlandübermittlung) | Übermittlung innerhalb der EEA; die Kapitel-V-Regeln der DSGVO finden keine Anwendung |
-| 7 | Authentifizierung (OAuth-Token, MFA-Geheimnisse) | EU-Rechenzentrum — Finnland; Google LLC / GitHub, Inc. (OAuth) | Anbieter-verwaltet | EWR (Kern); US für OAuth-Anbieter | SCCs (OAuth-Anbieter) |
-| 8 | Abrechnung (Rechnungen, Transaktionen, Zahlungstoken) | EU-Rechenzentrum — Finnland; Mollie B.V. (Niederlande, EU) | Anbieter-verwaltet innerhalb der EU | EWR (ApexMail und Mollie); Kartennetzwerke gemäß Mollie-DPA | Verarbeitung innerhalb der EU (Mollie B.V., Amsterdam) |
-| 9 | Support-Tickets | EU-Rechenzentrum — Finnland | EU-Rechenzentrum — Finnland (Sekundärstandort) | EWR (keine Drittlandübermittlung) | Übermittlung innerhalb der EEA; die Kapitel-V-Regeln der DSGVO finden keine Anwendung |
-| 10 | Analytik (aggregierte Zustellmetriken, Engagement) | EU-Rechenzentrum — Finnland | EU-Rechenzentrum — Finnland (Sekundärstandort) | EWR (keine Drittlandübermittlung) | Übermittlung innerhalb der EEA; die Kapitel-V-Regeln der DSGVO finden keine Anwendung |
-| 11 | Sicherheitsprotokolle (Audit-Trails, Zugriffsprotokolle) | EU-Rechenzentrum — Finnland | EU-Rechenzentrum — Finnland (Sekundärstandort) | EWR (keine Drittlandübermittlung) | Übermittlung innerhalb der EEA; die Kapitel-V-Regeln der DSGVO finden keine Anwendung |
-| 12 | Backups (Datenbank, Dateispeicher-Snapshots) | EU-Rechenzentrum — Finnland | EU-Rechenzentrum — Finnland (verschlüsselter Cold Storage) | EWR (keine Drittlandübermittlung) | Übermittlung innerhalb der EEA; die Kapitel-V-Regeln der DSGVO finden keine Anwendung |
+| 1 | Kontodaten (Name, E-Mail, Unternehmen, Adresse) | EU-Rechenzentrum, Finnland | EU-Rechenzentrum, Finnland (Sekundärstandort) | EWR (keine Drittlandübermittlung) | Übermittlung innerhalb der EEA; die Kapitel-V-Regeln der DSGVO finden keine Anwendung |
+| 2 | API-Schlüssel (gehasht) | EU-Rechenzentrum, Finnland | EU-Rechenzentrum, Finnland (Sekundärstandort) | EWR (keine Drittlandübermittlung) | Übermittlung innerhalb der EEA; die Kapitel-V-Regeln der DSGVO finden keine Anwendung |
+| 3 | Absender- und Empfängeradressen | EU-Rechenzentrum, Finnland | EU-Rechenzentrum, Finnland (Sekundärstandort) | EWR (keine Drittlandübermittlung) | Übermittlung innerhalb der EEA; die Kapitel-V-Regeln der DSGVO finden keine Anwendung |
+| 4 | Nachrichteninhalt (Betreff, Text, Header) | EU-Rechenzentrum, Finnland | EU-Rechenzentrum, Finnland (Sekundärstandort) | EWR (keine Drittlandübermittlung) | Übermittlung innerhalb der EEA; die Kapitel-V-Regeln der DSGVO finden keine Anwendung |
+| 5 | Anhänge | EU-Rechenzentrum, Finnland | EU-Rechenzentrum, Finnland (Sekundärstandort) | EWR (keine Drittlandübermittlung) | Übermittlung innerhalb der EEA; die Kapitel-V-Regeln der DSGVO finden keine Anwendung |
+| 6 | Ereignisse und Protokolle (Zustellung, Öffnung, Klick, Bounce) | EU-Rechenzentrum, Finnland | EU-Rechenzentrum, Finnland (Sekundärstandort) | EWR (keine Drittlandübermittlung) | Übermittlung innerhalb der EEA; die Kapitel-V-Regeln der DSGVO finden keine Anwendung |
+| 7 | Authentifizierung (OAuth-Token, MFA-Geheimnisse) | EU-Rechenzentrum, Finnland; Google LLC / GitHub, Inc. (OAuth) | Anbieter-verwaltet | EWR (Kern); US für OAuth-Anbieter | SCCs (OAuth-Anbieter) |
+| 8 | Abrechnung (Rechnungen, Transaktionen, Zahlungstoken) | EU-Rechenzentrum, Finnland; Mollie B.V. (Niederlande, EU) | Anbieter-verwaltet innerhalb der EU | EWR (ApexMail und Mollie); Kartennetzwerke gemäß Mollie-DPA | Verarbeitung innerhalb der EU (Mollie B.V., Amsterdam) |
+| 9 | Support-Tickets | EU-Rechenzentrum, Finnland | EU-Rechenzentrum, Finnland (Sekundärstandort) | EWR (keine Drittlandübermittlung) | Übermittlung innerhalb der EEA; die Kapitel-V-Regeln der DSGVO finden keine Anwendung |
+| 10 | Analytik (aggregierte Zustellmetriken, Engagement) | EU-Rechenzentrum, Finnland | EU-Rechenzentrum, Finnland (Sekundärstandort) | EWR (keine Drittlandübermittlung) | Übermittlung innerhalb der EEA; die Kapitel-V-Regeln der DSGVO finden keine Anwendung |
+| 11 | Sicherheitsprotokolle (Audit-Trails, Zugriffsprotokolle) | EU-Rechenzentrum, Finnland | EU-Rechenzentrum, Finnland (Sekundärstandort) | EWR (keine Drittlandübermittlung) | Übermittlung innerhalb der EEA; die Kapitel-V-Regeln der DSGVO finden keine Anwendung |
+| 12 | Backups (Datenbank, Dateispeicher-Snapshots) | EU-Rechenzentrum, Finnland | EU-Rechenzentrum, Finnland (verschlüsselter Cold Storage) | EWR (keine Drittlandübermittlung) | Übermittlung innerhalb der EEA; die Kapitel-V-Regeln der DSGVO finden keine Anwendung |
 
 ## Standorte der Unterauftragsverarbeiter
 
@@ -53,7 +53,7 @@ Mollie B.V. ist ein von der De Nederlandsche Bank (DNB) beaufsichtigtes Zahlungs
 
 ## EU-only-Routing
 
-Die obige Matrix betrifft die Speicherung. Der Zustelltransport wird durch den Routing-Modus des Mandanten bestimmt: Unter EU-only-Routing (`eu_only`) verlässt jede Nachricht das System über die eigenen EU-MTAs von ApexMail, und der gemeinsame Drittanbieter-Transport (AWS SES in dessen EU-Region) ist ausgeschlossen — eine nicht verfügbare eigene MTA-Route hält die Nachricht zurück, statt umzuleiten. Das vollständige Transport-Argument, jeder Punkt mit seiner Evidenz verlinkt, steht auf der [EU-Souveränitätsseite](/de/eu-sovereign/).
+Die obige Matrix betrifft die Speicherung. Der Zustelltransport wird durch den Routing-Modus des Mandanten bestimmt: Unter EU-only-Routing (`eu_only`) verlässt jede Nachricht das System über die eigenen EU-MTAs von ApexMail, und der gemeinsame Drittanbieter-Transport (AWS SES in dessen EU-Region) ist ausgeschlossen, eine nicht verfügbare eigene MTA-Route hält die Nachricht zurück, statt umzuleiten. Das vollständige Transport-Argument, jeder Punkt mit seiner Evidenz verlinkt, steht auf der [EU-Souveränitätsseite](/de/eu-sovereign/).
 
 ## Kontakt
 

@@ -1,6 +1,6 @@
 +++
 title = "Cookie Policy"
-description = "ApexMail Cookie Policy — how we use cookies and similar technologies."
+description = "ApexMail Cookie Policy, how we use cookies and similar technologies."
 template = "prose.html"
 
 [extra]
@@ -15,9 +15,9 @@ Cookies are small text files stored on your device when you visit our website. T
 
 ### Marketing Website (apexmail.ee)
 
-The marketing website ships **no scripts at all** — its Content-Security-Policy blocks script execution entirely — so it embeds **no analytics scripts, no tracking pixels, and no advertising cookies**. The only cookie associated with this site is:
+The marketing website ships **no scripts at all**, its Content-Security-Policy blocks script execution entirely, so it embeds **no analytics scripts, no tracking pixels, and no advertising cookies**. The only cookie associated with this site is:
 
-- **`apexmail_consent` (consent preference):** Records your cookie-banner choice. It is set by our API endpoint with `Domain=.apexmail.ee` and a one-year lifetime. It contains no personal identifiers — only your banner preference — and its only functional effect on this site is to hide the banner on future visits.
+- **`apexmail_consent` (consent preference):** Records your cookie-banner choice. It is set by our API endpoint with `Domain=.apexmail.ee` and a one-year lifetime. It contains no personal identifiers, only your banner preference, and its only functional effect on this site is to hide the banner on future visits.
 
 Although no client-side analytics run on this site, our web servers keep standard access logs (including IP addresses) for security and operational purposes. Access logs are covered by our [Privacy Policy](/privacy/).
 
@@ -42,7 +42,7 @@ When you first visit the marketing site, a JavaScript-free cookie banner offers:
 
 - **Accept All:** Records an "all" preference and dismisses the banner. Because the site runs no analytics scripts, this enables nothing beyond recording the preference.
 - **Necessary Only:** Records a necessary-only preference and dismisses the banner.
-- **Dismiss:** Same effect as Necessary Only — records a necessary-only preference.
+- **Dismiss:** Same effect as Necessary Only, records a necessary-only preference.
 
 Your recorded choice controls only the banner on this site. You can change your preference at any time by clearing your browser cookies and reloading the page.
 

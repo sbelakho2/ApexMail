@@ -53,7 +53,7 @@ fn validate_tenant_id(tenant_id: &str) -> Result<&str, (StatusCode, Json<serde_j
     Ok(tenant_id)
 }
 
-/// `POST /v1/inbox-placement/tests` — create a new placement test.
+/// `POST /v1/inbox-placement/tests`, create a new placement test.
 pub async fn create_placement_test(
     state: Arc<PlacementState>,
     tenant_id: String,
@@ -68,7 +68,7 @@ pub async fn create_placement_test(
         Ok(test) => created(serde_json::json!(test)),
         // Validation refusals travel as sqlx::Error::Protocol carrying
         // operator guidance (no seed accounts, rate limit, unverified From
-        // domain) — those are genuine 400s for the caller to act on.
+        // domain), those are genuine 400s for the caller to act on.
         Err(e @ sqlx::Error::Protocol(_)) => err(StatusCode::BAD_REQUEST, &e.to_string()),
         // Everything else is an infrastructure failure (DB outage, pool
         // exhaustion): a 500 that does not leak internals to the caller.
@@ -82,7 +82,7 @@ pub async fn create_placement_test(
     }
 }
 
-/// `GET /v1/inbox-placement/tests` — list placement tests (paginated).
+/// `GET /v1/inbox-placement/tests`, list placement tests (paginated).
 pub async fn list_placement_tests(
     state: Arc<PlacementState>,
     tenant_id: String,
@@ -189,7 +189,7 @@ pub async fn list_placement_tests(
     }))
 }
 
-/// `GET /v1/inbox-placement/tests/:id` — get test details + results + score.
+/// `GET /v1/inbox-placement/tests/:id`, get test details + results + score.
 pub async fn get_placement_test(
     state: Arc<PlacementState>,
     tenant_id: String,
@@ -289,7 +289,7 @@ pub async fn get_placement_test(
     }))
 }
 
-/// `GET /v1/inbox-placement/trends` — get placement trends.
+/// `GET /v1/inbox-placement/trends`, get placement trends.
 pub async fn get_placement_trends(
     state: Arc<PlacementState>,
     tenant_id: String,
@@ -317,7 +317,7 @@ pub async fn get_placement_trends(
     }
 }
 
-/// `GET /v1/inbox-placement/providers` — list seed providers with active account counts.
+/// `GET /v1/inbox-placement/providers`, list seed providers with active account counts.
 pub async fn list_seed_providers(
     state: Arc<PlacementState>,
 ) -> (StatusCode, Json<serde_json::Value>) {

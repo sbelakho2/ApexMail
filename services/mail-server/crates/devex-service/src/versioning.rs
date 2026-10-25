@@ -1,4 +1,4 @@
-//! API versioning — list, inspect, compare, and deprecation checks.
+//! API versioning, list, inspect, compare, and deprecation checks.
 //!
 //! Uses date-based versions (YYYY-MM).
 

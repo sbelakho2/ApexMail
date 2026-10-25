@@ -1,11 +1,11 @@
-//! Growth analytics endpoint — new signups, activation milestones,
+//! Growth analytics endpoint, new signups, activation milestones,
 //! active-tenant activity, trial conversion, and customer lifecycle metrics.
 //!
 //! All values come from real database queries against tenants, users, messages,
 //! events, subscriptions, and mollie_subscriptions tables.
 //!
 //! Honest labels: the activity counters here measure active TENANTS (distinct
-//! `events.tenant_id`), not users — ApexMail's events carry no user identity,
+//! `events.tenant_id`), not users | ApexMail's events carry no user identity,
 //! so DAU/WAU/MAU would be a lie. "Activation" and time-to-first-send are
 //! derived from the actual successful-send lifecycle (`events.event_type =
 //! 'sent'`), not from message rows or current status.
@@ -26,7 +26,7 @@
 //!   an earlier one. The API field is `activationMilestones`; nothing is
 //!   presented as nested funnel stages.
 //! * **Trial conversion uses ELIGIBLE trials.** The denominator is trials
-//!   that have ENDED (`trial_end < NOW()`), never all trials started — an
+//!   that have ENDED (`trial_end < NOW()`), never all trials started, an
 //!   ongoing trial has not had the chance to convert and must not
 //!   right-censor the rate. Time-to-paid uses the earliest actual paid
 //!   invoice at/after `trial_end` when billing data links one; `trial_end`
@@ -123,14 +123,14 @@ pub struct SourceBreakdown {
 pub struct ActivationStats {
     pub total_activated: i64,
     /// Fraction in `0.0..=1.0` (activated tenants / new tenants). `None`
-    /// when no tenant signed up in the window — absent, not `0`.
+    /// when no tenant signed up in the window, absent, not `0`.
     pub activation_rate: Option<f64>,
     /// Average hours from signup to the first ACTUAL successful send event
     /// (`events.event_type = 'sent'`). `None` when no tenant in the window
-    /// has sent yet — never-sent is explicitly distinct from zero elapsed
+    /// has sent yet, never-sent is explicitly distinct from zero elapsed
     /// time (F79).
     pub avg_time_to_first_send_hours: Option<f64>,
-    /// Independent activation MILESTONES — not nested funnel stages. Each
+    /// Independent activation MILESTONES, not nested funnel stages. Each
     /// milestone is measured against the same signup population and a later
     /// milestone may exceed an earlier one (the capabilities are independent:
     /// shared-pool sending needs neither domain verification nor DKIM).
@@ -146,7 +146,7 @@ pub struct ActivationMilestone {
     pub milestone: String,
     pub count: i64,
     /// Display percentage (0-100) of the signup population. `None` when the
-    /// signup denominator is zero — absent, not `0`.
+    /// signup denominator is zero, absent, not `0`.
     pub percentage: Option<f64>,
 }
 
@@ -162,7 +162,7 @@ pub struct EngagementMetrics {
     pub active_tenants_7d: i64,
     /// Distinct tenants with at least one event in the last 30 days.
     pub active_tenants_30d: i64,
-    /// `active_tenants_today / active_tenants_30d` — a fraction in
+    /// `active_tenants_today / active_tenants_30d`, a fraction in
     /// `0.0..=1.0`, measuring daily stickiness of the tenant base. `None`
     /// when there is no 30-day activity population.
     pub active_tenants_today_ratio_30d: Option<f64>,
@@ -190,7 +190,7 @@ pub struct TrialConversionStats {
     /// trial ended).
     pub trials_converted: i64,
     /// Fraction in `0.0..=1.0` of ELIGIBLE (ended) trials that converted;
-    /// `None` when no trial ended in the window — absent, not `0`.
+    /// `None` when no trial ended in the window, absent, not `0`.
     pub conversion_rate: Option<f64>,
     /// `Available(None)` = no converted trial exists (undefined, not zero);
     /// `Unavailable` = the aggregate could not be read.
@@ -218,8 +218,8 @@ pub struct TrialPlanConversion {
 
 /// Customer lifecycle over a fixed 30-day window.
 ///
-/// The churn rate is computed over the STARTING COHORT — subscriptions that
-/// existed at the period start and had not already been canceled — not over
+/// The churn rate is computed over the STARTING COHORT, subscriptions that
+/// existed at the period start and had not already been canceled, not over
 /// the current active count. New customers are a separate flow and are never
 /// subtracted; retained = cohort − churn, so neither can go out of bounds.
 #[derive(Debug, Serialize)]
@@ -235,10 +235,10 @@ pub struct CustomerLifecycle {
     /// period start and was not already canceled before it.
     pub cohort_customers_at_period_start: i64,
     /// Cohort members who canceled INSIDE the window. Always a subset of
-    /// `cohort_customers_at_period_start` — churn can never exceed the cohort.
+    /// `cohort_customers_at_period_start`, churn can never exceed the cohort.
     pub churned_customers_30d: i64,
     /// `churned / cohort`, a fraction in `0.0..=1.0`; `None` when the
-    /// starting cohort is empty — absent, not `0`.
+    /// starting cohort is empty, absent, not `0`.
     pub churn_rate_30d: Option<f64>,
     /// `cohort − churned`, never negative (the numerator is a subset of the
     /// denominator by construction).
@@ -431,8 +431,8 @@ fn activation_rate_of(part: i64, whole: i64) -> Option<f64> {
 ///
 /// Domain verified, DKIM configured and first email sent are counted
 /// independently against the same signup population. They are genuinely
-/// independent capabilities — a tenant can send through the platform's
-/// shared pool without verifying a domain or configuring DKIM — so a later
+/// independent capabilities, a tenant can send through the platform's
+/// shared pool without verifying a domain or configuring DKIM, so a later
 /// milestone can exceed an earlier one and none of the counts may be
 /// presented as a successive stage of a funnel. (Nested cohort CTEs were
 /// considered and rejected: forcing containment would fabricate a dependency
@@ -485,7 +485,7 @@ async fn avg_active_days_per_tenant_30d(db: &PgPool) -> MetricState<Option<f64>>
         Err(error) => {
             tracing::error!(
                 error = %error,
-                "growth analytics: avg active days aggregate failed — reporting unavailable, not zero"
+                "growth analytics: avg active days aggregate failed, reporting unavailable, not zero"
             );
             MetricState::Unavailable {
                 reason: "active-days aggregate could not be read",
@@ -547,14 +547,14 @@ async fn engagement_metrics(db: &PgPool) -> Result<EngagementMetrics, ApiError> 
 
 // ─── Trial conversion ──────────────────────────────────────────────────
 
-/// Trials started in the window — a trial is a mollie_subscriptions row
+/// Trials started in the window, a trial is a mollie_subscriptions row
 /// with a non-NULL trial_end. Includes trials still running (`trial_end >=
 /// NOW()`): this is the flow counter, NOT the conversion denominator.
 const TRIALS_STARTED_SQL: &str = "SELECT COUNT(*)::bigint FROM mollie_subscriptions
          WHERE trial_end IS NOT NULL
            AND created_at >= NOW() - $1::interval";
 
-/// ELIGIBLE trials — the conversion denominator. A trial is eligible once
+/// ELIGIBLE trials, the conversion denominator. A trial is eligible once
 /// it has ENDED (`trial_end < NOW()`): only ended trials have had the
 /// opportunity to convert, so an ongoing trial must not right-censor the
 /// rate. The numerator is filtered from this same population.
@@ -563,7 +563,7 @@ const TRIALS_ELIGIBLE_SQL: &str = "SELECT COUNT(*)::bigint FROM mollie_subscript
            AND trial_end < NOW()
            AND created_at >= NOW() - $1::interval";
 
-/// Converted trials — the trial period ended (trial_end < NOW()) and the
+/// Converted trials, the trial period ended (trial_end < NOW()) and the
 /// subscription is still paying (status active/past_due). The previous
 /// formulation selected rows that were simultaneously `status = 'active'`
 /// AND `status = 'trialing'` on a single-row-per-subscription table, which
@@ -584,7 +584,7 @@ const TRIAL_PAYMENT_TIME_METHOD: &str = "actual paid-invoice time at/after trial
 
 /// Mean trial-to-paid duration over converted trials. Activation time is
 /// the earliest `invoices.paid_at` at/after `trial_end` for the tenant (one
-/// subscription per tenant — `uq_mollie_subscriptions_tenant`), falling
+/// subscription per tenant, `uq_mollie_subscriptions_tenant`), falling
 /// back to `trial_end` only when no paid invoice links one. `Available(None)`
 /// when there are no converted trials; `Unavailable` when the aggregate
 /// cannot be read.
@@ -615,7 +615,7 @@ async fn avg_trial_to_paid_days(db: &PgPool, interval: &str) -> MetricState<Opti
         Err(error) => {
             tracing::error!(
                 error = %error,
-                "growth analytics: trial-to-paid aggregate failed — reporting unavailable, not zero"
+                "growth analytics: trial-to-paid aggregate failed, reporting unavailable, not zero"
             );
             MetricState::Unavailable {
                 reason: "trial-to-paid aggregate could not be read",
@@ -700,11 +700,11 @@ async fn active_customer_count(db: &PgPool) -> Result<i64, ApiError> {
 
 /// New customers in the last 30 days: a separate acquisition FLOW, not part
 /// of the churn denominator. Counts subscriptions created in the window
-/// regardless of their current status — a customer who joins and cancels
+/// regardless of their current status, a customer who joins and cancels
 /// inside the same window is still new (and is deliberately NOT counted as
 /// churn, because they were not in the starting cohort). Incomplete
 /// checkouts (Mollie `incomplete` / `incomplete_expired`) are not customers.
-/// Required — a failure propagates.
+/// Required, a failure propagates.
 async fn new_customer_count_30d(db: &PgPool) -> Result<i64, ApiError> {
     Ok(sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(DISTINCT tenant_id)::bigint FROM mollie_subscriptions
@@ -749,7 +749,7 @@ const COHORT_CHURN_SQL: &str = r#"
 "#;
 
 /// `(cohort at period start, cohort members canceled in the window)`.
-/// Required — a failure propagates.
+/// Required, a failure propagates.
 async fn cohort_churn_counts_30d(db: &PgPool) -> Result<(i64, i64), ApiError> {
     Ok(sqlx::query_as::<_, (i64, i64)>(COHORT_CHURN_SQL)
         .fetch_one(db)
@@ -771,7 +771,7 @@ async fn avg_customer_lifetime_days(db: &PgPool) -> MetricState<Option<f64>> {
         Err(error) => {
             tracing::error!(
                 error = %error,
-                "growth analytics: customer-lifetime aggregate failed — reporting unavailable, not zero"
+                "growth analytics: customer-lifetime aggregate failed, reporting unavailable, not zero"
             );
             MetricState::Unavailable {
                 reason: "customer-lifetime aggregate could not be read",
@@ -809,9 +809,9 @@ async fn customer_lifecycle(db: &PgPool) -> Result<CustomerLifecycle, ApiError> 
 /// F79: average time from signup to the first ACTUAL successful send event,
 /// shared by both endpoints. The first send is the earliest
 /// `events.event_type = 'sent'` occurrence for the tenant (written after
-/// provider acceptance) — not `messages.created_at` and not a current-status
+/// provider acceptance), not `messages.created_at` and not a current-status
 /// comparison. The per-tenant MIN lives in a subquery (nesting MIN inside
-/// AVG at one query level is invalid SQL — 42803); the outer SELECT
+/// AVG at one query level is invalid SQL, 42803); the outer SELECT
 /// averages the per-tenant deltas. The result is a typed `Option<f64>`:
 /// `None` means no tenant in the window has sent, which is explicitly
 /// distinct from a zero elapsed time. Query errors propagate as unavailable,
@@ -1082,7 +1082,7 @@ mod tests {
     #[test]
     fn trial_converted_sql_is_not_self_negating() {
         // The old query demanded status = 'active' AND membership in a
-        // status = 'trialing' set of the SAME single-row table — impossible.
+        // status = 'trialing' set of the SAME single-row table, impossible.
         assert!(!TRIALS_CONVERTED_SQL.contains("id IN"));
         assert!(TRIALS_CONVERTED_SQL.contains("trial_end < NOW()"));
         assert!(TRIALS_CONVERTED_SQL.contains("status IN ('active', 'past_due')"));
@@ -1126,7 +1126,7 @@ mod tests {
         let cohort_churned = 1_i64;
         let new_customers = 1_i64;
 
-        // OLD (wrong) math — reproduced here as the regression witness.
+        // OLD (wrong) math, reproduced here as the regression witness.
         let old_rate = canceled_in_window as f64 / current_active as f64;
         let old_retained = current_active - canceled_in_window;
         assert!(old_rate > 1.0, "old churn exceeded 100%: {old_rate}");
@@ -1259,7 +1259,7 @@ mod tests {
         };
 
         // Tenant A: sent 6h after signup. Tenant B: sent 18h after signup.
-        // Tenant C: never sent — excluded from the average, NOT counted as 0.
+        // Tenant C: never sent, excluded from the average, NOT counted as 0.
         seed(5, 6, true, "f79-a").await;
         seed(5, 18, true, "f79-b").await;
         seed(5, 0, false, "f79-c").await;
@@ -1342,7 +1342,7 @@ mod tests {
     }
 
     /// A successful read of a genuinely empty population is
-    /// `Available(None)` — distinguishable from a read failure.
+    /// `Available(None)`, distinguishable from a read failure.
     #[tokio::test]
     async fn empty_population_is_available_none_not_failure() {
         let Some(pool) = crate::test_db::canonical_pool("growth_empty_optional").await else {
@@ -1576,7 +1576,7 @@ mod tests {
         );
         assert!(
             (rate - 0.5).abs() > 1e-9,
-            "the old started-trials denominator would give 2/4 = 0.5 — right-censored"
+            "the old started-trials denominator would give 2/4 = 0.5, right-censored"
         );
 
         // The actual payment for tenant c is 17 days after signup; tenant d
@@ -1633,7 +1633,7 @@ mod adversarial_tests {
         // CURRENT_DATE + 1 minute: explicitly TODAY. The previous
         // "NOW() - N hours" stamp crossed UTC midnight on late-evening runs
         // (the 'today' metrics count `timestamp >= CURRENT_DATE`), flipping
-        // activeTenantsToday to 0 — a midnight-boundary flake, not a
+        // activeTenantsToday to 0, a midnight-boundary flake, not a
         // product bug. hours_ago is kept for relative-order assertions.
         sqlx::query(
             "INSERT INTO events (id, tenant_id, event_type, recipient, timestamp)
@@ -1697,7 +1697,7 @@ mod adversarial_tests {
                 .unwrap_or(0)
                 >= 1
         );
-        // Trials: no mollie subscriptions in a fresh DB — absent rates.
+        // Trials: no mollie subscriptions in a fresh DB, absent rates.
         assert_eq!(
             body["trialConversion"]["conversionRate"],
             serde_json::Value::Null
@@ -1733,7 +1733,7 @@ mod adversarial_tests {
         }
         // The fixture itself created a tenant inside the 7d window: the
         // population is 1 with none activated, so the rate is an honest
-        // 0.0 — `null` is reserved for an EMPTY population (zero signups),
+        // 0.0, `null` is reserved for an EMPTY population (zero signups),
         // proven by the activation_rate_of unit tests.
         let (status, body) = env
             .get("/v1/admin/analytics/growth/activation?period=7d")

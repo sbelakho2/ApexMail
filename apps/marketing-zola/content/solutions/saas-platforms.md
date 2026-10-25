@@ -25,12 +25,12 @@ Platforms that send email for customers inherit every customer's reputation risk
 
 ## ApexMail Solution
 
-- **Tenant Isolation** — Each tenant gets its own domains, API keys, webhook endpoints with per-tenant HMAC secrets, suppression lists, dedicated IPs, and event streams.
-- **Domain Isolation** — Per-tenant domain verification and authentication (SPF, DKIM, DMARC) prevents reputation cross-contamination.
-- **Custom RBAC** — Platform-level admin, tenant-level admin, and read-only roles. SCIM provisioning on Enterprise.
-- **SSO** — SAML 2.0 for platform operators and tenant administrators.
-- **Usage Quotas** — Hard and soft limits per tenant for volume, rate, and concurrency.
-- **White-Label** — Remove ApexMail branding from dashboards, email footers, and notification templates.
+- **Tenant Isolation**, Each tenant gets its own domains, API keys, webhook endpoints with per-tenant HMAC secrets, suppression lists, dedicated IPs, and event streams.
+- **Domain Isolation**, Per-tenant domain verification and authentication (SPF, DKIM, DMARC) prevents reputation cross-contamination.
+- **Custom RBAC**, Platform-level admin, tenant-level admin, and read-only roles. SCIM provisioning on Enterprise.
+- **SSO**, SAML 2.0 for platform operators and tenant administrators.
+- **Usage Quotas**, Hard and soft limits per tenant for volume, rate, and concurrency.
+- **White-Label**, Remove ApexMail branding from dashboards, email footers, and notification templates.
 
 ## Technical Implementation
 

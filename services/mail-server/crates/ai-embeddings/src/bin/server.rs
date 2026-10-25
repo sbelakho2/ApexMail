@@ -109,7 +109,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let embedding_service = EmbeddingService::new(config.inference.clone())?;
-    // P1 #6: per-workload credential — AI_EMBEDDINGS_AUTH_TOKEN when set (the
+    // P1 #6: per-workload credential, AI_EMBEDDINGS_AUTH_TOKEN when set (the
     // universal INTERNAL_SERVICE_TOKEN is then refused, loudly logged), the
     // universal token only as the non-production legacy fallback. Production
     // boots REFUSE without the dedicated token.
@@ -121,7 +121,7 @@ async fn main() -> anyhow::Result<()> {
     let trust_body_tenant = ai_embeddings::config::trust_body_tenant_from_env();
     if trust_body_tenant {
         tracing::warn!(
-            "AI_EMBEDDINGS_TRUST_BODY_TENANT=true — trusting the request-body tenant_id \
+            "AI_EMBEDDINGS_TRUST_BODY_TENANT=true, trusting the request-body tenant_id \
              WITHOUT gateway assertion. DEV-ONLY: never enable in production."
         );
     }
@@ -158,8 +158,8 @@ async fn main() -> anyhow::Result<()> {
         #[cfg(not(unix))]
         let terminate = std::future::pending::<()>();
         tokio::select! {
-            _ = ctrl_c => tracing::info!("received Ctrl+C — shutting down"),
-            _ = terminate => tracing::info!("received SIGTERM — shutting down"),
+            _ = ctrl_c => tracing::info!("received Ctrl+C, shutting down"),
+            _ = terminate => tracing::info!("received SIGTERM, shutting down"),
         }
     };
     axum::serve(listener, app)

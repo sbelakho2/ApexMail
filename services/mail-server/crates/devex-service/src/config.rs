@@ -1,4 +1,4 @@
-//! DevEx service configuration — loaded from environment variables.
+//! DevEx service configuration, loaded from environment variables.
 
 use std::env;
 
@@ -8,7 +8,7 @@ fn generated_dev_secret(label: &str) -> String {
 
 /// Configuration for the DevEx service.
 ///
-/// # O-20.2 — Webhook signing secret rotation
+/// # O-20.2, Webhook signing secret rotation
 /// `webhook_signing_secrets` is a list of active HMAC‑SHA256 signing secrets.
 /// The **first** secret is used for signing new payloads; **all** secrets are
 /// accepted during verification. This allows zero‑downtime rotation:

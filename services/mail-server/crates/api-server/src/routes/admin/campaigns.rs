@@ -245,7 +245,7 @@ mod tests {
             assert_eq!(rows[1]["sent"], 10);
             assert_eq!(rows[1]["opened"], 5);
             assert_eq!(rows[1]["clicked"], 2);
-            // replied is not a canonical campaign column — always 0.
+            // replied is not a canonical campaign column, always 0.
             assert_eq!(rows[1]["replied"], 0);
             assert_eq!(rows[1]["id"], old.to_string());
             assert!(rows[0]["createdAt"]
@@ -298,7 +298,7 @@ mod tests {
 
             let (status, body) = env.get("/v1/admin/campaigns?limit=0").await;
             assert_eq!(status, StatusCode::OK, "{body}");
-            // limit=0 clamps to 1 — a page of exactly one row.
+            // limit=0 clamps to 1, a page of exactly one row.
             assert_eq!(body.as_array().map(Vec::len), Some(1));
 
             let (status, body) = env.get("/v1/admin/campaigns?limit=2&offset=2").await;

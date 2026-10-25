@@ -17,7 +17,7 @@ use crate::types::{
 };
 
 /// F62: load the CURRENT version of a stored template from the canonical
-/// `templates` table — the same table (and columns) the api-server templates
+/// `templates` table, the same table (and columns) the api-server templates
 /// routes read. Ids and tenant scope are VARCHAR(26) TEXT, not UUIDs. The
 /// `tenant_id = $2` predicate is the ownership check: a template id that
 /// belongs to another tenant simply does not match and surfaces as
@@ -75,7 +75,7 @@ impl TemplateRenderer {
             None
         };
 
-        // Resolve subject placeholders (plain text — no HTML escaping; the
+        // Resolve subject placeholders (plain text, no HTML escaping; the
         // subject is a header value, not markup) and strip CR/LF/NUL so a
         // merge field can never inject additional headers. Missing fields
         // follow the same fallback policy as the body.
@@ -101,14 +101,14 @@ impl TemplateRenderer {
     }
 
     /// Render a stored template by ID from the canonical `templates` table,
-    /// or — when `version` is given — a pinned historical snapshot from
+    /// or, when `version` is given, a pinned historical snapshot from
     /// `template_versions`. Uses the render cache when the stored content is
     /// unchanged.
     ///
     /// F62: tenant ids are TEXT (`VARCHAR(26)`), matching the canonical
     /// repository. Both load queries are tenant-scoped, so a template id
     /// owned by a different tenant is indistinguishable from a missing one
-    /// (`TemplateError::NotFound`) — no cross-tenant leak, cached or
+    /// (`TemplateError::NotFound`), no cross-tenant leak, cached or
     /// otherwise.
     pub async fn render_template(
         &self,
@@ -121,7 +121,7 @@ impl TemplateRenderer {
         // stamp are part of the cache key, and only the canonical tables can
         // supply them. The api-server writer bumps `version` on every save
         // and rewrites `updated_at` (and the snapshot's `created_at`) on
-        // rollback, so any stored change rotates the key — a cached render
+        // rollback, so any stored change rotates the key, a cached render
         // never outlives a canonical write. The cache therefore saves the
         // sandbox render work, not the DB read.
         let stored = match version {
@@ -167,7 +167,7 @@ impl TemplateRenderer {
 
     /// Store a template in the canonical repository (F62): insert into
     /// `templates` and snapshot v1 into `template_versions` in one
-    /// transaction — the same write pair the api-server create route
+    /// transaction, the same write pair the api-server create route
     /// performs, so a template saved through this path is rollback-safe and
     /// versioned exactly like one saved through the API.
     pub async fn save_template(
@@ -190,7 +190,7 @@ impl TemplateRenderer {
             return Err(TemplateError::InvalidSyntax { message: msg });
         }
 
-        // templates.id is VARCHAR(26) — generate a 26-char text id (not a
+        // templates.id is VARCHAR(26), generate a 26-char text id (not a
         // UUID, whose 36-char hyphenated form overflows the column), exactly
         // like the api-server create route.
         let id = apexmail_lib::id::generate_id("", 26);
@@ -288,7 +288,7 @@ impl TemplateRenderer {
     /// stored-render contract (api-server `POST /v1/templates/:id/render`):
     /// the stored `subject` supplies the subject line unless the caller
     /// overrides it, and an explicit `text_body` (merge-field resolved) wins
-    /// over plaintext generated from the HTML. No DB access — unit-testable
+    /// over plaintext generated from the HTML. No DB access, unit-testable
     /// with a fake row.
     fn render_stored(
         &self,
@@ -315,7 +315,7 @@ impl TemplateRenderer {
         }
 
         // F62: the plaintext body may have just been REPLACED by the stored
-        // `text_body` — recompute the derived metadata from the FINAL body
+        // `text_body`, recompute the derived metadata from the FINAL body
         // so `plaintext_size_bytes` describes the body actually returned
         // (it previously kept the size of the HTML-generated plaintext).
         result.metadata.plaintext_size_bytes = result.plaintext.as_ref().map(|p| p.len());
@@ -336,8 +336,8 @@ struct StoredTemplate {
     html_body: String,
     text_body: Option<String>,
     /// `templates.updated_at` (current) or the snapshot's `created_at`
-    /// (historical). Part of the cache key so any canonical write — which
-    /// always moves one of `version`/`updated_at` — rotates it.
+    /// (historical). Part of the cache key so any canonical write, which
+    /// always moves one of `version`/`updated_at`, rotates it.
     content_stamp: DateTime<Utc>,
 }
 
@@ -345,7 +345,7 @@ struct StoredTemplate {
 ///
 /// #191: the props JSON is hashed for a stable key regardless of key
 /// ordering. F62: the key is a hash of a VERSIONED structure covering
-/// EVERYTHING that affects the output — the tenant (scope), the template,
+/// EVERYTHING that affects the output, the tenant (scope), the template,
 /// the stored content's `version` AND content stamp, and EVERY
 /// output-affecting `RenderOptions` field: `props`, `subject`, `minify`,
 /// `generate_plaintext` and `missing_field_fallback` (previously omitted,
@@ -362,7 +362,7 @@ const STORED_RENDER_CACHE_KEY_VERSION: u8 = 2;
 
 /// F62: the versioned structure hashed into the stored-render cache key.
 /// Serde serializes it field-by-field in declaration order, so every
-/// output-affecting dimension is part of the key BY CONSTRUCTION — the
+/// output-affecting dimension is part of the key BY CONSTRUCTION, the
 /// incomplete positional key this replaces silently dropped
 /// `missing_field_fallback`.
 #[derive(serde::Serialize)]
@@ -545,7 +545,7 @@ mod tests {
         let result = sandbox.execute(source, &opts).unwrap();
         assert_eq!(result.html, "<p>Hi</p>");
 
-        // Verify subject resolution (plain-text — no HTML escaping)
+        // Verify subject resolution (plain-text, no HTML escaping)
         let resolved_subject =
             transpiler::resolve_placeholders_plain("Hello {{ name }}!", &opts.props);
         assert_eq!(resolved_subject, "Hello Alice!");
@@ -585,7 +585,7 @@ mod tests {
             "text itself may survive; only the line break must not"
         );
 
-        // The body keeps its newline — only header-bound values are stripped.
+        // The body keeps its newline, only header-bound values are stripped.
         assert!(
             result.html.contains("first line\nsecond line"),
             "{}",
@@ -660,7 +660,7 @@ mod tests {
     }
 
     /// Render-historical-version: a `template_versions` snapshot renders its
-    /// OWN content, not the current row's — v1 snapshot vs v2 current must
+    /// OWN content, not the current row's, v1 snapshot vs v2 current must
     /// produce correspondingly different output.
     #[tokio::test]
     async fn stored_render_renders_historical_snapshot_not_current() {
@@ -697,7 +697,7 @@ mod tests {
 
     /// Reject-foreign-tenant, SQL side: both load queries must be scoped by
     /// `tenant_id` bound at $2 (with the id at $1), against the CANONICAL
-    /// tables — never `email_templates` (absent from every migration) and
+    /// tables, never `email_templates` (absent from every migration) and
     /// never an unscoped lookup that would let one tenant read another's
     /// template.
     #[test]
@@ -738,7 +738,7 @@ mod tests {
 
     /// Cache invalidation tied to the canonical writer: the api-server bumps
     /// `version` on every save and moves `updated_at` (or the snapshot's
-    /// `created_at`) on rollback — either change must rotate the cache key
+    /// `created_at`) on rollback, either change must rotate the cache key
     /// so a stale render is never served.
     #[test]
     fn stored_cache_key_rotates_on_version_bump_and_content_stamp() {
@@ -776,7 +776,7 @@ mod tests {
     }
 
     /// F62 regression: `missing_field_fallback` CHANGES the output, so it
-    /// must change the cache key — otherwise identical requests with
+    /// must change the cache key, otherwise identical requests with
     /// different fallbacks shared the first cached render.
     #[tokio::test]
     async fn stored_cache_key_discriminates_missing_field_fallback() {
@@ -805,7 +805,7 @@ mod tests {
     }
 
     /// F62: EVERY output-affecting RenderOptions field is part of the
-    /// versioned key — flipping any one of them must rotate it.
+    /// versioned key, flipping any one of them must rotate it.
     #[test]
     fn stored_cache_key_covers_every_output_affecting_option() {
         let stored = fake_stored_template(3, "s {{ n }}", "<p>{{ n }}</p>");
@@ -852,7 +852,7 @@ mod tests {
         );
     }
 
-    /// F62: derived metadata must describe the FINAL body — when the stored
+    /// F62: derived metadata must describe the FINAL body, when the stored
     /// `text_body` replaces the generated plaintext,
     /// `plaintext_size_bytes` follows the replacement.
     #[tokio::test]
@@ -876,7 +876,7 @@ mod tests {
     }
 
     /// F62 warm-cache identity: warm the cache with fallback A, then render
-    /// the same template with fallback B — the result must match an
+    /// the same template with fallback B, the result must match an
     /// uncached fallback-B render (body AND metadata), proving the fallback
     /// participates in the cache identity end-to-end.
     #[tokio::test]

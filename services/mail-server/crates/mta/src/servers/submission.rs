@@ -7,8 +7,8 @@
 //!
 //! Every submitted message passes the SAME
 //! [`billing_service::send_admission::SendAdmissionService`] gate the REST
-//! `POST /v1/messages` path uses — quota reservation against the tenant's
-//! plan, suppression check, and server-owned category validation — BEFORE it
+//! `POST /v1/messages` path uses, quota reservation against the tenant's
+//! plan, suppression check, and server-owned category validation, BEFORE it
 //! is queued. A submission that cannot reserve is refused with a transient
 //! SMTP 4xx reply (see [`admission_refusal_reply`]), never silently
 //! accepted. The category comes exclusively from authenticated server-owned
@@ -53,7 +53,7 @@ const AUTH_LINE_TIMEOUT: Duration = Duration::from_secs(120);
 /// Audit finding 11: wall-clock bound for the PRE-ADMISSION refusal write
 /// (the `421 Too many connections` line). A peer that connects, trips the
 /// per-IP cap, and never reads must not pin the refusal task on an
-/// unbounded `write_all().await` — the connection is refused either way, so
+/// unbounded `write_all().await`, the connection is refused either way, so
 /// a stalled receiver just gets the socket closed.
 const REFUSAL_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -82,7 +82,7 @@ enum ReadDataOutcome {
     /// A line exceeded the per-line cap or the message exceeded the size cap.
     TooLarge,
     /// The absolute line-drain limit was exceeded without a newline: the
-    /// stream cannot be resynchronised — the connection must close.
+    /// stream cannot be resynchronised, the connection must close.
     Overflow,
     /// Total or per-line deadline exceeded.
     TimedOut,
@@ -113,7 +113,7 @@ enum QueueOutcome {
     /// The message was inserted into `email_queue`.
     Queued,
     /// The MAIL FROM domain is not owned by the authenticated user's
-    /// tenant — the message must be refused with `550 5.7.1`.
+    /// tenant, the message must be refused with `550 5.7.1`.
     SenderNotOwned,
     /// The sender belongs to the tenant but does not satisfy the unified
     /// current-domain readiness contract for the selected transport.
@@ -121,7 +121,7 @@ enum QueueOutcome {
 }
 
 /// Why the queue write itself failed. Every constructor logs the CAUSE at
-/// ERROR level before returning — the previously swallowed
+/// ERROR level before returning, the previously swallowed
 /// `.map_err(|_| ())` sites answered 451 without leaving any trace of
 /// WHICH statement failed, turning every queue outage into an
 /// undiagnosable "Requested action aborted". The variant decides the
@@ -155,7 +155,7 @@ impl QueueWriteFailure {
 /// Terminal outcome of one AUTH exchange (RFC 4954). Failing replies are
 /// RETURNED, not written: the session loop emits them through `reply!` so
 /// every 4xx/5xx counts toward the session error budget and is logged via
-/// `log_smtp_reject` — a brute-forcer hammering AUTH disconnects after
+/// `log_smtp_reject`, a brute-forcer hammering AUTH disconnects after
 /// MAX_SESSION_ERRORS attempts exactly like any other error source.
 enum AuthOutcome {
     /// (authenticated email, tenant id). The tenant comes from the same
@@ -262,7 +262,7 @@ impl SubmissionServer {
         // Admission control: per-IP connection cap (mirrors the inbound
         // server's gate; without it `connections` is tracked but never
         // enforced, so one IP may hold unlimited concurrent sessions). The
-        // check and the slot increment are one atomic step — concurrent
+        // check and the slot increment are one atomic step, concurrent
         // connects cannot overshoot the cap.
         if self.rate_limit.enabled
             && !super::bounce::try_admit_connection(
@@ -271,7 +271,7 @@ impl SubmissionServer {
                 self.rate_limit.max_connections_per_ip,
             )
         {
-            // Audit finding 11: the refusal write is bounded — the peer may
+            // Audit finding 11: the refusal write is bounded, the peer may
             // never read; stalling here must not pin the task.
             let mut stream = BufStream::new(socket);
             let _ = tokio::time::timeout(
@@ -285,7 +285,7 @@ impl SubmissionServer {
             return;
         }
 
-        // F-19: RAII slot guard (same pattern as the bounce server) — the
+        // F-19: RAII slot guard (same pattern as the bounce server), the
         // per-IP slot is released on EVERY exit path, early returns included.
         let _conn_guard = super::bounce::ConnGuard {
             conns: self.connections.clone(),
@@ -320,7 +320,7 @@ impl SubmissionServer {
                         self.run_session_loop(&mut tls_buf, peer, false, true).await;
                     }
                     Err(()) => {
-                        // M26: timed-out/failed handshake — socket is dropped
+                        // M26: timed-out/failed handshake, socket is dropped
                         // and the connection slot released below.
                         debug!("STARTTLS handshake failed or timed out");
                     }
@@ -345,7 +345,7 @@ impl SubmissionServer {
         already_tls: bool,
     ) -> (bool, u32) {
         let mut authenticated = false;
-        // Tenant of the authenticated identity — the admission gate and the
+        // Tenant of the authenticated identity, the admission gate and the
         // queue row MUST use this exact tenant (finding P0).
         let mut auth_tenant = String::new();
         let mut helo_seen = false;
@@ -370,7 +370,7 @@ impl SubmissionServer {
         // Single write point for command replies: 4xx/5xx replies count
         // toward the error budget; at MAX_SESSION_ERRORS the session is
         // closed with 421 (RFC 5321 §4.3.2 "too many errors").
-        // NOTE: the plain `break` below exits the dispatch loop — the only
+        // NOTE: the plain `break` below exits the dispatch loop, the only
         // loop enclosing every `reply!` invocation.
         macro_rules! reply {
             ($($arg:tt)*) => {{
@@ -431,7 +431,7 @@ impl SubmissionServer {
                 Ok(Ok(LineRead::Line(_, LineTerminator::BareLf))) => {
                     // F-08: a bare-LF COMMAND line is refused (RFC 5321
                     // commands are CRLF-terminated). DATA body tolerance is
-                    // unchanged — only command lines are gated here.
+                    // unchanged, only command lines are gated here.
                     log_smtp_reject(
                         "submission",
                         ip,
@@ -481,7 +481,7 @@ impl SubmissionServer {
                 // n extra whitespace-separated tokens are a syntax error.
                 // Truncating at the first whitespace (the previous behavior)
                 // accepted `EHLO bad host` as the domain `bad` while the
-                // inbound server refused the same line — the same strict
+                // inbound server refused the same line, the same strict
                 // parser is used here.
                 let host = match super::inbound::parse_helo_hostname(trimmed) {
                     Some(host) => host,
@@ -516,7 +516,7 @@ impl SubmissionServer {
                 }
                 caps.push_str("250-8BITMIME\r\n");
                 caps.push_str("250-PIPELINING\r\n");
-                // F-05: ENHANCEDSTATUSCODES (RFC 2034) — every reply this
+                // F-05: ENHANCEDSTATUSCODES (RFC 2034), every reply this
                 // server emits already carries an enhanced status code.
                 caps.push_str("250-ENHANCEDSTATUSCODES\r\n");
                 caps.push_str("250 SMTPUTF8\r\n");
@@ -559,7 +559,7 @@ impl SubmissionServer {
                     // RFC 4954 §4: AUTH must not be used before EHLO.
                     reply!("503 5.5.1 Send EHLO first\r\n");
                 } else if !already_tls {
-                    // FIX-2: refuse AUTH on a plaintext session — the
+                    // FIX-2: refuse AUTH on a plaintext session, the
                     // credentials would traverse the network in cleartext.
                     reply!("530 5.7.0 Must issue STARTTLS first\r\n");
                 } else if mail_from.is_some() {
@@ -615,7 +615,7 @@ impl SubmissionServer {
                 } else if !authenticated {
                     reply!("530 5.7.0 Authentication required\r\n");
                 } else if mail_from.is_some() {
-                    // F-04: nested MAIL — RFC 5321 §4.1.4 sequencing error.
+                    // F-04: nested MAIL, RFC 5321 §4.1.4 sequencing error.
                     log_smtp_reject(
                         "submission",
                         ip,
@@ -864,14 +864,14 @@ impl SubmissionServer {
                                     reply!("550 5.7.1 sender domain is not verified and ready for delivery\r\n");
                                 }
                                 Err(QueueWriteFailure::Transient) => {
-                                    // Infrastructure failure — already
+                                    // Infrastructure failure, already
                                     // ERROR-logged with its cause inside
                                     // queue_message; the client retries.
                                     reply!("451 4.3.0 Requested action aborted\r\n");
                                 }
                                 Err(QueueWriteFailure::Permanent) => {
                                     // Internal invariant broken for THIS
-                                    // message — retrying cannot fix it.
+                                    // message, retrying cannot fix it.
                                     reply!("554 5.6.0 Message could not be queued\r\n");
                                 }
                             }
@@ -938,7 +938,7 @@ impl SubmissionServer {
     ///    and a per-line length cap,
     ///  - the overall size cap is enforced BEFORE buffering (552),
     ///  - end-of-data is ONLY a line that is exactly `.` terminated by CRLF
-    ///    (RFC 5321 §4.1.1.5 strict — a bare-LF `".\n"` line is body data,
+    ///    (RFC 5321 §4.1.1.5 strict, a bare-LF `".\n"` line is body data,
     ///    closing the SMTP-smuggling window),
     ///  - RFC 5321 §4.5.2 dot-unstuffing removes exactly ONE leading dot,
     ///  - every stored body line is CRLF-normalized (a bare-LF body line is
@@ -950,14 +950,14 @@ impl SubmissionServer {
     ///
     /// Outcomes:
     ///
-    /// * [`DataReception::Payload`] — a complete message, ready for loop
+    /// * [`DataReception::Payload`], a complete message, ready for loop
     ///   detection / admission / queueing;
-    /// * [`DataReception::ResetContinue`] — the size limit was hit (552
+    /// * [`DataReception::ResetContinue`], the size limit was hit (552
     ///   already sent); the transaction is reset and the session continues;
-    /// * [`DataReception::CloseAfter`] — a fatal transfer error (421 data
+    /// * [`DataReception::CloseAfter`], a fatal transfer error (421 data
     ///   timeout / 500 unresynchronisable line, already sent); the session
     ///   must close;
-    /// * [`DataReception::AbortQuiet`] — the client vanished mid-DATA; no
+    /// * [`DataReception::AbortQuiet`], the client vanished mid-DATA; no
     ///   reply is possible, the partial payload is discarded and the
     ///   session ends.
     ///
@@ -1040,7 +1040,7 @@ impl SubmissionServer {
                 }
                 Ok(Ok(LineRead::Overflow)) => {
                     // No newline within the absolute drain limit: the stream
-                    // cannot be resynchronised — treat as fatal for the DATA
+                    // cannot be resynchronised, treat as fatal for the DATA
                     // transfer (the caller closes after the 552/500 reply).
                     return ReadDataOutcome::Overflow;
                 }
@@ -1085,7 +1085,7 @@ impl SubmissionServer {
     /// terminating reply (never leave the client hanging). 334 challenges
     /// are written directly (they are not error replies); every terminal
     /// reply is returned as [`AuthOutcome::Reply`] so the session loop can
-    /// emit it through `reply!` — AUTH failures must count toward the
+    /// emit it through `reply!`, AUTH failures must count toward the
     /// session error budget like any other 4xx/5xx.
     async fn handle_auth_login<S: AsyncRead + AsyncWrite + Unpin>(
         self: &Arc<Self>,
@@ -1190,7 +1190,7 @@ impl SubmissionServer {
 
     /// Read one AUTH response line with a timeout and a line-length cap.
     /// A line consisting of the single `*` cancels the authentication
-    /// exchange (RFC 4954 §4) — the caller answers with 501. Over-long
+    /// exchange (RFC 4954 §4), the caller answers with 501. Over-long
     /// continuation lines are reported so the caller can answer 500 (the
     /// remainder was drained, the session stays synchronised). `None` means
     /// the transport died: no reply can be delivered.
@@ -1219,7 +1219,7 @@ impl SubmissionServer {
 
     // ── Auth helper ──────────────────────────────────────────────────────
 
-    /// Returns `(email, tenant_id)` — the tenant rides along so the
+    /// Returns `(email, tenant_id)`, the tenant rides along so the
     /// admission gate and the queue row use the SAME tenant as the
     /// authenticated credential.
     async fn authenticate_user(
@@ -1229,7 +1229,7 @@ impl SubmissionServer {
         ip: std::net::IpAddr,
     ) -> Result<(String, String), AuthError> {
         // FIX-3: lockout short-circuit BEFORE any work. Once an (IP,
-        // account) pair — or an IP across all accounts — has accumulated
+        // account) pair, or an IP across all accounts, has accumulated
         // enough recent failures, further attempts are rejected without
         // touching the database or verifying the presented password.
         // Counters decay after the tracker's TTL, which is the lockout
@@ -1240,7 +1240,7 @@ impl SubmissionServer {
         }
 
         // NOTE: `users` has no `username` column (only smtp_credentials does),
-        // so the lookup is by email only — identical to the api-server login
+        // so the lookup is by email only, identical to the api-server login
         // path. The tenant join enforces tenants.status here too (F18): a
         // suspended tenant's SMTP credentials must stop accepting
         // submission, same as the API/SSR gates in api-server.
@@ -1317,7 +1317,7 @@ impl SubmissionServer {
     ///
     /// F-10: `data` is the raw BYTES of the message (Received header already
     /// prepended by the caller). 8BITMIME is advertised, so the payload may
-    /// contain octets outside US-ASCII — the header/body split and the MIME
+    /// contain octets outside US-ASCII, the header/body split and the MIME
     /// parsing both run on the original bytes (see [`prepare_queue_payload`]);
     /// a lossy UTF-8 decode is applied ONLY to values destined for the TEXT
     /// columns, never to the parser input.
@@ -1333,7 +1333,7 @@ impl SubmissionServer {
         // The MIME parse is pure CPU over up to max_message_size (10 MB) of
         // bytes: it must run on the blocking pool, never on the async
         // worker the session loop shares with every other connection. The
-        // payload needs to be owned ('static) for the dispatch — one copy
+        // payload needs to be owned ('static) for the dispatch, one copy
         // is the price of not stalling the runtime.
         let payload = {
             let data = data.to_vec();
@@ -1368,7 +1368,7 @@ impl SubmissionServer {
             })?;
 
         // `tenant_id` is the authenticated identity's tenant (VARCHAR(26)
-        // referencing tenants(id) — never the user's account UUID). It was
+        // referencing tenants(id), never the user's account UUID). It was
         // resolved during AUTH and admission metered against it; the queue
         // row and the domain authorization use the SAME value.
         //
@@ -1438,7 +1438,7 @@ impl SubmissionServer {
 
         // The queue row's id/message_id are UUID columns: a non-UUID msg_id
         // is an internal invariant violation (this server minted it), not a
-        // client error and not a transient condition — 554, never retried
+        // client error and not a transient condition, 554, never retried
         // by a well-behaved client.
         let message_uuid = Uuid::parse_str(msg_id).map_err(|e| {
             QueueWriteFailure::permanent(e, "submission queue: generated message id is not a UUID")
@@ -1470,7 +1470,7 @@ impl SubmissionServer {
         .bind(Option::<serde_json::Value>::None)
         .bind(&payload.custom_headers)
         .bind(&payload.attachments)
-        // F55/P1: the admission-validated, server-owned category — written
+        // F55/P1: the admission-validated, server-owned category, written
         // EXPLICITLY so legal suppression semantics are never chosen by the
         // `message_category` schema default.
         .bind(admission.category())
@@ -1500,7 +1500,7 @@ impl SubmissionServer {
 
 /// Extract the bare address from an SMTP command line such as
 /// `RCPT TO:<user@example.com>` or `MAIL FROM: user@example.com`.
-/// Only the address path is returned — trailing parameters such as
+/// Only the address path is returned, trailing parameters such as
 /// `SIZE=1000` are never part of the address.
 fn extract_address(line: &str) -> String {
     // Prefer the explicit angle-bracketed path (shared panic-safe helper:
@@ -1509,7 +1509,7 @@ fn extract_address(line: &str) -> String {
         return addr.to_string();
     }
     // Fall back to the token directly after the MAIL FROM:/RCPT TO: verb
-    // (never the last token — that could be a command parameter).
+    // (never the last token, that could be a command parameter).
     let rest = line
         .split_once("MAIL FROM")
         .or_else(|| line.split_once("RCPT TO"))
@@ -1560,7 +1560,7 @@ pub(crate) fn is_valid_envelope_address(addr: &str) -> bool {
 
 /// Split a raw message into (headers, body) at the first blank line.
 ///
-/// F-10: byte-oriented — the raw payload may contain 8-bit octets
+/// F-10: byte-oriented, the raw payload may contain 8-bit octets
 /// (8BITMIME) that are NOT valid UTF-8, so the split must never go through
 /// a lossy String decode first (that would both corrupt the boundary search
 /// and replace body octets with U+FFFD). Shared with the inbound server's
@@ -1579,7 +1579,7 @@ pub(crate) fn split_headers_body(raw: &[u8]) -> (&[u8], &[u8]) {
 }
 
 /// Compose the message handed to the queue: the `Received:` trace header for
-/// this hop followed by the client's RAW bytes, verbatim (F-10 — the bytes
+/// this hop followed by the client's RAW bytes, verbatim (F-10, the bytes
 /// are never decoded on this path).
 fn compose_stored_message(received: &str, data: &[u8]) -> Vec<u8> {
     let mut message = Vec::with_capacity(received.len() + 2 + data.len());
@@ -1593,7 +1593,7 @@ fn compose_stored_message(received: &str, data: &[u8]) -> Vec<u8> {
 
 /// Category policy for an authenticated submission (finding P1).
 ///
-/// The category must come from authenticated, server-owned state — never
+/// The category must come from authenticated, server-owned state, never
 /// from the message (headers, envelope, body) and never from the
 /// `email_queue.message_category` schema default. The deployed SMTP
 /// credential (the `users` row checked by AUTH) carries no category
@@ -1624,7 +1624,7 @@ fn submission_credential_category() -> Option<&'static str> {
 /// a retry after a lost `250` records the SAME metering event and cannot
 /// reserve twice (a true duplicate delivery is still the client's retry
 /// semantics, unchanged). A message without a `Message-ID` falls back to the
-/// server-minted id — no cross-attempt replay identity, exactly like a REST
+/// server-minted id, no cross-attempt replay identity, exactly like a REST
 /// send without an idempotency key.
 fn submission_idempotency_key(message: &[u8], msg_id: &str) -> String {
     extract_message_id_header(message)
@@ -1633,8 +1633,8 @@ fn submission_idempotency_key(message: &[u8], msg_id: &str) -> String {
 }
 
 /// Extract the first `Message-ID:` header value from the raw (headers +
-/// body) message. Continuation lines are not followed — `Message-ID` is a
-/// short single-line header — and values over the 255-byte identity cap are
+/// body) message. Continuation lines are not followed, `Message-ID` is a
+/// short single-line header, and values over the 255-byte identity cap are
 /// ignored so the caller falls back to the minted id.
 fn extract_message_id_header(message: &[u8]) -> Option<String> {
     let (headers, _) = split_headers_body(message);
@@ -1661,17 +1661,17 @@ fn extract_message_id_header(message: &[u8]) -> Option<String> {
 ///   a retryable insufficient-resource/policy reply. A 5xx would make a
 ///   well-behaved sender hard-bounce mail that could legitimately be sent
 ///   later.
-/// * `451 4.3.0` for metering/suppression infrastructure failures — same
+/// * `451 4.3.0` for metering/suppression infrastructure failures, same
 ///   transient contract as a failed queue write.
 /// * `550 5.1.1` when every recipient is suppressed (mirrors the queue
 ///   path's existing reply and the REST path's refusal).
 /// * `550 5.3.0` for an invalid server-owned category policy: permanent for
-///   the client — retrying cannot fix an operator/credential configuration
+///   the client, retrying cannot fix an operator/credential configuration
 ///   error.
 /// * `550 5.7.1` for an F4 consent refusal: a TERMINAL policy verdict (the
 ///   recipient has no active marketing consent; retrying cannot create
 ///   it), mirroring the suppressions reply.
-/// * `451 4.3.0` when the consent store is unavailable — fail closed but
+/// * `451 4.3.0` when the consent store is unavailable, fail closed but
 ///   retryable, like the other infrastructure-failure replies.
 fn admission_refusal_reply(error: &SendAdmissionError) -> &'static str {
     match error {
@@ -1690,9 +1690,9 @@ fn admission_refusal_reply(error: &SendAdmissionError) -> &'static str {
 /// What to do with an admitted reservation once its queue write returned.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AdmissionSettlement {
-    /// The row is durably queued — the reservation stands.
+    /// The row is durably queued, the reservation stands.
     Commit,
-    /// Anything else — release the reservation so a failed submission never
+    /// Anything else, release the reservation so a failed submission never
     /// consumes quota.
     Rollback,
 }
@@ -1712,7 +1712,7 @@ fn settlement_for_queue_outcome(
 /// Derived values `email_queue` needs from the raw message bytes (F-10).
 struct PreparedQueuePayload {
     /// Header block as text for the `raw_headers` TEXT column (lossy decode
-    /// is acceptable ONLY here — it is a display/inspection column, not the
+    /// is acceptable ONLY here, it is a display/inspection column, not the
     /// parsing input).
     headers: String,
     subject: String,
@@ -1862,7 +1862,7 @@ fn extract_attachments(message: &mail_parser::Message<'_>) -> serde_json::Value 
 /// Split and MIME-parse the RAW message bytes.
 ///
 /// The MIME parser handles charset-labelled 8-bit bodies (e.g.
-/// `charset=iso-8859-1`) correctly when fed the ORIGINAL octets — decoding
+/// `charset=iso-8859-1`) correctly when fed the ORIGINAL octets, decoding
 /// to text with the declared charset. The previous implementation ran
 /// `String::from_utf8_lossy` over the whole payload first, which replaced
 /// every non-UTF-8 octet with U+FFFD BEFORE parsing and corrupted every
@@ -2356,7 +2356,7 @@ mod tests {
     async fn repeated_failed_auth_attempts_hit_the_session_error_budget() {
         // AUTH failures are 4xx/5xx replies like any other: each increments
         // the session error budget, so MAX_SESSION_ERRORS bad attempts must
-        // disconnect with 421 — a brute-forcer cannot hammer AUTH forever on
+        // disconnect with 421, a brute-forcer cannot hammer AUTH forever on
         // one connection. (After the lockout kicks in the reply becomes 454;
         // either way it counts toward the budget.)
         let server = Arc::new(test_server(None));
@@ -2772,7 +2772,7 @@ mod tests {
     #[test]
     fn submission_category_policy_is_server_owned_and_never_the_schema_default() {
         // The deployed SMTP credential carries no category attribute, so the
-        // documented policy default applies — explicitly, through the shared
+        // documented policy default applies, explicitly, through the shared
         // helper. `marketing` is the NON-preference-exempt category, so a
         // missing attribute can never silently grant a legal opt-out
         // exemption, and the `email_queue.message_category` schema default is
@@ -2788,7 +2788,7 @@ mod tests {
         assert_eq!(category, "marketing");
 
         // The queue write names the column and binds the admission-validated
-        // value — the schema default is not in the statement at all.
+        // value, the schema default is not in the statement at all.
         let source = include_str!("submission.rs");
         let insert = source
             .find("INSERT INTO email_queue (")
@@ -2851,7 +2851,7 @@ mod tests {
 
         assert!(
             admission_refusal_reply(&SendAdmissionError::QuotaExceeded).starts_with("452 4.7.0"),
-            "quota exhaustion is transient — a 5xx would hard-bounce retryable mail"
+            "quota exhaustion is transient, a 5xx would hard-bounce retryable mail"
         );
         assert!(
             admission_refusal_reply(&SendAdmissionError::MeteringUnavailable(
@@ -3107,7 +3107,7 @@ mod tests {
     fn prepare_queue_payload_preserves_iso_8859_1_bytes() {
         // 8BITMIME is advertised: an ISO-8859-1 body (0xE9 = é, 0xEF = ï)
         // must reach the MIME parser as RAW BYTES so the parser decodes it
-        // with the declared charset — never through a lossy UTF-8 decode
+        // with the declared charset, never through a lossy UTF-8 decode
         // that would replace every high octet with U+FFFD. (The subject
         // uses legal RFC 6532 UTF-8, which also round-trips exactly.)
         let mut msg = Vec::new();
@@ -3139,7 +3139,7 @@ mod tests {
     #[test]
     fn prepare_queue_payload_falls_back_lossy_only_for_text_columns() {
         // Unparseable body (no Content-Type, invalid UTF-8): the fallback for
-        // the TEXT column is lossy — but the mangling is confined to the
+        // the TEXT column is lossy, but the mangling is confined to the
         // derived text, and the parser still saw the original bytes.
         let msg = b"Subject: t\r\n\r\nraw \xe9 bytes";
         let payload = prepare_queue_payload(msg);
@@ -3162,7 +3162,7 @@ mod tests {
         // verbatim by eight_bit_body_bytes_are_preserved_verbatim) →
         // compose_stored_message (Received prepend) → prepare_queue_payload
         // (split + MIME parse feeding the queue columns). Every 0xE9/0xEF
-        // octet must survive to the parsed columns — the old
+        // octet must survive to the parsed columns, the old
         // String::from_utf8_lossy over the whole body replaced them with
         // U+FFFD here.
         let mut data = Vec::new();
@@ -3207,7 +3207,7 @@ mod tests {
     #[test]
     fn prepare_queue_payload_extracts_attachments_and_custom_headers() {
         // Attachments and custom headers (List-Unsubscribe, X-Custom, folded
-        // values) must reach the queue row — the worker rebuilds the outgoing
+        // values) must reach the queue row, the worker rebuilds the outgoing
         // MIME exclusively from `headers`/`attachments`; losing them silently
         // deleted customer attachments on delivery.
         use base64::Engine as _;
@@ -3311,8 +3311,8 @@ mod tests {
     fn queue_insert_tx_pins_synchronous_commit_before_the_email_queue_insert() {
         // The 250 acknowledgement for a submitted message must not precede
         // the WAL flush of its email_queue row. The queue transaction pins
-        // `SET LOCAL synchronous_commit = on` — immune to a relaxed
-        // session/pool/server default — and does so BEFORE the
+        // `SET LOCAL synchronous_commit = on`, immune to a relaxed
+        // session/pool/server default, and does so BEFORE the
         // INSERT INTO email_queue. The unit suite has no live Postgres, so
         // the invariant is pinned against the compiled-in source itself.
         let source = include_str!("submission.rs");
@@ -3327,7 +3327,7 @@ mod tests {
             .expect("the queue tx must insert into email_queue");
         assert!(
             begin_pos < set_pos,
-            "SET LOCAL only applies inside a transaction — it must follow BEGIN"
+            "SET LOCAL only applies inside a transaction, it must follow BEGIN"
         );
         assert!(
             set_pos < insert_pos,
@@ -3479,7 +3479,7 @@ mod tests {
         // The authenticated-path rules (EHLO resets the transaction; nested
         // MAIL → 503) are not reachable in the unit suite (no live DB to
         // authenticate against), so they are pinned against the compiled-in
-        // source — same idiom as the synchronous_commit pin above.
+        // source, same idiom as the synchronous_commit pin above.
         let source = include_str!("submission.rs");
         let ehlo_branch = source
             .find("if verb == \"EHLO\" || verb == \"HELO\"")
@@ -4036,7 +4036,7 @@ mod adversarial_db_tests {
     /// Grant an ACTIVE marketing consent record for `recipient`.
     ///
     /// SMTP submissions carry the server-owned `marketing` category (never the
-    /// schema default — see [`submission_credential_category`]), so the shared
+    /// schema default, see [`submission_credential_category`]), so the shared
     /// send admission's F4 consent gate requires a live consent record for
     /// every recipient it queues. The suites below exercise admission's LATER
     /// arms (durability pin, insert failure, suppression, budget, domain
@@ -4828,13 +4828,13 @@ mod adversarial_db_tests {
             Self { local_addr }
         }
 
-        /// A pool URL for `db` routed through the proxy (TLS off — the
+        /// A pool URL for `db` routed through the proxy (TLS off, the
         /// statement bytes must stay scannable).
         fn url(&self, db: &str) -> String {
             // The app role's password comes from TEST_DATABASE_URL when that
             // URL authenticates as `apexmail` (the local/dev shape); CI's URL
             // authenticates as the superuser, where the deployed CI image
-            // gives the app role the literal `apexmail` — so the fallback is
+            // gives the app role the literal `apexmail`, so the fallback is
             // kept for exactly that case.
             let password = app_role_password();
             format!(
@@ -5100,7 +5100,7 @@ mod adversarial_db_tests {
 
     /// Connect, EHLO, STARTTLS, handshake, and re-EHLO under TLS. Returns
     /// the stream positioned right after the post-TLS EHLO reply (AUTH is
-    /// now advertised) — the caller runs its own AUTH flow.
+    /// now advertised), the caller runs its own AUTH flow.
     async fn tls_session_pre_auth(
         addr: std::net::SocketAddr,
     ) -> tokio::io::BufStream<ClientTlsStream<TcpStream>> {
@@ -5501,7 +5501,7 @@ mod adversarial_db_tests {
         let (client, server_side) = tokio::io::duplex(1024 * 1024);
         let ip: std::net::IpAddr = "10.8.8.8".parse().unwrap();
         // A single line longer than the 64 MB absolute drain limit: the
-        // stream cannot be resynchronised — 500 and close.
+        // stream cannot be resynchronised, 500 and close.
         let mut client = BufStream::new(client);
         let mut server_buf = BufStream::new(server_side);
         let write_task = tokio::spawn(async move {
@@ -5795,7 +5795,7 @@ mod adversarial_db_tests {
                 .await
         });
         let mut client = BufStream::new(client);
-        // (run_session_loop sends no greeting — that is handle_session.)
+        // (run_session_loop sends no greeting, that is handle_session.)
 
         async fn cmd(client: &mut BufStream<tokio::io::DuplexStream>, line: &str) -> String {
             client
@@ -5930,7 +5930,7 @@ mod adversarial_db_tests {
         );
 
         // An UNRESYNCHRONISABLE flood (beyond the absolute 64 MiB drain
-        // limit with no newline at all): reply 500 and CLOSE — reading on
+        // limit with no newline at all): reply 500 and CLOSE, reading on
         // would parse attacker bytes as commands.
         let chunk = vec![b'x'; 1024 * 1024];
         let total = crate::servers::util::ABSOLUTE_LINE_DRAIN_LIMIT + 4 * 1024 * 1024;

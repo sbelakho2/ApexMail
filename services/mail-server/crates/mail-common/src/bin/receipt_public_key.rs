@@ -1,7 +1,7 @@
-//! `receipt-public-key` — operator CLI for the routing-receipt key material.
+//! `receipt-public-key`, operator CLI for the routing-receipt key material.
 //!
 //! Prints the PUBLIC half (and its `key_id` fingerprint) of the Ed25519 seed
-//! in `RECEIPT_SIGNING_KEY`, and — with `--verify` — verifies a presented
+//! in `RECEIPT_SIGNING_KEY`, and, with `--verify`, verifies a presented
 //! (payload, signature) pair against a public key. This is the "externally
 //! recomputed verification" tool: it holds NO deployment state and talks to
 //! nothing, so an auditor can reproduce a receipt check offline with the same
@@ -114,7 +114,7 @@ fn main() -> ExitCode {
         match mail_common::routing_receipt::verify_payload(&payload, &signature, &key) {
             Ok(()) => {
                 println!(
-                    "VALID — signature verifies over {} payload byte(s) under key_id {}",
+                    "VALID, signature verifies over {} payload byte(s) under key_id {}",
                     payload.len(),
                     mail_common::routing_receipt::key_id_for(&key)
                 );
@@ -122,7 +122,7 @@ fn main() -> ExitCode {
             }
             Err(error) => {
                 println!(
-                    "INVALID — {error} (key_id {})",
+                    "INVALID, {error} (key_id {})",
                     mail_common::routing_receipt::key_id_for(&key)
                 );
                 ExitCode::from(1)
@@ -144,7 +144,7 @@ fn main() -> ExitCode {
             }
             Ok(None) => {
                 eprintln!(
-                    "{} is unset — nothing to publish. Set a 32-byte Ed25519 seed \
+                    "{} is unset, nothing to publish. Set a 32-byte Ed25519 seed \
                      (`openssl rand -hex 32`).",
                     mail_common::routing_receipt::RECEIPT_SIGNING_KEY_ENV
                 );

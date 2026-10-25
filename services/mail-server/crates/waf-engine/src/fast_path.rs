@@ -135,7 +135,7 @@ fn xss_matcher() -> Option<&'static AhoCorasick> {
                 "livescript:",
                 "expression(",
                 // CSS injection vectors (audit SM5 F1: the analyzer's
-                // full pattern list must open the gate — see the property
+                // full pattern list must open the gate, see the property
                 // test iterating the analyzer vocabularies)
                 "@import",
                 "behavior:",
@@ -280,13 +280,13 @@ impl FastPathResult {
 /// `1 and 2>1` contain no SQL keyword, quote or comment, so a purely
 /// keyword-based gate never reached the AST analyzer. A digit (or quote, or
 /// hex-digit in a `0x` literal) immediately adjacent to a comparison
-/// operator is a strong enough signal to run the analyzer — worst case it
+/// operator is a strong enough signal to run the analyzer, worst case it
 /// costs one cheap parse of a short value.
 ///
 /// Whitespace skipping uses `char::is_whitespace` (Unicode) over `char`s:
 /// the tokenizer treats every Unicode whitespace as a skippable token, so
 /// `1\u{A0}=\u{A0}1` fires the tautology detector and the gate must open
-/// for it too (audit SM5 F1 repair — an ASCII-only scan desynced the gate).
+/// for it too (audit SM5 F1 repair, an ASCII-only scan desynced the gate).
 fn has_digit_adjacent_comparison(input: &str) -> bool {
     let chars: Vec<char> = input.chars().collect();
     let len = chars.len();
@@ -343,14 +343,14 @@ fn analyzer_normalized(input: &str) -> std::borrow::Cow<'_, str> {
 
 /// Structural XSS gate signals (audit SM5 F1).
 ///
-/// The keyword list above is an inclusion signal only — it can never be a
+/// The keyword list above is an inclusion signal only, it can never be a
 /// superset of the analyzer vocabularies (new event handlers, new tags).
 /// These structural checks close that gap:
-/// - `on[a-z]+ <ws>* =` — ANY event-handler assignment (the analyzer finds
+/// - `on[a-z]+ <ws>* =`, ANY event-handler assignment (the analyzer finds
 ///   handler names anywhere in the string and trims Unicode whitespace
 ///   before the `=`, so this signal mirrors exactly that shape for EVERY
-///   `on…` name — no word-boundary precondition, `xonclick=` opens too).
-/// - `<[a-z]` — ANY HTML tag opening (covers every tag/sink in the
+///   `on…` name, no word-boundary precondition, `xonclick=` opens too).
+/// - `<[a-z]`, ANY HTML tag opening (covers every tag/sink in the
 ///   analyzer's vocabulary, present and future).
 /// - whitespace-collapsed `javascript:`-family scheme (the analyzer strips
 ///   ALL whitespace before matching `detect_js_uri`'s schemes).
@@ -429,7 +429,7 @@ fn has_html_tag_open(input: &str) -> bool {
 
 /// Structural SQLi gate signal (audit SM5 F1).
 ///
-/// The keyword list in `sqli_matcher` is an inclusion signal only — it can
+/// The keyword list in `sqli_matcher` is an inclusion signal only, it can
 /// never be a superset of the analyzer's vocabulary (`truncate` proved
 /// that). This check runs the analyzer's own cheap tokenizer and opens the
 /// lane on every token shape one of its seven detectors can score:
@@ -446,7 +446,7 @@ fn has_html_tag_open(input: &str) -> bool {
 /// Bare English connectives (`and`, `is`, `if`, `from`, …) are NOT
 /// openers: no detector can score them without a quote/literal, and they
 /// appear in ordinary prose constantly. Worst case for any over-open is
-/// one analyzer pass that finds nothing — never an exclusion.
+/// one analyzer pass that finds nothing, never an exclusion.
 fn tokenizer_opens_sqli_lane(input: &str) -> bool {
     use crate::sql_analyzer::{SqlKeyword, SqlToken};
 
@@ -496,7 +496,7 @@ fn tokenizer_opens_sqli_lane(input: &str) -> bool {
             SqlToken::Keyword(
                 SqlKeyword::Sleep | SqlKeyword::Benchmark | SqlKeyword::PgSleep | SqlKeyword::Load,
             ) if matches!(next, Some(SqlToken::OpenParen)) => return true,
-            // LOAD DATA INFILE — "data" lexes as an identifier.
+            // LOAD DATA INFILE, "data" lexes as an identifier.
             SqlToken::Keyword(SqlKeyword::Load) if matches!(next, Some(SqlToken::Identifier(w)) if w.eq_ignore_ascii_case("data")) => {
                 return true
             }
@@ -530,7 +530,7 @@ pub fn fast_path_check(input: &str) -> FastPathResult {
 /// Quick check for SQLi patterns only.
 ///
 /// Audit SM5 F1: in addition to the keyword list, the cheap analyzer
-/// tokenizer runs on every input — the gate is the tokenizer's own
+/// tokenizer runs on every input, the gate is the tokenizer's own
 /// structural vocabulary, so a token like `truncate` (or any future
 /// keyword the analyzer learns) can no longer slip past.
 pub fn fast_path_sqli(input: &str) -> bool {
@@ -541,7 +541,7 @@ pub fn fast_path_sqli(input: &str) -> bool {
 
 /// Quick check for XSS patterns only.
 ///
-/// Audit SM5 F1: the gate is now STRUCTURAL — any `on…=` handler
+/// Audit SM5 F1: the gate is now STRUCTURAL, any `on…=` handler
 /// assignment or any `<tag` opening opens the lane, so the analyzer's
 /// handler/tag vocabulary (100+ names) can never outgrow the gate.
 /// The structural signals run on the analyzer's NUL-normalized view and
@@ -748,7 +748,7 @@ mod tests {
 
         // Every SQL keyword the analyzer recognizes. For each keyword, the
         // attack template that makes the analyzer SCORE must open the gate
-        // — and the test proves the template really scores, so the gate
+        //, and the test proves the template really scores, so the gate
         // assertion can never go vacuous. Keywords with no standalone
         // scorer (ordinary-English connectives) must keep the gate closed
         // in prose position.
@@ -791,7 +791,7 @@ mod tests {
                     let total: u32 = results.iter().map(|r| r.score).sum();
                     assert_eq!(
                         total, 0,
-                        "inert keyword {word:?} unexpectedly scored {total} on {prose:?} — it needs an attack template"
+                        "inert keyword {word:?} unexpectedly scored {total} on {prose:?}, it needs an attack template"
                     );
                     assert!(
                         !fast_path_sqli(&prose),
@@ -839,7 +839,7 @@ mod tests {
     fn test_xss_gate_stays_closed_for_handler_lookalikes() {
         // Prose assignments whose `on` is NOT followed by letters+'=' must
         // not open the lane. (Any `on<letters>[ws]=` shape DOES open it by
-        // design — including mid-word ones like `xonclick=`, because the
+        // design, including mid-word ones like `xonclick=`, because the
         // analyzer's substring search fires on those too; the gate is an
         // inclusion signal and the analyzer decides.)
         assert!(!fast_path_xss("person=smith season=4 reason=given"));
@@ -849,7 +849,7 @@ mod tests {
 
     // ── Audit SM5 F1 repair: normalization/obfuscation desync vectors ──
     // Each vector below FIRES the analyzer on its normalized view while the
-    // pre-repair gate stayed closed — the assertions pin the gate-open
+    // pre-repair gate stayed closed, the assertions pin the gate-open
     // direction (deleting a signal line from fast_path_xss fails these).
 
     #[test]
@@ -892,7 +892,7 @@ mod tests {
     #[test]
     fn test_f1_repair_unicode_whitespace_sqli_tautology_opens_gate() {
         // The tokenizer treats Unicode whitespace as skippable, so
-        // `1\u{A0}=\u{A0}1` fires 942100 — the digit-adjacency signal must
+        // `1\u{A0}=\u{A0}1` fires 942100, the digit-adjacency signal must
         // skip Unicode whitespace too.
         assert!(fast_path_sqli("1\u{A0}=\u{A0}1"));
         assert!(fast_path_sqli("2\u{2028}>\u{2028}1"));
@@ -907,7 +907,7 @@ mod tests {
         let engine = crate::engine::WafEngine::new(crate::config::WafConfig::default());
 
         // (1) JSON \u0000 escape materializes a NUL inside the extracted
-        // string value — only the analyzer's own NUL strip removes it.
+        // string value, only the analyzer's own NUL strip removes it.
         let body = "{\"comment\":\"x onload\\u0000=alert(1)\"}";
         let req = crate::engine::HttpRequest {
             client_ip: "10.0.0.1".parse().expect("valid IP"),

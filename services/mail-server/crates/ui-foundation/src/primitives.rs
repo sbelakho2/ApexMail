@@ -6,7 +6,7 @@
 //! "usable" when its behaviour works in a plain HTML document. Review §4.9 /
 //! §5.1 primitives.rs asks for that distinction to be explicit:
 //!
-//! **Usable (native, SSR-complete) — compose these:**
+//! **Usable (native, SSR-complete), compose these:**
 //! * `Button`, `Label`, `Input`, `Textarea` (native `maxlength` when
 //!   `max_length` is set), `NativeSelect` (escaped at this boundary),
 //!   `NativeCheckbox`, `Badge`/`StatusIndicator`, `Card`, `EmptyState`,
@@ -15,7 +15,7 @@
 //!   `Avatar`, `Skeleton`, `ChartLegendItem`.
 //!
 //! **Inert legacy exports (library risks, NOT proof that a page is broken)
-//! — prefer the native counterpart or a confirmation page:**
+//!, prefer the native counterpart or a confirmation page:**
 //! * `Select` → `NativeSelect` (the combobox needs the hydration script).
 //! * `Checkbox` (button + `role="checkbox"`), `Switch`, `Slider`,
 //!   `RadioGroup` → `NativeCheckbox` / native `input[type=radio|range]`
@@ -25,7 +25,7 @@
 //!   with `data-*` hooks and no code to open, trap, or dismiss it.
 //! * `Tabs` → real links/query parameters where switching is
 //!   server-rendered. `Accordion` → native `<details>/<summary>`.
-//!   `Toast` → the flash banner (PRG feedback) — the disabled toast surface
+//!   `Toast` → the flash banner (PRG feedback), the disabled toast surface
 //!   stays disabled until its behaviour is real.
 //! * `PaginationControls::render_html` (inert buttons) →
 //!   `render_html_with_links`.
@@ -52,7 +52,7 @@ fn html_escape(text: &str) -> String {
 /// Deterministic per-title dialog id: renders must be byte-identical
 /// between calls (migration determinism contract), so a global counter is
 /// not usable. Two dialogs on one page share an id only if their titles are
-/// identical — titles are page-distinct ("Delete campaign?" vs "Delete
+/// identical, titles are page-distinct ("Delete campaign?" vs "Delete
 /// list?"), and a same-title pair is still addressed via distinct wrapper
 /// ids from the page markup.
 #[allow(dead_code)]
@@ -330,7 +330,7 @@ fn render_chart_shell(
 }
 
 fn chart_empty_state_markup(reason: &str) -> String {
-    // No outer border/background here — the surrounding chart frame already provides the
+    // No outer border/background here, the surrounding chart frame already provides the
     // single visible boundary. Adding another border created a triple-stacked look when
     // the chart frame itself was nested inside a card.
     format!("<div class=\"apex-empty-state flex min-h-[220px] flex-col items-center justify-center gap-3 p-6\"><svg aria-hidden=\"true\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.5\" class=\"h-7 w-7\"><path stroke-linecap=\"round\" stroke-linejoin=\"round\" d=\"M3 3v18h18M7 15l3-3 3 3 5-5\"/></svg><p class=\"max-w-xs\">{}</p></div>", chart_empty_description(reason))
@@ -511,7 +511,7 @@ impl<'a> Button<'a> {
             ""
         };
         let button_type = if self.submit { "submit" } else { "button" };
-        // ARK: a busy action changes its verb and its border — there is no
+        // ARK: a busy action changes its verb and its border, there is no
         // spinner. Icons are chrome (the API fields stay, unrendered).
         let _ = (self.left_icon, self.right_icon);
         let busy = if self.loading {
@@ -612,7 +612,7 @@ impl<'a> Input<'a> {
             id = id_attr,
             // Server-loaded, user-controlled values: escaping is mandatory
             // here (a `"` in a campaign name would otherwise break out of the
-            // attribute — the one render path in this crate that did not
+            // attribute, the one render path in this crate that did not
             // escape; dogfood finding 2026-10-06).
             value = html_escape(self.value),
             placeholder = html_escape(self.placeholder),
@@ -712,7 +712,7 @@ impl<'a> Textarea<'a> {
         if self.show_count {
             let count = self.value.chars().count();
             // The SSR render ships no script, so this can never be a LIVE
-            // counter. It states the LIMIT and the value as rendered — a
+            // counter. It states the LIMIT and the value as rendered, a
             // truthful helper instead of a counter that looks live and is
             // not (review §5.1 primitives.rs: "remove misleading static
             // counters" / "replace the SSR-only 'live' count with a truthful
@@ -816,7 +816,7 @@ impl NativeSelect<'_> {
 }
 
 /// A NATIVE `<input type="checkbox">` styled with the shared control
-/// classes — the no-JS sibling of the combobox-family [`Checkbox`] button.
+/// classes, the no-JS sibling of the combobox-family [`Checkbox`] button.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NativeCheckbox<'a> {
     pub id: &'a str,
@@ -928,7 +928,7 @@ pub struct RadioGroup<'a> {
 
 impl<'a> RadioGroup<'a> {
     pub fn render_html(&self) -> String {
-        // ARK: native radios in labelled rows — no roving tabindex, no
+        // ARK: native radios in labelled rows, no roving tabindex, no
         // role=radio buttons, no indicator glyph.
         let _ = (self.variant, self.size);
         let group_class = if self.orientation == "horizontal" {
@@ -1036,7 +1036,7 @@ pub struct Label<'a> {
     pub optional: bool,
     pub variant: &'a str,
     pub size: &'a str,
-    /// The labelled control's DOM id — emitted as the `for` attribute so
+    /// The labelled control's DOM id, emitted as the `for` attribute so
     /// `<label>`/`<input>` are programmatically associated (a11y). `None`
     /// keeps the label descriptive-only (the legacy render).
     pub html_for: Option<&'a str>,
@@ -1157,7 +1157,7 @@ pub struct EmptyState<'a> {
     pub description: Option<&'a str>,
     pub action_label: Option<&'a str>,
     /// When set, the action renders as a real link to this route (e.g.
-    /// "/campaigns/new") instead of a dead button — empty-state CTAs must
+    /// "/campaigns/new") instead of a dead button, empty-state CTAs must
     /// navigate somewhere that exists.
     pub action_href: Option<&'a str>,
 }
@@ -1264,7 +1264,7 @@ pub struct Skeleton<'a> {
 
 impl<'a> Skeleton<'a> {
     pub fn render_html(&self) -> String {
-        // ARK: loading is blank ruled rows — the shape of the ledger to come.
+        // ARK: loading is blank ruled rows, the shape of the ledger to come.
         format!(
             "<div class=\"{} {}\" aria-hidden=\"true\"><div class=\"apex-loading__row\"><div class=\"apex-loading__bar\"></div><div class=\"apex-loading__bar\" style=\"width:40%\"></div></div></div>",
             skeleton_variant_class(self.variant),
@@ -1310,7 +1310,7 @@ pub struct Dialog<'a> {
 impl<'a> Dialog<'a> {
     pub fn render_html(&self) -> String {
         // ARK: confirmation is a PAGE SECTION, never a modal. No overlay, no
-        // role=dialog, no focus trap — the content is a ruled notice.
+        // role=dialog, no focus trap, the content is a ruled notice.
         let _ = (self.size, self.variant, self.hide_close_button);
         let description = self
             .description
@@ -1443,7 +1443,7 @@ pub struct Tooltip<'a> {
 
 impl<'a> Tooltip<'a> {
     pub fn render_html(&self) -> String {
-        // ARK: no hover tooltips — the text is an always-visible help line.
+        // ARK: no hover tooltips, the text is an always-visible help line.
         let _ = (
             self.side,
             tooltip_variant_class(self.variant),
@@ -1508,7 +1508,7 @@ pub struct Accordion<'a> {
 
 impl<'a> Accordion<'a> {
     pub fn render_html(&self) -> String {
-        // ARK: native <details> disclosures inside ruled panels — zero JS,
+        // ARK: native <details> disclosures inside ruled panels, zero JS,
         // no roving focus, no rotating chevron.
         let _ = (self.accordion_type, self.collapsible, self.orientation);
         let items = self
@@ -1531,7 +1531,7 @@ impl<'a> Accordion<'a> {
     }
 
     /// Native <details> carries the disclosure contract: no animation, no
-    /// height math — the browser owns open/close.
+    /// height math, the browser owns open/close.
     pub fn animation_contract() -> AccordionAnimationContract {
         AccordionAnimationContract {
             expand_duration_ms: 0,
@@ -1853,7 +1853,7 @@ impl<'a> Table<'a> {
 
 impl<'a> Toast<'a> {
     pub fn render_html(&self) -> String {
-        // ARK: outcomes are written into the page as a status line — no
+        // ARK: outcomes are written into the page as a status line, no
         // overlay, no dismiss control, no icons.
         let description = self
             .description
@@ -1877,7 +1877,7 @@ impl<'a> Toast<'a> {
 impl PaginationControls {
     /// DEPRECATED (review §5.2 "Pagination: retain the working link-based
     /// renderer; deprecate inert button output"): this renders four
-    /// `<button>` elements with NO handler behind them — the console ships no
+    /// `<button>` elements with NO handler behind them, the console ships no
     /// JavaScript, so nothing can ever respond. Use
     /// [`PaginationControls::render_html_with_links`], which emits real
     /// `<a href>` links that preserve the current filter query and keeps only
@@ -2705,7 +2705,7 @@ mod tests {
         assert!(html.contains("absolute bottom-2 right-2"));
     }
 
-    /// Form fields must carry a `name` attribute — without one, `FormData`
+    /// Form fields must carry a `name` attribute, without one, `FormData`
     /// serialization skips the element entirely and `data-api-form` handlers
     /// receive an empty `{}` payload.
     #[test]
@@ -2910,7 +2910,7 @@ mod tests {
             ],
         }
         .render_html();
-        // ARK: labelled native radios — the label wraps the input, so no
+        // ARK: labelled native radios, the label wraps the input, so no
         // id/for wiring is needed (and none is emitted).
         assert!(html.contains("<label class=\"apex-check\">"), "{html}");
         assert!(
@@ -3130,8 +3130,8 @@ mod tests {
 
     /// Regression (audit SM11 F1): unknown status strings fall through
     /// `status_indicator_config` as the RAW input (DB-sourced event types /
-    /// suppression reasons are not a fixed enum), so the badge label — and
-    /// every other primitive text slot — must be escaped at the render
+    /// suppression reasons are not a fixed enum), so the badge label, and
+    /// every other primitive text slot, must be escaped at the render
     /// boundary. Markup in an unrecognized status value must render as text,
     /// never as elements or attributes.
     #[test]
@@ -3325,7 +3325,7 @@ mod tests {
             "{html}"
         );
         // ARK: no menu role, no separator element, no menuitem roving
-        // focus — the items render as inline underlined verbs in the row.
+        // focus, the items render as inline underlined verbs in the row.
         assert!(!html.contains("role=\"menu\""));
         assert!(!html.contains("role=\"menuitem\""));
         assert!(!html.contains("show_separator"));
@@ -3365,7 +3365,7 @@ mod tests {
             delay_duration: 200,
         }
         .render_html();
-        // ARK: no hover tooltips — the text is an always-visible help line.
+        // ARK: no hover tooltips, the text is an always-visible help line.
         assert!(html.contains("apex-help"), "{html}");
         assert!(html.contains("Helpful hint"), "{html}");
         assert!(!html.contains("role=\"tooltip\""));
@@ -3489,7 +3489,7 @@ mod tests {
     /// Review §4.8 / R2's filed item: the horizontally scrollable table
     /// region is keyboard-reachable (`tabindex="0"`), announced as a region
     /// (`role="region"`) and NAMED (the caption, or a generic label when the
-    /// table has no caption) — the stylesheet's `:focus-visible` ring was
+    /// table has no caption), the stylesheet's `:focus-visible` ring was
     /// already in place.
     #[test]
     fn table_scroll_region_is_keyboard_reachable_and_named() {
@@ -3614,7 +3614,7 @@ mod tests {
     }
 
     // ────────────────────────────────────────────────────────────
-    // Phase 4.10 RadioGroup — render + keyboard + variants/sizes
+    // Phase 4.10 RadioGroup, render + keyboard + variants/sizes
     // ────────────────────────────────────────────────────────────
 
     #[test]
@@ -3766,7 +3766,7 @@ mod tests {
     fn accordion_animation_contract_values() {
         let ac = Accordion::animation_contract();
 
-        // ARK: native <details> — no animation to configure.
+        // ARK: native <details>, no animation to configure.
         assert_eq!(ac.expand_duration_ms, 0);
         assert_eq!(ac.collapse_duration_ms, 0);
         assert_eq!(ac.easing, "none");
@@ -4011,7 +4011,7 @@ mod tests {
     #[test]
     fn skeleton_animation_contract_specifies_shimmer() {
         let c = SkeletonAnimationContract::spec();
-        // ARK: loading is blank ruled rows — no shimmer, no pulse.
+        // ARK: loading is blank ruled rows, no shimmer, no pulse.
         assert!(!c.shimmer_enabled);
         assert_eq!(c.shimmer_css, "apex-loading");
         assert_eq!(c.pulse_duration_ms, 0);
@@ -4144,7 +4144,7 @@ mod tests {
                 indeterminate,
                 "{state} aria-checked mixed"
             );
-            // ARK: no indicator glyph — the native checked attribute is the
+            // ARK: no indicator glyph, the native checked attribute is the
             // state, and indeterminate is aria-checked="mixed".
             assert_eq!(
                 html.contains(" checked>") || html.contains(" checked "),
@@ -4290,7 +4290,7 @@ mod tests {
             dialog_type: "confirm",
         }
         .render_html();
-        // ARK: no focus routing — there is no dialog. The notice carries the
+        // ARK: no focus routing, there is no dialog. The notice carries the
         // destructive verb and the message.
         assert!(confirm.contains("apex-notice--fail"), "{confirm}");
         assert!(confirm.contains("Remove"), "{confirm}");
@@ -4367,7 +4367,7 @@ mod escaping_tests {
 
     /// Review §3 P1-8: tenant-controlled list/segment names are interpolated
     /// into native `<option>` markup. The escape must happen AT the primitive
-    /// boundary — value, label, plus the select's own id/name — so no call
+    /// boundary, value, label, plus the select's own id/name, so no call
     /// site has to remember it.
     #[test]
     fn native_select_escapes_hostile_value_label_id_and_name() {

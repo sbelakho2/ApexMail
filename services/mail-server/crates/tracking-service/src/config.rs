@@ -17,9 +17,9 @@ pub struct Config {
     pub tracking: TrackingConfig,
     pub rate_limit: RateLimitConfig,
     pub metrics: MetricsConfig,
-    pub secret_key: zeroize::Zeroizing<String>, // nosemgrep: generic.secrets.security.detected-generic-secret.detected-generic-secret — a Rust field NAME, not a literal secret
+    pub secret_key: zeroize::Zeroizing<String>, // nosemgrep: generic.secrets.security.detected-generic-secret.detected-generic-secret, a Rust field NAME, not a literal secret
     /// RSA public key (PEM) for verifying RS256 JWTs (stream tokens).
-    /// SECURITY (SEC-119): All JWTs use RS256 — no HS256.
+    /// SECURITY (SEC-119): All JWTs use RS256, no HS256.
     pub jwt_public_key_pem: String,
 }
 
@@ -74,7 +74,7 @@ pub struct TrackingConfig {
     pub max_redirect_url_len: usize,
     /// Maximum age of unsubscribe/preference tokens, in DAYS. None = the
     /// codec's built-in 90-day lifetime (stale signed URLs must have an
-    /// explicit lifetime — audit #14). Some(0) = no expiry (intended
+    /// explicit lifetime, audit #14). Some(0) = no expiry (intended
     /// indefinite semantics, opt-in).
     #[serde(default)]
     pub token_max_age_days: Option<u64>,
@@ -161,7 +161,7 @@ fn parse_trusted_proxies(s: &str) -> Vec<IpNetwork> {
                 return None;
             }
             trimmed.parse::<IpNetwork>().ok().or_else(|| {
-                // Try bare IP without prefix — default to /32 or /128
+                // Try bare IP without prefix, default to /32 or /128
                 trimmed
                     .parse::<std::net::IpAddr>()
                     .ok()
@@ -188,7 +188,7 @@ fn build_redis_url(host: &str, port: u16, db: u32, password: Option<&str>) -> St
 
 /// The effective Postgres URL: `DATABASE_URL` when set, otherwise composed
 /// from the discrete `DB_*` parts (the docker-compose variable shape).
-/// Extracted from `load` so the fallback is unit-testable — `load` runs
+/// Extracted from `load` so the fallback is unit-testable, `load` runs
 /// `dotenvy`, and a repo-checkout `.env` normally provides `DATABASE_URL`,
 /// which would make the branch unreachable from a whole-`load` test.
 fn compose_database_url() -> String {
@@ -472,7 +472,7 @@ mod tests {
 
     #[test]
     fn load_parses_overrides_and_rejects_unsafe_values() {
-        let secret = "01234567890123456789012345678901"; // nosemgrep: generic.secrets.security.detected-generic-secret.detected-generic-secret — deterministic test vector in this cfg(test) module
+        let secret = "01234567890123456789012345678901"; // nosemgrep: generic.secrets.security.detected-generic-secret.detected-generic-secret, deterministic test vector in this cfg(test) module
         let base: Vec<(&str, Option<&str>)> = vec![
             ("TRACKING_SECRET_KEY", Some(secret)),
             ("JWT_PUBLIC_KEY_PEM", Some("-----BEGIN PUBLIC KEY-----")),
@@ -571,7 +571,7 @@ mod tests {
     /// and absurd values degrade safely (None / clamped to 100 years).
     #[test]
     fn token_max_age_days_parses_overrides_and_degrades_safely() {
-        let secret = "01234567890123456789012345678901"; // nosemgrep: generic.secrets.security.detected-generic-secret.detected-generic-secret — deterministic test vector in this cfg(test) module
+        let secret = "01234567890123456789012345678901"; // nosemgrep: generic.secrets.security.detected-generic-secret.detected-generic-secret, deterministic test vector in this cfg(test) module
         let base: Vec<(&str, Option<&str>)> = vec![
             ("TRACKING_SECRET_KEY", Some(secret)),
             ("JWT_PUBLIC_KEY_PEM", Some("-----BEGIN PUBLIC KEY-----")),
@@ -730,7 +730,7 @@ mod tests {
     }
 
     /// The deployment-wide redirect allowlist parser: comma-separated,
-    /// trimmed, lowercased, empties dropped — the values the click route
+    /// trimmed, lowercased, empties dropped, the values the click route
     /// matches with `match_domain_pattern`.
     #[test]
     fn allowed_redirect_domains_parse_shape() {

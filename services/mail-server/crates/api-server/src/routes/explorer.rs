@@ -4,24 +4,24 @@
 //! forms that POST here. This module:
 //!
 //! 1. lazily provisions a dedicated SANDBOX TENANT (tenant + api key +
-//!    example.com verified domain) — a REAL tenant, so every request runs
+//!    example.com verified domain), a REAL tenant, so every request runs
 //!    the REAL v1 handlers with a REAL api key;
 //! 2. executes each lane by dispatching IN-PROCESS through the app router
-//!    (`build_app` + `tower::ServiceExt::oneshot`) — genuine validation,
+//!    (`build_app` + `tower::ServiceExt::oneshot`), genuine validation,
 //!    idempotency, queue inserts and worker pickup: a send really flows and
 //!    delivery is genuinely attempted (the Messages lane shows the full
 //!    queued → attempted → bounced lifecycle);
 //! 3. guards abuse with a per-IP rate limit (Redis, with a STRICTER
 //!    in-process fixed-window emergency limiter engaged while Redis is
-//!    unavailable — a cache blip degrades to a local ceiling, never to
+//!    unavailable, a cache blip degrades to a local ceiling, never to
 //!    unlimited), an 8 KiB body cap, and a recipient policy for the send
 //!    lane: every to/cc/bcc address must end in @example.com (RFC 2606
-//!    reserved — real delivery attempt, harmless by construction, no relay
+//!    reserved, real delivery attempt, harmless by construction, no relay
 //!    potential);
 //! 4. renders the full result page via ui_foundation (zero JS anywhere).
 //!
-//! The calculator computes with `billing_service::plans` — the canonical
-//! pricing source — so this surface can never drift from billing.
+//! The calculator computes with `billing_service::plans`, the canonical
+//! pricing source, so this surface can never drift from billing.
 
 use axum::{
     extract::{Form, State},
@@ -41,7 +41,7 @@ const MAX_BODY_BYTES: usize = 8 * 1024;
 const RATE_LIMIT_PER_MINUTE: i64 = 12;
 /// Per-IP requests per minute while Redis is UNAVAILABLE. STRICTER than the
 /// distributed limit: a degraded limiter must still bound abuse of this
-/// public endpoint (which dispatches through the real router — real DB and
+/// public endpoint (which dispatches through the real router, real DB and
 /// message processing), never go unlimited.
 const EMERGENCY_RATE_LIMIT_PER_MINUTE: i64 = 6;
 /// Fixed window length of the in-process emergency limiter.
@@ -57,7 +57,7 @@ const EMERGENCY_PRUNE_THRESHOLD: usize = 10_000;
 
 struct Sandbox {
     api_key: String,
-    /// HMAC of [`Sandbox::api_key`] as stored in `api_keys.key_hash` — the
+    /// HMAC of [`Sandbox::api_key`] as stored in `api_keys.key_hash`, the
     /// liveness probe that keeps the process cache honest.
     key_hash: String,
 }
@@ -73,7 +73,7 @@ const SANDBOX_PROVISION_LOCK: &str = "apexmail:explorer-sandbox-provision";
 
 /// Fix (P1 cold-start race): the previous `OnceLock` + check-revoke-create
 /// sequence let two concurrent first requests interleave, and the loser's
-/// `OnceLock::set` silently failed — leaving a REVOKED credential in the
+/// `OnceLock::set` silently failed, leaving a REVOKED credential in the
 /// static sandbox (broken until restart). A cached provision guarantees
 /// exactly ONE provision per process: concurrent first requests await the
 /// winner's result instead of racing their own.
@@ -82,13 +82,13 @@ static SANDBOX: tokio::sync::RwLock<Option<std::sync::Arc<Sandbox>>> =
 
 /// Serializes provision attempts within THIS process so a cold-start burst
 /// cannot run several DELETE+INSERT rotations back to back (the raw key is
-/// un-recoverable from the row — only its hash is stored — so every extra
+/// un-recoverable from the row, only its hash is stored, so every extra
 /// rotation invalidates a key another request just received).
 static SANDBOX_PROVISION_MUTEX: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// Where the CURRENT sandbox raw key is published for SIBLING processes.
 /// `api_keys` keeps only the key's HMAC (hash-only storage), so a cold
-/// process cannot recover the live raw key from the row alone — without a
+/// process cannot recover the live raw key from the row alone, without a
 /// shared publication, every cold start would rotate the single row out
 /// from under every other replica (the audit-F4 churn the DELETE+INSERT cap
 /// fixed within one process). The sandbox key never leaves the server and
@@ -100,7 +100,7 @@ const SANDBOX_KEY_REDIS_TTL_SECS: u64 = 30 * 24 * 60 * 60;
 
 /// Is the cached sandbox key still the ONE live `api_keys` row? A sibling
 /// replica's cold-start provision (or an operator's touch) re-mints the
-/// single row — SM3 (audit F4) rotation — which silently invalidates every
+/// single row, SM3 (audit F4) rotation, which silently invalidates every
 /// OTHER process's cached raw key. One indexed probe per anonymous exec
 /// keeps the cache self-healing instead of broken-until-restart. A probe
 /// that CANNOT be answered (storage outage) is treated as not-live: the
@@ -120,7 +120,7 @@ async fn sandbox_key_is_live(state: &AppState, sandbox: &Sandbox) -> bool {
         Err(error) => {
             tracing::warn!(
                 error = %error,
-                "sandbox key liveness probe failed — falling through to provision"
+                "sandbox key liveness probe failed, falling through to provision"
             );
             false
         }
@@ -129,7 +129,7 @@ async fn sandbox_key_is_live(state: &AppState, sandbox: &Sandbox) -> bool {
 
 /// ADOPT the sandbox key a sibling process published in Redis, if it is
 /// still the live row. `None` means "no shared publication, or it no longer
-/// matches the row — provision".
+/// matches the row, provision".
 async fn adopted_shared_sandbox(state: &AppState) -> Option<Sandbox> {
     let raw: String = match state.redis.get().await {
         Ok(mut conn) => match deadpool_redis::redis::cmd("GET")
@@ -140,12 +140,12 @@ async fn adopted_shared_sandbox(state: &AppState) -> Option<Sandbox> {
             Ok(Some(raw)) if !raw.is_empty() => raw,
             Ok(_) => return None,
             Err(error) => {
-                tracing::warn!(%error, "sandbox shared-key read failed — falling through to provision");
+                tracing::warn!(%error, "sandbox shared-key read failed, falling through to provision");
                 return None;
             }
         },
         Err(error) => {
-            tracing::warn!(%error, "sandbox shared-key redis unavailable — falling through to provision");
+            tracing::warn!(%error, "sandbox shared-key redis unavailable, falling through to provision");
             return None;
         }
     };
@@ -222,7 +222,7 @@ async fn sandbox(state: &AppState) -> Result<std::sync::Arc<Sandbox>, String> {
 ///
 /// Everything happens in ONE transaction: a transaction-scoped advisory lock
 /// serializes racing provisions (cross-process too), and revoke-old +
-/// insert-new for the api key is atomic — no interleaving can persist a
+/// insert-new for the api key is atomic, no interleaving can persist a
 /// sandbox whose only keys are revoked.
 async fn provision_sandbox(state: &AppState) -> Result<Sandbox, String> {
     let now = chrono::Utc::now();
@@ -262,7 +262,7 @@ async fn provision_sandbox(state: &AppState) -> Result<Sandbox, String> {
     .map_err(|e| format!("sandbox domain check failed: {e}"))?;
     if existing_domain.is_none() {
         // Real DKIM keypair, encrypted exactly like the real create-domain
-        // handler (routes/domains.rs) — the REAL send path requires
+        // handler (routes/domains.rs), the REAL send path requires
         // dkim_private_key LIKE 'dkim:v1:%' and dkim_enabled to accept a send.
         let domain_id = uuid::Uuid::new_v4();
         let key_pair = apexmail_lib::dkim::generate_dkim_keypair()
@@ -293,7 +293,7 @@ async fn provision_sandbox(state: &AppState) -> Result<Sandbox, String> {
 
     // API key: generate fresh only when the tenant has none. SM3 (audit F4):
     // the sandbox key NEVER leaves the server (the explorer dispatches
-    // in-process), so rotation reclaims the superseded rows outright — the
+    // in-process), so rotation reclaims the superseded rows outright, the
     // previous revoke-only rotation left every superseded row in place, and
     // each process restart grew the api_keys table without bound (and
     // bypassed mint_api_key's per-tenant key ceiling with its raw insert).
@@ -326,7 +326,7 @@ async fn provision_sandbox(state: &AppState) -> Result<Sandbox, String> {
         .await
         .map_err(|e| format!("sandbox provision commit failed: {e}"))?;
 
-    // Publish the new raw key for sibling processes IMMEDIATELY — the row
+    // Publish the new raw key for sibling processes IMMEDIATELY, the row
     // and the shared publication must move together, or every other
     // replica's liveness probe fails and churns yet another rotation.
     let provisioned = Sandbox {
@@ -355,7 +355,7 @@ static EMERGENCY_LIMITER: OnceLock<
 async fn rate_limit(state: &AppState, ip: &str) -> bool {
     // Fix (P1): Redis unavailability no longer means "allowing". The
     // distributed verdict is used when Redis answers; ONLY on failure does
-    // the stricter in-process fixed-window limiter engage — the endpoint
+    // the stricter in-process fixed-window limiter engage, the endpoint
     // dispatches through the real router (real DB/message processing), so a
     // cache blip must degrade to a local ceiling, not to unlimited.
     match redis_rate_limit(state, &format!("explorer_rl:{ip}")).await {
@@ -370,7 +370,7 @@ async fn redis_rate_limit(state: &AppState, key: &str) -> Result<bool, ()> {
     let mut conn = state.redis.get().await.map_err(|e| {
         tracing::warn!(
             error = %e,
-            "explorer rate-limit redis unavailable — engaging the in-process emergency limiter"
+            "explorer rate-limit redis unavailable, engaging the in-process emergency limiter"
         );
     })?;
     let (count,): (i64,) = match redis::pipe()
@@ -385,7 +385,7 @@ async fn redis_rate_limit(state: &AppState, key: &str) -> Result<bool, ()> {
         Err(e) => {
             tracing::warn!(
                 error = %e,
-                "explorer rate-limit incr failed — engaging the in-process emergency limiter"
+                "explorer rate-limit incr failed, engaging the in-process emergency limiter"
             );
             return Err(());
         }
@@ -420,7 +420,7 @@ fn emergency_allow(ip: &str, now: std::time::Instant) -> bool {
 /// Rate-limit bucket key for a sandbox request. Delegates to the shared
 /// trusted-proxy walk (`extract_public_client_ip`): X-Forwarded-For is
 /// only honoured when the DIRECT peer is a configured trusted proxy, and
-/// then only the rightmost untrusted entry — the raw first-XFF read let
+/// then only the rightmost untrusted entry, the raw first-XFF read let
 /// any caller pick an arbitrary bucket identity.
 fn client_ip(
     req_headers: &axum::http::HeaderMap,
@@ -451,9 +451,9 @@ fn api_router(state: &AppState) -> &'static Router {
 /// key was rotated out from under this process between its liveness probe
 /// and the dispatch (a sibling's cold start re-mints the single row). The
 /// process cache is dropped, a fresh key is adopted, and the SAME request
-/// is retried exactly once — the explorer's own answer to the audit-F4
+/// is retried exactly once, the explorer's own answer to the audit-F4
 /// cross-process rotation window. A second 401 (or a 401 with an unchanged
-/// key — a genuine rejection, e.g. the send lane's policy) is surfaced
+/// key, a genuine rejection, e.g. the send lane's policy) is surfaced
 /// verbatim; nothing retries blind.
 async fn dispatch(
     state: &AppState,
@@ -474,7 +474,7 @@ async fn dispatch(
     dispatch_once(state, method, uri, &fresh.api_key, json_body).await
 }
 
-/// One dispatch attempt — the retryable core of [`dispatch`].
+/// One dispatch attempt, the retryable core of [`dispatch`].
 async fn dispatch_once(
     state: &AppState,
     method: Method,
@@ -496,7 +496,7 @@ async fn dispatch_once(
     let request = builder.body(body).expect("valid request");
     let response = match api_router(state).clone().oneshot(request).await {
         Ok(r) => r,
-        // coverage: justified — axum `Router`'s `Service::Error` is
+        // coverage: justified, axum `Router`'s `Service::Error` is
         // `Infallible`, so `oneshot` can never produce `Err`; the arm pins
         // the honest public response shape should that ever change.
         Err(e) => {
@@ -531,7 +531,7 @@ fn all_recipients_example_com(body: &serde_json::Value) -> Result<(), String> {
             Ok(())
         } else {
             Err(format!(
-                "recipient {addr:?} is outside the sandbox — explorer recipients must end in @example.com (the RFC 2606 reserved domain)"
+                "recipient {addr:?} is outside the sandbox, explorer recipients must end in @example.com (the RFC 2606 reserved domain)"
             ))
         }
     };
@@ -666,7 +666,7 @@ pub async fn exec(
     Form(form): Form<ExplorerForm>,
 ) -> Response {
     // Untrusted direct peer: the socket address IS the client. (Without
-    // ConnectInfo — e.g. an exotic service wrapper — bucket on "unknown"
+    // ConnectInfo, e.g. an exotic service wrapper, bucket on "unknown"
     // rather than trusting headers.)
     let bucket_ip = match connect_info {
         Some(axum::extract::ConnectInfo(addr)) => {
@@ -677,7 +677,7 @@ pub async fn exec(
     if !rate_limit(&state, &bucket_ip).await {
         return error_page(
             StatusCode::TOO_MANY_REQUESTS,
-            "Too many sandbox requests — try again in a minute.",
+            "Too many sandbox requests, try again in a minute.",
         );
     }
     if form.body.len() > MAX_BODY_BYTES {
@@ -690,7 +690,7 @@ pub async fn exec(
         Ok(s) => s,
         Err(e) => {
             // Public endpoint: the provisioning error carries database
-            // detail (table names, driver errors) — log it at ERROR and
+            // detail (table names, driver errors), log it at ERROR and
             // show a generic page instead of propagating it.
             tracing::error!(error = %e, "explorer sandbox provisioning failed");
             return error_page(
@@ -730,7 +730,7 @@ fn is_example_com_domain(body: &serde_json::Value) -> bool {
 
 /// Both rate-limit windows on the public explorer surface (the Redis fixed
 /// window and the in-process emergency window) are 60 s, so a `429` can
-/// honestly advertise `Retry-After: 60` — the same header contract every
+/// honestly advertise `Retry-After: 60`, the same header contract every
 /// other `429` on the API honours (error.rs `retry_after_secs`,
 /// middleware/rate_limiter.rs). The hand-rolled HTML error pages here bypass
 /// `ApiError`, so the header is attached at the page builders.
@@ -873,7 +873,7 @@ fn compute_calculator(f: &CalculatorForm) -> Vec<(String, String, bool)> {
         let overage =
             billing_service::plans::calculate_plan_overage_cost(plan.name, f.volume, limit);
         rows.push((
-            format!("Plan — {}", title(plan.name)),
+            format!("Plan, {}", title(plan.name)),
             format!("€{:.2}", base as f64 / 100.0),
             false,
         ));
@@ -891,7 +891,7 @@ fn compute_calculator(f: &CalculatorForm) -> Vec<(String, String, bool)> {
         }
         let total = base + overage;
         // Dedicated IP add-on (owner price table 2026-10-15): first managed
-        // IP €49/mo, each additional €69/mo — on Pro and above. The literals
+        // IP €49/mo, each additional €69/mo, on Pro and above. The literals
         // are the ones the pricing-drift gate parses as the add-on price
         // authority (`tools/validate_pricing_drift.py`); they must equal
         // `platform_catalog::DEDICATED_IP_FIRST_CENTS` /
@@ -939,14 +939,14 @@ fn compute_calculator(f: &CalculatorForm) -> Vec<(String, String, bool)> {
                 false,
             ));
         }
-        // coverage: justified — `default_plans()` is a static table that
+        // coverage: justified, `default_plans()` is a static table that
         // always contains "scale" (and "free"), so `chosen` can never be
         // `None`; this arm is the defensive fallback should the plan table
         // ever drift into an empty/enterprise-only state.
     } else {
         rows.push((
             "Plan".to_string(),
-            "Contact us — Enterprise".to_string(),
+            "Contact us, Enterprise".to_string(),
             true,
         ));
     }
@@ -1135,7 +1135,7 @@ pub async fn grade_domain(
             StatusCode::TOO_MANY_REQUESTS,
             "",
             "RATE_LIMITED",
-            "Too many checks — try again in a minute.",
+            "Too many checks, try again in a minute.",
         );
     }
     let domain = clean_domain_input(&form.domain);
@@ -1165,7 +1165,7 @@ pub async fn grade_domain(
     let client_ip_addr: std::net::IpAddr = bucket_ip
         .parse()
         .unwrap_or_else(|_| "0.0.0.0".parse().expect("static ip literal"));
-    // Delegate to the canonical transport-agnostic handler — enabled flag,
+    // Delegate to the canonical transport-agnostic handler, enabled flag,
     // per-IP engine rate limit, error mapping and scoring all stay in ONE
     // place, identical to the /v1/grader/check JSON API.
     let (status, axum::Json(value)) = email_grader::routes::check_domain(
@@ -1205,7 +1205,7 @@ fn grader_error_page(status: StatusCode, domain: &str, code: &str, message: &str
         .into_response()
 }
 
-// coverage: justified — intentionally dead: exists only so the `HeaderName`
+// coverage: justified, intentionally dead: exists only so the `HeaderName`
 // import stays used (keeps clippy quiet about the unused-headers path); it is
 // never called at runtime or from tests.
 #[allow(unused)]
@@ -1433,7 +1433,7 @@ mod tests {
             "yourcompany.com"
         );
         assert_eq!(clean_domain_input(".yourcompany.com."), "yourcompany.com");
-        // Empty stays empty — the handler rejects it with INVALID_INPUT.
+        // Empty stays empty, the handler rejects it with INVALID_INPUT.
         assert_eq!(clean_domain_input("   "), "");
     }
 
@@ -1485,7 +1485,7 @@ mod tests {
 // the process-global `DKIM_ENV_MUTEX` (like admin/domains.rs) and pin the
 // test key. They also share ONE runtime + AppState: the explorer dispatches
 // through a process-wide cached router (`API_ROUTER`), and a pool created on
-// a runtime that has since shut down cannot be driven from a new one — a
+// a runtime that has since shut down cannot be driven from a new one, a
 // per-test runtime therefore starved the cached router's pool (5 s acquire
 // timeout → 500). One long-lived runtime removes that failure mode.
 
@@ -1512,7 +1512,7 @@ mod adversarial_tests {
                 .enable_all()
                 .build()
                 .expect("shared test runtime");
-            // coverage: justified — the `?` fires only when TEST_DATABASE_URL
+            // coverage: justified, the `?` fires only when TEST_DATABASE_URL
             // is unset (soft-skip contract); coverage runs are always
             // database-provisioned, so the skip arm stays unmeasured here.
             let pool = runtime.block_on(crate::test_db::optional_pg_pool(
@@ -1540,7 +1540,7 @@ mod adversarial_tests {
                 let state = shared.state.clone();
                 shared.runtime.block_on(body(state));
             }
-            // coverage: justified — same soft-skip contract as `shared()`:
+            // coverage: justified, same soft-skip contract as `shared()`:
             // only reachable when TEST_DATABASE_URL is unset.
             None => eprintln!("skipping explorer test: set TEST_DATABASE_URL"),
         }
@@ -1557,7 +1557,7 @@ mod adversarial_tests {
     /// leak between test calls (each gets its own 12/min window). The second
     /// octet is PROCESS-unique (audit #12c): every nextest test runs in its
     /// own process against the SHARED test Redis, and the counter below
-    /// restarts at 1 in each of them — without the pid seed the first exec
+    /// restarts at 1 in each of them, without the pid seed the first exec
     /// call of every parallel explorer test landed in the SAME
     /// `explorer_rl:198.18.0.1` bucket and the 13th concurrent process was
     /// rate-limited with a 429.
@@ -1576,12 +1576,12 @@ mod adversarial_tests {
     /// audit 2026-10-02 #12c). Every api-server test process shares ONE
     /// database (`<TEST_DATABASE_URL db>_api`, reused, never dropped between
     /// processes) and one Redis publication, and the sandbox tenant id is a
-    /// fixed constant — so the single sandbox key row is GLOBAL state that
+    /// fixed constant, so the single sandbox key row is GLOBAL state that
     /// every concurrently running explorer test legitimately re-mints (that
     /// is exactly what a replica sibling is). A multi-step assertion sequence
     /// therefore races a sibling's `provision_sandbox` unless it holds the
     /// production provision advisory key (`SANDBOX_PROVISION_LOCK`,
-    /// transaction-scoped — the same `pg_advisory_xact_lock` the provision
+    /// transaction-scoped, the same `pg_advisory_xact_lock` the provision
     /// path itself takes) for the window's duration: sibling re-mints BLOCK
     /// until the window closes, and the observations see one stable row.
     ///
@@ -1607,7 +1607,7 @@ mod adversarial_tests {
     /// rate-limit bucket (requests with no peer address):
     /// `exec_buckets_unknown_peers_and_enforces_the_ceiling_on_them`
     /// fills/exhausts that bucket while `grader_without_connect_info_still_
-    /// validates_input` INCRs and DELs it — as parallel nextest processes
+    /// validates_input` INCRs and DELs it, as parallel nextest processes
     /// they were resetting each other's bucket mid-assertion (audit #12c).
     /// The key is test-only; no production path takes it, so holding it
     /// cannot deadlock anything.
@@ -1775,11 +1775,11 @@ mod adversarial_tests {
 
     /// SM3 (audit F4): the sandbox key is provisioned ONCE per process and
     /// reused across requests, and the sandbox tenant is capped at exactly
-    /// ONE api_keys row — re-provisioning (what a restarted process does)
+    /// ONE api_keys row, re-provisioning (what a restarted process does)
     /// reclaims the superseded row instead of stockpiling revoked ones.
     ///
     /// Audit #12c: the reuse assertion observes the shared row inside a
-    /// [`provision_window`] — a sibling process's legitimate re-mint between
+    /// [`provision_window`], a sibling process's legitimate re-mint between
     /// the two calls would otherwise replace the cached key mid-assertion.
     #[test]
     fn sandbox_key_is_cached_per_process_and_capped_at_one_row() {
@@ -1801,7 +1801,7 @@ mod adversarial_tests {
                 };
 
                 // The per-process cache hands out the SAME credential on
-                // every call — no per-request inserts. The observation runs
+                // every call, no per-request inserts. The observation runs
                 // under the provision window: a sibling re-mint that slips
                 // in before the window is simply converged away by the retry.
                 for attempt in 0..5u32 {
@@ -1859,9 +1859,9 @@ mod adversarial_tests {
 
     /// SM3 (audit F4) self-heal: a SIBLING process's rotation re-mints the
     /// single key row out from under this process's cache (the raw key is
-    /// stored hash-only, so the sibling cannot reuse ours — it must mint a
+    /// stored hash-only, so the sibling cannot reuse ours, it must mint a
     /// new one). The cache must notice via the liveness probe and hand back
-    /// a key that matches the live row — not keep dispatching with the dead
+    /// a key that matches the live row, not keep dispatching with the dead
     /// one until restart.
     ///
     /// Audit #12c: the heal observation runs inside [`provision_window`] —
@@ -1912,7 +1912,7 @@ mod adversarial_tests {
                     // provision here would wait on the window's own key). Re-publish
                     // the sibling's key through the same production seam the
                     // sibling's provision used, then require the publication to be
-                    // readable — a Redis outage fails loudly instead of deadlocking.
+                    // readable, a Redis outage fails loudly instead of deadlocking.
                     publish_shared_sandbox(&state, &sibling).await;
                     if adopted_shared_sandbox(&state).await.is_none() {
                         window
@@ -1920,7 +1920,7 @@ mod adversarial_tests {
                             .await
                             .expect("window rollback after publication failure");
                         panic!(
-                            "the sandbox key publication is unreadable — the self-heal \
+                            "the sandbox key publication is unreadable, the self-heal \
                              scenario requires a working TEST_REDIS_URL"
                         );
                     }
@@ -1977,7 +1977,7 @@ mod adversarial_tests {
                     // Exclusive observation window over the shared row.
                     let window = provision_window(&state).await;
                     // `first` must still BE the live row (a sibling may have
-                    // re-minted between the provision and the window — then
+                    // re-minted between the provision and the window, then
                     // converge on the sibling's row and observe again).
                     if !sandbox_key_is_live(&state, &first).await {
                         window.rollback().await.expect("window rollback");
@@ -2033,7 +2033,7 @@ mod adversarial_tests {
                 let key = format!("adv_explorer_rl:{}", uuid::Uuid::new_v4());
                 for _ in 0..RATE_LIMIT_PER_MINUTE {
                     assert!(
-                        // coverage: justified — the closure fires only if
+                        // coverage: justified, the closure fires only if
                         // Redis fails during a test asserting Redis health;
                         // a healthy test Redis keeps it at zero.
                         redis_rate_limit(&state, &key)
@@ -2058,7 +2058,7 @@ mod adversarial_tests {
                     .await;
 
                 // Fix (P1 Redis-down = no abuse ceiling): without Redis the
-                // distributed limiter can no longer answer (Err) — and the
+                // distributed limiter can no longer answer (Err), and the
                 // caller engages the in-process emergency limiter instead of
                 // allowing. The emergency ceiling is STRICTER than the
                 // distributed one.
@@ -2070,7 +2070,7 @@ mod adversarial_tests {
                 .await;
                 assert!(
                     redis_rate_limit(&dead, "adv_explorer_dead").await.is_err(),
-                    "an unreachable Redis must surface as Err(()) — never as allow"
+                    "an unreachable Redis must surface as Err(()), never as allow"
                 );
                 let ip = format!("adv-dead-{}", uuid::Uuid::new_v4());
                 for _ in 0..EMERGENCY_RATE_LIMIT_PER_MINUTE {
@@ -2130,7 +2130,7 @@ mod adversarial_tests {
         let map = EMERGENCY_LIMITER.get().expect("limiter initialized").lock();
         assert!(
             map.len() <= 2,
-            // coverage: justified — the format argument is evaluated only
+            // coverage: justified, the format argument is evaluated only
             // when the assertion FAILS; a passing run never measures it.
             "stale buckets must be pruned once the map grows large, got {}",
             map.len()
@@ -2199,7 +2199,7 @@ mod adversarial_tests {
     /// cold-start race this cache replaced), and the process must CONVERGE
     /// on the live row. Sibling processes legitimately rotate the single
     /// row (each has its own cache), so "identical keys" is not the
-    /// invariant — "no caller is left holding a dead credential, and the
+    /// invariant, "no caller is left holding a dead credential, and the
     /// cache ends live" is.
     #[test]
     fn concurrent_first_requests_converge_on_a_live_sandbox_key() {
@@ -2380,7 +2380,7 @@ mod adversarial_tests {
     /// provisioner takes, so no racing process re-inserts it first), a
     /// provision generates a REAL DKIM keypair and re-inserts the verified
     /// domain. The immediately following provision finds the live key and
-    /// ROTATES it — still exactly one live key, and the survivor is the
+    /// ROTATES it, still exactly one live key, and the survivor is the
     /// newest provision's plaintext.
     #[test]
     fn provision_inserts_a_missing_domain_and_rotates_a_live_key() {
@@ -2428,7 +2428,7 @@ mod adversarial_tests {
                 // comparison would otherwise replace the "newest provision"
                 // out from under the assertion. A rival that started earlier
                 // and committed later may still own the row when the window
-                // is acquired — then converge and rotate again.
+                // is acquired, then converge and rotate again.
                 for attempt in 0..5u32 {
                     let second = provision_sandbox(&state).await.expect("second provision");
                     assert_ne!(
@@ -2484,7 +2484,7 @@ mod adversarial_tests {
 
     /// A Redis peer that accepts TCP but ERRORS every data command: the
     /// pool's connect AND its recycle PING both succeed (PING args are
-    /// echoed, as Redis does) while the INCR fails — the limiter must
+    /// echoed, as Redis does) while the INCR fails, the limiter must
     /// surface `Err(())` (never a fabricated allow) and the caller must
     /// engage the stricter in-process emergency limiter.
     /// Byte substring search for the RESP-lite stub below.
@@ -2494,7 +2494,7 @@ mod adversarial_tests {
             .position(|window| window == needle)
     }
 
-    /// RESP-lite: answer EVERY command in the chunk — clients pipeline
+    /// RESP-lite: answer EVERY command in the chunk, clients pipeline
     /// (deadpool's recycle PING and the INCR can share one TCP write),
     /// so replying to only the first command strands the second and the
     /// client hangs forever. PING echoes its argument (what a real
@@ -2549,7 +2549,7 @@ mod adversarial_tests {
                             break;
                         }
                         if sock.write_all(&reply_for(&buf[..n])).is_err() {
-                            // coverage: justified — fires only when the
+                            // coverage: justified, fires only when the
                             // client resets the connection between its last
                             // read and this write (a disconnect race); the
                             // deterministic clients below always drain the
@@ -2578,7 +2578,7 @@ mod adversarial_tests {
                     redis_rate_limit(&erroring, "adv_explorer_erroring_incr")
                         .await
                         .is_err(),
-                    "a failing INCR is Err(()) — never an accidental allow"
+                    "a failing INCR is Err(()), never an accidental allow"
                 );
                 let ip = format!("adv-erroring-{}", uuid::Uuid::new_v4());
                 for _ in 0..EMERGENCY_RATE_LIMIT_PER_MINUTE {
@@ -2628,7 +2628,7 @@ mod adversarial_tests {
 
     /// Malformed and truncated RESP chunks against the fake Redis stub: a
     /// non-numeric bulk-length prefix and a bulk string cut off mid-payload
-    /// must degrade to the stub's error reply — never hang or panic.
+    /// must degrade to the stub's error reply, never hang or panic.
     #[test]
     fn fake_redis_stub_degrades_malformed_and_truncated_resp_to_errors() {
         let port = spawn_fake_redis();
@@ -2645,7 +2645,7 @@ mod adversarial_tests {
         let n = bad.read(&mut reply).expect("read stub error reply");
         assert!(
             reply[..n].starts_with(b"-ERR"),
-            // coverage: justified — the format argument is evaluated only
+            // coverage: justified, the format argument is evaluated only
             // when the assertion FAILS; a passing run never measures it.
             "a non-numeric RESP length must error, got {:?}",
             &reply[..n]
@@ -2666,7 +2666,7 @@ mod adversarial_tests {
             .expect("read truncated-bulk error reply");
         assert!(
             reply[..n].starts_with(b"-ERR"),
-            // coverage: justified — the format argument is evaluated only
+            // coverage: justified, the format argument is evaluated only
             // when the assertion FAILS; a passing run never measures it.
             "a truncated bulk string must still produce an error reply, got {:?}",
             &reply[..n]
@@ -2674,7 +2674,7 @@ mod adversarial_tests {
     }
 
     /// An AppState with the Email Grader ENABLED (real DNS resolver; DNS
-    /// failures degrade to low scores, never errors — GraderEngine
+    /// failures degrade to low scores, never errors, GraderEngine
     /// assembles a response either way). `rate_limit_max = 0` refuses every
     /// check at the engine's per-IP limiter, deterministically and with no
     /// network at all.
@@ -2740,7 +2740,7 @@ mod adversarial_tests {
 
     /// The grader-delegated ERROR branch: the engine's per-IP rate limit
     /// (max = 0) refuses the check, and the explorer must map the JSON error
-    /// envelope onto its honest error page — code AND message extracted from
+    /// envelope onto its honest error page, code AND message extracted from
     /// the envelope, never raw engine internals.
     #[test]
     fn grader_engine_refusal_maps_to_the_explorer_error_page() {

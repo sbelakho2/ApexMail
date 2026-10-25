@@ -2,7 +2,7 @@
 //!
 //! `tenants.legal_hold` (migration 121) freezes a tenant's records as
 //! evidence. Before this module, three jobs enforced the flag three
-//! different ways — the retention sweep filtered `gdpr_exports` /
+//! different ways, the retention sweep filtered `gdpr_exports` /
 //! `dsr_verification_outbox` purges, `AuditLogger::archive` carried its own
 //! inline exclusion, and `GdprAutomation::enforce_retention` plus the DSR
 //! erasure path ignored the flag entirely (a held tenant's SAR exports and
@@ -10,12 +10,12 @@
 //! path now resolves holds through [`active_holds`] / [`tenant_is_held`].
 //!
 //! Semantics (identical to the established `archive()` behavior):
-//! * `Ok(Some(ids))` — holds were consulted; `ids` are the held tenants
+//! * `Ok(Some(ids))`, holds were consulted; `ids` are the held tenants
 //!   (possibly empty).
-//! * `Ok(None)` — the deployment has no `tenants` table / `legal_hold`
+//! * `Ok(None)`, the deployment has no `tenants` table / `legal_hold`
 //!   column (pre-migration-121 schemas): no exclusion is possible and
 //!   callers keep their historical behavior.
-//! * `Err(_)` — the lookup itself failed; callers must fail closed (never
+//! * `Err(_)`, the lookup itself failed; callers must fail closed (never
 //!   delete on an unknown hold state).
 
 use sqlx::PgPool;
@@ -36,7 +36,7 @@ pub async fn active_holds(db: &PgPool) -> Result<Option<Vec<String>>, String> {
 
 /// Whether ONE tenant is under an active legal hold. The row-level form of
 /// [`active_holds`] for per-tenant paths (DSR erasure). `Ok(None)` (no
-/// tenants table) means "not held" — the deployment cannot express holds at
+/// tenants table) means "not held", the deployment cannot express holds at
 /// all; a genuine lookup error is propagated so the caller can fail closed.
 pub async fn tenant_is_held(db: &PgPool, tenant_id: &str) -> Result<Option<bool>, String> {
     match sqlx::query_scalar::<_, bool>(
@@ -55,7 +55,7 @@ pub async fn tenant_is_held(db: &PgPool, tenant_id: &str) -> Result<Option<bool>
 
 /// The SQL fragment that excludes held tenants from a DELETE on
 /// `tenant_column`. NULL-tenant rows are excluded too while any hold is
-/// active — they cannot be attributed, so they might belong to a held
+/// active, they cannot be attributed, so they might belong to a held
 /// tenant (fall back to keep). Empty string when no hold is active.
 ///
 /// The fragment references `$(N)` as the NEXT bind parameter; callers bind
@@ -139,7 +139,7 @@ mod tests {
                 .expect("tenant_is_held"),
             Some(true)
         );
-        // An UNKNOWN tenant id has no row: `Ok(None)` — callers treat the
+        // An UNKNOWN tenant id has no row: `Ok(None)`, callers treat the
         // unresolvable case as not-held (an erasure for a nonexistent
         // tenant proceeds harmlessly), never as held.
         assert_eq!(

@@ -154,7 +154,7 @@ impl AuditService {
         // rows) is only legitimate when the caller asked for a WINDOW: with
         // `start_time` set, the parent may simply lie before the window. An
         // unwindowed verification must treat a missing parent as a deleted
-        // row — truncation — and fail closed.
+        // row, truncation, and fail closed.
         verify_chain_rows(&rows, &self.signing_key, start_time.is_some())
     }
 
@@ -387,7 +387,7 @@ impl AuditService {
         result
     }
 
-    /// Critical section of [`Self::flush_events`] — caller holds the
+    /// Critical section of [`Self::flush_events`], caller holds the
     /// per-org locks.
     async fn flush_events_locked(&self, events: Vec<AuditEvent>) -> anyhow::Result<()> {
         if events.is_empty() {
@@ -1035,7 +1035,7 @@ mod tests {
 
     #[test]
     fn test_verify_chain_rows_detects_fork() {
-        // Two rows claiming the same parent — what concurrent unserialized
+        // Two rows claiming the same parent, what concurrent unserialized
         // flushes used to produce.
         let t0 = Utc::now();
         let r1 = chain_row("e1", t0, "");

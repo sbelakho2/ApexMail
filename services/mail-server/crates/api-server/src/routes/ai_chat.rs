@@ -134,7 +134,7 @@ pub(crate) async fn ask_assistant(
         ));
     }
 
-    // Account context assembled HERE, from tenant-scoped queries — the
+    // Account context assembled HERE, from tenant-scoped queries, the
     // trusted half of the design. ai-service treats it as display data.
     let account_context = account_context(state, tenant_id).await;
 
@@ -194,7 +194,7 @@ pub(crate) async fn ask_assistant(
             })
         }
         StatusCode::TOO_MANY_REQUESTS => Err(ApiError::RateLimitedMessage(
-            "assistant rate limit reached — please retry in a minute".into(),
+            "assistant rate limit reached, please retry in a minute".into(),
         )),
         status => {
             tracing::warn!(status = %status, "ai chat: service error");
@@ -272,10 +272,10 @@ pub(crate) async fn chat(
 /// forward only the tenant header, so a tenant-level `ai:read` key read
 /// every teammate's conversation. The console session surface is per-user
 /// and `docs/user-guide/assistant.md` documents conversations as "visible
-/// only to the user they belong to" — so the deliberate contract here is the
+/// only to the user they belong to", so the deliberate contract here is the
 /// CALLER's own history: a user-bound credential (session, impersonation, a
 /// user-owned API key) gets its own turns, and a credential with NO user
-/// identity (a tenant-level key) gets a named 403 — there is no caller whose
+/// identity (a tenant-level key) gets a named 403, there is no caller whose
 /// history could be returned, and the tenant-wide view is exactly the leak.
 pub(crate) async fn chat_history(
     State(state): State<AppState>,
@@ -533,7 +533,7 @@ pub(crate) async fn read_session_turns(
     let limit = query.limit.unwrap_or(SESSION_WINDOW_TURNS).clamp(1, 50);
     // THE NEWEST `limit` turns, returned oldest-first. `ORDER BY created_at
     // ASC LIMIT n` returned the OLDEST n turns: past the window the API (and
-    // every consumer) could never see the latest exchange at all — a live
+    // every consumer) could never see the latest exchange at all, a live
     // concurrency probe read 12 of 16 turns, hiding the four newest. The page
     // loader already reads the newest window (DESC LIMIT then reverse); this
     // is the same contract on the JSON surface.
@@ -581,7 +581,7 @@ pub(crate) async fn read_session_turns(
 }
 
 /// The assistant's SESSION history: the user's turns from this session,
-/// oldest first, as the model context. Only persisted turns travel — a
+/// oldest first, as the model context. Only persisted turns travel, a
 /// client cannot inject history into a session.
 async fn session_history(
     state: &AppState,
@@ -639,7 +639,7 @@ async fn contact_intent_lead(
     //
     // users.id is UUID (canonical schema): bind natively so the primary key is
     // used. A user key that is not a UUID (an API key id, a console
-    // placeholder) cannot name a user row and resolves to no owner — the same
+    // placeholder) cannot name a user row and resolves to no owner, the same
     // outcome the `id::text = 'garbage'` comparison produced, minus the scan.
     let owner: Option<String> = match uuid::Uuid::parse_str(user_key) {
         Ok(user_id) => {
@@ -887,7 +887,7 @@ async fn chat_rate_limit(
     }
     if count > CHAT_RATE_LIMIT {
         return Err(ApiError::RateLimitedMessage(
-            "assistant rate limit reached — please retry in a minute".into(),
+            "assistant rate limit reached, please retry in a minute".into(),
         ));
     }
     Ok(())
@@ -1106,7 +1106,7 @@ mod adversarial_tests {
         let Some((env, tenant, _user)) = AdvEnv::session(pool.clone(), "owner").await else {
             return;
         };
-        // Rebuild the SAME session env but with the mock ai URL — the shared
+        // Rebuild the SAME session env but with the mock ai URL, the shared
         // helper builds its own config; drive a tenant API key instead so
         // the URL override rides along.
         let (key_env, key_tenant) =
@@ -1557,7 +1557,7 @@ mod session_tests {
 
     /// Regression (dogfood P1): the console's PRG handler calls
     /// `session_turn_inner` directly, and while the capability flag lived in
-    /// the JSON wrapper that path ignored it — a tenant with `ai_chat`
+    /// the JSON wrapper that path ignored it, a tenant with `ai_chat`
     /// disabled could still chat from the console, and the refused turn was
     /// still persisted. The shared flow now refuses BEFORE writing anything.
     #[tokio::test]
@@ -1677,7 +1677,7 @@ mod session_tests {
     }
 
     /// Chat -> CRM (plan §5.4): a grounded answer to a contact-intent message
-    /// captures the lead through the canonical lead write — and the lead is
+    /// captures the lead through the canonical lead write, and the lead is
     /// recorded as a `chat_lead` request, not a contact-form one.
     #[tokio::test]
     async fn contact_intent_message_captures_a_chat_lead_once() {
@@ -1877,7 +1877,7 @@ mod session_tests {
 
     /// The owner-email fallback of `contact_intent_lead` binds `users.id`
     /// NATIVELY (it is UUID, migration 052) instead of casting the column with
-    /// `id::text = $1` — which defeated the primary key on every contact-intent
+    /// `id::text = $1`, which defeated the primary key on every contact-intent
     /// turn. Both arms must behave as before: an intent message with no address
     /// resolves the signed-in owner's address; a user key that cannot name a
     /// user row (an API-key identity, another tenant's user) resolves nothing.

@@ -17,14 +17,14 @@ By accessing or using the Service, you agree to these Terms. If you do not agree
 
 ## 2. Definitions
 
-- **"Service"** — the ApexMail email API, SMTP relay, analytics dashboard, webhook system, and related tools.
-- **"Customer"** / **"you"** — the individual or entity entering into these Terms.
-- **"Account"** — a registered workspace on the ApexMail platform.
-- **"Customer Content"** — all data, text, emails, attachments, lists, and configurations submitted by or on behalf of Customer.
-- **"Recipient"** — a natural person who receives email sent through the Service.
-- **"Consumer"** — a natural person acting for purposes outside their trade, business, craft, or profession (per Directive 2011/83/EU).
-- **"API Key"** — a credential used to authenticate to the ApexMail API.
-- **"Stream"** — a logical sending configuration within an Account.
+- **"Service"**, the ApexMail email API, SMTP relay, analytics dashboard, webhook system, and related tools.
+- **"Customer"** / **"you"**, the individual or entity entering into these Terms.
+- **"Account"**, a registered workspace on the ApexMail platform.
+- **"Customer Content"**, all data, text, emails, attachments, lists, and configurations submitted by or on behalf of Customer.
+- **"Recipient"**, a natural person who receives email sent through the Service.
+- **"Consumer"**, a natural person acting for purposes outside their trade, business, craft, or profession (per Directive 2011/83/EU).
+- **"API Key"**, a credential used to authenticate to the ApexMail API.
+- **"Stream"**, a logical sending configuration within an Account.
 
 ## 3. Account Authority
 

@@ -1,4 +1,4 @@
-//! ApexMail database migrator — the deployment-time migration gate.
+//! ApexMail database migrator, the deployment-time migration gate.
 //!
 //! Every production deploy path (`.github/workflows/deploy-hetzner.yml` and
 //! `deploy/scripts/deploy.sh`) runs this binary as a one-shot compose job
@@ -13,7 +13,7 @@
 //! `postgres_password` Docker secret by `deploy/scripts/entrypoint-wrapper.sh`,
 //! same as every sibling service) and applies the workspace migration set
 //! embedded at compile time from `services/mail-server/migrations` via the
-//! library's [`migrator::apply_migrations`] — the same apply path the
+//! library's [`migrator::apply_migrations`], the same apply path the
 //! `test_support` module exposes to test infrastructure (audit F01).
 //!
 //! The interactive fallback (`sqlx migrate run --source
@@ -75,7 +75,7 @@ async fn main() -> ExitCode {
         )
         .init();
 
-    let dry_run = std::env::args().any(|arg| arg == "--dry-run" || arg == "-n"); // nosemgrep: rust.lang.security.args.args — reads argv for flag detection / passes constant tool-side paths — no shell, no user-input interpolation
+    let dry_run = std::env::args().any(|arg| arg == "--dry-run" || arg == "-n"); // nosemgrep: rust.lang.security.args.args, reads argv for flag detection / passes constant tool-side paths, no shell, no user-input interpolation
     let gc_databases = std::env::args().any(|arg| arg == "--gc-test-databases"); // nosemgrep: rust.lang.security.args.args
     let ensure_template = std::env::args().any(|arg| arg == "--ensure-canonical-template"); // nosemgrep: rust.lang.security.args.args
     if ensure_template {
@@ -86,7 +86,7 @@ async fn main() -> ExitCode {
         let test_url = match std::env::var("TEST_DATABASE_URL") {
             Ok(url) if !url.is_empty() => url,
             _ => {
-                eprintln!("error: TEST_DATABASE_URL is not set — nothing to prepare");
+                eprintln!("error: TEST_DATABASE_URL is not set, nothing to prepare");
                 return ExitCode::FAILURE;
             }
         };
@@ -110,7 +110,7 @@ async fn main() -> ExitCode {
     let database_url = match std::env::var("DATABASE_URL") {
         Ok(url) if !url.is_empty() => url,
         _ => {
-            eprintln!("error: DATABASE_URL is not set — the entrypoint wrapper assembles it from DB_* + the postgres_password secret");
+            eprintln!("error: DATABASE_URL is not set, the entrypoint wrapper assembles it from DB_* + the postgres_password secret");
             return ExitCode::FAILURE;
         }
     };
@@ -151,7 +151,7 @@ async fn main() -> ExitCode {
 /// Every DB-backed suite provisions `apexmail_*` clones from the canonical
 /// template and, by design, leaves them behind (a one-shot CI runner throws
 /// the whole Postgres away). On a long-lived dev/CI host the clones grow
-/// without bound — the 2026-10-07 fold found 1,096 of them (55 GB) and the
+/// without bound, the 2026-10-07 fold found 1,096 of them (55 GB) and the
 /// resulting disk pressure was crashing Postgres mid-suite. This mode drops
 /// `apexmail_%` databases other than the protected base name; databases with
 /// live connections are terminated only after a `pg_terminate_backend`, and
@@ -247,11 +247,11 @@ mod tests {
 
     /// The deploy gate relies on the migrator covering the full chain from
     /// its head. sqlx applies every embedded file in version order, so an
-    /// interior gap skips nothing — the 2026-09 remediation wave reserved
+    /// interior gap skips nothing, the 2026-09 remediation wave reserved
     /// per-stream number ranges and several slots are intentionally unused
     /// (129, 141–152, 154–158). What a mis-pointed macro or a misnamed file
     /// CAN produce, and what this catches: a chain whose head is missing
-    /// (min ≠ 1 — a partial directory). A missing TAIL is not self-
+    /// (min ≠ 1, a partial directory). A missing TAIL is not self-
     /// detectable (the embedded set cannot know the true latest); the
     /// ascending + uniqueness contract lives in the test above.
     #[test]

@@ -23,7 +23,7 @@
 //!
 //! ## Named refusals (never a silent drop)
 //!
-//! * more than one personalization — per-personalization subject/headers would
+//! * more than one personalization, per-personalization subject/headers would
 //!   be lost; send one request per personalization;
 //! * `personalizations[].substitutions` / `.dynamic_template_data`,
 //!   `template_id`, `dynamic_template_data` (SendGrid template ids are not
@@ -319,7 +319,7 @@ fn map_personalizations(
                 }
             }
             _ => issues.push(
-                "more than one 'personalizations' entry is not supported by the ApexMail compatibility surface: per-personalization subject/headers would be dropped — send one request per personalization",
+                "more than one 'personalizations' entry is not supported by the ApexMail compatibility surface: per-personalization subject/headers would be dropped, send one request per personalization",
             ),
         },
         Some(Value::Null) | None => issues.push("field 'personalizations' is required"),
@@ -411,7 +411,7 @@ fn map_attachments(root: &Map<String, Value>, issues: &mut MappingIssues) -> Vec
         if let Some(content_id) = map_str(attachment, "content_id", issues) {
             issues.push(unsupported(
                 &format!("attachments[{index}].content_id='{content_id}'"),
-                "the canonical send path has no inline-part concept — attach the file instead of embedding it",
+                "the canonical send path has no inline-part concept, attach the file instead of embedding it",
             ));
         }
         if let Some(disposition) = map_str(attachment, "disposition", issues) {
@@ -534,7 +534,7 @@ fn map_send_at(
 /// SendGrid `mail_settings`.
 ///
 /// The ONE accepted value is the explicit no-op used by every SDK's
-/// documented default — `{"sandbox_mode": {"enable": false}}` (sandbox mode
+/// documented default, `{"sandbox_mode": {"enable": false}}` (sandbox mode
 /// disabled, i.e. the message really goes out). Enabling sandbox mode, or any
 /// other mail-level setting (`bcc`, `bypass_list_management`, `footer`,
 /// `bypass_spam_management`, `bypass_bounce_management`, …), changes delivery
@@ -556,7 +556,7 @@ fn map_mail_settings(root: &Map<String, Value>, issues: &mut MappingIssues) {
             None | Some(Value::Bool(false)) => {}
             Some(Value::Bool(true)) => issues.push(unsupported(
                 "mail_settings.sandbox_mode.enable=true",
-                "the canonical send path has no per-message sandbox mode — use the platform test-mode surface",
+                "the canonical send path has no per-message sandbox mode, use the platform test-mode surface",
             )),
             Some(other) => issues.push(format!(
                 "field 'mail_settings.sandbox_mode.enable' must be a boolean (received {})",

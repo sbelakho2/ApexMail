@@ -1,4 +1,4 @@
-//! Canonical knowledge — the SINGLE source of truth every AI surface reads.
+//! Canonical knowledge, the SINGLE source of truth every AI surface reads.
 //!
 //! The prompt builders (pipeline, email agent), the deterministic verifier,
 //! and the DNS record generator must never carry their own copies of facts.
@@ -23,7 +23,7 @@ pub struct PlanFacts {
     pub retention_days: i64,
 }
 
-/// DERIVED from `platform-catalog` — the canonical source the billing
+/// DERIVED from `platform-catalog`, the canonical source the billing
 /// runtime seeds from. The catalog prices are euro CENTS; the chat/verifier
 /// surfaces speak whole EUR (the deployed catalog has no sub-euro monthly
 /// price). This cannot drift: the catalog row IS the value.
@@ -41,7 +41,7 @@ pub static PLANS: LazyLock<Vec<PlanFacts>> = LazyLock::new(|| {
         .collect()
 });
 
-/// PAYG per-email tier rates (EUR/email) by cumulative volume — derived
+/// PAYG per-email tier rates (EUR/email) by cumulative volume, derived
 /// from `platform-catalog`.
 pub static PAYG_TIERS: LazyLock<Vec<f64>> = LazyLock::new(|| {
     platform_catalog::PAYG_TIERS_EUR_PER_EMAIL
@@ -50,7 +50,7 @@ pub static PAYG_TIERS: LazyLock<Vec<f64>> = LazyLock::new(|| {
         .collect()
 });
 /// Per-plan subscription overage rates (EUR per 1,000 emails beyond the
-/// included volume) — derived from the catalog. Plan order matches PLANS.
+/// included volume), derived from the catalog. Plan order matches PLANS.
 pub static OVERAGE_PER_1K: LazyLock<Vec<f64>> = LazyLock::new(|| {
     platform_catalog::PLANS
         .iter()
@@ -111,13 +111,13 @@ pub const ALLOWED_HOSTS: &[&str] = &[
     "status.apexmail.ee",
 ];
 
-/// Truthful compliance posture — matches the published compliance pages.
+/// Truthful compliance posture, matches the published compliance pages.
 pub const COMPLIANCE_FACTS: &str = "GDPR: EU/EEA processing; a Data Processing \
 Agreement is available. HIPAA: not currently offered. SOC 2: not currently \
 offered. Encryption: TLS 1.2+ in transit, AES-256 at rest. Data locations and \
 the subprocessor register are published on apexmail.ee.";
 
-/// Truthful security posture — only controls wired into the deployed stack.
+/// Truthful security posture, only controls wired into the deployed stack.
 pub const SECURITY_FACTS: &str = "Security: TLS 1.2+ everywhere, AES-256 at \
 rest, hashed API keys (keyed HMAC), MFA/TOTP support, KiwiCaptcha proof-of-work \
 protection on login routes (web and control plane), per-tenant rate limits \
@@ -135,7 +135,7 @@ entries that include ApexMail's sending hosts; DMARC is optional but \
 recommended. Inbound authentication (SPF/DKIM/DMARC) is evaluated on every \
 accepted message and surfaced in headers.";
 
-/// SDK availability — packages are NOT on public registries yet.
+/// SDK availability, packages are NOT on public registries yet.
 pub const SDK_FACTS: &str = "SDKs exist for Python, Go, PHP, Ruby and Java but \
 are not yet published to public registries; source drops are provided on \
 request via support@apexmail.ee. The REST API and SMTP submission work today.";
@@ -148,7 +148,7 @@ pub fn shared_knowledge_markdown() -> String {
     let mut md = String::with_capacity(2048);
     let _ = writeln!(
         md,
-        "# ApexMail canonical facts (authoritative — never contradict or recompute)"
+        "# ApexMail canonical facts (authoritative, never contradict or recompute)"
     );
     let _ = writeln!(
         md,
@@ -172,7 +172,7 @@ pub fn shared_knowledge_markdown() -> String {
         "\nPAYG per-email tiers: €0.001 (0–10K), €0.0008 (10K–100K), €0.0005 (100K–1M), €0.0003 (1M+); \
 first 100K API calls/month free, then €0.10/1K. Subscription overage per 1,000 emails beyond \
 the included volume: Developer €0.80, Pro €0.60, Growth/Business €0.35 (Enterprise Cloud \
-contractual, €0.35 runtime default) — paid plans keep sending into a +{}% allowance and the \
+contractual, €0.35 runtime default), paid plans keep sending into a +{}% allowance and the \
 excess is invoiced at period end; free plans stop at the limit.\n\n{}\n\n{}\n\n{}\n\n{}\n",
         OVERAGE_ALLOWANCE_PERCENT,
         DELIVERABILITY_FACTS,

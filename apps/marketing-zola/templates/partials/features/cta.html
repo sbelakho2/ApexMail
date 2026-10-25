@@ -1,17 +1,18 @@
-{# ── Feature CTA — ARK marketing revision (law 11/12) ─────────── #}
+{# ── Feature CTA, ARK marketing revision (law 11/12) ─────────── #}
 {# The one crimson field on the features page. The bordered box, the
    centered layout and the &bull; separator are gone; the brand recipe
    inverts the primary button and rules the secondary automatically. #}
 
 <section class="apex-mkt-section apex-mkt-section--brand" aria-label="Get started">
   <div class="apex-mkt-container">
-    <span class="apex-mkt-kicker">
+    <div class="apex-mkt-heading--statement">
+      <span class="apex-mkt-kicker">
       {% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["cta_badge"] %}{{ i18n_data[l]["features"]["cta_badge"] }}{% else %}Start in 5 Minutes{% endif %}
     </span>
-
-    <h2 class="apex-h2">
+      <h2 class="apex-mkt-heading__title">
       {% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["cta_heading"] %}{{ i18n_data[l]["features"]["cta_heading"] }}{% else %}Ready to send?{% endif %}
     </h2>
+    </div>
 
     <p class="apex-lead max-w-2xl">
       {% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["cta_subtitle"] %}{{ i18n_data[l]["features"]["cta_subtitle"] }}{% else %}ApexMail provides reliable transactional email with built-in compliance. Start free with 3,000 emails per month.{% endif %}

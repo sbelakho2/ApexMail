@@ -1,4 +1,4 @@
-//! Threat intel engine — orchestrates IP/domain blocklist lookups and reputation scoring
+//! Threat intel engine, orchestrates IP/domain blocklist lookups and reputation scoring
 
 use crate::config::{FeedEnforcementMode, ThreatIntelConfig};
 use crate::domain_blocklist::DomainBlocklist;
@@ -26,9 +26,9 @@ pub struct ThreatVerdict {
 pub enum ThreatAction {
     /// No threat detected
     Allow,
-    /// Suspicious — flag for monitoring
+    /// Suspicious, flag for monitoring
     Flag,
-    /// Known threat — block
+    /// Known threat, block
     Block,
 }
 
@@ -46,7 +46,7 @@ impl std::fmt::Display for ThreatAction {
 pub struct ThreatIntelEngine {
     config: ThreatIntelConfig,
     /// Unified v4+v6 IP blocklist (previously IPv4-only, so every IPv6
-    /// lookup failed open — a listed IPv6 attacker was always "clean").
+    /// lookup failed open, a listed IPv6 attacker was always "clean").
     /// Kept behind a lock so a feed refresh can swap the whole set
     /// atomically; clones share state via internal Arcs.
     ip_blocklist: parking_lot::RwLock<UnifiedIpBlocklist>,
@@ -129,7 +129,7 @@ impl ThreatIntelEngine {
     ///   (their old entries are removed first, then the fresh ones added).
     ///   Entries from every other source are kept (last-known per source).
     /// - Refuses (returns `false`, nothing touched) when BOTH inputs are
-    ///   empty — a broken feed must not wipe the last-known-good blocklist.
+    ///   empty, a broken feed must not wipe the last-known-good blocklist.
     /// - If [`ThreatIntelConfig::drop_absent_sources_on_refresh`] is set,
     ///   entries of CONFIGURED feeds that are absent from the payload are
     ///   dropped as well (explicit operator opt-in; default is to keep
@@ -204,7 +204,7 @@ impl ThreatIntelEngine {
             // entries SILENTLY (`let _ = add_cidr(...)` discards the
             // BlocklistFull error, `add_ip_str`'s false is ignored). Once
             // `max_ip_entries` was reached, every refresh reported success
-            // while absorbing zero new IoCs — newly listed attacker
+            // while absorbing zero new IoCs, newly listed attacker
             // infrastructure scored Clean indefinitely. Rejections are now
             // counted, logged, and surfaced: a material drop refuses to
             // report success (degraded state + failure counter) instead of
@@ -246,7 +246,7 @@ impl ThreatIntelEngine {
                 // the failure counter increments and
                 // `last_successful_refresh` does not advance.
                 self.record_refresh_failure(&format!(
-                    "blocklist saturated: {rejected} of {total} feed entries dropped — refresh is DEGRADED, not fully applied"
+                    "blocklist saturated: {rejected} of {total} feed entries dropped, refresh is DEGRADED, not fully applied"
                 ));
                 return false;
             }
@@ -272,7 +272,7 @@ impl ThreatIntelEngine {
         let ip_hit = self.ip_blocklist.read().lookup_str(ip_str);
         if let Some(entry) = ip_hit {
             // Entries whose feed is explicitly DISABLED must not score at
-            // all — previously they fell through with full trust and could
+            // all, previously they fell through with full trust and could
             // still produce hard blocks.
             if !self.feed_disabled(&entry.source) {
                 let (effective_score, is_monitor_only) =
@@ -307,7 +307,7 @@ impl ThreatIntelEngine {
             action = ThreatAction::Flag;
         }
 
-        let summary = format!("IP {} — {} (score: {:.1})", ip_str, action, ip_rep.score);
+        let summary = format!("IP {}, {} (score: {:.1})", ip_str, action, ip_rep.score);
 
         ThreatVerdict {
             ip_reputation: Some(ip_rep),
@@ -359,7 +359,7 @@ impl ThreatIntelEngine {
         }
 
         let summary = format!(
-            "Domain {} — {} (score: {:.1})",
+            "Domain {}, {} (score: {:.1})",
             domain, action, domain_rep.score
         );
 
@@ -462,13 +462,13 @@ impl ThreatIntelEngine {
     /// The RAW confidence is returned unmodified: trust weighting is
     /// applied exactly ONCE, inside
     /// [`reputation::compute_reputation_weighted`]. Pre-scaling here as
-    /// well double-applied trust — a confidence-10 hit from a trust-7
+    /// well double-applied trust, a confidence-10 hit from a trust-7
     /// feed scored 5.7 instead of 8.2 and fell below the block threshold,
     /// so confirmed-malicious verdicts were silently dampened to Flags.
     ///
     /// UNCONFIGURED sources (audit F6) are always monitor-only: a feed the
     /// operator never vouched for can contribute to scoring but can never
-    /// produce an Enforce (Block) outcome — to make a source enforceable it
+    /// produce an Enforce (Block) outcome, to make a source enforceable it
     /// must be added to `config.feeds` with `Enforce` and sufficient trust.
     fn feed_adjusted_score(&self, source_name: &str, raw_confidence: f64) -> (f64, bool) {
         let raw = raw_confidence.clamp(0.0, 10.0);
@@ -507,7 +507,7 @@ impl ThreatIntelEngine {
 
 /// Default trust granted to sources that are NOT configured in
 /// [`ThreatIntelConfig::feeds`] (audit F6). Low on purpose: unconfigured
-/// feeds can never produce Enforce (Block) verdicts — see
+/// feeds can never produce Enforce (Block) verdicts, see
 /// [`ThreatIntelEngine::feed_adjusted_score`].
 const UNCONFIGURED_FEED_TRUST: f64 = 3.0;
 
@@ -757,7 +757,7 @@ mod tests {
 
     #[test]
     fn test_confirmed_malicious_single_source_reaches_block() {
-        // Fail-first: trust was applied TWICE — the engine pre-scaled the
+        // Fail-first: trust was applied TWICE, the engine pre-scaled the
         // raw confidence by trust/10 and the reputation composite scaled
         // by trust again. A confidence-10 hit from a trust-7 feed landed
         // at 5.7, below the block threshold (7.0): confirmed-malicious
@@ -834,7 +834,7 @@ mod tests {
     #[test]
     fn test_ipv6_lookup_no_longer_fails_open() {
         let engine = configured_engine();
-        // A listed IPv6 IOC must produce a Block verdict — previously the
+        // A listed IPv6 IOC must produce a Block verdict, previously the
         // engine consulted an IPv4-only blocklist and every IPv6 lookup
         // came back clean.
         engine
@@ -930,7 +930,7 @@ mod tests {
     #[test]
     fn test_unconfigured_source_can_never_block() {
         // Even a confidence-10 hit from an unconfigured source must not
-        // produce an Enforce (Block) verdict — it is monitor-only and
+        // produce an Enforce (Block) verdict, it is monitor-only and
         // down-weighted. Previously it blocked with full trust.
         let engine = ThreatIntelEngine::new();
         engine.ip_blocklist().add_ip_str(
@@ -1034,7 +1034,7 @@ mod tests {
             .collect();
         let rejected_before = feed_entries_rejected_total();
 
-        // 6 of 10 entries cannot fit — a material drop (60% ≥ 10%) must
+        // 6 of 10 entries cannot fit, a material drop (60% ≥ 10%) must
         // refuse to report success.
         assert!(
             !engine.apply_feed_refresh(entries, Vec::new()),
@@ -1095,7 +1095,7 @@ mod tests {
         // Adversarial verification of the saturation fix: the DOMAIN
         // blocklist has the same saturation semantics
         // (`DomainBlocklist::add` returns `false` at the cap), and its
-        // result was still discarded after the IP path was repaired — a
+        // result was still discarded after the IP path was repaired, a
         // saturated domain list silently absorbed zero new IoC domains
         // while every refresh reported success. The same discipline must
         // apply: counted, logged, refused at a material fraction.
@@ -1112,7 +1112,7 @@ mod tests {
             .collect();
         let rejected_before = feed_entries_rejected_total();
 
-        // 6 of 10 domain entries cannot fit — a material drop (60% ≥ 10%)
+        // 6 of 10 domain entries cannot fit, a material drop (60% ≥ 10%)
         // must refuse to report success.
         assert!(
             !engine.apply_feed_refresh(Vec::new(), entries),

@@ -2,7 +2,7 @@
 //!
 //! Live mailbot dogfood 2026-10-06 (F-5): a GDPR/DSR email delivered to a
 //! monitored mailbox was classified as an ordinary `question`, drafted a
-//! human-review reply and STOPPED there — the platform's statutory DSR
+//! human-review reply and STOPPED there, the platform's statutory DSR
 //! automation (`compliance::gdpr_automation`, the `dsr_verification_outbox`
 //! flush, the verification double opt-in and the processing queue) was never
 //! reached. The documented API path (`POST /gdpr/submit`) also exists, but a
@@ -12,11 +12,11 @@
 //! This module closes it with the smallest REAL path: a deterministic,
 //! narrow detector runs on the classified reply, and a detected request is
 //! written into the SAME canonical tables the compliance automation's intake
-//! writes — `data_subject_requests` (with the statutory receipt clock) and
+//! writes, `data_subject_requests` (with the statutory receipt clock) and
 //! `dsr_verification_outbox` (the verification mail the automation's flush
-//! job sends) — plus the control plane's `gdpr_requests` mirror. From there
+//! job sends), plus the control plane's `gdpr_requests` mirror. From there
 //! the EXISTING automation takes over end to end: verification email,
-//! double opt-in, statutory processing, retention/erasure — nothing else in
+//! double opt-in, statutory processing, retention/erasure, nothing else in
 //! this pipeline needs to know about DSRs.
 //!
 //! Contract and invariants (mirroring `GdprAutomation::submit_request`
@@ -177,7 +177,7 @@ pub async fn submit(
     }
 
     // SEC-15 per-user DSAR limit (1 new request / 24h) before anything is
-    // written — matching the API intake's rate limiter.
+    // written, matching the API intake's rate limiter.
     let recent: Result<Option<String>, sqlx::Error> = sqlx::query_scalar(
         "SELECT id FROM data_subject_requests \
          WHERE tenant_id = $1 AND lower(email) = $2 \

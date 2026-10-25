@@ -2,7 +2,7 @@
 //!
 //! The tax-truth P0 finding was that `billing-common::vat_rates` treated a
 //! structurally valid EU VAT number as sufficient for a reverse charge while
-//! claiming "full VIES validation happens out-of-band in vat_emta" — a
+//! claiming "full VIES validation happens out-of-band in vat_emta", a
 //! validator that did not exist. This module is that production validator:
 //!
 //! * [`validate_vat_number_vies`] performs the SOAP `checkVat` consultation;
@@ -66,7 +66,7 @@ impl ViesOutcome {
         matches!(self, Self::Outage { .. })
     }
 
-    /// Outage markers that mean "the authority could not answer" — always
+    /// Outage markers that mean "the authority could not answer", always
     /// fail closed (normal VAT), never silently valid.
     pub fn classify_fault(fault: &str) -> Self {
         let fault = fault.trim();
@@ -79,7 +79,7 @@ impl ViesOutcome {
                 fault: fault.to_string(),
             },
             // Unknown faults and malformed requests are also "no
-            // authoritative answer" — an unclassified failure must never be
+            // authoritative answer", an unclassified failure must never be
             // treated as validity.
             _ => Self::Outage {
                 fault: if fault.is_empty() {

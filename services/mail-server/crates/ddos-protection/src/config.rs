@@ -78,7 +78,7 @@ pub struct ProtectorConfig {
     /// no HTTP deployment in this repo populates `tls_fingerprint` (rustls
     /// does not expose the JA4 inputs), so a missing-fingerprint penalty
     /// drained EVERY client's reputation by 1 per request and false-blocked
-    /// legitimate traffic within minutes of sustained use — with no
+    /// legitimate traffic within minutes of sustained use, with no
     /// redemption path in the compiled feature set. Enable only when a
     /// trusted proxy actually forwards fingerprints AND the challenge
     /// redemption route is wired; a PRESENT suspicious fingerprint is
@@ -133,13 +133,13 @@ pub struct ProtectorConfig {
     ///
     /// A refused probe is worse than no protection. The orchestrator reads a
     /// non-200 as "this instance is unhealthy" and restarts a healthy
-    /// service — repeatedly, forever, because the restart does not change
+    /// service, repeatedly, forever, because the restart does not change
     /// the client's rate. The same applies to a load balancer's health check
     /// and a Prometheus scrape. These endpoints do no database work and
     /// return a constant, so exempting them cannot be amplified into load.
     ///
     /// Live run 2026-10-22: `/health/live` answered 429 to all 250 polls of a
-    /// liveness-probe cadence, and `/health/ready` to 150 of 250 — the
+    /// liveness-probe cadence, and `/health/ready` to 150 of 250, the
     /// protector was throttling the endpoints whose only job is to say
     /// whether the process is alive. `DDOS_PROBE_PATHS` (comma-separated)
     /// overrides the list for deployments with different probe routes.
@@ -155,7 +155,7 @@ impl Default for ProtectorConfig {
             // traffic shape of the browser console: one page load is a
             // document (~1 020 units) plus its API calls (~1 020 each) plus
             // ~30 sub-resource fetches (64 units each, see
-            // `cost_based::SUBRESOURCE_COST`) — roughly 11 200 units. The old
+            // `cost_based::SUBRESOURCE_COST`), roughly 11 200 units. The old
             // 100 000 was sized when "a request" meant one API call, so it
             // held only ~2 page loads per minute and 429'd an ordinary user
             // mid-session (live run 2026-10-22). 2 000 000 holds ~178 page
@@ -172,7 +172,7 @@ impl Default for ProtectorConfig {
             // The FLOOR of the adaptive threshold. It must sit above what a
             // legitimate browser generates, because a console page load is
             // one document plus ~20-40 sub-resource fetches (stylesheet,
-            // scripts, fonts, images, then the page's own API calls) — and
+            // scripts, fonts, images, then the page's own API calls), and
             // every one of those is a request this limiter counts. The old
             // floor of 10 RPM (1/6 rps) was below a single page load, so the
             // limiter's attack-mode threshold (baseline × 0.5) could collapse
@@ -283,7 +283,7 @@ impl ProtectorConfig {
         }
 
         // The probe list is deployment-shaped (an orchestrator's probe route
-        // is an operator decision), so it is overridable — but only
+        // is an operator decision), so it is overridable, but only
         // wholesale: a deployment that adds its own routes must still list
         // the standard ones it relies on.
         if let Ok(val) = std::env::var("DDOS_PROBE_PATHS") {

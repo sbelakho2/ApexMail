@@ -16,7 +16,7 @@ type HmacSha256 = Hmac<Sha256>;
 /// Generate a full-length (32-character hex) audit log entry ID.
 ///
 /// Uses [`Uuid::new_v4()`] and returns the complete 32-character lowercase
-/// hex string — **no trimming**.
+/// hex string, **no trimming**.
 pub fn generate_audit_log_id() -> String {
     Uuid::new_v4().to_string().replace('-', "")
 }

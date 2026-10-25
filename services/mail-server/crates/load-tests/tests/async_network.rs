@@ -1,20 +1,20 @@
 //! Async load tests over REAL production machinery (SM12 F10).
 //!
-//! Audit finding 10: this file previously tested tokio itself — simulated
+//! Audit finding 10: this file previously tested tokio itself, simulated
 //! 20 ms "network" sleeps, an mpsc channel measuring the runtime, and a
 //! "cancellation safety" test that read its own leak counter into a
 //! discarded binding and asserted nothing. Every test now drives real
 //! workspace code under async concurrency:
 //!
-//! * webhook dispatch burst — the REAL `worker_processors::common::
+//! * webhook dispatch burst, the REAL `worker_processors::common::
 //!   Backpressure` controller (the concurrency limiter production
 //!   processors acquire before every job) plus the REAL webhook retry
 //!   ladder and delivery-result policy from `worker_processors::webhook`;
-//! * queue soak — REAL `queue_provider::FairQueueScheduler` claim/release
+//! * queue soak, REAL `queue_provider::FairQueueScheduler` claim/release
 //!   passes fed by concurrent producers through a bounded channel;
-//! * mixed workload — REAL in-memory production calls (keyed rate limiter,
+//! * mixed workload, REAL in-memory production calls (keyed rate limiter,
 //!   email validation, HMAC, metrics aggregation) under contention;
-//! * cancellation safety — tasks hold a RAII guard over the counter and
+//! * cancellation safety, tasks hold a RAII guard over the counter and
 //!   the test ASSERTS the leak-counter invariant (counter returns to 0
 //!   after aborting every task), not merely "no panic".
 //!
@@ -57,7 +57,7 @@ fn stress_webhook_job(attempt: i32) -> WebhookJob {
 }
 
 // ===========================================================================
-// 1. Webhook dispatch burst — Backpressure + real retry ladder
+// 1. Webhook dispatch burst, Backpressure + real retry ladder
 // ===========================================================================
 
 /// A burst of webhook dispatches through the production concurrency
@@ -84,7 +84,7 @@ async fn test_webhook_dispatch_burst() {
         let bp = Arc::clone(&backpressure);
         let delivered = Arc::clone(&delivered);
         handles.push(tokio::spawn(async move {
-            // The permit IS the production admission control — dispatches
+            // The permit IS the production admission control, dispatches
             // beyond max_concurrency wait here (or are shed).
             let permit = bp
                 .acquire()
@@ -128,12 +128,12 @@ async fn test_webhook_dispatch_burst() {
         elapsed < Duration::from_secs(15),
         "200 bounded dispatches took {elapsed:?}"
     );
-    // The controller must be fully drained — permits returned, nothing in
+    // The controller must be fully drained, permits returned, nothing in
     // flight, and (with cooldown disabled) nothing shed.
     assert_eq!(
         backpressure.in_flight(),
         0,
-        "all permits must be released after the burst — leaked concurrency slot"
+        "all permits must be released after the burst, leaked concurrency slot"
     );
     assert_eq!(backpressure.available(), MAX_CONCURRENCY);
     assert_eq!(
@@ -145,7 +145,7 @@ async fn test_webhook_dispatch_burst() {
 }
 
 // ===========================================================================
-// 2. Queue soak — concurrent producers → real fair-scheduler claim loop
+// 2. Queue soak, concurrent producers → real fair-scheduler claim loop
 // ===========================================================================
 
 fn soak_job(seq: u64, tenant_id: uuid::Uuid) -> Job {
@@ -188,7 +188,7 @@ async fn test_queue_scheduler_soak() {
 
     let start = Instant::now();
 
-    // Producers — real jobs with unique payloads.
+    // Producers, real jobs with unique payloads.
     let mut producers = Vec::with_capacity(PRODUCERS);
     for p in 0..PRODUCERS {
         let tx = tx.clone();
@@ -203,7 +203,7 @@ async fn test_queue_scheduler_soak() {
     }
     drop(tx); // dispatcher terminates when producers finish and queue drains
 
-    // Dispatcher — the production claim → schedule → dispatch → release
+    // Dispatcher, the production claim → schedule → dispatch → release
     // loop, repeated until the queue is fully drained.
     let processed = Arc::new(AtomicU64::new(0));
     let processed_dispatcher = Arc::clone(&processed);
@@ -225,7 +225,7 @@ async fn test_queue_scheduler_soak() {
             let outcome = scheduler_dispatcher.schedule(batch, BATCH);
             // Dispatch the selected (in-memory processing = counting).
             processed_dispatcher.fetch_add(outcome.selected.len() as u64, Ordering::Relaxed);
-            // Release deferred back — a claim loop that drops these loses jobs.
+            // Release deferred back, a claim loop that drops these loses jobs.
             for job in outcome.deferred {
                 retry_queue.push_back(job);
             }
@@ -243,7 +243,7 @@ async fn test_queue_scheduler_soak() {
     let done = processed.load(Ordering::Relaxed);
     assert_eq!(
         done, TOTAL_JOBS as u64,
-        "soak processed {done} of {TOTAL_JOBS} jobs — the claim loop lost work"
+        "soak processed {done} of {TOTAL_JOBS} jobs, the claim loop lost work"
     );
     let jobs_per_sec = TOTAL_JOBS as f64 / elapsed.as_secs_f64();
     println!("queue soak: {TOTAL_JOBS} jobs in {elapsed:?} ({jobs_per_sec:.0} jobs/s)");
@@ -258,7 +258,7 @@ async fn test_queue_scheduler_soak() {
 }
 
 // ===========================================================================
-// 3. Mixed workload — real in-memory production calls under contention
+// 3. Mixed workload, real in-memory production calls under contention
 // ===========================================================================
 
 /// Sustained mixed load of REAL operations (no simulated latencies): keyed
@@ -326,7 +326,7 @@ async fn test_mixed_workload_under_load() {
 
     assert!(
         worst < Duration::from_secs(1),
-        "an individual 4-op iteration took {worst:?} — the runtime or a shared structure stalled"
+        "an individual 4-op iteration took {worst:?}, the runtime or a shared structure stalled"
     );
     // The throughput floor is machine-relative (cores, ambient suite load):
     // the CI/deploy runner calibrates it via LOAD_TEST_MIXED_OPS_FLOOR at
@@ -356,11 +356,11 @@ async fn test_mixed_workload_under_load() {
 }
 
 // ===========================================================================
-// 4. Cancellation safety — the leak-counter invariant, ASSERTED
+// 4. Cancellation safety, the leak-counter invariant, ASSERTED
 // ===========================================================================
 
 /// RAII guard representing an acquired resource (a dispatch slot, a DB
-/// connection, a lease). Dropping it releases the resource — this is the
+/// connection, a lease). Dropping it releases the resource, this is the
 /// mechanism real processors rely on, so cancellation safety means "every
 /// guard is dropped", which is observable as the counter returning to zero.
 struct InflightGuard {
@@ -403,7 +403,7 @@ async fn test_async_cancellation_safety() {
             // Long awaits: every task is guaranteed to be parked here when
             // aborted, so the guard's Drop is the only cleanup that runs.
             tokio::time::sleep(Duration::from_secs(60)).await;
-            // Never reached — a task that resumed here would double-release
+            // Never reached, a task that resumed here would double-release
             // via drop AND this manual decrement:
             counter.fetch_sub(1, Ordering::SeqCst);
         }));

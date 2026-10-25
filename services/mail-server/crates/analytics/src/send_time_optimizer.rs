@@ -44,7 +44,7 @@ pub struct SendTimeOptimizer {
 const TENANT_OFFSET_TTL: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// One recipient in a batch optimal-window read (see
-/// [`SendTimeOptimizer::optimal_windows_batch`]) — the campaign drain's page
+/// [`SendTimeOptimizer::optimal_windows_batch`]), the campaign drain's page
 /// entry.
 #[derive(Debug, Clone)]
 pub struct BatchWindowRequest {
@@ -99,7 +99,7 @@ impl SendTimeOptimizer {
     /// Get optimal send window for a recipient in the TENANT'S timezone (F5).
     ///
     /// The hour buckets are meaningless in UTC for non-UTC recipients, so the
-    /// tenant's offset (from `tenants.settings` — see
+    /// tenant's offset (from `tenants.settings`, see
     /// [`utc_offset_minutes_from_settings`]) shifts both the hour extraction
     /// and the cold-start hour; the result labels the applied offset.
     ///
@@ -120,7 +120,7 @@ impl SendTimeOptimizer {
     /// (minutes).
     ///
     /// Used when a caller holds a more specific timezone than the tenant
-    /// record — the campaign send path passes `settings.timezone` here, the
+    /// record, the campaign send path passes `settings.timezone` here, the
     /// documented "IANA timezone used to interpret send-time-optimization
     /// windows" knob. `None` resolves the offset from `tenants.settings`.
     pub async fn get_optimal_window_for_tenant_with_offset(
@@ -166,7 +166,7 @@ impl SendTimeOptimizer {
     /// a claimed campaign page: ONE grouped profile read per DISTINCT applied
     /// offset (histogram AND profile age in the same GROUP BY) plus at most
     /// ONE `tenants.settings` read per unseen tenant (the same in-process
-    /// offset cache the single-recipient path uses) — instead of two event
+    /// offset cache the single-recipient path uses), instead of two event
     /// queries per recipient.
     ///
     /// Returns one result per request, ALIGNED with `requests` (a caller may
@@ -176,8 +176,8 @@ impl SendTimeOptimizer {
     /// through to the result cache when one is configured; a Redis-less
     /// optimizer (test harness) behaves identically.
     ///
-    /// The profile read is tenant-scoped per recipient — `(tenant_id,
-    /// recipient)` pairs — so the same address under a different tenant can
+    /// The profile read is tenant-scoped per recipient, `(tenant_id,
+    /// recipient)` pairs, so the same address under a different tenant can
     /// never contribute events (the wave-G contract, batched).
     pub async fn optimal_windows_batch(
         &self,
@@ -352,7 +352,7 @@ impl SendTimeOptimizer {
     /// No existing key convention was found in the settings readers
     /// (`billingCurrency` camelCase is the closest precedent), so BOTH a
     /// `timezone` IANA name and an explicit `utc_offset_minutes` number are
-    /// supported — see [`utc_offset_minutes_from_settings`]. Unknown tenants
+    /// supported, see [`utc_offset_minutes_from_settings`]. Unknown tenants
     /// or absent keys default to 0 (UTC), never an error:the optimizer must
     /// still produce a window.
     async fn tenant_utc_offset_minutes(&self, tenant_id: &str) -> anyhow::Result<i32> {
@@ -396,7 +396,7 @@ impl SendTimeOptimizer {
         let rows = sqlx::query_as::<_, (i32, i32, i64)>(
             // ISODOW is 1=Monday..7=Sunday; the engine's DAY_PRIORS are
             // 0=Monday..6=Sunday, so subtract 1. (Postgres DOW would be
-            // 0=Sunday — the old expression shifted every day bucket by one.)
+            // 0=Sunday, the old expression shifted every day bucket by one.)
             "SELECT EXTRACT(HOUR FROM (timestamp AT TIME ZONE 'UTC') \
                  + make_interval(mins => $3))::int as hour, \
              (EXTRACT(ISODOW FROM (timestamp AT TIME ZONE 'UTC') \
@@ -495,7 +495,7 @@ impl SendTimeOptimizer {
 ///
 /// The window was computed in the tenant's local time; `utc_offset_minutes`
 /// is the same offset the profile was bucketed with. The search looks at most
-/// seven days ahead — a window always recurs within a week — and returns an
+/// seven days ahead, a window always recurs within a week, and returns an
 /// exact minute boundary (seconds and below zeroed). `offset_minutes` is
 /// applied as a fixed offset: the engine standardises on a single offset per
 /// tenant (see `utc_offset_minutes_from_settings`), so no DST history is
@@ -574,7 +574,7 @@ pub fn compute_optimal_windows(profile: &RecipientProfile) -> Vec<OptimalSendWin
 /// [`compute_optimal_windows`] with the tenant's UTC offset applied (F5).
 ///
 /// The profile's hour distribution must already be LOCAL (built with the
-/// same offset — see `build_recipient_profile`); the offset here shifts the
+/// same offset, see `build_recipient_profile`); the offset here shifts the
 /// cold-start hour, whose constant is defined in UTC, into local time.
 /// `HOUR_PRIORS`/`DAY_PRIORS` model human behaviour in LOCAL time and need
 /// no shift.
@@ -637,7 +637,7 @@ pub fn compute_optimal_windows_at_offset(
 }
 
 /// The UTC cold-start hour (10:00) expressed in local time under the given
-/// offset, wrapped into 0..=24 hours. The day bucket stays put — a cold
+/// offset, wrapped into 0..=24 hours. The day bucket stays put, a cold
 /// start has no data to justify a weekday shift.
 fn local_cold_start_hour(utc_offset_minutes: i32) -> u32 {
     let minutes = COLD_START_HOUR as i64 * 60 + utc_offset_minutes as i64;
@@ -648,18 +648,18 @@ fn local_cold_start_hour(utc_offset_minutes: i32) -> u32 {
 ///
 /// No key convention existed among the settings readers, so both spellings
 /// are supported (in this precedence):
-/// 1. `timezone` — IANA name (`"Europe/Tallinn"`), resolved via chrono-tz
+/// 1. `timezone`, IANA name (`"Europe/Tallinn"`), resolved via chrono-tz
 ///    to the offset in effect NOW (per-event DST history is out of scope for
 ///    hour-bucket histograms; the label on the result makes the applied
 ///    offset visible). An unresolvable name falls through to (2).
-/// 2. `utc_offset_minutes` — explicit number (e.g. `120`), rounded.
+/// 2. `utc_offset_minutes`, explicit number (e.g. `120`), rounded.
 /// 3. Default `0` (UTC).
 ///
 /// Out-of-range values (|offset| > 24 h) are treated as unset.
 pub fn utc_offset_minutes_from_settings(settings: &serde_json::Value) -> i32 {
     if let Some(name) = settings.get("timezone").and_then(|v| v.as_str()) {
         if let Ok(tz) = name.parse::<chrono_tz::Tz>() {
-            // `local_minus_utc` is in SECONDS — convert to the minutes unit
+            // `local_minus_utc` is in SECONDS, convert to the minutes unit
             // this module (and `utc_offset_minutes`) standardises on.
             return Utc::now()
                 .with_timezone(&tz)
@@ -823,7 +823,7 @@ mod tests {
 
     #[test]
     fn test_settings_offset_iana_name_resolves() {
-        // Europe/Tallinn is UTC+2 in winter / UTC+3 in summer — either is a
+        // Europe/Tallinn is UTC+2 in winter / UTC+3 in summer, either is a
         // valid DST offset; assert it round-trips to one of those.
         let settings = serde_json::json!({ "timezone": "Europe/Tallinn" });
         let offset = utc_offset_minutes_from_settings(&settings);

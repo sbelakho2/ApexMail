@@ -37,7 +37,7 @@ pub struct RetryConfig {
     pub max_retries: u32,
     /// Base delay of the retry schedule. SM10 F16: aligned with the email
     /// processor's actual soft-bounce base (`ProcessorConfig::retry_delay`,
-    /// 30 s) — this service mirrors that behavior, it does not invent its
+    /// 30 s), this service mirrors that behavior, it does not invent its
     /// own schedule.
     pub initial_delay_secs: u64,
     /// Upper clamp for absurd operator configs; with the aligned defaults
@@ -49,7 +49,7 @@ pub struct RetryConfig {
     /// Deprecated, retained for configuration-file compatibility
     /// (`deny_unknown_fields` rejects removal): no longer read. Greylisted
     /// responses follow the SAME exponential schedule as every other 4xx,
-    /// matching the email processor (SM10 F16) — the previous fixed 300 s
+    /// matching the email processor (SM10 F16), the previous fixed 300 s
     /// greylist promise was never honored by any delivery path.
     pub greylist_retry_delay_secs: u64,
 }
@@ -182,7 +182,7 @@ impl Default for ClamAVConfig {
             port: 3310,
             timeout_secs: 30,
             enabled: true,
-            chunk_size: 8192, // 8 KB — ClamAV recommended default
+            chunk_size: 8192, // 8 KB, ClamAV recommended default
         }
     }
 }
@@ -227,7 +227,7 @@ impl EdgeCasesConfig {
                 ));
             }
             tracing::warn!(
-                "SECURITY: EDGE_CASES_ALLOW_ANONYMOUS=true — edge-cases protected routes are \
+                "SECURITY: EDGE_CASES_ALLOW_ANONYMOUS=true, edge-cases protected routes are \
                  UNAUTHENTICATED. Never enable this in production."
             );
         }

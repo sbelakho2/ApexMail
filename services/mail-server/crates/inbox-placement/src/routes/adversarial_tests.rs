@@ -469,7 +469,7 @@ async fn report_attaches_the_tenant_scoped_analytics_summary() {
         body.0
     );
 
-    // Without a client the key exists but is null — never a fabricated
+    // Without a client the key exists but is null, never a fabricated
     // all-zero "healthy" block.
     let plain = state(db.clone());
     let (status, body) = get_placement_test(plain, tenant.clone(), test_id).await;

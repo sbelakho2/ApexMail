@@ -1,27 +1,27 @@
-//! WP F12/F9 — the reply auto-send PROMOTION surface (owner-only).
+//! WP F12/F9, the reply auto-send PROMOTION surface (owner-only).
 //!
 //! The operating model: autonomy moves only through the promotion gates in
 //! WP F12, and promoting autonomy is an owner act. This module is that act for
 //! the reply pipeline: a per-`(tenant, reply class)` enablement row
 //! (`reply_autosend_grants`, migration 259) that may be switched ON only
 //!
-//!   * by a live OWNER — the structural `require_sales_owner` layer around
+//!   * by a live OWNER, the structural `require_sales_owner` layer around
 //!     `/v1/admin/autopilot` admits only a human control-plane session of the
 //!     system tenant whose live `users.role` is exactly `owner`, and the gate
 //!     function itself re-verifies that role inside the write transaction
 //!     (`OwnerActor::verify`), so an agent path or a machine credential
 //!     reaching this module by any route still cannot enable anything;
-//!   * with RECORDED EVIDENCE — the class's approvals are counted live from
+//!   * with RECORDED EVIDENCE, the class's approvals are counted live from
 //!     `audit_logs` (the rows the approval transaction writes) and the
 //!     window's complaints/opt-outs from `sales_reply_classifications`;
 //!     an unsatisfied bar refuses the enablement with the numbers;
-//!   * default OFF — no row means no autonomy, and a read can never create
+//!   * default OFF, no row means no autonomy, and a read can never create
 //!     one.
 //!
 //! Revocation is the per-class kill switch: it flips `enabled` back to FALSE
 //! and keeps the row (the captured evidence stays on record). Both mutations
 //! write their actor-attributed audit row INSIDE the same transaction as the
-//! grant change — a promotion either happens fully on record or not at all.
+//! grant change, a promotion either happens fully on record or not at all.
 
 use axum::extract::{Query, State};
 use axum::routing::{get, post};
@@ -131,7 +131,7 @@ pub struct RevokeRequest {
     pub reply_class: String,
 }
 
-/// Promote one `(tenant, reply class)` to autonomous sending — an owner act,
+/// Promote one `(tenant, reply class)` to autonomous sending, an owner act,
 /// backed by the class's recorded approvals at this instant.
 async fn post_enable(
     State(state): State<AppState>,
@@ -391,7 +391,7 @@ mod promotion_tests {
                   is_verp_reply, received_at, classification, classification_confidence, \
                   processed, processed_at) \
              VALUES ($1, $2, $3, 'Re: demo', \
-                     'Thursday 10:00 works for us — shall I send an invite?', \
+                     'Thursday 10:00 works for us, shall I send an invite?', \
                      true, false, NOW(), 'meeting_request', 0.95, true, NOW())",
         )
         .bind(id)

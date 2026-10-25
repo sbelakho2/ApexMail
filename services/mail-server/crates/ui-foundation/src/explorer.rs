@@ -54,7 +54,7 @@ fn body_is_char_boundary(s: &str, idx: usize) -> bool {
 
 /// The marketing origin these sandbox pages belong to. They are served from
 /// the API origin (`api.apexmail.ee`), where none of the marketing paths
-/// exist — a relative "back" link 404s (review §5.1 explorer.rs: "use
+/// exist, a relative "back" link 404s (review §5.1 explorer.rs: "use
 /// configured marketing-origin return links").
 const MARKETING_ORIGIN: &str = "https://apexmail.ee";
 
@@ -152,7 +152,7 @@ fn sandbox_shell(title: &str, back_href: &str, back_label: &str, body: &str) -> 
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex">
-<title>{title} — ApexMail Sandbox</title>
+<title>{title} | ApexMail Sandbox</title>
 <style>{fallback}</style>
 </head>
 <body>
@@ -436,7 +436,7 @@ pub fn grader_response_page(result: &serde_json::Value) -> String {
     {breakdown_section}
     {findings_section}
     {recs_section}
-    <p class="apex-footnote">Computed live by the ApexMail Email Grader with real DNS lookups — SPF, DKIM, DMARC, MX and blocklists. Domain-only readiness check; run the full email grader from the console for message-level analysis.</p>
+    <p class="apex-footnote">Computed live by the ApexMail Email Grader with real DNS lookups, SPF, DKIM, DMARC, MX and blocklists. Domain-only readiness check; run the full email grader from the console for message-level analysis.</p>
   </div>
 </div>"#,
         domain = esc(domain),
@@ -468,7 +468,7 @@ pub fn grader_error_page(domain: &str, code: &str, message: &str) -> String {
   <div class="apex-evidence__bar"><span class="apex-method">GRADE</span><span class="apex-mono">{domain}</span><span class="apex-label" style="border:0;padding:0;margin:0">Domain check</span></div>
   <div class="apex-evidence__body">
     <div class="apex-notice"><b>{code}</b><p>{message}</p></div>
-    <p class="apex-meta">Enter a domain you send from — for example <span class="apex-mono">yourcompany.com</span>.</p>
+    <p class="apex-meta">Enter a domain you send from, for example <span class="apex-mono">yourcompany.com</span>.</p>
     <form method="POST" action="/explorer/grade" class="apex-field">
       <label for="grade-retry-domain">Domain</label>
       <input id="grade-retry-domain" type="text" name="domain" value="{domain_value}" required autocomplete="off" autocapitalize="none" spellcheck="false" class="apex-input" />

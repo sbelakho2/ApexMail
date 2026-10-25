@@ -499,7 +499,7 @@ async fn export(
                 .execute(&db)
                 .await
                 {
-                    tracing::error!(job_id = %job_id, error = %db_err, "Failed to mark export job as failed — job will be stuck");
+                    tracing::error!(job_id = %job_id, error = %db_err, "Failed to mark export job as failed, job will be stuck");
                 }
             }
             Err(_panic) => {
@@ -512,7 +512,7 @@ async fn export(
                 .execute(&db)
                 .await
                 {
-                    tracing::error!(job_id = %job_id, error = %db_err, "Failed to mark panicked export job as failed — job will be stuck");
+                    tracing::error!(job_id = %job_id, error = %db_err, "Failed to mark panicked export job as failed, job will be stuck");
                 }
             }
         }
@@ -541,7 +541,7 @@ async fn process_analytics_export(
 
     // Query analytics data. Written against the real `messages` schema
     // (migration 073 / runtime CREATE_MESSAGES): id UUID, subject TEXT,
-    // to_emails JSONB, created_at TIMESTAMPTZ — the previous query selected
+    // to_emails JSONB, created_at TIMESTAMPTZ, the previous query selected
     // nonexistent columns (m.message_id, m.recipient, m.sent_at) and keyed
     // the events join on them, so every export failed.
     let rows: Vec<ExportRow> = sqlx::query_as(
@@ -681,7 +681,7 @@ fn export_object_key(tenant_id: &str, job_id: uuid::Uuid, format: &str) -> Strin
     )
 }
 
-/// On-disk file name for a storage key (flat, no subdirectories — the key
+/// On-disk file name for a storage key (flat, no subdirectories, the key
 /// separator is flattened so a crafted key can never traverse paths).
 fn export_file_name(key: &str) -> String {
     key.replace('/', "_")
@@ -708,7 +708,7 @@ async fn store_export_file(key: &str, content: &[u8]) -> anyhow::Result<()> {
     tokio::fs::create_dir_all(&export_dir).await?;
 
     // Set restrictive permissions on the directory (owner only) on the
-    // blocking pool — std::fs::set_permissions blocks the runtime thread.
+    // blocking pool, std::fs::set_permissions blocks the runtime thread.
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -728,7 +728,7 @@ async fn store_export_file(key: &str, content: &[u8]) -> anyhow::Result<()> {
 #[derive(sqlx::FromRow, Serialize)]
 struct ExportRow {
     message_id: String,
-    /// Nullable on the table (messages written without a subject) — a
+    /// Nullable on the table (messages written without a subject), a
     /// NULL must not fail the whole export (previously `String`, which
     /// made any subject-less message decode-error the job).
     subject: Option<String>,
@@ -790,7 +790,7 @@ struct ExportJobRow {
     error_message: Option<String>,
 }
 
-/// `GET /analytics/export/:job_id/download` — streams a completed export
+/// `GET /analytics/export/:job_id/download`, streams a completed export
 /// artifact from the exports volume (L-28). Tenant-scoped: the job must
 /// belong to the caller's tenant, be completed, and be inside its 24h
 /// download window.
@@ -933,7 +933,7 @@ async fn export_pdf(
     let (from, to) = resolve_analytics_range(params.from, params.to)?;
 
     // Gather summary data for the PDF template. Sent/delivered/bounced come
-    // from message statuses; opens/clicks come from the events table — the
+    // from message statuses; opens/clicks come from the events table, the
     // previous query counted `messages.status = 'opened'/'clicked'`, statuses
     // that never exist, so PDFs always reported zero engagement.
     let counts = sqlx::query_as::<_, DashboardCountsRow>(
@@ -1020,7 +1020,7 @@ async fn export_pdf(
     // below bounds the render round-trip.
     // P1 #6 per-workload credential: once PDF_RENDERER_AUTH_TOKEN is
     // configured, pdf-renderer accepts EXACTLY it (the universal
-    // INTERNAL_SERVICE_TOKEN is refused, loudly logged) — so the dedicated
+    // INTERNAL_SERVICE_TOKEN is refused, loudly logged), so the dedicated
     // token must ride the request when present, universal token only as the
     // legacy fallback. A configured-but-empty value sends no header (an
     // empty credential would 401 anyway).
@@ -1228,7 +1228,7 @@ mod tests {
         let _guard = EXPORT_ENV_MUTEX.lock().await;
 
         let dir =
-            std::env::temp_dir().join(format!("apexmail-export-test-{}", uuid::Uuid::new_v4())); // nosemgrep: rust.lang.security.temp-dir.temp-dir — test fixture under a unique pid/uuid path — no predictable-name temp collision
+            std::env::temp_dir().join(format!("apexmail-export-test-{}", uuid::Uuid::new_v4())); // nosemgrep: rust.lang.security.temp-dir.temp-dir, test fixture under a unique pid/uuid path, no predictable-name temp collision
         std::fs::create_dir_all(&dir).unwrap();
         std::env::set_var("EXPORT_STORAGE_PATH", &dir);
 
@@ -1287,7 +1287,7 @@ mod adversarial_tests {
     /// A canonical database dedicated to ONE test. `fresh_canonical_pool`
     /// drops + recreates + migrates it, so the name only needs to be unique
     /// per test (and per process under nextest, where every test is its own
-    /// process — hence the pid in the shared prefix is unnecessary).
+    /// process, hence the pid in the shared prefix is unnecessary).
     async fn pool_for(test_name: &str) -> Option<PgPool> {
         crate::test_db::canonical_pool(&format!("adv_analytics_{test_name}")).await
     }
@@ -1384,7 +1384,7 @@ mod adversarial_tests {
         })
     }
 
-    /// RFC 3339 with `Z` — `+00:00` would decode to a space in a query
+    /// RFC 3339 with `Z`, `+00:00` would decode to a space in a query
     /// string and turn every ranged request into a 400.
     fn rfc(dt: DateTime<Utc>) -> String {
         dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
@@ -2036,7 +2036,7 @@ mod adversarial_tests {
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
         let (status, _) = post_json(&h, path, Some("application/json"), r#"{"subject":42}"#).await;
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
-        // Duplicate keys are refused by serde's struct deserializer — no
+        // Duplicate keys are refused by serde's struct deserializer, no
         // "last one wins" ambiguity for a body the analyzer scores.
         let (status, _) = post_json(
             &h,
@@ -2048,7 +2048,7 @@ mod adversarial_tests {
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
 
         // Empty / whitespace-only subjects are refused. (U+200B is NOT
-        // Unicode whitespace, so it is data — asserted below, not here.)
+        // Unicode whitespace, so it is data, asserted below, not here.)
         for subject in ["", "   ", "\t\n"] {
             let (status, body) = post_json(
                 &h,
@@ -2150,7 +2150,7 @@ mod adversarial_tests {
         let Some(h) = harness("export_lifecycle").await else {
             return;
         };
-        let dir = std::env::temp_dir().join(format!("adv-analytics-{}", uuid::Uuid::new_v4())); // nosemgrep: rust.lang.security.temp-dir.temp-dir — test fixture under a unique pid/uuid path — no predictable-name temp collision
+        let dir = std::env::temp_dir().join(format!("adv-analytics-{}", uuid::Uuid::new_v4())); // nosemgrep: rust.lang.security.temp-dir.temp-dir, test fixture under a unique pid/uuid path, no predictable-name temp collision
         let _guard = lock_export_env().await;
         std::env::set_var("EXPORT_STORAGE_PATH", &dir);
 
@@ -2409,7 +2409,7 @@ mod adversarial_tests {
         let Some(pool) = pool_for("export_endpoint").await else {
             return;
         };
-        let dir = std::env::temp_dir().join(format!("adv-analytics-ep-{}", uuid::Uuid::new_v4())); // nosemgrep: rust.lang.security.temp-dir.temp-dir — test fixture under a unique pid/uuid path — no predictable-name temp collision
+        let dir = std::env::temp_dir().join(format!("adv-analytics-ep-{}", uuid::Uuid::new_v4())); // nosemgrep: rust.lang.security.temp-dir.temp-dir, test fixture under a unique pid/uuid path, no predictable-name temp collision
         let _guard = lock_export_env().await;
         std::env::set_var("EXPORT_STORAGE_PATH", &dir);
 
@@ -2566,7 +2566,7 @@ mod adversarial_tests {
         let _guard = lock_pdf_env().await;
 
         // Local mock renderer: first call succeeds with a PDF, later calls
-        // fail — both branches of the renderer contract are asserted.
+        // fail, both branches of the renderer contract are asserted.
         let calls = Arc::new(AtomicUsize::new(0));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();

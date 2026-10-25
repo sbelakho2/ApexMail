@@ -32,9 +32,9 @@ This page defines every performance metric published by ApexMail, including how 
 | Numerator | Messages that complete processing with status `processed` or `queued_for_delivery` |
 | Denominator | Total messages accepted into the processing pipeline (API Acceptance count) |
 | When a message counts as "processed" | When it has passed internal validation, template rendering, recipient resolution, and is handed to the delivery engine or queued for outbound delivery |
-| Do queued messages count? | Yes — a message queued for delivery is considered successfully processed from the pipeline perspective. Delivery to recipient server is tracked separately (see §1.3) |
-| Do delayed messages count? | Yes — delayed messages are still processed; they are not failures |
-| Does provider rejection count? | No — if the message is rejected by the internal pipeline (e.g., policy violation, blocklist match), it is not counted as successfully processed |
+| Do queued messages count? | Yes, a message queued for delivery is considered successfully processed from the pipeline perspective. Delivery to recipient server is tracked separately (see §1.3) |
+| Do delayed messages count? | Yes, delayed messages are still processed; they are not failures |
+| Does provider rejection count? | No, if the message is rejected by the internal pipeline (e.g., policy violation, blocklist match), it is not counted as successfully processed |
 | Do internal retries count? | A retried message counts once (when first enqueued). Retry attempts are not double-counted |
 | Measurement period | Rolling 30 days |
 | Data source | Queue processor metrics (Prometheus counter `pipeline_messages_processed_total` / `pipeline_messages_accepted_total`) |
@@ -75,7 +75,7 @@ Any published API latency number must specify the exact measurement boundaries.
 | Metric type | p50 (median), p95, p99 |
 | Sample size | All API requests in the measurement period |
 | Sample period | Rolling 30 days |
-| Regions | All regions where API servers are deployed (EU — Helsinki) |
+| Regions | All regions where API servers are deployed (EU, Helsinki) |
 | Included requests | All authenticated API requests (any HTTP method, any endpoint) |
 | Excluded requests | Health-check probes, unauthenticated requests, rate-limited requests (HTTP 429) |
 | Measurement | Server-side timing via Prometheus histogram `http_request_duration_seconds` |
@@ -86,7 +86,7 @@ Any published API latency number must specify the exact measurement boundaries.
 
 **Prohibited public statements**:
 
-> Average API latency is under Xms. _(Must specify p50/p95/p99 — "average" is ambiguous.)_
+> Average API latency is under Xms. _(Must specify p50/p95/p99, "average" is ambiguous.)_
 
 > API responds in under Xms. _(Must specify what start and end events measure and exclude network round-trip.)_
 
@@ -122,15 +122,15 @@ Uptime is measured per component, not as a single global number. Each component 
 
 | Component | Definition | Uptime Measurement |
 |---|---|---|
-| **REST API** | `api.apexmail.com` — all API endpoints (HTTP 2xx on `/health`, `/v1/health`) | External probe; SSL certificate validity also checked |
-| **SMTP Relay** | `smtp.apexmail.com:587` — SMTP STARTTLS handshake and banner response | External probe; SMTP connection, banner, and STARTTLS negotiation |
-| **Dashboard** | `app.apexmail.com` — web dashboard application | External probe; HTTP 2xx on login page and authenticated health endpoint |
-| **Authentication** | `api.apexmail.com/auth` — login, token refresh, SSO | External probe; HTTP 2xx on auth health endpoint |
+| **REST API** | `api.apexmail.com`, all API endpoints (HTTP 2xx on `/health`, `/v1/health`) | External probe; SSL certificate validity also checked |
+| **SMTP Relay** | `smtp.apexmail.com:587`, SMTP STARTTLS handshake and banner response | External probe; SMTP connection, banner, and STARTTLS negotiation |
+| **Dashboard** | `app.apexmail.com`, web dashboard application | External probe; HTTP 2xx on login page and authenticated health endpoint |
+| **Authentication** | `api.apexmail.com/auth`, login, token refresh, SSO | External probe; HTTP 2xx on auth health endpoint |
 | **Queue Processing** | Internal message queue consumer health (queue depth, processing latency) | Internal probe; queue depth within threshold, consumer process running |
 | **Delivery Engine** | Outbound SMTP delivery workers | Internal probe; delivery worker count above minimum, no stalled workers |
 | **Webhooks** | Outbound webhook delivery service | External probe; HTTP 2xx on webhook health endpoint; webhook dispatch latency within threshold |
-| **Documentation** | `docs.apexmail.com` — API and guide documentation | External probe; HTTP 2xx on documentation home page |
-| **Status Page** | `status.apexmail.com` — public status dashboard | External probe; independently hosted and monitored separately |
+| **Documentation** | `docs.apexmail.com`, API and guide documentation | External probe; HTTP 2xx on documentation home page |
+| **Status Page** | `status.apexmail.com`, public status dashboard | External probe; independently hosted and monitored separately |
 | **Billing** | Billing API and invoice generation | Internal probe; billing service reachable, no stalled invoice jobs |
 | **Private Cloud Control Plane** | Management API for Private Cloud deployments | Internal probe (where applicable); control plane API responding |
 
@@ -170,9 +170,9 @@ Uptime is measured per component, not as a single global number. Each component 
 
 | Location | Provider | Type |
 |---|---|---|
-| Helsinki, Finland | Hetzner | Primary — same region as production infrastructure |
-| Frankfurt, Germany | Hetzner | Secondary — independent region |
-| Amsterdam, Netherlands | Independent VPS | Tertiary — fully independent infrastructure |
+| Helsinki, Finland | Hetzner | Primary, same region as production infrastructure |
+| Frankfurt, Germany | Hetzner | Secondary, independent region |
+| Amsterdam, Netherlands | Independent VPS | Tertiary, fully independent infrastructure |
 
 ---
 
@@ -182,7 +182,7 @@ The following are excluded from performance calculations:
 
 - **Test traffic**: Messages sent to test domains, sandbox environments, or internal test recipients.
 - **Customer misconfiguration**: Failures caused by missing DNS records (SPF, DKIM, DMARC), unverified domains, or incorrect API key usage.
-- **Recipient issues**: Full mailbox, invalid recipient address, recipient server policy rejection — these are counted in bounce metrics, not performance metrics.
+- **Recipient issues**: Full mailbox, invalid recipient address, recipient server policy rejection, these are counted in bounce metrics, not performance metrics.
 - **Force majeure events**: Events qualifying as force majeure under the Terms of Service (natural disasters, internet backbone failures, DDoS attacks exceeding mitigation capacity).
 - **Scheduled maintenance**: Published maintenance windows with at least 48 hours' notice.
 

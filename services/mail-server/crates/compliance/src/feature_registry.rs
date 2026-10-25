@@ -571,7 +571,7 @@ pub fn seed_feature_registry() -> FeatureRegistry {
         customer_outcome: "Organise sending under separate subaccounts with independent quotas, domains, and API keys.".into(),
         definition: "Hierarchical subaccount model with per-subaccount quotas, domain isolation, API key scoping, and consolidated billing. Subaccount users cannot access other subaccounts.".into(),
         status: FeatureStatus::Planned,
-        // Sold on Business and Enterprise Cloud only — the canonical
+        // Sold on Business and Enterprise Cloud only, the canonical
         // catalog sells `subaccounts` on `scale` (Business, ceiling 10) and
         // `enterprise` (unlimited); the earlier "Growth 5 / Business 25 /
         // Enterprise 50" text contradicted the runtime seeds.
@@ -726,7 +726,7 @@ pub fn seed_feature_registry() -> FeatureRegistry {
     registry.register(FeatureRecord {
         feature_id: "FEAT-028".into(),
         public_name: "EU-only Routing".into(),
-        customer_outcome: "Keep outbound mail on ApexMail's own EU MTAs — no third-party transport — with a held message (not a fallback) whenever that route is unavailable.".into(),
+        customer_outcome: "Keep outbound mail on ApexMail's own EU MTAs, no third-party transport, with a held message (not a fallback) whenever that route is unavailable.".into(),
         definition: "Per-tenant delivery routing mode (`tenants.settings.routingMode`: `global` | `eu_only`). Under `eu_only` the worker sends exclusively through ApexMail's own relay MTAs; the shared third-party transport (SES) is forbidden and an unavailable own-MTA route HOLDS the message in queue (`deferred`, named reason, audit evidence) instead of failing over. Activation is entitlement-gated (`eu_only_routing`): included on Enterprise Cloud and the Compliance contract line; sold as the €149/$165 per-month add-on on self-serve Pro and above.".into(),
         status: FeatureStatus::GA,
         minimum_plan: FeaturePlan::Pro,

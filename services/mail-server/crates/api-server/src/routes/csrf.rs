@@ -109,7 +109,7 @@ pub fn validate_csrf_token(token: &str, secret: &str) -> Result<(), ApiError> {
     mac.verify_slice(&sig_bytes)
         .map_err(|_| ApiError::Forbidden("CSRF token validation failed".into()))?;
 
-    // Check timestamp: tokens are valid for 1 hour, and — audit J — a token
+    // Check timestamp: tokens are valid for 1 hour, and, audit J, a token
     // stamped MORE than `CSRF_MAX_FUTURE_SKEW_MS` into the future is rejected
     // outright. Previously only the lower bound was enforced, so a token
     // minted with a far-future timestamp (e.g. by a client with a spoofed

@@ -1,11 +1,11 @@
-//! Response verifier — deterministic checks on LLM output before returning to user.
+//! Response verifier, deterministic checks on LLM output before returning to user.
 //!
 //! Implements Stage 3 of the 3-stage pipeline:
-//!   1. Pricing accuracy — every euro amount must match canonical pricing
-//!   2. Safety boundaries — no internal info, no prompt injection compliance
-//!   3. URL validation — only apexmail.ee domains allowed
-//!   4. Response quality — length, repetition, PII detection
-//!   5. Claim support (P1-GROUNDING) — every atomic factual claim must be
+//!   1. Pricing accuracy, every euro amount must match canonical pricing
+//!   2. Safety boundaries, no internal info, no prompt injection compliance
+//!   3. URL validation, only apexmail.ee domains allowed
+//!   4. Response quality, length, repetition, PII detection
+//!   5. Claim support (P1-GROUNDING), every atomic factual claim must be
 //!      supported by canonical facts, account context, tool output, or a
 //!      cited retrieved chunk with meaningful lexical overlap
 //!
@@ -17,14 +17,14 @@ use regex::Regex;
 use std::collections::HashSet;
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Canonical pricing — must match docs/pricing.md and prompts_v2.py exactly
+// Canonical pricing, must match docs/pricing.md and prompts_v2.py exactly
 // ═══════════════════════════════════════════════════════════════════════════
 
 // Canonical values come from the knowledge module (single source of truth
 // shared with the prompt builders) so the verifier can never drift from
 // what the model was told.
 // Canonical values DERIVED from `platform-catalog` (the source the billing
-// runtime seeds from) via the knowledge module — the verifier can never
+// runtime seeds from) via the knowledge module, the verifier can never
 // bless a stale price or reject a real one. Owner price table 2026-10-15:
 // Developer €20 (was €29), Pro €89, Growth €229, Business €699,
 // Enterprise Cloud €1,750. Overage: Developer €0.80/1K, Pro €0.60/1K,
@@ -45,7 +45,7 @@ const CANONICAL_RATES: &[f64] = &[
 const ALLOWED_DOMAINS: &[&str] = crate::knowledge::ALLOWED_HOSTS;
 
 /// The local tables above must equal the knowledge module's canonical
-/// values — enforced by `canonical_tables_match_knowledge` in the tests.
+/// values, enforced by `canonical_tables_match_knowledge` in the tests.
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Verdict types
@@ -102,7 +102,7 @@ pub enum Violation {
         claim: String,
     },
     /// Fix #17/#18: a `[n]` citation marker in an answer produced while docs
-    /// retrieval was UNAVAILABLE — there is no chunk the marker could map to,
+    /// retrieval was UNAVAILABLE, there is no chunk the marker could map to,
     /// so the citation is unsupported by construction.
     UnavailableCitation {
         claim: String,
@@ -134,7 +134,7 @@ impl std::fmt::Display for Violation {
             ),
             Self::UnavailableCitation { claim } => write!(
                 f,
-                "citation marker while documentation retrieval is unavailable — the cited \
+                "citation marker while documentation retrieval is unavailable, the cited \
                  passage could not be consulted, so the citation is unsupported: {claim:?}"
             ),
         }
@@ -187,11 +187,11 @@ pub struct Grounding<'a> {
     pub tool_output: &'a str,
     /// Retrieved passages in prompt order: chunk `i` is cited as `[i+1]`.
     pub chunks: &'a [RetrievedChunk],
-    /// Fix #17/#18 — retrieval Unavailable mode. The docs index could not be
+    /// Fix #17/#18, retrieval Unavailable mode. The docs index could not be
     /// consulted, so cited-chunk provenance is IMPOSSIBLE by construction:
     /// any `[n]` citation marker in the answer is unsupported (nothing was
     /// retrieved to cite), and provenance ladder (d) never applies. Canonical
-    /// facts / account context / tool output remain valid sources — they are
+    /// facts / account context / tool output remain valid sources, they are
     /// in-process data, not served by the broken index.
     pub retrieval_unavailable: bool,
 }
@@ -215,7 +215,7 @@ impl ResponseVerifier {
     /// deterministic tools computed must not be rejected as "forbidden"
     /// prices merely because they are not plan prices.
     ///
-    /// This is the POLICY check only — it says nothing about factual
+    /// This is the POLICY check only, it says nothing about factual
     /// grounding (P1-GROUNDING: the field consumers read is named
     /// `passed_policy_verification` for exactly this reason).
     pub fn verify_with_allowlist(&self, response: &str, allowed_totals: &[f64]) -> Verdict {
@@ -225,8 +225,8 @@ impl ResponseVerifier {
 
     /// Verify a response against its grounding sources: all policy checks
     /// PLUS the atomic-claim support check. A factual sentence whose numbers
-    /// or named entities no source accounts for — even when it carries a
-    /// `[n]` citation marker — is rejected as an [`Violation::UnsupportedClaim`].
+    /// or named entities no source accounts for, even when it carries a
+    /// `[n]` citation marker, is rejected as an [`Violation::UnsupportedClaim`].
     pub fn verify_grounded(
         &self,
         response: &str,
@@ -280,7 +280,7 @@ impl ResponseVerifier {
     /// (d) a cited retrieved chunk with meaningful lexical overlap, else the
     /// claim is UNSUPPORTED.
     ///
-    /// Fix #17/#18 — Unavailable mode ([`Grounding::retrieval_unavailable`]):
+    /// Fix #17/#18, Unavailable mode ([`Grounding::retrieval_unavailable`]):
     /// the docs index could not be consulted, so ANY `[n]` citation marker is
     /// unsupported BY CONSTRUCTION (there is no chunk n to map to) and ladder
     /// (d) is skipped entirely. Deterministic: the flag alone decides, never
@@ -296,7 +296,7 @@ impl ResponseVerifier {
             if !claim.is_factual() {
                 continue;
             }
-            // Formulaic fragments — greetings ("Hello John,"), sign-offs
+            // Formulaic fragments, greetings ("Hello John,"), sign-offs
             // ("Best regards,"), signature lines ("ApexMail AI Assistant") —
             // are not checkable assertions: a claim needs a complete
             // sentence. Without this, every legitimate email draft opened
@@ -327,7 +327,7 @@ impl ResponseVerifier {
                 continue;
             }
             // (d) the citation marker must map to a real chunk whose content
-            // overlaps the claim — the mere presence of "[1]" proves nothing.
+            // overlaps the claim, the mere presence of "[1]" proves nothing.
             // Under Unavailable retrieval it can never map: skip by flag.
             let chunk_supported = !grounding.retrieval_unavailable
                 && claim.citations.iter().any(|&marker| {
@@ -484,7 +484,7 @@ impl ResponseVerifier {
             }
         }
 
-        // Multilingual injection patterns — detect prompt injection across scripts
+        // Multilingual injection patterns, detect prompt injection across scripts
         let multilingual_patterns: &[(&str, &str)] = &[
             ("忽略之前的指令", "zh:ignore_previous"),
             ("忘记你的规则", "zh:forget_rules"),
@@ -503,7 +503,7 @@ impl ResponseVerifier {
             }
         }
 
-        // Stored XSS patterns — check for HTML entities that could encode XSS
+        // Stored XSS patterns, check for HTML entities that could encode XSS
         static HTML_XSS_RE: Lazy<Regex> = Lazy::new(|| {
             Regex::new(r"(?i)(&#x?[0-9a-f]{2,4};?\s*(?:script|iframe|svg|img|onerror|onload|onclick|javascript))").expect("valid HTML XSS regex")
         });
@@ -516,7 +516,7 @@ impl ResponseVerifier {
         // SM9 #1: RAW markup payloads, alongside the entity-encoded ones
         // above. An answer carrying literal `<script>alert(1)</script>`,
         // `<img src=x onerror=…>`, a `javascript:` URL, or an inline event
-        // handler matches none of the entity rules — the sanitizer downstream
+        // handler matches none of the entity rules, the sanitizer downstream
         // strips it, but an answer that NEEDS stripping is an answer the
         // model was manipulated into producing, so it is refused here and
         // follows the escalation ladder instead.
@@ -558,7 +558,7 @@ impl ResponseVerifier {
             let abs_pos = search_start + kw_pos;
             // Floor/ceil to char boundaries: raw byte offsets around a match
             // in multi-byte text (CJK, emoji) can land mid-char, and slicing
-            // there panics — killing the whole request.
+            // there panics, killing the whole request.
             let start = floor_to_char_boundary(&lower, abs_pos.saturating_sub(80));
             let end = ceil_to_char_boundary(&lower, abs_pos + kw_lower.len() + 80);
             let context = &lower[start..end];
@@ -567,7 +567,7 @@ impl ResponseVerifier {
             }
             search_start = abs_pos + kw_lower.len();
         }
-        // If the keyword was never found, it's not a match — allow.
+        // If the keyword was never found, it's not a match, allow.
         search_start > 0
     }
 
@@ -598,7 +598,7 @@ impl ResponseVerifier {
                 let end = without_fragment.find('/').unwrap_or(without_fragment.len());
                 &without_fragment[..end]
             } else {
-                // coverage: justified — the URL regex only admits http(s)
+                // coverage: justified, the URL regex only admits http(s)
                 // URLs, so one of the two prefixes above always strips.
                 url
             };
@@ -646,7 +646,7 @@ impl ResponseVerifier {
         // three or more times. The rule must not reject PARALLEL LISTS: a
         // multi-plan comparison ("The X plan is €Y per month, with N emails
         // per month…") repeats one structural frame while every salient
-        // token — plan name, price, limits — differs, and the previous
+        // token, plan name, price, limits, differs, and the previous
         // trigram rule flagged shared function-word frames such as
         // "per month, with" and escalated every legitimate comparison.
         if let Some(phrase) = repetition_phrase(text) {
@@ -661,7 +661,7 @@ impl ResponseVerifier {
     fn check_pii(&self, text: &str) -> Vec<Violation> {
         let mut violations = Vec::new();
 
-        // Credit card pattern — 13-16 digit sequences with optional separators
+        // Credit card pattern, 13-16 digit sequences with optional separators
         static CC_RE: Lazy<Regex> = Lazy::new(|| {
             Regex::new(r###"\b(?:\d[ -]*?){13,16}\b"###).expect("valid static CC regex")
         });
@@ -722,20 +722,20 @@ impl ResponseVerifier {
         let mut violations = Vec::new();
         let lower = text.to_lowercase();
 
-        // Uptime SLA claims — require "uptime" or "sla" in proximity (±60 chars)
+        // Uptime SLA claims, require "uptime" or "sla" in proximity (±60 chars)
         // to avoid false-positives on delivery rates, open rates, etc.
         static SLA_RE: Lazy<Regex> = Lazy::new(|| {
             Regex::new(r###"99\.9+\s*%|99\.99\s*%|100\s*%\s*uptime"###)
                 .expect("valid static SLA regex")
         });
         if let Some(m) = SLA_RE.find(&lower) {
-            // Floor/ceil to char boundaries — see is_legitimate_mention.
+            // Floor/ceil to char boundaries, see is_legitimate_mention.
             let m_start = floor_to_char_boundary(&lower, m.start().saturating_sub(60));
             let m_end = ceil_to_char_boundary(&lower, m.end() + 60);
             let sla_context = &lower[m_start..m_end];
             // Uptime context must recognize the CJK wording too: a Chinese
             // answer saying 正常运行时间 99.99% (uptime 99.99%) makes the
-            // same over-promise as the English one — the verifier grades
+            // same over-promise as the English one, the verifier grades
             // assistant output, which is not guaranteed to be English.
             let is_uptime_context = sla_context.contains("uptime")
                 || sla_context.contains("sla")
@@ -784,18 +784,18 @@ impl ResponseVerifier {
         for v in &verdict.violations {
             match v {
                 Violation::ForbiddenPrice { found, .. } => {
-                    hints.push(format!("Remove €{found} — it's not a real ApexMail plan price. Use pricing from the system prompt."));
+                    hints.push(format!("Remove €{found}, it's not a real ApexMail plan price. Use pricing from the system prompt."));
                 }
                 Violation::UnsupportedClaim { claim } => {
                     hints.push(format!(
-                        "Remove or correctly re-cite the claim {claim:?} — every factual \
+                        "Remove or correctly re-cite the claim {claim:?}, every factual \
                          statement must come from the Canonical Facts block, a cited passage, \
                          or a tool result."
                     ));
                 }
                 Violation::UnavailableCitation { claim } => {
                     hints.push(format!(
-                        "Remove the citation marker from {claim:?} — the documentation search \
+                        "Remove the citation marker from {claim:?}, the documentation search \
                          is currently unavailable, so no passage can be cited. Answer only \
                          from the Canonical Facts block and say so if that is not enough."
                     ));
@@ -1173,7 +1173,7 @@ fn normalize_number(raw: &str) -> String {
 /// Provenance (a)/(b)/(c): a source supports a claim when every number and
 /// every named entity in the claim appears in the source. Content-word overlap
 /// is intentionally NOT required for these trusted sources when the claim
-/// carries hard markers (numbers/entities) — canonical facts are terse tables
+/// carries hard markers (numbers/entities), canonical facts are terse tables
 /// and synonym paraphrases must not reject true facts. Claims that are factual
 /// PURELY through an absolute quantifier have no hard marker to match, so they
 /// need meaningful content-word overlap instead (otherwise any source would
@@ -1201,7 +1201,7 @@ fn supported_by_source(claim: &ClaimTokens, source: &Option<SourceTokens>) -> bo
 
 /// Provenance (d): a cited chunk supports a claim when the claim's numbers
 /// and named entities appear in it AND its content words meaningfully overlap
-/// — the audit's "72 hours soft bounce [1]" citation of an unrelated passage
+///, the audit's "72 hours soft bounce [1]" citation of an unrelated passage
 /// must fail here even though the marker exists.
 fn supported_by_chunk(claim: &ClaimTokens, chunk: &RetrievedChunk) -> bool {
     let chunk_text = format!("{} {} {}", chunk.path, chunk.title, chunk.snippet);
@@ -1219,11 +1219,11 @@ fn supported_by_chunk(claim: &ClaimTokens, chunk: &RetrievedChunk) -> bool {
 
 /// Split text into sentence-level atomic claims. Newlines and `!`/`?` always
 /// end a sentence; `.` ends one only when followed by whitespace or end of
-/// text — except decimals ("65.50") and single-letter abbreviations
+/// text, except decimals ("65.50") and single-letter abbreviations
 /// ("e.g.", "support@apexmail.ee.").
 /// Verbatim-clause width for the intra-sentence repetition arm. Eight words
 /// (and the content-word floor below) is long enough that a parallel list's
-/// shared frame — "emails per month", "per month, with" — never qualifies,
+/// shared frame, "emails per month", "per month, with", never qualifies,
 /// while a padded answer that restates one real clause three times still does.
 const REPETITION_WINDOW_WORDS: usize = 8;
 /// How many verbatim occurrences decide "repetition".
@@ -1237,7 +1237,7 @@ const REPETITION_MIN_CONTENT_WORDS: usize = 2;
 
 /// Lowercase, punctuation-stripped, whitespace-collapsed unit for comparison.
 /// Digits keep their grouping separators ("3,000", "€1,750") so numbers stay
-/// one token — a parallel list's numbers are the salient tokens the windows
+/// one token, a parallel list's numbers are the salient tokens the windows
 /// must remain distinct on.
 fn repetition_normalize(text: &str) -> Vec<String> {
     let mut words = Vec::new();
@@ -1345,7 +1345,7 @@ fn split_sentences(text: &str) -> Vec<String> {
                     {
                         false
                     }
-                    // Sentence end: whitespace or end of text — unless the
+                    // Sentence end: whitespace or end of text, unless the
                     // word before the dot is a single letter ("e.g.").
                     None => !word_before_is_single_letter(&current),
                     Some(' ') | Some('\t') | Some('\r') => !word_before_is_single_letter(&current),
@@ -1370,7 +1370,7 @@ fn split_sentences(text: &str) -> Vec<String> {
 }
 
 /// True when the word immediately before the trailing '.' of `current` is a
-/// single letter ("e.", "g.") — an abbreviation that must not split.
+/// single letter ("e.", "g."), an abbreviation that must not split.
 fn word_before_is_single_letter(current: &str) -> bool {
     let without_dot = current.trim_end_matches('.').trim_end();
     let last_word = without_dot
@@ -1407,7 +1407,7 @@ fn extract_euro_matches(text: &str) -> Vec<(f64, String)> {
         let amount: f64 = raw.parse().ok()?;
         let amount = (amount * 100.0).round() / 100.0;
         let m = cap.get(0).expect("capture 0 is the whole match");
-        // Floor/ceil to char boundaries — see is_legitimate_mention.
+        // Floor/ceil to char boundaries, see is_legitimate_mention.
         let start = floor_to_char_boundary(text, m.start().saturating_sub(60));
         let end = ceil_to_char_boundary(text, m.end() + 60);
         let context = text[start..end].to_string();
@@ -1508,7 +1508,7 @@ mod tests {
 
     /// SM9 #1: RAW (non-entity-encoded) markup payloads are refused, in
     /// addition to the entity-encoded ones. An answer that NEEDS stripping
-    /// was manipulated into existence — it is refused into the escalation
+    /// was manipulated into existence, it is refused into the escalation
     /// ladder, not cleaned in place (the downstream allowlist remains the
     /// unconditional backstop).
     #[test]
@@ -1745,7 +1745,7 @@ mod tests {
 
     #[test]
     fn boundary_helpers_floor_and_ceil_to_char_boundaries() {
-        // "é€世🎉" — 2, 3, 3 and 4 byte chars.
+        // "é€世🎉", 2, 3, 3 and 4 byte chars.
         let text = "é€世🎉";
         for index in 0..=text.len() {
             let floored = floor_to_char_boundary(text, index);
@@ -1771,7 +1771,7 @@ mod tests {
         // multi-byte text before the keyword the slice panicked and killed
         // the whole request. The Chinese text refuses to share the keyword,
         // but the refusal-phrase list is English, so the keyword is still
-        // flagged — the requirement is the flag arrives without a panic.
+        // flagged, the requirement is the flag arrives without a panic.
         let v = ResponseVerifier::new();
         let response = "关于您的账户问题，我们的建议如下。我不能分享database password\u{1F512}这样的内部信息，这超出我的范围。请提供更多细节以便我们协助您。";
         let verdict = v.verify(response);
@@ -1873,7 +1873,7 @@ mod tests {
     #[test]
     fn status_host_taught_by_knowledge_verifies() {
         // Regression: knowledge::ALLOWED_HOSTS listed status.apexmail.ee but
-        // the verifier's own list did not — answers citing it were rejected.
+        // the verifier's own list did not, answers citing it were rejected.
         let v = ResponseVerifier::new();
         let verdict = v.verify("Current platform status is at https://status.apexmail.ee anytime.");
         assert!(
@@ -1884,7 +1884,7 @@ mod tests {
     }
 
     /// Every violation variant renders an actionable, self-describing
-    /// message — including the grounded-evidence variants the audit added.
+    /// message, including the grounded-evidence variants the audit added.
     #[test]
     fn violation_display_is_actionable_for_every_variant() {
         let cases: Vec<(Violation, &str)> = vec![
@@ -1977,7 +1977,7 @@ mod tests {
     }
 
     /// A plan-context euro amount that is not a canonical price AND not a
-    /// canonical email limit is flagged as both — the catch-all tier of the
+    /// canonical email limit is flagged as both, the catch-all tier of the
     /// volume check never mints a fake limit.
     #[test]
     fn non_canonical_round_email_volume_in_plan_context_is_flagged() {
@@ -2012,7 +2012,7 @@ mod tests {
 
     /// Allowed hosts are examined URL-wise: fragments (`#…`) are stripped
     /// before host comparison, and plain-http ApexMail links are checked by
-    /// the same ladder — none of these shapes slip past or are misflagged.
+    /// the same ladder, none of these shapes slip past or are misflagged.
     #[test]
     fn allowed_hosts_with_fragments_and_plain_http_are_examined_not_flagged() {
         let v = ResponseVerifier::new();
@@ -2055,7 +2055,7 @@ mod tests {
 
     /// Regression (dogfood P1, corpus agent): a PARALLEL LIST is not
     /// repetition. A multi-plan comparison repeats one structural frame while
-    /// plan names and numbers differ — the old trigram rule flagged the
+    /// plan names and numbers differ, the old trigram rule flagged the
     /// shared "per month, with" frame and escalated the whole answer. Both
     /// phrasings a real model (and the mock) produce must pass.
     #[test]
@@ -2226,7 +2226,7 @@ mod grounding_tests {
         }
     }
 
-    /// Fix #17/#18: a grounding set under UNAVAILABLE docs retrieval — no
+    /// Fix #17/#18: a grounding set under UNAVAILABLE docs retrieval, no
     /// passage could be consulted, so cited-chunk provenance is impossible.
     fn grounded_unavailable<'a>(
         canonical: &'a str,
@@ -2246,7 +2246,7 @@ mod grounding_tests {
 
     /// The audit's exact shape: a claim whose `[1]` marker maps to a chunk
     /// that does NOT contain the claim's numbers ("72 hours") must be
-    /// rejected — the marker alone proves nothing. The supported sentence in
+    /// rejected, the marker alone proves nothing. The supported sentence in
     /// the same answer (warmup, which the chunk does cover) must NOT be
     /// flagged.
     #[test]
@@ -2305,7 +2305,7 @@ mod grounding_tests {
     fn canonical_fact_and_tool_backed_claims_pass_without_citations() {
         let canonical = canonical();
         // (a) canonical pricing: €89/150,000 are canonical, "Pro" a canonical
-        // plan name — no chunk, no marker needed.
+        // plan name, no chunk, no marker needed.
         let grounding = grounded(&canonical, &[], "", "");
         let v = ResponseVerifier::new().verify_grounded(
             "The Pro plan costs \u{20ac}89 per month with 150,000 emails included.",
@@ -2319,7 +2319,7 @@ mod grounding_tests {
         );
 
         // (c) tool output: €69.00 is not canonical pricing but the
-        // deterministic tool computed it — its result is the grounding text
+        // deterministic tool computed it, its result is the grounding text
         // and its total the allowlisted amount, exactly as the pipeline wires
         // it. The claim echoes the result WITHOUT a citation marker.
         let tool = r#"{"tool":"calculate_overage","total":69.0}"#;
@@ -2472,7 +2472,7 @@ mod grounding_tests {
     // ── Fix #17/#18: Unavailable retrieval mode ─────────────────────────
 
     /// Under Unavailable retrieval ANY citation marker is unsupported by
-    /// construction — even when the claim itself would be backed by the
+    /// construction, even when the claim itself would be backed by the
     /// canonical facts. The same sentence without the marker passes.
     #[test]
     fn unavailable_retrieval_rejects_any_citation_marker() {

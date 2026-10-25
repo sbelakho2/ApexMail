@@ -24,15 +24,15 @@ pub(crate) const WEB_ROOT_BODY_CLASSES: &str = "";
 /// Deferred-feature 8: the console favicon. A single inline SVG (the ApexMail
 /// wordmark's "A" chevron on the brand color) served BOTH as a data: URL in
 /// every root layout's `<link rel="icon">` and as the `/favicon.ico` route's
-/// body — no new dependency, no extra asset pipeline, and browser tab chrome
+/// body, no new dependency, no extra asset pipeline, and browser tab chrome
 /// stops 404-ing on every console page. The fill is the pinned brand token
 /// `#dc2626` (audit SM11 F4: this was indigo `#4f46e5`, the one indigo
-/// artifact left in the red/black brand — pinned by
+/// artifact left in the red/black brand, pinned by
 /// `brand_palette_is_red_and_black` in lib.rs).
 pub const FAVICON_SVG: &str = "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 32 32\"><rect width=\"32\" height=\"32\" fill=\"#B91C1C\"/><path d=\"M16 7 26 25h-5.4L16 16.6 11.4 25H6L16 7Z\" fill=\"#ffffff\"/></svg>";
 
 /// The favicon as an HTML `href` value: percent-encoded `data:image/svg+xml`
-/// (no base64 — keeps the encoded form byte-stable across renders).
+/// (no base64, keeps the encoded form byte-stable across renders).
 pub fn favicon_data_url() -> String {
     let mut out = String::from("data:image/svg+xml,");
     for byte in FAVICON_SVG.bytes() {
@@ -56,7 +56,7 @@ pub fn favicon_data_url() -> String {
 }
 
 /// Pixel-identical reproduction of the web root layout contract, now with a
-/// per-page document title ("{Page} — ApexMail"; batch-2 titles fix).
+/// per-page document title ("{Page} | ApexMail"; batch-2 titles fix).
 ///
 /// The root layout no longer emits its own `<main id="app-main">`: every
 /// inner view (dashboard shell, auth shell, home, not-found) renders THE
@@ -75,7 +75,7 @@ pub fn web_root_layout(child_html: &str, title: &str) -> String {
 /// favicon (when configured) and the single branding `<style>` block in
 /// `<head>` (validated color variables + sanitized custom CSS).
 ///
-/// `None` renders the stock document byte-for-byte — no style element, no
+/// `None` renders the stock document byte-for-byte, no style element, no
 /// empty `<img>`, the original data-URL favicon.
 pub fn web_root_layout_with_branding(
     child_html: &str,
@@ -132,9 +132,9 @@ fn favicon_link_html() -> String {
 /// out-of-router callers that cannot know a route context (the api-server's
 /// 501 page and the error-page contracts); every routed control-plane
 /// document goes through [`control_plane_root_layout_with_title`] with the
-/// route's "Page — ApexMail" title (batch-2 titles fix).
+/// route's "Page | ApexMail" title (batch-2 titles fix).
 pub fn control_plane_root_layout(child_html: &str) -> String {
-    control_plane_root_layout_with_title(child_html, "Control Plane — ApexMail")
+    control_plane_root_layout_with_title(child_html, "Control Plane | ApexMail")
 }
 
 /// Control-plane root layout with the per-page document title.
@@ -239,7 +239,7 @@ pub struct ControlPlaneSessionContext<'a> {
 /// [`control_plane_app_layout_with_role`] plus the active impersonation
 /// session's banner: an operator browsing the control plane while
 /// impersonating keeps the banner and its Terminate form on every page
-/// (dogfood 2026-10-06 — the SSR request path never rendered it).
+/// (dogfood 2026-10-06, the SSR request path never rendered it).
 ///
 /// `session.user_context` carries the authenticated session's identity
 /// (display name, email, tenant plan label) into the CP header. The render
@@ -286,7 +286,7 @@ pub fn control_plane_app_layout_with_session(
 /// Pixel-identical reproduction of the web landing page contract.
 pub fn web_home_page() -> String {
     // The page's own <main> is the document's single landmark (batch-2
-    // single-main fix — the root layout no longer adds one).
+    // single-main fix, the root layout no longer adds one).
     "<main id=\"app-main\" class=\"min-h-screen\">\
 <section class=\"mx-auto flex min-h-screen w-full max-w-7xl flex-col justify-center px-6 py-16 lg:px-8\">\
 <div class=\"grid gap-10 lg:grid-cols-[1.05fr_0.95fr] lg:items-center\">\
@@ -312,7 +312,7 @@ pub fn web_home_page() -> String {
 /// Pixel-identical reproduction of the web not-found contract.
 pub fn web_not_found_page() -> String {
     // The page's own <main> is the document's single landmark (batch-2
-    // single-main fix — the root layout no longer adds one).
+    // single-main fix, the root layout no longer adds one).
     "<main id=\"app-main\" class=\"flex min-h-screen flex-col items-center justify-center\">\
 <div class=\"\">\
 <h1 class=\"apex-page-title\">404</h1>\
@@ -355,7 +355,7 @@ pub fn web_dashboard_layout_with_user_context(
 /// session's banner.
 ///
 /// The banner renders whenever the request carries a verified impersonation
-/// cookie — it is the only in-UI way to end an impersonation session, so the
+/// cookie, it is the only in-UI way to end an impersonation session, so the
 /// request path must never drop it (dogfood 2026-10-06: the component
 /// existed, no caller ever passed it).
 pub fn web_dashboard_layout_with_session(
@@ -405,7 +405,7 @@ pub fn web_dashboard_layout_with_branding(
         },
         impersonation_banner,
         // Dead JS-era markup purge (design report item 14): the toast store
-        // could never show anything without script — the signed flash cookie
+        // could never show anything without script, the signed flash cookie
         // is the real feedback channel. The surface renders only when a
         // caller explicitly has toasts.
         toast_surface: None,
@@ -458,7 +458,7 @@ fn render_debounced_filter_bar(
 ///
 /// Every interpolation is escaped at this helper boundary (values, option
 /// text, id, name, label): the helper is private today and its callers pass
-/// literal option lists, but a primitive must not rely on that — the same
+/// literal option lists, but a primitive must not rely on that, the same
 /// rule `primitives::NativeSelect` enforces (review §3 P1-8 / §5.2).
 #[allow(clippy::too_many_arguments)]
 fn render_native_select(
@@ -607,7 +607,7 @@ fn cp_flavored(base_path: &str) -> bool {
     CP_FLAVOR_BASE_PATHS.contains(&base_path)
 }
 
-/// True when the base path is `{prefix}{uuid}` — the detail-page shape the
+/// True when the base path is `{prefix}{uuid}`, the detail-page shape the
 /// loaders emit (`/domains/{id}`, `/campaigns/{id}`).
 fn detail_id_under(base_path: &str, prefix: &str) -> bool {
     let Some(rest) = base_path.strip_prefix(prefix) else {
@@ -622,7 +622,7 @@ fn detail_id_under(base_path: &str, prefix: &str) -> bool {
 
 /// The domain detail flow (design report structural #2): DNS records as
 /// mono chips with select-to-copy guidance, per-record verification state,
-/// and the verify action — a plain form POST to the committed handler.
+/// and the verify action, a plain form POST to the committed handler.
 fn domain_detail_section(data: &ListPageData) -> String {
     let records = data
         .table
@@ -658,7 +658,7 @@ fn domain_detail_section(data: &ListPageData) -> String {
                     .unwrap_or_default()
             };
             format!(
-                "<div class=\"border p-4\"><div class=\"flex flex-wrap items-center justify-between gap-3\"><p class=\"apex-em\">{record_type}, {host}</p>{state}</div><div class=\"mt-3 space-y-2\"><div><p class=\"apex-em\">Value — select to copy</p><code class=\"mt-1 block px-2 py-1.5 break-all apex-select\">{value}</code></div></div></div>",
+                "<div class=\"border p-4\"><div class=\"flex flex-wrap items-center justify-between gap-3\"><p class=\"apex-em\">{record_type}, {host}</p>{state}</div><div class=\"mt-3 space-y-2\"><div><p class=\"apex-em\">Value, select to copy</p><code class=\"mt-1 block px-2 py-1.5 break-all apex-select\">{value}</code></div></div></div>",
                 record_type = cell(0),
                 host = cell(1),
                 state = cell(3),
@@ -669,7 +669,7 @@ fn domain_detail_section(data: &ListPageData) -> String {
         .join("");
     format!(
         "<section class=\"space-y-4\" data-page=\"domain-detail\">\
-        <div class=\"border p-4\"><div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><div><p class=\"apex-em\">DNS setup</p><p class=\"mt-1\">Add each record at your DNS provider, then verify. Values are selectable — copy them straight from this page.</p></div>{verify_form}</div></div>\
+        <div class=\"border p-4\"><div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><div><p class=\"apex-em\">DNS setup</p><p class=\"mt-1\">Add each record at your DNS provider, then verify. Values are selectable, copy them straight from this page.</p></div>{verify_form}</div></div>\
         <div class=\"space-y-3\">{rows}</div>\
         </section>",
         verify_form = verify_form,
@@ -683,7 +683,7 @@ fn domain_detail_section(data: &ListPageData) -> String {
 /// Available) and the audience select built by the committed loader.
 fn campaign_detail_section(data: &ListPageData) -> String {
     // The wired-audience select: the loader emits the tenant's lists as the
-    // `list_id` filter — a form field here, not a URL filter.
+    // `list_id` filter, a form field here, not a URL filter.
     let recipients_form = data
         .filters
         .iter()
@@ -756,7 +756,7 @@ fn campaign_detail_section(data: &ListPageData) -> String {
         recipients = recipients_form.map(|form| format!(
             "<div class=\"border p-6\"><h2 class=\"mb-4 apex-section-head\">Audience</h2>{form}</div>",
             form = form
-        )).unwrap_or_else(|| "<div class=\"border p-6\"><h2 class=\"mb-2 apex-section-head\">Audience</h2><p class=\"\">No lists exist yet — create a list, then wire this campaign's recipients.</p><a href=\"/lists/new\" class=\"mt-3 inline-flex items-center justify-center h-10 px-4 py-2 apex-btn\">Create list</a></div>".to_string()),
+        )).unwrap_or_else(|| "<div class=\"border p-6\"><h2 class=\"mb-2 apex-section-head\">Audience</h2><p class=\"\">No lists exist yet, create a list, then wire this campaign's recipients.</p><a href=\"/lists/new\" class=\"mt-3 inline-flex items-center justify-center h-10 px-4 py-2 apex-btn\">Create list</a></div>".to_string()),
     )
 }
 
@@ -778,7 +778,7 @@ fn domain_transfer_section(data: &ListPageData) -> String {
         .unwrap_or_default();
     let expected = format!("transfer {domain}");
     format!(
-        "<section class=\"space-y-4\" data-page=\"domain-transfer\"><div class=\"border p-4\"><p class=\"apex-em\">Typed confirmation required</p><p class=\"mt-1\">Transferring a domain re-binds DKIM and resets verification. Type <code class=\"px-1.5 py-0.5\">{expected}</code> exactly to confirm — the browser checks the pattern before anything is submitted.</p></div>\
+        "<section class=\"space-y-4\" data-page=\"domain-transfer\"><div class=\"border p-4\"><p class=\"apex-em\">Typed confirmation required</p><p class=\"mt-1\">Transferring a domain re-binds DKIM and resets verification. Type <code class=\"px-1.5 py-0.5\">{expected}</code> exactly to confirm, the browser checks the pattern before anything is submitted.</p></div>\
         <form method=\"post\" action=\"/web/admin/domains/transfer\" class=\"space-y-4 border p-6\" data-form-id=\"domain-transfer\">\
         <div class=\"space-y-2\"><label class=\"apex-em apex-label\" for=\"transfer-domain\">Domain</label><input id=\"transfer-domain\" name=\"domain\" type=\"text\" required value=\"{domain}\" class=\"flex h-12 w-full border px-3 apex-input\" /></div>\
         <div class=\"space-y-2\"><label class=\"apex-em apex-label\" for=\"transfer-target\">Target tenant id</label><input id=\"transfer-target\" name=\"to_tenant_id\" type=\"text\" required placeholder=\"tenant UUID\" class=\"flex h-12 w-full border px-3 apex-input\" /></div>\
@@ -984,7 +984,7 @@ fn gdpr_transition_button(
 
 /// Generic server-data list page. This is the data-driven counterpart of
 /// the hand-written demo pages: the api-server loads real rows per route
-/// and renders them through here — same chrome (breadcrumbs, stat tiles,
+/// and renders them through here, same chrome (breadcrumbs, stat tiles,
 /// native GET filter bar, bulk-action form, pagination) with zero demo
 /// content. Empty tables render an honest empty state; nothing is
 /// fabricated.
@@ -1004,7 +1004,7 @@ pub fn data_list_page(data: &ListPageData, noun: &str) -> String {
 
     let is_transfer = data.title == "Domain Transfer";
     // Campaign detail moves its select into the recipients POST form and
-    // its actions into lifecycle buttons — the generic GET filter bar and
+    // its actions into lifecycle buttons, the generic GET filter bar and
     // primary link would both lie (a POST-only target rendered as a link).
     let is_campaign_detail = detail_id_under(&data.base_path, "/campaigns/");
 
@@ -1022,7 +1022,7 @@ pub fn data_list_page(data: &ListPageData, noun: &str) -> String {
     };
     // Secondary header actions (review §4.1/§4.4): exports and other
     // alternate workflows ride beside the primary action as outlined
-    // buttons — one primary per local task, downloads visibly secondary.
+    // buttons, one primary per local task, downloads visibly secondary.
     let secondary_actions = if data.secondary_actions.is_empty() {
         String::new()
     } else {
@@ -1065,7 +1065,7 @@ pub fn data_list_page(data: &ListPageData, noun: &str) -> String {
     };
 
     // CP chrome: operator pages get the dense-table/scroll-container
-    // treatment. ARK: no eyebrow kicker — the page band carries the title.
+    // treatment. ARK: no eyebrow kicker, the page band carries the title.
     let cp = cp_flavored(&data.base_path);
 
     // Native GET filter form: search input + selects + Apply/Clear.
@@ -1146,7 +1146,7 @@ pub fn data_list_page(data: &ListPageData, noun: &str) -> String {
             Some(table) => {
                 let has_bulk = data.bulk_action.is_some();
                 // The Actions column must appear for EVERY per-row
-                // affordance — including tables whose only action is the
+                // affordance, including tables whose only action is the
                 // edit link (templates). Omitting `edit_path_prefix` here
                 // silently dropped the editor link (review §6.3).
                 let has_actions = data.detail_path_prefix.is_some()
@@ -1189,7 +1189,7 @@ pub fn data_list_page(data: &ListPageData, noun: &str) -> String {
                     let mut cells: Vec<String> = Vec::with_capacity(columns.len());
                     if has_bulk {
                         // Review §6.2: row selection is labeled with the
-                        // row's readable identity (first text cell — e.g.
+                        // row's readable identity (first text cell, e.g.
                         // the contact email), not only an opaque row id.
                         let readable = row
                             .cells
@@ -1236,7 +1236,7 @@ pub fn data_list_page(data: &ListPageData, noun: &str) -> String {
                         if let Some(intent) = &data.delete_intent {
                             // Destructive actions render as a button bound to
                             // a sibling form (via the `form` attribute),
-                            // GETting the signed confirmation page — never as
+                            // GETting the signed confirmation page, never as
                             // a plain navigation-styled link, and never as a
                             // form nested inside the bulk form.
                             let form_id = format!("row-delete-{}", html_escape(&row.id));
@@ -1430,7 +1430,7 @@ fn render_campaign_editor_page_with_data(
     let outage_notice = if editor.unavailable {
         "<div class=\"apex-notice apex-notice--warn mb-6\" role=\"status\">\
          <strong>Some of this form could not be loaded</strong>\
-         <span>Lists, segments, or the current audience may be missing. This information is temporarily unavailable — reload before saving.</span></div>"
+         <span>Lists, segments, or the current audience may be missing. This information is temporarily unavailable, reload before saving.</span></div>"
     } else {
         ""
     };
@@ -1543,7 +1543,7 @@ fn render_campaign_editor_page_with_data(
 
     let save_button = format!("<button type=\"submit\" class=\"inline-flex items-center justify-center px-4 py-2 apex-btn apex-btn--primary\">{}</button>", primary_action_label);
     // Review §4.11: saving is save-as-configured, and "Save as draft" is a
-    // distinct native submit that authorizes nothing — the named button
+    // distinct native submit that authorizes nothing, the named button
     // value reaches the handler, which clears any schedule instead of
     // arming an automatic send.
     let save_draft_button = "<button type=\"submit\" name=\"as_draft\" value=\"1\" class=\"inline-flex items-center justify-center px-4 py-2 apex-btn\">Save as draft</button>";
@@ -1572,14 +1572,14 @@ fn render_campaign_editor_page_with_data(
 <div class=\"space-y-2\">{name_label}{name_input}</div>\
 <div class=\"grid gap-6 md:grid-cols-2\"><div class=\"space-y-2\">{subject_label}{subject_input}</div><div class=\"space-y-2\">{preview_label}{preview_input}</div></div>\
 <div class=\"grid gap-6 md:grid-cols-2\"><div class=\"space-y-2\">{from_label}{from_input}</div><div class=\"space-y-2\">{from_name_label}{from_name_input}</div></div>\
-<div class=\"grid gap-6 md:grid-cols-2\"><div class=\"space-y-2\">{reply_to_label}{reply_to_input}</div><div class=\"space-y-2\"><label class=\"apex-em apex-label\" for=\"campaign-scheduled-at\">Schedule (optional, UTC)</label><input id=\"campaign-scheduled-at\" name=\"scheduled_at\" type=\"datetime-local\" value=\"{scheduled_value}\" class=\"flex h-12 w-full border px-3 apex-input\" /><p class=\"\">Enter the send time in UTC. Scheduled campaigns start automatically at the selected time — saving a schedule authorizes that automatic send. Leave blank to keep the campaign as a draft you start yourself.</p></div></div>\
+<div class=\"grid gap-6 md:grid-cols-2\"><div class=\"space-y-2\">{reply_to_label}{reply_to_input}</div><div class=\"space-y-2\"><label class=\"apex-em apex-label\" for=\"campaign-scheduled-at\">Schedule (optional, UTC)</label><input id=\"campaign-scheduled-at\" name=\"scheduled_at\" type=\"datetime-local\" value=\"{scheduled_value}\" class=\"flex h-12 w-full border px-3 apex-input\" /><p class=\"\">Enter the send time in UTC. Scheduled campaigns start automatically at the selected time, saving a schedule authorizes that automatic send. Leave blank to keep the campaign as a draft you start yourself.</p></div></div>\
 <div class=\"grid gap-6 md:grid-cols-2\"><div class=\"space-y-2\">{audience_label}{audience_select}<p class=\"\">Ctrl/Cmd-click to select several lists. The audience is their subscribed members.</p></div><div class=\"space-y-2\">{segment_label}{segment_select}<p class=\"\">Optional saved segment narrows the audience by its tag and status rules.</p></div></div>\
 <div class=\"space-y-2\">{content_label}{content_input}</div>\
 <div class=\"grid gap-6 md:grid-cols-2\"><div class=\"space-y-2\">{variables_label}{variables_input}<p class=\"\">One <code>key=value</code> per line, usable as {{{{key}}}} in the subject and body.</p></div><div class=\"space-y-2\"><p class=\"apex-em\">Tracking</p>{track_opens_box}{track_clicks_box}<p class=\"\">The unsubscribe link is always included.</p></div></div>\
 <div class=\"grid gap-6 md:grid-cols-3\"><div class=\"space-y-2\">{utm_source_label}{utm_source_input}</div><div class=\"space-y-2\">{utm_medium_label}{utm_medium_input}</div><div class=\"space-y-2\">{utm_campaign_label}{utm_campaign_input}</div></div>\
 <div class=\"grid gap-6 md:grid-cols-2\"><div class=\"space-y-2\">{throttle_label}{throttle_input}<p class=\"\">Maximum emails per hour for this campaign (0 = unlimited).</p></div><div class=\"space-y-2\">{ip_pool_label}{ip_pool_input}<p class=\"\">Optional dedicated-IP pool name to route this campaign through.</p></div></div>\
 <div class=\"grid gap-6 md:grid-cols-2\"><div class=\"space-y-2\">{timezone_label}{timezone_input}</div><div class=\"space-y-2\"><p class=\"apex-em\">Send-time optimization</p>{sto_box}<p class=\"\">Schedule each recipient at their optimal engagement hour.</p></div></div>\
-<section class=\"border p-4\"><p class=\"apex-em\">Before you save</p><p class=\"mt-1\">With a schedule set, scheduled delivery will begin automatically at that time (UTC) — saving the schedule authorizes that send. Without one, the campaign stays a draft until you start it. Save as draft always clears the schedule.</p></section>\
+<section class=\"border p-4\"><p class=\"apex-em\">Before you save</p><p class=\"mt-1\">With a schedule set, scheduled delivery will begin automatically at that time (UTC), saving the schedule authorizes that send. Without one, the campaign stays a draft until you start it. Save as draft always clears the schedule.</p></section>\
 <div class=\"flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between\"><p class=\"\">Your changes take effect when you submit this form.</p><div class=\"flex flex-col gap-3 sm:flex-row\">{preview_button}{save_draft_button}{save_button}</div></div>\
 </form></div>",
         breadcrumbs = breadcrumbs,
@@ -1632,21 +1632,21 @@ fn render_campaign_editor_page_with_data(
 }
 
 /// Server-rendered campaign HTML preview (target of the editor's Preview
-/// button — a plain form POST, rendered by Rust, no JavaScript).
+/// button, a plain form POST, rendered by Rust, no JavaScript).
 pub fn web_campaign_preview_page(html_body: &str) -> String {
     let safe_html = sanitize_preview_html(html_body);
     format!(
-        "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Campaign Preview — ApexMail</title><link rel=\"stylesheet\" href=\"{globals_css}\" data-globals-css></head><body class=\"\"><header class=\"border-b px-6 py-4\"><p class=\"apex-em\">Sanitized structural preview</p><p class=\"mt-1\">Styles, scripts, and remote assets are removed, so this is the content structure — not how the email will look in a recipient's client. Close this tab to return to the editor.</p></header><main class=\"mx-auto max-w-2xl px-6 py-8\"><div class=\"border p-6\">{safe_html}</div></main></body></html>",
+        "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Campaign Preview | ApexMail</title><link rel=\"stylesheet\" href=\"{globals_css}\" data-globals-css></head><body class=\"\"><header class=\"border-b px-6 py-4\"><p class=\"apex-em\">Sanitized structural preview</p><p class=\"mt-1\">Styles, scripts, and remote assets are removed, so this is the content structure, not how the email will look in a recipient's client. Close this tab to return to the editor.</p></header><main class=\"mx-auto max-w-2xl px-6 py-8\"><div class=\"border p-6\">{safe_html}</div></main></body></html>",
         globals_css = crate::globals_css_url(),
         safe_html = safe_html,
     )
 }
 
 /// Allowlist sanitizer for preview HTML: parse tags and keep ONLY the safe
-/// element/attribute set. Everything else — unknown elements (`<script>`,
+/// element/attribute set. Everything else, unknown elements (`<script>`,
 /// `<style>`, `<iframe>`, `<object>`, `<meta>`, `<base>`, `<form>`, …),
 /// script/style bodies, comments, doctypes, and every attribute outside
-/// href/src/alt/title/colspan/rowspan — is dropped regardless of what
+/// href/src/alt/title/colspan/rowspan, is dropped regardless of what
 /// whitespace (or `/`) separates the attributes. `href`/`src` values must be
 /// absolute http(s) URLs; anything else (including `javascript:` and
 /// scheme-obfuscated variants) drops the attribute. This is defense in depth
@@ -1767,7 +1767,7 @@ impl<'a> Sanitizer<'a> {
             Some(b'/') => self.handle_closing_tag(),
             // `<!-- … -->` comment or `<! …>` bogus markup (doctype et al.).
             Some(b'!') => self.skip_bang_markup(),
-            // `<? …>` processing instruction — dropped entirely.
+            // `<? …>` processing instruction, dropped entirely.
             Some(b'?') => self.skip_until_gt(),
             Some(byte) if byte.is_ascii_alphabetic() => self.handle_opening_tag(),
             // A lone `<` that starts no tag (e.g. "a < b"): escape it so it
@@ -1795,7 +1795,7 @@ impl<'a> Sanitizer<'a> {
     fn handle_opening_tag(&mut self) {
         self.pos += 1; // consume '<'
         let Some(name) = self.read_tag_name() else {
-            // Not a real tag after all — escape the '<' and continue from
+            // Not a real tag after all, escape the '<' and continue from
             // the next byte.
             self.out.push_str("&lt;");
             return;
@@ -1809,7 +1809,7 @@ impl<'a> Sanitizer<'a> {
 
         if !PREVIEW_ALLOWED_ELEMENTS.contains(&name.as_str()) {
             // Unknown/disallowed element: drop the tag, keep scanning (any
-            // inner text stays — it is inert once the tags are gone).
+            // inner text stays, it is inert once the tags are gone).
             self.skip_until_gt();
             return;
         }
@@ -1980,7 +1980,7 @@ impl<'a> Sanitizer<'a> {
                 value
             }
             // Unquoted value: runs to whitespace or `>` (HTML also ends it
-            // there — `/` is a legitimate part of unquoted URLs).
+            // there, `/` is a legitimate part of unquoted URLs).
             _ => {
                 let start = self.pos;
                 while self
@@ -2222,7 +2222,7 @@ pub fn control_plane_audit_page() -> String {
 
 // ─── Sales autopilot control surface ────────────────────────
 //
-// Audit §30: this surface answers one question — "Is the machine generating
+// Audit §30: this surface answers one question, "Is the machine generating
 // qualified pipeline profitably and safely right now?" Every figure is a
 // value from the sales-autopilot control data; a gap renders as an explicit
 // unavailable/empty state, never as a placeholder number. Zero JavaScript:
@@ -2258,7 +2258,7 @@ fn sales_panel(id: &str, eyebrow: &str, title: &str, body: &str) -> String {
     )
 }
 
-/// Honest empty/unavailable statement — never a fake row.
+/// Honest empty/unavailable statement, never a fake row.
 fn sales_note(text: &str) -> String {
     format!(r#"<p class="mt-5 border p-4">{}</p>"#, html_escape(text))
 }
@@ -2316,7 +2316,7 @@ fn format_eur_amount(value: f64) -> String {
 }
 
 /// Confidence from the control API is a 0..=1 fraction; `None` or a
-/// non-finite value renders "unavailable" — never a fabricated zero percent.
+/// non-finite value renders "unavailable", never a fabricated zero percent.
 fn format_confidence(confidence: Option<f64>) -> String {
     match confidence {
         Some(value) if value.is_finite() => {
@@ -2342,7 +2342,7 @@ fn rfc3339_utc_label(value: &str) -> Option<String> {
     Some(format!("{date} {} UTC", rfc3339_clock(value)?))
 }
 
-/// Trimmed, escaped data value — or the explicit absence marker.
+/// Trimmed, escaped data value, or the explicit absence marker.
 fn sales_value_or(value: Option<&str>, fallback: &str) -> String {
     match value {
         Some(text) if !text.trim().is_empty() => html_escape(text.trim()),
@@ -2352,7 +2352,7 @@ fn sales_value_or(value: Option<&str>, fallback: &str) -> String {
 
 /// Decision action verb: data, uppercased. An empty action is explicitly
 /// unknown rather than silently blank. The vocabulary is ENRICH / CONTACT /
-/// SKIP — the engine's own decision verbs.
+/// SKIP, the engine's own decision verbs.
 fn sales_decision_action(decision: &SalesDecisionData) -> String {
     if decision.action.trim().is_empty() {
         "UNKNOWN".to_string()
@@ -2543,7 +2543,7 @@ fn sales_dead_letter_summary(letter: &SalesDeadLetterData) -> String {
 }
 
 /// Dead-letter row with the replay control (Actions section). Replay is a
-/// real native POST — the console mounts its own handler
+/// real native POST, the console mounts its own handler
 /// (`/web/admin/autopilot/actions/{id}/replay`), so a failed action can be
 /// requeued without JavaScript and without an API client (review §7).
 fn sales_dead_letter_replay_control(letter: &SalesDeadLetterData) -> String {
@@ -2553,7 +2553,7 @@ fn sales_dead_letter_replay_control(letter: &SalesDeadLetterData) -> String {
         .and_then(rfc3339_utc_label)
         .unwrap_or_else(|| "not recorded".to_string());
     format!(
-        r#"<li class="border p-4"><p class="">{id}</p><p class="mt-1">{action_type}, {entity_type} {entity_id}, attempt {attempt} of {max_attempts}</p><p class="mt-1">Last error: {last_error}</p><p class="mt-1">Due: {due}</p><form method="post" action="/web/admin/autopilot/actions/{id}/replay" class="mt-3 flex flex-wrap items-center gap-3"><input type="hidden" name="return_to" value="/sales"><button type="submit" class="apex-btn apex-btn--sm">Replay</button><p class="">Requeues this action with a fresh attempt budget — it runs when the engine next polls.</p></form></li>"#,
+        r#"<li class="border p-4"><p class="">{id}</p><p class="mt-1">{action_type}, {entity_type} {entity_id}, attempt {attempt} of {max_attempts}</p><p class="mt-1">Last error: {last_error}</p><p class="mt-1">Due: {due}</p><form method="post" action="/web/admin/autopilot/actions/{id}/replay" class="mt-3 flex flex-wrap items-center gap-3"><input type="hidden" name="return_to" value="/sales"><button type="submit" class="apex-btn apex-btn--sm">Replay</button><p class="">Requeues this action with a fresh attempt budget, it runs when the engine next polls.</p></form></li>"#,
         id = html_escape(&letter.id),
         action_type = html_escape(&letter.action_type),
         entity_type = html_escape(&letter.entity_type),
@@ -2621,7 +2621,7 @@ fn sales_hero(data: &SalesPageData) -> String {
     };
     let session = r#"<section class="apex-panel"><p class="">Session</p><h2 class="mt-2 apex-h2">Same-origin operator session</h2><p class="mt-4">This console uses your signed-in operator session; system-tenant access is enforced on every action. No API keys are handled in the browser.</p><p class="mt-4">Status, Cookie session</p></section>"#;
     format!(
-        r#"<header class="apex-panel p-6"><div class="grid gap-6 xl:grid-cols-[1.2fr_0.8fr]"><div><p class="apex-em">Autonomous Sales</p><h1 class="mt-3 apex-page-title">Sales Autopilot</h1><p class="mt-3 max-w-3xl">Is the machine generating qualified pipeline profitably and safely right now? This surface reports the live sales-autopilot control state — revenue outcomes, autonomy, decisions, exceptions, queue health, enrollments, and the hard compliance gate. Every value is served by the engine; when the control API does not answer, the section says so instead of estimating. Every action below takes effect when you submit it.</p>{gap_banner}<div class="mt-5 grid gap-3 break-words sm:grid-cols-2 xl:grid-cols-4">{revenue_tile}{meetings_tile}{decisions_tile}{blocked_tile}</div></div>{session}</div></header>"#,
+        r#"<header class="apex-panel p-6"><div class="grid gap-6 xl:grid-cols-[1.2fr_0.8fr]"><div><p class="apex-em">Autonomous Sales</p><h1 class="mt-3 apex-page-title">Sales Autopilot</h1><p class="mt-3 max-w-3xl">Is the machine generating qualified pipeline profitably and safely right now? This surface reports the live sales-autopilot control state, revenue outcomes, autonomy, decisions, exceptions, queue health, enrollments, and the hard compliance gate. Every value is served by the engine; when the control API does not answer, the section says so instead of estimating. Every action below takes effect when you submit it.</p>{gap_banner}<div class="mt-5 grid gap-3 break-words sm:grid-cols-2 xl:grid-cols-4">{revenue_tile}{meetings_tile}{decisions_tile}{blocked_tile}</div></div>{session}</div></header>"#,
         gap_banner = gap_banner,
         revenue_tile = sales_kpi_tile("Revenue (30d)", &revenue_value, revenue_hint),
         meetings_tile = sales_kpi_tile("Meetings booked (30d)", &meetings_value, meetings_hint),
@@ -2646,7 +2646,7 @@ fn sales_revenue_section(overview: Option<&SalesOverviewData>) -> String {
                 format!(
                     "{}{}",
                     sales_note(
-                        "No revenue outcomes recorded in the last 30 days — the outcomes feed is empty, not zero-filled.",
+                        "No revenue outcomes recorded in the last 30 days, the outcomes feed is empty, not zero-filled.",
                     ),
                     window,
                 )
@@ -2689,11 +2689,11 @@ fn sales_autonomy_body(autonomy: &SalesAutonomyData) -> String {
     };
     let kill_switch = if autonomy.kill_switch {
         sales_warning_note(
-            "Kill switch engaged — outbound is halted: no new outbound action will be queued or executed. Inbound reply processing continues while the kill switch is engaged.",
+            "Kill switch engaged, outbound is halted: no new outbound action will be queued or executed. Inbound reply processing continues while the kill switch is engaged.",
         )
     } else {
         sales_note(
-            "Kill switch released — outbound execution follows the current autonomy mode and its policy gates.",
+            "Kill switch released, outbound execution follows the current autonomy mode and its policy gates.",
         )
     };
     let brain = if autonomy.runs_brain {
@@ -2740,14 +2740,14 @@ fn sales_autonomy_section(overview: Option<&SalesOverviewData>) -> String {
     )
 }
 
-/// The live autonomous decision stream (§31) — chronological, newest first.
+/// The live autonomous decision stream (§31), chronological, newest first.
 fn sales_decision_stream_section(data: &SalesPageData) -> String {
     let body = match data.decisions.as_ref() {
         None => sales_note(
             "The decision stream is temporarily unavailable, so no rows are shown and nothing is inferred.",
         ),
         Some(decisions) if decisions.is_empty() => sales_note(
-            "No decisions yet — the engine has not recorded a decision for this tenant. The stream fills as soon as the engine decides.",
+            "No decisions yet, the engine has not recorded a decision for this tenant. The stream fills as soon as the engine decides.",
         ),
         Some(decisions) => format!(
             r#"<p class="mt-4">Chronological, newest first. Action vocabulary: <span class="">ENRICH</span> gathers evidence, <span class="">CONTACT</span> starts or advances outreach, <span class="">SKIP</span> refuses the decision and sends nothing.</p><ol class="mt-4 space-y-3">{rows}</ol>"#,
@@ -2772,7 +2772,7 @@ fn sales_decisions_section(data: &SalesPageData) -> String {
     let body = match data.decisions.as_ref() {
         None => sales_note("Recent decisions are temporarily unavailable. No rows are shown."),
         Some(decisions) if decisions.is_empty() => sales_note(
-            "No decisions recorded yet — the engine has not produced a decision for this tenant.",
+            "No decisions recorded yet, the engine has not produced a decision for this tenant.",
         ),
         Some(decisions) => {
             let rows = sales_decisions_newest_first(decisions)
@@ -2798,7 +2798,7 @@ fn sales_exceptions_section(data: &SalesPageData) -> String {
             "Blocked and pending-approval decisions are temporarily unavailable.",
         )),
         Some(exceptions) if exceptions.is_empty() => parts.push(sales_note(
-            "No blocked or pending-approval decisions — nothing requires operator action.",
+            "No blocked or pending-approval decisions, nothing requires operator action.",
         )),
         Some(exceptions) => {
             let items = exceptions
@@ -2818,7 +2818,7 @@ fn sales_exceptions_section(data: &SalesPageData) -> String {
             "The dead-letter feed is temporarily unavailable.",
         )),
         Some(letters) if letters.is_empty() => parts.push(sales_note(
-            "No dead letters — every queued action completed or is still retrying within its attempt budget.",
+            "No dead letters, every queued action completed or is still retrying within its attempt budget.",
         )),
         Some(letters) => {
             let items = letters
@@ -2859,7 +2859,7 @@ fn sales_actions_section(data: &SalesPageData) -> String {
         states = stats.by_state.len(),
     );
     let by_state = if stats.by_state.is_empty() {
-        sales_note("No actions are queued for this tenant — there is no action row to count.")
+        sales_note("No actions are queued for this tenant, there is no action row to count.")
     } else {
         let rows = stats
             .by_state
@@ -2880,7 +2880,7 @@ fn sales_actions_section(data: &SalesPageData) -> String {
     let replay = match data.dead_letters.as_ref() {
         None => sales_note("The dead-letter replay list is temporarily unavailable."),
         Some(letters) if letters.is_empty() => {
-            sales_note("No dead letters to replay — the queue has no exhausted action.")
+            sales_note("No dead letters to replay, the queue has no exhausted action.")
         }
         Some(letters) => {
             let items = letters
@@ -2893,7 +2893,7 @@ fn sales_actions_section(data: &SalesPageData) -> String {
             )
         }
     };
-    let enrichment = r#"<form method="post" action="/web/admin/sales/discovery/run" class="mt-6 grid gap-4 border p-4"><div class="space-y-2"><label for="sales-enrich-sources" class="block apex-label">Source domains (comma-separated)</label><input id="sales-enrich-sources" name="sources" required class="apex-input w-full" /></div><div><button type="submit" class="apex-btn">Run enrichment</button></div><p class="">Manual enrichment trigger — normal discovery is engine-driven; this asks the engine to enrich the listed domains now.</p></form>"#;
+    let enrichment = r#"<form method="post" action="/web/admin/sales/discovery/run" class="mt-6 grid gap-4 border p-4"><div class="space-y-2"><label for="sales-enrich-sources" class="block apex-label">Source domains (comma-separated)</label><input id="sales-enrich-sources" name="sources" required class="apex-input w-full" /></div><div><button type="submit" class="apex-btn">Run enrichment</button></div><p class="">Manual enrichment trigger, normal discovery is engine-driven; this asks the engine to enrich the listed domains now.</p></form>"#;
     sales_panel(
         "sales-actions",
         "Queue",
@@ -2908,7 +2908,7 @@ fn sales_enrollments_section(data: &SalesPageData) -> String {
     let counts = match data.overview.as_ref() {
         None => sales_note("Enrollment counts are temporarily unavailable."),
         Some(overview) if overview.enrollments.is_empty() => {
-            sales_note("No enrollments yet — no contact is currently enrolled in a sequence.")
+            sales_note("No enrollments yet, no contact is currently enrolled in a sequence.")
         }
         Some(overview) => {
             let rows = overview
@@ -2944,11 +2944,11 @@ fn sales_compliance_section() -> String {
         "sales-compliance",
         "Governance",
         "Compliance",
-        r#"<p class="mt-4">Legal policy is a hard gate, not a warning: every decision resolves the recipient's jurisdiction against the approved policy before anything is sent. A jurisdiction that is unknown, unlisted, or below the country-confidence floor blocks the decision.</p><p class="mt-3">Blocked decisions and their block reasons appear under Exceptions. An unapproved jurisdiction cannot send — there is no override on this page or in the control API's review flow.</p>"#,
+        r#"<p class="mt-4">Legal policy is a hard gate, not a warning: every decision resolves the recipient's jurisdiction against the approved policy before anything is sent. A jurisdiction that is unknown, unlisted, or below the country-confidence floor blocks the decision.</p><p class="mt-3">Blocked decisions and their block reasons appear under Exceptions. An unapproved jurisdiction cannot send, there is no override on this page or in the control API's review flow.</p>"#,
     )
 }
 
-/// Costs: explicitly not yet instrumented — no fabricated figure.
+/// Costs: explicitly not yet instrumented, no fabricated figure.
 fn sales_costs_section() -> String {
     sales_panel(
         "sales-costs",
@@ -2984,10 +2984,10 @@ pub fn control_plane_sales_page_with_data(data: &SalesPageData) -> String {
 
 /// The first-response tile (plan §5.4): pending depth plus the measured
 /// accept→enqueue percentiles against the published target. `None` data is
-/// the honest unavailable contract — never zeros.
+/// the honest unavailable contract, never zeros.
 fn sales_first_response_section(data: &SalesPageData) -> String {
     let Some(kpi) = data.first_response.as_ref() else {
-        return "<section aria-label=\"First response\" class=\"border p-5\"><h2 class=\"apex-h3\">First response</h2><p class=\"mt-2\">Latency unavailable — the first-response store could not be read. The figures are unknown, not zero.</p></section>".to_string();
+        return "<section aria-label=\"First response\" class=\"border p-5\"><h2 class=\"apex-h3\">First response</h2><p class=\"mt-2\">Latency unavailable, the first-response store could not be read. The figures are unknown, not zero.</p></section>".to_string();
     };
     let pct = |value: Option<f64>| -> String {
         match value {
@@ -3032,7 +3032,7 @@ pub fn control_plane_sales_page() -> String {
 
 /// Marketing shell wrapper that matches the Zola marketing site structure.
 /// CSP is provided by the HTTP response header set in `browser_html_response`,
-/// so no `<meta>` CSP tag is rendered here — this avoids conflicting policies.
+/// so no `<meta>` CSP tag is rendered here, this avoids conflicting policies.
 pub fn marketing_page(child_html: &str) -> String {
     let header = crate::marketing::MarketingHeader {
         is_scrolled: false,
@@ -3158,7 +3158,7 @@ fn web_auth_shell(title: &str, subtitle: &str, form_html: &str, footer_html: &st
     // cookie rendered on the following GET.
     //
     // The auth shell's <main> is the document's single landmark (batch-2
-    // single-main fix — the root layout no longer adds one); the id keeps
+    // single-main fix, the root layout no longer adds one); the id keeps
     // the skip link and the #flash anchor targeted at it.
     format!(
         "<main id=\"app-main\" class=\"min-h-screen relative flex items-center justify-center p-6\">\
@@ -3185,12 +3185,12 @@ fn password_requirements_text() -> &'static str {
     // NIST SP 800-63B-4 (review 2026-09-08 §21): length-only policy —
     // no composition mandates. Kept to one compact sentence: it renders
     // as a focus-revealed hint and as the input's title tooltip.
-    "15-128 characters — longer is stronger. Any characters welcome; avoid common passwords and simple repeated patterns."
+    "15-128 characters, longer is stronger. Any characters welcome; avoid common passwords and simple repeated patterns."
 }
 
 /// Password requirements as a focus-revealed hint: the paragraph paints
 /// only while its field is focused (`.apex-pwd-wrap:focus-within` in
-/// globals.css — zero JavaScript), and the same text stays reachable to
+/// globals.css, zero JavaScript), and the same text stays reachable to
 /// assistive technology through the input's `title` and
 /// `aria-describedby`. An always-on paragraph between the form elements
 /// read as clutter (user review 2026-09-09).
@@ -3224,12 +3224,12 @@ fn csrf_hidden_input(token: &str) -> String {
 // KiwiCaptcha is ApexMail's native Rust CAPTCHA. Under the zero-JS policy
 // the browser widget is gone: proof-of-work challenges are solved by the
 // SERVER during `/web/auth/*` handling (the form POST itself is the proof
-// of humanity — rate limiting plus the signed CSRF token gate the flow),
+// of humanity, rate limiting plus the signed CSRF token gate the flow),
 // so there is no client-side widget markup here anymore.
 
 fn web_auth_notice(intent: &str, title: &str, description: &str) -> String {
     // `title`/`description` interpolate query-derived values (message, email
-    // address sentences) — escape everything to block reflected XSS.
+    // address sentences), escape everything to block reflected XSS.
     web_auth_notice_rich(intent, title, &html_escape(description))
 }
 
@@ -3239,7 +3239,7 @@ fn web_auth_notice(intent: &str, title: &str, description: &str) -> String {
 /// markup + class source, so a notice can never be hand-rolled with a
 /// palette pairing that breaks in one of the themes (dogfood 2026-10-06: the
 /// MFA challenge page hand-rolled its box as `bg-brand-50/80` with no text
-/// color — near-white inherited text on a pale panel in dark mode).
+/// color, near-white inherited text on a pale panel in dark mode).
 fn web_auth_notice_rich(intent: &str, title: &str, body_html: &str) -> String {
     let classes = match intent {
         "success" => "apex-notice--ok",
@@ -3470,7 +3470,7 @@ pub fn web_verify_email_page_with_state(
                 message.unwrap_or("Email verified successfully. You can now log in."),
             ),
             // Batch-2 dead-link fix: /pricing is a marketing-only route that
-            // does not resolve on the web surface — point at the absolute
+            // does not resolve on the web surface, point at the absolute
             // marketing URL instead.
             "<div class=\"space-y-4\"><a href=\"/login\" class=\"flex w-full items-center justify-center gap-3 py-3 apex-btn apex-btn--primary\"><span>Continue to sign in</span></a><a href=\"https://apexmail.ee/pricing\" class=\"flex w-full items-center justify-center gap-3 py-3 apex-btn\"><span>Explore plans</span></a></div>".to_string(),
             "<div class=\"px-8 pb-8\"><p class=\"px-4 apex-em\">Need help getting started? <a href=\"mailto:support@apexmail.ee\" class=\"apex-link\">Contact support</a>.</p></div>".to_string(),
@@ -3483,7 +3483,7 @@ pub fn web_verify_email_page_with_state(
                 "Verification failed",
                 message.unwrap_or("Use the latest verification email or create a new account to receive a fresh link."),
             ),
-            // Deferred-feature 2: the dead-end is gone — the page offers a
+            // Deferred-feature 2: the dead-end is gone, the page offers a
             // resend affordance. The endpoint answers with the SAME neutral
             // response whether or not the address belongs to an unverified
             // account (anti-enumeration), and the dual IP+email limiter
@@ -3551,12 +3551,12 @@ pub fn web_verify_email_page_with_state(
 pub fn web_dashboard_page() -> String {
     // Batch-2 honesty fix: the static fallback previously fabricated a
     // 98.9% delivery-health dial and a "representative" 14-day send-volume
-    // series — figures the static page cannot know. The data-backed
+    // series, figures the static page cannot know. The data-backed
     // dashboard renders real KPIs; this no-data fallback now states that
-    // delivery health is unavailable — not 100%, not zero.
+    // delivery health is unavailable, not 100%, not zero.
     //
     // Design DNA (the `dna_verify` gate's contract): the fallback still
-    // renders the dashboard's two mark elements — the 270° DIAL and the
+    // renders the dashboard's two mark elements, the 270° DIAL and the
     // MONOLINE chart chassis. Both render their EMPTY state rather than a
     // fabricated reading: the dial draws its track with no value arc and
     // reads "—", the monoline draws no strokes. The elements are present,
@@ -3578,7 +3578,7 @@ pub fn web_dashboard_page() -> String {
     let dna_block = format!(
         "<div class=\"max-w-full border p-4\">\
 <div class=\"flex flex-col sm:flex-row items-center gap-6\">{delivery_dial}{volume_chart}</div>\
-<p class=\"mt-3 max-w-md\">Delivery health is unavailable and the chart has no strokes until your first send — an absent figure is not zero.</p>\
+<p class=\"mt-3 max-w-md\">Delivery health is unavailable and the chart has no strokes until your first send, an absent figure is not zero.</p>\
 </div>"
     );
     "<div class=\"space-y-8\">\
@@ -3656,7 +3656,7 @@ pub fn web_campaigns_page() -> String {
         ),
     );
     // Native checkboxes: the whole table lives inside one form whose bulk
-    // actions submit the checked ids — pure HTML, no JavaScript. (A
+    // actions submit the checked ids, pure HTML, no JavaScript. (A
     // select-all control is impossible without JS, so each row carries its
     // own checkbox instead.)
     let select_all = "";
@@ -3743,11 +3743,11 @@ pub fn web_campaign_detail_page() -> String {
     )
 }
 
-/// Message timeline page (time-travel debugging) — the static SSR fallback.
+/// Message timeline page (time-travel debugging), the static SSR fallback.
 /// The api-server renders the real reconstruction through the data path
 /// (`web_data_page` + the `message_timeline` module); this skeleton backs
 /// the route inventory and is the honest empty state if it is ever reached
-/// without data — it never fabricates a transition.
+/// without data, it never fabricates a transition.
 pub fn web_message_timeline_page() -> String {
     "<div class=\"space-y-6\"><nav aria-label=\"Breadcrumb\" class=\"mb-2\"><ol class=\"flex items-center gap-2\"><li><a href=\"/events\" class=\"apex-link\">Events</a></li><li class=\"\">/</li><li class=\"apex-em\">Message Timeline</li></ol></nav>\
      <div><h1 class=\"apex-page-title\">Message Timeline</h1>\
@@ -3785,7 +3785,7 @@ pub fn web_campaign_edit_page_for_id(campaign_id: &str) -> String {
 
 /// Campaign edit page with server-loaded values: the form carries the
 /// campaign's id (hidden) and prefilled name/subject/content, and POSTs to
-/// the real update handler — editing updates the row instead of silently
+/// the real update handler, editing updates the row instead of silently
 /// creating a duplicate.
 /// Data-driven edit editor: same full-fidelity form as create, prefilled
 /// from the row and posting to /web/campaigns/update with the hidden id.
@@ -3815,7 +3815,7 @@ pub fn web_campaign_edit_page_with_values(edit: &crate::view_data::CampaignEditD
 <div class=\"space-y-2\"><label class=\"apex-em apex-label\" for=\"campaign-name\">Campaign Name</label><input id=\"campaign-name\" name=\"name\" type=\"text\" required value=\"{name}\" class=\"flex h-12 w-full border px-3 apex-input\" /></div>\
 <div class=\"space-y-2\"><label class=\"apex-em apex-label\" for=\"campaign-subject\">Subject Line</label><input id=\"campaign-subject\" name=\"subject\" type=\"text\" required value=\"{subject}\" class=\"flex h-12 w-full border px-3 apex-input\" /></div>\
 <div class=\"space-y-2\"><label class=\"apex-em apex-label\" for=\"campaign-content\">HTML Content</label><textarea id=\"campaign-content\" name=\"html_body\" rows=\"10\" maxlength=\"25000\" class=\"flex min-h-[160px] w-full border px-3 py-2 apex-input apex-textarea\">{html_body}</textarea></div>\
-<div class=\"space-y-2\"><label class=\"apex-em apex-label\" for=\"campaign-scheduled-at\">Schedule (optional, UTC)</label><input id=\"campaign-scheduled-at\" name=\"scheduled_at\" type=\"datetime-local\" value=\"{scheduled_at}\" class=\"flex h-12 w-full border px-3 apex-input\" /><p class=\"\">Enter the send time in UTC. A scheduled time starts the send automatically when it arrives — saving a schedule authorizes that automatic send. Keep the field empty to store the campaign as a draft.</p></div>\
+<div class=\"space-y-2\"><label class=\"apex-em apex-label\" for=\"campaign-scheduled-at\">Schedule (optional, UTC)</label><input id=\"campaign-scheduled-at\" name=\"scheduled_at\" type=\"datetime-local\" value=\"{scheduled_at}\" class=\"flex h-12 w-full border px-3 apex-input\" /><p class=\"\">Enter the send time in UTC. A scheduled time starts the send automatically when it arrives, saving a schedule authorizes that automatic send. Keep the field empty to store the campaign as a draft.</p></div>\
 <div class=\"flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between\"><p class=\"\">Your changes take effect when you submit this form.</p><button type=\"submit\" class=\"inline-flex items-center justify-center px-4 py-2 apex-btn apex-btn--primary\">Save Changes</button></div>\
 </form></div>",
         breadcrumbs = breadcrumbs,
@@ -3993,10 +3993,10 @@ pub fn web_contact_edit_page_with_values(contact: &crate::view_data::ContactEdit
     format!(
         "<div class=\"w-full max-w-3xl space-y-6\">{breadcrumbs}\
 <div class=\"flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between\"><div><h1 class=\"apex-page-title\">Edit Contact</h1><p class=\"\">Saving updates this contact in place.</p></div><a href=\"/contacts\" class=\"inline-flex items-center justify-center px-4 py-2 apex-btn\">Back to contacts</a></div>\
-<section class=\"border p-4\"><p class=\"apex-em\">Audience membership</p>{membership}<p class=\"mt-1\">Membership is managed from each list's page — this editor changes identity and subscription status only.</p></section>\
+<section class=\"border p-4\"><p class=\"apex-em\">Audience membership</p>{membership}<p class=\"mt-1\">Membership is managed from each list's page, this editor changes identity and subscription status only.</p></section>\
 <form class=\"space-y-6\" method=\"post\" action=\"/web/contacts/update\">\
 <input type=\"hidden\" name=\"id\" value=\"{id}\" />\
-<div class=\"space-y-2\"><label class=\"apex-em apex-label\" for=\"contact-email\">Email address</label><input id=\"contact-email\" type=\"text\" value=\"{email}\" readonly disabled class=\"flex h-12 w-full border px-3 apex-input\" /><p class=\"\">The address is the contact's identity and cannot be changed — delete the contact and add the new address instead.</p></div>\
+<div class=\"space-y-2\"><label class=\"apex-em apex-label\" for=\"contact-email\">Email address</label><input id=\"contact-email\" type=\"text\" value=\"{email}\" readonly disabled class=\"flex h-12 w-full border px-3 apex-input\" /><p class=\"\">The address is the contact's identity and cannot be changed, delete the contact and add the new address instead.</p></div>\
 <div class=\"space-y-2\"><label class=\"apex-em apex-label\" for=\"contact-name\">Name</label><input id=\"contact-name\" name=\"name\" type=\"text\" value=\"{name}\" maxlength=\"120\" class=\"flex h-12 w-full border px-3 apex-input\" /></div>\
 <div class=\"space-y-2\"><label class=\"apex-em apex-label\" for=\"contact-status\">Subscription status</label><select id=\"contact-status\" name=\"status\" class=\"flex h-12 w-full border px-3 apex-select\">{options}</select></div>\
 <div class=\"flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between\"><p class=\"\">Your changes take effect when you submit this form.</p><button type=\"submit\" class=\"inline-flex items-center justify-center px-4 py-2 apex-btn apex-btn--primary\">Save Contact</button></div>\
@@ -4011,7 +4011,7 @@ pub fn web_contact_edit_page_with_values(contact: &crate::view_data::ContactEdit
 }
 
 /// New contact page: single-contact add plus the CSV import form (design
-/// report structural #18) — both are plain form posts to the committed
+/// report structural #18), both are plain form posts to the committed
 /// handlers; the import parses RFC 4180 CSV from the textarea OR the file.
 pub fn web_contacts_new_page() -> String {
     format!(
@@ -4030,7 +4030,7 @@ pub fn web_contacts_new_page() -> String {
 </form>\
 <section class=\"mt-10 border p-6\" aria-labelledby=\"contacts-import-title\">\
 <h2 id=\"contacts-import-title\" class=\"apex-h2\">Import contacts from CSV</h2>\
-<p class=\"mt-1\">Paste CSV rows or attach a file — one contact per line with a header row (<code class=\"px-1.5 py-0.5\">email,name</code>). Quoted fields with commas follow RFC 4180. Duplicates are skipped and every row's outcome is reported.</p>\
+<p class=\"mt-1\">Paste CSV rows or attach a file, one contact per line with a header row (<code class=\"px-1.5 py-0.5\">email,name</code>). Quoted fields with commas follow RFC 4180. Duplicates are skipped and every row's outcome is reported.</p>\
 <form class=\"mt-4 space-y-4\" method=\"post\" action=\"/web/contacts/import\" enctype=\"multipart/form-data\" data-form-id=\"contacts-import\">\
 <div class=\"space-y-2\">\
 <label class=\"apex-em apex-label\" for=\"contacts-import-csv\">Paste CSV</label>\
@@ -4130,7 +4130,7 @@ pub fn web_lists_page() -> String {
     )
 }
 
-/// STATIC list detail page — the demo-data fallback ONLY (batch-2
+/// STATIC list detail page, the demo-data fallback ONLY (batch-2
 /// list-detail fix). It renders when a non-UUID demo id (`/lists/l_launch`,
 /// `/lists/l_vip`) is requested and hardcodes the demo list; a REAL list id
 /// is data-backed through `web_list_detail_page_with_values` (api-server's
@@ -4155,7 +4155,7 @@ pub fn web_list_detail_page() -> String {
 </div></div>".to_string()
 }
 
-/// STATIC list edit page — the no-data fallback ONLY (batch-2 list-edit
+/// STATIC list edit page, the no-data fallback ONLY (batch-2 list-edit
 /// fix). It posts name-only to /web/lists/update (which honestly refuses
 /// without an id); a real `/lists/{id}/edit` render goes through
 /// `web_list_edit_page_with_values`, which carries the hidden id and the
@@ -4209,7 +4209,7 @@ pub fn web_list_edit_page() -> String {
 
 /// List edit page with server-loaded values (batch-2 list-edit fix): the
 /// form carries the list's id (hidden) and the prefilled name, and POSTs to
-/// the real update handler — previously the form posted only `name` with no
+/// the real update handler, previously the form posted only `name` with no
 /// `id`, so every save was rejected with "Pick a list and give it a name."
 pub fn web_list_edit_page_with_values(edit: &crate::view_data::ListEditData) -> String {
     format!(
@@ -4296,7 +4296,7 @@ pub fn web_list_detail_page_with_values(detail: &crate::view_data::ListDetailDat
 }
 
 /// `/lists/{id}/members` with server-loaded values (review §6.2): the list
-/// detail's subscriber count is now inspectable — readable identity,
+/// detail's subscriber count is now inspectable, readable identity,
 /// membership status and the date the contact was added, newest first. An
 /// empty list renders the honest empty state WITH the next action, never a
 /// fabricated row.
@@ -4342,7 +4342,7 @@ pub fn web_list_members_page_with_values(members: &crate::view_data::ListMembers
 <li class=\"\">/</li>\
 <li class=\"apex-em\" aria-current=\"page\">Members</li></ol></nav>\
 <div class=\"flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between\">\
-<div><h1 class=\"apex-page-title\">Members — {name}</h1>\
+<div><h1 class=\"apex-page-title\">Members, {name}</h1>\
 <p class=\"\">{total} subscriber(s) on this list, newest first.</p></div>\
 <a href=\"/lists/{id}\" class=\"inline-flex items-center justify-center px-6 py-3 apex-btn\">Back to list</a>\
 </div>\
@@ -4357,7 +4357,7 @@ pub fn web_list_members_page_with_values(members: &crate::view_data::ListMembers
 
 /// `/lists/{id}/members` without loaded values: the route skeleton used by
 /// the render inventory and the no-data demo render. It states what the page
-/// will show — it never fabricates a member.
+/// will show, it never fabricates a member.
 pub fn web_list_members_page() -> String {
     "<div class=\"space-y-6\" data-page=\"list-members\">\
 <nav aria-label=\"Breadcrumb\" class=\"mb-2\"><ol class=\"flex items-center gap-2\">\
@@ -4454,14 +4454,14 @@ pub fn web_templates_new_page() -> String {
     format!(
         "<div class=\"max-w-3xl\">\
 <div class=\"apex-page-heading\"><h1 class=\"apex-page-title\">Create Template</h1>\
-<p class=\"mt-1\">Write or paste HTML directly — this is an HTML editor, not a visual builder.</p></div>\
+<p class=\"mt-1\">Write or paste HTML directly, this is an HTML editor, not a visual builder.</p></div>\
 <form class=\"space-y-6\" method=\"post\" action=\"/web/templates\">\
 <div class=\"space-y-2\">{name_label}{name_input}</div>\
 <div class=\"space-y-2\">{subject_label}{subject_input}</div>\
 <div class=\"space-y-2\">\
 <label class=\"apex-em apex-label\" for=\"template-new-content\">HTML Content</label>\
 <textarea id=\"template-new-content\" name=\"html_body\" class=\"flex min-h-[300px] w-full border px-3 py-2 resize-vertical apex-input apex-textarea\" placeholder=\"&lt;h1&gt;Hello {{{{name}}}}&lt;/h1&gt;&#10;&lt;p&gt;Your message goes here.&lt;/p&gt;&#10;&lt;a href=&quot;{{{{cta_url}}}}&quot;&gt;Get started&lt;/a&gt;\"></textarea>\
-<p class=\"\">The placeholder above is a working starter — replace the text and keep the {{{{key}}}} variables you want to fill per campaign.</p>\
+<p class=\"\">The placeholder above is a working starter, replace the text and keep the {{{{key}}}} variables you want to fill per campaign.</p>\
 </div>\
 <div class=\"flex gap-3\">{save_button}</div>\
 </form></div>",
@@ -4474,7 +4474,7 @@ pub fn web_templates_new_page() -> String {
 }
 
 /// Template edit page (design report quick win #19): the campaign editor's
-/// proven `formaction`/`formtarget` pattern — Save posts to the committed
+/// proven `formaction`/`formtarget` pattern, Save posts to the committed
 /// update handler (bumping a version snapshot), Preview renders the stored
 /// or edited body server-side in a new tab. Failed posts re-populate via
 /// the signed field-map cookie.
@@ -4494,7 +4494,7 @@ pub fn web_template_edit_page_with_values(edit: &crate::view_data::TemplateEditD
     let breadcrumbs = "<nav aria-label=\"Breadcrumb\" class=\"mb-6\"><ol class=\"flex items-center gap-2\"><li><a href=\"/templates\" class=\"apex-link\">Templates</a></li><li class=\"\">/</li><li class=\"apex-em\" aria-current=\"page\">Edit Template</li></ol></nav>".to_string();
     format!(
         "{breadcrumbs}<div class=\"w-full max-w-3xl space-y-6\">\
-<div class=\"flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between\"><div><h1 class=\"apex-page-title\">Edit Template</h1><p class=\"\">Saving creates a new version snapshot — the previous one can be restored.</p></div><a href=\"/templates\" class=\"inline-flex items-center justify-center px-4 py-2 apex-btn\">Back to templates</a></div>\
+<div class=\"flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between\"><div><h1 class=\"apex-page-title\">Edit Template</h1><p class=\"\">Saving creates a new version snapshot, the previous one can be restored.</p></div><a href=\"/templates\" class=\"inline-flex items-center justify-center px-4 py-2 apex-btn\">Back to templates</a></div>\
 <form class=\"space-y-6\" method=\"post\" action=\"/web/templates/update\" data-form-id=\"template-update\">\
 <input type=\"hidden\" name=\"id\" value=\"{id}\" />\
 <div class=\"space-y-2\"><label class=\"apex-em apex-label\" for=\"template-name\">Template Name</label><input id=\"template-name\" name=\"name\" type=\"text\" required value=\"{name}\" class=\"flex h-12 w-full border px-3 apex-input\" /></div>\
@@ -4631,9 +4631,9 @@ pub fn web_reports_deliverability_page() -> String {
 /// "Run new test" CTA. Backed by `GET /v1/placement/tests`.
 pub fn web_inbox_placement_page() -> String {
     let kpi_total = format!("<article aria-label=\"Total placement tests: 0 all time\">{}</article>", Card { title: "Total tests", body: "<p class=\"apex-em\" data-metric=\"placement.total\">0</p><p class=\"\">All time</p>", variant: "default", padding: "default", interactive: false }.render_html());
-    let kpi_inbox = format!("<article aria-label=\"Average inbox rate: — last 30 days\">{}</article>", Card { title: "Avg inbox rate", body: "<p class=\"apex-em\" data-metric=\"placement.inbox_rate\">—</p><p class=\"\">Last 30 days</p>", variant: "default", padding: "default", interactive: false }.render_html());
-    let kpi_spam = format!("<article aria-label=\"Average spam rate: — last 30 days\">{}</article>", Card { title: "Avg spam rate", body: "<p class=\"apex-em\" data-metric=\"placement.spam_rate\">—</p><p class=\"\">Last 30 days</p>", variant: "default", padding: "default", interactive: false }.render_html());
-    let kpi_recent = format!("<article aria-label=\"Last placement test: — most recent run\">{}</article>", Card { title: "Last test", body: "<p class=\"apex-em\" data-metric=\"placement.last_run\">—</p><p class=\"\">Most recent run</p>", variant: "default", padding: "default", interactive: false }.render_html());
+    let kpi_inbox = format!("<article aria-label=\"Average inbox rate:, last 30 days\">{}</article>", Card { title: "Avg inbox rate", body: "<p class=\"apex-em\" data-metric=\"placement.inbox_rate\">—</p><p class=\"\">Last 30 days</p>", variant: "default", padding: "default", interactive: false }.render_html());
+    let kpi_spam = format!("<article aria-label=\"Average spam rate:, last 30 days\">{}</article>", Card { title: "Avg spam rate", body: "<p class=\"apex-em\" data-metric=\"placement.spam_rate\">—</p><p class=\"\">Last 30 days</p>", variant: "default", padding: "default", interactive: false }.render_html());
+    let kpi_recent = format!("<article aria-label=\"Last placement test:, most recent run\">{}</article>", Card { title: "Last test", body: "<p class=\"apex-em\" data-metric=\"placement.last_run\">—</p><p class=\"\">Most recent run</p>", variant: "default", padding: "default", interactive: false }.render_html());
     format!(
         "<div class=\"space-y-6\" data-page=\"inbox-placement\">\
 <nav aria-label=\"Breadcrumb\" class=\"mb-2\"><ol class=\"flex items-center gap-2\">\
@@ -4683,7 +4683,7 @@ pub fn web_inbox_placement_new_page() -> String {
             title: "Test configuration",
             body: "<form data-form-id=\"placement-test-create\" action=\"/web/inbox-placement/tests\" method=\"post\" class=\"space-y-4\">\
 <div class=\"apex-field\"><label for=\"placement-name\">Test name</label>\
-<input id=\"placement-name\" name=\"name\" type=\"text\" required maxlength=\"120\" placeholder=\"Q1 onboarding sequence — variant A\" /></div>\
+<input id=\"placement-name\" name=\"name\" type=\"text\" required maxlength=\"120\" placeholder=\"Q1 onboarding sequence, variant A\" /></div>\
 <div class=\"grid gap-4 md:grid-cols-2\">\
 <div class=\"apex-field\"><label for=\"placement-from\">From email</label>\
 <input id=\"placement-from\" name=\"from_email\" type=\"email\" required autocomplete=\"email\" placeholder=\"hello@yourdomain.com\" /></div>\
@@ -4716,7 +4716,7 @@ pub fn web_inbox_placement_new_page() -> String {
 }
 
 /// Inbox-placement test detail page. Static fallback renders the honest
-/// "open a test" state — the permanent "Loading test…" placeholder was a
+/// "open a test" state, the permanent "Loading test…" placeholder was a
 /// JS-era lie (nothing ever loaded it); the data path replaces this.
 pub fn web_inbox_placement_detail_page() -> String {
     format!(
@@ -4736,7 +4736,7 @@ pub fn web_inbox_placement_detail_page() -> String {
 </div>",
         empty_state = EmptyState {
             title: "Results appear once the test completes",
-            description: Some("Seed accounts report as they receive the probe message — reload this page to check for new results."),
+            description: Some("Seed accounts report as they receive the probe message, reload this page to check for new results."),
             icon_markup: None,
             action_label: Some("Back to tests"),
             action_href: Some("/inbox-placement"),
@@ -4817,7 +4817,7 @@ pub fn web_inbox_placement_detail_page_with_data(
         .render_html(),
         _ => EmptyState {
             title: "Results appear once the test completes",
-            description: Some("Seed accounts report as they receive the probe message — reload this page to check for new results."),
+            description: Some("Seed accounts report as they receive the probe message, reload this page to check for new results."),
             icon_markup: None,
             action_label: Some("Back to tests"),
             action_href: Some("/inbox-placement"),
@@ -4933,7 +4933,7 @@ pub fn display_or<'a>(value: &'a str, placeholder: &'static str) -> &'a str {
 }
 
 /// Display text for a message subject (an empty subject renders as
-/// "(no subject)" — the incoming message carried no Subject header).
+/// "(no subject)", the incoming message carried no Subject header).
 pub fn display_subject(subject: &str) -> &str {
     display_or(subject, "(no subject)")
 }
@@ -5043,7 +5043,7 @@ pub fn web_demos_page(data: Option<&DemosPageData>) -> String {
         .map(|url| {
             format!(
                 "<div class=\"apex-notice apex-notice--ok\" role=\"status\">\
-                 <strong>Viewer link — shown once</strong>\
+                 <strong>Viewer link, shown once</strong>\
                  <span>Share this with the prospect. It is not stored in plaintext, so copy it now.</span>\
                  <code class=\"apex-mono mt-2 block break-all\">{url}</code>\
                  <a href=\"{url}\" class=\"mt-3 inline-flex items-center justify-center px-4 py-2 apex-btn\">Open viewer</a>\
@@ -5056,7 +5056,7 @@ pub fn web_demos_page(data: Option<&DemosPageData>) -> String {
     let mut rows = String::new();
     if unavailable {
         rows.push_str(
-            "<tr><td colspan=\"5\" class=\"\">The demo list is unavailable right now — this is a service problem, not an empty list.</td></tr>",
+            "<tr><td colspan=\"5\" class=\"\">The demo list is unavailable right now, this is a service problem, not an empty list.</td></tr>",
         );
     } else if sessions.is_empty() {
         rows.push_str(
@@ -5099,7 +5099,7 @@ pub fn web_demos_page(data: Option<&DemosPageData>) -> String {
     format!(
         "<div class=\"space-y-6\">
 <h1 class=\"apex-page-title\">Demos</h1>\
-<p class=\"\">Scripted, server-driven walkthroughs that execute the real product — the same console, the same API sandbox, the same grader and the same pricing source a customer would use.</p>\
+<p class=\"\">Scripted, server-driven walkthroughs that execute the real product, the same console, the same API sandbox, the same grader and the same pricing source a customer would use.</p>\
 {viewer_url}\
 <form class=\"apex-panel space-y-4\" method=\"post\" action=\"/web/admin/demos\">\
 <div class=\"apex-field\">\
@@ -5137,7 +5137,7 @@ pub fn web_demo_viewer_page(data: Option<&DemoViewerData>) -> String {
              <span>You are viewing a replay of every step and its result.</span></div>"
             .to_string(),
         "unavailable" => {
-            // Audit #16: the step read failed — a service problem, not an
+            // Audit #16: the step read failed, a service problem, not an
             // empty walkthrough.
             "<div class=\"apex-notice apex-notice--warn\" role=\"status\">\
              <strong>The walkthrough could not be loaded</strong>\
@@ -5158,7 +5158,7 @@ pub fn web_demo_viewer_page(data: Option<&DemoViewerData>) -> String {
     let mut list = String::new();
     if steps.is_empty() && state != "invalid" && state != "unavailable" {
         list.push_str(
-            "<p class=\"\">Nothing has been shown yet — the presenter has not started the walkthrough.</p>",
+            "<p class=\"\">Nothing has been shown yet, the presenter has not started the walkthrough.</p>",
         );
     } else {
         list.push_str("<ol class=\"space-y-6\">");
@@ -5224,9 +5224,9 @@ pub fn web_demo_viewer_page(data: Option<&DemoViewerData>) -> String {
 ///
 /// States: empty (`data.turns` empty, session optional), populated,
 /// escalated answers (the human-handoff notice), disabled (the per-tenant
-/// `ai_chat` feature flag is off for this workspace — the named refusal, and
+/// `ai_chat` feature flag is off for this workspace, the named refusal, and
 /// no form to post into a capability that is switched off), and unavailable
-/// (the session store could not be read — never an empty-conversation
+/// (the session store could not be read, never an empty-conversation
 /// illusion).
 pub fn web_assistant_page(data: Option<&AssistantPageData>) -> String {
     // No server data means the SSR skeleton (an empty conversation with the
@@ -5245,7 +5245,7 @@ pub fn web_assistant_page(data: Option<&AssistantPageData>) -> String {
         transcript.push_str(
             "<div class=\"apex-notice apex-notice--warn\" role=\"status\">\
              <strong>The assistant is not enabled for this workspace</strong>\
-             <span>An administrator switched the AI assistant off for this workspace. It is not broken — the capability is disabled, and nothing was sent to the model. Contact support@apexmail.ee if you believe it should be on.</span></div>",
+             <span>An administrator switched the AI assistant off for this workspace. It is not broken, the capability is disabled, and nothing was sent to the model. Contact support@apexmail.ee if you believe it should be on.</span></div>",
         );
     } else if unavailable {
         // The canonical warning recipe (dogfood 2026-10-06 ui-visual): the
@@ -5257,13 +5257,13 @@ pub fn web_assistant_page(data: Option<&AssistantPageData>) -> String {
         transcript.push_str(
             "<div class=\"apex-notice apex-notice--warn\" role=\"status\">\
              <strong>Conversation unavailable</strong>\
-             <span>The assistant could not read your conversation history just now. This is a temporary service problem, not an empty conversation — reload to try again.</span></div>",
+             <span>The assistant could not read your conversation history just now. This is a temporary service problem, not an empty conversation, reload to try again.</span></div>",
         );
     } else if turns.is_empty() {
         transcript.push_str(
             "<div class=\"border p-8\">\
              <h2 class=\"apex-h2\">Ask about your workspace</h2>\
-             <p class=\"mt-2\">Pricing, deliverability, domains, compliance or the API — answers come from the published ApexMail documentation, and anything the assistant cannot verify is escalated to a human.</p></div>",
+             <p class=\"mt-2\">Pricing, deliverability, domains, compliance or the API, answers come from the published ApexMail documentation, and anything the assistant cannot verify is escalated to a human.</p></div>",
         );
     } else {
         transcript.push_str("<div class=\"space-y-6\">");
@@ -5340,7 +5340,7 @@ fn assistant_turn_html(turn: &AssistantTurnData) -> String {
         // Same canonical warning recipe as the unavailable state above: the
         // amber classes were undefined (no `amber` scale in this palette)
         // and rendered nothing.
-        "<div class=\"apex-notice apex-notice--warn mt-3\" role=\"status\"><span class=\"apex-em\">A human will follow up on this question — contact support@apexmail.ee for anything urgent.</span></div>"
+        "<div class=\"apex-notice apex-notice--warn mt-3\" role=\"status\"><span class=\"apex-em\">A human will follow up on this question, contact support@apexmail.ee for anything urgent.</span></div>"
     } else {
         ""
     };
@@ -5436,7 +5436,7 @@ pub fn web_settings_page() -> String {
 </section></div>".to_string()
 }
 
-/// Suppressions settings page (deferred-feature 4) — the static fallback the
+/// Suppressions settings page (deferred-feature 4), the static fallback the
 /// render pipeline shows without server data. The data-backed page renders
 /// through the same generic list machinery as every other settings list;
 /// this fallback is the honest empty state, never demo rows. The list is
@@ -5463,14 +5463,14 @@ pub fn web_settings_suppressions_page() -> String {
     };
     format!(
         "<div class=\"space-y-6\">\
-<div class=\"flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between\"><div><h1 class=\"apex-page-title\">Suppressions</h1><p class=\"\">Addresses withheld from sending — recorded by bounces, complaints, and unsubscribes.</p></div></div>\
-<section class=\"border p-6\"><p class=\"apex-em\">Why this list is read-only</p><p class=\"mt-1\">Addresses land here automatically when they bounce, complain, or unsubscribe, and they never receive campaign mail while listed. That makes the list a safety record rather than something to edit — a contact who wants mail again resubscribes through your signup path.</p></section>\
+<div class=\"flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between\"><div><h1 class=\"apex-page-title\">Suppressions</h1><p class=\"\">Addresses withheld from sending, recorded by bounces, complaints, and unsubscribes.</p></div></div>\
+<section class=\"border p-6\"><p class=\"apex-em\">Why this list is read-only</p><p class=\"mt-1\">Addresses land here automatically when they bounce, complain, or unsubscribe, and they never receive campaign mail while listed. That makes the list a safety record rather than something to edit, a contact who wants mail again resubscribes through your signup path.</p></section>\
 {table}</div>",
         table = table.render_html(),
     )
 }
 
-/// Mailboxes archive + journaling page — the static fallback the render
+/// Mailboxes archive + journaling page, the static fallback the render
 /// pipeline shows without server data. The data-backed page renders the
 /// real tenant-scoped rows through the generic list machinery; this
 /// fallback is the honest empty state (no fabricated entries, no raw body).
@@ -5512,7 +5512,7 @@ pub fn web_settings_journal_page() -> String {
     format!(
         "<div class=\"space-y-6\">\
 <div class=\"flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between\"><div><h1 class=\"apex-page-title\">Journal</h1><p class=\"\">The legal copy of inbound and outbound messages for workspace mailboxes with archive + journaling enabled.</p></div></div>\
-<section class=\"border p-6\"><p class=\"apex-em\">How journaling works</p><p class=\"mt-1\">When the Mailboxes archive + journaling add-on is active — for the workspace or for an individual mailbox — every inbound delivery and every outbound send writes one immutable copy here, including the complete raw message. Disabling the add-on stops new copies; entries already written stay readable. Only workspace administrators can open this page.</p></section>\
+<section class=\"border p-6\"><p class=\"apex-em\">How journaling works</p><p class=\"mt-1\">When the Mailboxes archive + journaling add-on is active, for the workspace or for an individual mailbox, every inbound delivery and every outbound send writes one immutable copy here, including the complete raw message. Disabling the add-on stops new copies; entries already written stay readable. Only workspace administrators can open this page.</p></section>\
 <section data-view-state=\"empty\" class=\"space-y-4\">{empty}</section>\
 {table}</div>",
         empty = EmptyState {
@@ -5567,7 +5567,7 @@ pub fn web_settings_api_keys_page() -> String {
 /// API-key creation form: name + expiry + scopes grouped by task. Used both
 /// on the handwritten settings page and beside the live keys table.
 pub fn api_key_create_form_html() -> String {
-    // Scopes grouped by job — least privilege is the default story, not a
+    // Scopes grouped by job, least privilege is the default story, not a
     // wall of equal checkboxes.
     let groups: [(&str, &str, &[&str]); 6] = [
         (
@@ -5671,7 +5671,7 @@ pub fn team_invite_form_html() -> String {
 <div class=\"space-y-2\"><label class=\"apex-em apex-label\" for=\"team-invite-role\">Role</label>\
 <select id=\"team-invite-role\" name=\"role\" class=\"flex h-12 w-full border px-3 apex-select\"><option value=\"member\">Member</option><option value=\"admin\">Admin</option></select></div>\
 <button type=\"submit\" class=\"inline-flex items-center justify-center px-4 py-2 apex-btn apex-btn--primary\">Send invitation</button>\
-<p class=\"\">Submitting creates an invitation record and adds the address as <strong>invited</strong>. No invitation email is sent from this page yet — the record alone does not sign anyone in.</p>\
+<p class=\"\">Submitting creates an invitation record and adds the address as <strong>invited</strong>. No invitation email is sent from this page yet, the record alone does not sign anyone in.</p>\
 </form>"
         .to_string()
 }
@@ -5730,7 +5730,7 @@ pub fn dedicated_ip_request_form_html() -> String {
 /// beside live billing rows.
 pub fn billing_action_form_html() -> String {
     "<div class=\"border p-6 space-y-3\">\
-<p class=\"\">Plan changes and invoice downloads are completed through the billing team. Submitting logs a request — it does not charge the account.</p>\
+<p class=\"\">Plan changes and invoice downloads are completed through the billing team. Submitting logs a request, it does not charge the account.</p>\
 <a href=\"/settings/billing\" class=\"inline-flex items-center justify-center px-4 py-2 apex-btn apex-btn--primary\">Manage billing</a>\
 </div>"
         .to_string()
@@ -5775,7 +5775,7 @@ pub fn web_settings_billing_page() -> String {
     // Batch-2 honesty fix: this static fallback used to fabricate a plan
     // ("Free Tier", "$0/month") and a usage figure ("0 of 1,000 emails
     // sent") it cannot know. Figures it cannot read now say
-    // "unavailable" — never a fabricated zero — and the plan-change form
+    // "unavailable", never a fabricated zero, and the plan-change form
     // states up front what submitting it actually does (see the matching
     // flash copy in api-server's billing twins).
     format!(
@@ -5784,11 +5784,11 @@ pub fn web_settings_billing_page() -> String {
 <section data-view-state=\"ready\" class=\"space-y-6\">\
 <div class=\"border p-6 md:p-8\">\
 <h2 class=\"mb-2 apex-h3\">Current Plan</h2>\
-<p class=\"mt-4 apex-em\">unavailable<span class=\"\"> — live figures load with your account data</span></p>\
+<p class=\"mt-4 apex-em\">unavailable<span class=\"\">, live figures load with your account data</span></p>\
 <p class=\"mt-3\">Choosing a plan opens Mollie&rsquo;s secure checkout in this browser. The plan changes only once Mollie confirms the payment; nothing is charged on this page.</p>\
 <form class=\"mt-4 space-y-3\" method=\"post\" action=\"/web/billing/checkout\">\
 <label class=\"mb-2 apex-label\" for=\"upgrade-plan\"><svg class=\"\" viewBox=\"0 0 24 14\" width=\"17\" height=\"11\" fill=\"none\" aria-hidden=\"true\"><path d=\"M4 12 A 9 9 0 0 1 20 12\" stroke=\"currentColor\" stroke-width=\"2.6\" stroke-linecap=\"round\"/></svg>Plan</label>\
-<select id=\"upgrade-plan\" name=\"plan\" class=\"w-full max-w-xs px-4 py-3 border apex-select\"><option value=\"starter\">Developer — €20/mo</option><option value=\"pro\">Pro — €89/mo</option><option value=\"growth\">Growth — €229/mo</option><option value=\"scale\">Business — €699/mo</option></select>\
+<select id=\"upgrade-plan\" name=\"plan\" class=\"w-full max-w-xs px-4 py-3 border apex-select\"><option value=\"starter\">Developer, €20/mo</option><option value=\"pro\">Pro, €89/mo</option><option value=\"growth\">Growth, €229/mo</option><option value=\"scale\">Business, €699/mo</option></select>\
 <label class=\"mb-2 apex-label\" for=\"upgrade-interval\">Billing interval</label>\
 <select id=\"upgrade-interval\" name=\"interval\" class=\"w-full max-w-xs px-4 py-3 border apex-select\"><option value=\"monthly\">Monthly</option><option value=\"yearly\">Yearly, ten monthly payments</option></select>\
 <button type=\"submit\" class=\"mt-3 inline-flex items-center justify-center h-12 px-6 py-3 apex-btn apex-btn--primary\">Continue to checkout</button>\
@@ -5816,12 +5816,12 @@ pub fn web_settings_billing_page() -> String {
 </div>\
 <div class=\"border p-6 md:p-8\"><h2 class=\"mb-6 apex-h3\">Usage This Month</h2>\
 {progress}\
-<p class=\"mt-2\">Usage for this month is unavailable here — not zero. The live figure loads with your account data.</p>\
+<p class=\"mt-2\">Usage for this month is unavailable here, not zero. The live figure loads with your account data.</p>\
 </div>\
 </section>\
 <section data-view-state=\"empty\" hidden><div class=\"border p-12\"><p class=\"apex-em\">No billing data available</p><p class=\"mt-1\">Billing information will appear once you start sending emails.</p></div></section>\
 </div>",
-        // No fabricated "0%" readout on the static fallback — the meter is
+        // No fabricated "0%" readout on the static fallback, the meter is
         // a chassis; the unavailable copy carries the uncertainty.
         progress = Progress { value: 0, variant: "default", size: "default", animated: false, show_value: false }.render_html(),
     )
@@ -6110,7 +6110,7 @@ fn render_cp_collection_page(
         description: Some(empty_description),
         action_label: action.map(|(label, _)| label),
         // The collection header's action href is a real route (e.g.
-        // /tenants/new) — empty-state CTAs navigate, they never dead-end.
+        // /tenants/new), empty-state CTAs navigate, they never dead-end.
         action_href: action.map(|(_, href)| href),
     }
     .render_html();
@@ -6186,7 +6186,7 @@ pub fn control_plane_tenants_page() -> String {
     )
 }
 
-/// New tenant page — no-data fallback (route inventory, offline renders).
+/// New tenant page, no-data fallback (route inventory, offline renders).
 /// The plan catalog is unknown here, so the page renders the honest
 /// catalog-unavailable state (F11) instead of a fabricated plan list.
 pub fn control_plane_tenants_new_page() -> String {
@@ -6207,7 +6207,7 @@ pub fn control_plane_tenants_new_page_with_data(
     use crate::view_data::TenantNewPageData;
 
     // `None` (no data) and `Some(unavailable)` share the honest failure
-    // render; an empty catalog is equally unusable — a create would have no
+    // render; an empty catalog is equally unusable, a create would have no
     // verifiable plan to land on.
     let catalog_usable =
         matches!(data, Some(TenantNewPageData { unavailable: false, plans }) if !plans.is_empty());
@@ -6244,7 +6244,7 @@ pub fn control_plane_tenants_new_page_with_data(
         )
     } else {
         (
-            "<div class=\"space-y-2\"><label class=\"apex-em apex-label\" for=\"tenant-new-plan\">Plan</label><select id=\"tenant-new-plan\" name=\"plan\" disabled class=\"flex h-12 w-full border px-3 apex-select\"><option>Plan catalog unavailable</option></select><p class=\"\">The billing plan catalog could not be read, so a tenant cannot be created on a verifiable plan right now. This is a service problem, not an empty catalog — try again shortly.</p></div>"
+            "<div class=\"space-y-2\"><label class=\"apex-em apex-label\" for=\"tenant-new-plan\">Plan</label><select id=\"tenant-new-plan\" name=\"plan\" disabled class=\"flex h-12 w-full border px-3 apex-select\"><option>Plan catalog unavailable</option></select><p class=\"\">The billing plan catalog could not be read, so a tenant cannot be created on a verifiable plan right now. This is a service problem, not an empty catalog, try again shortly.</p></div>"
                 .to_string(),
             String::new(),
         )
@@ -6314,18 +6314,18 @@ pub fn control_plane_tenants_new_page_with_data(
     )
 }
 
-/// `/tenants/{id}` — the control-plane tenant detail page with the audited
+/// `/tenants/{id}`, the control-plane tenant detail page with the audited
 /// plan-change form (lane C C1: the plan change had NO SSR surface; the CP
 /// could only read the plan column).
 ///
 /// The select binds to the ACTIVE billing catalog and preselects the
-/// tenant's EFFECTIVE plan (an active `plan_overrides` row wins — the same
+/// tenant's EFFECTIVE plan (an active `plan_overrides` row wins, the same
 /// precedence the entitlement resolver applies). The POST performs the
 /// audited plan-override upsert plus the `tenants.plan` projection, so the
 /// change is both immediately effective and visible in the canonical column.
 ///
 /// `None`/`unavailable` renders the honest read-failure state: no select,
-/// no submit — never a form whose POST could not be validated.
+/// no submit, never a form whose POST could not be validated.
 pub fn control_plane_tenant_detail_page_with_data(
     data: Option<&crate::view_data::TenantDetailPageData>,
 ) -> String {
@@ -6344,7 +6344,7 @@ pub fn control_plane_tenant_detail_page_with_data(
             // A readable tenant with an UNREADABLE catalog must not submit an
             // unverifiable plan: render the honest unavailable state (the
             // tenant's current plan as a read-only line, no select, no
-            // button) — the same shape the create form uses.
+            // button), the same shape the create form uses.
             let catalog_usable = !tenant.plans.is_empty();
             let mut options = tenant
                 .plans
@@ -6419,12 +6419,12 @@ pub fn control_plane_tenant_detail_page_with_data(
         }
         None => {
             // Two distinct honest states: an ABSENT tenant is not a service
-            // problem, a failed read is — the copy must not swap them.
+            // problem, a failed read is, the copy must not swap them.
             let missing = data.is_some_and(|tenant| tenant.missing);
             let note = if missing {
-                "<p class=\"\">No tenant with this id exists in the control plane. It may have been deleted — the tenant list shows the current workspaces.</p>"
+                "<p class=\"\">No tenant with this id exists in the control plane. It may have been deleted, the tenant list shows the current workspaces.</p>"
             } else {
-                "<p class=\"\">The tenant could not be read, so the plan cannot be shown or changed right now. This is a service problem, not a missing tenant — try again shortly.</p>"
+                "<p class=\"\">The tenant could not be read, so the plan cannot be shown or changed right now. This is a service problem, not a missing tenant, try again shortly.</p>"
             };
             (
                 String::new(),
@@ -6467,7 +6467,7 @@ fn format_plan_option_label(display_name: &str, email_limit: i64) -> String {
     } else {
         email_limit.to_string()
     };
-    format!("{display_name} — {compact} emails / mo")
+    format!("{display_name}, {compact} emails / mo")
 }
 
 /// Operators list page.
@@ -6601,7 +6601,7 @@ pub fn control_plane_analytics_page() -> String {
     )
 }
 
-/// Discovery page — IA honesty (item 26): this route lists the lead
+/// Discovery page, IA honesty (item 26): this route lists the lead
 /// sources discovery runs enriched, so the fallback says exactly that
 /// instead of fabricating service-registry health rows.
 pub fn control_plane_discovery_page() -> String {
@@ -6609,7 +6609,7 @@ pub fn control_plane_discovery_page() -> String {
 <h1 class=\"apex-page-title\">Lead Sources</h1>\
 <div class=\"border p-6 md:p-8\">\
 <h2 class=\"mb-6 apex-h3\">Discovery intake</h2>\
-<p class=\"\">Discovery runs register the lead sources they enriched here, with per-source yield. No sources have reported yet — run a discovery cycle from the Sales Console to populate this page.</p>\
+<p class=\"\">Discovery runs register the lead sources they enriched here, with per-source yield. No sources have reported yet, run a discovery cycle from the Sales Console to populate this page.</p>\
 </div></div>".to_string()
 }
 
@@ -6621,7 +6621,7 @@ pub fn control_plane_discovery_page() -> String {
 /// * in-flight (`processing`) and terminal (`completed`) rows render an
 ///   explicit "in flight" / "history" note instead of a dead control.
 ///
-/// Each control is a native zero-JSON POST form (CSRF auto-injected) — the
+/// Each control is a native zero-JSON POST form (CSRF auto-injected), the
 /// same no-JavaScript contract as every other CP mutation.
 pub fn control_plane_jobs_page_with_data(data: Option<&crate::view_data::JobsPageData>) -> String {
     let Some(data) = data else {
@@ -6632,7 +6632,7 @@ pub fn control_plane_jobs_page_with_data(data: Option<&crate::view_data::JobsPag
 <h1 class=\"apex-page-title\">Jobs</h1>\
 <div class=\"border p-8\">\
 <h2 class=\"mb-4 apex-h3\">Job queues</h2>\
-<p class=\"\">The job queue store could not be read — this is a service problem, not an idle queue. Retry and cancel controls are hidden until the store answers, because acting on an unknown queue state would be guesswork.</p>\
+<p class=\"\">The job queue store could not be read, this is a service problem, not an idle queue. Retry and cancel controls are hidden until the store answers, because acting on an unknown queue state would be guesswork.</p>\
 </div></div>"
             .to_string();
     }
@@ -6679,7 +6679,7 @@ pub fn control_plane_jobs_page_with_data(data: Option<&crate::view_data::JobsPag
     }
 
     let rows = if row_html.is_empty() {
-        "<tr><td colspan=\"7\" class=\"p-10\">No queued jobs — the worker queues are idle. Rows appear here as workers enqueue work, and dead-lettered jobs become retryable.</td></tr>".to_string()
+        "<tr><td colspan=\"7\" class=\"p-10\">No queued jobs, the worker queues are idle. Rows appear here as workers enqueue work, and dead-lettered jobs become retryable.</td></tr>".to_string()
     } else {
         row_html.join("")
     };
@@ -6707,7 +6707,7 @@ pub fn control_plane_jobs_page_with_data(data: Option<&crate::view_data::JobsPag
     )
 }
 
-/// Jobs page — no-data fallback (route inventory / offline renders).
+/// Jobs page, no-data fallback (route inventory / offline renders).
 pub fn control_plane_jobs_page() -> String {
     let table = Table {
         caption: Some("Background jobs"),
@@ -6893,8 +6893,8 @@ pub fn control_plane_billing_page() -> String {
 }
 
 /// CP billing operations page (`/billing`): the whole Mollie lifecycle for
-/// the operator — money, entitlement, collections, incidents, webhook health
-/// and settlements — from the same snapshot the JSON endpoints serve.
+/// the operator, money, entitlement, collections, incidents, webhook health
+/// and settlements, from the same snapshot the JSON endpoints serve.
 /// `None` renders the explicit unavailable state (never a zero-filled board).
 pub fn control_plane_billing_page_with_data(
     data: Option<&crate::view_data::BillingOpsPageData>,
@@ -7270,12 +7270,12 @@ pub fn control_plane_alerts_page() -> String {
     )
 }
 
-/// CP alert rules page — the REAL management surface for the evaluated
+/// CP alert rules page, the REAL management surface for the evaluated
 /// usage-alert store (`usage_alert_configs`, migrations 024 + 246).
 ///
 /// Every row shown here is read by the billing-service maintenance sweep, so
 /// a rule created/edited on this page changes what actually fires into
-/// `system_alerts` on `/alerts` — there is no second, dead rule store.
+/// `system_alerts` on `/alerts`, there is no second, dead rule store.
 /// `data: None` (unit tests / the static export) renders the same surface
 /// with the honest empty state instead of fabricated rules.
 pub fn control_plane_alert_rules_page(data: Option<&AlertRulesPageData>) -> String {
@@ -7332,7 +7332,7 @@ pub fn control_plane_alert_rules_page(data: Option<&AlertRulesPageData>) -> Stri
             format!(
                 "<form class=\"apex-panel space-y-4\" method=\"post\" action=\"/web/admin/alert-rules/{id}/update\" data-form-id=\"alert-rule-edit\">\
 <h2 class=\"apex-panel-title\">Edit rule</h2>\
-<p class=\"\">Tenant <span class=\"apex-mono\">{tenant}</span>, metric <span class=\"apex-mono\">{metric}</span> (fixed — delete and recreate the rule to change them).</p>\
+<p class=\"\">Tenant <span class=\"apex-mono\">{tenant}</span>, metric <span class=\"apex-mono\">{metric}</span> (fixed, delete and recreate the rule to change them).</p>\
 <div class=\"grid gap-4 md:grid-cols-2\">\
 <div class=\"apex-field\"><label for=\"rule-edit-name\">Name</label><input id=\"rule-edit-name\" name=\"name\" type=\"text\" maxlength=\"80\" required value=\"{name}\"></div>\
 <div class=\"apex-field\"><label for=\"rule-edit-threshold\">Threshold (% of plan limit)</label><input id=\"rule-edit-threshold\" name=\"threshold\" type=\"number\" min=\"1\" max=\"100\" required value=\"{threshold}\"></div>\
@@ -7375,11 +7375,11 @@ pub fn control_plane_alert_rules_page(data: Option<&AlertRulesPageData>) -> Stri
     let mut rows = String::new();
     if unavailable {
         rows.push_str(
-            "<tr><td colspan=\"8\" class=\"\">The rule list is unavailable right now — this is a service problem, not an empty list.</td></tr>",
+            "<tr><td colspan=\"8\" class=\"\">The rule list is unavailable right now, this is a service problem, not an empty list.</td></tr>",
         );
     } else if rules.is_empty() {
         rows.push_str(
-            "<tr><td colspan=\"8\" class=\"\">No alert rules yet — create one above. Every rule here is evaluated against live usage and fires onto the Alerts page.</td></tr>",
+            "<tr><td colspan=\"8\" class=\"\">No alert rules yet, create one above. Every rule here is evaluated against live usage and fires onto the Alerts page.</td></tr>",
         );
     } else {
         for rule in rules {
@@ -7505,7 +7505,7 @@ pub fn control_plane_security_page() -> String {
 
 /// MFA state carried from the server: when a setup is in flight the server
 /// passes the TOTP secret + otpauth URI (via a short-lived signed cookie,
-/// never the URL) and the page renders the QR — encoded entirely in Rust —
+/// never the URL) and the page renders the QR, encoded entirely in Rust —
 /// plus the manual-entry fallback and the verify form. Every step is a
 /// native POST to /web/auth/mfa/*; there is no client-side code.
 pub fn control_plane_security_page_with_setup(setup: Option<&MfaSetupView<'_>>) -> String {
@@ -7518,8 +7518,8 @@ pub fn control_plane_security_page_with_setup(setup: Option<&MfaSetupView<'_>>) 
 </form></div>".to_string(),
         Some(view) => format!(
             "<div class=\"border p-6 md:p-8\">\
-<h2 class=\"mb-6 apex-h3\">MFA Configuration — step 2 of 2</h2>\
-<p class=\"mb-4\">Scan this QR with your authenticator app (e.g. Google Authenticator, Authy, 1Password), then enter a code to confirm. The QR is generated on the server — the secret never leaves this origin.</p>\
+<h2 class=\"mb-6 apex-h3\">MFA Configuration, step 2 of 2</h2>\
+<p class=\"mb-4\">Scan this QR with your authenticator app (e.g. Google Authenticator, Authy, 1Password), then enter a code to confirm. The QR is generated on the server, the secret never leaves this origin.</p>\
 <div class=\"flex flex-col items-center gap-4 mb-6\" aria-label=\"MFA QR code (server-rendered)\">{qr_svg}\
 <div class=\"w-full max-w-md\">\
 <p class=\"mb-2 apex-em\">No camera? Enter this manually</p>\
@@ -7554,7 +7554,7 @@ pub fn control_plane_security_page_with_setup(setup: Option<&MfaSetupView<'_>>) 
 }
 
 /// Server-provided MFA setup view: the QR arrives pre-rendered as an inline
-/// SVG from `crate::qr` (byte-mode, ECC L — see that module's round-trip
+/// SVG from `crate::qr` (byte-mode, ECC L, see that module's round-trip
 /// decoder tests).
 pub struct MfaSetupView<'a> {
     pub secret: &'a str,
@@ -7565,7 +7565,7 @@ pub struct MfaSetupView<'a> {
 impl<'a> MfaSetupView<'a> {
     pub fn new(secret: &'a str, otpauth: &'a str) -> Self {
         let qr_svg = crate::qr::encode_to_svg(otpauth, 5, 4).unwrap_or_else(|| {
-            "<p class=\"\">QR unavailable — use the manual secret below.</p>".to_string()
+            "<p class=\"\">QR unavailable, use the manual secret below.</p>".to_string()
         });
         Self {
             secret,
@@ -7929,14 +7929,14 @@ pub fn web_login_page_with_state(message: Option<&str>, csrf_token: &str) -> Str
     )
 }
 
-/// Multi-step SSR MFA challenge — step two of the zero-JS login flow.
+/// Multi-step SSR MFA challenge, step two of the zero-JS login flow.
 ///
 /// `POST /web/auth/login` validated the password and set a short-lived
 /// HMAC-signed `apexmail_login_challenge` cookie, then redirected here
 /// (`/login?mfa=1&email=…`). This page renders the second factor as a
 /// plain form posting to `/web/auth/mfa/verify`; the server re-verifies
 /// both the challenge cookie and the TOTP code before minting a session.
-/// There is no client-side code — the step transition itself is a redirect.
+/// There is no client-side code, the step transition itself is a redirect.
 pub fn web_login_mfa_challenge_page(csrf_token: &str, email: &str, return_to: &str) -> String {
     let csrf = csrf_hidden_input(csrf_token);
     // Only same-origin paths survive (defense in depth: the router already
@@ -7960,7 +7960,7 @@ pub fn web_login_mfa_challenge_page(csrf_token: &str, email: &str, return_to: &s
     // Renders as a SIBLING of the authenticator form, never inside it: the
     // HTML parser discards a nested <form> start tag, which merged both
     // control sets into one form whose required recovery input could never
-    // be filled from the invisible half — "Verify and sign in" then produced
+    // be filled from the invisible half, "Verify and sign in" then produced
     // no request at all (dogfood P0, 2026-10-06; pinned by GATE D's
     // no_rendered_document_nests_a_form_inside_another_form).
     let recovery_form = format!(
@@ -8026,7 +8026,7 @@ pub fn control_plane_login_page(csrf_token: &str) -> String {
     let csrf = csrf_hidden_input(csrf_token);
     // Batch-2 copy fix: plain field names ("Email", "Password"), and the
     // dead "Maintain session security" checkbox is gone (the login handler
-    // never read it — a control that did nothing must not render).
+    // never read it, a control that did nothing must not render).
     let form_html = format!(
         "<form class=\"p-8 space-y-6\" action=\"/web/cp/login\" method=\"POST\">\
 {csrf}\
@@ -8068,13 +8068,13 @@ mod tests {
     fn web_root_layout_matches_nextjs_structure() {
         // Batch-2 titles fix: the root layout takes the per-page document
         // title instead of the hardcoded "ApexMail".
-        let html = web_root_layout("<p>test</p>", "Dashboard — ApexMail");
+        let html = web_root_layout("<p>test</p>", "Dashboard | ApexMail");
         assert!(html.starts_with("<!DOCTYPE html>"));
         assert!(html.contains(&format!(
             "<html lang=\"en\" class=\"{}\">",
             WEB_ROOT_HTML_CLASSES
         )));
-        assert!(html.contains("<title>Dashboard — ApexMail</title>"));
+        assert!(html.contains("<title>Dashboard | ApexMail</title>"));
         assert!(html.contains("Modern email infrastructure for developers"));
         // Batch-2 single-main fix: the former landmark's styling moved onto
         // the <body> and the root layout no longer emits a <main>.
@@ -8093,9 +8093,9 @@ mod tests {
         // Batch-2 titles fix: the routed render passes the per-page title;
         // the one-argument form keeps the generic control-plane title.
         let html = control_plane_root_layout("<p>test</p>");
-        assert!(html.contains("<title>Control Plane — ApexMail</title>"));
-        let titled = control_plane_root_layout_with_title("<p>test</p>", "Tenants — ApexMail");
-        assert!(titled.contains("<title>Tenants — ApexMail</title>"));
+        assert!(html.contains("<title>Control Plane | ApexMail</title>"));
+        let titled = control_plane_root_layout_with_title("<p>test</p>", "Tenants | ApexMail");
+        assert!(titled.contains("<title>Tenants | ApexMail</title>"));
         assert!(html.contains("<body class=\"\">"));
         assert!(html.contains("<p>test</p>"));
     }
@@ -8196,7 +8196,7 @@ mod tests {
     }
 
     /// The fallback pricing page must mirror the marketing catalog (six
-    /// plans, EUR) — previously it invented three USD plans. Prices are the
+    /// plans, EUR), previously it invented three USD plans. Prices are the
     /// owner's 2026-10-15 table: Developer €20 (was €29), Pro €89,
     /// Growth €229, Business €699, Enterprise Cloud from €1,750.
     #[test]
@@ -8298,7 +8298,7 @@ mod tests {
         ] {
             assert!(
                 !html.contains("data-sample-data"),
-                "{name} carries a sample-data marker — fabricated metrics must not ship"
+                "{name} carries a sample-data marker, fabricated metrics must not ship"
             );
         }
     }
@@ -8332,11 +8332,11 @@ mod tests {
     }
 
     /// ZERO-JavaScript contract: no root layout may reference or inline any
-    /// script — the console is pure SSR + CSS.
+    /// script, the console is pure SSR + CSS.
     #[test]
     fn root_layouts_reference_no_scripts() {
         for html in [
-            web_root_layout("<p>test</p>", "Dashboard — ApexMail"),
+            web_root_layout("<p>test</p>", "Dashboard | ApexMail"),
             control_plane_root_layout("<p>test</p>"),
         ] {
             assert!(
@@ -8364,7 +8364,7 @@ mod tests {
             format!("otpauth://totp/ApexMail:ops@apexmail.ee?secret={secret}&issuer=ApexMail");
         let view = MfaSetupView::new(secret, &otpauth);
         let setup = control_plane_security_page_with_setup(Some(&view));
-        // QR rendered server-side as inline SVG — no third-party service,
+        // QR rendered server-side as inline SVG, no third-party service,
         // no canvas, no JavaScript.
         assert!(setup.contains("<svg"), "server-rendered QR SVG missing");
         assert!(setup.contains("role=\"img\""));
@@ -8392,7 +8392,7 @@ mod tests {
         // to the actual dashboard route (it used to open /campaigns).
         assert!(html.contains("href=\"/dashboard\""));
         assert!(html.contains("Go to Dashboard"));
-        // The CTA composes the canonical recipe now — `apex-btn` carries the
+        // The CTA composes the canonical recipe now, `apex-btn` carries the
         // primary fill, so assert the recipe rather than the raw utility.
         assert!(html.contains("apex-btn") || html.contains("bg-primary"));
     }
@@ -8623,7 +8623,7 @@ mod tests {
     }
 
     /// Review §7: a pending-approval exception carries the native
-    /// approve/reject form — the console decides the review, with no API
+    /// approve/reject form, the console decides the review, with no API
     /// client (R6). A blocked decision is a hard-gate refusal with nothing
     /// to release, so it carries no review control.
     #[test]
@@ -8666,7 +8666,7 @@ mod tests {
     }
 
     /// Audit §30 adversarial: the sales surface must never regress into
-    /// labelled fiction — no sample-data marker anywhere, in any state.
+    /// labelled fiction, no sample-data marker anywhere, in any state.
     #[test]
     fn sales_page_never_carries_sample_data_marker() {
         for html in [
@@ -8686,7 +8686,7 @@ mod tests {
 
     /// Audit §30 adversarial: money and percentages must derive from the
     /// input data. Two different datasets must produce different money /
-    /// percentage token sets — a hardcoded figure would be identical in
+    /// percentage token sets, a hardcoded figure would be identical in
     /// both renders.
     #[test]
     fn sales_page_money_and_percentages_follow_the_input_data() {
@@ -8727,7 +8727,7 @@ mod tests {
         );
         assert_ne!(
             first_tokens, second_tokens,
-            "money/percentage output must change when the input data changes — \
+            "money/percentage output must change when the input data changes, \
              identical sets mean a hardcoded figure leaked in"
         );
         assert!(
@@ -8745,7 +8745,7 @@ mod tests {
     }
 
     /// Audit §30: an engaged kill switch must be unmistakable and must state
-    /// the documented behaviour — outbound halted, inbound replies continue.
+    /// the documented behaviour, outbound halted, inbound replies continue.
     #[test]
     fn sales_page_kill_switch_states_outbound_halt_and_inbound_continuation() {
         let mut data = sales_page_data_fixture();
@@ -8770,7 +8770,7 @@ mod tests {
         assert!(!released.contains("kill switch engaged"));
     }
 
-    /// Every one of the five autonomy modes must render its meaning — a
+    /// Every one of the five autonomy modes must render its meaning, a
     /// mode with no description is a UX defect. The API description wins
     /// when present; the canonical shipped meaning is the fallback.
     #[test]
@@ -8822,7 +8822,7 @@ mod tests {
         assert!(exceptions.contains("Rationale: country confidence below the floor"));
     }
 
-    /// Empty data must render explicit empty states — never a zero-filled
+    /// Empty data must render explicit empty states, never a zero-filled
     /// table row that implies activity.
     #[test]
     fn sales_page_empty_states_are_explicit_not_zero_rows() {
@@ -9040,7 +9040,7 @@ mod tests {
         assert!(!html.contains("id=\"mfaCode\""));
         assert!(!html.contains("data-mfa-section"));
         // Dead JS-era markup purge: the hidden rate-limit error slot is
-        // gone — errors arrive via the signed flash cookie.
+        // gone, errors arrive via the signed flash cookie.
         assert!(!html.contains("data-error-key"));
         // CSRF endpoint
         assert!(html.contains("action=\"/web/auth/login\""));
@@ -9211,7 +9211,7 @@ mod tests {
     fn auth_page_markup_is_structurally_sound() {
         // Regression (2026-09-09): deleting the signup name/company grid
         // left a stray `</div>` inside the HTML format string, which
-        // closed the form early in the browser — the fields rendered
+        // closed the form early in the browser, the fields rendered
         // OUTSIDE the <form> and the submit button was orphaned, so the
         // page looked broken and could not submit. These structural
         // invariants catch that class of slip (unbalanced containers,
@@ -9248,7 +9248,7 @@ mod tests {
             // control sits inside SOME form. Auth pages may legitimately
             // carry more than one form (e.g. the MFA challenge's
             // authenticator + recovery-code paths); what must never happen
-            // is a control rendered outside every form — or a form nested
+            // is a control rendered outside every form, or a form nested
             // inside another, which the parser silently collapses
             // (dogfood 2026-10-06; pinned by GATE D's nested-form gate).
             let form_ranges: Vec<(usize, usize)> = {
@@ -9316,7 +9316,7 @@ mod tests {
 
     /// Reflected-XSS regression: /reset-password interpolates the `token`,
     /// `email`, and `message` query parameters into hidden inputs and the
-    /// header notice. Hostile payloads must be HTML-escaped — never rendered
+    /// header notice. Hostile payloads must be HTML-escaped, never rendered
     /// as raw markup or allowed to break out of an attribute.
     #[test]
     fn web_reset_password_page_escapes_hostile_query_params() {
@@ -9433,7 +9433,7 @@ mod tests {
         // H1 consistency: every console page title is the page-band title.
         assert!(html.contains("apex-page-heading"), "{html}");
         // Batch-2 honesty fix: the no-data fallback must not fabricate a
-        // delivery rate — "unavailable", never a dial claiming 98.9%.
+        // delivery rate, "unavailable", never a dial claiming 98.9%.
         assert!(!html.contains("98.9"));
         assert!(html.contains("unavailable"));
     }
@@ -9778,7 +9778,7 @@ mod tests {
         assert!(html.contains("Billing"));
         assert!(html.contains("Current Plan"));
         // Batch-2 honesty fix: the static fallback no longer fabricates a
-        // plan/price/usage — it states "unavailable", not a fake Free Tier
+        // plan/price/usage, it states "unavailable", not a fake Free Tier
         // $0 or "0 of 1,000 emails".
         assert!(!html.contains("Free Tier"));
         assert!(!html.contains("$0"));
@@ -9992,7 +9992,7 @@ mod tests {
             html.contains("value=\"growth\" selected"),
             "the EFFECTIVE plan must be the selected option"
         );
-        assert!(html.contains("Growth — 500K emails / mo"));
+        assert!(html.contains("Growth, 500K emails / mo"));
         // A non-positive limit means unlimited: no fabricated number.
         assert!(html.contains(">Enterprise Cloud</option>"));
         // The form is catalog-bound and submits the plan name token.
@@ -10148,58 +10148,58 @@ mod tests {
     fn all_web_pages_produce_valid_html() {
         // Batch-2 titles fix: each wrap carries its route's document title.
         let pages = vec![
-            web_root_layout(&web_home_page(), "Home — ApexMail"),
+            web_root_layout(&web_home_page(), "Home | ApexMail"),
             web_root_layout(
                 &web_dashboard_layout(&web_campaigns_new_page(), ""),
-                "New Campaign — ApexMail",
+                "New Campaign | ApexMail",
             ),
             web_root_layout(
                 &web_dashboard_layout(&web_dedicated_ips_page(), ""),
-                "Dedicated IPs — ApexMail",
+                "Dedicated IPs | ApexMail",
             ),
             web_root_layout(
                 &web_dashboard_layout(&web_dashboard_page(), ""),
-                "Dashboard — ApexMail",
+                "Dashboard | ApexMail",
             ),
             web_root_layout(
                 &web_dashboard_layout(&web_campaigns_page(), ""),
-                "Campaigns — ApexMail",
+                "Campaigns | ApexMail",
             ),
             web_root_layout(
                 &web_dashboard_layout(&web_contacts_page(), ""),
-                "Contacts — ApexMail",
+                "Contacts | ApexMail",
             ),
             web_root_layout(
                 &web_dashboard_layout(&web_lists_page(), ""),
-                "Lists — ApexMail",
+                "Lists | ApexMail",
             ),
             web_root_layout(
                 &web_dashboard_layout(&web_templates_page(), ""),
-                "Templates — ApexMail",
+                "Templates | ApexMail",
             ),
             web_root_layout(
                 &web_dashboard_layout(&web_reports_page(), ""),
-                "Reports — ApexMail",
+                "Reports | ApexMail",
             ),
             web_root_layout(
                 &web_dashboard_layout(&web_analytics_page(), ""),
-                "Analytics — ApexMail",
+                "Analytics | ApexMail",
             ),
             web_root_layout(
                 &web_dashboard_layout(&web_events_page(), ""),
-                "Events — ApexMail",
+                "Events | ApexMail",
             ),
             web_root_layout(
                 &web_dashboard_layout(&web_domains_page(), ""),
-                "Domains — ApexMail",
+                "Domains | ApexMail",
             ),
             web_root_layout(
                 &web_dashboard_layout(&web_settings_page(), ""),
-                "Settings — ApexMail",
+                "Settings | ApexMail",
             ),
-            web_root_layout(&web_login_page(""), "Login — ApexMail"),
-            web_root_layout(&web_signup_page(""), "Signup — ApexMail"),
-            web_root_layout(&web_not_found_page(), "Page not found — ApexMail"),
+            web_root_layout(&web_login_page(""), "Login | ApexMail"),
+            web_root_layout(&web_signup_page(""), "Signup | ApexMail"),
+            web_root_layout(&web_not_found_page(), "Page not found | ApexMail"),
         ];
         for (i, html) in pages.iter().enumerate() {
             assert!(
@@ -10279,7 +10279,7 @@ mod tests {
     }
 
     /// F11 (live dogfood 2026-10-08): the `/tenants/new` form must render the
-    /// bound plan select from the ACTIVE catalog — the create handler
+    /// bound plan select from the ACTIVE catalog, the create handler
     /// validates `plan` against that catalog, and with no field every
     /// CP-created tenant was silently pinned to `free`.
     #[test]
@@ -10306,13 +10306,13 @@ mod tests {
             "the plan select must bind the plan field"
         );
         assert!(html.contains("value=\"free\" selected"), "{html}");
-        assert!(html.contains("Free — 3K emails / mo"), "{html}");
+        assert!(html.contains("Free, 3K emails / mo"), "{html}");
         assert!(html.contains("value=\"scale\""), "{html}");
-        assert!(html.contains("Business — 2M emails / mo"), "{html}");
+        assert!(html.contains("Business, 2M emails / mo"), "{html}");
         assert!(html.contains("action=\"/web/admin/tenants\""));
 
         // No data / unavailable / empty catalog: honest refusal to create on
-        // an unverifiable plan — no submit button, no fabricated options.
+        // an unverifiable plan, no submit button, no fabricated options.
         for case in [
             None,
             Some(&TenantNewPageData {
@@ -10744,7 +10744,7 @@ mod deferred_feature_view_tests {
     }
 
     /// Review §6.3: a table whose ONLY per-row action is the editor link
-    /// (templates) must still render the Actions column — the edit-only
+    /// (templates) must still render the Actions column, the edit-only
     /// branch must not depend on a delete/detail affordance.
     #[test]
     fn data_list_page_renders_edit_link_when_it_is_the_only_action() {
@@ -10875,7 +10875,7 @@ mod deferred_feature_view_tests {
         assert!(page.contains("Suppressions"));
         assert!(page.contains("Why this list is read-only"));
         assert!(page.contains("never receive campaign mail"));
-        // The empty table renders — never demo rows.
+        // The empty table renders, never demo rows.
         assert!(page.contains("apex-table"));
         assert!(!page.contains("example.com"));
     }
@@ -10907,7 +10907,7 @@ mod deferred_feature_view_tests {
 
     /// A workspace with `ai_chat` switched off must get the NAMED refusal
     /// (docs/user-guide/assistant.md: "the page reports that the capability
-    /// is not enabled") and no message form — a form whose every submission
+    /// is not enabled") and no message form, a form whose every submission
     /// is refused is not an honest disabled state. The unavailable state
     /// stays distinct (that one IS a service problem).
     #[test]
@@ -11127,7 +11127,7 @@ mod deferred_feature_view_tests {
     }
 
     /// The handwritten API-keys page and the live-table create form share
-    /// one contract (same helper) — they cannot drift into two products.
+    /// one contract (same helper), they cannot drift into two products.
     #[test]
     fn api_keys_page_composes_the_shared_create_form() {
         let page = web_settings_api_keys_page();
@@ -11249,7 +11249,7 @@ mod deferred_feature_view_tests {
                 "dedicated ip request",
                 // `form_dedicated_ip_request` reads no named control beyond
                 // the CSRF token, which the render pass injects into every
-                // form (`axum_router::inject_csrf_and_sign_confirms`) — the
+                // form (`axum_router::inject_csrf_and_sign_confirms`), the
                 // fragments themselves never carry `_csrf`.
                 &[],
                 dedicated_ip_request_form_html(),
@@ -11260,7 +11260,7 @@ mod deferred_feature_view_tests {
             for field in fields {
                 assert!(
                     form.contains(&format!("name=\"{field}\"")),
-                    "{label} form must supply name=\"{field}\" — its handler reads it. form: {form}"
+                    "{label} form must supply name=\"{field}\", its handler reads it. form: {form}"
                 );
             }
         }
@@ -11288,7 +11288,7 @@ mod deferred_feature_view_tests {
     }
 
     /// Row-delete confirmation forms are SIBLINGS of the bulk form and bind
-    /// via the `form` attribute — never nested (HTML drops nested forms).
+    /// via the `form` attribute, never nested (HTML drops nested forms).
     #[test]
     fn bulk_row_delete_uses_sibling_forms_not_nested_forms() {
         let mut data = crate::view_data::ListPageData {
@@ -11383,7 +11383,7 @@ mod deferred_feature_view_tests {
         );
     }
 
-    /// Preview is a sanitized structural view — never claimed as
+    /// Preview is a sanitized structural view, never claimed as
     /// recipient-client fidelity (the sanitizer strips inline styles).
     #[test]
     fn campaign_editor_preview_copy_is_structural_not_client_fidelity() {

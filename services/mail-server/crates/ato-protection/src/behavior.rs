@@ -1,4 +1,4 @@
-//! Behavioral profiling — login pattern analysis
+//! Behavioral profiling, login pattern analysis
 //!
 //! Analyzes user behavior patterns to detect anomalies://! - Time-of-day deviation from typical patterns
 //! - Login frequency anomalies
@@ -65,7 +65,7 @@ pub fn analyze_behavior(login_hour: u32, history: &UserLoginHistory) -> Behavior
         });
     }
 
-    // 3. Burst login pattern (many logins in short period — could be automated)
+    // 3. Burst login pattern (many logins in short period, could be automated)
     let recent_logins = history
         .events
         .iter()

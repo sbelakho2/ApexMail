@@ -1,4 +1,4 @@
-//! Reply policy — layer 3 of 3, the ONLY place that decides what happens next.
+//! Reply policy, layer 3 of 3, the ONLY place that decides what happens next.
 //!
 //! A classification is an observation; this module turns it into an action.
 //! It is a pure function ([`decide`]) so the entire table is unit-testable
@@ -18,7 +18,7 @@
 //! | `Unknown` | `paused` | cancelled | stop the next outbound touch pending classification |
 //!
 //! `has_human_reply` is set for every disposition whose
-//! [`ReplyDisposition::stops_normal_sequence`] is true — i.e. everything
+//! [`ReplyDisposition::stops_normal_sequence`] is true, i.e. everything
 //! except `OutOfOffice` and `BounceSoft`.
 
 use chrono::{DateTime, Duration, Utc};
@@ -145,7 +145,7 @@ pub struct PolicyDecision {
     pub has_human_reply: bool,
     /// UPSERT `sales_unsubscribes` (and the platform suppression mirror).
     pub suppress_endpoint: bool,
-    /// `unsubscribe`, `complaint`, or `bounce_hard` — the suppression reason.
+    /// `unsubscribe`, `complaint`, or `bounce_hard`, the suppression reason.
     pub suppression_reason: Option<&'static str>,
     /// Mark the contact point `invalid` and suppressed.
     pub invalidate_contact_point: bool,
@@ -931,7 +931,7 @@ mod coverage_arms {
             Some("non-finite confidence")
         );
         // The downgraded decision still auto-executes its SAFE action
-        // (stop the pending touch pending human review) — but never
+        // (stop the pending touch pending human review), but never
         // suppression or any recipient-affecting effect.
         assert_eq!(
             decision.suggested_action, "stop_next_touch_pending_classification",

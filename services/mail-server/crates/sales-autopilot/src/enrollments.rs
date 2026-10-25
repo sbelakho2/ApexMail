@@ -2,16 +2,16 @@
 //!
 //! This is the write side of the sequence model:
 //!
-//! * [`start_outreach`] — the control plane's outreach command. It resolves
+//! * [`start_outreach`], the control plane's outreach command. It resolves
 //!   the sequence to an approved ACTIVE version, evaluates every per-contact
 //!   gate (existence, email, suppression, legal policy, verification,
 //!   duplicate enrollment), and atomically enrolls each accepted contact and
 //!   enqueues its first step execution. Rejections are never silent: the
 //!   response reports the exact reason key for every rejected contact.
-//! * [`list_enrollments`] — the read model the CP campaigns page renders.
-//! * [`set_enrollment_state`] — pause/resume/cancel of one enrollment's
+//! * [`list_enrollments`], the read model the CP campaigns page renders.
+//! * [`set_enrollment_state`], pause/resume/cancel of one enrollment's
 //!   queued work.
-//! * [`lock_on_reply`] — the release gate behind "100% of human replies
+//! * [`lock_on_reply`], the release gate behind "100% of human replies
 //!   prevent subsequent normal sequence sends". A reply transactionally sets
 //!   `has_human_reply`, moves the enrollment off the normal path, and then
 //!   cancels queued work.
@@ -79,7 +79,7 @@ const DEFAULT_VARIANT: &str = "default";
 const FIRST_STEP_ACTION_PRIORITY: i16 = 100;
 
 /// The CP's outreach command. `sequence_id` and `contact_ids` are the
-/// canonical identifiers — NOT lead ids + a free-text template name.
+/// canonical identifiers, NOT lead ids + a free-text template name.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct StartOutreachRequest {
@@ -137,30 +137,30 @@ pub struct EnrollmentSummary {
 /// Each contact is evaluated once, in this order, and rejected with the first
 /// matching reason key:
 ///
-/// 1. `not_found` — no such contact in this tenant.
-/// 2. `no_email` — no `sales_contact_points` row with `channel = 'email'`.
-/// 3. `suppressed` — the chosen address is in `sales_unsubscribes`, the
+/// 1. `not_found`, no such contact in this tenant.
+/// 2. `no_email`, no `sales_contact_points` row with `channel = 'email'`.
+/// 3. `suppressed`, the chosen address is in `sales_unsubscribes`, the
 ///    contact point has `suppressed_at` set, or the address is in the platform
 ///    `suppressions` table (all compared tenant + lower(email)).
-/// 4. `legal_policy` — the policy resolved from the CURRENT canonical
+/// 4. `legal_policy`, the policy resolved from the CURRENT canonical
 ///    `sales_jurisdiction_policies` store for this contact (jurisdiction from
 ///    the account's country/confidence with the contact's country as
 ///    fallback, contact type, channel) is `prohibited`. A historical
 ///    `sales_contact_policy_decisions` row is never read as permission.
-/// 5. `stale_policy` — the resolved policy is not `prohibited`, the request
+/// 5. `stale_policy`, the resolved policy is not `prohibited`, the request
 ///    supplied a (deprecated, optional) `autonomy_policy_id`, and that id is
 ///    not the policy row the store resolved FOR THIS CONTACT. The caller's id
 ///    is advisory; the machine resolves what applies. An omitted id skips this
-///    check entirely — which is what makes a mixed-jurisdiction batch work:
+///    check entirely, which is what makes a mixed-jurisdiction batch work:
 ///    every contact is resolved against its own current policy.
-/// 6. `unverified_contact` — the email point's `verification` is neither
+/// 6. `unverified_contact`, the email point's `verification` is neither
 ///    `valid` nor `risky`. `unknown` is therefore rejected too. `risky` is
 ///    accepted (reachable but lower confidence) and counted as accepted.
-/// 7. `already_enrolled` — a `sales_enrollments` row for (tenant, version,
+/// 7. `already_enrolled`, a `sales_enrollments` row for (tenant, version,
 ///    contact) exists in a state other than
 ///    `completed`/`failed`/`suppressed`. Those terminal states may be
 ///    re-enrolled; the upsert resets the row.
-/// 8. `account_coordination` — inside the per-contact transaction, with the
+/// 8. `account_coordination`, inside the per-contact transaction, with the
 ///    `sales_accounts` row locked `FOR UPDATE`, the account-level contact
 ///    coordination rules refuse the contact: the `max_active_contacts` cap is
 ///    reached, the account tier does not permit multi-threading, a
@@ -171,7 +171,7 @@ pub struct EnrollmentSummary {
 ///    because the account lock serialises the decision with the enrollment
 ///    insert. Referral promotion (R6) has no live-path input yet: no canonical
 ///    column marks a contact as referred (see `account_coordination`).
-/// 9. `account_budget` — the account's weekly touch budget
+/// 9. `account_budget`, the account's weekly touch budget
 ///    (`sales_account_touch_reservations` + realised outcomes) is exhausted;
 ///    `decision_engine::reserve_account_touch_tx` refused the reservation for
 ///    this enrollment's logical send unit.
@@ -199,7 +199,7 @@ pub struct EnrollmentSummary {
 /// * `sequence_id` must resolve to an approved ACTIVE version (see
 ///   [`load_active_version`]); otherwise the call fails.
 /// * `autonomy_policy_id` is deprecated and optional. When omitted, the
-///   machine resolves the current policy independently per contact — the
+///   machine resolves the current policy independently per contact, the
 ///   required behavior for a batch spanning jurisdictions. When supplied
 ///   (rolling-deploy compatibility), it is verified per contact against the
 ///   resolved verdict (`stale_policy` on mismatch); it is never the
@@ -224,8 +224,8 @@ pub struct EnrollmentSummary {
 /// `sales_account_touch_reservations` (keyed by the same logical send unit the
 /// action queue uses, `sa-send:{step_execution_id}`); it runs for every
 /// accepted contact that has an account relation. If anything after it in
-/// the transaction fails — the step-execution insert, the action enqueue, or
-/// the commit itself — the transaction rolls back and the reservation row
+/// the transaction fails, the step-execution insert, the action enqueue, or
+/// the commit itself, the transaction rolls back and the reservation row
 /// disappears with it, so a refused enrollment never consumes weekly budget
 /// (`transaction_rollback_releases_touch_and_sender_reservations` asserts
 /// this). A successful commit leaves the reservation live; it is settled when
@@ -251,7 +251,7 @@ pub async fn start_outreach(
     let version = load_active_version(db, tenant_id, request.sequence_id).await?;
     let first_step = version.steps.first().ok_or_else(|| {
         SalesError::ServiceUnavailable(format!(
-            "sequence {} active version {} has no steps — nothing to enroll",
+            "sequence {} active version {} has no steps, nothing to enroll",
             request.sequence_id, version.version
         ))
     })?;
@@ -455,7 +455,7 @@ pub async fn start_outreach(
         // touch reservation below, so `max_active_contacts` cannot be exceeded
         // by a concurrent request for the same account. A refusal is a
         // database-independent verdict: roll back (nothing was written), count
-        // the documented reason key and move to the next contact — never a
+        // the documented reason key and move to the next contact, never a
         // hard error.
         if let Some(account_id) = account_id {
             let verdict = crate::account_coordination::request_contact_slot_locked_in_tx(
@@ -762,8 +762,8 @@ pub async fn set_enrollment_state(
 /// The enrollment update (state + `has_human_reply`) and the unsubscribe
 /// upsert happen in ONE transaction; the queue cancellation follows the
 /// commit via [`ActionQueue::cancel_for_entity`]. The committed
-/// `has_human_reply` flag is the authoritative gate — the dispatcher's send
-/// path must check it — because the cancellation of an already-leased action
+/// `has_human_reply` flag is the authoritative gate, the dispatcher's send
+/// path must check it, because the cancellation of an already-leased action
 /// cannot be made to race with the send inside the enrollment transaction
 /// without bypassing the queue API.
 ///
@@ -772,10 +772,10 @@ pub async fn set_enrollment_state(
 /// | Disposition | State | Queued work | Unsubscribe |
 /// |---|---|---|---|
 /// | `Unsubscribe`, `Complaint`, `BounceHard` | `suppressed` | cancelled | upserted |
-/// | `Positive`, `MeetingRequest`, `Question`, `Referral` | `replied` | cancelled | — |
-/// | `NotInterested` | `completed` | cancelled | — |
-/// | `OutOfOffice`, `BounceSoft` | `waiting` | kept (resumes later) | — |
-/// | `Unknown` | `paused` | cancelled | — |
+/// | `Positive`, `MeetingRequest`, `Question`, `Referral` | `replied` | cancelled |, |
+/// | `NotInterested` | `completed` | cancelled |, |
+/// | `OutOfOffice`, `BounceSoft` | `waiting` | kept (resumes later) |, |
+/// | `Unknown` | `paused` | cancelled |, |
 ///
 /// `has_human_reply` is set for every disposition except `OutOfOffice` and
 /// `BounceSoft` (`ReplyDisposition::stops_normal_sequence`): a soft bounce or
@@ -952,7 +952,7 @@ enum PolicyGate {
 /// Map the resolved verdict plus the caller's believed policy id to a gate
 /// result.
 ///
-/// * `Prohibited` always prohibits — a caller naming the prohibiting policy
+/// * `Prohibited` always prohibits, a caller naming the prohibiting policy
 ///   does not make the contact contactable, and a caller naming another
 ///   policy does not soften it.
 /// * When an authoritative policy resolved (`Some(id)`) AND the request
@@ -994,8 +994,8 @@ fn policy_gate(
 /// Consent evidence is loaded in batch from `sales_consent_evidence` (active
 /// row newest by `collected_at`; a withdrawn row becomes
 /// `consent_status = "withdrawn"`). Subscriber type has no canonical source,
-/// so it fails closed to Unknown — inferring legal personality from the B2B
-/// persona is forbidden — and the §103¹(2) similar-product/collection-opt-out
+/// so it fails closed to Unknown, inferring legal personality from the B2B
+/// persona is forbidden, and the §103¹(2) similar-product/collection-opt-out
 /// facts have no canonical source either, so they stay at the fail-closed
 /// value exactly like the send path.
 fn contact_policy_input(
@@ -1130,13 +1130,13 @@ struct ContactRow {
     account_id: Option<Uuid>,
     #[allow(dead_code)]
     full_name: String,
-    /// `COALESCE(account.country, contact.country)` — the recipient country
+    /// `COALESCE(account.country, contact.country)`, the recipient country
     /// the policy engine resolves.
     recipient_country: Option<String>,
     /// `COALESCE(account.country_confidence, 0)`: a missing confidence fails
     /// closed to the UNKNOWN jurisdiction.
     country_confidence: f32,
-    /// `account.lifecycle = 'customer'` — the relationship fact the policy
+    /// `account.lifecycle = 'customer'`, the relationship fact the policy
     /// engine consumes (same as the worker's `build_policy_input`).
     has_existing_relationship: bool,
 }
@@ -1718,7 +1718,7 @@ mod tests {
         // Resolve the policy FIRST and use the jurisdiction it actually landed
         // under as the recipient's country. The policy insert is race-tolerant
         // (the 2-letter fixture namespace is shared across parallel test
-        // processes), so the code it returns is the authoritative one — writing
+        // processes), so the code it returns is the authoritative one, writing
         // a country chosen beforehand could leave the row without a policy.
         let (policy_id, jurisdiction) = match policy {
             Some((decision, basis)) => {
@@ -1925,7 +1925,7 @@ mod tests {
 
     /// A contact in a jurisdiction with no policy at all resolves to the
     /// fail-closed `ApprovalRequired` (never `Allowed`) and is accepted but
-    /// gated — not rejected (audit item 9).
+    /// gated, not rejected (audit item 9).
     #[tokio::test]
     async fn no_policy_anywhere_is_planned_under_approval_required() {
         let Some(pool) = live_pool("no_policy").await else {
@@ -2043,7 +2043,7 @@ mod tests {
             .rejection_reasons
             .contains_key(rejection_reason::STALE_POLICY));
 
-        // Naming the resolved policy explicitly is also accepted — the contact
+        // Naming the resolved policy explicitly is also accepted, the contact
         // is simply already enrolled by the call above.
         let named = start_outreach(
             &pool,
@@ -2077,7 +2077,7 @@ mod tests {
     }
 
     /// An `approval_required` current policy is accepted (planned) even when
-    /// the caller names it — item 9's enrollment-side contract.
+    /// the caller names it, item 9's enrollment-side contract.
     #[tokio::test]
     async fn approval_required_policy_is_accepted_and_gated_at_execution() {
         let Some(pool) = live_pool("approval_required_planned").await else {
@@ -3043,7 +3043,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     /// Every reply disposition lands the documented enrollment state and
-    /// queue effect — a soft bounce/out-of-office keeps the sequence, a human
+    /// queue effect, a soft bounce/out-of-office keeps the sequence, a human
     /// reply stops it, and a suppression disposition records the unsubscribe.
     /// The listing is tenant-scoped and joined, and `set_enrollment_state`
     /// cancels queued work only for stopping states.

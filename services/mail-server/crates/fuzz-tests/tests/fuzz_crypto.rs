@@ -53,7 +53,7 @@ fn fuzz_id_always_prefixed() {
             let len = rng.random::<u32>() as usize % 32 + 8;
             let id = generate_id(prefix, len);
             if prefix.is_empty() {
-                // No prefix — no underscore
+                // No prefix, no underscore
                 assert!(
                     !id.starts_with('_'),
                     "Empty prefix should not produce leading underscore: {id}"

@@ -29,7 +29,7 @@ pub struct ClickHouseEngine {
 ///
 /// The `timestamp` field is serialized as `DateTime64(3)` (millisecond
 /// precision, matching the `events.timestamp` column). It must NOT be a raw
-/// integer — ClickHouse interprets integers inserted into `DateTime64`
+/// integer, ClickHouse interprets integers inserted into `DateTime64`
 /// columns as *seconds*, which would corrupt the value (e.g. ms since epoch
 /// lands in the year 56 000).
 #[derive(Debug, Clone, Serialize, Deserialize, Row)]
@@ -39,12 +39,12 @@ pub struct ClickHouseEvent {
     pub message_id: String,
     pub event_type: String,
     #[serde(with = "clickhouse::serde::time::datetime64::millis")]
-    pub timestamp: time::OffsetDateTime, // DateTime64(3) — milliseconds
+    pub timestamp: time::OffsetDateTime, // DateTime64(3), milliseconds
     pub recipient: String,
     pub recipient_domain: String,
     pub link_id: String,
     pub user_agent: String,
-    /// GDPR:stored MASKED at ingest (IPv4 → /24, IPv6 → /48 — see
+    /// GDPR:stored MASKED at ingest (IPv4 → /24, IPv6 → /48, see
     /// [`crate::ip_mask`]). The column stays `String`; it carries the
     /// truncated network form, never the full client IP.
     pub ip_address: String,
@@ -118,7 +118,7 @@ impl ClickHouseEngine {
             .with_compression(clickhouse::Compression::Lz4)
             // DB-11: async_insert=1 batches concurrent inserts for write
             // throughput. wait_for_async_insert=1 makes each insert return
-            // only after the data is durably flushed — read-after-write
+            // only after the data is durably flushed, read-after-write
             // consistency AND surfaced write errors (with wait=0, insert
             // errors are silently dropped and queries can lag arbitrarily).
             .with_option("async_insert", "1")
@@ -183,7 +183,7 @@ impl ClickHouseEngine {
                     link_id String,
                     user_agent String,
                     -- GDPR:ip_address stores the MASKED network form
-                    -- (IPv4 /24, IPv6 /48 — see analytics::ip_mask),
+                    -- (IPv4 /24, IPv6 /48, see analytics::ip_mask),
                     -- never the full client IP.
                     ip_address String,
                     country LowCardinality(String),
@@ -289,7 +289,7 @@ impl ClickHouseEngine {
     /// to prevent unbounded waits when ClickHouse is slow or unresponsive.
     ///
     /// GDPR:client IPs are masked at this ingest boundary (IPv4 → /24,
-    /// IPv6 → /48) so the OLAP store never persists a full address — the
+    /// IPv6 → /48) so the OLAP store never persists a full address, the
     /// 730-day TTL makes raw IPs disproportionate personal data.
     pub async fn insert_events(&self, events: &[ClickHouseEvent]) -> anyhow::Result<()> {
         if events.is_empty() {
@@ -840,7 +840,7 @@ pub struct StorageStats {
 /// stage with 50 events). Rules now:
 ///
 /// - The denominator is the FIRST stage (in the requested order) with a
-///   nonzero count — the earliest stage the data actually observes.
+///   nonzero count, the earliest stage the data actually observes.
 /// - When every stage is zero, every percentage is `0.0`.
 /// - Stages at/after the chosen denominator never exceed `100.0`
 ///   (non-monotonic funnels are clamped rather than reported as >100%).
@@ -849,7 +849,7 @@ pub struct StorageStats {
 fn compute_funnel_percentages(ordered_counts: &[u64]) -> Vec<f64> {
     let base = match ordered_counts.iter().find(|c| **c > 0) {
         Some(base) => *base,
-        // Empty funnel — no observable base stage.
+        // Empty funnel, no observable base stage.
         None => return vec![0.0; ordered_counts.len()],
     };
     ordered_counts
@@ -866,7 +866,7 @@ fn compute_funnel_percentages(ordered_counts: &[u64]) -> Vec<f64> {
 /// subtotal stood in for the whole population and every percentage was
 /// inflated (they summed to 100% over a partial slice). `total` comes from
 /// a separate `count()` over the identical WHERE. Zero total (no events at
-/// all) yields `None` percentages — nothing to be a percentage of.
+/// all) yields `None` percentages, nothing to be a percentage of.
 fn dimension_results(rows: Vec<AggregationRow>, total: u64) -> Vec<AggregationResult> {
     rows.into_iter()
         .map(|r| AggregationResult {
@@ -888,7 +888,7 @@ mod tests {
     /// The deliverability query's SELECT/GROUP BY must alias `event_type` to
     /// `dimension` so its column shape matches the [`AggregationRow`] contract
     /// (the same pattern `aggregate_by_dimension` uses). RowBinary decoding is
-    /// positional in clickhouse 0.12, so a mismatch is silent today — but any
+    /// positional in clickhouse 0.12, so a mismatch is silent today, but any
     /// by-name decoding (crate upgrade, `RowBinaryWithNamesAndTypes`) fails to
     /// find the `dimension` column and kills the whole deliverability surface.
     #[test]
@@ -918,7 +918,7 @@ mod tests {
     /// THE F14 regression shape: more distinct dimension values than the
     /// query LIMIT (100). The rows are only the top-100 slice; `total` is
     /// the full population from the separate count() query. Percentages
-    /// must reflect the true share (they sum to far less than 100%) — the
+    /// must reflect the true share (they sum to far less than 100%), the
     /// old subtotal denominator reported exactly 100% over the slice.
     #[test]
     fn dimension_percentages_use_the_true_total_not_the_top_slice() {
@@ -945,7 +945,7 @@ mod tests {
         assert_eq!(results[1].percentage, Some(0.4)); // 400 / 100_000
 
         // The old denominator (slice subtotal = 1_000) would have produced
-        // 60% + 40% = 100% — pinned here as the behavior that must NOT
+        // 60% + 40% = 100%, pinned here as the behavior that must NOT
         // return.
         assert!(
             (sum - 100.0).abs() > 90.0,
@@ -985,7 +985,7 @@ mod tests {
         assert_eq!(results[0].count, 5, "counts survive even without a base");
     }
 
-    /// F7:normal funnel — stage 0 is the base, each stage is its share.
+    /// F7:normal funnel, stage 0 is the base, each stage is its share.
     #[test]
     fn funnel_percentages_classic_funnel() {
         let p = compute_funnel_percentages(&[100, 50, 25]);
@@ -1023,7 +1023,7 @@ mod tests {
 
     /// Requires a running ClickHouse; soft-skips when it is absent. The URL is
     /// configurable (`CLICKHOUSE_TEST_URL`, default localhost:8123) and the
-    /// database is CREATED here, because the engine assumes it exists — the
+    /// database is CREATED here, because the engine assumes it exists, the
     /// test used to be `#[ignore]`d and depended on someone having created
     /// `apexmail_test` by hand.
     /// Is a ClickHouse reachable at `url`? Used to soft-skip instead of
@@ -1129,7 +1129,7 @@ mod tests {
         let engine = ClickHouseEngine::new(config).await.expect("engine init");
         assert!(engine.health_check().await.unwrap());
 
-        // Unique tenant per run — safe to execute against a shared instance
+        // Unique tenant per run, safe to execute against a shared instance
         // (no truncation, no cross-run interference).
         let tenant = format!("tenant_engine_e2e_{}", std::process::id());
 

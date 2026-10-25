@@ -83,14 +83,14 @@ pub struct BounceServer {
     pool: PgPool,
     hostname: String,
     shutdown: Arc<Notify>,
-    /// Active connections per IP — enforces `max_connections_per_ip`.
+    /// Active connections per IP, enforces `max_connections_per_ip`.
     connections: Arc<DashMap<IpAddr, u32>>,
-    /// Rolling per-IP message counter — enforces `max_messages_per_ip_per_hour`.
+    /// Rolling per-IP message counter, enforces `max_messages_per_ip_per_hour`.
     per_ip_msgs: moka::sync::Cache<IpAddr, u64>,
     /// Shared HMAC secret for VERP v2 tokens (`VERP_HMAC_SECRET`). `None`
     /// means v2 tokens cannot be authenticated: every bounce is recorded as
     /// a non-authoritative observation and nothing suppresses (production
-    /// startup rejects this configuration — see `MtaConfig::validate`).
+    /// startup rejects this configuration, see `MtaConfig::validate`).
     verp_secret: Option<Vec<u8>>,
     /// `verp.v2_enabled`: when false, v2-shaped addresses are treated as
     /// unverifiable observations.
@@ -304,7 +304,7 @@ impl BounceServer {
                 // RFC 5321:bounces (DSNs) must have exactly the null sender.
                 // `extract_addr("MAIL FROM:<>")` yields the EMPTY string (the
                 // angle brackets are stripped), so the null sender check must
-                // accept "" — anything non-empty is a real sender and rejected.
+                // accept "", anything non-empty is a real sender and rejected.
                 if !null_sender_ok(&addr) {
                     reject_reply!("550 5.7.1 Bounce MAIL FROM must be null (<>)\r\n");
                 } else {
@@ -364,7 +364,7 @@ impl BounceServer {
                     line.clear();
                     // Clamping the per-line timeout to the remaining total
                     // enforces the whole-payload deadline with this single
-                    // timer — no redundant pre-check needed.
+                    // timer, no redundant pre-check needed.
                     let remaining = deadline
                         .checked_duration_since(tokio::time::Instant::now())
                         .unwrap_or(Duration::ZERO);
@@ -463,7 +463,7 @@ impl BounceServer {
                     }
                 }
                 msgs_this_conn += 1;
-                // RFC 5321 §4.1.1.4: end-of-DATA ends the transaction — the
+                // RFC 5321 §4.1.1.4: end-of-DATA ends the transaction, the
                 // next message must start with a fresh MAIL FROM (the
                 // recipient state used to be cleared here but not the
                 // reverse-path flag, so a follow-up transaction could skip
@@ -516,7 +516,7 @@ impl BounceServer {
     // ── bounce processing ──────────────────────────────────────────────────────
 
     async fn process_bounce(&self, rcpt_to: &[String], raw: &[u8]) -> anyhow::Result<String> {
-        // bounce_events.id is a UUID column (migration 093) — bind the Uuid
+        // bounce_events.id is a UUID column (migration 093), bind the Uuid
         // itself, not its String form.
         let bounce_id = Uuid::new_v4();
         let message = String::from_utf8_lossy(raw);
@@ -524,8 +524,8 @@ impl BounceServer {
 
         // 1. Resolve VERP recipients. An AUTHENTICATED v2 token (MAC
         //    recomputed successfully, not expired) is authoritative; every
-        //    other recognisable VERP address — unsigned v1, bad-MAC v2,
-        //    expired v2 — is kept as a non-suppressive observation only.
+        //    other recognisable VERP address, unsigned v1, bad-MAC v2,
+        //    expired v2, is kept as a non-suppressive observation only.
         let mut authoritative: Option<VerpV2Claims> = None;
         let mut observation: Option<VerpResolution> = None;
         for addr in rcpt_to {
@@ -551,7 +551,7 @@ impl BounceServer {
         // (original_message_id, original_recipient) dedupe slot, an attacker
         // who knows a sent message id + recipient could pre-insert a row and
         // make the genuine authoritative bounce a no-op. The claimed linkage
-        // is preserved in `observation_detail` instead, for audit — including
+        // is preserved in `observation_detail` instead, for audit, including
         // for a plain non-VERP DSN, whose claimed recipient comes from the
         // DSN's Final-Recipient / Original-Rcpt-To (dogfood finding
         // 2026-10-06 P3: the `none` arm dropped it entirely, so "why did this
@@ -643,7 +643,7 @@ impl BounceServer {
 
         // 5. C3: only act on bounces that reference a message this system sent.
         //    The token's (queue id, tenant, recipient) claims are authenticated
-        //    but still cross-checked against the queue row — a mismatch means
+        //    but still cross-checked against the queue row, a mismatch means
         //    the row changed underneath the token (or the minting context was
         //    wrong) and must not poison suppression.
         self.record_verp_token_observation(&claims).await;
@@ -652,7 +652,7 @@ impl BounceServer {
         else {
             warn!(
                 queue_id = %claims.queue_id,
-                "Authoritative bounce references unknown message — recorded, no suppression"
+                "Authoritative bounce references unknown message, recorded, no suppression"
             );
             return Ok(bounce_id.to_string());
         };
@@ -660,12 +660,12 @@ impl BounceServer {
         let suppression_recipient =
             authoritative_suppression_target(Some(&claims), Some((&tenant_id, &queued_recipient)));
         if suppression_recipient.is_none() {
-            // F-23: both addresses are PII — redact before logging.
+            // F-23: both addresses are PII, redact before logging.
             warn!(
                 verp_recipient = %mail_common::pii::redact_email(&claims.recipient),
                 queued_recipient = %mail_common::pii::redact_email(&queued_recipient),
                 queue_id = %claims.queue_id,
-                "Authoritative VERP claims do not match the queued message — dropping stale/forged bounce"
+                "Authoritative VERP claims do not match the queued message, dropping stale/forged bounce"
             );
             return Ok(bounce_id.to_string());
         }
@@ -786,7 +786,7 @@ impl BounceServer {
             // Typed comparisons keep the PK (id) and message_id index usable.
             // The previous `id::text = $1 OR message_id::text = $1` cast both
             // sides to text, forcing a sequential scan of the partitioned
-            // high-volume table on every inbound VERP reply — an
+            // high-volume table on every inbound VERP reply, an
             // attacker-influenceable path.
             r#"SELECT COALESCE(tenant_id, '') AS tenant_id,
                       COALESCE(to_addresses[1], "to", '') AS recipient
@@ -879,7 +879,7 @@ pub fn classify_bounce(message: &str) -> BounceInfo {
         s if s.starts_with("5.7.") => {
             let hard = if s == "5.7.1" {
                 // A bare 5.7.1 ("policy rejection") is usually a content or
-                // spam policy, not a verdict on the recipient — retrying
+                // spam policy, not a verdict on the recipient, retrying
                 // later often succeeds, so it must not permanently suppress.
                 // Only an SPF/DMARC/DKIM-flavoured 5.7.1 is a genuine hard
                 // failure of the sender's authentication.
@@ -1003,7 +1003,7 @@ pub(crate) fn try_admit_connection(conns: &DashMap<IpAddr, u32>, ip: IpAddr, max
 /// RFC 5321:bounce sessions require exactly the null sender `<>`.
 ///
 /// `extract_addr` returns the address BETWEEN the angle brackets, so the null
-/// sender arrives here as the empty string — requiring the literal `<>` used
+/// sender arrives here as the empty string, requiring the literal `<>` used
 /// to reject every legitimate bounce and killed the whole bounce pipeline.
 pub(crate) fn null_sender_ok(addr: &str) -> bool {
     addr.is_empty()
@@ -1062,11 +1062,11 @@ fn is_valid_email_addr(addr: &str) -> bool {
 
 /// Append one DATA body line (terminator already stripped) to the message
 /// buffer, honoring RFC 5321 §4.5.2 dot-unstuffing (exactly ONE leading dot
-/// removed) and normalizing the stored terminator to CRLF — a bare-LF body
+/// removed) and normalizing the stored terminator to CRLF, a bare-LF body
 /// line must never be stored or relayed with a bare LF.
 ///
 /// Returns `false` (leaving the buffer untouched) when the line would push
-/// the message past `max_size` — the caller must then reject with `552` and
+/// the message past `max_size`, the caller must then reject with `552` and
 /// drain the remainder (H10).
 pub(crate) fn append_data_line(message: &mut BytesMut, content: &[u8], max_size: usize) -> bool {
     let body = super::util::unstuff_dot_line_bytes(content);
@@ -1150,7 +1150,7 @@ pub(crate) fn resolve_verp_address(
 /// be deleted once BOTH hold:
 /// 1. `SELECT max(created_at) FROM bounce_events WHERE verp_version = 'v1'`
 ///    is older than the bounce retention window (v1 mail is no longer being
-///    delivered — allow at least one full queue-retention cycle after the
+///    delivered, allow at least one full queue-retention cycle after the
 ///    migration 210 deploy);
 /// 2. `rg 'verp_return_path\(' crates/` shows no v1-grammar caller (the
 ///    worker emits v2 only).
@@ -1191,7 +1191,7 @@ pub(crate) fn sanitize_observation_value(value: &str) -> String {
 /// Decide which address (if any) an AUTHENTICATED v2 bounce may place on the
 /// suppression list.
 ///
-/// * `claims` must come from a successfully verified v2 token — a `None`
+/// * `claims` must come from a successfully verified v2 token, a `None`
 ///   here means the bounce is an unsigned/failed observation and can never
 ///   suppress (a DSN `Original-Message-ID` header alone is attacker-writable
 ///   and is never suppression authority).
@@ -1223,7 +1223,7 @@ fn extract_status_code(message: &str) -> String {
     let mut saw_dsn_header = false;
     for line in message.lines() {
         let trimmed = line.trim().to_lowercase();
-        // M54: stop at the attached original message — the MIME boundary is
+        // M54: stop at the attached original message, the MIME boundary is
         // where attacker-controlled (or merely stale) headers begin.
         if is_attached_original_boundary(&trimmed) {
             break;
@@ -1263,8 +1263,8 @@ fn extract_status_code(message: &str) -> String {
 /// attached original message, i.e. the DSN part is over (M54).
 ///
 /// Only `message/rfc822` marks that boundary. `message/delivery-status` is
-/// the DSN's OWN per-recipient part — the part whose `Status:` header is the
-/// authoritative classification input — so treating it as the end of the DSN
+/// the DSN's OWN per-recipient part, the part whose `Status:` header is the
+/// authoritative classification input, so treating it as the end of the DSN
 /// skipped every real-world DSN's Status header and downgraded the whole
 /// classification to keyword heuristics (hard bounces recorded as transient,
 /// suppressions never firing for standard DSNs).
@@ -1309,7 +1309,7 @@ fn extract_original_message_id(message: &str) -> Option<String> {
     for line in message.lines() {
         let trimmed = line.trim().to_lowercase();
         // M54 parity with extract_status_code: the linkage header must come
-        // from the DSN part — everything after the message/rfc822 boundary
+        // from the DSN part, everything after the message/rfc822 boundary
         // belongs to the attached original message and is attacker-writable.
         if is_attached_original_boundary(&trimmed) {
             break;
@@ -1342,7 +1342,7 @@ fn extract_original_message_id(message: &str) -> Option<String> {
 /// attached-original boundary exactly like the status/diagnostic/Message-ID
 /// extractors: a header inside the attached original message is
 /// attacker-writable and must not become the observation's claim. The claim
-/// is NEVER suppression authority — the natural-key columns stay NULL — it
+/// is NEVER suppression authority, the natural-key columns stay NULL, it
 /// exists so an operator can search "which recipient did this DSN claim?".
 fn claimed_dsn_recipient(message: &str) -> Option<String> {
     for line in message.lines() {
@@ -1429,7 +1429,7 @@ mod tests {
     fn test_classify_generic_571_policy_rejection_is_soft() {
         // A bare 5.7.1 "policy rejection" (spam/content policy, rate
         // limits, greylisting-ish deferrals) says nothing permanent about
-        // the RECIPIENT — treating it as Hard permanently suppressed
+        // the RECIPIENT, treating it as Hard permanently suppressed
         // addresses that could accept mail again minutes later.
         let msg = "Status: 5.7.1\r\nDiagnostic-Code: smtp; 550 5.7.1 Policy rejection - mail refused by local policy";
         let info = classify_bounce(msg);
@@ -1691,7 +1691,7 @@ mod tests {
     #[test]
     fn unsigned_v1_bounce_is_an_observation_never_suppression_authority() {
         // Legacy v1 addresses stay parseable for read-compatibility, but the
-        // resolver must never classify them as authoritative — the plaintext
+        // resolver must never classify them as authoritative, the plaintext
         // message-id/recipient pair is forgeable by anyone.
         let addr = "bounces+msg123=example.com=user@bounces.apexmail.ee";
         let resolved = resolve_verp_address(
@@ -1836,7 +1836,7 @@ mod tests {
     fn forged_bounce_with_only_original_message_id_never_suppresses() {
         // A bounce carrying only an attacker-writable Original-Message-ID
         // (no valid VERP envelope) must never land the queued recipient on
-        // the suppression list — otherwise anyone can suppress any victim
+        // the suppression list, otherwise anyone can suppress any victim
         // by forging one header referencing a sent message. The suppression
         // gate requires authenticated v2 claims; a DSN header is not one.
         assert!(
@@ -1868,7 +1868,7 @@ mod tests {
 
     #[test]
     fn test_null_sender_ok() {
-        // extract_addr("MAIL FROM:<>") yields the empty string — the null
+        // extract_addr("MAIL FROM:<>") yields the empty string, the null
         // sender must be accepted in that form or every bounce is rejected.
         assert!(null_sender_ok(""));
         assert!(!null_sender_ok("attacker@evil.com"));
@@ -1976,7 +1976,7 @@ mod tests {
 
     #[test]
     fn test_append_data_line_caps_size() {
-        // NOTE: updated with the smuggling fix — append_data_line now takes
+        // NOTE: updated with the smuggling fix, append_data_line now takes
         // the line CONTENT (terminator stripped), unstuffs exactly ONE
         // leading dot, and always appends a normalized CRLF terminator.
         let mut message = BytesMut::new();
@@ -2071,7 +2071,7 @@ mod tests {
     fn concurrent_admissions_cannot_exceed_the_per_ip_cap() {
         // 16 threads released by a barrier all attempt admission against a
         // cap of 10: exactly 10 may be admitted and the counter must land
-        // on exactly 10 — a check-then-increment race admits the whole
+        // on exactly 10, a check-then-increment race admits the whole
         // first wave (16) past the cap.
         let conns: Arc<DashMap<IpAddr, u32>> = Arc::new(DashMap::new());
         let ip: IpAddr = "192.0.2.10".parse().unwrap();
@@ -2195,7 +2195,7 @@ mod tests {
             .unwrap();
 
         // Exactly one response follows the payload: the bounce hits the
-        // (unreachable) DB and must yield 451 — never a 221 from a smuggled
+        // (unreachable) DB and must yield 451, never a 221 from a smuggled
         // QUIT, and never a 250 for a truncated message.
         let resp = read_reply(&mut reader).await;
         assert!(
@@ -2528,7 +2528,7 @@ mod tests {
     #[test]
     fn webhook_events_go_to_the_canonical_consumer_queue() {
         // Events used to be LPUSHed onto the `mta:webhook_queue` Redis list,
-        // which NO component ever consumed — every inbound/bounce/complaint
+        // which NO component ever consumed, every inbound/bounce/complaint
         // webhook was silently dropped. They now enter the canonical
         // `webhook_queue` table the worker's webhook processor drains
         // (retries, circuit breaker, SSRF guard). Pinned against the
@@ -2701,7 +2701,7 @@ mod tests {
         }
 
         // Transaction 1: admitted at DATA, processing fails on the
-        // unreachable DB (451) — the per-connection counter still moved.
+        // unreachable DB (451), the per-connection counter still moved.
         let reply = data_txn(
             &mut writer,
             &mut reader,
@@ -2851,7 +2851,7 @@ mod tests {
         // Heartbeat the session with a NOOP every 30 virtual seconds. The
         // reply read carries its own 60s budget: the client therefore ALWAYS
         // owns the nearer runtime timer (60 < the server's 120s idle), so
-        // the idle timer can never be the closer — only the 30-minute
+        // the idle timer can never be the closer, only the 30-minute
         // session deadline can.
         let server = std::sync::Arc::new(test_bounce_server());
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -2877,7 +2877,7 @@ mod tests {
                 match tokio::time::timeout(Duration::from_secs(60), reader.read_line(&mut line))
                     .await
                 {
-                    // No reply within this virtual window yet — heartbeat on.
+                    // No reply within this virtual window yet, heartbeat on.
                     Err(_) => {
                         tokio::time::sleep(Duration::from_secs(30)).await;
                         continue;
@@ -2959,7 +2959,7 @@ mod adversarial_db_tests {
     //! `process_bounce` is driven with real VERP v2 tokens against the
     //! canonical provisioned schema: RFC 3463 classification decides the
     //! suppression, a forged/expired/replayed token must never suppress, and
-    //! an unclassifiable reply is a retry — never a silent permanent verdict.
+    //! an unclassifiable reply is a retry, never a silent permanent verdict.
     //! `TEST_DATABASE_URL` gates the suite: unset soft-skips, configured-but
     //! broken FAILS.
 
@@ -3225,7 +3225,7 @@ mod adversarial_db_tests {
         assert_eq!(queued[0].0, "message.bounced");
         assert_eq!(queued[0].1["data"]["bounce_id"], id.as_str());
 
-        // REPLAY: same token, same report — no second suppression/webhook.
+        // REPLAY: same token, same report, no second suppression/webhook.
         let replay = server
             .process_bounce(&rcpt, &raw)
             .await
@@ -3371,7 +3371,7 @@ mod adversarial_db_tests {
         assert_eq!(row.4, "v1");
         assert_eq!(suppression_count(&pool, &tenant, recipient).await, 0);
 
-        // No webhook may be emitted for either observation — with the
+        // No webhook may be emitted for either observation, with the
         // endpoint subscribed, any queue row would be one.
         assert!(
             queued_webhook_events(&pool, &tenant).await.is_empty(),
@@ -3382,7 +3382,7 @@ mod adversarial_db_tests {
     /// The unmatched-bounce retention sweep deletes only expired rows whose
     /// original message was never identified; matched rows (any age) and
     /// recent unmatched rows survive. This is the sweep the MTA binary
-    /// schedules every 6h — the function previously had zero callers.
+    /// schedules every 6h, the function previously had zero callers.
     #[tokio::test]
     async fn unmatched_bounce_retention_sweep_is_precise() {
         let Some(pool) = test_pool("unmatched_bounce_retention").await else {

@@ -1,4 +1,4 @@
-//! Isolation server binary — HTTP on port 4500 with background cron jobs
+//! Isolation server binary, HTTP on port 4500 with background cron jobs
 //! and graceful shutdown.
 
 use clap::Parser;
@@ -56,7 +56,7 @@ async fn main() -> anyhow::Result<()> {
     dotenvy::dotenv().ok();
 
     let cli = Cli::parse();
-    // SEC fix: from_env is fallible now — production REFUSES missing
+    // SEC fix: from_env is fallible now, production REFUSES missing
     // TENANT_ENCRYPTION_KEY / ISOLATION_INTERNAL_API_KEY instead of exiting
     // from inside the loader (EX_CONFIG; the isolation exit-78 convention,
     // shared with the compliance/ha crates).
@@ -64,7 +64,7 @@ async fn main() -> anyhow::Result<()> {
         Ok(config) => config,
         Err(error) => {
             error!(
-                "SECURITY: isolation configuration refused to load: {error} — set the \
+                "SECURITY: isolation configuration refused to load: {error}, set the \
                  required environment variables and restart (exit 78 / EX_CONFIG)"
             );
             std::process::exit(78); // EX_CONFIG
@@ -232,10 +232,10 @@ async fn shutdown_signal() {
     info!("Shutdown signal received");
 }
 
-/// Background cron jobs:/// 1. Audit buffer flush — every 5s
-/// 2. Audit log cleanup — daily (every 24h)
-/// 3. Encryption key rotation check — every 60min
-/// 4. Access-attempt audit retention cleanup — daily (F63)
+/// Background cron jobs:/// 1. Audit buffer flush, every 5s
+/// 2. Audit log cleanup, daily (every 24h)
+/// 3. Encryption key rotation check, every 60min
+/// 4. Access-attempt audit retention cleanup, daily (F63)
 async fn run_cron_jobs(state: Arc<AppState>) {
     let mut flush_ticker = interval(Duration::from_secs(5));
     let mut cleanup_ticker = interval(Duration::from_secs(86400));
@@ -413,7 +413,7 @@ mod tests {
     }
 
     /// The suite's Redis coordinates from TEST_REDIS_URL as
-    /// `(host, port, password, db)` — the dev defaults when absent.
+    /// `(host, port, password, db)`, the dev defaults when absent.
     fn test_redis_coordinates() -> (String, u16, Option<String>, u8) {
         let dev = || ("127.0.0.1".to_string(), 6379u16, None, 3u8);
         let Ok(url) = std::env::var("TEST_REDIS_URL") else {
@@ -553,7 +553,7 @@ mod tests {
         let port = reserve_port();
         // Occupy the SAME wildcard address `run` binds: tokio listeners set
         // SO_REUSEADDR, and on macOS that lets a 0.0.0.0 bind succeed even
-        // while 127.0.0.1 on the same port is held — the server would serve
+        // while 127.0.0.1 on the same port is held, the server would serve
         // forever instead of refusing. An exact wildcard-vs-wildcard
         // conflict is EADDRINUSE on every platform.
         let occupant = tokio::net::TcpListener::bind(("0.0.0.0", port))

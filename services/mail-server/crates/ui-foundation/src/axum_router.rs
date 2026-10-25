@@ -42,13 +42,13 @@ pub struct RouteData {
     ///
     /// Present means the loader reached the canonical sales tables and the
     /// page renders live autonomy, decision, exception and queue state.
-    /// Absent means the loader could not answer — the page then renders an
+    /// Absent means the loader could not answer, the page then renders an
     /// explicit unavailable state rather than a zero-filled dashboard.
     pub sales: Option<SalesPageData>,
     /// Console assistant conversation (`/assistant`).
     ///
     /// Present means the loader read the session store (or found no session
-    /// yet — the empty state). The page renders `unavailable` explicitly when
+    /// yet, the empty state). The page renders `unavailable` explicitly when
     /// the store could not be read.
     pub assistant: Option<crate::view_data::AssistantPageData>,
     /// Control-plane presenter data (`/cp/demos`).
@@ -65,8 +65,8 @@ pub struct RouteData {
     /// Control-plane alert-rules management data (`/alerts/rules`).
     ///
     /// Present means the loader read the evaluated store
-    /// (`usage_alert_configs`, migrations 024 + 246) — the same rows the
-    /// billing-service sweep evaluates — plus the tenant choices for the
+    /// (`usage_alert_configs`, migrations 024 + 246), the same rows the
+    /// billing-service sweep evaluates, plus the tenant choices for the
     /// create form. Its `unavailable` flag is the honest failure state.
     pub alert_rules: Option<AlertRulesPageData>,
     /// `/jobs` control state (F13): recent queue_jobs rows plus the
@@ -84,7 +84,7 @@ pub struct RouteData {
     pub tenant_detail: Option<crate::view_data::TenantDetailPageData>,
     /// Authenticated session identity for the console header (display name,
     /// email, REAL plan label). `None` (or a `None` `plan_label`) renders no
-    /// plan label — the shell never fabricates one.
+    /// plan label, the shell never fabricates one.
     pub session_identity: Option<SessionIdentity>,
     /// Tenant white-label branding for the WEB console. Populated only after
     /// the api-server resolves the tenant's plan entitlement (`white_label`)
@@ -140,7 +140,7 @@ pub struct SessionIdentity {
     pub display_name: String,
     pub email: String,
     /// The tenant's real plan label, resolved from the billing catalog.
-    /// `None` means it could not be resolved — render NO label.
+    /// `None` means it could not be resolved, render NO label.
     pub plan_label: Option<String>,
 }
 
@@ -165,20 +165,20 @@ struct UiQueryParams {
     resource_id: Option<String>,
     return_to: Option<String>,
     sig: Option<String>,
-    /// `error=<code>` — machine-readable failure codes (today: the SSO
+    /// `error=<code>`, machine-readable failure codes (today: the SSO
     /// redirect `?error=sso_denied`). Only known codes map to a banner;
     /// it is never a free-text channel.
     error: Option<String>,
-    /// `mfa=1` — step two of the multi-step SSR login (challenge form).
+    /// `mfa=1`, step two of the multi-step SSR login (challenge form).
     mfa_challenge: bool,
-    /// `refresh=10|30|60` — opt-in auto-refresh for live metrics pages.
+    /// `refresh=10|30|60`, opt-in auto-refresh for live metrics pages.
     /// Parsed ONLY for the pages in [`LIVE_METRICS_PATHS`]; every other
     /// route ignores the parameter entirely.
     refresh_secs: Option<u32>,
 }
 
 /// Map a login `?error=<code>` to the user-facing banner text. Unknown
-/// codes render nothing (the code space stays server-controlled — the
+/// codes render nothing (the code space stays server-controlled, the
 /// query string can never put arbitrary prose on the page).
 fn login_query_error_message(error: Option<&str>) -> Option<String> {
     match error? {
@@ -207,7 +207,7 @@ const LIVE_METRICS_PATHS: &[(&str, &str)] = &[
 ];
 
 /// Auto-refresh intervals we are willing to serve (seconds). Anything else
-/// is ignored — a hostile `refresh=1` must not turn into a reload loop.
+/// is ignored, a hostile `refresh=1` must not turn into a reload loop.
 const ALLOWED_REFRESH_SECS: &[u32] = &[10, 30, 60];
 
 const PUBLIC_SIGNUP_PLAN_IDS: &[&str] = &["free", "starter", "pro", "growth", "scale"];
@@ -245,7 +245,7 @@ fn parse_query_params(query: Option<&str>) -> UiQueryParams {
             "mfa" if value == "1" || value.eq_ignore_ascii_case("true") => {
                 params.mfa_challenge = true;
             }
-            // `error=<code>` — machine-readable failure codes (today: the
+            // `error=<code>`, machine-readable failure codes (today: the
             // SSO redirect `?error=sso_denied`). Deliberately NOT a free
             // text channel: only known codes map to a banner, so a query
             // string can never put arbitrary prose on the login page.
@@ -302,7 +302,7 @@ fn decode_query_component(input: &str) -> String {
 
 /// Serve any built marketing page by route. The Zola build output is the
 /// single source of truth: every `public/**/index.html` is whitelisted here
-/// (footer- and nav-linked pages included — /security/, /solutions/*,
+/// (footer- and nav-linked pages included, /security/, /solutions/*,
 /// /compare/*, locale variants) so no built page 404s behind the SSR router.
 /// Both marketing surfaces ("marketing" legacy and "marketing-zola") serve
 /// the same static documents.
@@ -1184,7 +1184,7 @@ fn normalize_marketing_static_document_uncached(document: &str) -> String {
     // smoke tests). Without this, browsers would fetch CSS/fonts/scripts/
     // images directly from the canonical apexmail.ee origin which bypasses
     // the api-server's static-asset routing during development. Only asset
-    // paths are rewritten — canonical/Open-Graph/Schema URLs are left as
+    // paths are rewritten, canonical/Open-Graph/Schema URLs are left as
     // absolute references because they are SEO-significant identifiers.
     for absolute_origin in ["https://apexmail.ee", "https://cdn.apexmail.ee"] {
         for asset_prefix in ["/css/", "/fonts/", "/images/"] {
@@ -1275,7 +1275,7 @@ pub fn render_route_with_query(
 }
 
 /// Full render with PRG flash messages. The flash banners (success / field
-/// errors from the previous POST) are injected server-side — the console has
+/// errors from the previous POST) are injected server-side, the console has
 /// ZERO JavaScript, so every dynamic behavior lives here in Rust:
 ///
 /// - hidden `_csrf` inputs are injected into every `POST /web/*` form,
@@ -1433,7 +1433,7 @@ pub fn render_route_with_form_fields_and_csrf(
                     let (title, description) = control_plane_route_context(path);
                     // F10: the session identity (operator name/email + the
                     // tenant's REAL plan label) rides the CP shell exactly
-                    // like the web shell — the data was loaded but dropped.
+                    // like the web shell, the data was loaded but dropped.
                     leptos_views::control_plane_app_layout_with_session(
                         &inner,
                         title,
@@ -1474,7 +1474,7 @@ pub fn render_route_with_form_fields_and_csrf(
 ///
 /// Item #20: pages WITHOUT the parameter render a start affordance (the
 /// 10/30/60s links) in the same fixed slot, and the active pill carries an
-/// honest "Updated" timestamp (the SSR render time — every reload is a new
+/// honest "Updated" timestamp (the SSR render time, every reload is a new
 /// render).
 fn inject_opt_in_auto_refresh(
     mut html: String,
@@ -1498,7 +1498,7 @@ fn inject_opt_in_auto_refresh(
     );
     let pill = match params.refresh_secs {
         Some(secs) => format!(
-            "<div role=\"status\" class=\"apex-statusline\"><span class=\"apex-status apex-status--on\">Live</span><span class=\"apex-em\">Live — auto-refresh every {secs}s</span><span class=\"\">{updated}</span><a class=\"apex-link\" href=\"{path}\" aria-label=\"Pause auto-refresh\">Pause</a></div>",
+            "<div role=\"status\" class=\"apex-statusline\"><span class=\"apex-status apex-status--on\">Live</span><span class=\"apex-em\">Live, auto-refresh every {secs}s</span><span class=\"\">{updated}</span><a class=\"apex-link\" href=\"{path}\" aria-label=\"Pause auto-refresh\">Pause</a></div>",
             updated = updated,
             path = crate::shell::html_escape(path),
         ),
@@ -1538,7 +1538,7 @@ fn inject_opt_in_auto_refresh(
 /// pages get them just inside `<main>`; other surfaces right after `<body>`.
 /// The container is the `#flash` anchor target: a redirect ending in
 /// `#flash` scrolls it into view and `:target` CSS rings it (design report
-/// quick win #7 — flash banners rendered above the viewport on long forms).
+/// quick win #7, flash banners rendered above the viewport on long forms).
 fn render_flash_banners(mut html: String, flash: &[crate::flash::FlashMessage]) -> String {
     if flash.is_empty() {
         return html;
@@ -1590,7 +1590,7 @@ fn render_flash_banners(mut html: String, flash: &[crate::flash::FlashMessage]) 
 
 /// Re-populate inputs and render per-field errors from a decoded
 /// [`FormFieldData`] map. Purely string-level post-processing over the
-/// rendered page — no view function needs to know about the cookie.
+/// rendered page, no view function needs to know about the cookie.
 ///
 /// Behavior:
 /// - `input` elements whose `name` has a value in the map gain/replace
@@ -1622,7 +1622,7 @@ fn inject_form_field_state(html: String, fields: Option<&FormFieldData>) -> Stri
             .iter()
             .map(|(label, value)| {
                 format!(
-                    "<div class=\"apex-flash mb-6 border px-4 py-3\" role=\"status\"><p class=\"apex-em\">{}</p><code class=\"mt-1 block px-2 py-1.5 break-all apex-select\">{}</code><p class=\"mt-1\">Shown once — select the value to copy it. It will not be displayed again.</p></div>",
+                    "<div class=\"apex-flash mb-6 border px-4 py-3\" role=\"status\"><p class=\"apex-em\">{}</p><code class=\"mt-1 block px-2 py-1.5 break-all apex-select\">{}</code><p class=\"mt-1\">Shown once, select the value to copy it. It will not be displayed again.</p></div>",
                     crate::shell::html_escape(label),
                     crate::shell::html_escape(value),
                 )
@@ -1631,7 +1631,7 @@ fn inject_form_field_state(html: String, fields: Option<&FormFieldData>) -> Stri
             .join("");
         // Right after the flash container when present; otherwise at the
         // top of the content. The fallback must not depend on a `</div>`
-        // existing anywhere — a page without one silently dropped the
+        // existing anywhere, a page without one silently dropped the
         // reveal-once secret.
         let after_flash = html.find("</div>").and_then(|idx| {
             html[..idx]
@@ -1652,12 +1652,12 @@ fn inject_form_field_state(html: String, fields: Option<&FormFieldData>) -> Stri
         }
     }
 
-    // 2. Value / error injection per named control — STRUCTURALLY scoped to
+    // 2. Value / error injection per named control, STRUCTURALLY scoped to
     //    the failing form (review §3 P1-12: "replay is not reliably confined
     //    to the matching form").
     if !html.contains("data-form-id=\"") {
         // No form identity anywhere on the page: replay page-wide, but a
-        // field name carried by MORE THAN ONE form is dropped — with no
+        // field name carried by MORE THAN ONE form is dropped, with no
         // marker there is no way to know which form failed, and guessing
         // would replay into an unrelated form.
         let cross_form = cross_form_names(&html);
@@ -1674,10 +1674,10 @@ fn inject_form_field_state(html: String, fields: Option<&FormFieldData>) -> Stri
         return html;
     }
     // The page marks its forms. The map must name one of them, and replay
-    // happens ONLY inside that form element — same-named fields in sibling
+    // happens ONLY inside that form element, same-named fields in sibling
     // forms stay untouched.
     let Some((start, end)) = marked_form_region(&html, &map.form_id) else {
-        // The map belongs to a form this page does not carry — do not
+        // The map belongs to a form this page does not carry, do not
         // replay values into unrelated fields.
         return html;
     };
@@ -1963,7 +1963,7 @@ fn rewrite_input_tag(tag: &str, map: &FormFieldData) -> String {
             // REPLACE: the rendered default never survives next to the
             // replayed state. A GROUP name (several posted values, e.g. a
             // webhook event checkbox group) is owned by the grouped pass
-            // above — this single-value pass must not re-strip its marks.
+            // above, this single-value pass must not re-strip its marks.
             let grouped = map.values.iter().filter(|(n, _)| *n == name).count() > 1;
             if !grouped {
                 body = strip_boolean_attribute(&body, "checked");
@@ -2188,7 +2188,7 @@ fn rewrite_option_tag(option_tag: &str, posted_value: &str) -> String {
 /// Inject the hidden `_csrf` input into every native `POST /web/*` form and
 /// append an HMAC signature to every `/confirm` link. Pages render without
 /// secrets; this pass (running only when a server secret is available) makes
-/// every submission verifiable — no client-side code participates.
+/// every submission verifiable, no client-side code participates.
 fn inject_csrf_and_sign_confirms(
     html: String,
     csrf_secret: Option<&str>,
@@ -2200,7 +2200,7 @@ fn inject_csrf_and_sign_confirms(
 
     // 1. Hidden CSRF inputs for /web POST forms that lack one. The token is
     //    the caller's (bound to the double-submit `csrf_token` cookie), not a
-    //    per-pass mint — see `render_route_with_form_fields_and_csrf`.
+    //    per-pass mint, see `render_route_with_form_fields_and_csrf`.
     let csrf_input = format!(
         "<input type=\"hidden\" name=\"_csrf\" value=\"{}\" />",
         crate::shell::html_escape(csrf_token),
@@ -2224,7 +2224,7 @@ fn inject_csrf_and_sign_confirms(
         // Case-insensitive: HTML method names are case-insensitive, so a
         // view that writes method="POST" must still receive the injected
         // token (the old lowercase-only check silently skipped it, leaving
-        // that form unsubmittable — found by GATE D's CSRF-presence gate).
+        // that form unsubmittable, found by GATE D's CSRF-presence gate).
         let lowered = tag.to_ascii_lowercase();
         let posts_to_web =
             lowered.contains("method=\"post\"") && lowered.contains("action=\"/web/");
@@ -2279,7 +2279,7 @@ fn extract_query_param(link: &str, key: &str) -> Option<String> {
     for pair in query.split('&') {
         let (k, v) = pair.split_once('=')?;
         // HTML-escaped links separate params with &amp;, so a split on '&'
-        // yields keys like "amp;id" — strip that prefix.
+        // yields keys like "amp;id", strip that prefix.
         let k = k.strip_prefix("amp;").unwrap_or(k);
         if k == key {
             return Some(decode_query_component(v));
@@ -2288,8 +2288,8 @@ fn extract_query_param(link: &str, key: &str) -> Option<String> {
     None
 }
 
-/// The document `<title>` for a route: "{Page} — ApexMail" (batch-2
-/// per-page-titles fix — the root layouts no longer hardcode one site-wide
+/// The document `<title>` for a route: "{Page} | ApexMail" (batch-2
+/// per-page-titles fix, the root layouts no longer hardcode one site-wide
 /// title). The page name comes from the manifest route name for web paths
 /// (with detail/edit pattern fallbacks) and the control-plane route context
 /// for CP paths (which already covers the /cp aliases).
@@ -2298,7 +2298,7 @@ pub fn route_document_title(surface: &str, path: &str) -> String {
 }
 
 /// [`route_document_title`] with the tenant's white-label company name as the
-/// suffix. An absent/blank company name keeps the stock `— ApexMail` suffix.
+/// suffix. An absent/blank company name keeps the stock `| ApexMail` suffix.
 /// The page name itself is never replaced (a route called "ApexMail" on an
 /// unknown path keeps its page name and only the suffix changes).
 pub fn route_document_title_with_branding(
@@ -2314,7 +2314,7 @@ pub fn route_document_title_with_branding(
         .map(str::trim)
         .filter(|name| !name.is_empty())
         .unwrap_or("ApexMail");
-    format!("{page} — {suffix}")
+    format!("{page} | {suffix}")
 }
 
 /// The page name for a web-surface path: the manifest route name, or a
@@ -2365,7 +2365,7 @@ pub fn control_plane_route_context(path: &str) -> (&'static str, &'static str) {
         ),
         "/cp/sales" | "/sales" => (
             "Sales Autopilot",
-            "Autonomy, decisions, exceptions and revenue — is the machine \
+            "Autonomy, decisions, exceptions and revenue, is the machine \
              generating qualified pipeline profitably and safely right now?",
         ),
         "/operators" => ("Operators", "Administrator access, roles, and activity."),
@@ -2379,7 +2379,7 @@ pub fn control_plane_route_context(path: &str) -> (&'static str, &'static str) {
         ),
         "/discovery" => (
             // IA honesty (design report item 26): the page lists the lead
-            // sources discovery runs enriched — not service-registry state.
+            // sources discovery runs enriched, not service-registry state.
             "Lead Sources",
             "Lead sources enriched by discovery runs and their yield.",
         ),
@@ -2401,7 +2401,7 @@ pub fn control_plane_route_context(path: &str) -> (&'static str, &'static str) {
         "/compliance/gdpr" => ("GDPR Compliance", "Data protection request handling."),
         "/alerts" => ("Alerts", "Incident triage and fleet risk signals."),
         // CP honesty: the rules page manages the evaluated usage-alert store
-        // the maintenance sweep reads — a rule fired there lands on /alerts.
+        // the maintenance sweep reads, a rule fired there lands on /alerts.
         "/alerts/rules" => (
             "Alert Rules",
             "Threshold rules evaluated against live usage; fired rules appear on Alerts.",
@@ -2651,7 +2651,7 @@ fn render_web(
         "/settings/webhooks" => data_backed_inner("/settings/webhooks", data)
             .unwrap_or_else(leptos_views::web_settings_webhooks_page),
         "/settings/profile" => leptos_views::web_settings_profile_page(),
-        // Deferred-feature 4: the suppressions list — data-backed like the
+        // Deferred-feature 4: the suppressions list, data-backed like the
         // other settings lists; the static fallback is the honest empty
         // state (the api-server loader owns the real rows).
         "/settings/suppressions" => data_backed_inner("/settings/suppressions", data)
@@ -2661,13 +2661,13 @@ fn render_web(
         // the honest empty state, never fabricated entries.
         "/settings/journal" => data_backed_inner("/settings/journal", data)
             .unwrap_or_else(leptos_views::web_settings_journal_page),
-        // /messages/{id}/timeline — the time-travel debugging page. The
+        // /messages/{id}/timeline, the time-travel debugging page. The
         // api-server renders the real reconstruction through the data path;
         // this static skeleton is the honest fallback (and backs the route
         // inventory/render sweep like every other detail route).
         p if p.starts_with("/messages/") && p.ends_with("/timeline") => {
             // The live reconstruction renders through the shared data-list
-            // page (noun "entry") — exactly what the api-server's data path
+            // page (noun "entry"), exactly what the api-server's data path
             // composes. The static skeleton stays the no-data fallback for
             // the route inventory sweep and the exported route fixture.
             match data.and_then(|route_data| route_data.list.as_ref()) {
@@ -2705,7 +2705,7 @@ fn render_web(
                 None => leptos_views::web_inbox_placement_detail_page(),
             }
         }
-        // /templates/{id}/edit — the editor's formaction/formtarget pattern
+        // /templates/{id}/edit, the editor's formaction/formtarget pattern
         // (previously a 404 behind the templates table's edit links).
         p if p.starts_with("/templates/") && p.ends_with("/edit") => {
             let id = p
@@ -2716,7 +2716,7 @@ fn render_web(
                 None => leptos_views::web_template_edit_page(id),
             }
         }
-        // /domains/{id}/tracking — the custom tracking-domain surface
+        // /domains/{id}/tracking, the custom tracking-domain surface
         // (capability wave 2). Its panel lives in the shared views
         // (`crate::tracking_domain`), so the manifest route, the state
         // fixtures and the goldens exercise the same markup the api-server
@@ -2727,17 +2727,17 @@ fn render_web(
                 csrf_token,
             )
         }
-        // /domains/{id} — the DNS detail flow; without data the list page
+        // /domains/{id}, the DNS detail flow; without data the list page
         // renders as the honest fallback.
         p if p.starts_with("/domains/") => {
             data_backed_inner(p, data).unwrap_or_else(leptos_views::web_domains_page)
         }
-        // /lists/{id}/edit — data-backed like /campaigns/{id}/edit: with
+        // /lists/{id}/edit, data-backed like /campaigns/{id}/edit: with
         // server-loaded values the form carries the hidden id + prefilled
         // name so POST /web/lists/update can actually save (batch-2
         // list-edit fix). Without data (anonymous / no row) the static
-        // no-values form renders — it cannot claim a list it did not load.
-        // Lane R6/review §6.2: /lists/{id}/members first — it must resolve
+        // no-values form renders, it cannot claim a list it did not load.
+        // Lane R6/review §6.2: /lists/{id}/members first, it must resolve
         // BEFORE the generic detail catch-all. With data the api-server
         // composes the real rows (`load_list_members`); without data this is
         // the manifest/render-inventory skeleton.
@@ -2820,7 +2820,7 @@ fn render_control_plane(
         "/tenants/new" => leptos_views::control_plane_tenants_new_page_with_data(
             data.and_then(|d| d.tenant_new.as_ref()),
         ),
-        // /cp/tenants/{id} and /tenants/{id} — the tenant detail page with
+        // /cp/tenants/{id} and /tenants/{id}, the tenant detail page with
         // the audited plan-change form (lane C C1). The exact arms above win,
         // so /tenants/new still renders the create form; everything else
         // under the tenant path renders the detail view (honest unavailable
@@ -3022,7 +3022,7 @@ mod tests {
 
     /// Dogfood 2026-10-06 P1/P2: the session identity and the active
     /// impersonation session must reach the rendered shells. The web header
-    /// renders the REAL plan (never the fabricated "Free Plan — 30K / mo"),
+    /// renders the REAL plan (never the fabricated "Free Plan, 30K / mo"),
     /// and both surfaces render the impersonation banner when the request
     /// carries a session.
     #[test]
@@ -3031,7 +3031,7 @@ mod tests {
             session_identity: Some(SessionIdentity {
                 display_name: "Ada Operator".into(),
                 email: "ada@apexmail.ee".into(),
-                plan_label: Some("Business Plan — 2M / mo".into()),
+                plan_label: Some("Business Plan, 2M / mo".into()),
             }),
             impersonation: Some(ImpersonationView {
                 tenant_id: "tenant_42".into(),
@@ -3052,7 +3052,7 @@ mod tests {
             None,
         )
         .expect("web dashboard renders");
-        assert!(web.contains("Business Plan — 2M / mo"));
+        assert!(web.contains("Business Plan, 2M / mo"));
         assert!(web.contains("Ada Operator"));
         assert!(web.contains("ada@apexmail.ee"));
         assert!(
@@ -3153,13 +3153,13 @@ mod tests {
     #[test]
     fn control_plane_cp_aliases_render() {
         // Batch-2 titles fix: every CP document titles from its route
-        // context ("Page — ApexMail") instead of the hardcoded site title.
+        // context ("Page | ApexMail") instead of the hardcoded site title.
         for (path, title) in [
-            ("/cp", "Dashboard — ApexMail"),
-            ("/cp/tenants", "Tenants — ApexMail"),
-            ("/cp/infra", "Infrastructure — ApexMail"),
-            ("/cp/security", "Security Settings — ApexMail"),
-            ("/cp/audit", "Audit Logs — ApexMail"),
+            ("/cp", "Dashboard | ApexMail"),
+            ("/cp/tenants", "Tenants | ApexMail"),
+            ("/cp/infra", "Infrastructure | ApexMail"),
+            ("/cp/security", "Security Settings | ApexMail"),
+            ("/cp/audit", "Audit Logs | ApexMail"),
         ] {
             let html = render_route("control-plane", path).unwrap();
             assert!(
@@ -3265,7 +3265,7 @@ mod tests {
         // Batch-2 list-edit fix + titles fix: the no-data render is the
         // static no-values form (no fabricated id), titled per route.
         assert!(!edit.contains("name=\"id\""));
-        assert!(edit.contains("<title>Edit List — ApexMail</title>"));
+        assert!(edit.contains("<title>Edit List | ApexMail</title>"));
 
         // With server-loaded values the form carries the hidden id and the
         // prefilled name so POST /web/lists/update can save.
@@ -3397,7 +3397,7 @@ mod tests {
         let html = render_route_with_query("web", "/login", None, None).unwrap();
         assert!(html.contains("action=\"/web/auth/login\""));
         assert!(!html.contains("action=\"/web/auth/mfa/verify\""));
-        // mfa=1 without an email cannot render a bound challenge — fall
+        // mfa=1 without an email cannot render a bound challenge, fall
         // back to the password form rather than a broken challenge page.
         let no_email = render_route_with_query("web", "/login", Some("mfa=1"), None).unwrap();
         assert!(no_email.contains("action=\"/web/auth/login\""));
@@ -3435,7 +3435,7 @@ mod tests {
         )
         .unwrap();
         assert!(live.contains("<meta http-equiv=\"refresh\" content=\"30\" />"));
-        assert!(live.contains("Live — auto-refresh every 30s"));
+        assert!(live.contains("Live, auto-refresh every 30s"));
         assert!(live.contains(
             "href=\"/infrastructure/queues\" aria-label=\"Pause auto-refresh\">Pause</a>"
         ));
@@ -3495,8 +3495,8 @@ mod tests {
 
     // ── ZERO-JavaScript contract (the killer assertions) ─────────────
 
-    /// Every SSR route — web, control-plane, AND the Zola-built marketing
-    /// pages — must render without a single executable script element.
+    /// Every SSR route, web, control-plane, AND the Zola-built marketing
+    /// pages, must render without a single executable script element.
     /// JSON-LD data blocks (non-executable, SEO) are the only exemption.
     #[test]
     fn no_executable_script_tags_in_any_rendered_route() {
@@ -3555,7 +3555,7 @@ mod tests {
     }
 
     /// BLANKET zero-JS shape guard: NO rendered route may contain ANY
-    /// `on<name>="…"` event-handler attribute shape at all — not just the
+    /// `on<name>="…"` event-handler attribute shape at all, not just the
     /// ten spellings enumerated above. Scans for ` on` + ASCII letters +
     /// `=` inside tag boundaries across every view the router can emit
     /// (web, control-plane, and the built marketing pages).
@@ -3925,7 +3925,7 @@ mod tests {
         assert!(html.contains("inbound"));
         assert!(html.contains("href=\"/v1/journal/row-1/raw\""));
         assert!(html.contains("Download raw"));
-        assert!(html.contains("<title>Journal — ApexMail</title>"));
+        assert!(html.contains("<title>Journal | ApexMail</title>"));
     }
 
     #[test]
@@ -3967,10 +3967,10 @@ mod tests {
             }
             let html = render_route_with_data("control-plane", path, None, None, &[], Some(&data))
                 .unwrap_or_else(|| panic!("control-plane {path} must render with data"));
-            // Batch-2 titles fix: every CP document titles "Page — ApexMail"
+            // Batch-2 titles fix: every CP document titles "Page | ApexMail"
             // from the route context instead of the hardcoded site title.
             assert!(
-                html.contains("<title>") && html.contains(" — ApexMail</title>"),
+                html.contains("<title>") && html.contains(" | ApexMail</title>"),
                 "{path} must carry a per-page title"
             );
             assert!(!html.contains("<title>ApexMail Control Plane</title>"));
@@ -3986,7 +3986,7 @@ mod tests {
     #[test]
     fn alert_rules_route_renders_the_real_management_surface() {
         // Static fallback (no server data): the REAL page with its honest
-        // empty state and a working create form — never a 501.
+        // empty state and a working create form, never a 501.
         let html = render_route("control-plane", "/alerts/rules")
             .expect("control-plane /alerts/rules must render");
         assert!(
@@ -3994,7 +3994,7 @@ mod tests {
             "the page must title the real surface"
         );
         assert!(
-            html.contains("No alert rules yet — create one"),
+            html.contains("No alert rules yet, create one"),
             "the empty state must be the honest one"
         );
         assert!(
@@ -4122,7 +4122,7 @@ mod tests {
             render_route_with_data("web", "/campaigns/c_123/edit", None, None, &[], Some(&data))
                 .expect("edit route must render with values");
         // The form POSTs to the real update handler with the row id and the
-        // stored values prefilled — editing no longer duplicates.
+        // stored values prefilled, editing no longer duplicates.
         assert!(html.contains("action=\"/web/campaigns/update\""));
         assert!(html.contains("name=\"id\" value=\"c_123\""));
         assert!(html.contains("value=\"Spring Winback\""));
@@ -4286,7 +4286,7 @@ mod tests {
         assert!(html.contains("value=\"https://example.com/hook\""));
         // The fallback page renders sent/bounced as its DEFAULTS; the posted
         // group (accepted/delivered) does not include them, so the replay
-        // must REPLACE the defaults — no stale `checked` survives (review §3
+        // must REPLACE the defaults, no stale `checked` survives (review §3
         // P1-12). The positive case (posted values present in the markup)
         // is pinned by `failed_replay_replaces_checked_and_selected_defaults`.
         assert_eq!(html.matches(" checked").count(), 0);
@@ -4308,7 +4308,7 @@ mod tests {
         let mut map = crate::view_data::FormFieldData::new("webhook-create");
         map.set("url", "https://example.com/hook");
         // /contacts/new carries data-form-id="contacts-import" but not
-        // "webhook-create" — the values must not leak into its fields.
+        // "webhook-create", the values must not leak into its fields.
         let html = render_route_with_form_fields(
             "web",
             "/contacts/new",
@@ -4345,7 +4345,7 @@ mod tests {
         assert!(html.contains("formtarget=\"_blank\""));
     }
 
-    /// Console item 2: the domain detail data renders the DNS flow — mono
+    /// Console item 2: the domain detail data renders the DNS flow, mono
     /// values with copy guidance, the verify POST, and per-record state.
     #[test]
     fn domain_detail_data_renders_the_dns_flow() {
@@ -4553,7 +4553,7 @@ mod tests {
     /// Every Zola-built document in the whitelist must actually resolve
     /// (locale variants, compare/*, docs/*, solutions/* included). A path
     /// arm that falls out of the match would silently 404 behind the SSR
-    /// router — the footer links every locale, so all of them are load
+    /// router, the footer links every locale, so all of them are load
     /// bearing.
     #[test]
     fn every_built_marketing_document_is_served_with_and_without_slash() {
@@ -4806,7 +4806,7 @@ mod tests {
             Some("refresh=30"),
         );
         assert!(html.contains("<meta http-equiv=\"refresh\" content=\"30\" />"));
-        assert!(html.contains("Live — auto-refresh every 30s"));
+        assert!(html.contains("Live, auto-refresh every 30s"));
         // Unknown surface/path pairs are untouched.
         let untouched = inject_opt_in_auto_refresh(
             "<body>x</body>".to_string(),
@@ -5023,7 +5023,7 @@ mod tests {
         map.set("url", "https://posted.example/hook");
         let html = inject_form_field_state(marked.to_string(), Some(&map));
         // Form b replayed (its stored value replaced by the posted one);
-        // form a — same field name — byte-identical.
+        // form a, same field name, byte-identical.
         assert!(
             html.contains("value=\"https://posted.example/hook\""),
             "{html}"
@@ -5067,7 +5067,7 @@ mod tests {
     }
 
     /// Review §3 P1-12 / §4.10: replay REPLACES rendered defaults instead of
-    /// accumulating attributes — an unchecked box loses its stale `checked`,
+    /// accumulating attributes, an unchecked box loses its stale `checked`,
     /// a non-posted option loses `selected`, and each failed control gains
     /// `aria-invalid` plus a resolvable `aria-describedby` error link.
     #[test]
@@ -5152,7 +5152,7 @@ mod tests {
     /// The typed `/confirm` page is a CONTROL-PLANE route too: CP destructive
     /// actions (tenant suspend from `/tenants`) redirect host-relative to
     /// `/confirm?...`, and before dogfood 2026-10-08 the route existed only on
-    /// the web manifest — the operator host 404'd on a freshly signed link and
+    /// the web manifest, the operator host 404'd on a freshly signed link and
     /// suspend was unreachable. The same signed-intent page must render on the
     /// control-plane surface, including the tampered-link refusal.
     #[test]

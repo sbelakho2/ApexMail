@@ -4,8 +4,8 @@
 //!
 //! Only [`UsersRepo::find_by_email_for_login`] selects `password_hash`
 //! (returning the full [`crate::types::User`], whose hash is additionally
-//! `#[serde(skip_serializing)]`). Every other read — create, find_by_id,
-//! update, and both listings — returns the credential-free
+//! `#[serde(skip_serializing)]`). Every other read, create, find_by_id,
+//! update, and both listings, returns the credential-free
 //! [`crate::types::UserPublic`]: the SELECT never fetches the hash, so no
 //! listing path can leak credential material through serialization, debug
 //! output, or a future field addition.
@@ -20,7 +20,7 @@ use crate::types::{User, UserPublic};
 /// non-login query so the shapes can never drift apart).
 const PUBLIC_COLUMNS: &str = "id, tenant_id, email, name, role, status, created_at, updated_at";
 
-/// The full column list — login fetch only.
+/// The full column list, login fetch only.
 const FULL_COLUMNS: &str =
     "id, tenant_id, email, name, password_hash, role, status, created_at, updated_at";
 
@@ -147,7 +147,7 @@ impl UsersRepo {
                 .await
             }
             _ => {
-                // First page — no cursor
+                // First page, no cursor
                 sqlx::query_as::<_, UserPublic>(&format!(
                     "SELECT {PUBLIC_COLUMNS} \
                      FROM users WHERE tenant_id = $1 \

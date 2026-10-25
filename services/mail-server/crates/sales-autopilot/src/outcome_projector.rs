@@ -1,4 +1,4 @@
-//! Outcome projector — the production producers of the sales feedback loops.
+//! Outcome projector, the production producers of the sales feedback loops.
 //!
 //! Migration 202 added the two feedback ledgers but nothing consumed them, so
 //! `sender_health::record_event` and `experiments::record_reward` had no
@@ -26,21 +26,21 @@
 //! # Claim protocol (mirrors [`crate::actions::ActionQueue`])
 //!
 //! `sales_sender_events` carries no `lease_owner` / `lease_token` /
-//! `lease_expires_at` columns — only `processed_at`. The durable claim is
+//! `lease_expires_at` columns, only `processed_at`. The durable claim is
 //! therefore written into that one column, following the same three
 //! properties as `ActionQueue::claim`:
 //!
-//! * **Claim** — one statement, `FOR UPDATE SKIP LOCKED` over
+//! * **Claim**, one statement, `FOR UPDATE SKIP LOCKED` over
 //!   `processed_at IS NULL` rows ordered by `occurred_at`, then
 //!   `UPDATE ... SET processed_at = NOW() ... RETURNING`. Two workers can
 //!   never claim the same row, exactly like `ActionQueue::claim`.
-//! * **Lease owner + token** — the claim value (`NOW()` at claim time, read
+//! * **Lease owner + token**, the claim value (`NOW()` at claim time, read
 //!   back per row) is the per-claim token carried in [`ClaimedSenderEvent`],
 //!   and `worker_id` is the owner. The token is the fence any release/re-open
 //!   predicate matches (`WHERE id = $1 AND processed_at = $claimed_at`). Both
 //!   live in process memory rather than in columns because the ledger has no
 //!   lease columns.
-//! * **Expiry recovery** — a worker that dies mid-application leaves the
+//! * **Expiry recovery**, a worker that dies mid-application leaves the
 //!   durable claim behind. [`OutcomeProjector::recover_unapplied_claims`]
 //!   re-opens a claim whose lease has expired (`claimed_at` older than
 //!   `lease_secs`) **only when the per-event applied marker for THIS event is
@@ -52,7 +52,7 @@
 //!
 //! [`OutcomeProjector::project_sender_events`] applies a claimed batch as
 //! ONE transaction with a per-event savepoint (perf audit 2026-10-18,
-//! finding 9 — the per-event implementation paid one `BEGIN`/`COMMIT` cycle
+//! finding 9, the per-event implementation paid one `BEGIN`/`COMMIT` cycle
 //! and one row-lock window PER EVENT per tick):
 //!
 //! ```text
@@ -72,7 +72,7 @@
 //! event that already has a marker hits `ON CONFLICT DO NOTHING`, returns no
 //! row, and moves no aggregate. Because the marker and the aggregate commit
 //! atomically, "the marker exists" is exactly equivalent to "this event's
-//! counters are in the aggregate" — no inference from any sender-wide
+//! counters are in the aggregate", no inference from any sender-wide
 //! watermark is needed or allowed. The previous implementation used
 //! `sales_sender_health.updated_at >= processed_at` as the proof, which
 //! **permanently undercounted** a crashed claim whenever a different event
@@ -81,7 +81,7 @@
 //! its comment are gone.
 //!
 //! A failed [`sender_health::record_event_tx`] rolls its event's SAVEPOINT
-//! back — undoing that event's marker with its aggregate — while the batch
+//! back, undoing that event's marker with its aggregate, while the batch
 //! transaction (and the batch-mates) stay alive, and the event's claim is
 //! deliberately left in place: the recovery sweep re-opens it after the
 //! lease expires (marker absent) and it is applied exactly once. A COMMIT
@@ -94,7 +94,7 @@
 //!
 //! The claim is durable BEFORE the aggregate transaction so that a crash at
 //! any point leaves either (a) an unclaimed pending row, or (b) a claimed row
-//! with no marker — both of which are recoverable — and never a row whose
+//! with no marker, both of which are recoverable, and never a row whose
 //! aggregate moved without the ledger saying so. Recovery no longer needs to
 //! guess from the aggregate: it asks the marker.
 //!
@@ -138,7 +138,7 @@ use crate::types::SalesError;
 pub const DEFAULT_BATCH_SIZE: i64 = 50;
 
 /// Default durable-claim lease. Mirrors
-/// [`crate::actions::DEFAULT_LEASE_SECS`] — long enough for one
+/// [`crate::actions::DEFAULT_LEASE_SECS`], long enough for one
 /// `record_event` round trip, short enough that a crashed worker's event is
 /// recovered promptly.
 pub const DEFAULT_LEASE_SECS: i64 = crate::actions::DEFAULT_LEASE_SECS;
@@ -153,7 +153,7 @@ pub const DEFAULT_RECOVERY_WINDOW_SECS: i64 = 3600;
 /// `sales-outcome:{sales_outcomes.id}`.
 pub const OUTCOME_KEY_PREFIX: &str = "sales-outcome:";
 
-/// The `sales_sender_events.event_type` vocabulary — exact wire strings of
+/// The `sales_sender_events.event_type` vocabulary, exact wire strings of
 /// the CHECK constraint (migration 202 lines 112-115).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -293,7 +293,7 @@ pub struct RewardProjectionReport {
     /// Outcomes successfully handed to `experiments::record_reward`
     /// (including idempotent replays).
     pub recorded: u64,
-    /// Outcomes with no linked experiment — marked processed, nothing to
+    /// Outcomes with no linked experiment, marked processed, nothing to
     /// attribute to.
     pub unattributed: u64,
     /// `record_reward` failures; the row stays pending and is retried.
@@ -412,7 +412,7 @@ impl OutcomeProjector {
 
         // Parse the vocabulary first: a corrupted row must not wedge the
         // batch, and releasing it would wedge it forever. Leave it claimed
-        // and make it visible (unchanged semantics — it never reaches the
+        // and make it visible (unchanged semantics, it never reaches the
         // batch transaction below).
         let mut claimed_events: Vec<ClaimedSenderEvent> = Vec::with_capacity(rows.len());
         for row in rows {
@@ -447,7 +447,7 @@ impl OutcomeProjector {
 
         // ONE transaction for the whole batch (perf audit 2026-10-18,
         // finding 9): the per-event implementation opened one transaction per
-        // event (BEGIN, marker INSERT, health write, COMMIT — one durable
+        // event (BEGIN, marker INSERT, health write, COMMIT, one durable
         // commit and one row-lock cycle PER EVENT per tick). Now the batch
         // commits once and every event applies inside its own SAVEPOINT, so
         // an individual event's failure still rolls back ONLY that event
@@ -455,7 +455,7 @@ impl OutcomeProjector {
         // claims above are written outside this transaction: a commit failure
         // rolls the whole batch back with every claim standing, and the
         // lease-expiry sweep below recovers exactly those (marker absent).
-        // An empty claim opens no transaction at all — the projector ticks
+        // An empty claim opens no transaction at all, the projector ticks
         // on an interval and the idle tick must stay free.
         if !claimed_events.is_empty() {
             let mut tx: Transaction<'_, Postgres> = self
@@ -532,7 +532,7 @@ impl OutcomeProjector {
     }
 
     /// Apply one claimed event INSIDE the batch transaction, fenced by a
-    /// per-event savepoint (a nested `BEGIN` on the open transaction — sqlx
+    /// per-event savepoint (a nested `BEGIN` on the open transaction, sqlx
     /// issues `SAVEPOINT`/`RELEASE SAVEPOINT` for it).
     ///
     /// The marker INSERT is the idempotency gate: its primary key makes a
@@ -545,7 +545,7 @@ impl OutcomeProjector {
     /// Returns `Ok(Some(assessment))` when this call moved the aggregate,
     /// `Ok(None)` when a marker for this event already existed (idempotent
     /// re-claim: the aggregate already contains the event and is not touched
-    /// again). On ANY error the savepoint rolls back — undoing ONLY this
+    /// again). On ANY error the savepoint rolls back, undoing ONLY this
     /// event's marker and health writes, leaving the batch transaction and
     /// the event's durable claim (written before it) intact, so lease-expiry
     /// recovery can retry this event alone, safely.
@@ -617,7 +617,7 @@ impl OutcomeProjector {
     /// the marker and the aggregate counter commit atomically, so an applied
     /// claim can never be re-opened (no double count) and an unapplied one is
     /// always retried (no undercount). The previous sender-wide
-    /// `sales_sender_health.updated_at` watermark is deliberately gone — a
+    /// `sales_sender_health.updated_at` watermark is deliberately gone, a
     /// different event for the same sender bumping `updated_at` used to mask
     /// a crashed claim permanently.
     pub async fn recover_unapplied_claims(
@@ -649,7 +649,7 @@ impl OutcomeProjector {
     ///
     /// The claim runs in a transaction so the `FOR UPDATE OF o SKIP LOCKED`
     /// locks are held while `record_reward` executes on the pool; the locks
-    /// are not what makes this idempotent — the stable
+    /// are not what makes this idempotent, the stable
     /// `"sales-outcome:{id}"` outcome key is (see the module docs). The claim
     /// predicate matches the partial index
     /// `idx_sales_outcomes_reward_pending` exactly.
@@ -693,7 +693,7 @@ impl OutcomeProjector {
         // processed together with the successful batch below.
         let mut processed_ids: Vec<Uuid> = Vec::new();
         // The reward writes themselves are batched: one arm preload, one
-        // multi-row ledger INSERT, one arm UPDATE — constant in batch size
+        // multi-row ledger INSERT, one arm UPDATE, constant in batch size
         // and all inside THIS transaction (no per-row pool checkout).
         let mut batch_inputs: Vec<experiments::BatchRewardInput> = Vec::new();
         let mut batched_rows: Vec<(Uuid, Uuid, String, OutcomeKind)> = Vec::new();
@@ -839,7 +839,7 @@ impl OutcomeProjector {
 /// Same shape as [`crate::actions::run`]: an interval with sub-second jitter
 /// so replicas do not wake together, a semaphore bounding the number of
 /// ticks in flight to `concurrency`, and a shutdown future that stops new
-/// ticks. Work already in flight is not forcibly awaited — a hard exit is
+/// ticks. Work already in flight is not forcibly awaited, a hard exit is
 /// recovered by lease expiry (see the module docs), which is exactly why the
 /// claim protocol is durable.
 pub async fn run(
@@ -901,7 +901,7 @@ pub async fn run(
                     }
                 }
                 Err(error) => {
-                    tracing::error!(error = %error, "sales outcome projector tick failed — will retry");
+                    tracing::error!(error = %error, "sales outcome projector tick failed, will retry");
                     metrics::counter!("sales_outcome_projector_tick_errors_total").increment(1);
                 }
             }
@@ -1012,7 +1012,7 @@ mod tests {
 
     // -----------------------------------------------------------------------
     // Live-database tests (canonical provisioned pool; soft-skip when
-    // SALES_TEST_DATABASE_URL is unconfigured — see src/test_db.rs)
+    // SALES_TEST_DATABASE_URL is unconfigured, see src/test_db.rs)
     //
     // The canonical database is SHARED and these tests run in parallel, so a
     // projector pass legitimately claims rows that belong to a sibling test.
@@ -1214,7 +1214,7 @@ mod tests {
     /// test database and the projector claims globally, bounded per tick by
     /// `batch_size`. A parallel test's unprojected rows therefore consume this
     /// test's batch budget, so "50 rows are projected within 4 ticks" is a
-    /// statement about the whole database, not about this test — it failed
+    /// statement about the whole database, not about this test, it failed
     /// exactly that way under a full-workspace run (46 of 50 rows after 4
     /// ticks). Ticking until THIS test's own rows are in makes the assertion
     /// deterministic; the exactly-once property it asserts is unchanged.
@@ -1350,7 +1350,7 @@ mod tests {
         let sender_applied = insert_sender(&pool, &tenant).await;
         let sender_unapplied = insert_sender(&pool, &tenant).await;
 
-        // Case A — crash AFTER the application transaction committed: the
+        // Case A, crash AFTER the application transaction committed: the
         // paper trail is "durable claim + marker + aggregate". Produce it
         // through the REAL projector (marker and aggregate commit together),
         // then age the claim to model a worker that died after commit.
@@ -1382,7 +1382,7 @@ mod tests {
         .await
         .expect("age the applied claim past the lease");
 
-        // Case B — crash BEFORE the application transaction committed: an
+        // Case B, crash BEFORE the application transaction committed: an
         // expired durable claim with no marker and no aggregate movement.
         let before_commit: Uuid = sqlx::query_scalar(
             "INSERT INTO sales_sender_events \
@@ -1400,7 +1400,7 @@ mod tests {
 
         drain(&projector, 3).await;
 
-        // Case A: the marker keeps the applied claim closed — no re-open, no
+        // Case A: the marker keeps the applied claim closed, no re-open, no
         // re-application, aggregate stays at exactly one.
         let (_, _, _, complaints_a, _, _, _, _) =
             health_counters(&pool, &tenant, sender_applied).await;
@@ -1443,7 +1443,7 @@ mod tests {
     /// second event B for the SAME sender is claimed by a worker that crashes
     /// before its application transaction commits, and the recovery sweep
     /// runs. The old heuristic compared B's claim against the sender-wide
-    /// `updated_at` written by A and concluded B was applied — permanently
+    /// `updated_at` written by A and concluded B was applied, permanently
     /// undercounting B. The per-event marker answers for B alone, so B is
     /// recovered and applied; neither event undercounts.
     #[tokio::test]
@@ -1522,7 +1522,7 @@ mod tests {
 
         // Apply the recovered event, then prove both events are counted once.
         // Volume counts sends: the hard bounce adds 1, the complaint adds 0
-        // (it is an event about a send, not a send) — the undercount this test
+        // (it is an event about a send, not a send), the undercount this test
         // guards would show as complaints = 0.
         drain(&projector, 3).await;
         let (volume, hard_bounces, _, complaints, _, _, _, _) =
@@ -1658,7 +1658,7 @@ mod tests {
     // -----------------------------------------------------------------------
     // Batch-transaction regressions (perf audit 2026-10-18, finding 9):
     // the sender-event projection must be ONE transaction per BATCH with a
-    // per-event SAVEPOINT — not one transaction per event.
+    // per-event SAVEPOINT, not one transaction per event.
     // -----------------------------------------------------------------------
 
     /// Isolated canonical database for the batch tests (the shared canonical
@@ -1681,7 +1681,7 @@ mod tests {
     /// Observable counts: sqlx issues `BEGIN`/`SAVEPOINT` through the
     /// connection's simple-query queue (no query logger), but `COMMIT`,
     /// `RELEASE SAVEPOINT` and every DML go through the logged executor path
-    /// — so "one `COMMIT` per tick" is the transaction count and
+    ///, so "one `COMMIT` per tick" is the transaction count and
     /// "N `RELEASE SAVEPOINT`" is the savepoint count.
     #[tokio::test]
     async fn sender_projection_is_one_transaction_per_batch_with_per_event_savepoints() {
@@ -2032,7 +2032,7 @@ mod tests {
 
     /// Commit failure: a fault that fires at COMMIT time (a deferred
     /// constraint trigger on the applied-marker table) rolls back the WHOLE
-    /// batch — no marker, no aggregate movement for any event — while the
+    /// batch, no marker, no aggregate movement for any event, while the
     /// durable claims (written outside the batch transaction) stand, so the
     /// lease-expiry sweep recovers every event and applies it exactly once.
     #[tokio::test]
@@ -2085,7 +2085,7 @@ mod tests {
             "the commit-time failure must surface to the caller"
         );
 
-        // The WHOLE batch rolled back: no marker, no aggregate — for either
+        // The WHOLE batch rolled back: no marker, no aggregate, for either
         // event.
         let markers: i64 = sqlx::query_scalar(
             "SELECT COUNT(*)::bigint FROM sales_sender_health_applied WHERE event_id = ANY($1)",
@@ -2104,7 +2104,7 @@ mod tests {
         .expect("count health rows");
         assert_eq!(health_rows, 0, "no aggregate movement may survive");
 
-        // The durable claims stand — written OUTSIDE the batch transaction —
+        // The durable claims stand, written OUTSIDE the batch transaction —
         // which is exactly what lease recovery needs.
         for event in [event_a, event_b] {
             let claimed: bool = sqlx::query_scalar(
@@ -2349,7 +2349,7 @@ mod tests {
         .expect("insert sales outcome")
     }
 
-    /// Insert a reward outcome against an explicit step execution — the
+    /// Insert a reward outcome against an explicit step execution, the
     /// canonical UNIQUE(tenant, outcome, step_execution_id) means a batch of
     /// same-kind outcomes needs one execution per outcome.
     async fn insert_outcome_for_step(
@@ -2502,8 +2502,8 @@ mod tests {
         );
     }
 
-    /// P2: reward projection is O(1) in statements per batch — one ledger
-    /// INSERT, one arm UPDATE, one reward_processed UPDATE — and the
+    /// P2: reward projection is O(1) in statements per batch, one ledger
+    /// INSERT, one arm UPDATE, one reward_processed UPDATE, and the
     /// posterior/ledger state matches the legacy per-row writes exactly.
     #[tokio::test]
     async fn reward_projection_statement_count_is_constant_in_batch_size() {

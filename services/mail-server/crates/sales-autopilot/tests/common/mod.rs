@@ -9,7 +9,7 @@
 //! The PLATFORM schema (tenants, domains, messages, email_queue,
 //! suppressions, templates, metering_events, …) is the CANONICAL production
 //! chain (`services/mail-server/migrations`) applied through the REAL
-//! production migrator (`migrator::test_support` — audit F01), exactly what
+//! production migrator (`migrator::test_support`, audit F01), exactly what
 //! every deploy installs; the sales-autopilot own tables are created by
 //! `routes::initialize_schema`.
 
@@ -25,7 +25,7 @@ use uuid::Uuid;
 const SALES_TEST_DB: &str = "apexmail_sales_test";
 
 /// Process-wide initialization marker: provisioning + migrations run exactly
-/// once per test PROCESS. The POOL itself is NOT shared — every
+/// once per test PROCESS. The POOL itself is NOT shared, every
 /// `#[tokio::test]` runs on its own runtime, and a sqlx pool is bound to
 /// the runtime that created it (sharing it deadlocks cross-runtime with
 /// PoolTimedOut). Fresh pool per test, shared initialized database.
@@ -49,7 +49,7 @@ pub async fn test_pool(test_name: &str) -> Option<PgPool> {
                 {
                     Ok(db) => db,
                     // F01: the URL is configured, so an unreachable server or a
-                    // failed clone/migration is an infrastructure FAILURE — it
+                    // failed clone/migration is an infrastructure FAILURE, it
                     // must fail the suite, not silently skip every test.
                     Err(error) => panic!("{}", error.panic_message()),
                 };
@@ -134,7 +134,7 @@ pub async fn insert_test_tenant(pool: &PgPool, suffix: &str) -> String {
 /// messages.rs tests) so the dispatcher's sender-domain gate passes.
 ///
 /// Canonical `domains` carries a GLOBAL unique index on name (a domain is
-/// claimable by one tenant), and the whole suite shares one database — use
+/// claimable by one tenant), and the whole suite shares one database, use
 /// [`unique_test_domain`] so parallel fixtures never collide on it.
 pub async fn insert_verified_domain(pool: &PgPool, tenant_id: &str, domain: &str) -> String {
     // Canonical domains.id is UUID: bind a real UUID, not its text form.
@@ -435,7 +435,7 @@ pub struct SequenceFixture {
 }
 
 /// Seed the canonical sequence fixture for `tenant_id` (which must already
-/// exist in `tenants` as far as platform columns are concerned — see
+/// exist in `tenants` as far as platform columns are concerned, see
 /// [`insert_test_tenant`]).
 pub async fn seed_sequence_fixture(
     pool: &PgPool,
@@ -761,7 +761,7 @@ pub async fn enqueue_send_step_action(
             serde_json::json!({ "stepExecutionId": step_execution_id }),
             // One second in the past: the action must be IMMEDIATELY
             // actionable, and the claim compares `due_at <= NOW()` in SQL
-            // against the DATABASE clock — a Rust-clock `now()` races that
+            // against the DATABASE clock, a Rust-clock `now()` races that
             // sub-second window (the same reason `enqueue` clamps below).
             chrono::Utc::now() - chrono::Duration::seconds(1),
             100,

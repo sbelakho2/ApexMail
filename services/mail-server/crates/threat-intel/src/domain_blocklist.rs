@@ -1,4 +1,4 @@
-//! Domain blocklist — exact and wildcard domain matching
+//! Domain blocklist, exact and wildcard domain matching
 
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
@@ -83,7 +83,7 @@ impl DomainBlocklist {
             }
             // Apex heuristic:once the remaining name has two labels
             // ("evil.com") we have checked the presumable registrable
-            // domain — stop. Multi-part public suffixes (co.uk) may need
+            // domain, stop. Multi-part public suffixes (co.uk) may need
             // one extra level, which the walk reaches naturally.
             if parts.matches('.').count() <= 1 {
                 break;
@@ -184,7 +184,7 @@ pub fn parse_url_list_domains(
             if host.parse::<std::net::Ipv4Addr>().is_ok()
                 || host.parse::<std::net::Ipv6Addr>().is_ok()
             {
-                return None; // IP literal — IP blocklist territory
+                return None; // IP literal, IP blocklist territory
             }
             if !host.contains('.') {
                 return None;

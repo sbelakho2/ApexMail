@@ -1,4 +1,4 @@
-//! Sandbox engine — top-level orchestrator
+//! Sandbox engine, top-level orchestrator
 //!
 //! Coordinates file inspection, policy evaluation, and produces
 //! a final `SandboxVerdict` for each attachment.
@@ -80,7 +80,7 @@ pub enum DynamicDecision {
 /// Shared, bounded Tokio runtime used to run dynamic analyzers.
 ///
 /// Previously every attachment analysis spawned a dedicated OS thread *and*
-/// built a fresh Tokio runtime — one thread + one runtime leaked per
+/// built a fresh Tokio runtime, one thread + one runtime leaked per
 /// analysis for stuck scanners. All analyses now share this single runtime
 /// with a small bounded blocking pool; analyzer implementations are expected
 /// to enforce their own I/O timeouts (the ClamAV analyzer sets socket
@@ -103,7 +103,7 @@ fn shared_analyzer_runtime() -> &'static tokio::runtime::Runtime {
 /// `spawn_blocking` closures that never return (an analyzer without an
 /// internal I/O timeout, a wedged scanner socket) hold one of the 8
 /// blocking threads forever. The caller's `tokio::time::timeout` abandons
-/// the *await*, not the pool slot — so eight stuck analyzers wedge the
+/// the *await*, not the pool slot, so eight stuck analyzers wedge the
 /// entire pool: every later analysis queues forever, times out, and fails
 /// closed (`any_rejected()` returns true for `Err` verdicts) with no
 /// recovery.
@@ -120,7 +120,7 @@ fn shared_analyzer_runtime() -> &'static tokio::runtime::Runtime {
 /// [`analyzer_slots_in_flight`] stays pinned at the pool bound of 8), the
 /// shared analyzer pool is wedged by analyzers that do not enforce their
 /// own timeouts. Analysis requests will fail closed until the **process
-/// is restarted** — wedged blocking threads cannot be reclaimed from
+/// is restarted**, wedged blocking threads cannot be reclaimed from
 /// inside the process. After restart, fix or remove the analyzer that
 /// lacks an internal I/O timeout (every `DynamicAnalyzer` must bound its
 /// own blocking work).
@@ -156,7 +156,7 @@ static ANALYZER_SLOTS: std::sync::OnceLock<AnalyzerSlotTracker> = std::sync::Onc
 /// sync `analyze()` API unusable from async callers (MTA handlers, any
 /// `#[tokio::test]`). When no ambient runtime exists (pure sync caller) the
 /// future is driven directly. When one does, the wait hops to a
-/// short-lived driver thread that is joined immediately — safe under BOTH
+/// short-lived driver thread that is joined immediately, safe under BOTH
 /// multi-thread and current_thread runtimes (`tokio::task::block_in_place`
 /// panics on current_thread, and `#[tokio::test]` defaults to exactly that
 /// flavor). The analyzer pool itself stays shared and bounded; the driver
@@ -195,7 +195,7 @@ pub fn analyzer_slots_in_flight() -> usize {
 }
 
 /// Metric: analyzer wedge detections since process start. Non-zero means
-/// at least one analyzer task outlived 2× its configured timeout — see the
+/// at least one analyzer task outlived 2× its configured timeout, see the
 /// operator note on [`AnalyzerSlotTracker`].
 pub fn analyzer_wedge_events() -> u64 {
     analyzer_slots()
@@ -281,13 +281,13 @@ fn check_for_wedged_slots(timeout: Duration) {
 /// 3. If `analyze` returns `Some(finding)`, the finding's risk is added to the
 /// static verdict and the decision is escalated according to
 /// [`DynamicDecision`].
-/// **Known limitation — RAR/7z and PDF object streams:** ZIP-family
+/// **Known limitation, RAR/7z and PDF object streams:** ZIP-family
 /// containers are recursed into by the static inspector
 /// ([`crate::archive`], bounded extraction), but RAR and 7z archives are
 /// not decompressed (only encryption heuristics apply) and PDF object
 /// streams are not inflated here. A `DynamicAnalyzer` implementation can
 /// compensate by unpacking and re-scanning inner payloads.
-/// **Known limitation — image-based payloads:** Steganographic or image-rendered
+/// **Known limitation, image-based payloads:** Steganographic or image-rendered
 /// content (e.g., phishing screenshots) is not inspected. An OCR-equipped
 /// dynamic analyzer can fill this gap.
 pub trait DynamicAnalyzer: Send + Sync {
@@ -354,7 +354,7 @@ impl SandboxEngine {
         // Step 1:File inspection (static analysis)
         let mut inspection: FileInspection = file_inspector::inspect_file(data, filename);
 
-        // Step 1b:Bounded archive extraction (audit finding) — recurse into
+        // Step 1b:Bounded archive extraction (audit finding), recurse into
         // ZIP containers under the configured depth/entry/byte budgets and
         // re-inspect every extracted entry on its DECOMPRESSED content, so
         // payloads nested inside archives are actually scored.
@@ -468,13 +468,13 @@ impl SandboxEngine {
         check_for_wedged_slots(timeout_duration);
         let task = runtime.spawn_blocking(move || {
             // RAII: the entry is removed when the blocking task actually
-            // finishes — even if the caller already abandoned it after a
+            // finishes, even if the caller already abandoned it after a
             // timeout, which is exactly the wedge case we need to see.
             let _guard = slot;
             analyzer.analyze(&data, filename.as_deref())
         });
 
-        // F11:driven via blocking_wait — safe from both sync callers and
+        // F11:driven via blocking_wait, safe from both sync callers and
         // callers already inside a Tokio runtime (nested block_on used to
         // panic there).
         let joined = blocking_wait(runtime, async {
@@ -774,7 +774,7 @@ mod tests {
 
     /// F11:the sync `analyze()` API must be callable from INSIDE a Tokio
     /// runtime without panicking. `#[tokio::test]` defaults to the
-    /// CURRENT-THREAD runtime flavor — the harshest context for the old
+    /// CURRENT-THREAD runtime flavor, the harshest context for the old
     /// nested `runtime.block_on` (which panicked with "cannot block the
     /// current thread from within a runtime" from any async caller, and
     /// where `block_in_place` would panic too). The dynamic-analyzer path
@@ -846,12 +846,12 @@ mod tests {
         );
 
         // Let the slot age past 2x the timeout, then dispatch a fast
-        // analysis — the wedge check must fire. The 2.6s wait gives the
+        // analysis, the wedge check must fire. The 2.6s wait gives the
         // slot a >=0.6s margin over the 2x(1s) threshold: under a fully
         // parallel test run the first dispatch's own scheduling delay eats
         // into a 1.5s wait and the check races the threshold.
         std::thread::sleep(std::time::Duration::from_millis(2_600));
-        // The wedge sweep runs on the DYNAMIC-analyzer dispatch path — the
+        // The wedge sweep runs on the DYNAMIC-analyzer dispatch path, the
         // probe must be a fast DYNAMIC analyzer, not the static-only
         // with_config engine (whose analyze never reaches the check).
         struct MockDynamicFast;
@@ -993,7 +993,7 @@ mod tests {
     fn encrypted_container_scores_quarantine_never_reject() {
         // MTA cross-crate escalation: an encrypted archive scores 7.0
         // (ARCHIVE_ENCRYPTED, QUARANTINE class). Its contents being
-        // uninspected is a CONSEQUENCE of the encryption — the extraction
+        // uninspected is a CONSEQUENCE of the encryption, the extraction
         // sweep must not stack a 3.0 ARCHIVE_ENTRY_UNREADABLE on the same
         // container: 7 + 3 = 10 crossed reject_threshold and flipped
         // QUARANTINE → REJECT (breaking the strip-but-never-reject posture
@@ -1060,7 +1060,7 @@ mod tests {
 
     #[test]
     fn nested_archive_payload_is_inspected_and_scored() {
-        // Audit finding: attachments were never unpacked — a PE payload
+        // Audit finding: attachments were never unpacked, a PE payload
         // inside a zip inside a zip was scored on the OUTER container's
         // bytes only. It must now surface in the verdict, with the
         // extraction summary visible in the reasons.
@@ -1098,7 +1098,7 @@ mod tests {
         // The previously-dead knob now governs reporting on the container
         // and extracted entries alike. The inner DOCX (a STORED zip, so the
         // vbaProject.bin indicator is visible in its raw bytes) is only
-        // inspectable via extraction — the outer container's compressed
+        // inspectable via extraction, the outer container's compressed
         // bytes cannot reveal it.
         fn write_zip_stored(entries: &[(&str, Vec<u8>)]) -> Vec<u8> {
             use std::io::Write as _;

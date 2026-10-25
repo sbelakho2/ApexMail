@@ -15,7 +15,7 @@
 //!                                                                     solver opt-in)
 //! ```
 //!
-//! # The solver hook — disabled by default, opt-in per host
+//! # The solver hook, disabled by default, opt-in per host
 //!
 //! `SCRAPE_CAPTCHA_SOLVER_URL` (+ optional `SCRAPE_CAPTCHA_SOLVER_TOKEN`)
 //! names an operator-run challenge-solving service. Three independent gates
@@ -33,7 +33,7 @@
 //!    through the ordinary fetch policy: robots, politeness and the backoff
 //!    gate all still apply. Nothing bypasses the per-host backoff.
 //!
-//! Every attempt — including the ones refused by gate 1, 2 or 3 — writes a
+//! Every attempt, including the ones refused by gate 1, 2 or 3, writes a
 //! `sales_scrape_solver_audit` row. Cookie/token material is never stored or
 //! logged; the audit records only *that* a token was received and what the
 //! one retry did.
@@ -73,8 +73,8 @@
 //! `status` is `solved` or `failed`. A `solved` answer MUST carry retry
 //! material (`cookie` and/or `headers`); both are validated against CR/LF
 //! injection and length caps before they are sent, and they are applied to
-//! exactly one same-host retry. Any other shape — a non-2xx, a timeout, an
-//! oversized body, JSON without `status` — is [`SolverOutcome::SolverFailed`]
+//! exactly one same-host retry. Any other shape, a non-2xx, a timeout, an
+//! oversized body, JSON without `status`, is [`SolverOutcome::SolverFailed`]
 //! and backs the host off.
 //!
 //! # What this module deliberately does NOT do
@@ -155,7 +155,7 @@ pub struct LeaseFence {
 /// when there is one.
 ///
 /// Returns `Some(id)` with the queue row's id, or `None` when the fence was
-/// supplied and no longer owns the job (the write was refused — the caller
+/// supplied and no longer owns the job (the write was refused, the caller
 /// must stop, exactly like the run/candidate writes).
 ///
 /// Re-observation is the same row: occurrences increment, the latest
@@ -405,7 +405,7 @@ pub async fn review_blocked_source(
     };
     if !transition_ok {
         return Err(SalesError::InvalidInput(format!(
-            "blocked source {id} is {} — `{}` is not a valid transition from that state",
+            "blocked source {id} is {}, `{}` is not a valid transition from that state",
             current.state,
             action.target_state()
         )));
@@ -760,8 +760,8 @@ async fn audit(
 
 /// Attempt the operator-gated solve of one blocked CAPTCHA source.
 ///
-/// The three gates are checked in order, and every outcome — including every
-/// refusal — is audited. See the module docs for the contract.
+/// The three gates are checked in order, and every outcome, including every
+/// refusal, is audited. See the module docs for the contract.
 pub async fn attempt_solve(
     db: &PgPool,
     client: &ScrapeClient,
@@ -847,7 +847,7 @@ pub async fn attempt_solve(
         || blocked.state != BLOCKED_STATE_OPEN
     {
         let detail = format!(
-            "blocked source is {} ({}) — only an open blocked_captcha row can be solved",
+            "blocked source is {} ({}), only an open blocked_captcha row can be solved",
             blocked.state, blocked.classification
         );
         let audit_id = audit(
@@ -1159,7 +1159,7 @@ async fn call_solver(
 }
 
 // ---------------------------------------------------------------------------
-// Tests — pure (no database, no network)
+// Tests, pure (no database, no network)
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]

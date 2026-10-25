@@ -9,7 +9,7 @@ use std::sync::Arc;
 use tower::ServiceExt;
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Helper — read response body as JSON
+// Helper, read response body as JSON
 // ═══════════════════════════════════════════════════════════════════════════
 
 async fn body_json(resp: axum::http::Response<Body>) -> serde_json::Value {
@@ -43,7 +43,7 @@ mod devex {
     }
 
     /// A local webhook sink: axum bound to an ephemeral loopback port that
-    /// counts every received request (SM12 F5 — replaces httpbin.org).
+    /// counts every received request (SM12 F5, replaces httpbin.org).
     async fn spawn_webhook_sink() -> (String, Arc<AtomicUsize>) {
         let hits = Arc::new(AtomicUsize::new(0));
         let hits_for_handler = Arc::clone(&hits);
@@ -109,7 +109,7 @@ mod devex {
 
     /// SM12 F5: the route must deliver a PRECISE verdict against a local
     /// axum sink, not accept any 200-or-500 outcome against httpbin.org.
-    /// A loopback target is refused by the production SSRF guard — and the
+    /// A loopback target is refused by the production SSRF guard, and the
     /// sink must have received NOTHING (the guard blocks before any
     /// connection). If the guard is unwired, the sink receives the POST,
     /// the route answers 200, and both assertions fail.
@@ -138,7 +138,7 @@ mod devex {
 
     /// The DNS-resolution failure arm delivers its own precise verdict.
     /// `.invalid` is guaranteed non-resolvable (RFC 2606): with a resolver
-    /// it is NXDOMAIN, without one the lookup errors — both surface as the
+    /// it is NXDOMAIN, without one the lookup errors, both surface as the
     /// same "could not be resolved" refusal, so this is network-independent.
     #[tokio::test]
     async fn webhook_test_route_reports_unresolvable_hosts_precisely() {
@@ -482,7 +482,7 @@ mod sales {
     #[tokio::test]
     async fn health_reports_degraded_without_db() {
         // SM12c rename: this asserts the DELIBERATE degraded answer the
-        // service gives without a database (503 + "degraded") — the old
+        // service gives without a database (503 + "degraded"), the old
         // `health_returns_200` name lied about what it pins.
         let resp = app()
             .oneshot(Request::get("/health").body(Body::empty()).unwrap())
@@ -500,7 +500,7 @@ mod sales {
         };
         // Unique per run: the route tests share the (persistent)
         // TEST_DATABASE_URL and sales_leads enforces
-        // UNIQUE(tenant_id, lower(contact_email)) — a fixed address 409s on
+        // UNIQUE(tenant_id, lower(contact_email)), a fixed address 409s on
         // every suite re-run against the same database.
         let email = format!("alice-{}@acme.com", uuid::Uuid::new_v4().simple());
         let submitted_email = email.clone();
@@ -522,7 +522,7 @@ mod sales {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let json = body_json(resp).await;
-        // SM12 F6: assert against the SUBMITTED email — the previous line
+        // SM12 F6: assert against the SUBMITTED email, the previous line
         // compared `json["email"]` to itself (always true).
         assert_eq!(
             json["email"].as_str().unwrap_or(""),
@@ -671,12 +671,12 @@ mod ai {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Billing service — plan-seed smoke only (SM12c: the CANONICAL default-plan
+// Billing service, plan-seed smoke only (SM12c: the CANONICAL default-plan
 // assertions live in functional-tests functional_billing.rs; the deep
 // per-feature/per-tier duplicates this module used to carry were removed so
 // there is one source of truth. The HTTP-level billing behaviour (invoice
 // creation, subscription override, wallet credit with idempotency keys) is
-// covered DB-backed in concurrency_tests.rs — audit SM12 F16b.)
+// covered DB-backed in concurrency_tests.rs, audit SM12 F16b.)
 // ═══════════════════════════════════════════════════════════════════════════
 
 mod billing {

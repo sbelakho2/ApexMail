@@ -1,4 +1,4 @@
-//! WAF Engine — main entry point that orchestrates all analyzers
+//! WAF Engine, main entry point that orchestrates all analyzers
 
 use std::net::IpAddr;
 use std::sync::Arc;
@@ -74,7 +74,7 @@ impl WafEngine {
     /// Create a new WAF engine
     pub fn new(config: WafConfig) -> Self {
         // Audit SM5 F14: paranoia_level 0 (or >4) silently DISARMS every
-        // rule — the retain filter at the end of `inspect` drops all
+        // rule, the retain filter at the end of `inspect` drops all
         // matches while the engine reports healthy. Fail closed: clamp an
         // invalid level into the legal range (0 becomes 1, the MOST
         // restrictive filtering level) and reject the config through
@@ -84,7 +84,7 @@ impl WafEngine {
         if let Err(reason) = config.validate() {
             warn!(
                 reason = %reason,
-                "WAF: invalid WafConfig rejected — paranoia_level clamped to 1 (fail-closed)"
+                "WAF: invalid WafConfig rejected, paranoia_level clamped to 1 (fail-closed)"
             );
             config.paranoia_level = config.paranoia_level.clamp(1, 4);
         }
@@ -110,7 +110,7 @@ impl WafEngine {
     pub fn inspect(&self, req: &HttpRequest<'_>) -> ThreatInfo {
         let mut all_matches: Vec<RuleMatch> = Vec::with_capacity(16);
 
-        // Check IP-level allow-lists — IP allowlist = full bypass (trusted internal scanners etc.)
+        // Check IP-level allow-lists, IP allowlist = full bypass (trusted internal scanners etc.)
         // Audit F10: compare as canonical IpAddr values (v4-mapped IPv6
         // collapses to IPv4 on both sides); string compare remains only as
         // a fallback for non-IP allowlist entries.
@@ -233,7 +233,7 @@ impl WafEngine {
         // Fast-path pre-filter:only run expensive parsers if suspicious keywords found
         let path_fast_check = fast_path::fast_path_check(&decoded_path);
 
-        // Path traversal is checked ALWAYS — even on allowlisted paths.
+        // Path traversal is checked ALWAYS, even on allowlisted paths.
         // Skipping it for a prefix like `/static` let `/static/../../etc`
         // escape the allowlist intent, and `..` after decoding is a jail
         // break regardless of which route serves the path.
@@ -354,7 +354,7 @@ impl WafEngine {
         // 4. Inspect body (truncated to the FIRST max_body_size bytes).
         // The truncated head is computed ONCE here and reused by every body
         // consumer below (steps 4, 7 and 8) so no analyzer ever sees the
-        // bytes beyond the cap — that is the whole point of the CPU bound.
+        // bytes beyond the cap, that is the whole point of the CPU bound.
         let truncated_body: Option<&str> = req.body.map(|body| {
             if body.len() > self.config.max_body_size {
                 // Keep the HEAD of the body (attacks overwhelmingly live at
@@ -958,7 +958,7 @@ mod tests {
     #[test]
     fn test_ip_allowlist_v4_mapped_equivalence() {
         // Entry configured as IPv4, request arrives as IPv4-mapped IPv6
-        // (what a dual-stack listener reports) — must still bypass.
+        // (what a dual-stack listener reports), must still bypass.
         let mut config = WafConfig::default();
         config.allowlist_ips.push("10.0.0.1".to_string());
         let engine = WafEngine::new(config);

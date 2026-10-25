@@ -9,7 +9,7 @@ pub mod claims_registry;
 pub mod config;
 pub mod consent_enforcement;
 // The consent-expiry sweep (P3: batched + set-based). It previously existed as
-// an orphan file — no `mod` declaration anywhere in the workspace — so it never
+// an orphan file, no `mod` declaration anywhere in the workspace, so it never
 // compiled, never ran, and could not be tested. Declaring it here makes the
 // sweep reachable (the job is started by an owner process, exactly like before).
 pub mod consent_expiry;
@@ -32,7 +32,7 @@ pub mod legal_hold;
 pub mod obligations;
 /// Procurement document index (the package a US customer's procurement
 /// review asks for). Carries the US DPA addendum as a DRAFT row until the
-/// owner approves it — never as an available artifact.
+/// owner approves it, never as an available artifact.
 pub mod procurement_package;
 pub mod registry_monitor;
 pub mod retention;

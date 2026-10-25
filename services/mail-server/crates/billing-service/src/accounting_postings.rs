@@ -21,12 +21,12 @@
 //!
 //! The in-transaction hooks run inside a SAVEPOINT. A typed adapter failure
 //! (`NoOpenPeriod`, `NoDefaultLegalEntity`) never touches the surrounding
-//! transaction — but a SQL-level failure (FK violation, CHECK violation)
+//! transaction, but a SQL-level failure (FK violation, CHECK violation)
 //! POISONS a Postgres transaction: without the savepoint, the billing
 //! `tx.commit()` would fail with an unrelated `Db` error and roll back the
 //! wallet mint / credit note. Rolling back to the savepoint heals the
 //! transaction, so SQL failures land on exactly the same logged-skip path as
-//! typed errors — one deliberate policy, not two contradictory ones. Every
+//! typed errors, one deliberate policy, not two contradictory ones. Every
 //! skip increments `accounting_postings_skipped_total` (alertable alongside
 //! the ERROR log; the billing sweeps in `accounting-core::sweeps` are the
 //! replay that catches skipped postings up).
@@ -66,7 +66,7 @@ async fn open_posting_savepoint(tx: &mut PgConnection, hook: &str, source_id: &s
             hook,
             source_id,
             error = %error,
-            "accounting posting: could not open the savepoint — the posting runs unfenced and \
+            "accounting posting: could not open the savepoint, the posting runs unfenced and \
              a SQL failure would abort the billing transaction"
         );
     }
@@ -82,7 +82,7 @@ async fn release_posting_savepoint(tx: &mut PgConnection, hook: &str, source_id:
             hook,
             source_id,
             error = %error,
-            "accounting posting succeeded but the savepoint release failed — the surrounding \
+            "accounting posting succeeded but the savepoint release failed, the surrounding \
              billing transaction may abort"
         );
     }
@@ -100,7 +100,7 @@ async fn rollback_posting_savepoint(tx: &mut PgConnection, hook: &str, source_id
             hook,
             source_id,
             rollback = %rollback,
-            "accounting posting failed AND the savepoint rollback failed — the billing \
+            "accounting posting failed AND the savepoint rollback failed, the billing \
              transaction will abort; the billing write is NOT silently lost"
         );
     }
@@ -112,7 +112,7 @@ fn log_post_failure(what: &str, source_id: &str, error: &accounting_core::Accoun
         hook = what,
         source_id,
         error = %error,
-        "accounting posting failed — billing state is committed; replay the source event once \
+        "accounting posting failed, billing state is committed; replay the source event once \
          the ledger is configured (posting is idempotent; the accounting sweeps replay it \
          automatically)"
     );
@@ -225,7 +225,7 @@ mod tests {
 
     /// The skip policy is uniform across BOTH failure classes (audit SM7 F4):
     /// the logged-skip path must render a typed error (no ledger configured)
-    /// and a SQL-level error (poisoned transaction) identically — neither may
+    /// and a SQL-level error (poisoned transaction) identically, neither may
     /// panic, neither may surface to the billing caller, both count as one
     /// skip.
     #[test]

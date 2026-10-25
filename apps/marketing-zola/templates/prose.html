@@ -1,4 +1,4 @@
-{# Prose page template — for legal/policy pages #}
+{# Prose page template, for legal/policy pages #}
 {% extends "base.html" %}
 
 {# Document mode by default: legal/policy pages are always documents.
@@ -14,44 +14,55 @@
 {% block twitter_description %}{% if page.description %}{{ page.description }}{% else %}{{ config.description }}{% endif %}{% endblock twitter_description %}
 
 {% block content %}
-<div class="max-w-3xl mx-auto px-6 py-20 lg:py-32">
-  <h1 class="mb-4 break-words apex-page-title">{{ page.title }}</h1>
-  {% if page.extra.last_updated %}
-  {# Machine-readable date + localized label: the literal string used to be
-     hardcoded English ("Last updated") on every locale. #}
-  <p class="mb-12 apex-em">
-    {% if i18n_data and i18n_data[l] and i18n_data[l]['a11y'] and i18n_data[l]['a11y']['last_updated'] %}{{ i18n_data[l]['a11y']['last_updated'] }}{% else %}Last updated:{% endif %}
-    <time datetime="{{ page.extra.last_updated }}">{{ page.extra.last_updated }}</time>
-  </p>
-  {% endif %}
-  {# Stable section navigation: Zola's heading anchors ARE the section ids,
-     so this nav survives renames of the page and is language-independent. #}
-  {% if page.toc %}
-  <nav aria-label="{% if i18n_data and i18n_data[l] and i18n_data[l]['a11y'] and i18n_data[l]['a11y']['on_this_page'] %}{{ i18n_data[l]['a11y']['on_this_page'] }}{% else %}On this page{% endif %}" class="mb-10 border p-4">
-    <ul class="space-y-1.5">
-      {% for h in page.toc %}
-      {% if h.level <= 2 %}
-      <li><a href="{{ h.permalink }}" class="apex-link">{{ h.title | safe }}</a></li>
+{% set page_mode = page.extra.mkt_page_mode | default(value="") %}
+{% set band_title = page.title %}
+{% set band_sub = page.description | default(value="") %}
+{% set band_kicker = "" %}
+{% if page_mode == "trust" %}
+{% if i18n_data and i18n_data[l] and i18n_data[l]["page_mode"] and i18n_data[l]["page_mode"]["trust"] %}{% set band_kicker = i18n_data[l]["page_mode"]["trust"] %}{% else %}{% set band_kicker = "Trust" %}{% endif %}
+{% elif page_mode == "architecture" %}
+{% if i18n_data and i18n_data[l] and i18n_data[l]["page_mode"] and i18n_data[l]["page_mode"]["architecture"] %}{% set band_kicker = i18n_data[l]["page_mode"]["architecture"] %}{% else %}{% set band_kicker = "Architecture" %}{% endif %}
+{% endif %}
+{% include "partials/hero-band.html" %}
+<section class="apex-mkt-section apex-mkt-section--dense">
+  <div class="apex-mkt-container">
+    <div class="mx-auto max-w-3xl">
+      {% if page.extra.last_updated %}
+      {# Machine-readable date + localized label: the literal string used to be
+         hardcoded English ("Last updated") on every locale. #}
+      <p class="mb-8 apex-em">
+        {% if i18n_data and i18n_data[l] and i18n_data[l]['a11y'] and i18n_data[l]['a11y']['last_updated'] %}{{ i18n_data[l]['a11y']['last_updated'] }}{% else %}Last updated:{% endif %}
+        <time datetime="{{ page.extra.last_updated }}">{{ page.extra.last_updated }}</time>
+      </p>
       {% endif %}
-      {% endfor %}
-    </ul>
-  </nav>
-  {% endif %}
-  {# Markdown tables cannot carry a tabindex: the prose block is the
-     keyboard-reachable scroll region for wide registers (axe
-     scrollable-region-focusable). #}
-  <div class="apex-prose" tabindex="0" role="region" aria-label="{% if i18n_data and i18n_data[l] and i18n_data[l]['a11y'] and i18n_data[l]['a11y']['page_content'] %}{{ i18n_data[l]['a11y']['page_content'] }}{% else %}Page content{% endif %}">
-    {# Content is rendered from trusted Markdown source files only (legal/policy pages). #}
-    {# |safe is acceptable because the content author is the site owner, not end users. #}
-    {{ page.content | safe }}
+      {# Stable section navigation: Zola's heading anchors ARE the section ids,
+         so this nav survives renames of the page and is language-independent. #}
+      {% if page.toc %}
+      <nav aria-label="{% if i18n_data and i18n_data[l] and i18n_data[l]['a11y'] and i18n_data[l]['a11y']['on_this_page'] %}{{ i18n_data[l]['a11y']['on_this_page'] }}{% else %}On this page{% endif %}" class="mb-10 border p-4">
+        <ul class="space-y-1.5">
+          {% for h in page.toc %}
+          {% if h.level <= 2 %}
+          <li><a href="{{ h.permalink }}" class="apex-link">{{ h.title | safe }}</a></li>
+          {% endif %}
+          {% endfor %}
+        </ul>
+      </nav>
+      {% endif %}
+      {# Markdown tables cannot carry a tabindex: the prose block is the
+         keyboard-reachable scroll region for wide registers (axe
+         scrollable-region-focusable). #}
+      <div class="apex-prose" tabindex="0" role="region" aria-label="{% if i18n_data and i18n_data[l] and i18n_data[l]['a11y'] and i18n_data[l]['a11y']['page_content'] %}{{ i18n_data[l]['a11y']['page_content'] }}{% else %}Page content{% endif %}">
+        {# Content is rendered from trusted Markdown source files only (legal/policy pages). #}
+        {# |safe is acceptable because the content author is the site owner, not end users. #}
+        {{ page.content | safe }}
+      </div>
+      {# Plan A4: the published deliverability report is a GENERATED island (the
+         status-island pattern) rendered by tools/generate_deliverability_report.py. #}
+      {% if page.extra.deliverability_report %}
+      {% include "partials/generated/deliverability-report.html" %}
+      {% endif %}
+    </div>
   </div>
-  {# Plan A4: the published deliverability report is a GENERATED island (the #}
-  {# status-island pattern) rendered by tools/generate_deliverability_report.py #}
-  {# from apps/marketing-zola/data/deliverability-report.json (ClickHouse #}
-  {# aggregates). Pages opt in with `[extra] deliverability_report = true`; a #}
-  {# page that has not opted in never renders a number whose artifact is absent. #}
-  {% if page.extra.deliverability_report %}
-  {% include "partials/generated/deliverability-report.html" %}
-  {% endif %}
-</div>
+</section>
+{% if page_mode == "trust" %}{% include "partials/trust-band.html" %}{% endif %}
 {% endblock content %}

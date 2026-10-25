@@ -4,7 +4,7 @@
 //! need exactly that: "N logical rows are now written by ONE statement, not N
 //! statements". Each installed trigger appends one row per distinct probe key
 //! (tenant id, campaign id, …) it sees in the statement's transition table, so
-//! tests sharing the canonical database never count each other's writes — they
+//! tests sharing the canonical database never count each other's writes, they
 //! filter by their own unique key.
 //!
 //! Installation is serialized with a PostgreSQL advisory lock so concurrent

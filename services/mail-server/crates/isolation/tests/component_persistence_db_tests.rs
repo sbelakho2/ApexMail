@@ -1,8 +1,8 @@
 //! F63 canonical persistence tests for the isolation component's remaining
 //! relations: iso_access_attempts (migration 195) and iso_encryption_policies
 //! (migration 196). These exercise the REAL services against the canonical
-//! migration chain — create, read, update and restart (a fresh service
-//! instance over the same database) — not migration-content substring
+//! migration chain, create, read, update and restart (a fresh service
+//! instance over the same database), not migration-content substring
 //! assertions.
 //!
 //! Gated on `TEST_DATABASE_URL` (workspace convention); each test provisions
@@ -233,7 +233,7 @@ async fn encryption_policies_persist_and_reload_across_restart() {
     );
 
     // Disabling the policy removes it from the active set (load_policies
-    // filters enabled = true) — the durable row survives.
+    // filters enabled = true), the durable row survives.
     sqlx::query("UPDATE iso_encryption_policies SET enabled = false WHERE resource = 'contacts'")
         .execute(&pool)
         .await
@@ -254,7 +254,7 @@ async fn encryption_policies_persist_and_reload_across_restart() {
 
 /// BUG 1 regression: on the canonical schema the Shared→DedicatedSchema
 /// migration must refuse BEFORE writing anything, and the refusal must be
-/// diagnosable — it names every missing table/column and the migration each
+/// diagnosable, it names every missing table/column and the migration each
 /// one needs.
 #[tokio::test]
 async fn shared_to_dedicated_refusal_names_every_missing_capability_and_writes_nothing() {
@@ -313,7 +313,7 @@ async fn shared_to_dedicated_refusal_names_every_missing_capability_and_writes_n
     }
 
     // The refusal must name every missing table/column and the migration it
-    // would need — a generic 4xx is the bug.
+    // would need, a generic 4xx is the bug.
     let message = error.to_string();
     for needle in [
         "public.emails",

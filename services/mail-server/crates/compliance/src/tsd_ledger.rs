@@ -4,7 +4,7 @@
 //! persons: gross payment, income tax withheld, social tax, employer and
 //! employee unemployment insurance, and the funded-pension (II pillar)
 //! contribution. Estonian law requires the declared figures to agree with the
-//! entity's accounting — so the declaration must be derived from what was
+//! entity's accounting, so the declaration must be derived from what was
 //! actually BOOKED, not from the operational payroll input rows.
 //!
 //! # Derivation contract
@@ -18,7 +18,7 @@
 //!   it can only hide a disagreement.
 //! * **Person identity and the declaration's completeness inputs** (personal
 //!   code, II-pillar rate, exemptions) come from the canonical payroll input
-//!   (`payroll_records`, migration 199) the posting was created from — the
+//!   (`payroll_records`, migration 199) the posting was created from, the
 //!   ledger posting stores the amount, not the person. Identity is a *fact
 //!   about the person*; the amount is a *fact about the books*.
 //! * The fiscal period(s) read are the ones **contained in the calendar
@@ -38,7 +38,7 @@
 //! * `payroll_records` rows exist for the month that are NOT posted to the
 //!   ledger (the payroll sweep has not run / the posting was reversed);
 //! * a posting's employee is missing a personal code or an II-pillar rate
-//!   (migration 199: NULL rate = participation unknown — never assumed);
+//!   (migration 199: NULL rate = participation unknown, never assumed);
 //! * a posting's own arithmetic is inconsistent
 //!   (`gross − unemployment(employee) − pension − income tax ≠ net`), which
 //!   means the books disagree with themselves and no figure can be trusted;
@@ -47,7 +47,7 @@
 //!
 //! A caller that ignores these flags gets a declaration whose
 //! `data_quality.has_sufficient_data` is `false` and whose `missing_fields`
-//! names the reason — the failure mode is a visibly-not-ready filing, not a
+//! names the reason, the failure mode is a visibly-not-ready filing, not a
 //! plausible-but-wrong number.
 //!
 //! # Known limitation of the unposted count (fails safe)
@@ -56,7 +56,7 @@
 //! `unposted_payroll_records` counts the whole database's unbooked payroll
 //! inputs for the month, not one entity's. In a multi-entity deployment this
 //! can only OVER-report, i.e. it can mark a declaration not-ready that is in
-//! fact complete — the safe direction. It can never hide an unbooked row.
+//! fact complete, the safe direction. It can never hide an unbooked row.
 
 #![deny(unsafe_code)]
 
@@ -141,7 +141,7 @@ pub struct TsdEmployee {
     pub personal_code: Option<String>,
     /// The rate to DECLARE: `Some(0.0)` for an exempt employee, the recorded
     /// employee-specific rate (2/4/6%), or `None` when participation is
-    /// unknown — in which case the record is incomplete, not zero-rated.
+    /// unknown, in which case the record is incomplete, not zero-rated.
     pub funded_pension_rate: Option<f64>,
     pub gross_salary_cents: i64,
     pub social_tax_cents: i64,
@@ -315,7 +315,7 @@ impl TsdLedgerSource {
         let open = self.open_periods();
         if !open.is_empty() {
             note.push_str(&format!(
-                " WARNING: fiscal period(s) {} are still OPEN — corrections before close \
+                " WARNING: fiscal period(s) {} are still OPEN, corrections before close \
                  will change these figures.",
                 open.iter()
                     .map(|p| p.label.as_str())

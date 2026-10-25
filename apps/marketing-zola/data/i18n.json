@@ -96,7 +96,7 @@
     "cta": {
       "heading_1": "Senden Sie",
       "heading_2": "bessere E-Mails.",
-      "subtitle": "Starten Sie im Free-Tarif und wachsen Sie mit derselben API — ohne Migration, ohne Neuverhandlung, ohne Überraschungen bei Überschreitungen.",
+      "subtitle": "Starten Sie im Free-Tarif und wachsen Sie mit derselben API, ohne Migration, ohne Neuverhandlung, ohne Überraschungen bei Überschreitungen.",
       "feature_test": "Senden Sie Ihre erste Test-E-Mail in wenigen Minuten",
       "feature_free": "3.000 kostenlose E-Mails pro Monat, dauerhaft + einmaliges Startguthaben von 30.000 E-Mails",
       "feature_no_cc": "Keine Kreditkarte erforderlich",
@@ -371,13 +371,13 @@
       "sla_entitlement": "SLA",
       "support_response": "Support-Reaktionszeit",
       "named_csm": "Benannter CSM",
-      "dedicated_ip_section": "Dedizierte IPs — Verwaltete Reputations-Assets",
+      "dedicated_ip_section": "Dedizierte IPs, Verwaltete Reputations-Assets",
       "card_most_popular": "Beliebt",
       "card_enterprise": "Enterprise",
       "card_annual_contract": "Jahresvertrag",
       "proof_deliverability_label": "Zustellbarkeit",
       "proof_deliverability_title": "Jeden Zustellversuch prüfen",
-      "proof_deliverability_desc": "Nachrichten-Zeitleisten zeigen API-Annahme, Warteschlangenzuweisung, Sende-IP, DKIM-Selektor, Ziel-MX, SMTP-Antwort, TLS-Version, Verzögerungsgrund und Endstatus — pro E-Mail, nicht pro Batch.",
+      "proof_deliverability_desc": "Nachrichten-Zeitleisten zeigen API-Annahme, Warteschlangenzuweisung, Sende-IP, DKIM-Selektor, Ziel-MX, SMTP-Antwort, TLS-Version, Verzögerungsgrund und Endstatus, pro E-Mail, nicht pro Batch.",
       "proof_compliance_label": "Compliance",
       "proof_compliance_title": "Workflows, keine Abzeichen",
       "proof_compliance_desc": "Eine DPA ist zur Prüfung verfügbar. HIPAA-Verfügbarkeit und BAA werden derzeit nicht angeboten. Aufbewahrung ist je nach Tarif konfigurierbar. Daten werden standardmäßig im EWR verarbeitet und gespeichert.",
@@ -389,7 +389,7 @@
       "view_private_deploy": "Private Bereitstellungsoptionen prüfen",
       "billing_rules": "Abrechnungsregeln",
       "billing_what": "Was Ihnen berechnet wird",
-      "billing_what_desc": "Jede akzeptierte E-Mail, die über die Plattform gesendet wird, zählt zu Ihrem monatlichen Volumen. Eine E-Mail wird einmal pro <strong>eindeutigem Empfänger</strong> gezählt — das Senden desselben Inhalts an 100 Empfänger zählt als 100 E-Mails.",
+      "billing_what_desc": "Jede akzeptierte E-Mail, die über die Plattform gesendet wird, zählt zu Ihrem monatlichen Volumen. Eine E-Mail wird einmal pro <strong>eindeutigem Empfänger</strong> gezählt, das Senden desselben Inhalts an 100 Empfänger zählt als 100 E-Mails.",
       "billing_not": "Was Ihnen NICHT berechnet wird",
       "billing_not_1": "Fehlgeschlagene Sendungen (bei API-Validierung oder MTA-Ebene abgelehnt)",
       "billing_not_2": "Automatische Wiederholungen nach temporären Zustellfehlern",
@@ -398,7 +398,7 @@
       "billing_overage_desc": "<strong>Self-Service-Tarife (Developer, Pro, Growth, Business):</strong> Überschreitungen werden bei aktivierter Abrechnung tarifabhängig berechnet: Developer €0,80, Pro €0,60, Growth/Business €0,35 pro 1.000; Enterprise Cloud €0,35 pro 1.000 (vertraglich). Eine gültige Zahlungsmethode und bestätigte Abrechnung sind erforderlich.",
       "billing_overage_free": "<strong>Free-Tarif:</strong> Keine automatische Überschreitung. Der Versand wird pausiert, wenn das enthaltene Volumen von 3.000/Monat erreicht ist. Führen Sie ein Upgrade durch, um weiter zu senden.",
       "billing_unused_title": "Ungenutztes Volumen & Bandpreise",
-      "billing_unused_desc": "<strong>Ungenutztes Volumen:</strong> Enthaltenes monatliches E-Mail-Volumen wird nicht übertragen — ungenutzte Anteile verfallen am Ende des Abrechnungsmonats.",
+      "billing_unused_desc": "<strong>Ungenutztes Volumen:</strong> Enthaltenes monatliches E-Mail-Volumen wird nicht übertragen, ungenutzte Anteile verfallen am Ende des Abrechnungsmonats.",
       "questions_title": "Häufig gestellte Fragen",
       "questions_body": "Sprechen Sie mit unserem Team über Beschaffung, Jahresverträge, Migration oder den passenden Tarif für Ihr Volumen.",
       "talk_to_sales": "Vertrieb kontaktieren",
@@ -597,13 +597,13 @@
       "svc_lb": "Load Balancer",
       "svc_dns": "DNS-Resolver",
       "latency_vpc_tag": "Gleiches VPC",
-      "latency_vpc_desc": "Submillisekunden — App und API teilen dasselbe Netzwerk-Fabric",
+      "latency_vpc_desc": "Submillisekunden, App und API teilen dasselbe Netzwerk-Fabric",
       "latency_region_tag": "Gleiche Region",
-      "latency_region_desc": "Wenige Millisekunden — minimale Cross-AZ-Hops",
+      "latency_region_desc": "Wenige Millisekunden, minimale Cross-AZ-Hops",
       "latency_shared_tag": "Regionsübergreifende API",
-      "latency_shared_desc": "Zehner bis Hunderter Millisekunden — Weg über das öffentliche Internet",
+      "latency_shared_desc": "Zehner bis Hunderter Millisekunden, Weg über das öffentliche Internet",
       "latency_saas_tag": "Externe HTTPS-API",
-      "latency_saas_desc": "Variabel — zusätzlich DNS, TLS-Handshake und Internet-Routing"
+      "latency_saas_desc": "Variabel, zusätzlich DNS, TLS-Handshake und Internet-Routing"
     },
     "compliance": {
       "hero_badge": "Compliance-Infrastruktur",
@@ -719,7 +719,7 @@
     "home_pricing_island": {
       "pricing_island_heading_1": "Preise, die",
       "pricing_island_heading_2": "mit Ihnen skalieren",
-      "pricing_island_subtitle": "Geben Sie Ihre Volumes ein — der Rechner nutzt dieselben Preisregeln wie die Abrechnung, sodass die Schätzung Ihrer Rechnung entspricht.",
+      "pricing_island_subtitle": "Geben Sie Ihre Volumes ein, der Rechner nutzt dieselben Preisregeln wie die Abrechnung, sodass die Schätzung Ihrer Rechnung entspricht.",
       "pricing_island_eyebrow": "§ Rechner"
     },
     "not_found": {
@@ -739,9 +739,9 @@
       "q2": "Gibt es einen kostenlosen Tarif?",
       "a2": "Ja. Der Free-Tarif umfasst 3.000 E-Mails pro Monat, und jedes neue Konto erhält in den ersten 30 Tagen ein einmaliges Startguthaben von 30.000 E-Mails. Keine Kreditkarte erforderlich. Sie können jederzeit upgraden, wenn Ihr Volumen wächst.",
       "q3": "Was passiert, wenn ich mein Tariflimit überschreite?",
-      "a3": "Zusätzliches Volumen über einen kostenpflichtigen Tarif hinaus wird tarifabhängig abgerechnet: Developer €0,80, Pro €0,60, Growth/Business €0,35 pro 1.000; Enterprise Cloud €0,35 pro 1.000 (vertraglich). Der Free-Tarif hat keine automatische Überschreitung — führen Sie stattdessen ein Upgrade durch. Nutzungs-, Missbrauchs- und Zahlungskontrollen gelten weiterhin. Prüfen Sie Ihre Abrechnungseinstellungen für die geltenden Limits und Warnungen.",
+      "a3": "Zusätzliches Volumen über einen kostenpflichtigen Tarif hinaus wird tarifabhängig abgerechnet: Developer €0,80, Pro €0,60, Growth/Business €0,35 pro 1.000; Enterprise Cloud €0,35 pro 1.000 (vertraglich). Der Free-Tarif hat keine automatische Überschreitung, führen Sie stattdessen ein Upgrade durch. Nutzungs-, Missbrauchs- und Zahlungskontrollen gelten weiterhin. Prüfen Sie Ihre Abrechnungseinstellungen für die geltenden Limits und Warnungen.",
       "q4": "Bieten Sie jährliche Abrechnung an?",
-      "a4": "Ja. Jahresabonnements werden mit dem 10-fachen Monatspreis abgerechnet — das entspricht einer Ersparnis von rund 16,7 % gegenüber zwölf Monatszahlungen. Jährliche Enterprise-Verträge folgen dem unterzeichneten Bestellformular.",
+      "a4": "Ja. Jahresabonnements werden mit dem 10-fachen Monatspreis abgerechnet, das entspricht einer Ersparnis von rund 16,7 % gegenüber zwölf Monatszahlungen. Jährliche Enterprise-Verträge folgen dem unterzeichneten Bestellformular.",
       "q5": "Ist HIPAA-Compliance enthalten?",
       "a5": "HIPAA-Verfügbarkeit wird derzeit nicht angeboten. Enterprise kann Compliance-Workflow-Gespräche unterstützen, aber ein regulierter Anwendungsfall darf erst nach schriftlicher Bestätigung und gegebenenfalls erforderlicher Vereinbarung mit unseren Security- und Legal-Teams fortgesetzt werden.",
       "q6": "Kann ich den Tarif jederzeit wechseln?",
@@ -759,13 +759,24 @@
       "point_2_desc": "Primärstandort Finnland; Kern-Servicedaten werden innerhalb des EWR verarbeitet und repliziert.",
       "point_2_link": "Matrix der Datenstandorte",
       "point_3_title": "EU-only-Routing, fail-closed",
-      "point_3_desc": "Eine Einstellung: Nachrichten verlassen das System ausschließlich über die eigenen EU-MTAs von ApexMail. Kein Drittanbieter-Transport — ein Versand ohne eigene MTA-Route wird angehalten, nicht umgeleitet.",
+      "point_3_desc": "Eine Einstellung: Nachrichten verlassen das System ausschließlich über die eigenen EU-MTAs von ApexMail. Kein Drittanbieter-Transport, ein Versand ohne eigene MTA-Route wird angehalten, nicht umgeleitet.",
       "point_3_link": "Preise und Verfügbarkeit",
       "point_4_title": "Signierte Routing-Belege",
       "point_4_desc": "Jede angenommene Nachricht trägt eine Ed25519-Signatur über ihre Routing-Daten, prüfbar von jeder dritten Partei mit dem veröffentlichten öffentlichen Schlüssel.",
       "point_4_link": "So funktioniert die Prüfung",
-      "note": "Offener Umfang: Die globale Standardzustellung läuft über AWS SES in dessen EU-Regionen (die Deutschland umfassen können) — EU-Regionen eines US-Unternehmens; das eigene Hosting von ApexMail steht in Finnland. EU-only-Routing entfernt diesen Transport; der vollständige Vergleich steht auf <a href=\"/de/eu-sovereign/\">der Souveränitätsseite</a>.",
+      "note": "Offener Umfang: Die globale Standardzustellung läuft über AWS SES in dessen EU-Regionen (die Deutschland umfassen können), EU-Regionen eines US-Unternehmens; das eigene Hosting von ApexMail steht in Finnland. EU-only-Routing entfernt diesen Transport; der vollständige Vergleich steht auf <a href=\"/de/eu-sovereign/\">der Souveränitätsseite</a>.",
       "see_all": "Souveränitäts-Dossier lesen"
+    },
+    "page_mode": {
+      "trust": "Vertrauen",
+      "architecture": "Architektur"
+    },
+    "trust_band": {
+      "kicker": "Belege",
+      "title": "Die Aussagen oben sind überprüfbar.",
+      "lead": "Jede angenommene Nachricht trägt einen Ed25519-signierten Routing-Beleg. Prüfen Sie einen davon mit dem veröffentlichten öffentlichen Schlüssel: Der Beleg ist der Nachweis, nicht das Dashboard.",
+      "receipt": "Routing-Beleg",
+      "note": "Prüfen Sie gegen den veröffentlichten Schlüssel auf <a href=\"/de/eu-sovereign/\">der Souveränitätsseite</a>."
     }
   },
   "fr": {
@@ -865,7 +876,7 @@
     "cta": {
       "heading_1": "Envoyez",
       "heading_2": "de meilleurs emails.",
-      "subtitle": "Commencez avec l'offre gratuite et grandissez avec la même API — sans migration, sans renégociation, sans frais de dépassement surprise.",
+      "subtitle": "Commencez avec l'offre gratuite et grandissez avec la même API, sans migration, sans renégociation, sans frais de dépassement surprise.",
       "feature_test": "Envoyez votre premier email de test en quelques minutes",
       "feature_free": "3 000 emails gratuits chaque mois, pour toujours + allocation de lancement unique de 30 000 emails",
       "feature_no_cc": "Aucune carte bancaire requise",
@@ -1001,7 +1012,7 @@
       "cta_badge": "Démarrez en 5 minutes",
       "cta_button": "Commencer gratuitement",
       "cta_heading": "Envoyez de meilleurs emails.",
-      "cta_note": "Aucune carte bancaire requise — le forfait gratuit inclut 3 000 emails/mois",
+      "cta_note": "Aucune carte bancaire requise, le forfait gratuit inclut 3 000 emails/mois",
       "cta_subtitle": "ApexMail fournit des emails transactionnels fiables avec conformité intégrée. Commencez gratuitement avec 3 000 emails par mois.",
       "cta_talk": "Contacter les ventes",
       "detail_api_benefit_1": "Bibliothèques client dans 6 langages",
@@ -1044,7 +1055,7 @@
       "hero_cta_trial": "Commencer gratuitement",
       "hero_heading_1": "Toutes les fonctionnalités dont vous avez besoin,",
       "hero_heading_2": "aucune de celles dont vous n'avez pas besoin",
-      "hero_subtitle": "De l'envoi à la livraison, ApexMail gère tout : authentification, délivrabilité, conformité, analyse et optimisation IA — sans dépendances externes.",
+      "hero_subtitle": "De l'envoi à la livraison, ApexMail gère tout : authentification, délivrabilité, conformité, analyse et optimisation IA, sans dépendances externes.",
       "inbox_cap_1_desc": "Provisionnement et gestion de comptes seed chez Gmail, Outlook, Yahoo, iCloud, AOL et Zoho avec supervision automatisée de l'état.",
       "inbox_cap_1_title": "Gestion des listes seed",
       "inbox_cap_2_desc": "Tests simultanés de délivrabilité chez 6 fournisseurs avec envoi SMTP automatisé et vérification de livraison par IMAP.",
@@ -1140,7 +1151,7 @@
       "sla_entitlement": "SLA",
       "support_response": "Délai de réponse support",
       "named_csm": "CSM dédié",
-      "dedicated_ip_section": "IPs dédiées — Actifs de réputation gérés",
+      "dedicated_ip_section": "IPs dédiées, Actifs de réputation gérés",
       "card_most_popular": "Populaire",
       "card_enterprise": "Entreprise",
       "card_annual_contract": "Contrat annuel",
@@ -1158,7 +1169,7 @@
       "view_private_deploy": "Options privées",
       "billing_rules": "Règles de facturation",
       "billing_what": "Ce qui vous est facturé",
-      "billing_what_desc": "Chaque email accepté envoyé via la plateforme compte dans votre volume mensuel. Un email est compté une fois par <strong>destinataire unique</strong> — envoyer le même contenu à 100 destinataires compte comme 100 emails.",
+      "billing_what_desc": "Chaque email accepté envoyé via la plateforme compte dans votre volume mensuel. Un email est compté une fois par <strong>destinataire unique</strong>, envoyer le même contenu à 100 destinataires compte comme 100 emails.",
       "billing_not": "Ce qui ne vous est PAS facturé",
       "billing_not_1": "Envois échoués (rejetés lors de la validation API ou au niveau MTA)",
       "billing_not_2": "Reprises automatiques après des échecs de livraison temporaires",
@@ -1167,7 +1178,7 @@
       "billing_overage_desc": "<strong>Forfaits en libre-service (Developer, Pro, Growth, Business) :</strong> Lorsque la facturation des dépassements est activée, les emails supplémentaires sont facturés selon le forfait : Developer €0,80, Pro €0,60, Growth/Business €0,35 par 1 000 ; Enterprise Cloud €0,35 par 1 000 (contractuel). Un moyen de paiement valide et une facturation confirmée sont requis.",
       "billing_overage_free": "<strong>Forfait Free :</strong> Pas de dépassement automatique. L'envoi est suspendu lorsque le volume inclus de 3 000/mois est atteint. Effectuez une mise à niveau pour continuer à envoyer.",
       "billing_unused_title": "Volume inutilisé et tarification par paliers",
-      "billing_unused_desc": "<strong>Volume inutilisé :</strong> Le volume mensuel d'emails inclus n'est pas reporté — toute portion inutilisée expire à la fin du mois de facturation.",
+      "billing_unused_desc": "<strong>Volume inutilisé :</strong> Le volume mensuel d'emails inclus n'est pas reporté, toute portion inutilisée expire à la fin du mois de facturation.",
       "questions_title": "Questions fréquentes",
       "questions_body": "Parlez à notre équipe de l'approvisionnement, des contrats annuels, de la migration ou du forfait adapté à votre volume.",
       "talk_to_sales": "Parler aux ventes",
@@ -1438,13 +1449,13 @@
       "svc_lb": "Répartiteur de charge",
       "svc_dns": "Résolveur DNS",
       "latency_vpc_tag": "Même VPC",
-      "latency_vpc_desc": "Inférieur à la milliseconde — l'application et l'API partagent le même réseau",
+      "latency_vpc_desc": "Inférieur à la milliseconde, l'application et l'API partagent le même réseau",
       "latency_region_tag": "Même région",
-      "latency_region_desc": "Quelques millisecondes — sauts inter-AZ minimaux",
+      "latency_region_desc": "Quelques millisecondes, sauts inter-AZ minimaux",
       "latency_shared_tag": "API inter-régions",
-      "latency_shared_desc": "De dizaines à des centaines de millisecondes — traversée de l'internet public",
+      "latency_shared_desc": "De dizaines à des centaines de millisecondes, traversée de l'internet public",
       "latency_saas_tag": "API HTTPS externe",
-      "latency_saas_desc": "Variable — ajout du DNS, de la poignée de main TLS et du routage internet"
+      "latency_saas_desc": "Variable, ajout du DNS, de la poignée de main TLS et du routage internet"
     },
     "security_page": {
       "cta_button": "Demander la documentation",
@@ -1487,7 +1498,7 @@
     "home_pricing_island": {
       "pricing_island_heading_1": "Des prix qui",
       "pricing_island_heading_2": "évoluent avec vous",
-      "pricing_island_subtitle": "Saisissez vos volumes — le calculateur applique les mêmes règles tarifaires que la facturation : l'estimation correspond à votre facture.",
+      "pricing_island_subtitle": "Saisissez vos volumes, le calculateur applique les mêmes règles tarifaires que la facturation : l'estimation correspond à votre facture.",
       "pricing_island_eyebrow": "§ calculateur"
     },
     "not_found": {
@@ -1507,9 +1518,9 @@
       "q2": "Existe-t-il un forfait gratuit ?",
       "a2": "Oui. Le forfait gratuit inclut 3 000 emails par mois, et chaque nouveau compte reçoit une allocation de lancement unique de 30 000 emails pour ses 30 premiers jours. Sans carte bancaire. Vous pouvez passer à un forfait supérieur à tout moment selon votre volume.",
       "q3": "Que se passe-t-il si je dépasse la limite de mon forfait ?",
-      "a3": "Le volume supplémentaire au-delà d'un forfait payant est facturé selon le forfait : Developer €0,80, Pro €0,60, Growth/Business €0,35 par 1 000 ; Enterprise Cloud €0,35 par 1 000 (contractuel). Le forfait Free n'a pas de dépassement automatique — passez à un forfait supérieur. Les contrôles d'usage, d'abus et de paiement continuent de s'appliquer. Vérifiez votre configuration de facturation pour les limites et alertes applicables.",
+      "a3": "Le volume supplémentaire au-delà d'un forfait payant est facturé selon le forfait : Developer €0,80, Pro €0,60, Growth/Business €0,35 par 1 000 ; Enterprise Cloud €0,35 par 1 000 (contractuel). Le forfait Free n'a pas de dépassement automatique, passez à un forfait supérieur. Les contrôles d'usage, d'abus et de paiement continuent de s'appliquer. Vérifiez votre configuration de facturation pour les limites et alertes applicables.",
       "q4": "Proposez-vous la facturation annuelle ?",
-      "a4": "Oui. Les abonnements annuels sont facturés à 10 fois le prix mensuel — soit une économie d'environ 16,7 % par rapport à douze paiements mensuels. Les contrats annuels Enterprise suivent le bon de commande signé.",
+      "a4": "Oui. Les abonnements annuels sont facturés à 10 fois le prix mensuel, soit une économie d'environ 16,7 % par rapport à douze paiements mensuels. Les contrats annuels Enterprise suivent le bon de commande signé.",
       "q5": "La conformité HIPAA est-elle incluse ?",
       "a5": "La disponibilité HIPAA n'est pas proposée actuellement. Enterprise peut accompagner les discussions sur les flux de conformité, mais un cas d'usage réglementé ne peut avancer qu'après confirmation écrite et tout accord requis avec nos équipes sécurité et juridique.",
       "q6": "Puis-je changer de forfait à tout moment ?",
@@ -1527,13 +1538,24 @@
       "point_2_desc": "Site principal en Finlande ; les données essentielles du service sont traitées et répliquées dans l’EEE.",
       "point_2_link": "Matrice des emplacements",
       "point_3_title": "Routage EU-only, fail-closed",
-      "point_3_desc": "Un seul réglage : les envois ne partent que par les MTA européens d’ApexMail. Aucun transport tiers — un envoi sans route MTA propre est retenu, pas réacheminé.",
+      "point_3_desc": "Un seul réglage : les envois ne partent que par les MTA européens d’ApexMail. Aucun transport tiers, un envoi sans route MTA propre est retenu, pas réacheminé.",
       "point_3_link": "Tarifs et disponibilité",
       "point_4_title": "Reçus de routage signés",
       "point_4_desc": "Chaque message accepté porte une signature Ed25519 sur ses données de routage, vérifiable par tout tiers avec la clé publique publiée.",
       "point_4_link": "Comment vérifier",
-      "note": "Périmètre honnête : la livraison globale par défaut passe par AWS SES dans ses régions UE (qui peuvent inclure l’Allemagne) — des régions UE d’une société américaine ; l’hébergement propre d’ApexMail est en Finlande. Le routage EU-only retire ce transport ; la comparaison complète figure sur <a href=\"/fr/eu-sovereign/\">la page souveraineté</a>.",
+      "note": "Périmètre honnête : la livraison globale par défaut passe par AWS SES dans ses régions UE (qui peuvent inclure l’Allemagne), des régions UE d’une société américaine ; l’hébergement propre d’ApexMail est en Finlande. Le routage EU-only retire ce transport ; la comparaison complète figure sur <a href=\"/fr/eu-sovereign/\">la page souveraineté</a>.",
       "see_all": "Lire le dossier souveraineté"
+    },
+    "page_mode": {
+      "trust": "Confiance",
+      "architecture": "Architecture"
+    },
+    "trust_band": {
+      "kicker": "Preuves",
+      "title": "Les affirmations ci-dessus sont vérifiables.",
+      "lead": "Chaque message accepté porte un reçu de routage signé Ed25519. Vérifiez-en un avec la clé publique publiée : le reçu est la preuve, pas le tableau de bord.",
+      "receipt": "Reçu de routage",
+      "note": "Vérifiez avec la clé publiée sur <a href=\"/fr/eu-sovereign/\">la page souveraineté</a>."
     }
   },
   "es": {
@@ -1908,13 +1930,13 @@
       "sla_entitlement": "SLA",
       "support_response": "Tiempo de respuesta de soporte",
       "named_csm": "CSM asignado",
-      "dedicated_ip_section": "IPs dedicadas — Activos de reputación gestionados",
+      "dedicated_ip_section": "IPs dedicadas, Activos de reputación gestionados",
       "card_most_popular": "Más popular",
       "card_enterprise": "Empresa",
       "card_annual_contract": "Contrato anual",
       "proof_deliverability_label": "Entregabilidad",
       "proof_deliverability_title": "Inspeccione cada intento de entrega",
-      "proof_deliverability_desc": "Las líneas de tiempo de mensajes muestran la aceptación de la API, la asignación de cola, la IP de envío, el selector DKIM, el MX de destino, la respuesta SMTP, la versión TLS, el motivo de aplazamiento y el estado final — por email, no por lote.",
+      "proof_deliverability_desc": "Las líneas de tiempo de mensajes muestran la aceptación de la API, la asignación de cola, la IP de envío, el selector DKIM, el MX de destino, la respuesta SMTP, la versión TLS, el motivo de aplazamiento y el estado final, por email, no por lote.",
       "proof_compliance_label": "Cumplimiento",
       "proof_compliance_title": "Flujos de trabajo, no insignias",
       "proof_compliance_desc": "Hay una DPA disponible para revisión. La disponibilidad HIPAA y los BAA no se ofrecen actualmente. La retención es configurable según el plan. Los datos se procesan y almacenan en el EEE por defecto.",
@@ -1926,7 +1948,7 @@
       "view_private_deploy": "Opciones privadas",
       "billing_rules": "Reglas de facturación",
       "billing_what": "Por lo que se le factura",
-      "billing_what_desc": "Cada email aceptado enviado a través de la plataforma cuenta para su volumen mensual. Un email se cuenta una vez por <strong>destinatario único</strong> — enviar el mismo contenido a 100 destinatarios cuenta como 100 emails.",
+      "billing_what_desc": "Cada email aceptado enviado a través de la plataforma cuenta para su volumen mensual. Un email se cuenta una vez por <strong>destinatario único</strong>, enviar el mismo contenido a 100 destinatarios cuenta como 100 emails.",
       "billing_not": "Por lo que NO se le factura",
       "billing_not_1": "Envíos fallidos (rechazados en la validación de API o a nivel MTA)",
       "billing_not_2": "Reintentos automáticos tras fallos temporales de entrega",
@@ -1935,7 +1957,7 @@
       "billing_overage_desc": "<strong>Planes de autoservicio (Developer, Pro, Growth, Business):</strong> Cuando la facturación por exceso está habilitada, los emails adicionales se cobran según el plan: Developer €0,80, Pro €0,60, Growth/Business €0,35 por 1.000; Enterprise Cloud €0,35 por 1.000 (contractual). Se requiere un método de pago válido y facturación confirmada.",
       "billing_overage_free": "<strong>Plan Free:</strong> Sin exceso automático. El envío se pausa cuando se alcanza el volumen incluido de 3.000/mes. Actualice para continuar enviando.",
       "billing_unused_title": "Volumen no utilizado y precios por banda",
-      "billing_unused_desc": "<strong>Volumen no utilizado:</strong> El volumen mensual de emails incluido no se transfiere — cualquier porción no utilizada expira al final del mes de facturación.",
+      "billing_unused_desc": "<strong>Volumen no utilizado:</strong> El volumen mensual de emails incluido no se transfiere, cualquier porción no utilizada expira al final del mes de facturación.",
       "questions_title": "Preguntas frecuentes",
       "questions_body": "Hable con nuestro equipo sobre contratación, contratos anuales, migración o el plan adecuado para su volumen.",
       "talk_to_sales": "Hablar con ventas",
@@ -2255,7 +2277,7 @@
     "home_pricing_island": {
       "pricing_island_heading_1": "Precios que",
       "pricing_island_heading_2": "escalan contigo",
-      "pricing_island_subtitle": "Introduce tus volúmenes — la calculadora usa las mismas reglas de precios que la facturación, por lo que el cálculo coincide con tu factura.",
+      "pricing_island_subtitle": "Introduce tus volúmenes, la calculadora usa las mismas reglas de precios que la facturación, por lo que el cálculo coincide con tu factura.",
       "pricing_island_eyebrow": "§ calculadora"
     },
     "not_found": {
@@ -2300,8 +2322,19 @@
       "point_4_title": "Recibos de enrutamiento firmados",
       "point_4_desc": "Cada mensaje aceptado lleva una firma Ed25519 sobre sus datos de enrutamiento, verificable por cualquier tercero con la clave pública publicada.",
       "point_4_link": "Cómo funciona la verificación",
-      "note": "Alcance honesto: la entrega global predeterminada pasa por AWS SES en sus regiones de la UE (que pueden incluir Alemania) — regiones de la UE de una empresa estadounidense; el alojamiento propio de ApexMail está en Finlandia. El enrutamiento EU-only elimina ese transporte; la comparación completa está en <a href=\"/es/eu-sovereign/\">la página de soberanía</a>.",
+      "note": "Alcance honesto: la entrega global predeterminada pasa por AWS SES en sus regiones de la UE (que pueden incluir Alemania), regiones de la UE de una empresa estadounidense; el alojamiento propio de ApexMail está en Finlandia. El enrutamiento EU-only elimina ese transporte; la comparación completa está en <a href=\"/es/eu-sovereign/\">la página de soberanía</a>.",
       "see_all": "Leer el caso de soberanía"
+    },
+    "page_mode": {
+      "trust": "Confianza",
+      "architecture": "Arquitectura"
+    },
+    "trust_band": {
+      "kicker": "Pruebas",
+      "title": "Las afirmaciones anteriores son verificables.",
+      "lead": "Cada mensaje aceptado lleva un recibo de enrutamiento firmado con Ed25519. Verifique uno con la clave pública publicada: el recibo es la prueba, no el panel.",
+      "receipt": "Recibo de enrutamiento",
+      "note": "Verifique con la clave publicada en <a href=\"/es/eu-sovereign/\">la página de soberanía</a>."
     }
   }
 }

@@ -1,6 +1,6 @@
 //! AWS SES v2 shared-pool sending provider.
 //!
-//! **DEPRECATED for dedicated IPs** — Dedicated IP provisioning has moved
+//! **DEPRECATED for dedicated IPs**, Dedicated IP provisioning has moved
 //! to [`crate::ip_provider::DedicatedIpProvider`] (Hetzner Cloud).
 //!
 //! This module is still used for://! - SES shared IP pool configuration (the default send path)
@@ -13,7 +13,7 @@
 //! ## Tenant isolation model (shared path)
 //!
 //! Shared sending uses the default SES IP pool. No per-tenant pools
-//! are needed for the shared path — SES manages IP rotation internally.
+//! are needed for the shared path, SES manages IP rotation internally.
 
 use aws_sdk_sesv2::types::ScalingMode;
 use aws_sdk_sesv2::Client as SesClient;
@@ -21,7 +21,7 @@ use sqlx::PgPool;
 use tracing::{info, warn};
 use uuid::Uuid;
 
-/// SES dedicated IP provider — manages pools and IP assignments via AWS SES v2.
+/// SES dedicated IP provider, manages pools and IP assignments via AWS SES v2.
 #[derive(Debug, Clone)]
 pub struct SesIpProvider {
     client: SesClient,
@@ -142,7 +142,7 @@ impl SesIpProvider {
         // MODELLED NotFound exception: `SdkError`'s Display is the constant
         // string "service error" (it never renders the modelled variant or
         // message), so the previous `format!("{e}").contains("NotFoundException")`
-        // check could never match — every missing pool was misread as a hard
+        // check could never match, every missing pool was misread as a hard
         // failure and pool creation was unreachable.
         match self
             .client
@@ -162,7 +162,7 @@ impl SesIpProvider {
                 if !is_not_found {
                     return Err(SesProviderError::SesApi(format!("{e}")));
                 }
-                // Pool doesn't exist — create it below
+                // Pool doesn't exist, create it below
             }
         }
 
@@ -204,7 +204,7 @@ impl SesIpProvider {
         let active_count = self.count_active_ips(tenant_id).await?;
 
         // Max IPs:included_count + unlimited add-ons (Pro gets 0 included but can add on).
-        // Enterprise-level cap is 25 (soft limit — can be raised by support).
+        // Enterprise-level cap is 25 (soft limit, can be raised by support).
         let hard_cap = if included_count >= 10 {
             25
         } else {
@@ -220,7 +220,7 @@ impl SesIpProvider {
         // ── 2. Pick an available IP from inventory ──
         // Use advisory lock to prevent race conditions.
         // `ses_ip_inventory.ip_address` is INET (migration 003): the read
-        // crosses as the BARE address (`host()` — `::text` would render the
+        // crosses as the BARE address (`host()`, `::text` would render the
         // CIDR form "a.b.c.d/32", which SES rejects as an IP) and the
         // predicates bind through `::inet`, so the text-typed Rust value
         // round-trips instead of failing with 42804 ("column is of type

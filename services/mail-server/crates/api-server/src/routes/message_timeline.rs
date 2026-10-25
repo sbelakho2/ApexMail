@@ -1,4 +1,4 @@
-//! Time-travel debugging — reconstruct a message's state AS OF a timestamp
+//! Time-travel debugging, reconstruct a message's state AS OF a timestamp
 //! from the append-only sources the system already persists.
 //!
 //! `GET /v1/messages/:id/timeline?at=<rfc3339>` answers "what did this
@@ -26,12 +26,12 @@
 //! before `scheduled_at`), `queued`, `sending`, `sent`, `delivered`,
 //! `opened`, `clicked`, `bounced`, `complained`, `unsubscribed`, `failed`,
 //! `deferred` (a failed attempt that may still retry), `suppressed`,
-//! `not_yet_accepted` (T precedes acceptance — provably did not exist).
+//! `not_yet_accepted` (T precedes acceptance, provably did not exist).
 //!
 //! Honesty rules (never fabricate):
 //!
 //! * `at` earlier than `messages.created_at` → state `not_yet_accepted`,
-//!   empty timeline (`history_complete: true` — absence is provable).
+//!   empty timeline (`history_complete: true`, absence is provable).
 //! * If NONE of `email_queue` / `email_delivery_log` / `events` /
 //!   `campaign_recipients` holds a single row for the message, and the
 //!   message row itself shows progress beyond acceptance (`sent_at` /
@@ -208,7 +208,7 @@ async fn message_timeline(
 
 /// Reconstruct one message's state at `at` from the append-only sources.
 ///
-/// Shared by the JSON replay API and the console timeline page — ONE
+/// Shared by the JSON replay API and the console timeline page, ONE
 /// reconstruction implementation, one contract (see the module docs).
 /// Callers own the authorization checks (scope, tenant isolation, the
 /// entitlement gate).
@@ -280,7 +280,7 @@ pub(crate) async fn reconstruct_timeline(
 
     // Insufficiency: acceptance is provable, but the message row shows
     // progress no surviving source can describe. (Acceptance itself —
-    // source_counts[0] — is not a pipeline source: it proves existence only.)
+    // source_counts[0], is not a pipeline source: it proves existence only.)
     let has_pipeline_sources = source_counts[1..].iter().any(|count| *count > 0);
     let progressed_beyond_acceptance = message.sent_at.is_some()
         || message.delivered_at.is_some()
@@ -292,7 +292,7 @@ pub(crate) async fn reconstruct_timeline(
         Some(InsufficientHistory {
             reason: "the append-only delivery sources (email_queue, email_delivery_log, \
                      events, campaign_recipients) hold no rows for this message; its state \
-                     after acceptance cannot be reconstructed — only acceptance itself is \
+                     after acceptance cannot be reconstructed, only acceptance itself is \
                      provable"
                 .into(),
             checked_sources: vec![
@@ -421,7 +421,7 @@ async fn collect_entries(
     let mut entries: Vec<RawEntry> = Vec::new();
     let mut counts = [0_i64; 5];
 
-    // 1. messages — acceptance (and the aggregate stamps, when they are at
+    // 1. messages, acceptance (and the aggregate stamps, when they are at
     //    or before T).
     entries.push(RawEntry {
         at: message.created_at,
@@ -460,7 +460,7 @@ async fn collect_entries(
         counts[0] += 1;
     }
 
-    // 2. campaign_recipients — campaign bookkeeping by message back-ref.
+    // 2. campaign_recipients, campaign bookkeeping by message back-ref.
     let campaign_rows: Vec<(Uuid, String, i32, DateTime<Utc>, DateTime<Utc>)> = sqlx::query_as(
         "SELECT id, status, COALESCE(arm_index, -1), created_at, updated_at \
          FROM campaign_recipients WHERE message_id = $1::uuid \
@@ -497,7 +497,7 @@ async fn collect_entries(
         }
     }
 
-    // 3. email_queue — the per-copy lifecycle.
+    // 3. email_queue, the per-copy lifecycle.
     let queue_rows: Vec<(
         Uuid,
         String,
@@ -590,7 +590,7 @@ async fn collect_entries(
         }
     }
 
-    // 4. email_delivery_log — SMTP attempts for the queue rows above.
+    // 4. email_delivery_log, SMTP attempts for the queue rows above.
     if !queue_ids.is_empty() {
         let attempt_rows: Vec<(
             Uuid,
@@ -647,7 +647,7 @@ async fn collect_entries(
         }
     }
 
-    // 5. events — provider/analytics facts.
+    // 5. events, provider/analytics facts.
     let event_rows: Vec<(
         String,
         String,
@@ -1107,7 +1107,7 @@ mod tests {
     }
 
     /// Insufficient history answers honestly: acceptance is provable, the
-    /// post-acceptance state is not — never fabricated.
+    /// post-acceptance state is not, never fabricated.
     #[tokio::test]
     async fn timeline_answers_insufficient_history_honestly() {
         let Some((state, pool)) = state_and_pool("timeline_gap").await else {

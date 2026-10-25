@@ -1,4 +1,4 @@
-//! Bank statement ingestion — the canonical writer `bank_statement_lines`
+//! Bank statement ingestion, the canonical writer `bank_statement_lines`
 //! never had.
 //!
 //! Migration 220 created [`crate::sweeps::sweep_unposted_bank_statement_lines`]'s
@@ -7,7 +7,7 @@
 //! `bank_statement_imports` record plus its `bank_statement_lines`, in one
 //! transaction, all-or-nothing.
 //!
-//! # Accepted format — CSV
+//! # Accepted format, CSV
 //!
 //! The product receives statements as CSV text (bank portals export CSV; a
 //! future API feed can call the same function with the same format). The
@@ -24,7 +24,7 @@
 //! | `reference` | no | free text |
 //! | `counterparty_name` | no | free text |
 //! | `counterparty_account` | no | free text |
-//! | `bank_account` | no | IBAN or UUID of the row's account; when present it must resolve to the same account the statement is for — an unknown or different account rejects the row |
+//! | `bank_account` | no | IBAN or UUID of the row's account; when present it must resolve to the same account the statement is for, an unknown or different account rejects the row |
 //!
 //! # Identity and idempotency (database-enforced, see migration 225)
 //!
@@ -183,7 +183,7 @@ struct KnownAccounts {
 /// Parse a signed decimal amount into cents. Accepts `.` or `,` as the
 /// decimal separator, an optional leading sign, and at most two fraction
 /// digits. Thousands separators and currency symbols are rejected (a bank
-/// CSV using them must be normalised first — guessing would silently
+/// CSV using them must be normalised first, guessing would silently
 /// misinterpret amounts).
 pub fn parse_amount_cents(raw: &str) -> Result<i64, String> {
     let trimmed = raw.trim();
@@ -234,7 +234,7 @@ pub fn parse_amount_cents(raw: &str) -> Result<i64, String> {
 }
 
 /// Parse the bank's `YYYY-MM-DD` date (ISO 8601). Anything else is a row
-/// error — the importer never guesses a date format.
+/// error, the importer never guesses a date format.
 pub fn parse_iso_date(raw: &str) -> Result<NaiveDate, String> {
     NaiveDate::parse_from_str(raw.trim(), "%Y-%m-%d")
         .map_err(|_| format!("date {raw:?} is not ISO 8601 YYYY-MM-DD"))

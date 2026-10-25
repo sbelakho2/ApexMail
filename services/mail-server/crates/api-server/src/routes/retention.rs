@@ -5,15 +5,15 @@
 //! ceiling and `tenants.retention_days` (migration 121) is the per-tenant
 //! override.
 //!
-//! * `GET /v1/retention` — the tenant's current setting, the plan ceiling and
+//! * `GET /v1/retention`, the tenant's current setting, the plan ceiling and
 //!   whether the custom-retention capability is granted (`retention:read`).
-//! * `PUT /v1/retention` — set the per-tenant retention override. Requires
+//! * `PUT /v1/retention`, set the per-tenant retention override. Requires
 //!   the `custom_retention` entitlement (Growth and above per
 //!   docs/pricing.md) and `retention:write`; the value must be at least the
-//!   1-day legal minimum and at most the plan's `max_retention_days` — both
+//!   1-day legal minimum and at most the plan's `max_retention_days`, both
 //!   refusals name the bound, and the capacity gate names the plan/limit
 //!   (`retention:write`).
-//! * `DELETE /v1/retention` — clear the override (plan-tier defaults apply);
+//! * `DELETE /v1/retention`, clear the override (plan-tier defaults apply);
 //!   cleanup is deliberately not entitlement-gated.
 //!
 //! The retention sweep (`compliance/src/retention_sweep.rs`) is the enforcer:
@@ -36,7 +36,7 @@ use crate::state::AppState;
 /// registry refuses values below every mapped category's
 /// `minimum_customer_selectable_days` (events: RET-007 is 1 day), so a
 /// tenant-wide value below 1 would silently fall back to defaults instead of
-/// taking effect — refuse it up front with the named reason.
+/// taking effect, refuse it up front with the named reason.
 pub const MINIMUM_RETENTION_DAYS: i64 = 1;
 
 pub fn router() -> Router<AppState> {
@@ -57,7 +57,7 @@ pub struct UpdateRetentionRequest {
 #[derive(Debug, Serialize, PartialEq, Eq)]
 pub struct RetentionSettingsResponse {
     pub plan: String,
-    /// The plan's `max_retention_days` — the enforced ceiling.
+    /// The plan's `max_retention_days`, the enforced ceiling.
     pub plan_max_retention_days: i64,
     /// The tenant override; null means plan-tier defaults apply.
     pub configured_retention_days: Option<i64>,
@@ -75,12 +75,12 @@ pub struct RetentionSettingsResponse {
 pub(crate) fn validate_retention_update(requested: i64, ceiling: i64) -> Result<(), ApiError> {
     if requested < MINIMUM_RETENTION_DAYS {
         return Err(ApiError::Validation(vec![format!(
-            "retention_days {requested} is below the legal minimum of {MINIMUM_RETENTION_DAYS} day(s) — regulated records must not be deleted sooner"
+            "retention_days {requested} is below the legal minimum of {MINIMUM_RETENTION_DAYS} day(s), regulated records must not be deleted sooner"
         )]));
     }
     if ceiling >= 0 && requested > ceiling {
         return Err(ApiError::Forbidden(format!(
-            "your plan allows at most {ceiling} retention days (requested {requested}) — upgrade to raise the ceiling"
+            "your plan allows at most {ceiling} retention days (requested {requested}), upgrade to raise the ceiling"
         )));
     }
     Ok(())
@@ -237,7 +237,7 @@ mod tests {
     }
 
     /// Pure validation: below the legal minimum is a 400, above the ceiling a
-    /// named 403 — the boundary values themselves are accepted.
+    /// named 403, the boundary values themselves are accepted.
     #[test]
     fn retention_bounds_are_validated_with_named_reasons() {
         assert!(validate_retention_update(1, 90).is_ok());
@@ -288,7 +288,7 @@ mod tests {
         );
     }
 
-    /// Put the tenant on the REAL Growth `plans` row — the canonical
+    /// Put the tenant on the REAL Growth `plans` row, the canonical
     /// RuntimeEnforced row the entitlement gate reads: `custom_retention`
     /// granted with a `max_retention_days` ceiling of 90 (the seed's
     /// `..PlanFeatures::default()` fields a partial JSON would corrupt).

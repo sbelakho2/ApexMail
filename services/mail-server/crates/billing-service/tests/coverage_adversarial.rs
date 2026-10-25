@@ -6,7 +6,7 @@
 //! `TEST_DATABASE_URL` unset → soft-skip (`Ok(None)`); a configured
 //! provisioning failure panics. Redis-backed paths use `TEST_REDIS_URL`.
 //!
-//! The mandate: this crate moves money and meters usage — tests attack
+//! The mandate: this crate moves money and meters usage, tests attack
 //! boundaries (exactly-at/one-below/one-above limits), idempotency, replay,
 //! overflow, malformed input, and refusal paths, and assert that nothing is
 //! written/deleted outside its window.
@@ -72,7 +72,7 @@ fn assert_soft_skip_allowed(env_var: &str) {
     }
     if std::env::var("APEXMAIL_RELEASE_TEST_MODE").as_deref() == Ok("1") {
         panic!(
-            "APEXMAIL_RELEASE_TEST_MODE: required variable {env_var} is missing — \
+            "APEXMAIL_RELEASE_TEST_MODE: required variable {env_var} is missing, \
              release CI must not skip infrastructure tests"
         );
     }
@@ -429,7 +429,7 @@ async fn usage_counter_key(pool: &PgPool, tenant_id: &str, event: MeterEventType
 }
 
 // ---------------------------------------------------------------------------
-// usage.rs — record_usage boundary/idempotency attacks
+// usage.rs, record_usage boundary/idempotency attacks
 // ---------------------------------------------------------------------------
 
 db_test!(record_usage_rejects_zero_and_negative_quantities, |h| {
@@ -567,7 +567,7 @@ db_test!(record_usage_rejects_divergent_reuse_of_event_id, |h| {
     // kind is a different logical operation in the durable ledger (documented
     // F71 semantics) and the metering row IS written. The Redis dedup key is
     // only keyed by event id, though, so the API reports the second write as
-    // a duplicate — a caller reusing one event id across kinds gets an
+    // a duplicate, a caller reusing one event id across kinds gets an
     // inconsistent answer (durable row written, reported duplicate). Assert
     // BOTH halves so the inconsistency stays visible instead of silently
     // accepted.
@@ -723,7 +723,7 @@ db_test!(record_usage_accepts_non_object_metadata, |h| {
 });
 
 // ---------------------------------------------------------------------------
-// usage.rs — get_usage / check_quota plan-limit boundaries
+// usage.rs, get_usage / check_quota plan-limit boundaries
 // ---------------------------------------------------------------------------
 
 db_test!(get_usage_aggregates_only_the_requested_period, |h| {
@@ -982,7 +982,7 @@ db_test!(check_quota_falls_back_to_db_when_redis_unavailable, |h| {
 });
 
 // ---------------------------------------------------------------------------
-// usage.rs — record_with_quota_check exactly-once accounting
+// usage.rs, record_with_quota_check exactly-once accounting
 // ---------------------------------------------------------------------------
 
 db_test!(quota_check_records_exactly_at_limit_and_denies_above, |h| {
@@ -1267,11 +1267,11 @@ db_test!(
 );
 
 // ---------------------------------------------------------------------------
-// usage.rs — rollback releases the logical-operation claim (F3)
+// usage.rs, rollback releases the logical-operation claim (F3)
 // ---------------------------------------------------------------------------
 
 // The live defect: a send reserves quota, the enqueue fails and the
-// reservation is rolled back — but the `usage_operations` claim survived,
+// reservation is rolled back, but the `usage_operations` claim survived,
 // so the client's retry of the same idempotency key was admitted as a
 // REPLAY (quota-free, unmetered). After the fix, the retry re-claims and is
 // metered exactly once.
@@ -1332,7 +1332,7 @@ db_test!(rollback_releases_the_claim_so_a_retry_is_metered, |h| {
     );
 
     // 3. The client retries the SAME logical send (same idempotency key
-    //    derives the same event id). It must be metered again — NOT treated
+    //    derives the same event id). It must be metered again, NOT treated
     //    as a replay that owns a metering row which no longer exists.
     let retry = record_with_quota_check(
         &h.pool,
@@ -1363,7 +1363,7 @@ db_test!(rollback_releases_the_claim_so_a_retry_is_metered, |h| {
 });
 
 // ---------------------------------------------------------------------------
-// send_admission.rs — send-time consent gate on the production backend (F4)
+// send_admission.rs, send-time consent gate on the production backend (F4)
 // ---------------------------------------------------------------------------
 
 // The documented send-time consent enforcer had ZERO callers. This drives
@@ -1530,13 +1530,13 @@ db_test!(
 );
 
 // ---------------------------------------------------------------------------
-// plans.rs — bootstrap reconciliation against the canonical catalog (F1)
+// plans.rs, bootstrap reconciliation against the canonical catalog (F1)
 // ---------------------------------------------------------------------------
 
 // The exact live-dogfood drift: Free 30k/mo, Pro €10, Business €50, a
 // missing starter/growth/enterprise/payg, and two active inline test rows
 // (`DF5 Small`/`DF5 Big`). The reconcile must converge the table to
-// `platform-catalog` exactly — and must be idempotent.
+// `platform-catalog` exactly, and must be idempotent.
 db_test!(reconcile_plans_converges_to_the_canonical_catalog, |h| {
     use billing_service::plans::{
         default_plans, plan_overage_rate_millicents, reconcile_plans_with_catalog,
@@ -1591,8 +1591,8 @@ db_test!(reconcile_plans_converges_to_the_canonical_catalog, |h| {
 
     // The ACTIVE set now equals the canonical catalog exactly: every
     // catalog row present with the catalog price/limit/retention/team.
-    // (Foreign rows stay in the table as deactivated history — asserted
-    // below — but are never served by `get_active_plans`.)
+    // (Foreign rows stay in the table as deactivated history, asserted
+    // below, but are never served by `get_active_plans`.)
     let rows: Vec<PlanRow> = sqlx::query_as(
         "SELECT name, display_name, price_monthly, price_yearly, email_limit,
                 api_call_limit, is_active, features
@@ -1694,7 +1694,7 @@ db_test!(reconcile_plans_converges_to_the_canonical_catalog, |h| {
 // The live P1 (capability waves): existing environments' plan rows predate
 // the new capability flags, so every row reported them false and the new
 // capabilities were ungrantable by plan. The reconcile must therefore
-// converge the feature BOOLEANS — not just prices/limits — on boot/seed.
+// converge the feature BOOLEANS, not just prices/limits, on boot/seed.
 db_test!(reconcile_repairs_drifted_capability_flags, |h| {
     use billing_service::plans::{
         default_plans, reconcile_plans_with_catalog, PlanReconcileReport,
@@ -1781,7 +1781,7 @@ db_test!(reconcile_repairs_drifted_capability_flags, |h| {
 });
 
 // ---------------------------------------------------------------------------
-// usage.rs — pure boundary functions
+// usage.rs, pure boundary functions
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -1872,7 +1872,7 @@ fn meter_event_type_strings_are_stable_wire_values() {
 }
 
 // ---------------------------------------------------------------------------
-// usage_ingest.rs — batch ingest attacks
+// usage_ingest.rs, batch ingest attacks
 // ---------------------------------------------------------------------------
 
 fn ingest_event(tenant: &str, event_type: MeterEventType, quantity: i64, id: Uuid) -> IngestEvent {
@@ -2009,7 +2009,7 @@ fn ingest_event_json_rejects_unknown_fields_and_defaults_quantity() {
 }
 
 // ---------------------------------------------------------------------------
-// usage_ingest.rs — derived sweep + reconciliation
+// usage_ingest.rs, derived sweep + reconciliation
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -2107,7 +2107,7 @@ fn date(year: i32, month: u32, day: u32) -> NaiveDate {
 }
 
 // ---------------------------------------------------------------------------
-// routes.rs — HTTP surface: auth gates, malformed input, error mapping
+// routes.rs, HTTP surface: auth gates, malformed input, error mapping
 // ---------------------------------------------------------------------------
 
 use axum::body::Body;
@@ -3002,7 +3002,7 @@ db_test!(router_plan_admin_surface, |h| {
 });
 
 // ---------------------------------------------------------------------------
-// overage.rs — end-of-period sweep: boundaries, idempotency, isolation
+// overage.rs, end-of-period sweep: boundaries, idempotency, isolation
 // ---------------------------------------------------------------------------
 
 async fn seed_billing_address(h: &Harness, tenant: &str, country: &str) {
@@ -3297,7 +3297,7 @@ db_test!(overage_sweep_flags_aged_zero_usage_period, |h| {
     seed_billing_address(&h, tenant, "EE").await;
     let now = Utc::now();
     // Ended 60 days ago (beyond the 40-day metering retention) with no
-    // events: cannot distinguish empty from aged-out — review, don't drop.
+    // events: cannot distinguish empty from aged-out, review, don't drop.
     let start = now - chrono::Duration::days(90);
     let end = now - chrono::Duration::days(60);
     let period = seed_billing_period(&h, tenant, start, end, "growth", Some(100), Some(40)).await;
@@ -3554,7 +3554,7 @@ db_test!(overage_sweep_applies_wallet_before_dunning, |h| {
 });
 
 // ---------------------------------------------------------------------------
-// mollie_webhooks.rs — Mollie's wire: `id=tr_…`, authenticated fetch, replay,
+// mollie_webhooks.rs, Mollie's wire: `id=tr_…`, authenticated fetch, replay,
 // ordering, recurring settlement and token binding
 // ---------------------------------------------------------------------------
 //
@@ -3570,7 +3570,7 @@ const MOLLIE_ACCEPTED: &str = "OK";
 type MockResponses = Arc<std::sync::Mutex<std::collections::HashMap<String, (u16, String)>>>;
 
 /// Provider-side object ledger: subscriptions the mock MINTED (distinct ids
-/// per create call) and ids DELETEd — so tests can assert provider-side
+/// per create call) and ids DELETEd, so tests can assert provider-side
 /// facts (one live subscription after a racing activation, an orphan
 /// actually canceled) instead of only local rows.
 #[derive(Default)]
@@ -4065,7 +4065,7 @@ db_test!(mollie_webhook_refusals_write_nothing_and_deadletter, |h| {
         "a refused id is deadlettered for triage"
     );
 
-    // legacy-wire-negative-test: NO signature exists — the pre-Mollie signed
+    // legacy-wire-negative-test: NO signature exists, the pre-Mollie signed
     // envelope (and a legacy HMAC header) authorise nothing, because the body
     // names no object id.
     let legacy_body = serde_json::to_vec(&serde_json::json!({
@@ -4671,14 +4671,14 @@ db_test!(
 );
 
 // ---------------------------------------------------------------------------
-// hetzner_ip_provider.rs — REMOVED: one provisioning implementation
+// hetzner_ip_provider.rs, REMOVED: one provisioning implementation
 // ---------------------------------------------------------------------------
 // billing-service carried a second, divergent dedicated-IP provisioning
 // implementation (direct floating-IP creation, immediate 'warming' insert,
 // its own status vocabulary) next to the canonical state machine in
 // api-server's `ip_provider` (provisioning -> created -> attached ->
 // rdns_ready -> warming -> active, with compensation). It had NO production
-// caller — but had it ever been wired up, it would have bypassed the
+// caller, but had it ever been wired up, it would have bypassed the
 // lifecycle guarantees migration 207 established. The duplicate is deleted;
 // this scan keeps it deleted.
 #[test]
@@ -4699,13 +4699,13 @@ fn billing_service_has_no_second_dedicated_ip_provisioning_implementation() {
         .unwrap_or(false);
     assert!(
         !has_hetzner_source,
-        "a hetzner-named source file exists in billing-service/src — the duplicate provider \
+        "a hetzner-named source file exists in billing-service/src, the duplicate provider \
          must not come back"
     );
 }
 
 // ---------------------------------------------------------------------------
-// maintenance.rs — abuse lifecycle, admin reset, derived sweep, reconciliation
+// maintenance.rs, abuse lifecycle, admin reset, derived sweep, reconciliation
 // ---------------------------------------------------------------------------
 
 use billing_service::maintenance::{
@@ -4897,7 +4897,7 @@ db_test!(admin_reset_clears_billing_but_not_abuse_hold, |h| {
     // Dismissing the abuse report releases the abuse hold, but the tenant
     // still does NOT reactivate on a subsequent admin reset: the reset only
     // reactivates when it clears an ACTIVE billing restriction in the same
-    // transaction (conservative attribution — an unattributable suspension
+    // transaction (conservative attribution, an unattributable suspension
     // is never auto-cleared). The earlier reset already cleared the billing
     // hold, so a billing-attributed suspension that outlived one abuse hold
     // stays suspended. Asserted here as documented behaviour; the residual
@@ -4949,7 +4949,7 @@ db_test!(derived_usage_sweep_records_yesterday_exactly_once, |h| {
         (tenant_a, day_start + chrono::Duration::hours(2)),
         (tenant_a, day_start + chrono::Duration::hours(5)),
         (tenant_b, day_start + chrono::Duration::hours(7)),
-        (tenant_a, now), // today — out of scope
+        (tenant_a, now), // today, out of scope
     ] {
         sqlx::query(
             "INSERT INTO email_queue (id, tenant_id, from_address, to_addresses, subject, status, sent_at)
@@ -5093,7 +5093,7 @@ db_test!(
 );
 
 // ---------------------------------------------------------------------------
-// routes.rs — second adversarial pass: proration preview, PAYG usage,
+// routes.rs, second adversarial pass: proration preview, PAYG usage,
 // reconciliation reports, current-plan resolution, export formats.
 // ---------------------------------------------------------------------------
 
@@ -5507,7 +5507,7 @@ db_test!(router_export_formats_and_invoice_window, |h| {
 });
 
 // ---------------------------------------------------------------------------
-// usage_ingest.rs — bounce/complaint collection in the reconciliation report
+// usage_ingest.rs, bounce/complaint collection in the reconciliation report
 // ---------------------------------------------------------------------------
 
 db_test!(
@@ -5520,7 +5520,7 @@ db_test!(
         let day_start = day.and_hms_opt(0, 0, 0).expect("midnight").and_utc();
 
         // Reserved 1000, delivered 900, bounced 90 (aggregated pipeline) and
-        // 5 complaints: 10 unaccounted — under the slack, so no candidate.
+        // 5 complaints: 10 unaccounted, under the slack, so no candidate.
         sqlx::query(
             "INSERT INTO metering_events (id, tenant_id, event_type, quantity, timestamp)
          VALUES (gen_random_uuid(), $1, 'emails_sent', 1000, $2),
@@ -5751,7 +5751,7 @@ async fn seed_invoice_row(
     .expect("seed invoice")
 }
 
-/// The Europe/Tallinn calendar month of an instant — the SAME convention
+/// The Europe/Tallinn calendar month of an instant, the SAME convention
 /// `vat_recognition` uses for `recognition_period` (its dates are Tallinn
 /// local). Deriving the expectation from the UTC date instead flips the
 /// month twice a year whenever a UTC evening is already the next day in
@@ -5933,7 +5933,7 @@ db_test!(vat_recognition_general_and_cash_special_timing, |h| {
 });
 
 // ---------------------------------------------------------------------------
-// invoices.rs — numbering under concurrency, immutable snapshots, overflow
+// invoices.rs, numbering under concurrency, immutable snapshots, overflow
 // ---------------------------------------------------------------------------
 
 db_test!(
@@ -6071,7 +6071,7 @@ db_test!(
 );
 
 // ---------------------------------------------------------------------------
-// accounting_export.rs — hostile names are RFC 4180 escaped, formula-safe
+// accounting_export.rs, hostile names are RFC 4180 escaped, formula-safe
 // ---------------------------------------------------------------------------
 
 db_test!(accounting_export_escapes_hostile_names_and_formulas, |h| {
@@ -6125,7 +6125,7 @@ db_test!(accounting_export_escapes_hostile_names_and_formulas, |h| {
     );
     // The embedded newline stays inside the quoted field: the physical
     // lines are header, record-part-1 (unclosed quote), record-part-2, and
-    // the trailing newline — never a broken/duplicated data record.
+    // the trailing newline, never a broken/duplicated data record.
     let records: Vec<&str> = csv.split('\n').collect();
     assert_eq!(
         records.len(),
@@ -6162,7 +6162,7 @@ db_test!(accounting_export_escapes_hostile_names_and_formulas, |h| {
 });
 
 // ---------------------------------------------------------------------------
-// credit_notes.rs — idempotent replay: matching returns, mismatch refuses
+// credit_notes.rs, idempotent replay: matching returns, mismatch refuses
 // ---------------------------------------------------------------------------
 
 db_test!(credit_note_replay_matches_payload_or_refuses, |h| {
@@ -6290,13 +6290,13 @@ db_test!(overage_sweep_backfills_legacy_pricing_snapshot_once, |h| {
 });
 
 // ---------------------------------------------------------------------------
-// E-SWEEP-TRIGGER — on-demand overage sweep entrypoint
+// E-SWEEP-TRIGGER, on-demand overage sweep entrypoint
 // ---------------------------------------------------------------------------
 
 /// Live dogfood 2026-10-08: the overage sweep's FIRST scheduled tick is the
 /// next UTC midnight and no on-demand trigger existed anywhere. This drives
 /// the REAL binary's one-shot `--sweep-overage-only` flag against a private
-/// canonical DB clone and asserts the printed report — the ops trigger, end
+/// canonical DB clone and asserts the printed report, the ops trigger, end
 /// to end (the sweep semantics themselves are covered by the overage tests
 /// above; here the entrypoint is the subject).
 #[tokio::test]
@@ -6340,7 +6340,7 @@ async fn sweep_overage_only_cli_runs_the_canonical_sweep_on_demand() {
 }
 
 // ---------------------------------------------------------------------------
-// COMMERCIAL CONTRACT — pricing authority (docs/pricing-authority.md)
+// COMMERCIAL CONTRACT, pricing authority (docs/pricing-authority.md)
 //
 // Authoritative plan facts live in `platform-catalog` and `plans.rs`.
 // Marketing `pricing.json` is presentation-only. These tests pin the
@@ -6349,13 +6349,13 @@ async fn sweep_overage_only_cli_runs_the_canonical_sweep_on_demand() {
 // ---------------------------------------------------------------------------
 
 /// Free = €0, 3,000 emails/month RECURRING + a ONE-TIME 30,000 launch
-/// allowance (first 30 days) — NOT 30k/month forever.
+/// allowance (first 30 days), NOT 30k/month forever.
 #[test]
 fn catalog_free_is_3000_recurring_plus_one_time_30000_launch_allowance() {
     let free = platform_catalog::plan_by_name("free").expect("free plan in catalog");
     assert_eq!(free.price_monthly_cents, 0, "Free is €0");
     assert_eq!(free.price_yearly_cents, 0);
-    // The RECURRING included volume is 3 000/month — the 2026-09-08 review
+    // The RECURRING included volume is 3 000/month, the 2026-09-08 review
     // moved Free off the historical 30 000/month give-away.
     assert_eq!(
         free.email_limit, 3_000,
@@ -6455,7 +6455,7 @@ fn annual_effective_discount_is_ten_monthly_payments_not_ten_percent() {
 /// set and must NOT grant `custom_templates` or dedicated IPs.
 #[test]
 fn unknown_plan_feature_set_excludes_custom_templates_and_dedicated_ips() {
-    // Quota lookup falls back to free for unknown names — the feature set
+    // Quota lookup falls back to free for unknown names, the feature set
     // that comes with it is the deny-most basic set.
     let fallback = billing_service::plans::builtin_plan_seed(Some("not-a-real-plan"));
     assert_eq!(fallback.name, "free", "unknown plan → basic set");
@@ -6588,7 +6588,7 @@ fn sla_credit_matrix_is_plan_scoped_with_no_invented_coverage() {
     }
 }
 
-/// Usage over the hard cap returns the named quota refusal — never a silent
+/// Usage over the hard cap returns the named quota refusal, never a silent
 /// drop and never a 500.
 #[test]
 fn hard_cap_refusal_carries_the_named_quota_error_string() {
@@ -6603,7 +6603,7 @@ fn hard_cap_refusal_carries_the_named_quota_error_string() {
     // QUOTA_EXCEEDED_MESSAGE) is the customer-visible refusal. Pin the
     // exact text so a wording drift is a test failure, not a support ticket.
     let messages_src = include_str!("../../api-server/src/routes/messages.rs");
-    let expected = "email quota exceeded: the plan volume and its overage allowance are exhausted — upgrade the plan or contact sales for a higher ceiling";
+    let expected = "email quota exceeded: the plan volume and its overage allowance are exhausted, upgrade the plan or contact sales for a higher ceiling";
     assert!(
         messages_src.contains(&format!(
             "const QUOTA_EXCEEDED_MESSAGE: &str = \"{expected}\""
@@ -6620,7 +6620,7 @@ fn overage_math_is_exact_and_quotes_only_catalog_rates() {
         calculate_overage_cost_with_rate, calculate_plan_overage_cost, plan_overage_rate_millicents,
     };
 
-    // Catalog ladder — never a second hardcoded rate table.
+    // Catalog ladder, never a second hardcoded rate table.
     assert_eq!(plan_overage_rate_millicents("free"), None);
     assert_eq!(plan_overage_rate_millicents("starter"), Some(80));
     assert_eq!(plan_overage_rate_millicents("pro"), Some(60));
@@ -6669,7 +6669,7 @@ fn overage_math_is_exact_and_quotes_only_catalog_rates() {
 }
 
 // ---------------------------------------------------------------------------
-// Plan activation — the money path: a verified paid checkout grants the plan,
+// Plan activation, the money path: a verified paid checkout grants the plan,
 // issues a paid invoice that reconciles to the collected gross, and is
 // idempotent on the payment id.
 // ---------------------------------------------------------------------------
@@ -6962,7 +6962,7 @@ db_test!(
 );
 
 // ---------------------------------------------------------------------------
-// Activation saga — the distributed-state invariants the black-box probes
+// Activation saga, the distributed-state invariants the black-box probes
 // could not cover: concurrent distinct-payment activations, orphan provider
 // subscriptions, and amount drift on a LIVE subscription.
 // ---------------------------------------------------------------------------
@@ -7182,7 +7182,7 @@ db_test!(
     .execute(&h.pool)
     .await
     .expect("seed subscription");
-        // The provider charges 19.00 while the catalog expects 20.00 — and the
+        // The provider charges 19.00 while the catalog expects 20.00, and the
         // subscription IS active, the exact case the old check skipped.
         mock.route(
             "/v2/customers/cst_cov_drift/subscriptions/sub_drift_1",
@@ -7211,7 +7211,7 @@ db_test!(
             incidents, 1,
             "one open incident per drifted subscription, not one per hourly sweep"
         );
-        // The customer paid; entitlement is untouched — the operator decides.
+        // The customer paid; entitlement is untouched, the operator decides.
         let plan: String = sqlx::query_scalar("SELECT plan FROM tenants WHERE id = $1")
             .bind("cov_drift")
             .fetch_one(&h.pool)

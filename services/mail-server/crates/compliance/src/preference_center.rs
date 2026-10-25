@@ -1,10 +1,10 @@
-//! Email Preference Centre — self-service consent and unsubscribe via encrypted tokens.
+//! Email Preference Centre, self-service consent and unsubscribe via encrypted tokens.
 //!
 //! Endpoints:
-//!   POST /preferences/opt-out/{token}    — unsubscribe (consent withdrawal + suppression)
-//!   GET  /preferences/status/{token}     — current consent status
-//!   POST /preferences/update/{token}     — update consent preferences
-//!   GET  /preferences/center/{tenant_id} — admin health overview
+//!   POST /preferences/opt-out/{token}   , unsubscribe (consent withdrawal + suppression)
+//!   GET  /preferences/status/{token}    , current consent status
+//!   POST /preferences/update/{token}    , update consent preferences
+//!   GET  /preferences/center/{tenant_id}, admin health overview
 //!
 //! Token format (compatible with tracking-service codec):
 //!   base64url( IV[12] || AuthTag[16] || AES-128-GCM( tenantId:recipient:unix_ms ) )

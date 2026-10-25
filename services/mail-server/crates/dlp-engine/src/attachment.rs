@@ -4,9 +4,9 @@
 //! scanning (PII, entropy, content policy) on the extracted content.
 //!
 //! Supported formats://! - **Plain text** (`.txt`, `.csv`, `.log`, `.json`, `.xml`, `.html`, `.md`)
-//! - **OOXML** (`.docx`, `.xlsx`, `.pptx`) — extracts from inner XML parts
-//! - **PDF** — extracts text streams between `BT`/`ET` operators
-//! - **RTF** — strips RTF control words, extracts plain text
+//! - **OOXML** (`.docx`, `.xlsx`, `.pptx`), extracts from inner XML parts
+//! - **PDF**, extracts text streams between `BT`/`ET` operators
+//! - **RTF**, strips RTF control words, extracts plain text
 //!
 //! Heavy lifting for PDF/OOXML intentionally stays zero-dep:we do a
 //! best-effort text extraction rather than full rendering.
@@ -72,7 +72,7 @@ impl AttachmentKind {
         if data.starts_with(b"%PDF") {
             Self::Pdf
         } else if data.starts_with(b"PK\x03\x04") {
-            // ZIP-based — could be OOXML
+            // ZIP-based, could be OOXML
             Self::Ooxml
         } else if data.starts_with(b"{\\rtf") {
             Self::Rtf
@@ -195,7 +195,7 @@ fn extract_text(data: &[u8], kind: AttachmentKind) -> (String, bool, String) {
             (
                 text.into_owned(),
                 partial,
-                "Binary file — best-effort UTF-8 decode".into(),
+                "Binary file, best-effort UTF-8 decode".into(),
             )
         }
     }
@@ -281,7 +281,7 @@ fn extract_ooxml_text(data: &[u8]) -> (String, bool, String) {
                         }
                         Ok(None) => {}
                         Err(_) => {
-                            // Bomb detected — abort to bound resource use.
+                            // Bomb detected, abort to bound resource use.
                             bombed = true;
                             break;
                         }
@@ -300,7 +300,7 @@ fn extract_ooxml_text(data: &[u8]) -> (String, bool, String) {
             text,
             true,
             format!(
-                "OOXML: aborted — decompression exceeded safety cap ({} parts before abort)",
+                "OOXML: aborted, decompression exceeded safety cap ({} parts before abort)",
                 parts_found
             ),
         );
@@ -403,7 +403,7 @@ const MAX_PDF_STREAMS_EXAMINED: usize = 256;
 /// of how many Flate streams are actually collected (audit finding: the
 /// collected-stream cap never fired for files made of non-Flate
 /// `stream…endstream` pairs, and each occurrence triggered a full backwards
-/// scan of the entire prefix for `<<` — quadratic work on a crafted
+/// scan of the entire prefix for `<<`, quadratic work on a crafted
 /// attachment).
 const MAX_PDF_STREAM_KEYWORD_HITS: usize = 4096;
 
@@ -414,17 +414,17 @@ const MAX_PDF_STREAM_KEYWORD_HITS: usize = 4096;
 const MAX_PDF_DICT_LOOKBACK_BYTES: usize = 1024;
 
 /// Process-wide count of PDFs whose `stream` keyword walk hit
-/// [`MAX_PDF_STREAM_KEYWORD_HITS`] — observable metric for operators.
+/// [`MAX_PDF_STREAM_KEYWORD_HITS`], observable metric for operators.
 pub static PDF_STREAM_KEYWORD_CAP_HITS: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 
 /// Process-wide count of PDFs whose stream count exceeded
-/// [`MAX_PDF_STREAMS_EXAMINED`] — observable metric for operators.
+/// [`MAX_PDF_STREAMS_EXAMINED`], observable metric for operators.
 pub static PDF_STREAM_CAP_HITS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-/// Risk floor applied when a text-bearing attachment yields no — or an
-/// implausibly small amount of — extractable text:contents are unverified,
-/// so policy — not a silent Allow — decides.
+/// Risk floor applied when a text-bearing attachment yields no, or an
+/// implausibly small amount of, extractable text:contents are unverified,
+/// so policy, not a silent Allow, decides.
 const EXTRACTION_FAILED_RISK_FLOOR: f64 = 3.0;
 
 /// Coverage heuristic denominator:extracted text below 1 byte per this many
@@ -494,7 +494,7 @@ fn extract_pdf_text(data: &[u8]) -> (String, bool, String) {
 /// Locate the raw byte payload of every `stream … endstream` object whose
 /// dictionary mentions `/FlateDecode`.
 ///
-/// Bounded two ways (audit finding — the old walk was quadratic on crafted
+/// Bounded two ways (audit finding, the old walk was quadratic on crafted
 /// input): total `stream` keyword iterations are capped independently of
 /// collected streams, and the backwards `<<` dictionary search is windowed
 /// to [`MAX_PDF_DICT_LOOKBACK_BYTES`] instead of scanning the whole prefix.
@@ -528,7 +528,7 @@ fn find_pdf_streams(data: &[u8]) -> Vec<&[u8]> {
         let stream_kw = pos + rel;
         // The dictionary precedes the stream keyword; look back for the
         // nearest `<<` within a small window (previously this scanned the
-        // ENTIRE prefix per keyword — O(position) per occurrence).
+        // ENTIRE prefix per keyword, O(position) per occurrence).
         let lookback_start = stream_kw.saturating_sub(MAX_PDF_DICT_LOOKBACK_BYTES);
         let dict_start = data[lookback_start..stream_kw]
             .windows(2)
@@ -585,7 +585,7 @@ fn inflate_with_cap(bytes: &[u8], max: u64) -> Option<Vec<u8>> {
     let mut out = Vec::new();
     decoder.read_to_end(&mut out).ok()?;
     if out.len() as u64 > max {
-        return None; // decompression bomb — refuse
+        return None; // decompression bomb, refuse
     }
     Some(out)
 }
@@ -609,7 +609,7 @@ fn extract_pdf_strings(text_object: &str, out: &mut String) {
                             }
                         }
                         '\\' => {
-                            // Escape sequence — take next char literally
+                            // Escape sequence, take next char literally
                             if let Some(esc) = chars.next() {
                                 match esc {
                                     'n' => s.push('\n'),
@@ -630,7 +630,7 @@ fn extract_pdf_strings(text_object: &str, out: &mut String) {
                 }
             }
             '<' => {
-                // Hex string:<48656C6C6F> — decode hex digit pairs into text.
+                // Hex string:<48656C6C6F>, decode hex digit pairs into text.
                 // '<' also opens dictionaries, but a dictionary body never
                 // consists solely of hex digits, so undecodable spans are
                 // skipped harmlessly.
@@ -748,7 +748,7 @@ impl DlpEngine {
         recipient_domain: Option<&str>,
     ) -> AttachmentVerdict {
         // Determine file kind. Container formats (PDF/OOXML/RTF) are
-        // identified by MAGIC BYTES first — extension claims are trivially
+        // identified by MAGIC BYTES first, extension claims are trivially
         // spoofed (malicious.pdf that is really a ZIP) and magic bytes are
         // the only signal tied to the actual bytes.
         let by_magic = AttachmentKind::from_magic(data);
@@ -798,7 +798,7 @@ impl DlpEngine {
                 // Text-bearing formats that yield NO extractable text are a
                 // red flag (compressed/obfuscated content our extractor cannot
                 // read). Silently returning Allow here would let PII sail
-                // through inside content we failed to decode — instead apply a
+                // through inside content we failed to decode, instead apply a
                 // risk floor so policy (thresholds) decides the outcome.
                 DlpVerdict {
                     risk_score: EXTRACTION_FAILED_RISK_FLOOR,
@@ -807,7 +807,7 @@ impl DlpEngine {
                     entropy_findings: Vec::new(),
                     policy_matches: Vec::new(),
                     summary: format!(
-                        "Attachment text extraction failed for kind={kind:?} — risk floor \
+                        "Attachment text extraction failed for kind={kind:?}, risk floor \
                          {EXTRACTION_FAILED_RISK_FLOOR} applied, contents unverified ({note})"
                     ),
                 }
@@ -825,7 +825,7 @@ impl DlpEngine {
         } else if container_like && (low_coverage || partial) {
             // Some text came out, but it covers an implausibly small share of
             // the file or the extraction was partial. Scan what we have, then
-            // raise the verdict to the unverified-contents floor — findings
+            // raise the verdict to the unverified-contents floor, findings
             // below the floor would read as "verified clean" when most of the
             // attachment was never decoded.
             let mut verdict = self.scan(&text, recipient_domain);
@@ -836,7 +836,7 @@ impl DlpEngine {
             }
             verdict.summary = format!(
                 "{}; extraction covers only ~{coverage_pct}% of the {}-byte attachment \
-                 (partial={partial}) — risk floor {EXTRACTION_FAILED_RISK_FLOOR} applied, \
+                 (partial={partial}), risk floor {EXTRACTION_FAILED_RISK_FLOOR} applied, \
                  contents partially unverified ({note})",
                 verdict.summary,
                 data.len()
@@ -1054,7 +1054,7 @@ mod tests {
     #[test]
     fn test_env_file_detection() {
         let engine = DlpEngine::new();
-        let env_content = b"DATABASE_URL=postgres://user:sk_live_4eC39HqLyjWDarjtT1zdp7dc@host/db\nAPI_KEY=very_secret_key_12345"; // nosemgrep: generic.secrets.security.detected-stripe-api-key.detected-stripe-api-key — the payment provider's public documentation example key (Stripe-shaped corpus, kept for multi-vendor DLP coverage) used as DLP detection-test corpus — the code that FINDS such keys
+        let env_content = b"DATABASE_URL=postgres://user:sk_live_4eC39HqLyjWDarjtT1zdp7dc@host/db\nAPI_KEY=very_secret_key_12345"; // nosemgrep: generic.secrets.security.detected-stripe-api-key.detected-stripe-api-key, the payment provider's public documentation example key (Stripe-shaped corpus, kept for multi-vendor DLP coverage) used as DLP detection-test corpus, the code that FINDS such keys
         let result = engine.scan_attachment(env_content, Some(".env"), None);
 
         assert_eq!(result.kind, AttachmentKind::PlainText);
@@ -1130,7 +1130,7 @@ mod tests {
     #[test]
     fn test_pdf_with_no_extractable_text_not_silent_allow() {
         // A PDF whose text cannot be extracted must NOT come back as a
-        // clean Allow — it carries a risk floor so policy decides.
+        // clean Allow, it carries a risk floor so policy decides.
         let engine = DlpEngine::new();
         // Binary junk with a PDF magic and no text objects.
         let mut pdf = b"%PDF-1.7\n".to_vec();
@@ -1212,7 +1212,7 @@ mod tests {
 
     #[test]
     fn test_pdf_stream_examination_capped() {
-        // Fail-first: stream examination was unbounded — thousands of tiny
+        // Fail-first: stream examination was unbounded, thousands of tiny
         // streams each paid an inflate. The walk must stop at the cap and
         // bump the observable counter.
         let payload = zlib(b"BT (x) Tj ET");
@@ -1256,7 +1256,7 @@ mod tests {
     #[test]
     fn test_pdf_decoy_single_char_gets_risk_floor() {
         // A PDF with ONE extractable character plus a large opaque payload
-        // must not read as "verified clean" — the floor applies.
+        // must not read as "verified clean", the floor applies.
         let engine = DlpEngine::new();
         let mut pdf = b"%PDF-1.7\nBT\n(x) Tj\nET\n".to_vec();
         pdf.extend(
@@ -1365,7 +1365,7 @@ mod tests {
     #[test]
     fn test_ole_doc_gets_unverified_risk_floor() {
         // Legacy .doc/.xls (OLE compound files) are undecodable text-bearing
-        // binaries — a clean Allow would assert we verified contents we
+        // binaries, a clean Allow would assert we verified contents we
         // never read.
         let engine = DlpEngine::new();
         let mut doc = vec![0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1];

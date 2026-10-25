@@ -446,7 +446,7 @@ async fn a_failing_tsa_persists_the_failure_and_refuses_the_submission() {
 
     // A TSA URL pointing at a dead port: timestamp_document fails, the
     // TimestampRecord::failed evidence is persisted with the package, and
-    // the submission is refused (fail closed) — even though the machine
+    // the submission is refused (fail closed), even though the machine
     // transport itself would have been ready.
     let tsa = compliance::signing::timestamp::TsaConfig::new("http://127.0.0.1:1/tsa")
         .expect("dead TSA config");
@@ -862,7 +862,7 @@ async fn manual_submission_refuses_mutated_or_unvalidated_packages() {
 
     // A submitted return whose sent package is gone cannot be acknowledged.
     // (The retention guard forbids DELETE on legal-retain packages, so the
-    // package is moved out of 'sent' instead — the ack query only matches
+    // package is moved out of 'sent' instead, the ack query only matches
     // sent packages.)
     sqlx::query(
         "UPDATE filing_submission_packages SET status = 'failed' \
@@ -949,7 +949,7 @@ async fn human_task_opening_is_idempotent_and_listable() {
     };
 
     // Re-open the SAME return's task through the seam the second submission
-    // would hit (the return is already submitted here — call open_human_tasks
+    // would hit (the return is already submitted here, call open_human_tasks
     // to prove the listing path and the task's shape instead).
     let tasks = open_human_tasks(&pool, 100).await.expect("list tasks");
     assert!(
@@ -963,7 +963,7 @@ async fn human_task_opening_is_idempotent_and_listable() {
 
     // The idempotency arm of open_human_task: a duplicate INSERT would be
     // skipped; verify via a direct second submission on a FRESH return that
-    // maps to the same package (the WHERE NOT EXISTS arm) — exercised by the
+    // maps to the same package (the WHERE NOT EXISTS arm), exercised by the
     // unique (return_kind, return_id, status='open') invariant.
     let count: i64 = sqlx::query_scalar(
         "SELECT COUNT(DISTINCT id) FROM filing_human_tasks WHERE return_id = $1",

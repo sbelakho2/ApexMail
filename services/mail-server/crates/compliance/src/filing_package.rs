@@ -3,7 +3,7 @@
 //! A [`FilingPackage`] is a *validated artefact*: form identity + period, the
 //! entity identity, a deterministic payload projection, the payload's SHA-256
 //! digest, a per-field validation report, and an explicit list of *named gaps*
-//! — legally required fields that no repository model can supply today. The
+//!, legally required fields that no repository model can supply today. The
 //! submission transport ([`crate::filing_transport`]) refuses to create a
 //! submission from anything that is not a validated, gap-free package, so a
 //! package with missing fields or named gaps can never be POSTed or handed to
@@ -22,30 +22,30 @@
 //! # Named gaps (fields the repository cannot supply today)
 //!
 //! Every gap is recorded in [`FilingPackage::named_gaps`] as
-//! `{ field, reason }` and makes the package **not submittable** — it is never
+//! `{ field, reason }` and makes the package **not submittable**, it is never
 //! silently skipped:
 //!
-//! * **KMD** — [`KMD_VAT_NUMBER_GAP`]: `VatDeclaration` has no VAT
+//! * **KMD**, [`KMD_VAT_NUMBER_GAP`]: `VatDeclaration` has no VAT
 //!   registration number member; the KMD identity requires it. Callers that
 //!   hold the entity record can pass it via
 //!   [`build_kmd_package_with_vat_number`]; when absent the gap is recorded.
-//! * **KMD INF** — [`KMD_INF_DERIVATION_GAP`]: no repository model or
+//! * **KMD INF**, [`KMD_INF_DERIVATION_GAP`]: no repository model or
 //!   derivation produces invoice-level KMD INF rows (the only KMD INF builder
 //!   in the repository, in the billing service, emits aggregate rate buckets).
 //!   Lines can be validated when supplied explicitly, but the package stays
 //!   non-submittable until a derivation exists.
-//! * **TSD** — [`TSD_PAYMENT_TYPE_GAP`]: TSD Annex 1 requires a payment-type
+//! * **TSD**, [`TSD_PAYMENT_TYPE_GAP`]: TSD Annex 1 requires a payment-type
 //!   code per person; `EmployeeTaxRecord` has no member for it and no source
 //!   assigns one.
-//! * **VD** — no gap. The form is the intra-Community SUPPLY listing this
+//! * **VD**, no gap. The form is the intra-Community SUPPLY listing this
 //!   repository documents (`obligations::StatutoryObligationType::Vd`,
 //!   "Intra-Community supply report (VD)"). The acquisition side of
 //!   intra-Community trade is declared on KMD, where it IS modelled
 //!   (`estonia_ou::VatInputBreakdown::intra_eu_acquisitions`) and is a
-//!   required field of the KMD package — so a supplies-only VD listing is the
+//!   required field of the KMD package, so a supplies-only VD listing is the
 //!   complete statutory return, not a partial one, and refusing it would have
 //!   withheld a lawful filing.
-//! * **OSS** — none: the union-scheme return's assessable content is fully
+//! * **OSS**, none: the union-scheme return's assessable content is fully
 //!   carried by `oss_registrations` + `oss_supply_entries` + `oss_returns`.
 //!
 //! # Determinism and digest scope
@@ -514,7 +514,7 @@ pub struct FilingPackage {
     /// Legally required fields no repository model can supply (unhashed
     /// envelope). Any gap makes the package non-submittable.
     pub named_gaps: Vec<NamedGap>,
-    /// Generation time. **Unhashed envelope field** — excluded from the
+    /// Generation time. **Unhashed envelope field**, excluded from the
     /// digest so the same declaration always produces the same digest.
     pub generated_at: DateTime<Utc>,
 }

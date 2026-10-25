@@ -17,7 +17,7 @@ og_image = "/images/og-image.png"
 # single loop, so design changes to the row/winner markup happen in ONE place.
 # Cell values are raw HTML (rendered with | safe) to preserve color-emphasis
 # spans and any inline markup. Winner is one of: apexmail | competitor | tie | none.
-# Postmark never declares a winner — every row uses winner = "none".
+# Postmark never declares a winner, every row uses winner = "none".
 comparison_sections = [
   { title = "ENTREGABILIDAD", rows = [
     { feature = "Tasa de entrega", apex = '<span>Alta</span>', comp = '<span class="">Alta</span>', winner = "none" },
@@ -47,14 +47,14 @@ comparison_sections = [
   ]},
   { title = "PRECIOS", rows = [
     { feature = "Nivel gratuito", apex = '<span>3.000/mes + asignación de lanzamiento única de 30.000</span>', comp = '<span class="">100/mes</span>', winner = "none" },
-    { feature = "100K emails/mes", apex = '<span>€89 (Pro: 150K)</span>', comp = '<span class="">€122.82 (US$133.50) — Pro: €15.18 (US$16.50)/mes + 90K de exceso a €1.20 (US$1.30)/1K</span>', winner = "none" },
+    { feature = "100K emails/mes", apex = '<span>€89 (Pro: 150K)</span>', comp = '<span class="">€122.82 (US$133.50), Pro: €15.18 (US$16.50)/mes + 90K de exceso a €1.20 (US$1.30)/1K</span>', winner = "none" },
     { feature = "Miembros de equipo ilimitados", apex = '<span>Plan Enterprise</span>', comp = '<span class="">✗</span>', winner = "none" },
     { feature = "Condiciones empresariales personalizadas", apex = '<span>Contratos anuales</span>', comp = '<span class="">✗</span>', winner = "none" }
   ]}
 ]
 
 # Trailing methodology paragraph (rendered via macros::methodology_note).
-# Raw HTML — the inner <p> content with the methodology link. Uses a TOML
+# Raw HTML, the inner <p> content with the methodology link. Uses a TOML
 # multi-line basic string (""" """) because the text contains both a single
 # quote ("provider's") and double-quoted HTML attributes; the leading \ trims
 # the opening newline and literal newlines collapse to spaces per TOML spec.

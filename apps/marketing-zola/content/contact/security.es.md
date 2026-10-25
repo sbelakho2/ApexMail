@@ -13,16 +13,16 @@ ApexMail proporciona documentación de seguridad a clientes y candidatos Enterpr
 
 ## Qué proporcionamos
 
-- **SIG / CAIQ / HECVAT** — Respuestas estandarizadas de evaluación de seguridad para clientes Enterprise cualificados.
-- **Resumen del test de intrusión** — Un resumen de hallazgos y correcciones estará disponible una vez completado el primer test de intrusión externo de la aplicación.
-- **Revisión de arquitectura de seguridad** — Un recorrido por los controles de seguridad de ApexMail, su arquitectura de cifrado, el registro de auditoría y los modelos de aislamiento de despliegue.
-- **Diagramas de flujo de datos** — Documentación visual del procesamiento de datos, las ubicaciones de almacenamiento y las relaciones con subprocesadores.
+- **SIG / CAIQ / HECVAT**, Respuestas estandarizadas de evaluación de seguridad para clientes Enterprise cualificados.
+- **Resumen del test de intrusión**, Un resumen de hallazgos y correcciones estará disponible una vez completado el primer test de intrusión externo de la aplicación.
+- **Revisión de arquitectura de seguridad**, Un recorrido por los controles de seguridad de ApexMail, su arquitectura de cifrado, el registro de auditoría y los modelos de aislamiento de despliegue.
+- **Diagramas de flujo de datos**, Documentación visual del procesamiento de datos, las ubicaciones de almacenamiento y las relaciones con subprocesadores.
 
 ## Formulario de solicitud de cuestionario de seguridad
 
 <div id="enquiry-submitted" class="apex-notice apex-notice--ok" role="status">
   <b>Recibida</b>
-  <p>Gracias — su solicitud se ha recibido correctamente. Nuestro equipo la revisa y responde en un plazo de 2 días laborables.</p>
+  <p>Gracias, su solicitud se ha recibido correctamente. Nuestro equipo la revisa y responde en un plazo de 2 días laborables.</p>
 </div>
 <div id="enquiry-error" class="apex-notice apex-notice--fail" role="alert">
   <b>No aceptada</b>

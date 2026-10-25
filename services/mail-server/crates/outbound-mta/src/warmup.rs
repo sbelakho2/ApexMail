@@ -4,7 +4,7 @@
 //!
 //! The relay owns DURABLE retries: a transient SMTP/DNS/network failure
 //! persists the send in `outbound_relay_ledger` and the daemon redelivers it
-//! later — possibly on another UTC day. When the outer worker held the only
+//! later, possibly on another UTC day. When the outer worker held the only
 //! warmup reservation, it released the slot when its inline submission
 //! returned a transient error, while the relay still owed a real
 //! reputation-affecting delivery from that same warming IP. Under enough
@@ -14,16 +14,16 @@
 //! The component that can actually transmit DATA must be the component that
 //! admits the warming IP for the day. [`WarmupGate`] runs at the very top of
 //! [`crate::Relay::deliver`], BEFORE any connection is opened, for every
-//! attempt — inline submissions and daemon retries alike. A refused or
+//! attempt, inline submissions and daemon retries alike. A refused or
 //! unavailable admission defers the send (nothing hit the wire), and the
 //! next attempt re-evaluates against the then-current day counter.
 //!
 //! # Accounting
 //!
-//! * Counter: `apexmail:warmup:ip:{ip}:{utc_day}` — the SAME key family the
+//! * Counter: `apexmail:warmup:ip:{ip}:{utc_day}`, the SAME key family the
 //!   quota tooling reads, so per-attempt relay admission and any external
 //!   observer agree on one number.
-//! * Marker: `apexmail:warmup:relay:{ip}:{utc_day}:{send_unit}` — a
+//! * Marker: `apexmail:warmup:relay:{ip}:{utc_day}:{send_unit}`, a
 //!   re-attempt of the SAME send unit within the same day is admitted
 //!   without a second increment (the earlier attempt already consumed the
 //!   day's slot by reaching the wire); the first attempt of a NEW day
@@ -152,7 +152,7 @@ impl WarmupAdmit for RedisWarmupGate {
         // re-selected upstream, never silently re-routed here).
         let Some(lifecycle) = load_lifecycle(db, source_ip).await? else {
             return Err(format!(
-                "dedicated IP {source_ip} no longer exists — its route must be re-selected"
+                "dedicated IP {source_ip} no longer exists, its route must be re-selected"
             ));
         };
         // Graduated/active IPs carry no quota: admission is free. Only a
@@ -162,7 +162,7 @@ impl WarmupAdmit for RedisWarmupGate {
         }
         let started = lifecycle.warmup_started_at.ok_or_else(|| {
             format!(
-                "warming IP {source_ip} has no warmup_started_at — refusing to admit unanchored"
+                "warming IP {source_ip} has no warmup_started_at, refusing to admit unanchored"
             )
         })?;
         let now = Utc::now();
@@ -237,7 +237,7 @@ impl WarmupGate {
             // A gate without its lifecycle store cannot judge the cap —
             // fail closed rather than send unaccounted.
             return Err(
-                "warmup admission is installed but the ledger is not Postgres-backed — \
+                "warmup admission is installed but the ledger is not Postgres-backed, \
                  refusing to send unaccounted"
                     .to_string(),
             );

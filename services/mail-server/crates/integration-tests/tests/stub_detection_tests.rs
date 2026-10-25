@@ -1,15 +1,15 @@
 //! # Stub and Bug Detection Tests (audit SM12 F1 rewrite)
 //!
 //! The original suite verified toy reimplementations defined inside this file
-//! (a hand-rolled rate limiter, an XOR "cipher", a stdlib `AtomicU64`) — the
+//! (a hand-rolled rate limiter, an XOR "cipher", a stdlib `AtomicU64`), the
 //! file whose job was catching stubs was itself the largest stub in the repo.
 //!
 //! Every test below now exercises REAL workspace production code:
-//! - `apexmail_rate_limiter` — `SlidingWindowCounter` window semantics
-//! - `worker_processors::common::CircuitBreaker` — trip / half-open race / close
-//! - `apexmail_lib::crypto` — HMAC-SHA256 + Argon2id + hash-version detection
-//! - `apexmail_lib::validation` — RFC 5322 email / domain / null-byte guards
-//! - `apexmail_rate_limiter::RedisLimiter` — the bounded-connect timeout path
+//! - `apexmail_rate_limiter`, `SlidingWindowCounter` window semantics
+//! - `worker_processors::common::CircuitBreaker`, trip / half-open race / close
+//! - `apexmail_lib::crypto`, HMAC-SHA256 + Argon2id + hash-version detection
+//! - `apexmail_lib::validation`, RFC 5322 email / domain / null-byte guards
+//! - `apexmail_rate_limiter::RedisLimiter`, the bounded-connect timeout path
 //!
 //! Modules from the old file with NO hermetic production counterpart (the
 //! toy `HealthChecker`, `AuditLog`, `GracefulShutdown`, and the literal-vs-
@@ -21,7 +21,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 // ===========================================================================
-// 1. RATE LIMITING — real SlidingWindowCounter window semantics
+// 1. RATE LIMITING, real SlidingWindowCounter window semantics
 // ===========================================================================
 
 /// The rate limiter must actually admit up to the limit, deny beyond it,
@@ -47,7 +47,7 @@ mod rate_limiter_real_tests {
         let sixth = counter.check_and_increment();
         assert!(
             sixth.is_denied(),
-            "request 6 over the limit MUST be denied — a pass-through limiter is a stub"
+            "request 6 over the limit MUST be denied, a pass-through limiter is a stub"
         );
         let retry_after = sixth
             .retry_after()
@@ -95,7 +95,7 @@ mod rate_limiter_real_tests {
         assert_eq!(
             counter.current_count(),
             before,
-            "peek must be read-only — a peek that consumes budget over-throttles"
+            "peek must be read-only, a peek that consumes budget over-throttles"
         );
         // And the reserved budget is still spendable after all the peeks.
         assert!(
@@ -110,7 +110,7 @@ mod rate_limiter_real_tests {
         for _ in 0..3 {
             counter.check_and_increment();
         }
-        counter.check_and_increment(); // denied — must NOT be counted
+        counter.check_and_increment(); // denied, must NOT be counted
         assert_eq!(
             counter.current_count(),
             3,
@@ -121,7 +121,7 @@ mod rate_limiter_real_tests {
 }
 
 // ===========================================================================
-// 2. RATE LIMITING UNDER CONTENTION — no lost updates on real shared state
+// 2. RATE LIMITING UNDER CONTENTION, no lost updates on real shared state
 // ===========================================================================
 
 /// The old `concurrency_bug_tests` module verified stdlib `AtomicU64` —
@@ -159,7 +159,7 @@ mod rate_limiter_contention_tests {
         let total_allowed: u32 = handles.into_iter().map(|h| h.join().unwrap()).sum();
         assert_eq!(
             total_allowed, 50,
-            "contention must admit EXACTLY the limit — fewer is a lost update, more is over-admission"
+            "contention must admit EXACTLY the limit, fewer is a lost update, more is over-admission"
         );
         assert_eq!(
             counter.current_count(),
@@ -170,7 +170,7 @@ mod rate_limiter_contention_tests {
 }
 
 // ===========================================================================
-// 3. CIRCUIT BREAKER — real trip / half-open race / close state machine
+// 3. CIRCUIT BREAKER, real trip / half-open race / close state machine
 // ===========================================================================
 
 /// `worker_processors::common::CircuitBreaker` must open at the threshold,
@@ -203,7 +203,7 @@ mod circuit_breaker_real_tests {
         for _ in 0..10 {
             assert!(
                 !cb.is_allowed(),
-                "an OPEN circuit must block ALL requests — a breaker that never blocks is a stub"
+                "an OPEN circuit must block ALL requests, a breaker that never blocks is a stub"
             );
         }
     }
@@ -296,7 +296,7 @@ mod circuit_breaker_real_tests {
 }
 
 // ===========================================================================
-// 4. CRYPTO — real HMAC-SHA256 / Argon2id round-trips (apexmail_lib::crypto)
+// 4. CRYPTO, real HMAC-SHA256 / Argon2id round-trips (apexmail_lib::crypto)
 // ===========================================================================
 
 /// The old module "encrypted" with XOR and compared the result to itself.
@@ -337,7 +337,7 @@ mod crypto_real_tests {
             "a tampered payload MUST produce a different signature"
         );
         // The documented relationship: hash_api_key_with_secret is
-        // HMAC(secret, key-as-data) — the credential path and the webhook
+        // HMAC(secret, key-as-data), the credential path and the webhook
         // path share one primitive.
         assert_eq!(
             hash_api_key_with_secret("am_live_key", "server-secret"),
@@ -412,7 +412,7 @@ mod crypto_real_tests {
 }
 
 // ===========================================================================
-// 5. INPUT VALIDATION — real apexmail_lib::validation guards
+// 5. INPUT VALIDATION, real apexmail_lib::validation guards
 // ===========================================================================
 
 /// The old module validated a hand-written `contains('@')` predicate. These
@@ -458,7 +458,7 @@ mod validation_real_tests {
         ] {
             assert!(
                 !is_valid_email(bad),
-                "{bad:?} must be REJECTED — accepting it is a security regression"
+                "{bad:?} must be REJECTED, accepting it is a security regression"
             );
         }
     }
@@ -489,7 +489,7 @@ mod validation_real_tests {
 }
 
 // ===========================================================================
-// 6. TIMEOUT ENFORCEMENT — real bounded-connect behavior (RedisLimiter)
+// 6. TIMEOUT ENFORCEMENT, real bounded-connect behavior (RedisLimiter)
 // ===========================================================================
 
 /// The old module tested tokio's own `timeout` combinator. The real question:

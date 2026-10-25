@@ -66,7 +66,7 @@ pub enum MessageDisposition {
     Quarantine,
     Reject,
     /// The DMARC policy lookup transiently failed AND neither SPF nor DKIM
-    /// passed — the message cannot be authenticated right now. The SMTP
+    /// passed, the message cannot be authenticated right now. The SMTP
     /// session must answer with a temporary failure (451) so the sender
     /// retries, instead of fail-open accepting a potentially spoofed message.
     TempFail,
@@ -145,7 +145,7 @@ pub struct DmarcRecord {
 /// Why a DMARC TXT record could not be turned into a policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DmarcRecordError {
-    /// Not a DMARC record (no `v=DMARC1` tag) — ignored.
+    /// Not a DMARC record (no `v=DMARC1` tag), ignored.
     NotDmarc,
     /// `v=DMARC1` present but the record is malformed (RFC 7489 §6.6.3 → permerror).
     PermError,
@@ -158,7 +158,7 @@ enum DmarcLookup {
     None,
     /// A valid record; `policy` already carries the effective policy (sp= vs p=).
     Record(DmarcRecord),
-    /// A `v=DMARC1` record that failed to parse — RFC 7489 §6.6.3 permerror.
+    /// A `v=DMARC1` record that failed to parse, RFC 7489 §6.6.3 permerror.
     PermError,
     /// The lookup itself failed transiently (timeout, SERVFAIL, network) —
     /// NOT the same as "no record published" (NXDOMAIN/NODATA). Consumers
@@ -254,7 +254,7 @@ impl EmailAuthenticator {
         helo_hostname: &str,
         mail_from: &str,
     ) -> anyhow::Result<AuthenticationResults> {
-        // SMTP envelope (MAIL FROM) domain — used for the SPF check itself.
+        // SMTP envelope (MAIL FROM) domain, used for the SPF check itself.
         let envelope_domain = mail_from
             .rsplit_once('@')
             .map(|(_, d)| d)
@@ -348,7 +348,7 @@ impl EmailAuthenticator {
             .verify_spf_sender(client_ip, helo, from_domain, mail_from)
             .await;
         let verdict = map_spf_result(&output.result());
-        // Transient SPF verdicts (TempError — timeout/SERVFAIL) are NOT
+        // Transient SPF verdicts (TempError, timeout/SERVFAIL) are NOT
         // cached, mirroring the DMARC guard below: a 5-minute cached
         // TempError turned a DNS blip into a persistent failure window.
         if verdict != SpfVerdict::TempError {
@@ -468,7 +468,7 @@ impl EmailAuthenticator {
                     DmarcLookup::None
                 }
             }
-            // C:NXDOMAIN / NODATA arrive as NoRecordsFound — that is a
+            // C:NXDOMAIN / NODATA arrive as NoRecordsFound, that is a
             // definitive "no record published" (→ None). Any other error
             // (timeout, SERVFAIL, network) is transient and must surface as
             // TempError so the caller can tempfail instead of treating the
@@ -532,7 +532,7 @@ impl EmailAuthenticator {
 }
 
 /// Printable-ASCII gate for values interpolated into the emitted
-/// Authentication-Results header — the same defence `build_received_header`
+/// Authentication-Results header, the same defence `build_received_header`
 /// applies to rDNS names. DKIM `d=`/`s=` (and the SPF/DMARC domains) are
 /// parsed out of attacker-supplied message content, so control characters
 /// or 8-bit bytes must never reach a trace header raw; a non-printable
@@ -586,7 +586,7 @@ fn disposition_for(
         return MessageDisposition::Reject;
     }
 
-    // C:DMARC lookup transiently failed (timeout/SERVFAIL — distinct from
+    // C:DMARC lookup transiently failed (timeout/SERVFAIL, distinct from
     // NXDOMAIN) while NEITHER SPF nor DKIM passed an ALIGNED check. The
     // message cannot be authenticated: tempfail (451) so the sender retries,
     // instead of fail-open accepting a potentially spoofed message.
@@ -619,7 +619,7 @@ fn disposition_for(
 /// DMARC tempfail gate (RFC 7489 §3.1).
 ///
 /// During TempError no policy record exists, so `aspf=`/`adkim=` are unknown
-/// and the record-driven alignment booleans are all false — alignment is
+/// and the record-driven alignment booleans are all false, alignment is
 /// therefore re-evaluated here with the RFC's default relaxed mode. Only an
 /// aligned pass counts: a pass on an unrelated domain authenticates that
 /// domain, not the (attacker-controlled) RFC 5322 From domain.
@@ -861,7 +861,7 @@ fn evaluate_dmarc(
                 dkim: false,
             },
         ),
-        // C:the lookup itself failed transiently — never conflated with a
+        // C:the lookup itself failed transiently, never conflated with a
         // published p=none.
         DmarcLookup::TempError => (
             DmarcVerdict::TempError,
@@ -885,7 +885,7 @@ fn evaluate_dmarc(
                 DmarcVerdict::Pass
             } else {
                 // Audit finding 5: an unaligned evaluation is a DMARC FAIL
-                // that carries the record's policy — including `p=none`
+                // that carries the record's policy, including `p=none`
                 // (RFC 7489 §6.6.3: "none" is only for "no usable record").
                 // The old mapping of unaligned p=none to `DmarcVerdict::None`
                 // made the operator's `allow_soft_fail=false` quarantine arm
@@ -1436,7 +1436,7 @@ mod tests {
     #[test]
     fn dmarc_temperror_with_unaligned_spf_pass_tempfails() {
         // From example.com but MAIL FROM (and the SPF pass) on evil.com: the
-        // pass authenticates evil.com, not the From domain — it must not
+        // pass authenticates evil.com, not the From domain, it must not
         // lift the tempfail gate.
         let results = temp_error_results(
             "example.com",
@@ -1526,7 +1526,7 @@ mod tests {
     #[test]
     fn test_dmarc_policy_none_without_alignment_is_fail_carrying_the_none_policy() {
         // Audit finding 5: an unaligned p=none evaluation is a DMARC FAIL
-        // whose policy is the record's `p=none` (RFC 7489 §6.6.3) — never a
+        // whose policy is the record's `p=none` (RFC 7489 §6.6.3), never a
         // bare `None`, which would hide the failure from the disposition
         // matrix and make `allow_soft_fail=false` a dead knob.
         let none_record = DmarcRecord {
@@ -1549,7 +1549,7 @@ mod tests {
     /// Audit finding 5 regression, both arms: a published p=none record with
     /// NO aligned pass must yield Fail+None from `evaluate_dmarc`, so
     /// `allow_soft_fail=true` accepts while `allow_soft_fail=false`
-    /// quarantines — the operator knob actually does something.
+    /// quarantines, the operator knob actually does something.
     #[test]
     fn allow_soft_fail_decides_the_disposition_for_unaligned_p_none() {
         let none_record = DmarcRecord {
@@ -1867,7 +1867,7 @@ mod tests {
 mod wire_gap_tests {
     //! Wire-path gap coverage against the loopback UDP DNS mock: the SPF
     //! cache-hit surface, the DKIM parse-failure fallback, and the DMARC
-    //! organizational-domain fallback (`sp=` / permerror recovery) — every
+    //! organizational-domain fallback (`sp=` / permerror recovery), every
     //! one of these decides real accept/reject dispositions.
 
     use super::super::test_dns::{resolver_at, DnsAnswer, MockDns};
@@ -2029,7 +2029,7 @@ mod wire_gap_tests {
     async fn a_malformed_record_at_the_subdomain_still_falls_back_to_the_org() {
         let mut rules: HashMap<&'static str, DnsAnswer> = HashMap::new();
         // v=DMARC1 without a usable p= is a PERMERROR (RFC 7489 §6.6.3) at
-        // the exact From domain — the org-domain record still applies.
+        // the exact From domain, the org-domain record still applies.
         rules.insert("_dmarc.a.b.example.net", txt(vec!["v=DMARC1; p=banana"]));
         rules.insert("_dmarc.example.net", txt(vec!["v=DMARC1; p=quarantine"]));
         rules.insert("a.b.example.net", txt(vec!["v=spf1 ip4:203.0.113.10 -all"]));
@@ -2058,7 +2058,7 @@ mod wire_gap_tests {
     async fn a_temperror_dmarc_lookup_is_never_cached_as_a_policy() {
         // SERVFAIL for the _dmarc query: TempError. TempError is NEVER
         // cached, so the same authenticator must pick up the record the
-        // moment DNS recovers — a cached TempError would keep the domain
+        // moment DNS recovers, a cached TempError would keep the domain
         // failed for the 5-minute cache window.
         let rules = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
         let socket = tokio::net::UdpSocket::bind(("127.0.0.1", 0)).await.unwrap();

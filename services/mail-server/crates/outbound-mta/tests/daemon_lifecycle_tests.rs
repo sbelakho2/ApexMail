@@ -42,7 +42,7 @@ fn spawn_daemon(database_url: &str, health_addr: SocketAddr) -> Child {
 }
 
 /// Poll the daemon's health endpoint until it answers (or the deadline
-/// expires — a hung bind fails here instead of hanging the runner).
+/// expires, a hung bind fails here instead of hanging the runner).
 fn wait_for_health(addr: SocketAddr) -> (u16, String) {
     let deadline = Instant::now() + STARTUP_DEADLINE;
     loop {
@@ -95,7 +95,7 @@ fn stderr_of(child: &mut Child) -> String {
 }
 
 /// The deployed daemon serves its health contract against the real ledger
-/// and drains to exit code 0 on SIGTERM — the container stop signal. Before
+/// and drains to exit code 0 on SIGTERM, the container stop signal. Before
 /// SIGTERM was handled, the default disposition killed the process
 /// mid-sweep and the graceful drain never ran.
 #[test]
@@ -167,7 +167,7 @@ fn daemon_sigint_exits_cleanly() {
 }
 
 /// A malformed DATABASE_URL must fail fast with exit code 1 and an error
-/// naming the variable — never serve "ok" health for a relay that cannot
+/// naming the variable, never serve "ok" health for a relay that cannot
 /// reach its queue. (A well-formed URL to a dead server is retried for the
 /// pool's 30s acquire_timeout by design; a parse error must not wait.)
 #[test]

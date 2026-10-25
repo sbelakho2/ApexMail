@@ -35,7 +35,7 @@ mod golden_tests;
 mod link_integrity_tests;
 
 // Gate J: theme-safe tinted surfaces (pale static tints need an explicit
-// text colour — the colour scheme flips the inherited one).
+// text colour, the colour scheme flips the inherited one).
 #[cfg(test)]
 mod theme_contrast_tests;
 
@@ -51,7 +51,7 @@ mod migration_tests;
 ///
 /// The routes `/assets/globals.css` is served from carry no hash, so a plain
 /// `/assets/globals.css` URL can be served from a browser or proxy cache for
-/// as long as the cache entry's freshness allows — a CSS change then leaves
+/// as long as the cache entry's freshness allows, a CSS change then leaves
 /// open tabs (and warm caches) rendering the PREVIOUS build (dogfood
 /// 2026-10-06: a redesigned page kept rendering the old sheet). The query is
 /// derived from the sheet itself, so a changed sheet is a changed URL and
@@ -70,7 +70,7 @@ pub fn globals_css_url() -> &'static str {
 
 pub const FOUNDATION_MANIFEST_JSON: &str =
     include_str!("../../../../../docs/development/ui-rust-foundation-manifest.json");
-/// The canonical webhook event vocabulary — the ONE list.
+/// The canonical webhook event vocabulary, the ONE list.
 ///
 /// api-server's `KNOWN_WEBHOOK_EVENTS` re-exports this constant, so the
 /// validator's accepted names and the console's checkbox group cannot drift
@@ -109,7 +109,7 @@ pub const GLOBALS_INPUT_CSS: &str = include_str!("../assets/globals.input.css");
 /// vocabulary). The single source both the console and marketing builds
 /// inline; tools/check_ark_mirror.py keeps the marketing copy identical.
 pub const ARK_CSS: &str = include_str!("../assets/ark.css");
-/// The marketing build's copy of the authority — must be byte-identical.
+/// The marketing build's copy of the authority, must be byte-identical.
 pub const MARKETING_ARK_CSS: &str =
     include_str!("../../../../../apps/marketing-zola/static/css/ark.css");
 /// Whether the embedded marketing pages are the REAL Zola build output
@@ -123,7 +123,7 @@ mod tests {
     use super::GLOBALS_CSS;
 
     /// The compiled artifact inlines the authority: fonts, tokens and the
-    /// apex-* vocabulary all resolve to ark.css content — and the artifact
+    /// apex-* vocabulary all resolve to ark.css content, and the artifact
     /// can never carry elevation, blur, fade gradients or arch radii,
     /// because cssgen cannot emit them and ark.css does not define them.
     /// Strip CSS comments so the law scan reads rules, not documentation
@@ -206,7 +206,7 @@ mod tests {
         }
     }
 
-    /// Dark mode must work from `prefers-color-scheme` alone — the zero-JS
+    /// Dark mode must work from `prefers-color-scheme` alone, the zero-JS
     /// console has no bootstrap script to toggle a `.dark` class at runtime.
     #[test]
     fn globals_css_dark_mode_needs_no_scripts() {
@@ -214,7 +214,7 @@ mod tests {
         assert!(GLOBALS_CSS.contains(":root:not(.light)"));
         // Dark is an inversion, not a second design: every COLOUR token the
         // light block defines must exist in the dark block (theme-invariant
-        // tokens — rules, radii, motion, fonts — need only light).
+        // tokens, rules, radii, motion, fonts, need only light).
         use crate::tokens::block_tokens;
         let dark = block_tokens(crate::ARK_CSS, ".dark");
         let light = block_tokens(crate::ARK_CSS, ":root");
@@ -391,7 +391,7 @@ mod tests {
         assert_eq!(token("--rule-2"), "2px");
         assert_eq!(token("--rule-1"), "1px");
         // No elevation exists in the authority. The single sanctioned
-        // box-shadow is the tab underline (inset 0 -3px 0 — a 3px ink RULE
+        // box-shadow is the tab underline (inset 0 -3px 0, a 3px ink RULE
         // drawn inside the tab, not an elevation).
         let rules = css_rules(sheet);
         for line in rules.lines() {
@@ -405,7 +405,7 @@ mod tests {
     }
 
     /// The palette law, pinned at the authority: ink structure, blue
-    /// interaction, amber caution, red destruction and the wordmark — and
+    /// interaction, amber caution, red destruction and the wordmark, and
     /// NO green and NO purple anywhere, in light or dark.
     #[test]
     fn palette_law_blue_ink_red_no_green_no_purple() {
@@ -436,7 +436,7 @@ mod tests {
         ] {
             assert!(
                 !sheet.contains(green),
-                "green {green:?} must not exist — verified renders blue"
+                "green {green:?} must not exist, verified renders blue"
             );
         }
         for purple in [
@@ -452,7 +452,7 @@ mod tests {
         ] {
             assert!(
                 !sheet.contains(purple),
-                "purple {purple:?} must not exist — no framework indigo"
+                "purple {purple:?} must not exist, no framework indigo"
             );
         }
         // The old red brand and zinc neutrals must stay gone (the wordmark
@@ -632,7 +632,7 @@ mod tests {
                 .unwrap_or(home.len())];
         assert!(
             !banner.contains("<button"),
-            "inert consent buttons must not ship — the zero-JS banner uses links"
+            "inert consent buttons must not ship, the zero-JS banner uses links"
         );
     }
 }

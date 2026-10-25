@@ -4,7 +4,7 @@
 //! activation are driven by verified Mollie webhooks, and direct create/plan
 //! changes remain refused. CANCELLATION is different (external audit 15 Oct,
 //! H1): ApexMail owns the subscription state, so a customer cancelling from
-//! the product is a LOCAL state change — `cancel_at_period_end` stops the next
+//! the product is a LOCAL state change, `cancel_at_period_end` stops the next
 //! renewal charge and a period-end sweep downgrades the tenant. The old
 //! refusal pointed customers at an Mollie hosted billing portal that does not
 //! exist, leaving them no way to stop being charged.
@@ -36,7 +36,7 @@ pub async fn create_subscription(
 
 /// SQL used by [`get_subscription`] to read the live subscription.
 ///
-/// Fix C — entitlement writers only ever touch `mollie_subscriptions` +
+/// Fix C, entitlement writers only ever touch `mollie_subscriptions` +
 /// `tenants.plan`; the legacy `subscriptions` table stays empty, so reads
 /// must resolve against mollie_subscriptions (period bounds live in
 /// billing_cycle_start/end) and join tenants for the effective plan name.
@@ -82,7 +82,7 @@ pub async fn update_plan(
     Err(SubscriptionError::PaymentConfirmationRequired)
 }
 
-/// Direct local cancellation — the self-service stop for the next renewal.
+/// Direct local cancellation, the self-service stop for the next renewal.
 ///
 /// `immediately == false` (the normal case) records `cancel_at_period_end`
 /// and keeps access until `billing_cycle_end`; the period-end sweep then
@@ -603,7 +603,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // Fix C — the subscription reader must target the table the Mollie
+    // Fix C, the subscription reader must target the table the Mollie
     // webhook writers actually populate.
     // ------------------------------------------------------------------
 

@@ -25,7 +25,7 @@ pub struct GovernorLimiter {
     /// retry-after for batch requests that can never fit in the burst.
     rps: u32,
     jitter: Option<Duration>,
-    /// F14:tokens consumed in the current window (approximation — decayed
+    /// F14:tokens consumed in the current window (approximation, decayed
     /// at the steady refill rate, clamped at 0). Shared across clones so
     /// the reported `remaining` reflects real consumption instead of
     /// always reporting the full burst.
@@ -81,7 +81,7 @@ impl GovernorLimiter {
     }
 
     /// F14:tokens remaining after the recorded consumption. For an unused
-    /// limiter this equals the burst — the true remaining of a full bucket;
+    /// limiter this equals the burst, the true remaining of a full bucket;
     /// the burst is only reported when nothing has been consumed.
     fn remaining(&self) -> u64 {
         let consumed = self.consumed.load(Ordering::Relaxed).max(0) as u64;
@@ -91,7 +91,7 @@ impl GovernorLimiter {
     /// Check if a single request is allowed.
     ///
     /// F14/#229:`remaining` used to ALWAYS report the full burst because
-    /// governor exposes no token count — callers could not see exhaustion
+    /// governor exposes no token count, callers could not see exhaustion
     /// approaching. Consumption is now tracked (decayed at the refill
     /// rate), so `remaining` is the real post-check budget.
     pub fn check(&self) -> Decision {
@@ -140,7 +140,7 @@ impl GovernorLimiter {
                         }
                     }
                     Err(_insufficient) => {
-                        // `n` exceeds the burst capacity permanently — the
+                        // `n` exceeds the burst capacity permanently, the
                         // wait is the time to accumulate `n` tokens at the
                         // steady rate (fix K5: previously a hardcoded 100ms
                         // regardless of state).
@@ -151,7 +151,7 @@ impl GovernorLimiter {
                         }
                     }
                     Ok(Err(not_until)) => {
-                        // Not enough tokens RIGHT NOW — compute the real
+                        // Not enough tokens RIGHT NOW, compute the real
                         // wait from the limiter state instead of a constant.
                         metrics::counter!("rate_limiter_requests_total", "strategy" => "governor_batch", "decision" => "denied").increment(n.get() as u64);
                         metrics::counter!("rate_limiter_blocked_total", "strategy" => "governor_batch").increment(1);
@@ -299,12 +299,12 @@ mod tests {
     // ── F14:remaining must reflect real consumption ──────────────────
     //
     // All use rps=1 so the consumed-tracker decay (which refills at the
-    // rps rate) needs a FULL second of wall time — adjacent statements
+    // rps rate) needs a FULL second of wall time, adjacent statements
     // execute in microseconds, so the counts are deterministic.
 
     #[test]
     fn test_remaining_falls_with_each_allowed_check() {
-        // Previously `remaining` always reported the full burst — callers
+        // Previously `remaining` always reported the full burst, callers
         // could not see exhaustion approaching.
         let limiter = GovernorLimiter::from_params(1, 5);
         assert_eq!(limiter.check().remaining(), 4, "burst 5, 1 consumed");
@@ -338,7 +338,7 @@ mod tests {
     fn test_remaining_recovers_with_refill() {
         // Drain fully (remaining 0, denied), wait for the 1rps steady
         // refill, then an allowed check consumes exactly the refilled
-        // token — remaining reports 0 again, proving the tracker follows
+        // token, remaining reports 0 again, proving the tracker follows
         // the refill rather than sticking at the drained value.
         let limiter = GovernorLimiter::from_params(1, 2);
         assert_eq!(limiter.check().remaining(), 1);

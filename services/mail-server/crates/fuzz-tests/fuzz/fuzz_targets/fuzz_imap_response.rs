@@ -1,6 +1,6 @@
 //! Fuzz target: the IMAP response parser (imap-proto-patched).
 //!
-//! Surface: `imap_proto::parse_response` — the parser that consumes
+//! Surface: `imap_proto::parse_response`, the parser that consumes
 //! attacker-influenced bytes from remote mail servers.
 
 #![no_main]

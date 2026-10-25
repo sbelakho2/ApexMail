@@ -26,12 +26,12 @@ Bei hohen Volumina haben kleine Zustellbarkeitsänderungen große Umsatzauswirku
 
 ## Die ApexMail-Lösung
 
-- **Dedizierte IPs** — Freigegebenes Add-on ab Pro; 1 enthalten ab Growth und Business, 3 ab Enterprise Cloud. Vertraglich vereinbarte Bereitstellungsoptionen werden separat geprüft.
-- **Automatisches Warm-Up** — Allmählicher Volumenanstieg nach anbieterspezifischen Zeitplänen. Überwachung auf Reputationssignale. Manuelles Override verfügbar.
-- **Warteschlangen-Priorisierung** — Transaktionaler Verkehr wird bei Last vor Massensendungen priorisiert. Time-to-Inbox-Ziele werden überwacht.
-- **Batch-API** (`POST /v1/messages/batch`) — Reichen Sie bis zu 100 Nachrichten pro Anfrage ein. Geringerer Aufwand pro Nachricht als bei einzelnen API-Aufrufen.
-- **Ratenbegrenzungen** — Limits werden je API-Key und Tarif durchgesetzt; siehe die aktuelle API-Dokumentation für die öffentlichen Limits.
-- **Vertragliche SLA** — Business und Enterprise enthalten Tarif-SLA-Bedingungen; nicht standardisierte Bereitstellungen erfordern eine separate Vertragsprüfung.
+- **Dedizierte IPs**, Freigegebenes Add-on ab Pro; 1 enthalten ab Growth und Business, 3 ab Enterprise Cloud. Vertraglich vereinbarte Bereitstellungsoptionen werden separat geprüft.
+- **Automatisches Warm-Up**, Allmählicher Volumenanstieg nach anbieterspezifischen Zeitplänen. Überwachung auf Reputationssignale. Manuelles Override verfügbar.
+- **Warteschlangen-Priorisierung**, Transaktionaler Verkehr wird bei Last vor Massensendungen priorisiert. Time-to-Inbox-Ziele werden überwacht.
+- **Batch-API** (`POST /v1/messages/batch`), Reichen Sie bis zu 100 Nachrichten pro Anfrage ein. Geringerer Aufwand pro Nachricht als bei einzelnen API-Aufrufen.
+- **Ratenbegrenzungen**, Limits werden je API-Key und Tarif durchgesetzt; siehe die aktuelle API-Dokumentation für die öffentlichen Limits.
+- **Vertragliche SLA**, Business und Enterprise enthalten Tarif-SLA-Bedingungen; nicht standardisierte Bereitstellungen erfordern eine separate Vertragsprüfung.
 
 ## Technische Umsetzung
 

@@ -68,7 +68,7 @@ La integridad del sistema se verifica mediante controles automatizados y recurre
 | **Integridad de los artefactos de implementación** | Las imágenes de contenedor se verifican por digest, no se firman: cada ejecución del pipeline registra un manifiesto de release (digests SHA-256 por imagen, `SHA256SUMS.images`) y genera una anulación de compose con digests fijados; el despliegue se niega a levantar cualquier imagen cuyo digest no coincida con ese manifiesto. | Cada despliegue | Manifiesto de release + verificación de digest antes del rollout en la etapa de despliegue |
 | **Integridad del registro de auditoría** | Las tablas del registro de auditoría llevan una cadena hash: el resumen SHA-256 de cada fila se encadena a su predecesor. | Continuo (por escritura) | Cadena hash del registro de auditoría |
 | **Registros de despliegue** | Cada ejecución del pipeline registra un manifiesto (etapa, estado, código de salida, duración) más los registros por etapa. Son registros operativos, no un libro mayor a prueba de manipulaciones orientado al cliente. | Cada despliegue | Manifiestos de ejecución de CI (`ci/runs/<ts>/manifest.json`) |
-| **Verificación de copias de seguridad** | Cada copia de seguridad se descifra y valida estructuralmente de forma automática (`pg_restore --list`) antes de borrar la copia en claro — una copia ilegible nunca se cuenta como buena. Los ejercicios completos de restauración son manuales y siguen la cadencia trimestral documentada. | Cada copia (validación automática); trimestral (ejercicios manuales) | Validación de restaurabilidad al crear la copia; registros de ejercicios DR |
+| **Verificación de copias de seguridad** | Cada copia de seguridad se descifra y valida estructuralmente de forma automática (`pg_restore --list`) antes de borrar la copia en claro, una copia ilegible nunca se cuenta como buena. Los ejercicios completos de restauración son manuales y siguen la cadencia trimestral documentada. | Cada copia (validación automática); trimestral (ejercicios manuales) | Validación de restaurabilidad al crear la copia; registros de ejercicios DR |
 | **Resiliencia en tiempo de ejecución** | Los servicios se ejecutan con healthchecks y reinicio automático; una sonda de contenido fallida tras el despliegue dispara la reversión automática a los pins de imagen anteriores. | Continuo | Healthchecks de contenedores; etapa de verificación + rollback |
 
 ## Seguridad de infraestructura
@@ -85,13 +85,13 @@ La integridad del sistema se verifica mediante controles automatizados y recurre
 
 - Escaneo automatizado de dependencias en el pipeline CI/CD.
 - Escaneo automatizado de vulnerabilidades de infraestructura (frecuencia semanal).
-- Prueba de penetración anual por terceros (planificada — actualmente en adquisición; los resultados se publicarán después de la primera prueba y remediación).
+- Prueba de penetración anual por terceros (planificada, actualmente en adquisición; los resultados se publicarán después de la primera prueba y remediación).
 - Programa de divulgación responsable: [security@apexmail.ee](mailto:security@apexmail.ee)
 - Objetivos de remediación de vulnerabilidades por gravedad:
   - **Crítica:** Mitigación inmediata requerida; corrección permanente en 7 días.
   - **Alta:** Objetivo dentro de 30 días.
   - **Media:** Objetivo dentro de 90 días.
-  - **Baja:** Basada en riesgo — abordada en ciclos de mantenimiento regulares.
+  - **Baja:** Basada en riesgo, abordada en ciclos de mantenimiento regulares.
   - **Explotada activamente:** Proceso de emergencia independientemente de la gravedad.
 
 ## Respuesta a incidentes

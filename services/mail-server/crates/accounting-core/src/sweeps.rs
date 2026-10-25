@@ -4,16 +4,16 @@
 //! A previous pass built the accounting adapters and reported honestly that
 //! three of them had no production writer:
 //!
-//! * **payroll** — `payroll_records` (migration 199) is created by no code in
+//! * **payroll**, `payroll_records` (migration 199) is created by no code in
 //!   the repository. There is no payroll-run service, admin endpoint or CLI
 //!   that inserts a row. The missing piece is the payroll-run FEATURE itself,
 //!   not the ledger wiring.
-//! * **expenses** — `operating_costs` is deployment-optional and deliberately
+//! * **expenses**, `operating_costs` is deployment-optional and deliberately
 //!   not created by migration 220. Nothing in the repository writes it (only
 //!   `compliance/src/estonia_ou.rs` reads it, through a table-existence
 //!   guard). The missing piece is the expense-entry feature (and the
 //!   deployment's provisioning of the store).
-//! * **bank** — CLOSED by [`crate::bank_ingest`] (migration 225): statements
+//! * **bank**, CLOSED by [`crate::bank_ingest`] (migration 225): statements
 //!   are ingested as CSV with a database-enforced identity, and the
 //!   compliance cron hosts [`sweep_unposted_bank_statement_lines`] on the
 //!   same tick as the payroll/expense sweeps.
@@ -26,17 +26,17 @@
 //! # Billing sources (audit SM7 F1)
 //!
 //! The invoice / payment-allocation / credit-note adapters DO have production
-//! writers — the billing flow's live hooks (`billing-service/src/
+//! writers, the billing flow's live hooks (`billing-service/src/
 //! accounting_postings.rs`). But those hooks are best-effort by policy: a
 //! posting that failed (unprovisioned ledger, closed period) is logged and
 //! the billing write commits without it. Before this pass there was NO replay
 //! for them, so a skipped posting stayed skipped forever. The three billing
 //! sweeps below mirror the payroll sweep exactly and replay every source row
-//! that has no source document yet — a skipped posting catches up within one
+//! that has no source document yet, a skipped posting catches up within one
 //! tick of [`sweep_all_unposted`] (the combined entry point, the host the
 //! compliance cron already uses for the payroll/expense/bank sweeps).
 //!
-//! # Claim protocol — one bounded SKIP LOCKED batch per tick
+//! # Claim protocol, one bounded SKIP LOCKED batch per tick
 //!
 //! A sweep tick claims up to [`SweepConfig::batch_size`] unposted rows with
 //! ONE `FOR UPDATE ... SKIP LOCKED ... LIMIT $1` statement and posts them
@@ -85,7 +85,7 @@
 //!   exists; a human must correct or write them off (bank reconciliation is a
 //!   separate workflow, migration 220's `bank_reconciliations`);
 //! * payroll records whose gross is zero, or whose per-employee facts are
-//!   incomplete (`funded_pension_rate IS NULL` without an exemption) — the
+//!   incomplete (`funded_pension_rate IS NULL` without an exemption), the
 //!   caller-supplied [`PayrollAmountsPolicy`] returns `None` for the latter,
 //!   mirroring `estonia_ou`'s "incomplete, not silently assumed" rule. Such a
 //!   record is retried on the next tick and posts automatically once the row
@@ -250,7 +250,7 @@ const CLAIM_PAYROLL_SQL: &str = r#"
 "#;
 
 // ---------------------------------------------------------------------------
-// Savepoint plumbing — one failed row must not take the batch down with it.
+// Savepoint plumbing, one failed row must not take the batch down with it.
 // ---------------------------------------------------------------------------
 
 /// Savepoint name wrapping one claimed row inside the batch transaction.
@@ -392,7 +392,7 @@ const CLAIM_EXPENSE_SQL: &str = r#"
 /// `operating_costs` is deployment-optional: when the store is absent the
 /// report says `source_table_missing` and the sweep succeeds (nothing to do),
 /// so a deployment without an expense feature is not an error. The moment a
-/// writer exists — a future expense entry feature, a migration, or `psql` —
+/// writer exists, a future expense entry feature, a migration, or `psql` —
 /// the row is picked up and posted with no further wiring.
 pub async fn sweep_unposted_expenses(pool: &PgPool, config: &SweepConfig) -> Result<SweepReport> {
     let mut report = SweepReport::default();
@@ -541,13 +541,13 @@ pub async fn sweep_unposted_bank_statement_lines(
 }
 
 // ---------------------------------------------------------------------------
-// Invoices (audit SM7 F1 — billing-source replay)
+// Invoices (audit SM7 F1, billing-source replay)
 // ---------------------------------------------------------------------------
 
 /// Claim up to `$1` unposted finalized invoices, oldest issued first.
 ///
 /// "Unposted" is `accounting_source_documents` absence for
-/// `('invoice', 'invoices', id)` — the adapter registers that document in the
+/// `('invoice', 'invoices', id)`, the adapter registers that document in the
 /// same transaction as the entry. Drafts and non-positive invoices are
 /// excluded: no journal exists for them (the adapter skips or refuses them),
 /// so claiming them would spin the batch.
@@ -607,12 +607,12 @@ pub async fn sweep_unposted_invoices(pool: &PgPool, config: &SweepConfig) -> Res
 }
 
 // ---------------------------------------------------------------------------
-// Payment allocations (audit SM7 F1 — billing-source replay)
+// Payment allocations (audit SM7 F1, billing-source replay)
 // ---------------------------------------------------------------------------
 
 /// Claim up to `$1` unposted settlement allocations, oldest first. Credit-note
 /// allocations are posted by the credit-note adapter (with the invoice's VAT
-/// split) and zero amounts have no balanced journal — both excluded.
+/// split) and zero amounts have no balanced journal, both excluded.
 const CLAIM_PAYMENT_ALLOCATION_SQL: &str = r#"
     SELECT a.id, a.operation_id
     FROM invoice_payment_allocations a
@@ -669,7 +669,7 @@ pub async fn sweep_unposted_payment_allocations(
 }
 
 // ---------------------------------------------------------------------------
-// Credit notes (audit SM7 F1 — billing-source replay)
+// Credit notes (audit SM7 F1, billing-source replay)
 // ---------------------------------------------------------------------------
 
 /// Claim up to `$1` credit notes with an unresolved part, oldest first.
@@ -777,7 +777,7 @@ mod tests {
     use super::*;
 
     /// The claim statements must lock the claimed rows and let a concurrent
-    /// sweeper skip them — the SKIP LOCKED discipline is the concurrency
+    /// sweeper skip them, the SKIP LOCKED discipline is the concurrency
     /// contract, so it is asserted as text (the DB-backed tests exercise the
     /// behaviour). Each claim is ONE bounded batch: `LIMIT $1` (the tick's
     /// batch size) replaces the previous per-row `LIMIT 1` loop, and a
@@ -807,7 +807,7 @@ mod tests {
         }
     }
 
-    /// Audit SM7 F1 — the billing sweeps select EXACTLY the rows the adapters
+    /// Audit SM7 F1, the billing sweeps select EXACTLY the rows the adapters
     /// would post: unposted per the source-document marker, and never rows the
     /// adapter refuses/skips (draft or zero invoices, credit-note-source
     /// allocations, fully-posted credit notes), so one claim always makes
@@ -817,12 +817,12 @@ mod tests {
         // Invoices: drafts and non-positive totals are never claimable.
         assert!(
             CLAIM_INVOICE_SQL.contains("status::text <> 'draft'"),
-            "draft invoices must not be claimed — the adapter refuses them"
+            "draft invoices must not be claimed, the adapter refuses them"
         );
         assert!(
             CLAIM_INVOICE_SQL
                 .contains("COALESCE(i.total, i.subtotal + i.vat_total, i.amount, 0) > 0"),
-            "non-positive invoices must not be claimed — the adapter skips them"
+            "non-positive invoices must not be claimed, the adapter skips them"
         );
         assert!(
             CLAIM_INVOICE_SQL.contains("d.source_type = 'invoice'")
@@ -853,7 +853,7 @@ mod tests {
         assert!(
             CLAIM_CREDIT_NOTE_SQL.contains("COALESCE(c.debt_reduction_cents, c.amount) <= 0")
                 && CLAIM_CREDIT_NOTE_SQL.contains("COALESCE(c.refunded_cents, 0) <= 0"),
-            "zero parts never block resolution — a refund-only or debt-only note resolves"
+            "zero parts never block resolution, a refund-only or debt-only note resolves"
         );
     }
 
@@ -917,7 +917,7 @@ mod batch_db_tests {
     //! DB-backed proof of the batched claim protocol:
     //!
     //! * a successful tick posts every claimed row in ONE transaction (the
-    //!   pre-fix loop committed one row per transaction — the statement-level
+    //!   pre-fix loop committed one row per transaction, the statement-level
     //!   probe below records one `txid_current()` per row there, one for the
     //!   whole batch here);
     //! * a poison row still rolls back alone (savepoint isolation) and the

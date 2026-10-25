@@ -104,9 +104,9 @@ pub struct EmailConfig {
     /// IP rate limiting configuration.
     pub ip_rate_limiting: IpRateLimitConfig,
     /// WORKER PRE-SEND DLP gate configuration (`WORKER_DLP_ENABLED`,
-    /// default OFF — see [`DlpGateConfig`]).
+    /// default OFF, see [`DlpGateConfig`]).
     pub dlp: DlpGateConfig,
-    /// Dedicated SALES transport slot (`SALES_TRANSPORT` et al — see
+    /// Dedicated SALES transport slot (`SALES_TRANSPORT` et al, see
     /// [`SalesTransportConfig`]). Separate from `smtp`/`ses` by design:
     /// sales mail never rides the customer transport.
     pub sales: SalesTransportConfig,
@@ -140,7 +140,7 @@ impl Default for EmailConfig {
 /// [`SmtpConfig`]/[`SesConfig`] routes: sales mail never rides the customer
 /// SES account or the customer relay, whatever the customer transport's
 /// configuration says. Absent/unrecognized configuration resolves to
-/// [`SalesTransportMode::None`] — sales sends then HOLD in the queue with
+/// [`SalesTransportMode::None`], sales sends then HOLD in the queue with
 /// the named reason `sales_transport_unconfigured` instead of falling back
 /// (fail closed; see `crate::email::sales`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -156,7 +156,7 @@ pub enum SalesTransportMode {
     Relay,
     /// A dedicated AWS SES account purchased for sales
     /// (`SALES_TRANSPORT=ses_account`), constructed from the `SALES_SES_*`
-    /// credentials — never the customer account's AWS provider chain.
+    /// credentials, never the customer account's AWS provider chain.
     SesAccount,
 }
 
@@ -200,14 +200,14 @@ impl SalesTransportMode {
 ///
 /// Deliberately NOT accepted: an explicit port (the own MTA delivers to
 /// recipient MX ports, so a submission port in the URL would be a lie), user
-/// info (the own MTA is ApexMail's own infrastructure — there is no
+/// info (the own MTA is ApexMail's own infrastructure, there is no
 /// third-party AUTH to carry), paths, and unknown schemes. Any of those is
 /// MISCONFIGURED and the caller refuses to build a sales transport.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SalesRelayConfig {
     /// The relay's declared identity (HELO name / `Reporting-MTA`).
     pub host: String,
-    /// `smtps://` — every recipient-facing connection must complete STARTTLS.
+    /// `smtps://`, every recipient-facing connection must complete STARTTLS.
     pub require_starttls: bool,
 }
 
@@ -251,7 +251,7 @@ pub struct SalesSesConfig {
     pub secret_access_key: Zeroizing<String>,
 }
 
-/// Dedicated SALES transport configuration — the `SALES_TRANSPORT` switch
+/// Dedicated SALES transport configuration, the `SALES_TRANSPORT` switch
 /// plus its endpoint/credentials and the sales sending-domain allowlist.
 ///
 /// Default is [`SalesTransportMode::None`] with an EMPTY allowlist: an
@@ -261,7 +261,7 @@ pub struct SalesSesConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SalesTransportConfig {
     pub mode: SalesTransportMode,
-    /// `SALES_SENDING_DOMAINS` — the exact sender domains a sales send may
+    /// `SALES_SENDING_DOMAINS`, the exact sender domains a sales send may
     /// use (comma-separated, lowercased, deduplicated). A sender domain
     /// outside this list is refused BY NAME
     /// (`sales_send_domain_not_allowed`); an empty list refuses every sales
@@ -315,7 +315,7 @@ impl SalesTransportConfig {
                 None => {
                     tracing::warn!(
                         value = %raw,
-                        "unrecognized SALES_TRANSPORT value — failing CLOSED to 'none' \
+                        "unrecognized SALES_TRANSPORT value, failing CLOSED to 'none' \
                          (sales sends will be held, never routed through the customer transport)"
                     );
                     SalesTransportMode::None
@@ -409,7 +409,7 @@ impl Default for SalesTransportConfig {
 ///
 /// The default is OFF so existing deployments keep byte-identical behavior
 /// on upgrade; compose/production set `WORKER_DLP_ENABLED` explicitly.
-/// Enforcement is global — no per-tenant override surface exists (that
+/// Enforcement is global, no per-tenant override surface exists (that
 /// would be a new policy table/migration, out of this crate's scope).
 #[derive(Debug, Clone)]
 pub struct DlpGateConfig {
@@ -454,7 +454,7 @@ pub struct SmtpConfig {
 }
 
 impl Default for SmtpConfig {
-    /// Defaults — host is intentionally invalid to force explicit configuration.
+    /// Defaults, host is intentionally invalid to force explicit configuration.
     fn default() -> Self {
         Self {
             host: "smtp.unset.invalid".to_string(),
@@ -522,14 +522,14 @@ impl TrackingConfig {
 
     /// Build the tracking config from the environment:
     ///
-    /// * `TRACKING_ENABLED` — `true`/`1` enables the rewrite gate. Absent
+    /// * `TRACKING_ENABLED`, `true`/`1` enables the rewrite gate. Absent
     ///   keeps the historical default (`false`) so existing deployments do
     ///   not silently change behaviour on upgrade; compose sets it
     ///   explicitly.
-    /// * `TRACKING_SECRET_KEY` — shared with the tracking-service; too-short
+    /// * `TRACKING_SECRET_KEY`, shared with the tracking-service; too-short
     ///   values are treated as unset (the encoder refuses short keys anyway,
     ///   and a deployment that disagrees on key policy must not half-encode).
-    /// * `TRACKING_PUBLIC_HOST` / `TRACKING_BASE_URL` — public tracking host.
+    /// * `TRACKING_PUBLIC_HOST` / `TRACKING_BASE_URL`, public tracking host.
     pub fn from_env() -> Self {
         let base_url = tracking_base_url_from_env();
         let enabled = std::env::var(Self::ENABLED_ENV)
@@ -561,7 +561,7 @@ impl Default for TrackingConfig {
     }
 }
 
-/// C: the public tracking host is unified with tracking-service — both read
+/// C: the public tracking host is unified with tracking-service, both read
 /// TRACKING_PUBLIC_HOST (falling back to TRACKING_BASE_URL, the service's
 /// legacy variable) with the service's default `https://t.apexmail.ee`. The
 /// worker previously defaulted to `tracking.apexmail.ee`, which does not
@@ -581,13 +581,13 @@ fn tracking_base_url_from_env() -> String {
 /// Warmup configuration.
 ///
 /// The canonical schedule is `mail_common::warmup::WarmupSchedule` (60 days,
-/// 50/day ramping to unlimited) — there is deliberately no per-process
+/// 50/day ramping to unlimited), there is deliberately no per-process
 /// schedule copy here (the old `schedule` vec was a second, wrong ~9-step
 /// ramp and was never read). This switch only gates the worker's send-time
 /// warmup cap. It defaults ON now that `get_domain` reads the REAL warmup
 /// state (the tenant's `dedicated_ips` rows, migrations 003/071/093):
 /// the cap can only ever engage for a domain whose tenant actually has a
-/// dedicated IP still in status 'warming' — every shared-pool domain is
+/// dedicated IP still in status 'warming', every shared-pool domain is
 /// unaffected (warmup_enabled comes back false for them).
 #[derive(Debug, Clone)]
 pub struct WarmupConfig {
@@ -616,7 +616,7 @@ pub struct SesConfig {
     pub configuration_set: Option<String>,
     /// Default "From" domain when tenant domain is not yet verified in SES.
     pub default_from_domain: Option<String>,
-    /// Maximum send rate (emails per second) — SES account-level limit.
+    /// Maximum send rate (emails per second), SES account-level limit.
     pub max_send_rate: u32,
     /// Enable SES feedback forwarding (bounces/complaints via email in addition to SNS).
     pub feedback_forwarding: bool,
@@ -792,7 +792,7 @@ mod tests {
     use super::*;
 
     /// Audit-2: the configured per-second send rate must actually be
-    /// reachable from the email processor's admission gate — the SES path
+    /// reachable from the email processor's admission gate, the SES path
     /// plumbed from SesConfig.max_send_rate, the SMTP path from
     /// SmtpConfig.rate_limit_per_second.
     #[test]
@@ -915,7 +915,7 @@ mod sales_transport_config_tests {
         }
     }
 
-    /// The mode switch: absent is NONE (fail closed — sales mail is held,
+    /// The mode switch: absent is NONE (fail closed, sales mail is held,
     /// never routed through the customer transport), every documented
     /// spelling maps, and an UNRECOGNIZED value fails closed to NONE rather
     /// than being treated as "configured".
@@ -949,7 +949,7 @@ mod sales_transport_config_tests {
     }
 
     /// Absent env: the default is an UNCONFIGURED sales slot with an empty
-    /// allowlist — nothing is guessed, nothing falls back.
+    /// allowlist, nothing is guessed, nothing falls back.
     #[test]
     fn sales_config_defaults_to_unconfigured_and_holds() {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -1020,7 +1020,7 @@ mod sales_transport_config_tests {
 
     /// The env-driven mode requires its material: `relay` without
     /// `SALES_RELAY_URL` (and `ses_account` without `SALES_SES_*`) is
-    /// MISCONFIGURED — the caller refuses to boot, never silently holds.
+    /// MISCONFIGURED, the caller refuses to boot, never silently holds.
     #[test]
     fn selected_sales_mode_without_material_is_unprovisioned() {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());

@@ -1,4 +1,4 @@
-//! API server binary — entry point.
+//! API server binary, entry point.
 //!
 //! Loads configuration, creates connection pools, builds the Axum app,
 //! and serves with graceful shutdown on SIGTERM / SIGINT.
@@ -141,7 +141,7 @@ async fn run(config: Config) -> anyhow::Result<()> {
     if ip_provider.is_some() {
         tracing::info!("Hetzner dedicated IP provider initialized");
     } else {
-        tracing::warn!("HETZNER_API_TOKEN not set — dedicated IP provisioning disabled");
+        tracing::warn!("HETZNER_API_TOKEN not set, dedicated IP provisioning disabled");
     }
 
     // ── App state ───────────────────────────────────────────
@@ -167,7 +167,7 @@ async fn run(config: Config) -> anyhow::Result<()> {
     .await
     .map_err(|e| anyhow::anyhow!("failed to initialize DDoS protector: {e}"))?;
     tracing::info!(
-        "resilience layer initialised — circuit breakers (db, redis, clickhouse) and bulkheads active"
+        "resilience layer initialised, circuit breakers (db, redis, clickhouse) and bulkheads active"
     );
 
     // ── Process heartbeat (real liveness for the control plane) ──
@@ -214,7 +214,7 @@ async fn run(config: Config) -> anyhow::Result<()> {
                     }
                     Err(error) => tracing::error!(
                         error = %error,
-                        "account-deletion retention sweep failed — retrying next interval"
+                        "account-deletion retention sweep failed, retrying next interval"
                     ),
                 }
             }
@@ -228,7 +228,7 @@ async fn run(config: Config) -> anyhow::Result<()> {
     // ── Billing notification queue drainer (audit: producer with no consumer) ──
     // `notification_queue` is written by billing-service (usage/cost alerts,
     // dunning, payment_failed, trial_ending, messages_purged) with nothing
-    // reading it — the live stack carried 64 pending usage alerts, oldest two
+    // reading it, the live stack carried 64 pending usage alerts, oldest two
     // days, attempts=0. The drainer hands each row to the platform mail
     // pipeline (`email_queue` via the DKIM-ready system sender) and records
     // retries/park-failed on the row. A pass failure is logged and retried on
@@ -239,7 +239,7 @@ async fn run(config: Config) -> anyhow::Result<()> {
         tokio::spawn(async move {
             let mut interval =
                 tokio::time::interval(std::time::Duration::from_secs(DRAIN_INTERVAL_SECS));
-            // The first tick fires immediately — a restart drains the backlog
+            // The first tick fires immediately, a restart drains the backlog
             // instead of waiting a full interval.
             loop {
                 interval.tick().await;
@@ -259,7 +259,7 @@ async fn run(config: Config) -> anyhow::Result<()> {
                     ),
                     Err(error) => tracing::error!(
                         error = %error,
-                        "billing notification drain failed — retrying next interval"
+                        "billing notification drain failed, retrying next interval"
                     ),
                 }
             }
@@ -268,7 +268,7 @@ async fn run(config: Config) -> anyhow::Result<()> {
     }
 
     // ── Reply auto-send sweep (WP F9) ────────────────────────
-    // LOW-risk reply classes may send WITHOUT a human approval — but only
+    // LOW-risk reply classes may send WITHOUT a human approval, but only
     // where the owner has promoted that `(tenant, reply class)` through the
     // promotion gate (default OFF; the sweep is invisible to a tenant with no
     // enabled row, and the gate is re-checked inside each send transaction
@@ -301,7 +301,7 @@ async fn run(config: Config) -> anyhow::Result<()> {
                     ),
                     Err(error) => tracing::error!(
                         error = %error,
-                        "reply auto-send sweep failed — retrying next interval"
+                        "reply auto-send sweep failed, retrying next interval"
                     ),
                 }
             }
@@ -370,7 +370,7 @@ async fn run(config: Config) -> anyhow::Result<()> {
         );
 
         // OPS-4 (live dogfood 2026-10-08): the documented redis_* eviction
-        // gauges had no emitter in the always-on stack — their only source,
+        // gauges had no emitter in the always-on stack, their only source,
         // the profile-gated observability service, never runs in dev, so
         // every redis_* alert/panel was unreachable. The api-server IS
         // always on and this recorder (:9090) is the exposed scrape target:
@@ -464,7 +464,7 @@ fn system_sender_bootstrap_requested() -> anyhow::Result<bool> {
 async fn shutdown_signal() {
     let ctrl_c = async {
         if let Err(e) = signal::ctrl_c().await {
-            tracing::error!(error = %e, "failed to listen for Ctrl+C — shutdown may require SIGKILL");
+            tracing::error!(error = %e, "failed to listen for Ctrl+C, shutdown may require SIGKILL");
             // Fall back to pending so the other branch (SIGTERM) can still work.
             std::future::pending::<()>().await;
         }

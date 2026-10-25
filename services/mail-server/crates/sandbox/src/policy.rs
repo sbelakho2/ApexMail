@@ -85,7 +85,7 @@ pub fn evaluate_policy(inspection: &FileInspection, config: &SandboxConfig) -> P
 
     // 1b. Blocked MIME types. The policy list is expressed in MIME terms,
     //     so the magic-byte detection is mapped onto its canonical MIME.
-    //     (Previously this list was read nowhere — operators could believe
+    //     (Previously this list was read nowhere, operators could believe
     //     a protection was configured that nothing enforced.)
     if let Some(mime) = mime_for_file_type(inspection.file_type, inspection.extension.as_deref()) {
         if config.blocked_mime_types.contains(&mime) {

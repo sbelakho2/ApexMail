@@ -1,11 +1,11 @@
 {% extends "base.html" %}
 {# Section Index Template
    Contract for section landing pages (e.g., /features/, /compare/, /contact/):
-     1. Section identity — the section title renders as the page h1 unless the
+     1. Section identity, the section title renders as the page h1 unless the
         authored body already carries its own <h1> (fully authored layouts).
-     2. Subsection index — real Zola subsections are listed alongside pages so
+     2. Subsection index, real Zola subsections are listed alongside pages so
         a nested index is never silently invisible.
-     3. Empty-index state — a section with neither pages, subsections nor body
+     3. Empty-index state, a section with neither pages, subsections nor body
         content renders a useful destination list instead of an empty page. #}
 
 {# Page mode hook: frontmatter `[extra] mkt_page_mode = "…"` selects the
@@ -21,25 +21,25 @@
 {% endblock description %}
 
 {% block content %}
+  {% set page_mode = section.extra.mkt_page_mode | default(value="") %}
+  {% if "<h1" not in section.content %}
+  {% set band_title = section.title %}
+  {% set band_sub = section.description | default(value="") %}
+  {% set band_kicker = "" %}
+  {% if page_mode == "trust" %}
+  {% if i18n_data and i18n_data[l] and i18n_data[l]["page_mode"] and i18n_data[l]["page_mode"]["trust"] %}{% set band_kicker = i18n_data[l]["page_mode"]["trust"] %}{% else %}{% set band_kicker = "Trust" %}{% endif %}
+  {% elif page_mode == "architecture" %}
+  {% if i18n_data and i18n_data[l] and i18n_data[l]["page_mode"] and i18n_data[l]["page_mode"]["architecture"] %}{% set band_kicker = i18n_data[l]["page_mode"]["architecture"] %}{% else %}{% set band_kicker = "Architecture" %}{% endif %}
+  {% endif %}
+  {% include "partials/hero-band.html" %}
+  {% endif %}
+
   {% if section.content %}
-  <section class="pt-24 pb-4 lg:pt-28">
-    <div class="mx-auto max-w-3xl px-6">
-      {% if "<h1" not in section.content %}
-      {# break-words matches prose-section.html: a long compound
-         heading (e.g. the German "Migrationsleitfäden") spilled its 327px
-         mobile box by 5px and failed the F52 layout gate. #}
-      <h1 class="mb-6 break-words apex-page-title">{{ section.title }}</h1>
-      {% endif %}
-      <div class="apex-prose">
+  <section class="apex-mkt-section apex-mkt-section--dense">
+    <div class="apex-mkt-container">
+      <div class="apex-prose mx-auto">
         {{ section.content | safe }}
       </div>
-    </div>
-  </section>
-  {% elif section.title %}
-  <section class="pt-24 pb-4 lg:pt-28">
-    <div class="mx-auto max-w-3xl px-6">
-      <h1 class="break-words apex-page-title">{{ section.title }}</h1>
-      {% if section.description %}<p class="mt-4">{{ section.description }}</p>{% endif %}
     </div>
   </section>
   {% endif %}
@@ -47,49 +47,59 @@
   {% if section.pages or section.subsections %}
   {# The index cards render as ruled ledger rows (index number + title +
      description) at the reading width; each row is one link. #}
-  <div class="mx-auto max-w-3xl px-6 py-12">
-    <div class="apex-ledger--indexed">
-      {% for page in section.pages %}
-      <a href="{{ page.permalink }}">
-        <span class="apex-index">{% if loop.index < 10 %}0{{ loop.index }}{% else %}{{ loop.index }}{% endif %}</span>
-        <div>
-          <h2 class="apex-h2">{{ page.title }}</h2>
-          {% if page.description %}<span class="mt-2 block">{{ page.description }}</span>{% endif %}
+  <section class="apex-mkt-section">
+    <div class="apex-mkt-container">
+      <div class="mx-auto max-w-3xl">
+        <div class="apex-ledger--indexed">
+          {% for page in section.pages %}
+          <a href="{{ page.permalink }}">
+            <span class="apex-index">{% if loop.index < 10 %}0{{ loop.index }}{% else %}{{ loop.index }}{% endif %}</span>
+            <div>
+              <h2 class="apex-h2">{{ page.title }}</h2>
+              {% if page.description %}<span class="mt-2 block">{{ page.description }}</span>{% endif %}
+            </div>
+          </a>
+          {% endfor %}
+          {# Real subsections (folders with _index.md) render in the same list so
+             nested indexes stay discoverable. #}
+          {% set ledger_offset = section.pages | length %}
+          {% for sub in section.subsections %}
+          {% set subsec = get_section(path=sub) %}
+          <a href="{{ subsec.permalink }}">
+            <span class="apex-index">{% set sub_no = ledger_offset + loop.index %}{% if sub_no < 10 %}0{{ sub_no }}{% else %}{{ sub_no }}{% endif %}</span>
+            <div>
+              <h2 class="apex-h2">{{ subsec.title }}</h2>
+              {% if subsec.description %}<span class="mt-2 block">{{ subsec.description }}</span>{% endif %}
+            </div>
+          </a>
+          {% endfor %}
         </div>
-      </a>
-      {% endfor %}
-      {# Real subsections (folders with _index.md) render in the same list so
-         nested indexes stay discoverable. #}
-      {% set ledger_offset = section.pages | length %}
-      {% for sub in section.subsections %}
-      {% set subsec = get_section(path=sub) %}
-      <a href="{{ subsec.permalink }}">
-        <span class="apex-index">{% set sub_no = ledger_offset + loop.index %}{% if sub_no < 10 %}0{{ sub_no }}{% else %}{{ sub_no }}{% endif %}</span>
-        <div>
-          <h2 class="apex-h2">{{ subsec.title }}</h2>
-          {% if subsec.description %}<span class="mt-2 block">{{ subsec.description }}</span>{% endif %}
-        </div>
-      </a>
-      {% endfor %}
-    </div>
-  </div>
-  {% else %}
-  {# Empty-index state: name what this section is and give real destinations
-     rather than shipping a blank page. #}
-  <div class="mx-auto max-w-3xl px-6 py-12">
-    <div class="p-6 border">
-      <h2 class="apex-h2">
-        {% if i18n_data and i18n_data[l] and i18n_data[l]['a11y'] and i18n_data[l]['a11y']['no_entries'] %}{{ i18n_data[l]['a11y']['no_entries'] }}{% else %}Nothing here yet.{% endif %}
-      </h2>
-      <p class="mt-2">
-        {% if i18n_data and i18n_data[l] and i18n_data[l]['a11y'] and i18n_data[l]['a11y']['no_entries_body'] %}{{ i18n_data[l]['a11y']['no_entries_body'] }}{% else %}This index has no published entries yet. Start with the quickstart, the API reference, or contact us if you expected something here.{% endif %}
-      </p>
-      <div class="mt-4 flex flex-wrap gap-3">
-        <a href="/quickstart/" class="apex-link">{% if i18n_data and i18n_data[l] and i18n_data[l]['footer'] and i18n_data[l]['footer']['documentation'] %}{{ i18n_data[l]['footer']['documentation'] }}{% else %}Quickstart{% endif %}</a>
-        <a href="/docs/" class="apex-link">{% if i18n_data and i18n_data[l] and i18n_data[l]['header'] and i18n_data[l]['header']['documentation'] %}{{ i18n_data[l]['header']['documentation'] }}{% else %}Documentation{% endif %}</a>
-        <a href="{{ lp }}/contact/" class="apex-link">{% if i18n_data and i18n_data[l] and i18n_data[l]['footer'] and i18n_data[l]['footer']['contact'] %}{{ i18n_data[l]['footer']['contact'] }}{% else %}Contact{% endif %}</a>
       </div>
     </div>
-  </div>
+  </section>
+  {% elif not section.content %}
+  {# Empty-index state: name what this section is and give real destinations
+     rather than shipping a blank page. #}
+  <section class="apex-mkt-section">
+    <div class="apex-mkt-container">
+      <div class="mx-auto max-w-3xl">
+        <div class="p-6 border">
+          <h2 class="apex-h2">
+            {% if i18n_data and i18n_data[l] and i18n_data[l]['a11y'] and i18n_data[l]['a11y']['no_entries'] %}{{ i18n_data[l]['a11y']['no_entries'] }}{% else %}Nothing here yet.{% endif %}
+          </h2>
+          <p class="mt-2">
+            {% if i18n_data and i18n_data[l] and i18n_data[l]['a11y'] and i18n_data[l]['a11y']['no_entries_body'] %}{{ i18n_data[l]['a11y']['no_entries_body'] }}{% else %}This index has no published entries yet. Start with the quickstart, the API reference, or contact us if you expected something here.{% endif %}
+          </p>
+          <div class="mt-4 flex flex-wrap gap-3">
+            <a href="/quickstart/" class="apex-link">{% if i18n_data and i18n_data[l] and i18n_data[l]['footer'] and i18n_data[l]['footer']['documentation'] %}{{ i18n_data[l]['footer']['documentation'] }}{% else %}Quickstart{% endif %}</a>
+            <a href="/docs/" class="apex-link">{% if i18n_data and i18n_data[l] and i18n_data[l]['header'] and i18n_data[l]['header']['documentation'] %}{{ i18n_data[l]['header']['documentation'] }}{% else %}Documentation{% endif %}</a>
+            <a href="{{ lp }}/contact/" class="apex-link">{% if i18n_data and i18n_data[l] and i18n_data[l]['footer'] and i18n_data[l]['footer']['contact'] %}{{ i18n_data[l]['footer']['contact'] }}{% else %}Contact{% endif %}</a>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
   {% endif %}
+
+  {% if page_mode == "trust" %}{% include "partials/trust-band.html" %}{% endif %}
 {% endblock content %}

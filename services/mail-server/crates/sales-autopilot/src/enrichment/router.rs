@@ -18,17 +18,17 @@
 //! score     = gain − COST_LAMBDA × cost_eur
 //! ```
 //!
-//! * `coverage = fills / attempts` — probability the provider actually fills
+//! * `coverage = fills / attempts`, probability the provider actually fills
 //!   the field.
-//! * `accuracy = verified_correct / fills` — discounted to
+//! * `accuracy = verified_correct / fills`, discounted to
 //!   `0.5 + 0.5·accuracy` because verification is asynchronous: a provider
 //!   that has served fills but no verification yet is not treated as a liar,
 //!   it is treated as half-known. Verified-wrong data decays the score.
-//! * `1 − error_rate` — a provider that errors cannot deliver its coverage.
-//! * `staleness` — no success in 30+ days starts discounting the score; a
+//! * `1 − error_rate`, a provider that errors cannot deliver its coverage.
+//! * `staleness`, no success in 30+ days starts discounting the score; a
 //!   year-old success counts roughly half. An explicit `None` (no history)
 //!   is *not* penalised; that is the exploration case.
-//! * `COST_LAMBDA = 1.0` — one score unit per EUR. A provider must buy its
+//! * `COST_LAMBDA = 1.0`, one score unit per EUR. A provider must buy its
 //!   extra coverage with at most that much price difference.
 //!
 //! # Cold start
@@ -153,7 +153,7 @@ pub struct RoutingCandidate<'a> {
     pub stats: Option<ProviderStats>,
 }
 
-/// Pure routing score — the single place the trade-off is encoded, so it is
+/// Pure routing score, the single place the trade-off is encoded, so it is
 /// directly unit-testable. See the module docs for the formula.
 pub fn routing_score(
     coverage: f64,
@@ -219,7 +219,7 @@ fn effective(candidate: &RoutingCandidate<'_>) -> (f64, f64, f64, f64, Option<f6
 ///
 /// Pure: no database, no clock reads beyond `Utc::now()` inside
 /// `days_since_success` conversion. Returns `None` only for an empty
-/// candidate list — a router that fails to act is never the answer.
+/// candidate list, a router that fails to act is never the answer.
 pub fn choose_provider_from_stats(candidates: &[RoutingCandidate<'_>]) -> Option<ProviderChoice> {
     let mut best: Option<ProviderChoice> = None;
     for candidate in candidates {
@@ -394,7 +394,7 @@ pub async fn record_error(
 
 /// Record the marginal cost of a **successful** fill.
 ///
-/// Callers must only invoke this after a fill — this is what keeps
+/// Callers must only invoke this after a fill, this is what keeps
 /// `total_cost_eur` from growing on failed lookups.
 pub async fn record_cost(
     db: &PgPool,
@@ -449,7 +449,7 @@ pub async fn record_verified_correct(
 }
 
 // ---------------------------------------------------------------------------
-// Tests — pure routing semantics pinned by the audit examples
+// Tests, pure routing semantics pinned by the audit examples
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
@@ -558,7 +558,7 @@ mod tests {
         assert!(score_b > score_a, "{score_b} should beat {score_a}");
     }
 
-    /// Cold start: no history must still choose (explore) — never refuse.
+    /// Cold start: no history must still choose (explore), never refuse.
     #[test]
     fn cold_start_explores_instead_of_refusing() {
         let provider_a = StubProvider {

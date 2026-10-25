@@ -207,7 +207,7 @@ fn sla_translations_carry_substantive_term_sections() {
                 ],
             ),
             (
-                // "ausschl" (stem) matches Ausschluss AND Ausschlüsse — the
+                // "ausschl" (stem) matches Ausschluss AND Ausschlüsse, the
                 // German heading uses the umlaut plural, which the previous
                 // "ausschluss" needle could never match.
                 "exclusions",

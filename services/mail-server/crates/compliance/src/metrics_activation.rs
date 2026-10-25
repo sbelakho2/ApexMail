@@ -1,4 +1,4 @@
-//! Metrics activation plan — product and commercial analytics tracking.
+//! Metrics activation plan, product and commercial analytics tracking.
 //!
 //! Tracks activation rate, revenue quality, support cost, abuse loss,
 //! and plan profitability through weekly snapshots. Provides the dashboard

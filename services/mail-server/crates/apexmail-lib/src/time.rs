@@ -13,7 +13,7 @@ pub fn parse_duration(s: &str) -> Result<Duration, String> {
     if s.len() < 2 {
         return Err(format!("Duration '{}' must have a suffix (s/m/h/d)", s));
     }
-    // strip_suffix operates on char boundaries — split_at(len-1) panicked
+    // strip_suffix operates on char boundaries, split_at(len-1) panicked
     // when the final character was multibyte (e.g. "5ä").
     let (num, suffix) = s
         .strip_suffix(['s', 'm', 'h', 'd'])

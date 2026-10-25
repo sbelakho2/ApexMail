@@ -1,17 +1,17 @@
-//! SSRF protection — DNS validation and private IP blocking.
+//! SSRF protection, DNS validation and private IP blocking.
 //!
 //! # DNS Rebinding Mitigation (O-16.4)
 //!
 //! This module mitigates DNS rebinding attacks through:
 //!
-//! 1. **DNS resolution at request time** — The hostname is resolved immediately
+//! 1. **DNS resolution at request time**, The hostname is resolved immediately
 //!    before the HTTP connection is made, not cached indefinitely.
-//! 2. **IP address pinning** — Resolved IPs are injected into the HTTP client
+//! 2. **IP address pinning**, Resolved IPs are injected into the HTTP client
 //!    via `resolve_to_addrs()`, preventing the HTTP client from performing its
 //!    own DNS resolution at connect time.
-//! 3. **Short cache TTL** — The DNS cache has a configurable TTL (default 60s)
+//! 3. **Short cache TTL**, The DNS cache has a configurable TTL (default 60s)
 //!    to reduce the window for rebinding.
-//! 4. **Post-connection IP re-verification** — After the HTTP response is received,
+//! 4. **Post-connection IP re-verification**, After the HTTP response is received,
 //!    the IPs are re-resolved and compared against the original resolution. If
 //!    they differ, the delivery is flagged (O-16.4 hardening).
 
@@ -156,7 +156,7 @@ impl SsrfValidator {
 
         // Check blocked hostnames. Under the dev-only private-target
         // override, loopback literals are admitted (they would otherwise
-        // always be refused by the IP checks below anyway) — every other
+        // always be refused by the IP checks below anyway), every other
         // blocked hostname (metadata endpoints, k8s internals) stays
         // refused even then.
         if self.is_blocked_hostname(&hostname)
@@ -169,7 +169,7 @@ impl SsrfValidator {
 
         // If hostname is an IP, check directly. `Url::host_str` serializes
         // IPv6 hosts WITH brackets ("[fc00::1]"); strip them so a bracketed
-        // IPv6 literal is classified by the IP checks — not left to the DNS
+        // IPv6 literal is classified by the IP checks, not left to the DNS
         // resolver, where refusal would depend on how the resolver treats
         // bracketed input.
         let ip_literal = match hostname.strip_prefix('[').and_then(|i| i.strip_suffix(']')) {
@@ -434,7 +434,7 @@ fn is_private_ipv6(ip: &Ipv6Addr) -> bool {
     // NAT64: 64:ff9b::/96 (RFC 6052 well-known prefix) and the RFC 8215
     // local-use variant embed a literal IPv4 address in the last 32 bits.
     // A dual-stack NAT64 gateway would translate the "public-looking" IPv6
-    // literal straight to that IPv4 — so an embedded private address must
+    // literal straight to that IPv4, so an embedded private address must
     // be refused exactly like the IPv4 itself.
     if segments[0] == 0x0064 && segments[1] == 0xff9b {
         let embedded_ipv4 = Ipv4Addr::new(
@@ -661,7 +661,7 @@ mod adversarial_tests {
 
     /// Regression (dogfood 2026-10-06, P2): `ALLOW_WEBHOOK_HTTP` used to be
     /// presence-based (`std::env::var(..).is_ok()`), so the natural
-    /// `ALLOW_WEBHOOK_HTTP=false` — or an empty value — ENABLED plaintext
+    /// `ALLOW_WEBHOOK_HTTP=false`, or an empty value, ENABLED plaintext
     /// webhook delivery (signed payloads and secrets in cleartext). Only an
     /// explicit truthy value may open the hatch.
     #[test]
@@ -777,7 +777,7 @@ mod adversarial_tests {
                 // No resolver answer for localhost in this sandbox: the empty
                 // current set differs from the pinned set only if the check
                 // treats emptiness as a mismatch. Never assert the unsafe
-                // direction — either refusal or a true match is acceptable.
+                // direction, either refusal or a true match is acceptable.
             }
         }
     }
@@ -866,7 +866,7 @@ mod adversarial_tests {
             .expect_err("a changed binding must be refused");
         assert!(error.to_string().contains("rebinding"), "{error}");
 
-        // The same host with the LIVE set pinned passes the recheck — and
+        // The same host with the LIVE set pinned passes the recheck, and
         // the second lookup is served from the DNS cache.
         let stale_match = ResolvedWebhookTarget {
             resolved_ips: vec!["8.8.8.8".parse::<IpAddr>().unwrap()],
@@ -988,7 +988,7 @@ mod residual_ip_literal_tests {
     /// DNS rebinding: a HOSTNAME whose resolution contains a private
     /// address is refused even though the URL itself carries no IP literal.
     /// A MIXED record set (public first, private second) must also be
-    /// refused — every resolved IP is checked, not just the first answer.
+    /// refused, every resolved IP is checked, not just the first answer.
     #[tokio::test]
     async fn hostname_resolving_to_a_private_ip_is_refused_even_mixed_with_public() {
         let validator = SsrfValidator::new();

@@ -37,14 +37,14 @@ pub struct WebhookJob {
     pub created_at: DateTime<Utc>,
     /// F10: owner token of the claim that fetched this job. Minted by the
     /// claim (`gen_random_uuid()`), held for the delivery's lifetime, and
-    /// required by every completion write — a worker whose visibility lease
+    /// required by every completion write, a worker whose visibility lease
     /// expired (and whose row was re-claimed) can no longer reschedule or
     /// delete the new owner's row. `None` for legacy/token-less claims.
     ///
     /// The `rename` is load-bearing: `fetch_jobs` aliases the column as
     /// `"claimToken"` (quoted, therefore case-sensitive), so without it the
     /// derive looks for `claim_token`, finds no such column, and `default`
-    /// silently yields `None` — every fenced completion write then matches
+    /// silently yields `None`, every fenced completion write then matches
     /// `claim_token IS NOT DISTINCT FROM NULL` against a row that HAS a
     /// token and is discarded as "lease lost" (rows stranded in
     /// `processing` forever).
@@ -219,7 +219,7 @@ impl WebhookDeliveryResult {
 
 /// Truncate large payload fields to stay within size limit.
 pub fn truncate_payload(payload: &serde_json::Value, max_bytes: usize) -> serde_json::Value {
-    const TRUNCATION_NOTICE: &str = "[truncated — payload exceeded size limit]";
+    const TRUNCATION_NOTICE: &str = "[truncated, payload exceeded size limit]";
     const LARGE_FIELD_KEYS: &[&str] = &[
         "html",
         "htmlBody",
@@ -287,7 +287,7 @@ mod truncate_tests {
     fn truncate_payload_handles_multibyte_utf8_without_panic() {
         // 4-byte emoji + CJK, repeated past the 256-byte large-field
         // threshold: `&s[..n]` byte-slicing would panic when the cut lands
-        // mid-codepoint (which it does — every char here is multibyte).
+        // mid-codepoint (which it does, every char here is multibyte).
         let unit = "🎉🎉中文"; // 4+4+3+3 = 14 bytes
         let body = unit.repeat(96); // 1344 bytes > 1024 first-pass threshold
         let payload = json!({ "body": body });

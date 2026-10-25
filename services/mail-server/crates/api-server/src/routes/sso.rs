@@ -63,7 +63,7 @@ struct GoogleTokenInfoResponse {
     aud: String,
     iss: String,
     exp: Option<String>,
-    /// Google's stable account id (`sub`) — the identity-link key. Never
+    /// Google's stable account id (`sub`), the identity-link key. Never
     /// an email address: emails change, `sub` does not.
     sub: Option<String>,
     email: Option<String>,
@@ -314,7 +314,7 @@ async fn sso_github_callback(
         .await
         .map_err(|e| ApiError::Internal(format!("GitHub user parse failed: {e}")))?;
 
-    // GitHub's stable account id — the identity-link key. It is minted by
+    // GitHub's stable account id, the identity-link key. It is minted by
     // GitHub and cannot be influenced by the account holder, unlike every
     // email field below.
     let github_subject = user_data["id"]
@@ -325,7 +325,7 @@ async fn sso_github_callback(
 
     // Email resolution: /user/emails is the ONLY source of verification
     // truth. The top-level profile `email` is a public, settable,
-    // unverified field — it previously took precedence and the fallback
+    // unverified field, it previously took precedence and the fallback
     // matched on `primary` without checking `verified`, letting an
     // attacker take over any account by setting their public GitHub email
     // to the victim's address. Verification data must come from this
@@ -342,7 +342,7 @@ async fn sso_github_callback(
         .map_err(|e| ApiError::Internal(format!("GitHub emails fetch failed: {e}")))?;
 
     if !emails_resp.status().is_success() {
-        tracing::warn!(status = %emails_resp.status(), "GitHub /user/emails unavailable — refusing SSO login rather than trusting the unverified profile email");
+        tracing::warn!(status = %emails_resp.status(), "GitHub /user/emails unavailable, refusing SSO login rather than trusting the unverified profile email");
         return Ok(Redirect::to("/login?error=sso_failed").into_response());
     }
 
@@ -392,7 +392,7 @@ async fn complete_sso_login(
     use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
 
     // Resolution order (audit 1.2 fix): (provider, subject) identity link
-    // FIRST — it is the only binding the IdP account holder cannot re-point
+    // FIRST, it is the only binding the IdP account holder cannot re-point
     // at someone else's local account. Email match runs only as the
     // first-link fallback and only on an IdP-VERIFIED address; every
     // caller of this function must have enforced that verification
@@ -444,7 +444,7 @@ async fn complete_sso_login(
             }
             // MFA gate: a user who has enrolled MFA (or whose role mandates
             // it) must not be able to bypass the second factor by signing in
-            // through SSO — otherwise the password+MFA flow is decorative.
+            // through SSO, otherwise the password+MFA flow is decorative.
             // Direct them through the password login, which issues an MFA
             // challenge. (Apple/Microsoft SSO already enforce this gate.)
             if mfa_enabled || super::auth::role_requires_mfa(&role) {
@@ -486,7 +486,7 @@ async fn complete_sso_login(
         None => {
             // No identity link and no email match. Without a VERIFIED
             // address there is no takeover-proof way to bind this identity
-            // to an account — refuse rather than fall back to unverified
+            // to an account, refuse rather than fall back to unverified
             // data (a returning user would have resolved via the identity
             // link above).
             let Some(email) = verified_email else {
@@ -501,7 +501,7 @@ async fn complete_sso_login(
             // Auto-provision: create tenant + user for SSO-first signup.
             // Schema note (canonical migrations lineage): tenants.id and
             // users.tenant_id are VARCHAR(26) (ULID, migrations 052/064)
-            // but users.id is UUID (migration 052) — the 26-char text id
+            // but users.id is UUID (migration 052), the 26-char text id
             // previously bound into users.id failed the UUID column and
             // broke every first-time SSO signup. Same convention as
             // `register()`: ULID-shaped tenant id, UUID user id.
@@ -525,7 +525,7 @@ async fn complete_sso_login(
 
             // Create placeholder password hash for SSO-only accounts.
             // `$sso$`-prefixed rows are refused with a clean 401 by the
-            // password-verification gate (routes/auth.rs) — no password can
+            // password-verification gate (routes/auth.rs), no password can
             // ever verify against this value.
             let sso_placeholder_hash = format!("$sso${provider}$no-password-sso-login-only");
 
@@ -684,7 +684,7 @@ fn redirect_from_oauth_state(state: &str) -> String {
 /// without `verified == true` is never returned: GitHub's profile email
 /// is settable to anything without proof of control, and matching on it
 /// allowed account takeover (audit 1.2). `None` means no verified
-/// address exists — the caller must not match or provision by email.
+/// address exists, the caller must not match or provision by email.
 fn select_verified_github_email(
     profile_email: Option<&str>,
     emails: &[serde_json::Value],
@@ -704,7 +704,7 @@ fn select_verified_github_email(
     }
 
     // The profile email is honored only when the verification data proves
-    // control of that exact address (case-insensitive match — GitHub
+    // control of that exact address (case-insensitive match, GitHub
     // addresses are case-insensitive at delivery).
     if let Some(profile) = profile_email.filter(|p| !p.trim().is_empty()) {
         if let Some(matching) = emails.iter().find(|e| {
@@ -729,15 +729,15 @@ async fn verify_google_id_token(
     // SM3 (audit F10): verify the RS256 signature LOCALLY against Google's
     // published JWKS (fetched once, cached with rotation). The previous
     // implementation round-tripped every Google login through the network
-    // `tokeninfo` endpoint — an endpoint Google documents as not intended
-    // for production use — coupling every login's availability and latency
+    // `tokeninfo` endpoint, an endpoint Google documents as not intended
+    // for production use, coupling every login's availability and latency
     // to a third-party service.
     match verify_google_id_token_via_jwks(http_client, id_token, expected_client_id).await {
         Ok(profile) => Ok(profile),
         Err(local_error) if google_tokeninfo_fallback_enabled() => {
             tracing::warn!(
                 error = %local_error,
-                "local JWKS verification failed — falling back to Google tokeninfo \
+                "local JWKS verification failed, falling back to Google tokeninfo \
                  (GOOGLE_TOKENINFO_FALLBACK is enabled)"
             );
             verify_google_id_token_via_tokeninfo(http_client, id_token, expected_client_id).await
@@ -753,7 +753,7 @@ async fn verify_google_id_token_via_jwks(
 ) -> Result<VerifiedGoogleProfile, ApiError> {
     let now = chrono::Utc::now();
     // Two passes: the cached JWKS, then ONE forced refresh (Google rotates
-    // signing keys — an unknown `kid` must trigger a re-fetch before the
+    // signing keys, an unknown `kid` must trigger a re-fetch before the
     // login is refused).
     let mut last_error = ApiError::Unauthorized("invalid Google ID token".into());
     for attempt in 0..2 {
@@ -772,7 +772,7 @@ async fn verify_google_id_token_via_jwks(
     Err(last_error)
 }
 
-/// The legacy network verification path — kept ONLY as an opt-in fallback
+/// The legacy network verification path, kept ONLY as an opt-in fallback
 /// behind `GOOGLE_TOKENINFO_FALLBACK` (default OFF). Still fails closed on
 /// non-2xx (a tokeninfo rejection is an authentication failure, never a
 /// passthrough).
@@ -840,7 +840,7 @@ fn jwks_cache_slot() -> &'static parking_lot::RwLock<Option<CachedGoogleJwks>> {
 
 /// Is the cached JWKS too old to serve? A missing cache is always stale;
 /// an entry at or beyond the TTL is stale (and still served as a fallback
-/// if Google cannot be reached — a stale PUBLIC key set is sound to verify
+/// if Google cannot be reached, a stale PUBLIC key set is sound to verify
 /// against, an unreachable one is not a reason to fail every login).
 fn jwks_stale(cached: Option<&CachedGoogleJwks>, now: chrono::DateTime<chrono::Utc>) -> bool {
     match cached {
@@ -851,7 +851,7 @@ fn jwks_stale(cached: Option<&CachedGoogleJwks>, now: chrono::DateTime<chrono::U
 
 /// Fetch (or serve from cache) Google's JWKS. `force_refresh` bypasses a
 /// fresh cache (the unknown-`kid` rotation path). A failed refresh that
-/// still has ANY cached set serves the stale set — availability of an
+/// still has ANY cached set serves the stale set, availability of an
 /// otherwise-sound public key set beats a hard outage; with no cache at all
 /// the failure is propagated (Internal, never a bypass).
 async fn cached_google_jwks(
@@ -900,7 +900,7 @@ async fn cached_google_jwks(
             if let Some(entry) = slot.as_ref() {
                 tracing::warn!(
                     error = %error,
-                    "Google JWKS refresh failed — serving the stale cached key set"
+                    "Google JWKS refresh failed, serving the stale cached key set"
                 );
                 return Ok(entry.jwks.clone());
             }
@@ -916,7 +916,7 @@ async fn cached_google_jwks(
 }
 
 /// SM3 (audit F10) fallback flag: the network `tokeninfo` endpoint is kept
-/// only for deployments that explicitly opt back in. Default OFF — local
+/// only for deployments that explicitly opt back in. Default OFF, local
 /// JWKS verification is the path.
 fn google_tokeninfo_fallback_enabled() -> bool {
     match std::env::var("GOOGLE_TOKENINFO_FALLBACK") {
@@ -930,7 +930,7 @@ fn google_tokeninfo_fallback_enabled() -> bool {
 
 /// Verify a Google `id_token` LOCALLY: RS256 signature against the served
 /// JWKS (kid-selected), then the same audience/issuer/expiry/profile checks
-/// the tokeninfo path enforces (`validate_google_token_info`) — aud and iss
+/// the tokeninfo path enforces (`validate_google_token_info`), aud and iss
 /// via the JWT validation policy, expiry via the standard `exp` check with
 /// the same refusal shape.
 fn verify_google_token_with_jwks(
@@ -1069,7 +1069,7 @@ fn validate_google_token_info(
 
     // `sub` is the only takeover-proof identifier: it is minted by Google
     // and cannot be influenced by the account holder. Without it the login
-    // could only be matched by (changeable, re-pointable) email — the exact
+    // could only be matched by (changeable, re-pointable) email, the exact
     // takeover shape the GitHub path was fixed for.
     let subject = token_info
         .sub
@@ -1330,7 +1330,7 @@ mod tests {
         let token = mint_google_token(&pem, "signing-key-1", serde_json::json!({}));
         let mut parts: Vec<&str> = token.split('.').collect();
         assert_eq!(parts.len(), 3, "jwt shape");
-        parts[1] = "eyJzdWIiOiJvdGhlciJ9"; // {"sub":"other"} — unsigned swap
+        parts[1] = "eyJzdWIiOiJvdGhlciJ9"; // {"sub":"other"}, unsigned swap
         let tampered = parts.join(".");
         assert_eq!(
             verify_google_token_with_jwks(&tampered, &jwks, "client-123", now),
@@ -1777,7 +1777,7 @@ mod tests {
 
     #[test]
     fn validate_google_token_info_rejects_missing_sub() {
-        // Without `sub` there is no takeover-proof identity key — the login
+        // Without `sub` there is no takeover-proof identity key, the login
         // could only be matched by (changeable) email, the exact takeover
         // shape the GitHub path was fixed for.
         let error = validate_google_token_info(
@@ -1854,7 +1854,7 @@ mod tests {
     #[test]
     fn github_email_selection_ignores_unverified_profile_email() {
         // The attacker-controlled public profile email must not be honored
-        // just because it is present — only when the verification data
+        // just because it is present, only when the verification data
         // proves control of that exact address.
         let emails = vec![
             gh_email("attacker-own@example.com", true, true),
@@ -1880,7 +1880,7 @@ mod tests {
 
     #[test]
     fn github_email_selection_falls_back_to_first_verified() {
-        // No primary, profile email absent — any verified address is usable.
+        // No primary, profile email absent, any verified address is usable.
         let emails = vec![
             gh_email("a@users.noreply.github.com", false, false),
             gh_email("b@example.com", false, true),
@@ -2176,7 +2176,7 @@ mod tests {
     #[test]
     fn test_google_token_exchange_response_deserialize() {
         // Verify GoogleTokenExchangeResponse can be deserialized from JSON.
-        let json = r#"{"id_token": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxIn0"}"#; // nosemgrep: generic.secrets.security.detected-jwt-token.detected-jwt-token — truncated dummy token in a serde deserialization test
+        let json = r#"{"id_token": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxIn0"}"#; // nosemgrep: generic.secrets.security.detected-jwt-token.detected-jwt-token, truncated dummy token in a serde deserialization test
         let parsed: GoogleTokenExchangeResponse = serde_json::from_str(json).unwrap();
         assert!(parsed.id_token.is_some());
         assert!(parsed.id_token.unwrap().starts_with("eyJ"));
@@ -2489,7 +2489,7 @@ mod adversarial_handler_tests {
         }
 
         // Matching state + code but a half-configured provider (client id,
-        // no secret) is refused before any token exchange — an unconfigured
+        // no secret) is refused before any token exchange, an unconfigured
         // provider must never produce a session.
         let mut half_configured = test_config();
         half_configured.google_client_id = Some("google-client-id".into());
@@ -2906,7 +2906,7 @@ mod adversarial_handler_tests {
         .unwrap();
 
         // The IdP account is linked to the attacker; the verified email names
-        // the victim. The link must win — email never re-points a link.
+        // the victim. The link must win, email never re-points a link.
         let response = complete_sso_login(
             &state,
             "github",

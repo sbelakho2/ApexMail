@@ -15,7 +15,7 @@ methodology = "Öffentliche Mailgun-Dokumentation unter mailgun.com/docs, geprü
 volume_assumption = "100.000 E-Mails/Monat"
 billing_period = "monthly"
 currency_note = "Preise werden in EUR angezeigt. Veröffentlicht ein Anbieter nur USD, wird der EUR-Betrag zum Kurs 1 USD = €0.92 (Referenzkurs, 2026-08-19) umgerechnet und der vom Anbieter veröffentlichte USD-Preis in Klammern angegeben. Angaben ohne anfallende Steuern."
-# Feature comparison counts — update when capabilities change
+# Feature comparison counts, update when capabilities change
 verdict_title = "Wie sich ApexMail von Mailgun unterscheidet"
 verdict_points = ["EU/EWR-orientierte Bereitstellungskonfiguration", "Aktueller öffentlicher Katalog (Mailgun veröffentlicht USD; EUR zum Referenzkurs umgerechnet)", "Zugriffskontrollen in Business und Enterprise", "Audit-Logs ab Growth", "Architektur- und Vertragsprüfung für nicht standardisierte Bereitstellungen"]
 
@@ -26,34 +26,34 @@ verdict_points = ["EU/EWR-orientierte Bereitstellungskonfiguration", "Aktueller 
 # of: apexmail | competitor | tie | none.
 comparison_sections = [
   { title = "EWR-DATENVERARBEITUNG", rows = [
-    { feature = "Primäre Hosting-Region", apex = 'EU-Rechenzentren in Finnland; Kerndaten werden im EWR verarbeitet. Global-Zustellungen laufen über AWS SES in dessen EU-Regionen (die Deutschland umfassen können) — EU-Regionen eines US-Unternehmens; EU-only-Routing entfernt diesen Transport (<a href="/de/eu-sovereign/">Details</a>)', comp = 'USA (Standard); EU-Region pro Sending-Domain wählbar (gleiches Konto, gleicher Tarif)<sup><a href="#src-mg1">1</a></sup>', winner = "none" },
-    { feature = "EU-only-Routing", apex = 'Ja — eine Einstellung: jede Nachricht verlässt das System über die eigenen EU-MTAs von ApexMail; der Drittanbieter-Transport entfällt, und eine nicht verfügbare eigene MTA-Route hält die Nachricht zurück (<a href="/de/eu-sovereign/">so funktioniert es</a>)', comp = 'Nicht angeboten — EU-Region je Sending-Domain wählbar; die Zustellung läuft weiterhin über die Infrastruktur von Mailgun<sup><a href="#src-mg1">1</a></sup>', winner = "none" },
-    { feature = "EWR-Datenverarbeitung standardmäßig", apex = 'EU/EWR-orientierte Standardkonfiguration; aktive Standorte sind vereinbarungsspezifisch', comp = 'Nein — standardmäßig US-basiert; EU-Region je Sende-Domain konfiguriert<sup><a href="#src-mg1">1</a></sup>', winner = "none" },
-    { feature = "AVV-Verfügbarkeit", apex = 'Verfügbar im Rahmen der anwendbaren ApexMail-Vereinbarung', comp = 'Verfügbar — die Sinch-AVV deckt die Mailgun-Dienste ab<sup><a href="#src-mg2">2</a></sup>', winner = "none" }
+    { feature = "Primäre Hosting-Region", apex = 'EU-Rechenzentren in Finnland; Kerndaten werden im EWR verarbeitet. Global-Zustellungen laufen über AWS SES in dessen EU-Regionen (die Deutschland umfassen können), EU-Regionen eines US-Unternehmens; EU-only-Routing entfernt diesen Transport (<a href="/de/eu-sovereign/">Details</a>)', comp = 'USA (Standard); EU-Region pro Sending-Domain wählbar (gleiches Konto, gleicher Tarif)<sup><a href="#src-mg1">1</a></sup>', winner = "none" },
+    { feature = "EU-only-Routing", apex = 'Ja, eine Einstellung: jede Nachricht verlässt das System über die eigenen EU-MTAs von ApexMail; der Drittanbieter-Transport entfällt, und eine nicht verfügbare eigene MTA-Route hält die Nachricht zurück (<a href="/de/eu-sovereign/">so funktioniert es</a>)', comp = 'Nicht angeboten, EU-Region je Sending-Domain wählbar; die Zustellung läuft weiterhin über die Infrastruktur von Mailgun<sup><a href="#src-mg1">1</a></sup>', winner = "none" },
+    { feature = "EWR-Datenverarbeitung standardmäßig", apex = 'EU/EWR-orientierte Standardkonfiguration; aktive Standorte sind vereinbarungsspezifisch', comp = 'Nein, standardmäßig US-basiert; EU-Region je Sende-Domain konfiguriert<sup><a href="#src-mg1">1</a></sup>', winner = "none" },
+    { feature = "AVV-Verfügbarkeit", apex = 'Verfügbar im Rahmen der anwendbaren ApexMail-Vereinbarung', comp = 'Verfügbar, die Sinch-AVV deckt die Mailgun-Dienste ab<sup><a href="#src-mg2">2</a></sup>', winner = "none" }
   ]},
   { title = "SENDEFUNKTIONEN", rows = [
-    { feature = "REST-API", apex = 'Ja — <code>POST /v1/messages</code>', comp = 'Ja — <code>POST /v3/{domain}/messages</code><sup><a href="#src-mg3">3</a></sup>', winner = "none" },
-    { feature = "SMTP-Relay", apex = 'Ja — smtp.apexmail.ee:587 (STARTTLS)', comp = 'Ja — smtp.mailgun.org:587 (STARTTLS)<sup><a href="#src-mg3">3</a></sup>', winner = "none" },
-    { feature = "Batch-Versand", apex = 'Verfügbar, sofern für den gebuchten Tarif aktiviert', comp = 'Ja — Batch-Versand über <code>recipient-variables</code> mit bis zu 1.000 Empfängern<sup><a href="#src-mg3">3</a></sup>', winner = "none" },
-    { feature = "Idempotenzschlüssel", apex = 'Ja (alle Tarife) — Header <code>Idempotency-Key</code>', comp = 'Nicht unterstützt — Anwendungen müssen Deduplizierungslogik selbst implementieren<sup><a href="#src-mg3">3</a></sup>', winner = "apexmail" },
-    { feature = "Geplantes Senden", apex = 'Verfügbar, sofern für den gebuchten Tarif aktiviert', comp = 'Ja — Parameter <code>o:deliverytime</code> (RFC 2822-Format, bis zu 3 Tage)<sup><a href="#src-mg3">3</a></sup>', winner = "none" },
-    { feature = "Eingehende E-Mails", apex = 'Business- und Enterprise-Tarife', comp = 'Ja — Inbound-Routen mit Weiterleitungs-, Speicher- und Webhook-Aktionen<sup><a href="#src-mg4">4</a></sup>', winner = "none" }
+    { feature = "REST-API", apex = 'Ja, <code>POST /v1/messages</code>', comp = 'Ja, <code>POST /v3/{domain}/messages</code><sup><a href="#src-mg3">3</a></sup>', winner = "none" },
+    { feature = "SMTP-Relay", apex = 'Ja, smtp.apexmail.ee:587 (STARTTLS)', comp = 'Ja, smtp.mailgun.org:587 (STARTTLS)<sup><a href="#src-mg3">3</a></sup>', winner = "none" },
+    { feature = "Batch-Versand", apex = 'Verfügbar, sofern für den gebuchten Tarif aktiviert', comp = 'Ja, Batch-Versand über <code>recipient-variables</code> mit bis zu 1.000 Empfängern<sup><a href="#src-mg3">3</a></sup>', winner = "none" },
+    { feature = "Idempotenzschlüssel", apex = 'Ja (alle Tarife), Header <code>Idempotency-Key</code>', comp = 'Nicht unterstützt, Anwendungen müssen Deduplizierungslogik selbst implementieren<sup><a href="#src-mg3">3</a></sup>', winner = "apexmail" },
+    { feature = "Geplantes Senden", apex = 'Verfügbar, sofern für den gebuchten Tarif aktiviert', comp = 'Ja, Parameter <code>o:deliverytime</code> (RFC 2822-Format, bis zu 3 Tage)<sup><a href="#src-mg3">3</a></sup>', winner = "none" },
+    { feature = "Eingehende E-Mails", apex = 'Business- und Enterprise-Tarife', comp = 'Ja, Inbound-Routen mit Weiterleitungs-, Speicher- und Webhook-Aktionen<sup><a href="#src-mg4">4</a></sup>', winner = "none" }
   ]},
   { title = "BEREITSTELLUNGSMODELLE", rows = [
-    { feature = "Shared Cloud", apex = 'Ja (alle Tarife) — Multi-Tenant, in der EU gehostet', comp = 'Ja (alle Tarife)<sup><a href="#src-mg5">5</a></sup>', winner = "none" },
+    { feature = "Shared Cloud", apex = 'Ja (alle Tarife), Multi-Tenant, in der EU gehostet', comp = 'Ja (alle Tarife)<sup><a href="#src-mg5">5</a></sup>', winner = "none" },
     { feature = "Dedizierte IP", apex = 'Freigegebenes Add-on ab Pro; 1 enthalten ab Growth und Business; 3 ab Enterprise Cloud', comp = 'Als Add-on verfügbar ab dem Foundation-Tarif und darüber<sup><a href="#src-mg5">5</a></sup>', winner = "none" },
     { feature = "Dedizierte Tenancy", apex = 'Vorbehaltlich Architektur- und Vertragsprüfung', comp = 'Siehe Anbieter-Dokumentation<sup><a href="#src-mg5">5</a></sup>', winner = "none" },
     { feature = "BYOC / private Bereitstellung", apex = 'Vorbehaltlich Architektur- und Vertragsprüfung', comp = 'Siehe Anbieter-Dokumentation<sup><a href="#src-mg5">5</a></sup>', winner = "none" }
   ]},
   { title = "ENTERPRISE-KONTROLLEN", rows = [
     { feature = "SAML SSO", apex = 'Business- und Enterprise-Tarife', comp = 'Ab dem Tarif Foundation 100K und darüber<sup><a href="#src-mg6">6</a></sup>', winner = "none" },
-    { feature = "SCIM", apex = 'Enterprise-Tarif', comp = 'Zum Verifikationsdatum nicht dokumentiert — Benutzer-Provisioning über die Mailgun-API<sup><a href="#src-mg6">6</a></sup>', winner = "apexmail" },
-    { feature = "Audit-Logs", apex = 'Ab Growth-Tarif — Kontoaktivität, API-Schlüssel-Nutzung, Konfigurationsänderungen; durchsuchbar, exportierbar', comp = 'Ereignisprotokolle über die Events API zugänglich; Aufbewahrung je nach Tarif; kein zusammengeführter Audit-Trail auf Kontoebene<sup><a href="#src-mg7">7</a></sup>', winner = "apexmail" }
+    { feature = "SCIM", apex = 'Enterprise-Tarif', comp = 'Zum Verifikationsdatum nicht dokumentiert, Benutzer-Provisioning über die Mailgun-API<sup><a href="#src-mg6">6</a></sup>', winner = "apexmail" },
+    { feature = "Audit-Logs", apex = 'Ab Growth-Tarif, Kontoaktivität, API-Schlüssel-Nutzung, Konfigurationsänderungen; durchsuchbar, exportierbar', comp = 'Ereignisprotokolle über die Events API zugänglich; Aufbewahrung je nach Tarif; kein zusammengeführter Audit-Trail auf Kontoebene<sup><a href="#src-mg7">7</a></sup>', winner = "apexmail" }
   ]},
   { title = "PREISE BEI 100K/MONAT (verifiziert 2026-07-29)", rows = [
     { feature = "Verglichener Tarif", apex = 'Pro: €89/Monat (150.000 E-Mails enthalten)', comp = 'Scale: €82.80 (US$90)/Monat (100.000 E-Mails enthalten)<sup><a href="#src-mg8">8</a></sup>', winner = "none" },
     { feature = "Nutzungsbedingungen", apex = 'Siehe den aktuellen öffentlichen Katalog und Checkout für die anwendbaren Nutzungsbedingungen', comp = 'ab €1.20 (US$1.30)/1.000 bei Foundation-Überschreitung; Staffelraten ab Scale<sup><a href="#src-mg8">8</a></sup>', winner = "none" },
-    { feature = "Kostenlose Stufe", apex = '3.000 E-Mails/Monat + einmaliges Startguthaben von 30.000 E-Mails', comp = '100 E-Mails/Tag (Flex-Testphase — keine Kreditkarte)<sup><a href="#src-mg8">8</a></sup>', winner = "apexmail" }
+    { feature = "Kostenlose Stufe", apex = '3.000 E-Mails/Monat + einmaliges Startguthaben von 30.000 E-Mails', comp = '100 E-Mails/Tag (Flex-Testphase, keine Kreditkarte)<sup><a href="#src-mg8">8</a></sup>', winner = "apexmail" }
   ]},
   { title = "BEREICHE, IN DENEN MAILGUN STÄRKER IST", rows = [
     { feature = "E-Mail-Validierung", apex = 'E-Mail-Grader-API (DNS/SPF/DKIM/DMARC/Inhalt/Reputation)', comp = 'Dedizierte E-Mail-Validierungs-API mit Echtzeit- und Massenvalidierung<sup><a href="#src-mg9">9</a></sup>', winner = "competitor" },

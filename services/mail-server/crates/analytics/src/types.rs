@@ -81,7 +81,7 @@ pub struct EventCounts {
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct EventRow {
     /// Canonical events.id is VARCHAR (F83: producers write textual event
-    /// ids) — NOT a UUID column; decoding as uuid fails against the
+    /// ids), NOT a UUID column; decoding as uuid fails against the
     /// canonical schema.
     pub id: String,
     pub tenant_id: String,
@@ -165,7 +165,7 @@ pub struct BulkOptimizationResult {
     pub confidence: f64,
     pub profile_age_days: u32,
     /// F5:UTC offset (minutes) that was applied when extracting the hour
-    /// buckets — `windows[*].hour` are LOCAL hours under this offset.
+    /// buckets, `windows[*].hour` are LOCAL hours under this offset.
     /// `serde(default)` keeps entries cached before the field existed
     /// readable (they were computed at offset 0).
     #[serde(default)]
@@ -364,7 +364,7 @@ pub struct MeasuredPlacement {
     pub spam: i64,
     /// Observed folders that are neither inbox nor spam (e.g. promotions).
     pub other_folders: i64,
-    /// Seeds delivered but never observed — placement unknown.
+    /// Seeds delivered but never observed, placement unknown.
     pub unknown: i64,
     /// inbox + spam + other_folders (everything actually observed).
     pub measured_total: i64,

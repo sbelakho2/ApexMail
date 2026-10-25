@@ -2,7 +2,7 @@
 {# 2026-09-08: this page IS a live sandbox (every lane POSTs to the
    Rust executor, which runs the REAL v1 handlers against an isolated
    sandbox tenant). The old hero claimed a "static explorer" with "no
-   live server requests" — a direct contradiction of the lanes below
+   live server requests", a direct contradiction of the lanes below
    it. Copy now states exactly what runs and what cannot escape. #}
 {# ARK hero system: tool page mode tightens the hero padding via the
    body class; the "How the sandbox works" panel renders as ARK
@@ -18,7 +18,7 @@
         </h1>
         <p class="apex-mkt-hero__sub">
            Tune the payload, press send, and the request executes against an isolated
-           ApexMail sandbox with a real API key — real validation, real queuing,
+           ApexMail sandbox with a real API key, real validation, real queuing,
            real delivery attempts, and the verbatim response.
         </p>
       </div>
@@ -29,9 +29,9 @@
           <div class="apex-evidence__hatch" aria-hidden="true"></div>
           <div class="apex-evidence__body">
             <div class="space-y-3">
-              <p>Requests run against an isolated ApexMail sandbox — the same handlers, queue and worker as production.</p>
+              <p>Requests run against an isolated ApexMail sandbox, the same handlers, queue and worker as production.</p>
               <p>Sandbox messages cannot be delivered to real recipients: every recipient must end in <span class="apex-em">@example.com</span> (RFC 2606 reserved).</p>
-              <p>Responses are the real status codes, latency and JSON bodies — not simulations.</p>
+              <p>Responses are the real status codes, latency and JSON bodies, not simulations.</p>
             </div>
           </div>
         </div>

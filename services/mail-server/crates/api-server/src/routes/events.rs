@@ -114,11 +114,11 @@ fn resolve_stats_window(
 
 // ─── Keyset cursor ─────────────────────────────────────────────
 //
-// Hex-encoded `(timestamp, id)` pair — the SAME wire format
+// Hex-encoded `(timestamp, id)` pair, the SAME wire format
 // `routes/audit.rs` uses (`encode_cursor`/`decode_cursor` in
 // `routes/helpers.rs`). The tie-break `timestamp = $ts AND id < $id` makes the
 // `timestamp DESC, id DESC` ordering total, so a page boundary inside a group
-// of events sharing one timestamp neither skips nor duplicates rows — the
+// of events sharing one timestamp neither skips nor duplicates rows, the
 // failure mode plain OFFSET cannot avoid under concurrent writes.
 
 const EVENTS_CURSOR_SEP: char = '\n';
@@ -200,7 +200,7 @@ fn build_events_list_plan(
         param_idx += 1;
     }
 
-    // Keyset: no OFFSET at all — the scan starts at the cursor position on
+    // Keyset: no OFFSET at all, the scan starts at the cursor position on
     // the `(tenant_id, timestamp DESC)` index (sibling migration) instead of
     // walking and discarding up to 100k rows.
     //
@@ -250,7 +250,7 @@ async fn list_events(
     require_scopes(&auth, &["events:read"])?;
 
     // SM3 (audit F8): the param that used to be `cursor` here was a raw
-    // integer OFFSET — a lie about the crate's opaque-keyset contract. The
+    // integer OFFSET, a lie about the crate's opaque-keyset contract. The
     // pagination inputs are now: the honestly-named `offset` (same offset and
     // clamp as before; the one ordering change is the deterministic
     // `id DESC` tie-break among equal timestamps, where the old SQL left the
@@ -307,7 +307,7 @@ async fn get_event(
 ) -> Result<Json<EventResponse>, ApiError> {
     require_scopes(&auth, &["events:read"])?;
 
-    // events.id is VARCHAR(64) (migration 075 / runtime CREATE_EVENTS) — the
+    // events.id is VARCHAR(64) (migration 075 / runtime CREATE_EVENTS), the
     // path parameter is bound as text after format validation, never parsed
     // as a UUID.
     if !is_valid_event_id(&id) {
@@ -613,7 +613,7 @@ mod tests {
     #[test]
     fn stats_window_rejects_range_over_92_days() {
         let now = Utc::now();
-        // 93 days — just over the cap.
+        // 93 days, just over the cap.
         let err = resolve_stats_window(
             &stats_query(Some(now - chrono::Duration::days(93)), Some(now)),
             || Utc::now() - chrono::Duration::days(30),
@@ -751,8 +751,8 @@ mod adversarial_tests {
         assert_eq!(items[0]["id"], delivered);
 
         // Pagination (SM3 audit F8): the mislabeled integer `cursor` is
-        // GONE from the contract — an unknown query field is refused loudly
-        // (deny_unknown_fields) instead of silently meaning "offset" — and
+        // GONE from the contract, an unknown query field is refused loudly
+        // (deny_unknown_fields) instead of silently meaning "offset", and
         // hostile `offset`/`limit` values still clamp.
         let (status, body) = env.get("/v1/events?limit=1&offset=99&cursor=1").await;
         assert_eq!(
@@ -878,7 +878,7 @@ mod adversarial_tests {
     }
 
     /// A group of events sharing one timestamp must neither duplicate nor
-    /// skip rows at a page boundary — the failure mode plain OFFSET cannot
+    /// skip rows at a page boundary, the failure mode plain OFFSET cannot
     /// avoid under concurrent writes, and the reason the cursor carries the
     /// `(timestamp, id)` tie-break.
     #[tokio::test]
@@ -888,7 +888,7 @@ mod adversarial_tests {
         };
         let (env, tenant) = AdvEnv::tenant(pool.clone(), &["events:read"]).await;
         let tied = chrono::Utc::now() - chrono::Duration::minutes(5);
-        // 4 events on the SAME timestamp, plus 2 newer — page size 2 forces
+        // 4 events on the SAME timestamp, plus 2 newer, page size 2 forces
         // page boundaries inside the tie group.
         for i in 0..4u8 {
             seed_event_at(&pool, &tenant, &format!("evt_tie_{i}"), tied).await;
@@ -974,7 +974,7 @@ mod adversarial_tests {
         assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
 
         // Malformed ids are 400, never a database cast error. (The empty
-        // id is unroutable — axum sends /v1/events/ to the list route — so
+        // id is unroutable, axum sends /v1/events/ to the list route, so
         // only over-length and control-character ids reach the validator.)
         for bad in ["x".repeat(65).as_str(), "evt%0Ainjection"] {
             let (status, _body) = env.get(&format!("/v1/events/{bad}")).await;

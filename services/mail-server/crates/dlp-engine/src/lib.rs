@@ -1,11 +1,11 @@
-//! # DLP Engine — Data Loss Prevention
+//! # DLP Engine, Data Loss Prevention
 //!
 //! Prevents sensitive data from leaving the organization via email://!
-//! 1. **PII detection** — Credit card numbers (Luhn), SSNs, passport numbers, phone numbers
-//! 2. **Sensitive content scanning** — Regex + keyword pattern matching for confidential markers
-//! 3. **Entropy analysis** — Detects potential secrets/keys via Shannon entropy
-//! 4. **Document watermarking** — Adds invisible watermarks to outbound attachments
-//! 5. **Policy engine** — Configurable rules to block, quarantine, or audit
+//! 1. **PII detection**, Credit card numbers (Luhn), SSNs, passport numbers, phone numbers
+//! 2. **Sensitive content scanning**, Regex + keyword pattern matching for confidential markers
+//! 3. **Entropy analysis**, Detects potential secrets/keys via Shannon entropy
+//! 4. **Document watermarking**, Adds invisible watermarks to outbound attachments
+//! 5. **Policy engine**, Configurable rules to block, quarantine, or audit
 //!
 //! ## Design
 //!

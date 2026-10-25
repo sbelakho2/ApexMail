@@ -73,7 +73,7 @@
         </a>
         {% endfor %}
         {# Real sections (API Reference) live in subsections now that the
-           folder is a true Zola section — list them in the same ledger so the
+           folder is a true Zola section, list them in the same ledger so the
            page remains discoverable exactly as before. #}
         {% set ledger_offset = section.pages | length %}
         {% for sub in section.subsections %}
@@ -91,7 +91,7 @@
   </section>
   {% else %}
   {# No-guides state: if the docs index has no published pages yet, keep the
-     reader moving — API reference, quickstart and support must still be
+     reader moving, API reference, quickstart and support must still be
      reachable instead of an empty grid. #}
   <section class="py-12 lg:py-16">
     <div class="apex-mkt-container">

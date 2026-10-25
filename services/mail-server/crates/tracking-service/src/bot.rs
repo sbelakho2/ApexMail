@@ -1,6 +1,6 @@
 //! Bot and security-scanner detection for tracking requests.
 //!
-//! Uses AhoCorasick for O(n) substring matching — no backtracking possible,
+//! Uses AhoCorasick for O(n) substring matching, no backtracking possible,
 //! immune to ReDoS attacks regardless of User-Agent content.
 //!
 //! IP-range checks use exact CIDR matching via `ipnetwork`, also O(1) per range.

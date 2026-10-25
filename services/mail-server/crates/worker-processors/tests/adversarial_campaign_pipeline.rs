@@ -1,7 +1,7 @@
 //! Adversarial DB-backed tests for the campaign send pipeline
 //! (`worker_processors::campaigns::CampaignExecutor`).
 //!
-//! These tests pin the DANGEROUS invariants of the mail pipeline — the ones
+//! These tests pin the DANGEROUS invariants of the mail pipeline, the ones
 //! whose failure means real customer harm (double-sends, suppressed mail
 //! leaving the building, fabricated "sent" counts, cross-worker races).
 //! Expectations are copied from the production source (`src/campaigns.rs`),
@@ -32,7 +32,7 @@ use worker_processors::campaigns::CampaignExecutor;
 // ---------------------------------------------------------------------------
 
 /// Fresh canonical database per test (soft-skip only when TEST_DATABASE_URL
-/// is unset; configured-but-broken panics — never a silent skip).
+/// is unset; configured-but-broken panics, never a silent skip).
 async fn fresh_pool(test_name: &str) -> Option<PgPool> {
     match migrator::test_support::fresh_canonical_pool(test_name, test_name).await {
         Ok(pool) => pool,
@@ -458,7 +458,7 @@ async fn due_scheduled_campaign_is_claimed_to_sending_not_left_scheduled() {
         status, "scheduled",
         "a due campaign must never stay scheduled after a tick"
     );
-    assert_eq!(sent_count, 0, "nothing admitted yet — no fabricated count");
+    assert_eq!(sent_count, 0, "nothing admitted yet, no fabricated count");
 
     // Audience expanded at claim time; every row is still honest (queued).
     let rows = recipient_statuses(&pool, campaign).await;
@@ -477,7 +477,7 @@ async fn due_scheduled_campaign_is_claimed_to_sending_not_left_scheduled() {
 
 /// INVARIANT: a campaign whose `scheduled_at` is still in the future is
 /// untouched by every tick. DANGER: claiming early fires production mail
-/// hours/days before the customer authorized it — a silent, irreversible
+/// hours/days before the customer authorized it, a silent, irreversible
 /// breach of the schedule==authorization contract.
 #[tokio::test]
 async fn future_due_scheduled_campaign_is_untouched() {
@@ -515,7 +515,7 @@ async fn future_due_scheduled_campaign_is_untouched() {
     let (future_status, _) = campaign_status(&pool, future).await;
     assert_eq!(
         future_status, "scheduled",
-        "a future-due campaign must stay scheduled — claiming it early \
+        "a future-due campaign must stay scheduled, claiming it early \
          sends mail before the customer's authorized time"
     );
     assert!(
@@ -546,7 +546,7 @@ async fn future_due_scheduled_campaign_is_untouched() {
 /// and two workers draining the same audience cannot both enqueue the same
 /// recipient (`FOR UPDATE SKIP LOCKED` + the per-(campaign, contact)
 /// idempotency key). DANGER: a double claim is a double-send to every
-/// subscriber — the single most expensive bug a mail pipeline can ship.
+/// subscriber, the single most expensive bug a mail pipeline can ship.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn two_workers_cannot_double_claim_or_double_send() {
     let Some(pool) = fresh_pool("adv_double_claim").await else {
@@ -614,7 +614,7 @@ async fn two_workers_cannot_double_claim_or_double_send() {
 
     // Every recipient row is terminal after both ticks (neither left a row
     // half-claimed); the campaign may still be `sending` here because the
-    // two finalizes can each see the other's in-flight lease and skip — the
+    // two finalizes can each see the other's in-flight lease and skip, the
     // FOLLOW-UP tick must be the one that converges it.
     let rows = recipient_statuses(&pool, campaign).await;
     assert!(
@@ -623,7 +623,7 @@ async fn two_workers_cannot_double_claim_or_double_send() {
     );
 
     // A third tick finds nothing left to send and finalizes any residual
-    // `sending` state — no re-send, no double convergence.
+    // `sending` state, no re-send, no double convergence.
     let report = executor(&pool, backend, "adv-race-c")
         .tick()
         .await
@@ -644,7 +644,7 @@ async fn two_workers_cannot_double_claim_or_double_send() {
 // Suppressions
 // ---------------------------------------------------------------------------
 
-/// INVARIANT: a suppressed recipient is NEVER enqueued — not on the first
+/// INVARIANT: a suppressed recipient is NEVER enqueued, not on the first
 /// pass, not after a resend requeues failures, not under a case-variant
 /// spelling of the same address. DANGER: sending to a suppressed address is
 /// a compliance violation (CAN-SPAM/GDPR/CCPA) and destroys sender
@@ -695,7 +695,7 @@ async fn suppressed_recipient_is_never_enqueued_even_on_resend() {
     assert_eq!(blocked_row.1, "suppressed");
 
     // Resend path (the API's resend flow): campaign_jobs resend + status
-    // `resending`. Only `failed` rows may requeue — the suppressed row is
+    // `resending`. Only `failed` rows may requeue, the suppressed row is
     // terminal.
     sqlx::query(
         "INSERT INTO campaign_jobs (id, campaign_id, tenant_id, job_type, status) \
@@ -714,7 +714,7 @@ async fn suppressed_recipient_is_never_enqueued_even_on_resend() {
         .expect("set resending");
 
     // Poison the clean row into `failed` so the resend has something legal
-    // to requeue — proving the filter is status-based, not "requeue all".
+    // to requeue, proving the filter is status-based, not "requeue all".
     sqlx::query(
         "UPDATE campaign_recipients SET status = 'failed', error = 'injected' \
          WHERE campaign_id = $1 AND email = $2",
@@ -735,7 +735,7 @@ async fn suppressed_recipient_is_never_enqueued_even_on_resend() {
         .expect("blocked row still present");
     assert_eq!(
         blocked_row.1, "suppressed",
-        "a resend must never retry a suppressed recipient — compliance terminal"
+        "a resend must never retry a suppressed recipient, compliance terminal"
     );
     assert_eq!(
         message_count_to(&pool, &tenant, blocked).await,
@@ -756,8 +756,8 @@ async fn suppressed_recipient_is_never_enqueued_even_on_resend() {
 // Empty audience honesty
 // ---------------------------------------------------------------------------
 
-/// INVARIANT: an empty-audience campaign stays honest — zero recipient rows,
-/// zero messages, zero sent_count — and an empty include set NEVER expands to
+/// INVARIANT: an empty-audience campaign stays honest, zero recipient rows,
+/// zero messages, zero sent_count, and an empty include set NEVER expands to
 /// "every contact in the tenant". DANGER: fabricated sends either blast the
 /// whole customer base (cardinality escape) or report success for mail that
 /// never existed (silent zeros).
@@ -811,7 +811,7 @@ async fn empty_audience_stays_honest_and_never_expands_to_every_contact() {
     );
     assert_eq!(
         report.recipients_sent, 0,
-        "an empty audience sends nothing — never the bystander roster"
+        "an empty audience sends nothing, never the bystander roster"
     );
 
     for campaign in [empty, empty_subscribed] {
@@ -832,7 +832,7 @@ async fn empty_audience_stays_honest_and_never_expands_to_every_contact() {
         );
         // Production contract (campaigns.rs module docs): finalize never
         // touches campaigns without recipient rows, so the claimed empty
-        // campaign stays `sending` — the API reports emptiness at send time.
+        // campaign stays `sending`, the API reports emptiness at send time.
         // What must NEVER happen is a fake `sent` with a non-zero count.
         assert!(
             status == "sending" || (status == "sent" && sent_count == 0),
@@ -995,7 +995,7 @@ async fn audience_expansion_honors_lists_excludes_status_and_segment_tags() {
     ];
     assert_eq!(
         expanded, expected,
-        "list ∪ segment-list, minus excludes and inactive status — \
+        "list ∪ segment-list, minus excludes and inactive status, \
          excluded/seg-excluded/inactive/outsider must all be absent; \
          vip stays IN here because campaign 1 has no tag filter"
     );
@@ -1008,12 +1008,12 @@ async fn audience_expansion_honors_lists_excludes_status_and_segment_tags() {
         "tags_all=['vip'] must filter the listed audience down to tagged contacts"
     );
 
-    // Campaign 3: only the beta-tagged contact — NOT the whole roster.
+    // Campaign 3: only the beta-tagged contact, NOT the whole roster.
     let expanded = recipient_emails(&pool, campaign_beta).await;
     assert_eq!(
         expanded,
         vec!["beta@example.test".to_string()],
-        "tags_any with an empty include selects matching tags only — \
+        "tags_any with an empty include selects matching tags only, \
          never every contact in the tenant"
     );
     pool.close().await;
@@ -1023,7 +1023,7 @@ async fn audience_expansion_honors_lists_excludes_status_and_segment_tags() {
 // Quota hard-stop (Free plan honesty)
 // ---------------------------------------------------------------------------
 
-/// INVARIANT: quota exhaustion is a HARD STOP that defers — it never fails
+/// INVARIANT: quota exhaustion is a HARD STOP that defers, it never fails
 /// rows, never fabricates sends, and never burns the recipient's message.
 /// When quota is restored the deferred rows deliver exactly once.
 /// DANGER: "helpful" retries at the cap create unbillable double-sends;
@@ -1062,7 +1062,7 @@ async fn quota_hard_stop_defers_without_fabricating_sends_then_recovers_once() {
     assert_eq!(report.recipients_sent, 0, "hard-stop sends nothing");
     assert_eq!(
         report.recipients_deferred, 3,
-        "every recipient defers at the cap — none fail"
+        "every recipient defers at the cap, none fail"
     );
     assert_eq!(
         report.recipients_failed, 0,
@@ -1195,7 +1195,7 @@ async fn statement_count(pool: &PgPool, tag: &str) -> i64 {
     .expect("counter value")
 }
 
-/// P1: three finished campaigns — plus two subscribed webhooks each — finalize
+/// P1: three finished campaigns, plus two subscribed webhooks each, finalize
 /// with ONE `campaigns` UPDATE and ONE `webhook_queue` INSERT while producing
 /// exactly the pre-batching rows: `sent`/`partial` with the real `sent_count`,
 /// and one completed-event queue row per (campaign x subscribed webhook).
@@ -1306,7 +1306,7 @@ async fn finalize_batches_counts_updates_and_webhook_enqueues() {
     );
 
     // One statement per batched shape, not one per campaign: the tick's
-    // scheduled-claim phase UPDATE always executes (a no-op here — no
+    // scheduled-claim phase UPDATE always executes (a no-op here, no
     // scheduled campaigns) and the finalize phase adds exactly ONE batched
     // UPDATE for all three campaigns. The old per-campaign finalize made this
     // count 1 + 3.

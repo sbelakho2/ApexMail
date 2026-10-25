@@ -20,7 +20,7 @@ This document describes the supplied EU/EEA-oriented deployment configuration; i
 | Database storage | Helsinki, Finland & Nuremberg, Germany | Self-managed on Hetzner |
 | Analytics (ClickHouse) | Helsinki, Finland & Nuremberg, Germany | Self-managed on Hetzner |
 | Caching (Redis) | Helsinki, Finland & Nuremberg, Germany | Self-managed on Hetzner |
-| Backups | Configurable object-store region (default: `us-east-1`) — the backup region is set by deployment configuration and must be confirmed for the active environment | Self-managed encrypted backups with S3-compatible object storage |
+| Backups | Configurable object-store region (default: `us-east-1`), the backup region is set by deployment configuration and must be confirmed for the active environment | Self-managed encrypted backups with S3-compatible object storage |
 | Log storage (Loki) | Configurable object-store region (default: `eu-central-1`) | Self-managed Loki with S3-compatible object storage |
 | Trace storage (Tempo) | Configurable object-store region (default: `eu-central-1`) | Self-managed Tempo with S3-compatible object storage |
 
@@ -43,7 +43,7 @@ the active deployment before relying on a location for compliance purposes.
 |---|---|
 | Account information (names, emails, company) | Database, EU/EEA (Hetzner) |
 | Billing records (invoices, transactions) | Database, EU/EEA (Hetzner); Mollie B.V. (Netherlands, EU) |
-| Payment card details | Not stored by ApexMail — processed by Mollie B.V. |
+| Payment card details | Not stored by ApexMail, processed by Mollie B.V. |
 | API keys (hashed) | Database, EU/EEA (Hetzner) |
 | Audit logs | Database, EU/EEA (Hetzner) + log storage |
 

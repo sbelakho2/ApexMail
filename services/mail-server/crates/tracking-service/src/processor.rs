@@ -4,7 +4,7 @@
 //! HTTP response is sent, so they survive process crashes (Redis AOF).
 //! • P0 (WAL durability, acknowledgement-based semantics):a background
 //! Tokio task CLAIMS a batch by atomically moving it `pending` →
-//! `processing` (a Lua multi-key move — a claim/lease, NOT a deletion),
+//! `processing` (a Lua multi-key move, a claim/lease, NOT a deletion),
 //! writes it to PostgreSQL, and ONLY after the commit ACKs (deletes the
 //! batch from `processing`). Every flush first RECLAIMS leftover
 //! `processing` entries back to the head of `pending` (crash recovery,
@@ -18,16 +18,16 @@
 //! `pending` (retry counter bumped) and released from `processing` in ONE
 //! atomic Lua step; after MAX_EVENT_RETRIES an event is dead-lettered to
 //! the durable `apexmail:events:dead` list (JSON envelope with a FNV-1a
-//! checksum — see `DeadLetterEntry`) instead of being silently dropped.
+//! checksum, see `DeadLetterEntry`) instead of being silently dropped.
 //! Unparsable WAL envelopes are dead-lettered too (the actual poison
 //! shape) rather than vanishing with a log line.
 //! • Events are wrapped in versioned envelopes with a SHA-256 checksum
 //! (E-174). v2 envelopes carry the full 64-hex-char digest; v1 envelopes
-//! carry only the first 8 hex chars (32 bits) — a corruption heuristic,
-//! NOT a security integrity check — and remain readable for backward
+//! carry only the first 8 hex chars (32 bits), a corruption heuristic,
+//! NOT a security integrity check, and remain readable for backward
 //! compatibility with entries already queued in Redis.
 //! • Dedup via Redis SETNX (EX 86400) keyed (message, recipient) for BOTH
-//! opens and clicks — click/open tokens minted without an embedded
+//! opens and clicks, click/open tokens minted without an embedded
 //! issued-at never expire (see `codec.rs`: legacy tokens have documented
 //! indefinite semantics; the 24 h dedup window is the replay bound), while
 //! newly minted tokens can carry a compact epoch-days issued-at that the
@@ -37,18 +37,18 @@
 //! • Unsubscribes are durable-or-failed (F2):when the suppression INSERT
 //! fails, a pending-retry record is RPUSH'd to
 //! `apexmail:suppressions:pending` (drained by the flush loop with the
-//! same retry budget as events) AND the caller gets an error — never a
+//! same retry budget as events) AND the caller gets an error, never a
 //! silent success without the suppression row.
 //! • F54:suppression/preference row ids are generated with the platform's
 //! canonical 26-char entity-ID generator (`apexmail_lib::id::generate_id`)
-//! — `suppressions.id` / `subscription_preferences.id` are VARCHAR(26) and
+//!, `suppressions.id` / `subscription_preferences.id` are VARCHAR(26) and
 //! the legacy 36-char `sup_` UUID ids overflowed the column (22001).
 //! • F55:every consent transition fans out on the `suppression:added` /
-//! `suppression:removed` / `suppression:changed` Redis channels — including
+//! `suppression:removed` / `suppression:changed` Redis channels, including
 //! suppressions that land via the retry queue and preference-center
-//! changes — so sending caches can invalidate.
+//! changes, so sending caches can invalidate.
 //! • GDPR:client IPs are masked at every persistence boundary (Postgres
-//! events, ClickHouse ingest — IPv4 → /24, IPv6 → /48 via
+//! events, ClickHouse ingest, IPv4 → /24, IPv6 → /48 via
 //! `analytics::ip_mask`); full IPs remain only in transient paths.
 
 use std::{
@@ -73,7 +73,7 @@ use uuid::Uuid;
 // ── Event envelope ────────────────────────────────────────────────────────────
 
 /// WAL envelope version for newly persisted tracking payloads.
-/// v2 — full 64-hex-char SHA-256 digest in `cs`.
+/// v2, full 64-hex-char SHA-256 digest in `cs`.
 const WAL_VERSION: u8 = 2;
 
 /// Legacy envelope version still accepted on replay: v1 carried only the
@@ -85,7 +85,7 @@ const WAL_VERSION_V1: u8 = 1;
 /// Maximum re-enqueue attempts for a WAL event whose Postgres write keeps
 /// failing. Events exceeding this are dead-lettered (see
 /// [`REDIS_DEAD_LETTER_KEY`]) so one permanently bad event cannot wedge the
-/// WAL forever — and are never silently lost.
+/// WAL forever, and are never silently lost.
 const MAX_EVENT_RETRIES: usize = 10;
 
 /// Upper bound for a single flush drain (adaptive: the actual batch is the
@@ -100,7 +100,7 @@ pub const DEAD_LETTER_SCHEMA_VERSION: u64 = 1;
 const DEAD_LETTER_REASON_MAX_RETRIES: &str = "max_retries_exceeded";
 
 /// DLQ `failure_reason`:the WAL envelope could not be parsed AT ALL
-/// (corrupt JSON, unknown schema) — the actual poison shape.
+/// (corrupt JSON, unknown schema), the actual poison shape.
 const DEAD_LETTER_REASON_UNPARSABLE: &str = "unparsable_envelope";
 
 /// Redis list key (without the `tracking:` keyPrefix applied by the pool).
@@ -129,7 +129,7 @@ pub const REDIS_SUPPRESSION_RETRY_KEY: &str = "apexmail:suppressions:pending";
 /// [`REDIS_WAL_PROCESSING_KEY`]).
 pub const REDIS_SUPPRESSION_PROCESSING_KEY: &str = "apexmail:suppressions:processing";
 
-/// P0 (WAL durability fix — acknowledgement-based semantics):
+/// P0 (WAL durability fix, acknowledgement-based semantics):
 ///
 /// Durable invariant for every ACCEPTED tracking event:
 /// ```text
@@ -137,7 +137,7 @@ pub const REDIS_SUPPRESSION_PROCESSING_KEY: &str = "apexmail:suppressions:proces
 ///     → durable Redis record      RPUSH apexmail:events:pending
 ///     → claim/lease WITHOUT deletion
 ///                                 Lua: LRANGE pending + RPUSH processing + LTRIM pending
-///                                 (one atomic script — the batch exists in
+///                                 (one atomic script, the batch exists in
 ///                                  exactly one of the two lists at rest)
 ///     → PostgreSQL COMMIT         INSERT … ON CONFLICT (id) DO NOTHING
 ///     → Redis ACK                 LREM the batch from apexmail:events:processing
@@ -146,7 +146,7 @@ pub const REDIS_SUPPRESSION_PROCESSING_KEY: &str = "apexmail:suppressions:proces
 ///   • before the claim → still in `pending`;
 ///   • after the claim, before the commit → durable in `processing`, and the
 ///     next flush RECLAIMS leftover leases back to the HEAD of `pending`
-///     (before claiming new work — no starvation);
+///     (before claiming new work, no starvation);
 ///   • after the commit, before the ACK → present in BOTH Postgres and
 ///     `processing`; the reclaim replays it and the `events` insert's
 ///     `ON CONFLICT (id) DO NOTHING` makes the replay a no-op
@@ -169,9 +169,9 @@ return events
 /// P0:reclamation (crash recovery). Moves EVERY entry still leased in
 /// `processing` back to the HEAD of `pending` (RPOPLPUSH preserves FIFO
 /// order) in ONE atomic script. Runs at the TOP of every flush, before new
-/// claims — orphaned events from a crash are retried before fresh traffic.
+/// claims, orphaned events from a crash are retried before fresh traffic.
 /// A live flusher's claim either lands entirely before this script (its
-/// entries are reclaimed and replayed — safe, see the invariant above) or
+/// entries are reclaimed and replayed, safe, see the invariant above) or
 /// entirely after (untouched); Redis scripts never interleave.
 const RECLAIM_SCRIPT: &str = r#"
 local moved = {}
@@ -258,7 +258,7 @@ impl std::fmt::Display for EventType {
 /// F10: the tracking event types the analytics worker aggregates
 /// (`opened`/`clicked`/`unsubscribed`). A refused click is an operator
 /// signal, not an analytics count, and the worker's type parse would discard
-/// it — so `click_refused` is never enqueued.
+/// it, so `click_refused` is never enqueued.
 fn is_analytics_event_type(event_type: &EventType) -> bool {
     matches!(
         event_type,
@@ -310,7 +310,7 @@ pub struct UnsubscribeData {
 
 // ── ClickHouse row ────────────────────────────────────────────────────────────
 
-/// Row shape of `apexmail.events` — column order and types must match
+/// Row shape of `apexmail.events`, column order and types must match
 /// `deploy/clickhouse/initdb/001_schema.sql` and
 /// `analytics::clickhouse_engine::ClickHouseEngine::init_schema`.
 #[derive(Debug, Clone, Serialize, Deserialize, clickhouse::Row)]
@@ -337,17 +337,17 @@ pub struct ClickHouseEventRow {
 
 impl ClickHouseEventRow {
     /// Map a WAL tracking event onto the ClickHouse row. All optional fields
-    /// are flattened to non-null strings — the `events` table has no
+    /// are flattened to non-null strings, the `events` table has no
     /// `Nullable` columns.
     ///
     /// D (PII): the raw recipient is NEVER stored in the OLAP events table.
-    /// It is privacy-encoded via `analytics::email_hash` — an HMAC digest
+    /// It is privacy-encoded via `analytics::email_hash`, an HMAC digest
     /// (stable, so per-recipient grouping keeps working) plus a truncated
     /// `a***@domain` form for human debugging. Postgres remains the
     /// system-of-record for raw recipients.
     ///
     /// GDPR:the client IP is masked at this ingest boundary (IPv4 → /24,
-    /// IPv6 → /48 via `analytics::ip_mask`) — the OLAP store's 730-day TTL
+    /// IPv6 → /48 via `analytics::ip_mask`), the OLAP store's 730-day TTL
     /// makes a full address disproportionate personal data. The transient
     /// WAL entry keeps the full IP until the flush.
     pub fn from_tracking_event(ev: &TrackingEvent) -> Self {
@@ -401,7 +401,7 @@ pub struct EventProcessor {
     max_buffer_size: usize,
     /// P0:atomic claim `pending` → `processing` (never deletes).
     claim_script: Script,
-    /// P0:crash recovery — leftover `processing` leases back to `pending`.
+    /// P0:crash recovery, leftover `processing` leases back to `pending`.
     reclaim_script: Script,
     /// P0:ACK (release a committed lease) and atomic requeue-on-failure
     /// (RPUSH bumped envelope to `pending` + LREM original from
@@ -452,7 +452,7 @@ impl EventProcessor {
 
         self.running.store(true, Ordering::SeqCst);
         tokio::spawn(async move {
-            // coverage: justified — llvm-cov region-counter artifact: this tracing
+            // coverage: justified, llvm-cov region-counter artifact: this tracing
             // field-argument line EXECUTES (verified: the log line prints its fields
             // under an instrumented single-test run with --nocapture, and the
             // enclosing arm's own region shows hits) but the macro's argument
@@ -572,7 +572,7 @@ impl EventProcessor {
     /// Record a click event into the Redis WAL.
     ///
     /// Dedup:clicks are deduped per (message, recipient) over 24 h, exactly
-    /// mirroring opens — the previous 1-second window let a replayed token
+    /// mirroring opens, the previous 1-second window let a replayed token
     /// (tokens carry no expiry; see the module notes in `codec.rs`) inflate
     /// click counts indefinitely. Token-level expiry remains future work and
     /// would be a wire-format change; the dedup window is the replay bound.
@@ -630,7 +630,7 @@ impl EventProcessor {
     ///
     /// Deduped independently of real clicks (`click_refused` namespace +
     /// the refused URL), so a repeated refused click cannot flood the WAL,
-    /// and a refusal can NEVER occupy the real click's 24 h dedup key — a
+    /// and a refusal can NEVER occupy the real click's 24 h dedup key, a
     /// later legitimate click on another link still records. Deliberately
     /// does not touch the click counters or `message.clicked` webhooks: the
     /// recipient never reached anything.
@@ -696,7 +696,7 @@ impl EventProcessor {
     /// Record an unsubscribe event into the Redis WAL and immediately add the
     /// recipient to the suppression list (GDPR / CAN-SPAM requirement).
     ///
-    /// F2:durable-or-failed — the suppression row (or a persisted
+    /// F2:durable-or-failed, the suppression row (or a persisted
     /// pending-retry record in Redis) is a precondition for success. When the
     /// suppression INSERT fails, the failure is enqueued for retry AND an
     /// error is returned so the HTTP route answers 5xx and the MUA retries
@@ -734,7 +734,7 @@ impl EventProcessor {
 
         // The suppression row IS the durable compliance state; the WAL event
         // is analytics. Record the durable state FIRST, then attempt the WAL
-        // enqueue best-effort — the old order (WAL before suppression) turned
+        // enqueue best-effort, the old order (WAL before suppression) turned
         // a Redis outage into a 500 for the MUA's one-click POST while the
         // suppression row was never even attempted, silently losing consent.
         // Suppression failure still fails the call (no silent success without
@@ -754,7 +754,7 @@ impl EventProcessor {
                 error!(
                     error = %retry_err,
                     tenant_id = %event.tenant_id,
-                    "CRITICAL: suppression insert failed AND retry enqueue failed — suppression NOT persisted anywhere"
+                    "CRITICAL: suppression insert failed AND retry enqueue failed, suppression NOT persisted anywhere"
                 );
             }
             return Err(sup_err.context("suppression insert failed (retry enqueued)"));
@@ -764,7 +764,7 @@ impl EventProcessor {
                 error = %wal_err,
                 tenant_id = %event.tenant_id,
                 recipient = %event.recipient,
-                "Unsubscribe WAL enqueue failed after the suppression row was persisted — the analytics event is lost, the consent change is not"
+                "Unsubscribe WAL enqueue failed after the suppression row was persisted, the analytics event is lost, the consent change is not"
             );
         }
 
@@ -791,7 +791,7 @@ impl EventProcessor {
     // ── Flush loop ────────────────────────────────────────────────────
 
     /// P0:claim up to `max` entries by atomically moving them
-    /// `pending` → `processing` (a lease — the durable copy is NOT deleted,
+    /// `pending` → `processing` (a lease, the durable copy is NOT deleted,
     /// it moves). Returns the claimed raw envelopes. Shared by the flush
     /// loop and the crash-window tests.
     async fn claim_batch(
@@ -817,10 +817,10 @@ impl EventProcessor {
     async fn flush(&self) -> Result<()> {
         let mut conn = self.redis.get().await.context("redis pool get (flush)")?;
 
-        // P0 step 1 — RECLAIM BEFORE CLAIMING: any lease left in
+        // P0 step 1, RECLAIM BEFORE CLAIMING: any lease left in
         // `processing` by a crash (or a lost ACK) is moved back to the HEAD
         // of `pending` first, so recovery work is never starved by fresh
-        // traffic. Atomic script — a concurrently live flusher's claim lands
+        // traffic. Atomic script, a concurrently live flusher's claim lands
         // entirely before or after it.
         let reclaimed: Vec<String> = self
             .reclaim_script
@@ -830,7 +830,7 @@ impl EventProcessor {
             .await
             .context("reclaim Lua script (processing → pending)")?;
         if !reclaimed.is_empty() {
-            // coverage: justified — llvm-cov region-counter artifact: this tracing
+            // coverage: justified, llvm-cov region-counter artifact: this tracing
             // field-argument line EXECUTES (verified: the log line prints its fields
             // under an instrumented single-test run with --nocapture, and the
             // enclosing arm's own region shows hits) but the macro's argument
@@ -838,7 +838,7 @@ impl EventProcessor {
             // adversarial tests.
             info!(
                 count = reclaimed.len(),
-                "P0: reclaimed orphaned WAL leases from a previous crash — re-draining first"
+                "P0: reclaimed orphaned WAL leases from a previous crash, re-draining first"
             );
         }
 
@@ -855,7 +855,7 @@ impl EventProcessor {
         }
         let batch: usize = (llen as usize).min(MAX_FLUSH_BATCH.max(self.max_buffer_size));
 
-        // P0 step 2 — atomic claim: the batch now lives ONLY in
+        // P0 step 2, atomic claim: the batch now lives ONLY in
         // `processing` (moved, never deleted). A kill from this point on
         // leaves it durable in Redis for reclamation.
         let raw: Vec<String> = self.claim_batch(&mut conn, batch).await?;
@@ -874,7 +874,7 @@ impl EventProcessor {
                     parsable.push(entry.clone());
                 }
                 Err(e) => {
-                    // coverage: justified — llvm-cov region-counter artifact: this tracing
+                    // coverage: justified, llvm-cov region-counter artifact: this tracing
                     // field-argument line EXECUTES (verified: the log line prints its fields
                     // under an instrumented single-test run with --nocapture, and the
                     // enclosing arm's own region shows hits) but the macro's argument
@@ -886,7 +886,7 @@ impl EventProcessor {
                         // externally influenced envelopes; a fixed-offset
                         // byte slice used to panic on multibyte content).
                         raw = crate::token_shape::token_log_prefix(entry, 100),
-                        "WAL entry parse error — dead-lettering"
+                        "WAL entry parse error, dead-lettering"
                     );
                     unparsable.push(entry.clone());
                 }
@@ -908,16 +908,16 @@ impl EventProcessor {
 
         match self.write_events(&events).await {
             Ok(()) => {
-                // P0 step 4 — ACK:the PostgreSQL transaction COMMITTED; only
+                // P0 step 4, ACK:the PostgreSQL transaction COMMITTED; only
                 // now are the leases released. A crash before this point
                 // replays the batch into the idempotent insert.
                 self.ack_committed_batch(&parsable).await;
             }
             Err(write_err) => {
-                // P0 step 4' — atomic requeue:move the batch BACK to
+                // P0 step 4', atomic requeue:move the batch BACK to
                 // `pending` (retry counter bumped) and release the lease in
                 // ONE Lua step; poison entries are dead-lettered.
-                // coverage: justified — llvm-cov region-counter artifact: this tracing
+                // coverage: justified, llvm-cov region-counter artifact: this tracing
                 // field-argument line EXECUTES (verified: the log line prints its fields
                 // under an instrumented single-test run with --nocapture, and the
                 // enclosing arm's own region shows hits) but the macro's argument
@@ -926,7 +926,7 @@ impl EventProcessor {
                 error!(
                     count = events.len(),
                     error = %write_err,
-                    "writeEvents failed — re-queueing the claimed batch to the WAL"
+                    "writeEvents failed, re-queueing the claimed batch to the WAL"
                 );
                 self.requeue_after_failure(&parsable).await;
                 return Err(write_err);
@@ -937,7 +937,7 @@ impl EventProcessor {
         Ok(())
     }
 
-    /// P0:ACK — the batch is committed to PostgreSQL, so the `processing`
+    /// P0:ACK, the batch is committed to PostgreSQL, so the `processing`
     /// leases can be released (LREM of the exact claimed envelopes). A failed
     /// release is only a performance issue: the orphaned leases are reclaimed
     /// by the next flush and the replay is absorbed by the
@@ -961,7 +961,7 @@ impl EventProcessor {
                     .invoke_async::<i64>(&mut *conn)
                     .await
                 {
-                    // coverage: justified — llvm-cov region-counter artifact: this tracing
+                    // coverage: justified, llvm-cov region-counter artifact: this tracing
                     // field-argument line EXECUTES (verified: the log line prints its fields
                     // under an instrumented single-test run with --nocapture, and the
                     // enclosing arm's own region shows hits) but the macro's argument
@@ -970,12 +970,12 @@ impl EventProcessor {
                     warn!(
                         error = %e,
                         count = claimed.len(),
-                        "P0: ACK (lease release) failed — the committed entries stay leased and will be reclaimed + re-inserted idempotently"
+                        "P0: ACK (lease release) failed, the committed entries stay leased and will be reclaimed + re-inserted idempotently"
                     );
                 }
             }
             Err(e) => {
-                // coverage: justified — llvm-cov region-counter artifact: this tracing
+                // coverage: justified, llvm-cov region-counter artifact: this tracing
                 // field-argument line EXECUTES (verified: the log line prints its fields
                 // under an instrumented single-test run with --nocapture, and the
                 // enclosing arm's own region shows hits) but the macro's argument
@@ -984,7 +984,7 @@ impl EventProcessor {
                 warn!(
                     error = %e,
                     count = claimed.len(),
-                    "P0: could not get Redis for the ACK — leases stay durable in `processing` and will be reclaimed"
+                    "P0: could not get Redis for the ACK, leases stay durable in `processing` and will be reclaimed"
                 );
             }
         }
@@ -992,11 +992,11 @@ impl EventProcessor {
 
     /// P0:the PG write FAILED after the claim. For every claimed entry,
     /// atomically (a) RPUSH the retry-bumped envelope back to `pending` and
-    /// (b) LREM the claimed original from `processing` — one Lua invocation,
+    /// (b) LREM the claimed original from `processing`, one Lua invocation,
     /// so no crash window can leave the event in both lists (double lease)
     /// or neither (loss). Entries whose retry budget is exhausted are
     /// dead-lettered. If Redis itself is unreachable here, the leases simply
-    /// STAY in `processing` (durable) and are reclaimed later — nothing lost.
+    /// STAY in `processing` (durable) and are reclaimed later, nothing lost.
     async fn requeue_after_failure(&self, claimed: &[String]) {
         let mut requeue_args: Vec<String> = Vec::with_capacity(claimed.len() * 2);
         let mut poison: Vec<String> = Vec::new();
@@ -1023,14 +1023,14 @@ impl EventProcessor {
                     {
                         error!(
                             error = %e,
-                            "CRITICAL: requeue Lua failed — the batch stays leased in `processing` and will be reclaimed (no loss)"
+                            "CRITICAL: requeue Lua failed, the batch stays leased in `processing` and will be reclaimed (no loss)"
                         );
                     }
                 }
                 Err(e) => {
                     error!(
                         error = %e,
-                        "CRITICAL: failed to get Redis conn for requeue — the batch stays leased in `processing` and will be reclaimed (no loss)"
+                        "CRITICAL: failed to get Redis conn for requeue, the batch stays leased in `processing` and will be reclaimed (no loss)"
                     );
                 }
             }
@@ -1067,7 +1067,7 @@ impl EventProcessor {
                     pipe.rpush(REDIS_DEAD_LETTER_KEY, envelope);
                 }
                 if let Err(e) = pipe.query_async::<()>(&mut *conn).await {
-                    // coverage: justified — llvm-cov region-counter artifact: this tracing
+                    // coverage: justified, llvm-cov region-counter artifact: this tracing
                     // field-argument line EXECUTES (verified: the log line prints its fields
                     // under an instrumented single-test run with --nocapture, and the
                     // enclosing arm's own region shows hits) but the macro's argument
@@ -1076,13 +1076,13 @@ impl EventProcessor {
                     error!(
                         error = %e,
                         count = raw.len(),
-                        "CRITICAL: dead-letter RPUSH failed — entries stay leased in `processing` and will be retried"
+                        "CRITICAL: dead-letter RPUSH failed, entries stay leased in `processing` and will be retried"
                     );
                     return;
                 }
                 metrics::counter!("apexmail_tracking_dead_letter_total")
                     .increment(raw.len() as u64);
-                // coverage: justified — llvm-cov region-counter artifact: this tracing
+                // coverage: justified, llvm-cov region-counter artifact: this tracing
                 // field-argument line EXECUTES (verified: the log line prints its fields
                 // under an instrumented single-test run with --nocapture, and the
                 // enclosing arm's own region shows hits) but the macro's argument
@@ -1110,12 +1110,12 @@ impl EventProcessor {
                     error!(
                         error = %e,
                         count = raw.len(),
-                        "DLQ lease release failed — dead-lettered entries will be reclaimed and dead-lettered again (at-least-once)"
+                        "DLQ lease release failed, dead-lettered entries will be reclaimed and dead-lettered again (at-least-once)"
                     );
                 }
             }
             Err(e) => {
-                // coverage: justified — llvm-cov region-counter artifact: this tracing
+                // coverage: justified, llvm-cov region-counter artifact: this tracing
                 // field-argument line EXECUTES (verified: the log line prints its fields
                 // under an instrumented single-test run with --nocapture, and the
                 // enclosing arm's own region shows hits) but the macro's argument
@@ -1124,7 +1124,7 @@ impl EventProcessor {
                 error!(
                     error = %e,
                     count = raw.len(),
-                    "CRITICAL: could not reach Redis for the dead-letter push — entries stay leased in `processing` and will be retried"
+                    "CRITICAL: could not reach Redis for the dead-letter push, entries stay leased in `processing` and will be retried"
                 );
             }
         }
@@ -1134,7 +1134,7 @@ impl EventProcessor {
         // P0:the shutdown drain also has to converge when a release/ack was
         // lost (entries parked in `processing`), hence the processing LLEN in
         // the loop condition. The round bound only matters for the
-        // pathological "commit succeeds, release keeps failing" shape — every
+        // pathological "commit succeeds, release keeps failing" shape, every
         // round is an idempotent re-insert.
         let mut rounds = 0usize;
         loop {
@@ -1175,7 +1175,7 @@ impl EventProcessor {
                 error!(
                     pending,
                     processing,
-                    "drain_all: round bound hit — leaving the remaining entries durable in Redis"
+                    "drain_all: round bound hit, leaving the remaining entries durable in Redis"
                 );
                 break;
             }
@@ -1251,13 +1251,13 @@ impl EventProcessor {
         // Idempotence: the events insert is `ON CONFLICT (id) DO NOTHING`
         // because a crash between commit and the Redis WAL ACK replays the
         // batch. `analytics_queue` has no natural key, so rows are enqueued
-        // only for event ids that were NOT already persisted — a replay
+        // only for event ids that were NOT already persisted, a replay
         // cannot double-count the rollup.
         //
         // Column shapes: `tenant_id` is VARCHAR(26) (canonical tenants fit),
         // `campaign_id` is VARCHAR(64) (UUID fits), but `message_id` and
         // `domain_id` are VARCHAR(26) while canonical message/domain ids are
-        // 36-char UUIDs. They are stored NULL — never truncated — with the
+        // 36-char UUIDs. They are stored NULL, never truncated, with the
         // full ids preserved in `metadata`; the hourly rollup keys on
         // tenant/domain/CAMPAIGN, so campaign-scoped analytics still resolve.
         // `click_refused` is deliberately NOT enqueued: it is an operator
@@ -1276,7 +1276,7 @@ impl EventProcessor {
         for chunk in events.chunks(MAX_PER_CHUNK) {
             // Use sqlx query_builder for safe parameterization.
             // GDPR:the persisted `ip_address` is the MASKED form (IPv4 → /24,
-            // IPv6 → /48) — the events table retains rows for years and a
+            // IPv6 → /48), the events table retains rows for years and a
             // full client IP is personal data (see `analytics::ip_mask`).
             // The full IP lives only in transient paths (Redis WAL between
             // flushes, rate limiting, SSE Pub/Sub).
@@ -1314,7 +1314,7 @@ impl EventProcessor {
         }
 
         // F10: enqueue the analytics rows for the events THIS flush actually
-        // creates (replay duplicates are filtered out — see above).
+        // creates (replay duplicates are filtered out, see above).
         let analytics_events: Vec<&TrackingEvent> = events
             .iter()
             .filter(|ev| {
@@ -1349,7 +1349,7 @@ impl EventProcessor {
                 b.push_bind(ev.tenant_id.clone())
                     .push_bind(ev.event_type.to_string())
                     // VARCHAR(26) cannot hold a canonical UUID id: NULL, with
-                    // the full id in metadata — never a truncated id.
+                    // the full id in metadata, never a truncated id.
                     .push_bind(Option::<String>::None)
                     .push_bind(Option::<String>::None)
                     .push_bind(campaign_id)
@@ -1385,7 +1385,7 @@ impl EventProcessor {
         }
         // messages.id is UUID (runtime + migration chains agree); the update
         // below casts the VALUE once per unnest row instead of casting the
-        // column — `m.id::text = v.id` forced a per-row text conversion of
+        // column, `m.id::text = v.id` forced a per-row text conversion of
         // the PK and defeated the index on every WAL flush. Ids that are not
         // valid UUIDs can never match a UUID PK and are skipped here (they
         // would abort the `::uuid` cast for the whole batch otherwise).
@@ -1430,10 +1430,10 @@ impl EventProcessor {
 
         // ── ClickHouse OLAP ingest ──────────────────────────────────────
         // Best-effort secondary store: Postgres is the source of truth, so a
-        // ClickHouse failure is logged (never re-enqueues the batch — that
+        // ClickHouse failure is logged (never re-enqueues the batch, that
         // would re-run the committed Postgres writes).
         if let Err(ch_err) = self.write_clickhouse(events).await {
-            // coverage: justified — llvm-cov region-counter artifact: this tracing
+            // coverage: justified, llvm-cov region-counter artifact: this tracing
             // field-argument line EXECUTES (verified: the log line prints its fields
             // under an instrumented single-test run with --nocapture, and the
             // enclosing arm's own region shows hits) but the macro's argument
@@ -1442,7 +1442,7 @@ impl EventProcessor {
             error!(
                 count = events.len(),
                 error = %ch_err,
-                "ClickHouse ingest failed — events are safe in Postgres"
+                "ClickHouse ingest failed, events are safe in Postgres"
             );
             metrics::counter!("apexmail_tracking_clickhouse_failures_total").increment(1);
         } else {
@@ -1590,7 +1590,7 @@ impl EventProcessor {
     }
 
     /// Add the recipient to the suppression list; `Err` when the row did not
-    /// land (F2 — the caller turns this into a 5xx + retry). The Redis
+    /// land (F2, the caller turns this into a 5xx + retry). The Redis
     /// `suppression:added` fan-out fires only on success, so subscribers of
     /// that channel never see a suppression that does not exist.
     async fn add_to_suppression_list(
@@ -1620,7 +1620,7 @@ impl EventProcessor {
     /// Fire-and-forget publish helpers (F-217 / F55). Subscribers (e.g. the
     /// worker's suppression cache) need the recipient identity
     /// (`tenantId` + `email`) plus what changed. Failures are logged and
-    /// never propagate — the Postgres row remains the source of truth and
+    /// never propagate, the Postgres row remains the source of truth and
     /// the Redis `suppression:*` channels are cache invalidations, not the
     /// record itself.
     pub fn publish_suppression_added(&self, tenant_id: &str, email: &str, category: Option<&str>) {
@@ -1634,7 +1634,7 @@ impl EventProcessor {
         self.publish_suppression_event("suppression:added", payload);
     }
 
-    /// F38/F55:a resubscription REMOVES the suppression — publishing
+    /// F38/F55:a resubscription REMOVES the suppression, publishing
     /// `suppression:removed` lets sending caches invalidate the stale
     /// "suppressed" entry instead of holding it for their TTL.
     pub fn publish_suppression_removed(&self, tenant_id: &str, email: &str) {
@@ -1709,7 +1709,7 @@ impl EventProcessor {
             .context("RPUSH suppression retry")?;
         warn!(
             tenant_id = tenant_id,
-            "Suppression insert failed — pending retry enqueued"
+            "Suppression insert failed, pending retry enqueued"
         );
         Ok(())
     }
@@ -1718,7 +1718,7 @@ impl EventProcessor {
     /// successes ACK (release the lease), failures are moved back to the
     /// queue with a bumped retry counter (poison dropped after
     /// [`MAX_EVENT_RETRIES`], mirroring the event WAL). P0:the same
-    /// claim/lease/ACK protocol as the event WAL — the batch is moved
+    /// claim/lease/ACK protocol as the event WAL, the batch is moved
     /// `pending` → `processing` (never deleted before the insert), so a
     /// crash cannot lose compliance-critical suppression retries between
     /// the read and the write. Runs off the flush loop's tick so a down
@@ -1779,7 +1779,7 @@ impl EventProcessor {
 
         for entry in &raw {
             let Some(retry) = parse_suppression_retry(entry) else {
-                // coverage: justified — llvm-cov region-counter artifact: this tracing
+                // coverage: justified, llvm-cov region-counter artifact: this tracing
                 // field-argument line EXECUTES (verified: the log line prints its fields
                 // under an instrumented single-test run with --nocapture, and the
                 // enclosing arm's own region shows hits) but the macro's argument
@@ -1794,7 +1794,7 @@ impl EventProcessor {
                 self.release_lease(&mut conn, entry, None).await;
                 continue;
             };
-            // F54:26-char entity id on the retry path too — the pending
+            // F54:26-char entity id on the retry path too, the pending
             // record eventually lands in the same VARCHAR(26) column.
             let sup_id = suppression_entity_id();
             match self
@@ -1807,7 +1807,7 @@ impl EventProcessor {
                 .await
             {
                 Ok(()) => {
-                    // coverage: justified — llvm-cov region-counter artifact: this tracing
+                    // coverage: justified, llvm-cov region-counter artifact: this tracing
                     // field-argument line EXECUTES (verified: the log line prints its fields
                     // under an instrumented single-test run with --nocapture, and the
                     // enclosing arm's own region shows hits) but the macro's argument
@@ -1819,7 +1819,7 @@ impl EventProcessor {
                         "Pending suppression retry succeeded"
                     );
                     // F55:a suppression that landed via the retry queue must
-                    // fan out exactly like the immediate path — subscribers
+                    // fan out exactly like the immediate path, subscribers
                     // would otherwise hold a stale "not suppressed" cache
                     // entry until their TTL expires.
                     self.publish_suppression_added(
@@ -1827,7 +1827,7 @@ impl EventProcessor {
                         &retry.email.to_lowercase(),
                         retry.category.as_deref(),
                     );
-                    // P0:ACK — the row is committed, release the lease.
+                    // P0:ACK, the row is committed, release the lease.
                     self.release_lease(&mut conn, entry, None).await;
                 }
                 Err(e) => {
@@ -1835,7 +1835,7 @@ impl EventProcessor {
                     if requeued.is_none() {
                         error!(
                             tenant_id = %retry.tenant_id,
-                            "CRITICAL: pending suppression dropped after max retries — operator intervention required"
+                            "CRITICAL: pending suppression dropped after max retries, operator intervention required"
                         );
                     }
                     // P0:atomic requeue (bumped replacement) + lease release;
@@ -1844,7 +1844,7 @@ impl EventProcessor {
                     let was_requeued = requeued.is_some();
                     self.release_lease(&mut conn, entry, requeued).await;
                     if was_requeued {
-                        warn!(error = %e, tenant_id = %retry.tenant_id, "Suppression retry failed — re-queued");
+                        warn!(error = %e, tenant_id = %retry.tenant_id, "Suppression retry failed, re-queued");
                     }
                 }
             }
@@ -1873,7 +1873,7 @@ impl EventProcessor {
         {
             warn!(
                 error = %e,
-                "Suppression retry lease release failed — the entry stays leased for reclamation"
+                "Suppression retry lease release failed, the entry stays leased for reclamation"
             );
         }
     }
@@ -1942,7 +1942,7 @@ impl EventProcessor {
         Ok(result.is_some())
     }
 
-    /// Delete a dedup key — used to roll back the SETNX when the subsequent
+    /// Delete a dedup key, used to roll back the SETNX when the subsequent
     /// WAL enqueue fails, so retries are not swallowed as duplicates.
     async fn clear_dedup(&self, key: &str) {
         match self.redis.get().await {
@@ -2001,8 +2001,8 @@ fn parse_single_wal_entry(raw: &str) -> Result<TrackingEvent> {
 
 /// Envelope checksum for a given envelope version.
 ///
-/// v2 — full 64-hex-char SHA-256 digest.
-/// v1 — first 8 hex chars (4 bytes): a 32-bit corruption heuristic, not a
+/// v2, full 64-hex-char SHA-256 digest.
+/// v1, first 8 hex chars (4 bytes): a 32-bit corruption heuristic, not a
 ///      security integrity check. Kept only so legacy envelopes still verify.
 fn wal_checksum_hex(version: u8, s: &str) -> String {
     if version >= WAL_VERSION {
@@ -2035,7 +2035,7 @@ fn new_id(prefix: &str) -> String {
 
 /// F54:generate a 26-char entity id for VARCHAR(26) PRIMARY KEY columns
 /// (`suppressions.id`, `subscription_preferences.id`). This is the
-/// platform's canonical generator — `apexmail_lib::id::generate_id` — the
+/// platform's canonical generator, `apexmail_lib::id::generate_id`, the
 /// same one the api-server uses for suppression rows
 /// (`generate_id("sup", 22)`): `"{prefix}_"` (4 chars) + 22 chars of
 /// [0-9a-z] nanoid = exactly 26.
@@ -2063,7 +2063,7 @@ fn dedup_key(event_type: &str, message_id: &str, recipient: &str, link_id: Optio
 
 /// Bump the retry counter (`"r"`) in a WAL envelope, returning the new
 /// envelope string. Returns `None` when the event has already been retried
-/// [`MAX_EVENT_RETRIES`] times (poison — drop it).
+/// [`MAX_EVENT_RETRIES`] times (poison, drop it).
 ///
 /// Legacy bare-event entries (no envelope) are wrapped into a versioned
 /// envelope with `r = 1`. The checksum is computed over the re-serialized
@@ -2086,7 +2086,7 @@ fn bump_envelope_retries(raw: &str) -> Option<String> {
             .unwrap_or(WAL_VERSION as u64) as u8;
         // Recompute the checksum over the re-serialized `d` value so the
         // modern verification path (which hashes `d.to_string()`) accepts
-        // the bumped envelope — the original string-form checksum does not
+        // the bumped envelope, the original string-form checksum does not
         // survive a Value round-trip without preserve_order.
         let d_str = outer.get("d").map(|d| d.to_string()).unwrap_or_default();
         let cs = wal_checksum_hex(version, &d_str);
@@ -2094,7 +2094,7 @@ fn bump_envelope_retries(raw: &str) -> Option<String> {
         outer["cs"] = serde_json::json!(cs);
         Some(outer.to_string())
     } else {
-        // Legacy bare event — wrap it at the CURRENT version, computing the
+        // Legacy bare event, wrap it at the CURRENT version, computing the
         // checksum the same way the modern parse path verifies it (`d`
         // re-serialized as a Value).
         let d_str = outer.to_string();
@@ -2134,7 +2134,7 @@ pub struct DeadLetterEntry {
     pub last_seen: String,
     /// Envelope schema version ([`DEAD_LETTER_SCHEMA_VERSION`]).
     pub schema_version: u64,
-    /// FNV-1a 64-bit hex over `payload` — a dependency-free corruption
+    /// FNV-1a 64-bit hex over `payload`, a dependency-free corruption
     /// heuristic for DLQ triage, NOT a security integrity check.
     pub checksum: String,
 }
@@ -2177,7 +2177,7 @@ fn build_dead_letter_entry(
 ///
 /// P3: the frames go out as ONE pipelined Redis round trip (`redis::pipe`) per
 /// flush instead of one round trip per event (≤500 per flush). The wire
-/// contract is UNCHANGED — one `PUBLISH events:{tenant} <json>` command per
+/// contract is UNCHANGED, one `PUBLISH events:{tenant} <json>` command per
 /// event, byte-identical to the per-event loop, so the SSE subscriber's frame
 /// shape and ordering are untouched. A new batched payload was deliberately
 /// NOT introduced: the consumer expects one event per frame.
@@ -2238,7 +2238,7 @@ fn parse_suppression_retry(raw: &str) -> Option<SuppressionRetry> {
 
 /// Bump the retry counter, returning the re-queued record string. Returns
 /// `None` when the record has already been retried
-/// [`MAX_EVENT_RETRIES`] times (poison — dropped with a CRITICAL log; a
+/// [`MAX_EVENT_RETRIES`] times (poison, dropped with a CRITICAL log; a
 /// suppression is compliance-critical, so the drop is loud).
 fn bump_suppression_retry(raw: &str) -> Option<String> {
     let mut record: SuppressionRetry = serde_json::from_str(raw).ok()?;
@@ -2252,7 +2252,7 @@ fn bump_suppression_retry(raw: &str) -> Option<String> {
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 /// One delivery per (event, subscribed webhook) for tracking events. The
-/// queue id is deterministic — `v5(event id, webhook id)` — so a duplicate
+/// queue id is deterministic, `v5(event id, webhook id)`, so a duplicate
 /// event (ON CONFLICT DO NOTHING upstream) can never enqueue a second
 /// One deliverable tracking event:
 /// `(event id, tenant id, event type, message id, recipient)`.
@@ -2272,8 +2272,8 @@ struct WebhookQueueRow {
 ///
 /// P3: one query per tenant replaces the pre-fix shape (a duplicate
 /// subscription query, then one INSERT per (event × webhook)). The row set is
-/// identical — the deterministic v5 ids, the `message.{type}` event name, the
-/// payload shape and `ON CONFLICT (id) DO NOTHING` are preserved — and the
+/// identical, the deterministic v5 ids, the `message.{type}` event name, the
+/// payload shape and `ON CONFLICT (id) DO NOTHING` are preserved, and the
 /// inserts are pushed with [`sqlx::QueryBuilder::push_values`] in bounded
 /// chunks (the same idiom the events/analytics inserts above use).
 async fn enqueue_tracking_event_webhooks(db: &sqlx::PgPool, events: &[DeliverableEvent]) {
@@ -2288,7 +2288,7 @@ async fn enqueue_tracking_event_webhooks(db: &sqlx::PgPool, events: &[Deliverabl
         0x31,
     ]);
 
-    /// Rows per bulk INSERT — bounds the statement size for a 500-event flush
+    /// Rows per bulk INSERT, bounds the statement size for a 500-event flush
     /// fanned out to many webhooks.
     const WEBHOOK_QUEUE_INSERT_CHUNK: usize = 500;
 
@@ -2406,7 +2406,7 @@ mod tests {
     /// suppressions.id / subscription_preferences.id are VARCHAR(26); the
     /// old `new_id("sup")` minted 36-char ids that overflowed the column
     /// (SQLSTATE 22001). The canonical generator must produce exactly 26
-    /// chars, prefixed, lowercase-alnum only — on EVERY call.
+    /// chars, prefixed, lowercase-alnum only, on EVERY call.
     #[test]
     fn entity_ids_for_varchar26_columns_are_exactly_26_chars() {
         for _ in 0..100 {
@@ -2426,7 +2426,7 @@ mod tests {
     }
 
     /// The UUID-based generator stays legal ONLY for the wide VARCHAR(64)
-    /// columns (events, webhook_queue) — pin its shape so a future reuse on
+    /// columns (events, webhook_queue), pin its shape so a future reuse on
     /// a VARCHAR(26) table is caught by this test failing review.
     #[test]
     fn uuid_based_new_id_is_36_chars_and_only_used_for_wide_columns() {
@@ -2506,7 +2506,7 @@ mod tests {
     }
 
     /// A v2-labelled envelope with only a truncated (8-hex) checksum must be
-    /// rejected — the version commits the digest width.
+    /// rejected, the version commits the digest width.
     #[test]
     fn parse_rejects_v2_envelope_with_truncated_checksum() {
         let truncated = sha256_hex8(BARE_PAYLOAD);
@@ -2637,7 +2637,7 @@ mod tests {
 
         assert_eq!(row.id, "evt_1");
         assert_eq!(row.event_type, "clicked");
-        // D: the OLAP row never carries the raw recipient — only the
+        // D: the OLAP row never carries the raw recipient, only the
         // privacy-encoded HMAC + redacted form.
         assert!(row.recipient.starts_with("h:"), "got {}", row.recipient);
         assert!(!row.recipient.contains("User@"), "got {}", row.recipient);
@@ -2788,7 +2788,7 @@ mod tests {
         let probe = if password.is_empty() {
             probe
         } else {
-            // coverage: justified — the with_password branch needs
+            // coverage: justified, the with_password branch needs
             // CLICKHOUSE_TEST_PASSWORD to be set while the probe STILL fails;
             // the soft-skip arm below is mutually exclusive with the (covered)
             // success path in any single measurement run: the probe fails
@@ -2797,7 +2797,7 @@ mod tests {
             probe.with_password(password.clone())
         };
         if probe.query("SELECT 1").fetch_one::<u8>().await.is_err() {
-            // coverage: justified — soft-skip arm, mutually exclusive with
+            // coverage: justified, soft-skip arm, mutually exclusive with
             // this test's (covered) success path in one run: covering it
             // requires ClickHouse to be DOWN, which would leave every
             // statement after the probe unexecuted.
@@ -2813,7 +2813,7 @@ mod tests {
 
         // Fixed recognisable timestamp: 2026-08-08T12:34:56.789Z
         let ts_millis = 1783687496789i64;
-        // Unique tenant per run — safe to execute against a shared instance
+        // Unique tenant per run, safe to execute against a shared instance
         // (no truncation, no cross-run interference).
         let tenant = format!("tenant_e2e_{}", std::process::id());
         let make = |id: &str, event_type: EventType, recipient: &str| TrackingEvent {

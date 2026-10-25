@@ -41,7 +41,7 @@ The ApexMail dashboard (app.apexmail.ee) uses:
 
 ## 4. Third-Party Cookies
 
-The ApexMail platform does not set third-party cookies. The only exception is if you embed ApexMail forms on your own website — those forms may set a `session_id` cookie scoped to your domain for CSRF protection.
+The ApexMail platform does not set third-party cookies. The only exception is if you embed ApexMail forms on your own website, those forms may set a `session_id` cookie scoped to your domain for CSRF protection.
 
 ## 5. Email Tracking
 

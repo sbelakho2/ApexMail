@@ -1,4 +1,4 @@
-//! Unified send admission — the ONE gate in front of every outbound send
+//! Unified send admission, the ONE gate in front of every outbound send
 //! path.
 //!
 //! Audit finding P0 (findings-2026-09-10): authenticated SMTP submission on
@@ -8,24 +8,24 @@
 //! the extraction of the REST admission logic into a single service both
 //! paths call:
 //!
-//! 1. **category** — validated/normalized through the ONE shared helper
+//! 1. **category**, validated/normalized through the ONE shared helper
 //!    (`apexmail_lib::email_headers::message_category::validate`, audit F55)
 //!    and returned explicitly. A send whose authenticated, server-owned input
 //!    carries no category gets the documented policy default
-//!    ([`DEFAULT_MESSAGE_CATEGORY`]) — never the
+//!    ([`DEFAULT_MESSAGE_CATEGORY`]), never the
 //!    `email_queue.message_category` schema default (finding P1).
-//! 2. **suppression** — the tenant suppression list, through THE canonical
+//! 2. **suppression**, the tenant suppression list, through THE canonical
 //!    query ([`suppressed_recipients_in_db`]) shared with the REST validation
 //!    path; the SMTP caller lets admission drop suppressed recipients before
 //!    queueing, the REST caller validates them up front.
-//! 3. **consent** (F4) — every non-transactional (marketing/other) recipient is checked against the canonical consent records through the `ConsentEnforcer`. A marketing send without an active consent record is refused with the enforcer's named reason; transactional/service sends keep their existing contract (suppression + quota). The consent store failing fails CLOSED.
-//! 4. **entitlement + quota** — the plan gate and the `EmailsSent`
+//! 3. **consent** (F4), every non-transactional (marketing/other) recipient is checked against the canonical consent records through the `ConsentEnforcer`. A marketing send without an active consent record is refused with the enforcer's named reason; transactional/service sends keep their existing contract (suppression + quota). The consent store failing fails CLOSED.
+//! 4. **entitlement + quota**, the plan gate and the `EmailsSent`
 //!    reservation through the canonical
 //!    [`crate::usage::record_with_quota_check`], keyed by the deterministic
 //!    usage event id derived from the caller's idempotency identity
 //!    ([`usage_event_id`]): a duplicate send on either path records the SAME
 //!    metering event and can only ever reserve once.
-//! 5. **settlement** — the returned [`SendAdmission`] handle is
+//! 5. **settlement**, the returned [`SendAdmission`] handle is
 //!    [`SendAdmission::commit`]ed after a successful enqueue and
 //!    [`SendAdmission::rollback`]ed when the queue write fails, so a failed
 //!    enqueue never consumes quota. A duplicate reservation owns no metering
@@ -40,7 +40,7 @@
 //! compensates the whole page). It returns one
 //! [`BatchAdmissionOutcome`] per recipient so suppressed/consent-refused
 //! recipients still land in the same terminal state the single-recipient
-//! path gives them — refusal stays per-recipient, only the probes and the
+//! path gives them, refusal stays per-recipient, only the probes and the
 //! reservation are page-granular. The single-recipient `admit` is untouched
 //! and remains the fallback ladder.
 //!
@@ -51,7 +51,7 @@
 //! because `billing-service` already depends on `apexmail-lib` for the
 //! category helper. `api-server` already depends on `billing-service`; the
 //! `mta` crate (owner of the SMTP submission server) adds the same
-//! dependency. `billing-service` depends on neither caller — no cycle.
+//! dependency. `billing-service` depends on neither caller, no cycle.
 //!
 //! ## Category policy (P1)
 //!
@@ -96,7 +96,7 @@ pub const SEND_METER_EVENT: MeterEventType = MeterEventType::EmailsSent;
 /// (`message_category::PREFERENCE_EXEMPT` contains only `transactional` and
 /// `service`): a missing attribute must never silently grant an opt-out
 /// exemption. The value is returned EXPLICITLY and written into
-/// `email_queue.message_category` by the caller — the schema default never
+/// `email_queue.message_category` by the caller, the schema default never
 /// decides.
 pub const DEFAULT_MESSAGE_CATEGORY: &str = message_category::MARKETING;
 
@@ -111,7 +111,7 @@ pub fn canonical_recipient(email: &str) -> String {
 /// shared helper (`apexmail_lib::email_headers::message_category::validate`).
 ///
 /// `None` selects the documented policy default and returns it as an
-/// explicit value — a caller can never end up with an empty category that
+/// explicit value, a caller can never end up with an empty category that
 /// the `email_queue.message_category` schema default would silently fill in.
 pub fn normalize_category(raw: Option<&str>) -> Result<String, SendAdmissionError> {
     match raw {
@@ -128,8 +128,8 @@ pub fn normalize_category(raw: Option<&str>) -> Result<String, SendAdmissionErro
 /// from the REST route so both paths derive the identity identically).
 ///
 /// With an idempotency key the id is derived deterministically from
-/// (tenant, key[, batch item index]), so concurrent duplicate sends — or a
-/// retry whose Redis accelerator state was lost — record the SAME metering
+/// (tenant, key[, batch item index]), so concurrent duplicate sends, or a
+/// retry whose Redis accelerator state was lost, record the SAME metering
 /// event. `record_with_quota_check` de-duplicates on the event id and
 /// reports `duplicate: true`, making a double reservation impossible.
 /// Without a key the reservation keeps a random id (no replay identity to
@@ -187,7 +187,7 @@ pub enum SendAdmissionError {
     #[error("invalid message category '{raw}'")]
     InvalidCategory { raw: String },
 
-    /// EVERY recipient is on the tenant suppression list — the send is
+    /// EVERY recipient is on the tenant suppression list, the send is
     /// refused rather than queued with an empty recipient set.
     #[error("all recipients are suppressed")]
     Suppressed(Vec<String>),
@@ -197,24 +197,24 @@ pub enum SendAdmissionError {
     #[error("email quota exceeded")]
     QuotaExceeded,
 
-    /// The canonical metering layer (Redis/Postgres) is unavailable — the
+    /// The canonical metering layer (Redis/Postgres) is unavailable, the
     /// send must be refused, never admitted unmetered.
     #[error("billing quota enforcement unavailable: {0}")]
     MeteringUnavailable(#[source] UsageError),
 
-    /// The suppression lookup failed — fail closed, never admit unmetered
+    /// The suppression lookup failed, fail closed, never admit unmetered
     /// or unscreened.
     #[error("suppression lookup unavailable: {0}")]
     SuppressionUnavailable(String),
 
     /// F4: the send-time consent gate refused a non-transactional
-    /// (marketing) recipient — no active consent record, revoked, expired,
+    /// (marketing) recipient, no active consent record, revoked, expired,
     /// or an unconfirmed double opt-in. Carries the recipient and the
     /// enforcer's named reason.
     #[error("marketing consent required for {email}: {reason}")]
     ConsentRefused { email: String, reason: String },
 
-    /// F4: the consent store was unavailable — fail closed, never send
+    /// F4: the consent store was unavailable, fail closed, never send
     /// marketing mail without a completed consent check.
     #[error("consent lookup unavailable: {0}")]
     ConsentUnavailable(String),
@@ -263,7 +263,7 @@ pub trait SendAdmissionBackend: Send + Sync + 'static {
     /// implementation allows, so test/in-memory backends that do not model
     /// consent keep their previous contract; a backend that DOES enforce
     /// must never return `Allowed` when the consent store is unreadable
-    /// (return `Err` — the service fails closed).
+    /// (return `Err`, the service fails closed).
     async fn consent_decision(
         &self,
         _tenant_id: &str,
@@ -409,7 +409,7 @@ impl SendAdmissionBackend for PostgresAdmissionBackend {
 
         // Transactional/service mail bypasses the marketing-consent gate on
         // the legitimate-interest path (frameworks is empty here, so the
-        // bypass always applies) — but suppression still blocks it.
+        // bypass always applies), but suppression still blocks it.
         let mut decisions = if is_transactional {
             let mut map = HashMap::with_capacity(lowered.len());
             for email in &lowered {
@@ -435,7 +435,7 @@ impl SendAdmissionBackend for PostgresAdmissionBackend {
 /// How the metered quantity is determined.
 #[derive(Debug)]
 pub enum AdmissionMeter<'a> {
-    /// Meter a fixed, already-validated quantity — the REST path's delivery
+    /// Meter a fixed, already-validated quantity, the REST path's delivery
     /// recipient count (to + cc + bcc; each becomes one queue row).
     Quantity(i64),
     /// Check the tenant suppression list for these envelope recipients and
@@ -457,7 +457,7 @@ pub struct SendAdmissionRequest<'a> {
     /// Batch item index for the shared batch idempotency key.
     pub idempotency_item: Option<usize>,
     /// Authenticated, server-owned category input. `None` applies the
-    /// documented policy default — it never falls through to the schema
+    /// documented policy default, it never falls through to the schema
     /// default.
     pub category: Option<&'a str>,
 }
@@ -468,15 +468,15 @@ pub struct SendAdmissionRequest<'a> {
 pub enum BatchAdmissionOutcome {
     /// Admitted under the page-level reservation ([`BatchAdmission`]).
     Allowed,
-    /// On the tenant suppression list — a terminal refusal for a campaign
+    /// On the tenant suppression list, a terminal refusal for a campaign
     /// recipient (the campaign drain marks it `suppressed`, never retries).
     Suppressed,
-    /// The send-time consent gate refused this marketing recipient — a
+    /// The send-time consent gate refused this marketing recipient, a
     /// terminal refusal. Carries the enforcer's named reason, exactly as the
     /// single-recipient [`SendAdmissionError::ConsentRefused`] does.
     ConsentRefused { reason: String },
     /// The batch failed before this recipient's gates ran. The caller must
-    /// defer (requeue) it exactly like today's transient arms — never mark
+    /// defer (requeue) it exactly like today's transient arms, never mark
     /// it sent, never silently skip it. Only ever present alongside a
     /// [`BatchAdmission::failure`].
     Unchecked,
@@ -487,12 +487,12 @@ pub enum BatchAdmissionOutcome {
 /// must still be applied per recipient; the rest of the page defers.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum BatchAdmissionFailure {
-    /// The server-owned category failed validation — the batch never probed
+    /// The server-owned category failed validation, the batch never probed
     /// and never reserved anything.
     #[error("invalid message category '{raw}'")]
     InvalidCategory { raw: String },
 
-    /// The ONE suppression probe failed — nothing is known, nothing was
+    /// The ONE suppression probe failed, nothing is known, nothing was
     /// reserved; the page defers.
     #[error("suppression lookup unavailable: {0}")]
     SuppressionUnavailable(String),
@@ -510,7 +510,7 @@ pub enum BatchAdmissionFailure {
     #[error("email quota exceeded")]
     QuotaExceeded,
 
-    /// The canonical metering layer was unavailable — fail closed, never
+    /// The canonical metering layer was unavailable, fail closed, never
     /// admit unmetered.
     #[error("billing quota enforcement unavailable: {0}")]
     MeteringUnavailable(String),
@@ -522,7 +522,7 @@ pub enum BatchAdmissionFailure {
 ///
 /// Settlement is page-granular: [`SendAdmission::commit`] the reservation
 /// after the page's enqueue transaction succeeds, or
-/// [`SendAdmission::rollback`] when it fails — compensating the WHOLE page.
+/// [`SendAdmission::rollback`] when it fails, compensating the WHOLE page.
 /// The reservation is `None` when nothing was allowed (every recipient
 /// refused, or the page failed before reserving): there is nothing to settle.
 pub struct BatchAdmission {
@@ -564,7 +564,7 @@ impl BatchAdmission {
     /// Destructure the batch in one move: the per-recipient outcomes (input
     /// order), the page reservation to settle after the enqueue transaction,
     /// and the batch failure (if any). The drain's hot path consumes all
-    /// three; nothing is dropped — an unconsumed reservation is the caller's
+    /// three; nothing is dropped, an unconsumed reservation is the caller's
     /// bug, so no `Drop` compensation hides here.
     pub fn into_parts(
         self,
@@ -577,7 +577,7 @@ impl BatchAdmission {
     }
 
     /// Why the batch could not complete, when it could not. `None` means the
-    /// admission itself finished — the outcomes are complete and a
+    /// admission itself finished, the outcomes are complete and a
     /// reservation exists iff any recipient was allowed.
     pub fn failure(&self) -> Option<&BatchAdmissionFailure> {
         self.failure.as_ref()
@@ -635,7 +635,7 @@ impl fmt::Debug for SendAdmission {
 impl SendAdmission {
     /// The validated, normalized category to write into
     /// `messages.message_category` / `email_queue.message_category`. Always
-    /// explicit — never empty, never decided by the schema default.
+    /// explicit, never empty, never decided by the schema default.
     pub fn category(&self) -> &str {
         &self.category
     }
@@ -653,7 +653,7 @@ impl SendAdmission {
 
     /// True when the billing layer recognized the usage event id as already
     /// recorded: this admission reserved NOTHING and must not be
-    /// compensated (the concurrent winner owns the event — F22).
+    /// compensated (the concurrent winner owns the event, F22).
     pub fn duplicate(&self) -> bool {
         self.duplicate
     }
@@ -885,7 +885,7 @@ impl SendAdmissionService {
     /// validate the server-owned category ONCE, run ONE suppression probe and
     /// ONE batched consent decision for the whole page, then reserve
     /// `EmailsSent` ONCE for the allowed count under the caller's page
-    /// idempotency identity — one [`SendAdmission`] handle whose rollback
+    /// idempotency identity, one [`SendAdmission`] handle whose rollback
     /// compensates the WHOLE page.
     ///
     /// Per-recipient parity with [`Self::admit`] is preserved through the
@@ -961,8 +961,8 @@ impl SendAdmissionService {
 
         // 3. ONE batched consent decision for the non-suppressed remainder.
         //    Preference-exempt categories (transactional/service) bypass the
-        //    marketing-consent gate on the legitimate-interest path — the
-        //    same contract `admit`/`enforce_consent` apply — but suppression
+        //    marketing-consent gate on the legitimate-interest path, the
+        //    same contract `admit`/`enforce_consent` apply, but suppression
         //    still blocks. A missing decision for a requested address fails
         //    closed: silence is not consent.
         let consent_inputs: Vec<String> = canonical
@@ -1026,7 +1026,7 @@ impl SendAdmissionService {
             .count() as i64;
         if allowed_count == 0 {
             // Every recipient refused (or an empty page): nothing to meter,
-            // nothing to settle — the outcomes carry the refusals.
+            // nothing to settle, the outcomes carry the refusals.
             return BatchAdmission {
                 outcomes,
                 reservation: None,
@@ -1228,7 +1228,7 @@ mod tests {
                 Ok(SendDecision::Allowed)
             } else {
                 Ok(SendDecision::Blocked(
-                    "no marketing consent on file — recipient must opt in".into(),
+                    "no marketing consent on file, recipient must opt in".into(),
                 ))
             }
         }
@@ -1689,7 +1689,7 @@ mod tests {
 
     /// The REST path's admission carries only a quantity, so the route calls
     /// [`SendAdmissionService::enforce_consent`] directly with the delivery
-    /// recipient list — the same gate the recipient-carrying admissions use.
+    /// recipient list, the same gate the recipient-carrying admissions use.
     #[tokio::test]
     async fn enforce_consent_is_the_shared_gate_for_quantity_admissions() {
         let (service, backend) = service(10);
@@ -1847,7 +1847,7 @@ mod tests {
                 BatchAdmissionOutcome::Suppressed,
                 BatchAdmissionOutcome::Allowed,
                 BatchAdmissionOutcome::ConsentRefused {
-                    reason: "no marketing consent on file — recipient must opt in".to_string()
+                    reason: "no marketing consent on file, recipient must opt in".to_string()
                 },
             ],
             "refusal outcomes are per recipient, in input order"
@@ -1892,7 +1892,7 @@ mod tests {
         assert!(second.duplicate(), "the replay must collapse to one event");
         assert_eq!(backend.used(), 3, "the duplicate reserved nothing");
         assert_eq!(backend.reserves(), 2, "one live + one duplicate ask");
-        // The duplicate's rollback is a no-op (F22) — the winner stands.
+        // The duplicate's rollback is a no-op (F22), the winner stands.
         second.rollback().await.unwrap();
         assert_eq!(backend.used(), 3);
         first.commit();
@@ -2005,7 +2005,7 @@ mod tests {
     }
 
     /// A preference-exempt category (transactional) admits the whole page
-    /// without consulting the consent gate — the single-recipient contract,
+    /// without consulting the consent gate, the single-recipient contract,
     /// batched.
     #[tokio::test]
     async fn batch_admission_exempt_category_skips_consent() {

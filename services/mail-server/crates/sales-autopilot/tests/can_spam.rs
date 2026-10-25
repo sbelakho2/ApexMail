@@ -9,9 +9,9 @@
 //! `decision_engine::decide` → `ProductionCampaignDispatcher::enqueue_sequenced`
 //! → `messages` + `email_queue`.
 //!
-//! * the opt-out footer — unsubscribe link in HTML **and** text, plus the
+//! * the opt-out footer, unsubscribe link in HTML **and** text, plus the
 //!   truthful business-contact disclosure (the footer must never claim a
-//!   signup that did not happen) — is pure renderer coverage and runs by
+//!   signup that did not happen), is pure renderer coverage and runs by
 //!   default;
 //! * a suppressed recipient is refused at enrollment and again at the
 //!   pre-send recheck (against the canonical test database);
@@ -183,7 +183,7 @@ fn dispatcher_for(db: &sqlx::PgPool, domain: &str) -> Arc<ProductionCampaignDisp
     )
 }
 
-/// Opted-out recipients must never be mailed — neither when the suppression
+/// Opted-out recipients must never be mailed, neither when the suppression
 /// predates enrollment (the canonical enrollment gate rejects the contact) nor
 /// when it lands after the step was queued (the pre-send Decision Packet
 /// refuses the send). The old test asserted the dispatch batch skipped them;
@@ -313,7 +313,7 @@ async fn opted_out_recipient_is_refused_at_enrollment_and_at_send_time() {
 
 /// The surviving frequency control is the per-account weekly touch budget
 /// checked inside `decision_engine::decide`. A capped account's send is
-/// refused while a fresh account still sends — the same funnel split the old
+/// refused while a fresh account still sends, the same funnel split the old
 /// per-recipient cap test asserted.
 #[tokio::test]
 async fn account_frequency_budget_blocks_over_mailing() {

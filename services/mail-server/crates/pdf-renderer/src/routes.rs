@@ -1,8 +1,8 @@
 //! Axum routes for the PDF renderer service.
 //!
-//! Routes://! - `POST /v1/pdf/render` — render template → PDF bytes (streaming)
-//! - `POST /v1/pdf/render/json` — render template → JSON with base64 PDF
-//! - `GET /health` — health check
+//! Routes://! - `POST /v1/pdf/render`, render template → PDF bytes (streaming)
+//! - `POST /v1/pdf/render/json`, render template → JSON with base64 PDF
+//! - `GET /health`, health check
 
 use std::time::Duration;
 
@@ -51,12 +51,12 @@ async fn require_service_token(
         return Ok(next.run(req).await);
     }
     // P1 #6: a configured dedicated token means the universal
-    // INTERNAL_SERVICE_TOKEN no longer authorizes anything here — call out
+    // INTERNAL_SERVICE_TOKEN no longer authorizes anything here, call out
     // unmigrated callers loudly (they get 401 either way).
     if state.is_refused_universal_attempt(&provided) {
         tracing::warn!(
             "request refused: the universal INTERNAL_SERVICE_TOKEN was presented but \
-             PDF_RENDERER_AUTH_TOKEN is configured — the caller must migrate to the \
+             PDF_RENDERER_AUTH_TOKEN is configured, the caller must migrate to the \
              dedicated per-workload token"
         );
     }
@@ -87,7 +87,7 @@ pub fn pdf_router(service_auth: ServiceAuth) -> Router {
 // Handlers
 // ---------------------------------------------------------------------------
 
-/// Health check — returns 200 OK with template count.
+/// Health check, returns 200 OK with template count.
 async fn health() -> impl IntoResponse {
     let template_count = crate::world::TEMPLATES.len();
     Json(json!({
@@ -208,7 +208,7 @@ mod tests {
     use axum::http::Request;
     use tower::ServiceExt;
 
-    // P1 #6: tests build the resolved per-workload `ServiceAuth` — a single
+    // P1 #6: tests build the resolved per-workload `ServiceAuth`, a single
     // accepted dedicated token, or the deny-all resolution when nothing is
     // configured (previously a bare token string).
     fn dedicated_auth(token: &str) -> ServiceAuth {
@@ -294,7 +294,7 @@ mod tests {
     }
 
     /// Legacy fallback (dedicated env unset): the universal token still
-    /// authenticates outside production — migration-safe behavior.
+    /// authenticates outside production, migration-safe behavior.
     #[tokio::test]
     async fn unset_dedicated_token_keeps_universal_token_working() {
         let auth = ServiceAuth::resolve(None, Some("universal-legacy"), false)
@@ -481,12 +481,12 @@ mod tests {
 
     /// PINNED (considered by the 2026-09 privilege-boundary audit): the PDF
     /// renderer has NO tenant dimension to fail closed on. The only surface
-    /// is `POST /v1/pdf/render[,/json]` — a pure function of
+    /// is `POST /v1/pdf/render[,/json]`, a pure function of
     /// `(platform-template-name, caller-supplied data)` over the
     /// token-gated platform template directory (`PDF_TEMPLATES_DIR`,
     /// charset-validated, path-traversal refused). It stores nothing, reads
     /// no tenant rows, accepts no tenant selector, and holds no per-caller
-    /// state — identical inputs render identical bytes for any caller, so
+    /// state, identical inputs render identical bytes for any caller, so
     /// there is no cross-tenant read to probe and no default bucket to
     /// exploit. The token check (empty-token fail-closed, 401 matrix) is
     /// pinned by the sibling tests above; this test pins the STATELESSNESS —

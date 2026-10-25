@@ -1,4 +1,4 @@
-//! PII detection — credit cards (Luhn), SSNs, phone numbers, email addresses
+//! PII detection, credit cards (Luhn), SSNs, phone numbers, email addresses
 //!
 //! All detection uses regex + validation (no external PII databases).
 //!
@@ -103,7 +103,7 @@ fn spaced_card_regex() -> Option<&'static Regex> {
         // Bounded spaced-digit heuristic:13–19 digits with at most one
         // separator (space, dot, or dash) between each digit. Catches
         // "4 1 1 1  1 1 1 1…" style spacing that the grouped pattern misses.
-        // Each position is a single optional separator — no nested
+        // Each position is a single optional separator, no nested
         // quantifiers, so the pattern is linear-time (ReDoS-safe).
         Regex::new(r"\b\d(?:[ .\-]?\d){12,18}\b").ok()
     })
@@ -206,7 +206,7 @@ const DOCUMENTATION_PHRASES: &[&str] = &[
 
 /// Risk reduction factor for context modifiers. Total reduction is capped
 /// at 25% (factor 0.75):context clues alone must never be able to
-/// de-facto suppress a PII finding — a real card number preceded by
+/// de-facto suppress a PII finding, a real card number preceded by
 /// "e.g." is still a real card number leaving the organization.
 const CONTEXT_RISK_FACTOR: f64 = 0.75;
 
@@ -246,7 +246,7 @@ fn detect_context_modifier(
 
     // Example phrases only count when they appear IMMEDIATELY before the
     // match (short window) AND the value itself is wrapped in quotes or
-    // backtick code formatting — "e.g. <code>4111…</code>". A stray word
+    // backtick code formatting, "e.g. <code>4111…</code>". A stray word
     // like "sample" three sentences earlier must not mask real PII.
     // The window start is walked to a char boundary exactly like the long
     // window above: a raw `match_offset - 48` byte offset can land
@@ -403,7 +403,7 @@ pub fn scan_pii_with_context(
 /// Like [`scan_pii_with_context`], but additionally returns the exact
 /// matched byte span `(offset, end)` of every finding, PARALLEL to the
 /// returned matches vector. Offsets and spans refer to the NORMALIZED text
-/// (see [`normalize_pii_text`]) — the same coordinate system as
+/// (see [`normalize_pii_text`]), the same coordinate system as
 /// [`PiiMatch::offset`]. The engine's chunked scanner uses the spans to
 /// de-duplicate findings that a chunk's 64-byte carry-over window scanned
 /// twice (audit finding: chunk-seam evasion).
@@ -725,7 +725,7 @@ mod tests {
         assert_eq!(cc.risk, cc.base_risk);
 
         // Genuinely quoted sample data right after an example cue IS
-        // reduced — but only by the capped 25%.
+        // reduced, but only by the capped 25%.
         let quoted = "for example \"4111111111111111\" in docs";
         let results = scan_pii(quoted, true, false, false, false);
         let cc = &results[0];
@@ -887,7 +887,7 @@ mod tests {
     #[test]
     fn test_zero_width_characters_in_card_detected() {
         // Invisible characters splitting the number must not defeat
-        // detection — normalization strips them before the regexes run.
+        // detection, normalization strips them before the regexes run.
         let text = "card 4111\u{200b}1111\u{200b}1111\u{200b}1111 end";
         let matches = scan_pii(text, true, false, false, false);
         assert!(
@@ -957,7 +957,7 @@ mod tests {
     #[test]
     fn spaced_candidate_overlapping_reported_card_is_suppressed_exactly() {
         // The spaced-digit heuristic must not re-report the same card the
-        // grouped pattern already found — including candidates whose span
+        // grouped pattern already found, including candidates whose span
         // extends past a hardcoded 16-byte end (the pre-fix behavior).
         // "4111 1111 1111 1111" is 19 bytes; a spaced candidate starting
         // inside its tail must be suppressed by the true-span taken range.

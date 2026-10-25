@@ -177,7 +177,7 @@ pub fn delivery_category(folder: &InboxFolder) -> &'static str {
 /// 1. `INBOX` under any casing → `"inbox"` (RFC 3501 interprets INBOX
 ///    case-insensitively).
 /// 2. Folders matching `(?i)spam|junk|bulk` → `"spam"`.
-/// 3. Anything else — including Promotions — → [`classify_folder`] +
+/// 3. Anything else, including Promotions, → [`classify_folder`] +
 ///    [`delivery_category`] for the provider (e.g. Gmail Social/Updates
 ///    tabs, Archive, custom folders).
 ///

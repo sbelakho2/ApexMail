@@ -10,7 +10,7 @@
 //! Offset‑based pagination (`LIMIT x OFFSET y`) becomes O(n²) for large
 //! datasets because PostgreSQL must scan and discard all preceding rows.
 //! Keyset pagination (`WHERE id > $1 LIMIT x`) uses the index to start
-//! reading directly at the cursor position — O(1) per page.
+//! reading directly at the cursor position, O(1) per page.
 //!
 //! # Usage
 //!
@@ -32,7 +32,7 @@
 //!         )
 //!         .bind(tenant_id).bind(c).bind(fetch_limit).fetch_all(&pool).await?
 //!     } else {
-//!         // First page — no cursor
+//!         // First page, no cursor
 //!         sqlx::query_as::<_, ItemRow>(
 //!             "SELECT ... FROM items WHERE tenant_id = $1
 //!              ORDER BY created_at DESC LIMIT $2"

@@ -47,7 +47,7 @@ impl SupportPlan {
             Self::Growth => "8 business hours",
             Self::Business => "4 business hours",
             Self::Enterprise => "Negotiated per contract",
-            Self::DedicatedTenant => "Premium — negotiated per contract",
+            Self::DedicatedTenant => "Premium, negotiated per contract",
         }
     }
 

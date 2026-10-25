@@ -78,7 +78,7 @@ async fn build_harness() -> Option<Harness> {
     // `shared_canonical_db`, NOT `fresh_canonical_pool`: this suite's tests all
     // share ONE database for the whole process (the `SHARED` OnceCell builds
     // the harness once), and `fresh_canonical_pool` DROPS and re-creates its
-    // database on every call — under a parallel runner a second caller could
+    // database on every call, under a parallel runner a second caller could
     // drop the database the first caller was connecting to, which is exactly
     // the observed `clone-connect: database "…_enterprise_core" does not exist`
     // failure. The shared variant creates-if-absent under a cluster advisory
@@ -188,7 +188,7 @@ fn mint_token(tenant: &str, subject: &str, admin: bool) -> String {
 /// sub-account routes now gate on the owning tenant's entitlement snapshot
 /// (`billing_service::plans::get_entitlement_snapshot`). The shared harness
 /// tenants stay on `free`, so the gated flows below provision their OWN
-/// tenant on a dedicated plan row carrying the wave-1 flags — the same
+/// tenant on a dedicated plan row carrying the wave-1 flags, the same
 /// fixture shape as wave-1's `routes.rs::seed_capability_plan` /
 /// `seed_capability_tenant`.
 const ENTITLED_PLAN: &str = "adv-entitled";
@@ -542,7 +542,7 @@ fn contract_lifecycle_enforces_admin_role_and_tenant_ownership() {
 
         // Another tenant cannot see or act on the contract: the lookup is
         // scoped by the TOKEN's tenant, so it is indistinguishable from an
-        // unknown id (404 — no existence oracle).
+        // unknown id (404, no existence oracle).
         let (status, _) = call(
             &app,
             "GET",
@@ -1140,7 +1140,7 @@ fn compliance_audit_identity_baa_and_data_access_are_fail_closed() {
         .await;
         assert_eq!(status, StatusCode::OK);
 
-        // Field tooling: ciphertext is tenant-bound — decrypting through
+        // Field tooling: ciphertext is tenant-bound, decrypting through
         // another tenant's context is refused.
         let (status, json) = call(
             &app,
@@ -1362,7 +1362,7 @@ fn log_streaming_secrets_are_masked_and_ssrf_is_refused() {
             .any(|s| s["id"] == id.as_str()));
 
         // SSRF: verifying a webhook pinned to a private/metadata address must
-        // be refused — no outbound request is made.
+        // be refused, no outbound request is made.
         for private_url in [
             "https://127.0.0.1:9/hook",
             "https://169.254.169.254/latest/meta-data/",
@@ -1402,7 +1402,7 @@ fn log_streaming_secrets_are_masked_and_ssrf_is_refused() {
             );
             // The refusal is a structured VERIFICATION_FAILED (the guard
             // either blocks the resolved private address or the resolution
-            // itself fails) — never a success.
+            // itself fails), never a success.
             assert_eq!(json["code"], "VERIFICATION_FAILED", "{json}");
             let _ = call(
                 &app,
@@ -1636,7 +1636,7 @@ fn private_deploy_ip_pool_and_byoip_are_validated() {
         )
         .await;
         // A failed verification is a STATE conflict (409), not a 200 with
-        // success:false — the earlier version of this assertion pinned the
+        // success:false, the earlier version of this assertion pinned the
         // status lie the service_result mapping was fixed to remove.
         assert_eq!(status, StatusCode::CONFLICT, "{json}");
         assert_ne!(json["success"], true, "wrong token must not verify: {json}");
@@ -1801,7 +1801,7 @@ fn sub_accounts_and_api_keys_enforce_lifecycle_and_tenant_bounds() {
         assert_eq!(json["success"], false, "deleted sub-account is not found");
 
         // The wave-1 gate itself, still covered: the shared FREE-plan tenant
-        // is refused 403 naming `subaccounts` — the entitled fixture tenant
+        // is refused 403 naming `subaccounts`, the entitled fixture tenant
         // above is what admits the lifecycle, never a weakened check.
         let (status, json) = call(
             &app,
@@ -2043,7 +2043,7 @@ fn templates_whitelabel_and_qbr_flows_are_tenant_scoped() {
         // in-process mock renderer (PDF_RENDERER_URL is read per call).
 
         // The wave-1 gate itself, still covered: the shared FREE-plan tenant
-        // is refused 403 naming `template_approval_workflow` — the entitled
+        // is refused 403 naming `template_approval_workflow`, the entitled
         // fixture tenant above is what admits the flow, never a weakened gate.
         let (status, json) = call(
             &app,
@@ -2083,7 +2083,7 @@ fn sso_routes_and_saml_validation_reject_unsigned_and_mismatched_responses() {
         let domain = format!("sso-{}.example.com", Uuid::new_v4().simple());
 
         // Audit F8 (verifier repair): SSO configuration is an admin-only
-        // control-plane mutation — a plain tenant member is refused (403)
+        // control-plane mutation, a plain tenant member is refused (403)
         // even with a WELL-FORMED body (a malformed one never reaches the
         // handler: axum's Json extractor answers 422 first).
         let (status, body) = call(
@@ -2109,7 +2109,7 @@ fn sso_routes_and_saml_validation_reject_unsigned_and_mismatched_responses() {
         );
 
         // Malformed SSO configuration is rejected honestly (under the admin
-        // token, so the validation layer — not the RBAC gate — answers).
+        // token, so the validation layer, not the RBAC gate, answers).
         let (status, _) = call(
             &app,
             "POST",
@@ -2144,7 +2144,7 @@ fn sso_routes_and_saml_validation_reject_unsigned_and_mismatched_responses() {
         assert_eq!(status, StatusCode::NOT_FOUND);
 
         // Configuring with a certificate that is not a valid X.509 PEM must
-        // not silently enable signature-less validation (admin caller — the
+        // not silently enable signature-less validation (admin caller, the
         // RBAC gate above already refused the member).
         let (status, json) = call(
             &app,
@@ -2313,7 +2313,7 @@ fn sso_routes_and_saml_validation_reject_unsigned_and_mismatched_responses() {
 
 // ── HTTP status honesty ────────────────────────────────────────────────
 
-/// A NOT_FOUND service result must surface as HTTP 404 — not as HTTP 200
+/// A NOT_FOUND service result must surface as HTTP 404, not as HTTP 200
 /// with `{"success":false}`, which lies to any client checking
 /// `response.ok`. The ApiResult envelope itself is unchanged (`success`,
 /// `error`, `code` still present).
@@ -2818,13 +2818,13 @@ fn saml_assertion_replay_and_clock_skew_are_enforced() {
 // audit) ────────────────────────────────────────────────────────────────────
 
 /// PINNED + adversarially proven: `resolve_tenant_id`'s ABSENT-header arm
-/// resolves to the JWT-AUTHENTICATED tenant — never to a broad default
+/// resolves to the JWT-AUTHENTICATED tenant, never to a broad default
 /// bucket (the `_control-plane` shape the AI audit fixed). A request with no
 /// tenant header is scoped to the caller's own tenant: a regular user sees
 /// only their tenant's contracts, and even an ADMIN without the header gets
 /// only their own tenant (the override must be asserted per request, not
 /// silently implied). Cross-tenant reads therefore require BOTH an admin
-/// claim AND the explicit header — and the non-admin header override stays a
+/// claim AND the explicit header, and the non-admin header override stays a
 /// 403.
 #[test]
 fn absent_tenant_header_scopes_to_the_authenticated_tenant_never_a_broader_bucket() {

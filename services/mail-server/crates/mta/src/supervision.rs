@@ -5,7 +5,7 @@
 //! (`tokio::task::JoinSet`). The binary selects on the JoinSet alongside the
 //! shutdown signal:
 //!
-//! * a listener that exits — with `Ok`, `Err`, or a panic — flips the shared
+//! * a listener that exits, with `Ok`, `Err`, or a panic, flips the shared
 //!   [`Readiness`] flag to false (`/ready` starts answering 503) and makes
 //!   the process terminate with an error so the supervisor/orchestrator
 //!   restarts the service;
@@ -30,7 +30,7 @@ pub struct Readiness {
 }
 
 impl Readiness {
-    /// Ready initially — the flag exists before any listener binds.
+    /// Ready initially, the flag exists before any listener binds.
     pub fn new() -> Self {
         Self {
             flag: Arc::new(AtomicBool::new(true)),

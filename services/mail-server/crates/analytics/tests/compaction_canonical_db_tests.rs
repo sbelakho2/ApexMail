@@ -50,7 +50,7 @@ impl Drop for EphemeralRedis {
     fn drop(&mut self) {
         // The guard owns the throwaway server; killing it explicitly (rather
         // than relying on the field's own Drop) also marks the field as READ
-        // — clippy -D warnings rejects a Drop-only field as dead code.
+        //, clippy -D warnings rejects a Drop-only field as dead code.
         self.server.kill();
     }
 }
@@ -207,7 +207,7 @@ async fn compaction_derives_provider_region_from_validated_metadata() {
 
     // Restart: a second run finds nothing left and writes nothing new.
     // FINDING B:the dedup that makes this restart safe consults the LEDGER
-    // (analytics_compaction_batches) — asserted in the ledger tests below —
+    // (analytics_compaction_batches), asserted in the ledger tests below —
     // not a rescan of the manifest tree.
     let second = worker(&pool, &redis, &storage)
         .run()
@@ -535,7 +535,7 @@ async fn same_millisecond_batches_get_distinct_cold_objects() {
     pool.close().await;
 }
 
-/// FINDING A kill window 1 — crash AFTER the object write, BEFORE the ledger
+/// FINDING A kill window 1, crash AFTER the object write, BEFORE the ledger
 /// commit:an orphan object is left behind. It must be TOLERATED (never
 /// swept mid-flight, never fatal) and the events must stay INTACT: the rerun
 /// re-writes them under a fresh identity, commits the ledger, and only then
@@ -573,7 +573,7 @@ async fn crash_after_object_write_before_commit_orphan_is_tolerated() {
         .expect("rerun after crash");
     assert_eq!(
         status.rows_migrated, 2,
-        "orphan ids are not covered — they are re-written"
+        "orphan ids are not covered, they are re-written"
     );
     assert_eq!(
         status.rows_deleted, 2,
@@ -615,11 +615,11 @@ async fn crash_after_object_write_before_commit_orphan_is_tolerated() {
     pool.close().await;
 }
 
-/// FINDING A kill window 2 + FINDING B — crash AFTER the ledger commit,
+/// FINDING A kill window 2 + FINDING B, crash AFTER the ledger commit,
 /// BEFORE the hot DELETE. The rerun must consult the LEDGER (not the
 /// filesystem): the covered ids are NOT re-written, and their hot rows are
 /// deleted to finish the interrupted migration. The fixture deliberately has
-/// NO manifest files at all — under the old manifest-scan dedup this rerun
+/// NO manifest files at all, under the old manifest-scan dedup this rerun
 /// would have re-written (duplicated) the batch.
 #[tokio::test]
 async fn crash_after_commit_before_delete_rerun_consults_ledger() {
@@ -667,7 +667,7 @@ async fn crash_after_commit_before_delete_rerun_consults_ledger() {
             .unwrap();
     assert_eq!(hot, 0);
 
-    // Still exactly one committed batch, object untouched — no duplicates.
+    // Still exactly one committed batch, object untouched, no duplicates.
     let committed = load_committed_batches(&pool, "tenant_pend").await.unwrap();
     assert_eq!(committed.len(), 1);
     assert_eq!(committed[0].event_count, 2);
@@ -688,7 +688,7 @@ async fn crash_after_commit_before_delete_rerun_consults_ledger() {
 
 /// FINDING B:ledger-driven id coverage must EQUAL the old full
 /// manifest-tree scan (the removed load_manifested_ids recursion), on a
-/// generated fixture tree — property test over seeded batches, shuffled
+/// generated fixture tree, property test over seeded batches, shuffled
 /// candidate sets, plus tenant isolation (a tenant's coverage never leaks
 /// into another tenant's probe).
 #[tokio::test]
@@ -790,7 +790,7 @@ async fn ledger_coverage_equals_old_full_manifest_scan_property() {
 }
 
 /// FINDING A/B:the ledger ages out with the same `{YYYY/MM}` retention rule
-/// as the on-disk month directories — a committed batch never outlives its
+/// as the on-disk month directories, a committed batch never outlives its
 /// materialization, keeping the recovery lookup bounded by retention.
 #[tokio::test]
 async fn ledger_retention_tracks_cold_retention() {

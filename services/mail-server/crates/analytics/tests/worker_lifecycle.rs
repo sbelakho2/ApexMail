@@ -26,7 +26,7 @@ fn spawn_worker(database_url: &str, args: &[&str]) -> Child {
         .env("DATABASE_URL", database_url)
         // The suite's Redis: TEST_REDIS_URL is the CI/deploy endpoint (an
         // ephemeral Redis on a random port). 127.0.0.1:6379 is only the
-        // local dev default — the deploy host runs no host-level Redis, so
+        // local dev default, the deploy host runs no host-level Redis, so
         // pinning it made `--health` (Postgres + Redis pools required)
         // fail there (deploy 2026-10-11).
         .env("REDIS_URL", test_redis_url())
@@ -96,7 +96,7 @@ fn reconcile_mode_exits_zero_against_live_dependencies() {
 /// Daemon mode installs the SIGINT/SIGTERM handlers and waits; SIGTERM must
 /// drain to exit code 0 after aborting the scheduled tasks (the container
 /// stop path). The signal is only sent once the worker's own logs prove the
-/// startup reached the signal wait — a signal racing an uninstalled handler
+/// startup reached the signal wait, a signal racing an uninstalled handler
 /// would kill the process with the default disposition.
 #[test]
 fn daemon_sigterm_exits_cleanly() {
@@ -106,7 +106,7 @@ fn daemon_sigterm_exits_cleanly() {
     };
     let mut child = spawn_worker(&database_url, &[]);
 
-    // The scheduled tasks log right after being spawned — at that point
+    // The scheduled tasks log right after being spawned, at that point
     // main is at (or a few statements from) the signal await.
     let mut startup_log = String::new();
     let mut ready = false;
@@ -166,7 +166,7 @@ fn daemon_fails_fast_on_an_unreachable_database() {
 }
 
 /// The `can_connect` helper stays exercised: the suite's Redis answers.
-/// The endpoint comes from TEST_REDIS_URL — the CI stage provides an
+/// The endpoint comes from TEST_REDIS_URL, the CI stage provides an
 /// ephemeral Redis on a RANDOM port, so a hardcoded 6379 asserted the wrong
 /// thing there (and nothing listens on a bare CI host's 6379). 6379 remains
 /// the dev fallback when the var is unset.

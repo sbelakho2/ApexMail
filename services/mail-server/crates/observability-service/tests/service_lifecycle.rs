@@ -91,7 +91,7 @@ fn test_db_coordinates() -> (String, String, String, String, String) {
 }
 
 /// Spawn the service with a fully explicit environment: no inherited OTEL
-/// endpoint, no host-wide Redis overrides — the child's contract is exactly
+/// endpoint, no host-wide Redis overrides, the child's contract is exactly
 /// what this test states.
 fn spawn_service(health_addr: SocketAddr, extra_env: &[(&str, &str)]) -> Child {
     let mut command = Command::new(env!("CARGO_BIN_EXE_observability-service"));
@@ -175,7 +175,7 @@ fn output_of(child: &mut Child) -> String {
 }
 
 /// The service serves its health and metrics contracts and drains to exit
-/// code 0 on SIGTERM — the container stop signal.
+/// code 0 on SIGTERM, the container stop signal.
 #[test]
 fn service_serves_health_and_metrics_and_sigterm_exits_cleanly() {
     let addr = reserve_addr();
@@ -224,7 +224,7 @@ fn service_sigint_exits_cleanly() {
 }
 
 /// A malformed environment (LOG_LEVEL=off fails validation) must refuse
-/// startup with exit code 1 and a message on stderr — never a half-booted
+/// startup with exit code 1 and a message on stderr, never a half-booted
 /// service.
 #[test]
 fn service_refuses_an_invalid_configuration() {

@@ -4,8 +4,8 @@
 //! at regular intervals with keep-alive pings for connection health.
 //!
 //! Mounted under the dashboard router (see `dashboard.rs`):
-//! - `GET /v1/admin/dashboard/sse/dashboard` — live dashboard metrics every 5 seconds
-//! - `GET /v1/admin/dashboard/sse/alerts` — real-time alert stream every 10 seconds
+//! - `GET /v1/admin/dashboard/sse/dashboard`, live dashboard metrics every 5 seconds
+//! - `GET /v1/admin/dashboard/sse/alerts`, real-time alert stream every 10 seconds
 //!
 //! The dashboard snapshot is computed ONCE per [`SNAPSHOT_TTL`] on a shared
 //! cache and served to every connected operator (P1/P2 fix: the global
@@ -47,7 +47,7 @@ const ALERTS_POLL_INTERVAL: Duration = Duration::from_secs(10);
 /// How long one computed platform snapshot is served to ALL SSE clients
 /// before a recompute is allowed. Equal to the per-client poll cadence, so
 /// every operator still sees a snapshot at most one interval old (the same
-/// freshness contract as the old per-client recomputation) — but the global
+/// freshness contract as the old per-client recomputation), but the global
 /// aggregates run ONCE per interval for the whole platform instead of once
 /// per connected operator.
 const SNAPSHOT_TTL: Duration = Duration::from_secs(5);
@@ -65,13 +65,13 @@ struct SnapshotSlot<T, E> {
 
 /// TTL cache with serialized recompute (P1/P2 perf fix): the admin SSE
 /// dashboard used to recompute global counts, schema probes and the MRR
-/// aggregation every ~5s PER CONNECTED operator — query load scaled with
+/// aggregation every ~5s PER CONNECTED operator, query load scaled with
 /// the operator count. Now all clients read one shared snapshot: a fresh
 /// slot is served without the refresh lock (fast path), an expired slot
 /// triggers exactly one recompute at a time (the `refresh` mutex), and
 /// clients that queued behind the winner find the slot fresh and reuse it.
 struct SnapshotCache<T, E> {
-    /// One slot per database identity — test-isolated databases (and any
+    /// One slot per database identity, test-isolated databases (and any
     /// future second pool) never share snapshots.
     slots: Mutex<HashMap<String, SnapshotSlot<T, E>>>,
     /// At most one recompute in flight at a time, across all clients.
@@ -211,8 +211,8 @@ async fn query_dashboard_snapshot(db: &sqlx::PgPool) -> Result<DashboardSsePaylo
         0
     };
 
-    // MRR from mollie_subscriptions — the table the billing webhook writers
-    // populate — mirroring billing-service's get_mrr_report pattern (tenants.plan
+    // MRR from mollie_subscriptions, the table the billing webhook writers
+    // populate, mirroring billing-service's get_mrr_report pattern (tenants.plan
     // → plans pricing, ROUND(price_yearly / 12.0) yearly normalization).
     // The legacy `subscriptions` table has no writer and always read as zero.
     let mrr = if table_exists(db, "mollie_subscriptions").await?
@@ -288,7 +288,7 @@ async fn sse_dashboard(
     let db = state.db.clone();
     // Bounded stream (P2): ends at MAX_STREAM_DURATION or after
     // MAX_CONSECUTIVE_POLL_ERRORS failing polls (degraded comment events in
-    // between) — the browser's EventSource reconnects, which both resets
+    // between), the browser's EventSource reconnects, which both resets
     // the window and re-runs the auth/scope gates. `unfold` owns the poll
     // state (scan's closure bounds reject futures that borrow it).
     let stream = futures::stream::unfold(
@@ -346,7 +346,7 @@ struct AlertSsePayload {
     acknowledged: bool,
 }
 
-/// system_alerts has no `timestamp` column — its time column is `created_at`
+/// system_alerts has no `timestamp` column, its time column is `created_at`
 /// (and `component` only exists after migration 108; fall back to
 /// alert_type). The query aliases both, mirroring system_health.rs.
 const NEW_ALERTS_SQL: &str = "SELECT id::text, severity, COALESCE(component, alert_type) as component, message, created_at AS timestamp, acknowledged
@@ -530,14 +530,14 @@ mod tests {
     #[test]
     fn alerts_sql_aliases_real_system_alerts_columns() {
         // system_alerts has created_at (not timestamp) and gained `component`
-        // in migration 108 — the query must reference real columns only.
+        // in migration 108, the query must reference real columns only.
         assert!(NEW_ALERTS_SQL.contains("created_at AS timestamp"));
         assert!(NEW_ALERTS_SQL.contains("COALESCE(component, alert_type)"));
         assert!(!NEW_ALERTS_SQL.contains("WHERE timestamp"));
     }
 
     /// Fix (P1/P2 per-client global SQL): N concurrent clients hitting an
-    /// expired snapshot must produce exactly ONE computation — the first
+    /// expired snapshot must produce exactly ONE computation, the first
     /// recomputes while holding the refresh lock, the rest queue and then
     /// reuse the winner's fresh snapshot. All clients receive the SAME Arc.
     #[tokio::test(start_paused = true)]
@@ -1009,7 +1009,7 @@ mod adversarial_tests {
 
     /// A canonical clone with the OPTIONAL tables and columns removed: the
     /// snapshot must honestly degrade (queue 0, MRR 0, health unknown) and
-    /// the alerts query an empty backlog — table absence is `Ok`, never a
+    /// the alerts query an empty backlog, table absence is `Ok`, never a
     /// fabricated reading, and never an error.
     #[tokio::test]
     async fn snapshot_degrades_honestly_when_optional_tables_are_absent() {
@@ -1018,7 +1018,7 @@ mod adversarial_tests {
         };
 
         // Phase 1: mollie_subscriptions WITHOUT the billing_interval column
-        // — the 'monthly' literal branch — with a paid subscription so the
+        //, the 'monthly' literal branch, with a paid subscription so the
         // MRR join still computes through the fallback expression.
         sqlx::query("ALTER TABLE mollie_subscriptions DROP COLUMN IF EXISTS billing_interval")
             .execute(&pool)
@@ -1088,7 +1088,7 @@ mod adversarial_tests {
         assert_eq!(filled.component.as_deref(), Some("network"));
 
         // Phase 2: drop the optional tables. The documented contract (P2):
-        // snapshot errors PROPAGATE — a broken dependency must never render
+        // snapshot errors PROPAGATE, a broken dependency must never render
         // as a healthy all-zero dashboard, and the capability memo is
         // deliberately per-process (tables do not vanish under a running
         // production binary; a stale memo mid-migration fails LOUDLY, which
@@ -1150,7 +1150,7 @@ mod adversarial_tests {
     ///
     /// REAL time, bounded collection: pausing tokio time while the stream
     /// queries the real database fires sqlx's pool-acquire timer on every
-    /// auto-advance, degrading every tick to "dashboard-unavailable" — a
+    /// auto-advance, degrading every tick to "dashboard-unavailable", a
     /// test-infrastructure conflict, not a product property. The full-
     /// window/cap semantics are pinned by the paused-time DEAD-POOL test
     /// below (identical stream over a query that fails fast and never
@@ -1254,7 +1254,7 @@ mod adversarial_tests {
     /// REAL time, bounded collection: pausing tokio time while the stream
     /// queries the real database fires sqlx's pool-acquire timer on every
     /// auto-advance, degrading every poll to "database error" before the
-    /// backlog — a test-infrastructure conflict, not a product property.
+    /// backlog, a test-infrastructure conflict, not a product property.
     /// The full-window/cap semantics are pinned by the paused-time
     /// `build_alerts_stream` tests above (which run the identical stream
     /// over an injectable poll); this test pins that the handler's REAL
@@ -1302,7 +1302,7 @@ mod adversarial_tests {
         })
     }
 
-    /// A poll that fails every tick (sqlx::Error is not Clone — the error
+    /// A poll that fails every tick (sqlx::Error is not Clone, the error
     /// is constructed fresh per call).
     fn failing_poll(calls: Arc<std::sync::atomic::AtomicUsize>) -> AlertPollFn {
         Arc::new(move |_since| {
@@ -1347,7 +1347,7 @@ mod adversarial_tests {
 
         // The stream emits one SSE Event per alert (the unparseable one is
         // skipped for the watermark but still streamed? No: it is filtered
-        // before emission — drain bounded until a-old and a-new both seen;
+        // before emission, drain bounded until a-old and a-new both seen;
         // start_paused advances the tick interval across awaits).
         let mut seen_old = false;
         let mut seen_new = false;

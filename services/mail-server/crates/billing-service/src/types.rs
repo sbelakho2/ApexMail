@@ -39,53 +39,53 @@ pub struct Plan {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlanFeatures {
     // Infrastructure
-    /// RuntimeEnforced — dedicated IP allocation requires this entitlement (`dedicated_ips::allocate_ip`).
+    /// RuntimeEnforced, dedicated IP allocation requires this entitlement (`dedicated_ips::allocate_ip`).
     pub dedicated_ip: bool,
-    /// ContractualOnly capacity — included dedicated IPs (billing term: extras are charged, not refused).
+    /// ContractualOnly capacity, included dedicated IPs (billing term: extras are charged, not refused).
     pub dedicated_ip_count: i32,
-    /// RuntimeEnforced capacity — domain creation checks the requested total.
+    /// RuntimeEnforced capacity, domain creation checks the requested total.
     pub max_sending_domains: i32,
-    /// RuntimeEnforced — activating EU-only routing (`PUT /v1/routing`) requires this entitlement;
+    /// RuntimeEnforced, activating EU-only routing (`PUT /v1/routing`) requires this entitlement;
     /// the worker then sends through our own MTAs only and HOLDS (never SES) when that route is
     /// unavailable. Included on Enterprise Cloud / the Compliance contract line; add-on on
     /// self-serve Pro+ via `settings.addons.euOnlyRouting` (`platform-catalog` `eu_only_routing`).
     ///
     /// `#[serde(default)]`: plan rows written before this key existed carry no
     /// value for it, and a missing entitlement Bool must read as NOT entitled
-    /// (fail-closed) — never as a deserialization error that would fail every
+    /// (fail-closed), never as a deserialization error that would fail every
     /// tenant's entitlement lookup on a rolling deploy (`get_entitlement_snapshot`
     /// treats malformed-but-present JSON as corruption, Fix #10).
     #[serde(default)]
     pub eu_only_routing: bool,
 
     // Auth & Security
-    /// RuntimeEnforced — enterprise SSO is gated at the SSO-enforced login path.
+    /// RuntimeEnforced, enterprise SSO is gated at the SSO-enforced login path.
     pub sso_enabled: bool,
-    /// RuntimeEnforced — the customer `GET /v1/audit` + `/v1/audit/export` routes require this entitlement.
+    /// RuntimeEnforced, the customer `GET /v1/audit` + `/v1/audit/export` routes require this entitlement.
     pub audit_logs: bool,
 
     // API & Integrations
-    /// RuntimeEnforced — API key minting requires this entitlement.
+    /// RuntimeEnforced, API key minting requires this entitlement.
     pub api_access: bool,
-    /// RuntimeEnforced — webhook endpoint creation requires this entitlement.
+    /// RuntimeEnforced, webhook endpoint creation requires this entitlement.
     pub webhooks_enabled: bool,
-    /// RuntimeEnforced — inbound event consumption (webhook `inbound` subscriptions); raw SMTP acceptance is never gated.
+    /// RuntimeEnforced, inbound event consumption (webhook `inbound` subscriptions); raw SMTP acceptance is never gated.
     pub inbound_email: bool,
-    /// RuntimeEnforced — mailbox provisioning (`routes/admin/mailboxes.rs`)
+    /// RuntimeEnforced, mailbox provisioning (`routes/admin/mailboxes.rs`)
     /// requires this entitlement OR an active Mailboxes product-line
     /// contract (`product_line_contracts`, migration 256). The Mailboxes
     /// line is a separate per-seat product (10-seat minimum,
     /// `platform-catalog` `addon_by_name("mailboxes")`), so no canonical
-    /// plan seed grants it — the contract row is the purchase record the
+    /// plan seed grants it, the contract row is the purchase record the
     /// monthly seat billing reads.
     ///
     /// `#[serde(default)]`: plan rows written before this key existed carry
     /// no value for it, and a missing entitlement Bool must read as NOT
-    /// entitled (fail-closed) — never a deserialization error on a rolling
+    /// entitled (fail-closed), never a deserialization error on a rolling
     /// deploy.
     #[serde(default)]
     pub mailboxes: bool,
-    /// RuntimeEnforced — Inbox Placement Monitoring (seed-account placement
+    /// RuntimeEnforced, Inbox Placement Monitoring (seed-account placement
     /// tests). Sold as a separate monthly line (`platform-catalog`
     /// `addon_by_name("inbox_placement_monitoring")`, €99/$109 per month);
     /// no self-serve plan seed grants it. Runtime grant: an active
@@ -96,69 +96,69 @@ pub struct PlanFeatures {
     ///
     /// `#[serde(default)]`: plan rows written before this key existed carry
     /// no value for it, and a missing entitlement Bool must read as NOT
-    /// entitled (fail-closed) — never a deserialization error on a rolling
+    /// entitled (fail-closed), never a deserialization error on a rolling
     /// deploy.
     #[serde(default)]
     pub inbox_placement: bool,
 
     // Analytics
-    /// RuntimeEnforced — engagement/deliverability analytics endpoints require this entitlement.
+    /// RuntimeEnforced, engagement/deliverability analytics endpoints require this entitlement.
     pub advanced_analytics: bool,
-    /// RuntimeEnforced — the send-time recommendation endpoint requires this entitlement.
+    /// RuntimeEnforced, the send-time recommendation endpoint requires this entitlement.
     pub send_time_optimization: bool,
-    /// RuntimeEnforced — campaign experiment execution (arm assignment, holdout, guarded winner selection) and the results API gate on it.
+    /// RuntimeEnforced, campaign experiment execution (arm assignment, holdout, guarded winner selection) and the results API gate on it.
     pub ab_testing: bool,
-    /// RuntimeEnforced — historical message-state replay (`/v1/messages/:id/timeline`) gates on it.
+    /// RuntimeEnforced, historical message-state replay (`/v1/messages/:id/timeline`) gates on it.
     pub time_travel_debugging: bool,
-    /// RuntimeEnforced — export handlers (analytics export/PDF/download, contacts CSV) require this entitlement.
+    /// RuntimeEnforced, export handlers (analytics export/PDF/download, contacts CSV) require this entitlement.
     pub data_export: bool,
 
     // Customization
-    /// RuntimeEnforced — the tracking-domain lifecycle (create/verify/delete, DNS records) requires this entitlement; the tracking service serves only verified custom hosts.
+    /// RuntimeEnforced, the tracking-domain lifecycle (create/verify/delete, DNS records) requires this entitlement; the tracking service serves only verified custom hosts.
     pub custom_tracking_domain: bool,
-    /// RuntimeEnforced — template create/update requires this entitlement.
+    /// RuntimeEnforced, template create/update requires this entitlement.
     pub custom_templates: bool,
-    /// RuntimeEnforced — the enterprise maker/checker template routes require this entitlement.
+    /// RuntimeEnforced, the enterprise maker/checker template routes require this entitlement.
     pub template_approval_workflow: bool,
-    /// ContractualOnly — renderer/deployment branding; never a request-path gate.
+    /// ContractualOnly, renderer/deployment branding; never a request-path gate.
     pub white_label: bool,
-    /// ContractualOnly — central renderer presentation switch; never a request-path gate.
+    /// ContractualOnly, central renderer presentation switch; never a request-path gate.
     pub powered_by_footer: bool,
 
     // Retention
-    /// RuntimeEnforced — retention editing (`PUT /v1/retention`) requires this entitlement; the sweep applies the stored override.
+    /// RuntimeEnforced, retention editing (`PUT /v1/retention`) requires this entitlement; the sweep applies the stored override.
     pub custom_retention: bool,
-    /// RuntimeEnforced capacity — the editing handler refuses above this ceiling by name and the retention sweep clamps stored overrides to it.
+    /// RuntimeEnforced capacity, the editing handler refuses above this ceiling by name and the retention sweep clamps stored overrides to it.
     pub max_retention_days: i32,
 
     // Team
-    /// RuntimeEnforced capacity — team invitations check seats transactionally.
+    /// RuntimeEnforced capacity, team invitations check seats transactionally.
     pub max_team_members: i32,
-    /// RuntimeEnforced — the enterprise sub-account CRUD routes require this entitlement.
+    /// RuntimeEnforced, the enterprise sub-account CRUD routes require this entitlement.
     pub subaccounts: bool,
-    /// RuntimeEnforced capacity — sub-account creation enforces the ceiling transactionally (Business 10, Enterprise -1).
+    /// RuntimeEnforced capacity, sub-account creation enforces the ceiling transactionally (Business 10, Enterprise -1).
     pub max_subaccounts: i32,
 
     // Support
-    /// ContractualOnly — support policy is process/contract-delivered (docs/enterprise/support.md).
+    /// ContractualOnly, support policy is process/contract-delivered (docs/enterprise/support.md).
     pub support_level: SupportLevel,
-    /// ContractualOnly — staffing commitment, not an access gate.
+    /// ContractualOnly, staffing commitment, not an access gate.
     pub dedicated_csm: bool,
-    /// ContractualOnly — onboarding process commitment, not an access gate.
+    /// ContractualOnly, onboarding process commitment, not an access gate.
     pub priority_onboarding: bool,
 
     // Enterprise
-    /// ContractualOnly — separate reviewed infrastructure flow, not an API gate.
+    /// ContractualOnly, separate reviewed infrastructure flow, not an API gate.
     pub byoip: bool,
-    /// ContractualOnly — exists only in a signed contract.
+    /// ContractualOnly, exists only in a signed contract.
     pub sla_guarantee: bool,
-    /// ContractualOnly — contract term used for credit calculation.
+    /// ContractualOnly, contract term used for credit calculation.
     pub sla_credit_percentage: i32,
-    /// ContractualOnly — BAA review fact; never certification and never a gate.
+    /// ContractualOnly, BAA review fact; never certification and never a gate.
     pub hipaa_compliance: bool,
-    /// ContractualOnly — audit/report fact; never certification and never a gate.
+    /// ContractualOnly, audit/report fact; never certification and never a gate.
     pub soc2_compliance: bool,
-    /// ContractualOnly — deployment fact chosen outside the request path.
+    /// ContractualOnly, deployment fact chosen outside the request path.
     pub private_cloud: bool,
 }
 
@@ -401,7 +401,7 @@ pub struct Invoice {
     #[serde(default)]
     pub us_sales_tax_cents: i64,
     /// The provenance stamp of `us_sales_tax_cents` (state, rate in basis
-    /// points, source URL, retrieved date). `None` iff the amount is 0 — the
+    /// points, source URL, retrieved date). `None` iff the amount is 0, the
     /// pair is a CHECK constraint on `invoices`.
     #[serde(default)]
     pub us_sales_tax_snapshot: Option<serde_json::Value>,
@@ -504,7 +504,7 @@ mod tests {
 
     /// The async-first support policy enforces a strict ordering of SLA
     /// response times across tiers. If this test ever fails, somebody
-    /// reintroduced 24/7 live chat or weakened the Enterprise SLA — both
+    /// reintroduced 24/7 live chat or weakened the Enterprise SLA, both
     /// violate `docs/enterprise/support.md` and the chatbot's tier guidance.
     #[test]
     fn support_level_response_sla_is_monotonic() {
@@ -516,7 +516,7 @@ mod tests {
             dedicated < priority && priority < email,
             "SLA ordering broken: dedicated={dedicated}h priority={priority}h email={email}h"
         );
-        // No tier is "instant" — async-first means the floor is hours, not
+        // No tier is "instant", async-first means the floor is hours, not
         // minutes. Anyone trying to ship a 15-minute SLA must update the
         // policy doc first.
         assert!(dedicated >= 1, "no instant-response tier allowed");
@@ -536,7 +536,7 @@ mod tests {
         ] {
             let policy = level.human_channel_policy();
             let lower = policy.to_lowercase();
-            // Flag *positive* 24/7 promises only — "No 24/7." is a permitted
+            // Flag *positive* 24/7 promises only, "No 24/7." is a permitted
             // explicit denial.
             let promises_24_7 = lower.contains("available 24/7")
                 || lower.contains("24/7 live")

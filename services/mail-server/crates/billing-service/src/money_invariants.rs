@@ -1,27 +1,27 @@
-//! Money invariants (audit item 4) — a dedicated gate over every amount
+//! Money invariants (audit item 4), a dedicated gate over every amount
 //! path in the billing crates.
 //!
 //! Invariants enforced here:
 //!
-//! 1. **Integer-cents round-trips** — every money amount travels as `i64`
+//! 1. **Integer-cents round-trips**, every money amount travels as `i64`
 //!    cents; the display formatting (`cents_to_usd_string`) must invert
 //!    exactly for any representable value.
-//! 2. **Half-up rounding** — PAYG millicents→cents, VAT `round_vat`,
+//! 2. **Half-up rounding**, PAYG millicents→cents, VAT `round_vat`,
 //!    overage millicents→cents and SLA `percent_of_cents_half_up` all
 //!    round halves up, verified against exact rational (i128) references.
-//! 3. **VAT reconciliation** — after `allocate_vat_across_lines`, the sum
+//! 3. **VAT reconciliation**, after `allocate_vat_across_lines`, the sum
 //!    of per-line VAT always equals the VAT computed on the invoice total
 //!    (the KMD/PDF headline), for randomized line sets (seeded).
-//! 4. **Wallet conservation** — a seeded random sequence of
+//! 4. **Wallet conservation**, a seeded random sequence of
 //!    credit/debit/reserve/release/capture/expire operations never loses
 //!    cents: `balance + reserved` changes by exactly the op's signed
 //!    amount, never goes negative, and the BIGINT release clamp
 //!    (migrations 101+104) cannot wrap.
-//! 5. **No f32/f64 in money-computation paths** — a source-scan gate over
+//! 5. **No f32/f64 in money-computation paths**, a source-scan gate over
 //!    the modules that compute money; float tokens may appear only in
 //!    `format!`-style display lines, which are enumerated here.
 //!
-//! The PRNG is a deterministic xorshift64* seeded per test — reproducible
+//! The PRNG is a deterministic xorshift64* seeded per test, reproducible
 //! failures, no external `rand` dependency.
 
 #![cfg(test)]
@@ -176,7 +176,7 @@ fn vat_round_vat_is_half_up() {
 
 #[test]
 fn overage_millicents_is_ceiling_per_platform_contract() {
-    // The overage path charges ceil(overage * rate / 1000) — documented
+    // The overage path charges ceil(overage * rate / 1000), documented
     // platform contract (never undercharge); verify against exact math.
     let mut rng = Rng::new(0x0A0A);
     for _ in 0..1_000 {
@@ -241,7 +241,7 @@ fn proration_amounts_are_half_up() {
 }
 
 /// US sales tax (plan WP C2) is integer basis points on integer cents,
-/// rounded half-up ONCE — verified against an exact rational reference, the
+/// rounded half-up ONCE, verified against an exact rational reference, the
 /// same way every other money ladder in this gate is.
 #[test]
 fn us_sales_tax_basis_points_is_half_up_and_integer_only() {
@@ -416,7 +416,7 @@ fn dead_wallet_reservation_sweep_stays_removed() {
     ] {
         assert!(
             !maintenance.contains(banned),
-            "maintenance.rs still references `{banned}` — the reservation flow has no \
+            "maintenance.rs still references `{banned}`, the reservation flow has no \
              production writer, so the sweep/model must not be reintroduced without one"
         );
     }
@@ -439,20 +439,20 @@ const MONEY_PATH_FILES: &[(&str, &str)] = &[
     ("src/subscriptions.rs", "src/subscriptions.rs"),
     (
         // The sweep + collection path (wallet debit, Mollie invoice item,
-        // overage/PAYG pricing) is money movement — gated.
+        // overage/PAYG pricing) is money movement, gated.
         "src/overage.rs",
         "src/overage.rs",
     ),
     (
         // Contract product-line pricing (Platform base/tier/subaccounts,
-        // Mailboxes seats/archive) is money computation — gated.
+        // Mailboxes seats/archive) is money computation, gated.
         "src/product_lines.rs",
         "src/product_lines.rs",
     ),
     (
         // US sales tax (plan WP C2): the tax on US invoices is money, and the
         // nexus thresholds are money. Rates travel as integer basis points,
-        // amounts as integer cents — no float is allowed on any line.
+        // amounts as integer cents, no float is allowed on any line.
         "src/us_tax.rs",
         "src/us_tax.rs",
     ),
@@ -504,7 +504,7 @@ const MONEY_PATH_FILES: &[(&str, &str)] = &[
 /// A float mention is a rate/percent/metric context, not money math.
 /// Statutory VAT rates in percent may be fractional (25.5); SLA/cost-margin
 /// percentages, uptime metrics and alert thresholds are ratios, never
-/// amounts. Every monetary amount stays in integer cents — a money amount
+/// amounts. Every monetary amount stays in integer cents, a money amount
 /// can never legitimately be `f64`, `Option<f64>` or part of an `(f64, …)`
 /// return, which is exactly what this predicate carves out.
 fn is_vat_rate_context(line: &str) -> bool {
@@ -561,7 +561,7 @@ fn no_floating_point_in_money_computation_paths() {
             }
             if trimmed.contains("f64") || trimmed.contains("f32") {
                 // Floats are tolerated ONLY inside display formatting or
-                // VAT-rate contexts — never monetary computation.
+                // VAT-rate contexts, never monetary computation.
                 let is_display =
                     trimmed.contains("format!(") || trimmed.contains("format_currency");
                 if !is_display && !is_vat_rate_context(trimmed) {
@@ -589,19 +589,19 @@ fn money_types_are_integer_cents_everywhere_in_gate() {
         let path = std::path::Path::new(manifest).join(relative);
         assert!(
             path.exists(),
-            "{label}: gated file {relative} no longer exists — update MONEY_PATH_FILES"
+            "{label}: gated file {relative} no longer exists, update MONEY_PATH_FILES"
         );
     }
 }
 
 // ---------------------------------------------------------------------------
-// 6. Crate-wide int-width gates (audit item 3e — i64 everywhere in money)
+// 6. Crate-wide int-width gates (audit item 3e, i64 everywhere in money)
 // ---------------------------------------------------------------------------
 
 /// Identifiers whose lines are money paths. A line mentioning any of these
 /// together with a narrow SQL integer cast (`::int4`, `::integer`,
 /// `::int2`, `::smallint`) is a money amount being forced through 32-bit
-/// (or narrower) arithmetic — the exact class of bug migration 104 widens
+/// (or narrower) arithmetic, the exact class of bug migration 104 widens
 /// out of the wallet schema.
 const MONEY_IDENTIFIERS: &[&str] = &[
     "balance",
@@ -618,7 +618,7 @@ const MONEY_IDENTIFIERS: &[&str] = &[
 ];
 
 /// All non-test source files of both billing crates, scanned by the
-/// crate-wide gates below. (This module is excluded — it quotes the
+/// crate-wide gates below. (This module is excluded, it quotes the
 /// offending tokens inside its own assertions.)
 fn crate_source_files() -> Vec<std::path::PathBuf> {
     let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -676,14 +676,14 @@ fn no_narrow_sql_integer_casts_on_money_lines() {
 
     assert!(
         violations.is_empty(),
-        "narrow (32-bit or less) SQL integer casts found on money lines — \
+        "narrow (32-bit or less) SQL integer casts found on money lines, \
          money amounts must be BIGINT/i64 end-to-end (migration 104):\n{}",
         violations.join("\n")
     );
 }
 
 /// Historical bug pattern this gate exists for:
-/// `((cents as f64) * pct / 100.0).round() as i64` — a money amount routed
+/// `((cents as f64) * pct / 100.0).round() as i64`, a money amount routed
 /// through a float and truncated back to an integer. The only surviving
 /// float→int conversions in the crates are non-money metric percentages,
 /// enumerated here.
@@ -730,7 +730,7 @@ fn no_float_to_int_conversions_outside_display() {
 
     assert!(
         violations.is_empty(),
-        "float→int conversion in a computation path — money amounts must never \
+        "float→int conversion in a computation path, money amounts must never \
          route through floats; metric exceptions must be allowlisted explicitly:\n{}",
         violations.join("\n")
     );

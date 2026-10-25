@@ -1,4 +1,4 @@
-//! ISP warmup CATALOG repository — advisory data only.
+//! ISP warmup CATALOG repository, advisory data only.
 //! It is NOT an admission control.
 //!
 //! [`WarmupCatalogRepo`] is plain CRUD over `isp_warmup_templates`
@@ -31,7 +31,7 @@
 //!   (`crates/worker-processors/src/email/transport.rs`);
 //! * `SesTransport` does not report a recipient provider either (same file);
 //! * `DeliveryReceipt.recipient_provider` documents `None` as "NOT KNOWN on
-//!   this path — never guessed"
+//!   this path, never guessed"
 //!   (`crates/worker-processors/src/email/types.rs`);
 //! * the worker crate does not depend on this crate, and no MX resolver is
 //!   reachable from its send path.
@@ -47,7 +47,7 @@ use sqlx::PgPool;
 use crate::types::IspWarmupTemplate;
 
 /// Repository for the ADVISORY ISP warmup template catalog
-/// (`isp_warmup_templates`). Catalog CRUD only — no admission logic.
+/// (`isp_warmup_templates`). Catalog CRUD only, no admission logic.
 pub struct WarmupCatalogRepo;
 
 impl WarmupCatalogRepo {

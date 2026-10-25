@@ -1,4 +1,4 @@
-//! Send-Time Optimisation (STO) — find the best hour/day to send emails.
+//! Send-Time Optimisation (STO), find the best hour/day to send emails.
 
 use crate::types::SendTimeSlot;
 

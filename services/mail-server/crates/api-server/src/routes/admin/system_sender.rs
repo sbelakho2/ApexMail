@@ -24,7 +24,7 @@ pub fn router() -> Router<AppState> {
 
 /// Actor-attributed audit for platform-sender control mutations (P2-2):
 /// bootstrapping/verifying the platform's own sending domain changes what
-/// mail the platform can sign and send — the operator who ordered it must
+/// mail the platform can sign and send, the operator who ordered it must
 /// be on record.
 async fn log_system_sender_audit(
     state: &AppState,
@@ -112,7 +112,7 @@ mod adversarial_tests {
 
     use crate::app::test_support::adv::AdvEnv;
 
-    /// All-DNS-failing backend: no SPF, no MX, no DKIM, no DMARC — the
+    /// All-DNS-failing backend: no SPF, no MX, no DKIM, no DMARC, the
     /// honest observation for an unverified platform sender, with zero
     /// network I/O.
     struct EmptyDns;
@@ -192,7 +192,7 @@ mod adversarial_tests {
 
         // With the domain row gone (never bootstrapped / removed), the
         // status route must say ServiceUnavailable and name the bootstrap
-        // operation — never a raw 500.
+        // operation, never a raw 500.
         sqlx::query("DELETE FROM domains WHERE id = $1")
             .bind(uuid::Uuid::parse_str(crate::routes::system_sender::SYSTEM_DOMAIN_ID).unwrap())
             .execute(&pool)

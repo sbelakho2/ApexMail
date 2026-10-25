@@ -1,4 +1,4 @@
-//! WP F9 — reply risk classes and the promotion gate that lets a LOW class
+//! WP F9, reply risk classes and the promotion gate that lets a LOW class
 //! send without human approval.
 //!
 //! The operating model is one line: *autonomy moves only through the promotion
@@ -21,19 +21,19 @@
 //!
 //! # The classifier (table-driven, deterministic, fail closed)
 //!
-//! Inputs — all read from the pending draft row plus owner flags; nothing is
+//! Inputs, all read from the pending draft row plus owner flags; nothing is
 //! model-inferred:
 //!
 //! | Input | Source |
 //! |---|---|
 //! | `draft_text` | `inbound_messages.ai_response` |
-//! | `intent_class` | `inbound_messages.classification` — the 11-value disposition taxonomy of `sales_reply_classifications` (migration 200), the SAME vocabulary the reply worker persists; no parallel taxonomy is invented |
+//! | `intent_class` | `inbound_messages.classification`, the 11-value disposition taxonomy of `sales_reply_classifications` (migration 200), the SAME vocabulary the reply worker persists; no parallel taxonomy is invented |
 //! | `intent_confidence` | `inbound_messages.classification_confidence`, gated at the worker's own `MIN_AUTO_ACTION_CONFIDENCE` (0.7) |
 //! | `suggestion` | `inbound_messages.suggested_action` JSONB (`objection_class`, `draft_prompt_version`, `first_touch`/`sequence_step`) |
 //! | KB grounding | the draft text scanned against the SHARED canonical knowledge base (`sales_knowledge`): restricted-capability claims via `validate_claim`, numeric claims via the KB's own number grounding, and citation markers |
-//! | owner flags | recipient flagged as a contract-tier decision-maker — the tenant's autonomy rules (`sales_autonomy_state.rules -> reply_autosend_flagged_recipients`, see [`FLAGGED_RECIPIENTS_RULE_KEY`]); first-touch-of-a-new-sequence marker (`first_touch` / `sequence_step = 1`) |
+//! | owner flags | recipient flagged as a contract-tier decision-maker, the tenant's autonomy rules (`sales_autonomy_state.rules -> reply_autosend_flagged_recipients`, see [`FLAGGED_RECIPIENTS_RULE_KEY`]); first-touch-of-a-new-sequence marker (`first_touch` / `sequence_step = 1`) |
 //!
-//! Decision table — the FIRST rule that fires wins, and the order is the
+//! Decision table, the FIRST rule that fires wins, and the order is the
 //! safety order (structure, then flags, then content, then the intent map):
 //!
 //! | # | Condition | Verdict |
@@ -93,7 +93,7 @@ use sqlx::PgConnection;
 use crate::types::{AutonomyMode, SalesError};
 
 // ---------------------------------------------------------------------------
-// Constants — the bars the gate is pinned to
+// Constants, the bars the gate is pinned to
 // ---------------------------------------------------------------------------
 
 /// The worker's own auto-action confidence gate (reply_handler/policy.rs):
@@ -119,7 +119,7 @@ pub const MIN_EVIDENCE_WINDOW_DAYS: i64 = 7;
 pub const MAX_EVIDENCE_WINDOW_DAYS: i64 = 90;
 
 /// The audit action a real approval writes (api-server's AI-draft approval).
-/// The evidence query reads THIS action's rows — a counter update is not
+/// The evidence query reads THIS action's rows, a counter update is not
 /// evidence; a recorded approval is.
 pub const APPROVED_AUDIT_ACTION: &str = "control_plane.ai_draft.approved";
 
@@ -141,7 +141,7 @@ pub const APPROVED_CLASS_COUNT_SQL: &str = r#"
 
 /// Complaints/opt-outs recorded for the tenant inside the window: the
 /// canonical reply-classification rows (migration 200) the reply worker
-/// writes. Zero tolerance — a single complaint or unsubscribe in the window
+/// writes. Zero tolerance, a single complaint or unsubscribe in the window
 /// closes every class for that tenant.
 pub const COMPLAINT_OR_OPTOUT_COUNT_SQL: &str = r#"
     SELECT COUNT(*)::bigint
@@ -152,8 +152,8 @@ pub const COMPLAINT_OR_OPTOUT_COUNT_SQL: &str = r#"
 "#;
 
 /// The AI-transparency disclosure every autonomous outbound message carries
-/// (invariant I11). Both autonomous writers render it into the body — the
-/// reply auto-send path (api-server) and the sequence worker — so no
+/// (invariant I11). Both autonomous writers render it into the body, the
+/// reply auto-send path (api-server) and the sequence worker, so no
 /// unattended send leaves the platform without saying how it was produced and
 /// how to reach a human.
 pub const AUTO_SEND_AI_DISCLOSURE: &str = "This message was drafted automatically by \
@@ -168,7 +168,7 @@ pub const AUTO_SENT_AUDIT_ACTION: &str = "control_plane.ai_draft.auto_sent";
 // The risk taxonomy
 // ---------------------------------------------------------------------------
 
-/// The low-risk reply classes — the enablement unit of the promotion gate.
+/// The low-risk reply classes, the enablement unit of the promotion gate.
 ///
 /// These are the classes the owner may promote one at a time, each with its
 /// own evidence bar. The names are the canonical strings persisted in
@@ -208,7 +208,7 @@ impl LowRiskClass {
         }
     }
 
-    /// Parse the persisted string. Unknown values are `None` — a caller must
+    /// Parse the persisted string. Unknown values are `None`, a caller must
     /// fail closed, never guess a class.
     pub fn parse(value: &str) -> Option<Self> {
         Self::ALL
@@ -318,7 +318,7 @@ impl ReplyRisk {
 pub struct DraftRiskInput<'a> {
     /// `inbound_messages.ai_response`.
     pub draft_text: &'a str,
-    /// `inbound_messages.classification` — the canonical disposition taxonomy.
+    /// `inbound_messages.classification`, the canonical disposition taxonomy.
     pub intent_class: Option<&'a str>,
     /// `inbound_messages.classification_confidence`.
     pub intent_confidence: Option<f64>,
@@ -679,7 +679,7 @@ pub fn classify_draft(input: &DraftRiskInput<'_>) -> ReplyRiskVerdict {
         return high(HighRiskReason::UnbackedClaim);
     }
 
-    // 10-12. Topic language — a commitment is HIGH whatever the KB says.
+    // 10-12. Topic language, a commitment is HIGH whatever the KB says.
     let lower = input.draft_text.to_lowercase();
     if PRICING_MARKERS.iter().any(|marker| lower.contains(marker)) {
         return high(HighRiskReason::PricingOrCommitment);
@@ -876,7 +876,7 @@ pub async fn load_grant(
 }
 
 /// Every grant row for a tenant, plus (for each canonical class) the live
-/// evidence report — the promotion status the owner reads before deciding.
+/// evidence report, the promotion status the owner reads before deciding.
 pub async fn promotion_status(
     conn: &mut PgConnection,
     tenant_id: &str,
@@ -1040,7 +1040,7 @@ pub async fn enable(
 }
 
 /// Revoke a class for a tenant (the per-class kill switch). The row is kept —
-/// the evidence snapshot stays on record — and `enabled` goes back to FALSE.
+/// the evidence snapshot stays on record, and `enabled` goes back to FALSE.
 /// Idempotent: revoking a class that was never enabled reports `false` (no row
 /// changed), never an error.
 pub async fn revoke(
@@ -1100,7 +1100,7 @@ const AUTONOMY_STATE_SQL: &str =
 /// `sales_autonomy_state.rules -> 'reply_autosend_flagged_recipients'`.
 ///
 /// The rules JSONB is the autonomy state's own operator-policy column (the
-/// same one [`crate::autonomy::set_rules`] writes) — the owner-scope place a
+/// same one [`crate::autonomy::set_rules`] writes), the owner-scope place a
 /// per-tenant policy belongs. The repository has no separate flagged-recipient
 /// registry or owner UI for it, so the rule is enforced wherever the data
 /// exists and an absent key means "nothing flagged"; the classifier treats a
@@ -1110,7 +1110,7 @@ pub const FLAGGED_RECIPIENTS_RULE_KEY: &str = "reply_autosend_flagged_recipients
 const AUTONOMY_RULES_SQL: &str = "SELECT rules FROM sales_autonomy_state WHERE tenant_id = $1";
 
 /// The owner-flagged recipients for a tenant (lowercased). A missing row or
-/// absent/!array key yields none — never an error, never a guess.
+/// absent/!array key yields none, never an error, never a guess.
 pub async fn flagged_recipients(
     conn: &mut PgConnection,
     tenant_id: &str,
@@ -1153,7 +1153,7 @@ pub async fn evaluate_for_send(
 ) -> Result<GateVerdict, SalesError> {
     let mut reasons = Vec::new();
 
-    // Ring 1 — the per-class promotion row (default OFF: no row = no grant).
+    // Ring 1, the per-class promotion row (default OFF: no row = no grant).
     let grant = load_grant(&mut *conn, tenant_id, class).await?;
     let (required, window_days) = grant
         .as_ref()
@@ -1169,7 +1169,7 @@ pub async fn evaluate_for_send(
         )),
     }
 
-    // Ring 2 — the evidence, re-derived now (never the stored snapshot).
+    // Ring 2, the evidence, re-derived now (never the stored snapshot).
     let evidence = evidence_report(&mut *conn, tenant_id, class, required, window_days).await?;
     if !evidence.satisfied {
         reasons.push(format!(
@@ -1182,7 +1182,7 @@ pub async fn evaluate_for_send(
         ));
     }
 
-    // Ring 3 — the tenant's autonomy state (the F12 outer gate): the routed
+    // Ring 3, the tenant's autonomy state (the F12 outer gate): the routed
     // tenant must have granted autonomous execution and its kill switch must
     // be disengaged. A missing row is `disabled`, the fail-closed default.
     let state: Option<(String, bool)> = sqlx::query_as(AUTONOMY_STATE_SQL)
@@ -1206,7 +1206,7 @@ pub async fn evaluate_for_send(
              permits autonomous execution"
         ));
     } else {
-        // Ring 4 — invariant I22: the MODE grants execution; an active,
+        // Ring 4, invariant I22: the MODE grants execution; an active,
         // OWNER-APPROVED policy pack covering this tenant AND the action kind
         // (with budget left) is the AUTHORITY. Fail-closed: no pack, wrong
         // action coverage or exhausted caps refuse here.
@@ -1287,7 +1287,7 @@ mod gate_db_tests {
         .expect("seed autonomy state");
     }
 
-    /// Invariant I22 — the pack ring. Grant + evidence + autonomy all pass,
+    /// Invariant I22, the pack ring. Grant + evidence + autonomy all pass,
     /// but the AUTHORITY is the pack: missing, wrong-action, expired and
     /// exhausted packs all refuse; a covering pack with budget allows.
     #[tokio::test]
@@ -1298,7 +1298,7 @@ mod gate_db_tests {
         let tenant = unique_test_tenant("f9pack");
         let class = LowRiskClass::Scheduling;
 
-        // The pack table has a real FK to tenants — the tenant must exist.
+        // The pack table has a real FK to tenants, the tenant must exist.
         sqlx::query(
             "INSERT INTO tenants (id, name, plan, status) \
              VALUES ($1, $2, 'free', 'active') ON CONFLICT (id) DO NOTHING",
@@ -1521,7 +1521,7 @@ mod gate_db_tests {
     }
 
     /// The (tenant, class) state is OFF with no row, and only real recorded
-    /// approvals satisfy the evidence — wrong action, missing/foreign class,
+    /// approvals satisfy the evidence, wrong action, missing/foreign class,
     /// and out-of-window rows all count zero.
     #[tokio::test]
     async fn default_off_and_evidence_is_only_real_recorded_approvals() {
@@ -1629,7 +1629,7 @@ mod gate_db_tests {
         let owner = seed_user(&pool, "f9-owner@apexmail.test", "owner").await;
         let mut conn = pool.acquire().await.expect("acquire");
 
-        // A live admin — however privileged — is not the owner.
+        // A live admin, however privileged, is not the owner.
         let refused = OwnerActor::verify(&mut conn, &admin).await;
         assert!(
             matches!(refused, Err(SalesError::Unauthorized(_))),
@@ -1995,8 +1995,8 @@ mod gate_db_tests {
         );
     }
 
-    /// A hand-written "satisfied" snapshot — the closest thing to a forgeable
-    /// counter the schema allows — does not open the gate: the send-time check
+    /// A hand-written "satisfied" snapshot, the closest thing to a forgeable
+    /// counter the schema allows, does not open the gate: the send-time check
     /// recomputes the evidence from the canonical records and ignores the
     /// snapshot. Same for an enabled row whose attribution is faked by a
     /// direct UPDATE that bypasses [`enable`]: the live evidence still has to
@@ -2070,12 +2070,12 @@ mod tests {
     fn low_classes_are_reachable_for_their_intents() {
         let cases = [
             (
-                "Thanks for the note — I will review it and get back to you.",
+                "Thanks for the note, I will review it and get back to you.",
                 "ooo",
                 LowRiskClass::Acknowledgement,
             ),
             (
-                "Thursday 10:00 works for us — shall I send an invite?",
+                "Thursday 10:00 works for us, shall I send an invite?",
                 "meeting_request",
                 LowRiskClass::Scheduling,
             ),
@@ -2085,7 +2085,7 @@ mod tests {
                 LowRiskClass::Clarification,
             ),
             (
-                "Done — you have been unsubscribed and will not receive further messages.",
+                "Done, you have been unsubscribed and will not receive further messages.",
                 "unsubscribe",
                 LowRiskClass::OptOutConfirmation,
             ),
@@ -2131,7 +2131,7 @@ mod tests {
     fn pricing_legal_and_security_language_is_high_even_when_grounded() {
         for (draft, expected) in [
             (
-                "Our plan pricing starts per month — shall I book a call?",
+                "Our plan pricing starts per month, shall I book a call?",
                 HighRiskReason::PricingOrCommitment,
             ),
             (
@@ -2236,7 +2236,7 @@ mod tests {
 
         // Confidence below the worker's 0.7 gate, non-finite, and missing.
         for confidence in [Some(0.69), Some(f64::NAN), Some(f64::INFINITY), None] {
-            let mut risk_input = input("Thanks — noted.", "ooo");
+            let mut risk_input = input("Thanks, noted.", "ooo");
             risk_input.intent_confidence = confidence;
             assert_eq!(
                 classify_draft(&risk_input).risk,
@@ -2248,14 +2248,14 @@ mod tests {
 
     #[test]
     fn owner_flags_and_first_touch_are_high() {
-        let mut risk_input = input("Thanks — noted.", "ooo");
+        let mut risk_input = input("Thanks, noted.", "ooo");
         risk_input.recipient_owner_flagged = true;
         assert_eq!(
             classify_draft(&risk_input).risk,
             ReplyRisk::High(HighRiskReason::FlaggedDecisionMaker)
         );
 
-        let mut risk_input = input("Hello — introducing ourselves.", "question");
+        let mut risk_input = input("Hello, introducing ourselves.", "question");
         risk_input.first_message_of_new_sequence = true;
         assert_eq!(
             classify_draft(&risk_input).risk,
@@ -2310,7 +2310,7 @@ mod tests {
         // worker-processors, so the value is mirrored and pinned here; a
         // change there must change this constant in the same wave.
         assert_eq!(MIN_REPLY_CONFIDENCE, 0.7);
-        let mut risk_input = input("Thanks — noted.", "ooo");
+        let mut risk_input = input("Thanks, noted.", "ooo");
         risk_input.intent_confidence = Some(MIN_REPLY_CONFIDENCE);
         assert!(classify_draft(&risk_input).risk.is_low());
         risk_input.intent_confidence = Some(MIN_REPLY_CONFIDENCE - f64::EPSILON);

@@ -14,7 +14,7 @@
 //! `idx_sales_discovery_candidates_source_url` on
 //! `(tenant_id, source, source_url) WHERE source_url IS NOT NULL`
 //! (`200_sales_autopilot_v2_unification.sql:882-884`), and only *fresh
-//! inserts* increment `sales_discovery_jobs.discovered` — a re-run of the
+//! inserts* increment `sales_discovery_jobs.discovered`, a re-run of the
 //! same query does not double-count.
 //!
 //! All values coming back from a provider are sanitized before they touch the
@@ -31,23 +31,23 @@
 //! `201_sales_execution_contract.sql:123-139`). One `run_job` batch is one
 //! claim:
 //!
-//! 1. **Claim** — a single conditional `UPDATE ... WHERE status IN
+//! 1. **Claim**, a single conditional `UPDATE ... WHERE status IN
 //!    ('queued','running') AND (lease_expires_at IS NULL OR lease_expires_at
 //!    < NOW())` issues a fresh `lease_token`. Postgres serialises concurrent
 //!    claims on the row, so exactly one runner wins and the losers get a
 //!    distinct [`JOB_LEASED_MARKER`] outcome without calling any provider.
-//! 2. **Fence** — every cursor/terminal write carries the token
+//! 2. **Fence**, every cursor/terminal write carries the token
 //!    (`WHERE ... AND lease_token = $token`), and source-run/candidate writes
 //!    are scoped through an `EXISTS (... lease_token = $token)` guard because
 //!    `sales_source_runs` has no token column (`200:886-900`). A runner whose
 //!    lease was superseded by a recovery claim writes zero rows and stops, so
 //!    a recovered job's stale runner cannot append runs or advance the
 //!    cursor.
-//! 3. **Heartbeat** — the lease is extended before every (possibly slow)
+//! 3. **Heartbeat**, the lease is extended before every (possibly slow)
 //!    provider call. The lease is released when the batch finishes (any
 //!    status), so `run_to_completion` can reclaim its own job for the next
 //!    batch without waiting out the lease.
-//! 4. **Attempt ceiling** — a job whose runner keeps crashing is recovered
+//! 4. **Attempt ceiling**, a job whose runner keeps crashing is recovered
 //!    with `attempt + 1`; past [`MAX_JOB_ATTEMPTS`] consecutive claims
 //!    without progress the job is failed instead of retried forever. A batch
 //!    that reaches `running`/`completed` resets the counter; a `failed` batch
@@ -79,8 +79,8 @@ pub const MAX_BATCHES: usize = 100;
 pub const REFRESH_TTL_DAYS: i64 = 30;
 
 /// How long one runner owns a claimed job. The lease is extended
-/// (heartbeat) before every provider call; when it lapses — a crashed
-/// runner — another runner may claim the job.
+/// (heartbeat) before every provider call; when it lapses, a crashed
+/// runner, another runner may claim the job.
 pub const JOB_LEASE_MINUTES: i64 = 5;
 
 /// Consecutive claims without progress after which a job is failed instead
@@ -292,7 +292,7 @@ impl DiscoveryJobRunner {
     ///
     /// `requested_sources` names the sources to run. An empty request means
     /// every configured source. A name that matches no configured source is
-    /// [`SalesError::InvalidInput`] — the old fallback to "all configured
+    /// [`SalesError::InvalidInput`], the old fallback to "all configured
     /// sources" is deleted (audit item 14): running a possibly paid provider
     /// because of a typo is not acceptable. The error names every unknown
     /// source.
@@ -539,7 +539,7 @@ impl DiscoveryJobRunner {
 
     /// Renew the lease while a (possibly slow) provider request is in flight.
     ///
-    /// `false` means the token no longer owns the job — it was superseded by
+    /// `false` means the token no longer owns the job, it was superseded by
     /// a recovery claim or the lease already expired. The caller must stop
     /// without writing anything.
     async fn heartbeat(
@@ -815,7 +815,7 @@ impl DiscoveryJobRunner {
                     // the same lease-fenced write discipline as candidate and
                     // run rows. The error already carries the structured
                     // evidence, and the source returned NO candidates for it
-                    // — a blocked page must never become a data row.
+                    //, a blocked page must never become a data row.
                     let mut queue_note: Option<String> = None;
                     if let Some(evidence) = discovery_error.blocked_evidence() {
                         tracing::warn!(
@@ -910,8 +910,8 @@ impl DiscoveryJobRunner {
     /// `sales_source_runs` has no lease-token column (`200:886-900`), so the
     /// write is scoped THROUGH the job row: the `INSERT ... SELECT` only
     /// produces a row while `sales_discovery_jobs.lease_token` still equals
-    /// this runner's token. A superseded runner inserts zero rows — returning
-    /// `false` — and `run_job` aborts, so a recovered job's stale runner can
+    /// this runner's token. A superseded runner inserts zero rows, returning
+    /// `false`, and `run_job` aborts, so a recovered job's stale runner can
     /// never append runs.
     async fn insert_source_run(
         &self,
@@ -1003,7 +1003,7 @@ async fn upsert_candidates(
         ));
         confidences.push(clamp_confidence(candidate.confidence));
         // Provenance: the source's own fetch time when it knows one,
-        // otherwise the discovery time — never NULL.
+        // otherwise the discovery time, never NULL.
         fetched_ats.push(candidate.fetched_at.unwrap_or_else(Utc::now));
         refresh_expires.push(refresh_expires_at);
     }
@@ -1139,7 +1139,7 @@ pub async fn promote_candidate(
 
     let Some(domain) = sanitize_domain(raw_domain.as_deref()) else {
         return Err(SalesError::InvalidInput(format!(
-            "discovery candidate {candidate_id} has no usable domain — promotion refused"
+            "discovery candidate {candidate_id} has no usable domain, promotion refused"
         )));
     };
 
@@ -1288,7 +1288,7 @@ pub fn sanitize_jurisdiction(raw: Option<&str>) -> Option<String> {
 /// Normalize a company name: control characters dropped and every run of
 /// whitespace collapsed to one space (so "Acme  OÜ" and "Acme\nOÜ" are one
 /// name), truncating absurd values at a char boundary. Case and legal-form
-/// wording are preserved — that is the source's data, not ours to rewrite.
+/// wording are preserved, that is the source's data, not ours to rewrite.
 pub fn sanitize_company_name(raw: Option<&str>) -> Option<String> {
     let raw = raw?.trim();
     if raw.is_empty() {
@@ -1325,7 +1325,7 @@ pub fn sanitize_company_name(raw: Option<&str>) -> Option<String> {
 /// Normalize a contact email, or `None` when it is not a usable address.
 ///
 /// Strips a `mailto:` prefix, a query/fragment and wrapping punctuation,
-/// lowercases the whole address (industry-standard normalization — these
+/// lowercases the whole address (industry-standard normalization, these
 /// addresses are outreach targets, never credentials), requires an ASCII
 /// local part and a real multi-label domain, and rejects control characters,
 /// whitespace and oversized values.
@@ -1834,7 +1834,7 @@ mod tests {
     }
 
     /// One page of candidates is persisted by ONE INSERT (pre-fix: one
-    /// statement per candidate — up to 1,000 credentials per page).
+    /// statement per candidate, up to 1,000 credentials per page).
     #[tokio::test]
     async fn a_page_of_candidates_is_persisted_by_one_statement() {
         let Some(pool) = live_pool("candidate_batch").await else {

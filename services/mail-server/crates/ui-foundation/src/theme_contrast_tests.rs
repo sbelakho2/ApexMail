@@ -1,16 +1,16 @@
-//! GATE J — theme-safe tinted surfaces.
+//! GATE J, theme-safe tinted surfaces.
 //!
 //! The console's `--surface-*` tokens FLIP with the colour scheme, but the
 //! static hue palettes (`brand`, `success`, `warning`, `rose`, `amber`,
 //! `emerald`, …) do NOT: `bg-brand-50` is a pale panel in BOTH themes. An
 //! element that paints such a pale panel and leaves the text colour to
 //! inheritance therefore breaks whichever theme the inherited colour does
-//! not match — in dark mode the inherited colour is near-white and the
+//! not match, in dark mode the inherited colour is near-white and the
 //! notice goes blank.
 //!
 //! Found by dogfood 2026-10-06: the MFA challenge page hand-rolled its
 //! "Two-factor verification required" box as `border-brand-200
-//! bg-brand-50/80` with no text colour — measured live at 250,250,250 text
+//! bg-brand-50/80` with no text colour, measured live at 250,250,250 text
 //! on a 207,197,198 panel (≈1.05:1, invisible). The shared
 //! `web_auth_notice` primitive had carried the correct pairing (and both
 //! themes' CSS) all along; the page bypassed it.
@@ -20,9 +20,9 @@
 //! in dark mode by one of exactly two means:
 //!
 //! 1. an explicit `text-*` colour class on the same element (self-contained
-//!    pairing — what the shared notice primitive does), or
+//!    pairing, what the shared notice primitive does), or
 //! 2. a dark-mode rule for that exact class in `globals.css` **in the
-//!    `:root:not(.light)` form** — the media-query path the zero-JS console
+//!    `:root:not(.light)` form**, the media-query path the zero-JS console
 //!    actually takes (`bg-success-50` is themed this way); the `.dark`
 //!    class form alone does not count, because no script ever sets it.
 //!
@@ -129,7 +129,7 @@ fn css_themes_the_class(class_name: &str) -> bool {
         // Variant classes (hover:/focus:/…) ride a base class in practice.
         return true;
     }
-    // ARK: pale tints are token-bound — the .dark block redefines every ramp
+    // ARK: pale tints are token-bound, the .dark block redefines every ramp
     // step, so the same class flips to the dark wash automatically. The
     // class is themed when its `bg-<hue>-<step>` token exists in BOTH blocks.
     let Some(rest) = class_name.strip_prefix("bg-") else {
@@ -166,7 +166,7 @@ fn pale_tint_violations(surface: &str, document: &str, html: &str) -> Vec<String
             continue;
         }
         violations.push(format!(
-            "[{surface}] {document}: <{tag}> paints the pale static tint(s) {unthemed:?} with neither an explicit text-* colour nor a `:root:not(.light)` dark rule in globals.css — the inherited colour flips with the theme and this element goes unreadable in dark mode. Use the shared `apex-auth-notice` primitive (web_auth_notice), add the matching text-* class, or theme the class in both dark blocks.",
+            "[{surface}] {document}: <{tag}> paints the pale static tint(s) {unthemed:?} with neither an explicit text-* colour nor a `:root:not(.light)` dark rule in globals.css, the inherited colour flips with the theme and this element goes unreadable in dark mode. Use the shared `apex-auth-notice` primitive (web_auth_notice), add the matching text-* class, or theme the class in both dark blocks.",
         ));
     }
     violations
@@ -242,7 +242,7 @@ mod pale_tint_detector_tests {
     /// `--wordmark-mail` (ink), plus the emphasis token `--accent-text`
     /// that links and `apex-em` derive from. The old framework utilities
     /// (.text-brand-600 / .text-surface-950 / .text-primary) must NOT come
-    /// back — the wordmark renders through the primitive classes.
+    /// back, the wordmark renders through the primitive classes.
     #[test]
     fn wordmark_and_emphasis_tokens_are_defined_in_the_artifact() {
         let sheet = include_str!("../assets/globals.css");

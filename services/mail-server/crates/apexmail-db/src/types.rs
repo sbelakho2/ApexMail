@@ -1,4 +1,4 @@
-//! Shared database types — models used across repositories.
+//! Shared database types, models used across repositories.
 //!
 //! Id-type contract (audit F8): the canonical schema uses string ids —
 //! `VARCHAR(26)` for tenant ids and ULID-style primary keys (migration
@@ -41,7 +41,7 @@ pub struct User {
     pub name: Option<String>,
     /// Credential material. Only the LOGIN fetch
     /// (`UsersRepo::find_by_email_for_login`) selects this column, and it is
-    /// excluded from serialization (audit F12) — one accidental
+    /// excluded from serialization (audit F12), one accidental
     /// `Json(user)` must not leak the credential table.
     #[serde(skip_serializing)]
     pub password_hash: String,
@@ -53,7 +53,7 @@ pub struct User {
 
 /// Credential-free user projection (audit F12): the shape returned by every
 /// non-login read (`create`, `find_by_id`, `update`, `list_by_tenant`,
-/// `list_keyset`). Carries no `password_hash` field AT ALL — the defense is
+/// `list_keyset`). Carries no `password_hash` field AT ALL, the defense is
 /// not merely `#[serde(skip)]` on a struct that still SELECTs the hash, but
 /// a projection that never fetches it, so an accidental serialization (or a
 /// debug log) of a listing cannot include credential material.
@@ -155,7 +155,7 @@ pub struct Message {
 
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Event {
-    /// VARCHAR(64) string id (migration 075) — NOT a UUID.
+    /// VARCHAR(64) string id (migration 075), NOT a UUID.
     pub id: String,
     /// VARCHAR(26) tenant reference (migration 064).
     pub tenant_id: String,
@@ -209,13 +209,13 @@ pub struct Webhook {
     pub tenant_id: String,
     pub url: String,
     pub events: serde_json::Value,
-    /// MASKED PREFIX for display (audit F4) — never the signing secret.
+    /// MASKED PREFIX for display (audit F4), never the signing secret.
     ///
     /// The stored value is the `secret_at_rest` encrypted envelope
     /// (AAD = `webhook={id}`); every repo read projects only a masked
     /// prefix of the decrypted secret into this field. The plaintext is
     /// available exclusively through
-    /// [`crate::repos::webhooks::WebhooksRepo::secret_for_signing`] — the
+    /// [`crate::repos::webhooks::WebhooksRepo::secret_for_signing`], the
     /// authorized fetch for the outbound-signing path.
     #[serde(skip_serializing)]
     pub secret: String,
@@ -474,7 +474,7 @@ mod tests {
         };
         assert_eq!(s.isp_name, "Gmail");
         // Zero/negative schedule entries are storable as data and have no
-        // admission reader to fall back from — the canonical schedule is
+        // admission reader to fall back from, the canonical schedule is
         // the only cap.
         let hostile = IspWarmupTemplate {
             warmup_schedule: serde_json::json!([0, -1]),

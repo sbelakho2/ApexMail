@@ -1,4 +1,4 @@
-//! HTTP routes — 25+ endpoints for organizations, workspaces, members, quota,
+//! HTTP routes, 25+ endpoints for organizations, workspaces, members, quota,
 //! rate limiting, encryption, data isolation, and audit.
 //!
 //! Bearer token auth using constant-time comparison. Health check at GET /health.
@@ -154,14 +154,14 @@ fn extract_user_id(headers: &HeaderMap) -> Result<String, (StatusCode, &'static 
 // ─── Tenant Claim Authorization ─────────────────────────────────
 //
 // This service authenticates callers with a shared internal API token, so
-// the bearer token alone proves "some trusted internal service" — never
+// the bearer token alone proves "some trusted internal service", never
 // *which* tenant the call is for. The trusted edge/gateway is expected to
 // strip any client-supplied `x-org-id` header and set its own, derived from
 // the authenticated session. When that claim header is present, every
 // organization/workspace in the request path MUST belong to the claimed
 // organization; a mismatch is a cross-tenant access attempt and gets 403.
 // When absent (direct internal service-to-service traffic), the request is
-// allowed but logged — deployments that need strict enforcement must front
+// allowed but logged, deployments that need strict enforcement must front
 // this service with the edge.
 
 const ORG_CLAIM_HEADER: &str = "x-org-id";
@@ -193,7 +193,7 @@ fn missing_claim_verdict(require_claim: bool) -> Result<(), (StatusCode, &'stati
     if require_claim {
         ORG_CLAIM_MISSING_TOTAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         tracing::warn!(
-            "SECURITY: required x-org-id claim header missing — refusing request (production mode)"
+            "SECURITY: required x-org-id claim header missing, refusing request (production mode)"
         );
         Err((
             StatusCode::UNAUTHORIZED,
@@ -208,7 +208,7 @@ fn missing_claim_verdict(require_claim: bool) -> Result<(), (StatusCode, &'stati
 /// Verify the edge-supplied org claim matches the organization in the path.
 ///
 /// Audit SM5 F15: the claim model previously failed OPEN on a missing
-/// header — any client whose `x-org-id` was not (yet) stripped by the edge
+/// header, any client whose `x-org-id` was not (yet) stripped by the edge
 /// could reach any org. In production mode (`Config::require_org_claim`,
 /// default ON in production, fail-closed) a MISSING claim is refused; a
 /// PRESENT mismatching claim is always refused (and counted) regardless
@@ -229,7 +229,7 @@ fn verify_org_claim(
             tracing::warn!(
                 claimed_org = %claim,
                 path_org = %path_org_id,
-                "SECURITY: org claim does not match path — refusing request"
+                "SECURITY: org claim does not match path, refusing request"
             );
             Err((
                 StatusCode::FORBIDDEN,
@@ -251,7 +251,7 @@ async fn verify_workspace_org_claim(
         .and_then(|v| v.to_str().ok())
         .map(str::trim)
     else {
-        // Audit SM5 F15: honor the require mode here too — this verifier
+        // Audit SM5 F15: honor the require mode here too, this verifier
         // guards NINE workspace-scoped routes and previously allowed a
         // missing header unconditionally.
         return missing_claim_verdict(state.config.require_org_claim);
@@ -789,7 +789,7 @@ async fn rate_limit_status(
         return (e.0, err_json(e.1));
     }
     // Read the EXACT key the enforcement path writes (shared key builder in
-    // rate_limit.rs) — the old `ratelimit:workspace:{ws}:api` key was a
+    // rate_limit.rs), the old `ratelimit:workspace:{ws}:api` key was a
     // phantom that enforcement never populated.
     let (key, prefix) = crate::rate_limit::workspace_api_rate_limit_key_parts(&workspace_id);
     let config = RateLimitConfig {
@@ -827,7 +827,7 @@ async fn rate_limit_reset(
     }
     // Only this workspace's OWN enforcement key may be deleted (built from
     // the path param via the shared key builder); arbitrary caller-supplied
-    // keys — including the old phantom `workspace:{ws}:api` shape — are
+    // keys, including the old phantom `workspace:{ws}:api` shape, are
     // rejected.
     let (key, prefix) = match resettable_rate_limit_key(&workspace_id, Some(&body.key)) {
         Ok(parts) => parts,
@@ -1016,7 +1016,7 @@ async fn isolation_migrate(
     }
 
     // Audit SM5 F8: `migrate_isolation_level` takes a WORKSPACE id, but
-    // this route was passing the ORG id — every statement matched zero
+    // this route was passing the ORG id, every statement matched zero
     // rows, an orphan `ws_{org_id}` schema was created, and the endpoint
     // still reported `{"status":"migrated"}`. Resolve the org's actual
     // workspaces and migrate EACH in its own transaction; an org with no
@@ -1080,7 +1080,7 @@ async fn isolation_migrate(
 }
 
 /// Audit SM5 F8 (hermetic core of the org-scoped migrate route): an org
-/// that resolves to ZERO workspaces must be a 404 — the route must never
+/// that resolves to ZERO workspaces must be a 404, the route must never
 /// report "migrated" for an empty workspace list (that was the bug's
 /// symptom: the ORG id was passed where a WORKSPACE id was required, all
 /// statements matched zero rows, and success was still returned). Pure so
@@ -1294,7 +1294,7 @@ mod tests {
     #[test]
     fn test_missing_claim_is_refused_when_required() {
         // Audit SM5 F15: in require (production) mode an ABSENT claim is a
-        // 401 for BOTH verifiers — the workspace-scoped verifier previously
+        // 401 for BOTH verifiers, the workspace-scoped verifier previously
         // failed open on a missing header and let a header-less client past
         // nine workspace routes.
         let err = missing_claim_verdict(true).expect_err("required claim must be enforced");
@@ -1310,7 +1310,7 @@ mod tests {
     /// F14 regression:/audit/query takes the organization from QUERY
     /// params rather than the path, and previously skipped the org-claim
     /// check every sibling enforced. The handler now runs the same
-    /// verify_org_claim on `params.organization_id` — pin that behavior
+    /// verify_org_claim on `params.organization_id`, pin that behavior
     /// for both the mismatch (403) and match (allowed) cases.
     #[test]
     fn test_audit_query_org_claim_enforced() {
@@ -1340,7 +1340,7 @@ mod tests {
         assert_eq!(err.0, StatusCode::FORBIDDEN);
 
         // The OLD phantom key shape (`workspace:{ws}:api`) is not a key the
-        // enforcement path ever writes — it must be rejected too, not
+        // enforcement path ever writes, it must be rejected too, not
         // silently deleted as a no-op.
         let err = resettable_rate_limit_key("ws-1", Some("workspace:ws-1:api"))
             .expect_err("phantom key shape must be rejected");
@@ -1464,7 +1464,7 @@ mod tests {
     #[test]
     fn test_verify_org_claim_required_mode_refuses_missing_header() {
         // Fail-closed: with require_claim=true a MISSING claim header is a
-        // hard refusal — previously it always failed open.
+        // hard refusal, previously it always failed open.
         let err = verify_org_claim(&claim_headers(None), "org-1", true)
             .expect_err("missing required claim must be refused");
         assert_eq!(err.0, StatusCode::UNAUTHORIZED);

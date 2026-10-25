@@ -1,4 +1,4 @@
-//! Predictive analytics endpoint — churn-risk scoring, capacity planning,
+//! Predictive analytics endpoint, churn-risk scoring, capacity planning,
 //! volume trend extrapolation, and anomaly detection.
 //!
 //! **These outputs are HEURISTICS, not calibrated predictions.** There is no
@@ -7,7 +7,7 @@
 //! extrapolations of observed successful sends, and anomalies are threshold
 //! comparisons. Output fields are labelled `heuristic*` accordingly.
 //!
-//! **Fixed horizons — there is deliberately NO `window` parameter.** Earlier
+//! **Fixed horizons, there is deliberately NO `window` parameter.** Earlier
 //! versions accepted `?window=` and then ignored it, which made the parameter
 //! cosmetic. Every endpoint here is defined on fixed, documented horizons
 //! ([`FIXED_HORIZONS`], also returned as `fixedHorizons` on the aggregate
@@ -22,7 +22,7 @@
 //! expect it to change any number.
 //!
 //! Volume metrics count DISTINCT messages with a successful `sent` event
-//! (event-occurrence timestamps) — never `messages.created_at`, which counts
+//! (event-occurrence timestamps), never `messages.created_at`, which counts
 //! mail that may never have left the queue.
 
 use axum::extract::State;
@@ -44,7 +44,7 @@ pub fn router() -> Router<AppState> {
 
 /// The fixed horizons every endpoint in this module uses. Exposed in the
 /// aggregate response as `fixedHorizons`; there is no client-selectable
-/// window (the old `?window=` was parsed and then ignored — cosmetic).
+/// window (the old `?window=` was parsed and then ignored, cosmetic).
 pub const FIXED_HORIZONS: &str =
     "fixed horizons: today, last 7/14/30 days, last 90 days (trend), 30-day bounce baseline vs last 24h; no window parameter";
 
@@ -135,7 +135,7 @@ pub struct VolumeForecast {
     pub heuristic_next_month: i64,
     pub heuristic_next_quarter: i64,
     /// Observed variability band (coefficient of variation of historical
-    /// daily send volumes) — NOT a statistical confidence interval.
+    /// daily send volumes), NOT a statistical confidence interval.
     pub variability_band: String,
     /// Static provenance string: these are heuristics, not a model.
     pub method: String,
@@ -150,7 +150,7 @@ pub struct Anomaly {
     pub detected_value: String,
     pub expected_range: String,
     pub detected_at: String,
-    /// How the anomaly was detected — always a heuristic threshold
+    /// How the anomaly was detected, always a heuristic threshold
     /// comparison, never a trained model's output.
     pub method: String,
 }
@@ -205,7 +205,7 @@ fn compute_capacity_utilization(queue_depth: i64, capacity: i64) -> f64 {
 /// Days until the queue reaches its configured capacity. Some(0) when the
 /// backlog already exceeds capacity; None otherwise because we do not track
 /// backlog-growth history to project a date from (previously a hardcoded
-/// None placeholder — still honest, now for a documented reason).
+/// None placeholder, still honest, now for a documented reason).
 fn days_until_capacity_limit(queue_depth: i64, capacity: i64) -> Option<i64> {
     if capacity > 0 && queue_depth >= capacity {
         Some(0)
@@ -217,7 +217,7 @@ fn days_until_capacity_limit(queue_depth: i64, capacity: i64) -> Option<i64> {
 /// Observed variability of daily send volumes: the coefficient of variation
 /// (stdev / mean) over the trend window. With fewer than two daily data
 /// points there is nothing to estimate variability from, so the band is
-/// reported as unestimated — never a fabricated "±15%" and never labelled a
+/// reported as unestimated, never a fabricated "±15%" and never labelled a
 /// statistical confidence interval.
 fn volume_variability_band(daily_volumes: &[i64]) -> String {
     if daily_volumes.len() < 2 {
@@ -316,7 +316,7 @@ async fn send_trend(db: &sqlx::PgPool, days: i32) -> Vec<TrendPoint> {
 /// Distinct-message bounce rate (fraction) over a window of `window_hours`
 /// ending `exclude_last_hours` before now. Bounce = distinct messages with a
 /// bounced event / distinct messages with a sent event, both by event
-/// occurrence — the same cardinality and time conventions as
+/// occurrence, the same cardinality and time conventions as
 /// [`crate::analytics_metrics`], so the two windows compared are
 /// like-for-like.
 async fn event_bounce_rate(db: &sqlx::PgPool, window_hours: i32, exclude_last_hours: i32) -> f64 {
@@ -351,7 +351,7 @@ async fn get_predictive_analytics(
     let now = chrono::Utc::now();
 
     // ─── Churn Risk ─────────────────────────────────────────────────────
-    // Subscription existence reads mollie_subscriptions — the table billing
+    // Subscription existence reads mollie_subscriptions, the table billing
     // webhooks write (the legacy `subscriptions` table has no writer).
     let inactive: Vec<InactiveTenantRow> = sqlx::query_as(
         "SELECT
@@ -438,7 +438,7 @@ async fn get_predictive_analytics(
     let trend_30 = send_trend(db, 30).await;
     let trend_90 = send_trend(db, 90).await;
 
-    // Weekly growth rate — compare last 7 days with the 7 before.
+    // Weekly growth rate, compare last 7 days with the 7 before.
     let recent_7 = recent_sends(db, 7).await;
     let prev_7: i64 = sqlx::query_scalar(
         "SELECT COUNT(DISTINCT message_id)::bigint FROM events
@@ -498,7 +498,7 @@ async fn get_predictive_analytics(
 
     // Anomaly: backlog at/over the configured load-shedding capacity.
     // Like-for-like fix: the old code compared the CURRENT backlog against
-    // the average number of queue rows CREATED per day — unlike quantities.
+    // the average number of queue rows CREATED per day, unlike quantities.
     // Backlog-growth history is not retained, so there is no historical
     // backlog baseline; the honest comparison is current backlog vs the
     // configured backlog threshold (EMAIL_MAX_BACKLOG).
@@ -571,7 +571,7 @@ async fn get_predictive_analytics(
 
     // ─── Volume Forecast (heuristic linear extrapolation) ────────────────
     // The variability band is derived from the observed 30-day daily-volume
-    // variability (coefficient of variation) — not a hardcoded constant and
+    // variability (coefficient of variation), not a hardcoded constant and
     // not a statistical confidence interval.
     let daily_volumes: Vec<i64> = trend_30.iter().map(|p| p.volume).collect();
     let forecast = VolumeForecast {
@@ -815,7 +815,7 @@ async fn get_anomalies(
     let gen_at = now.to_rfc3339();
     let mut anomalies: Vec<Anomaly> = Vec::new();
 
-    // Bounce rate anomaly — distinct-message rates over event occurrence
+    // Bounce rate anomaly, distinct-message rates over event occurrence
     // for both windows (like-for-like).
     let normal_bounce = event_bounce_rate(db, 30 * 24, 24).await;
     let today_bounce = event_bounce_rate(db, 24, 0).await;
@@ -841,7 +841,7 @@ async fn get_anomalies(
         });
     }
 
-    // Queue backlog anomaly — like-for-like: current backlog vs the
+    // Queue backlog anomaly, like-for-like: current backlog vs the
     // configured backlog threshold. Backlog-growth history is not retained,
     // so no historical backlog baseline is claimed.
     let current_queue: i64 = sqlx::query_scalar(
@@ -1124,7 +1124,7 @@ mod tests {
     //
     // These drive the HTTP handlers through `build_app` (system-tenant
     // machine key) against a per-test canonical database, so every assertion
-    // is about the JSON a client receives — not a helper's return value.
+    // is about the JSON a client receives, not a helper's return value.
 
     const PREDICTIVE_PATH: &str = "/v1/admin/analytics/predictive";
 
@@ -1351,7 +1351,7 @@ mod tests {
         seed_event(&pool, bounced, &b_msg.to_string(), "bounced", 90).await;
 
         // Volume fixtures: two distinct messages today (one with two `sent`
-        // events — distinct-message counting must ignore the duplicate), one
+        // events, distinct-message counting must ignore the duplicate), one
         // 10 days ago, one 20 days ago.
         let today_a = uuid::Uuid::new_v4().to_string();
         let today_b = uuid::Uuid::new_v4().to_string();
@@ -1425,7 +1425,7 @@ mod tests {
         );
         assert_eq!(signals[1]["affectedTenants"], 1, "only B bounces");
 
-        // The dedicated endpoints agree with the aggregate — same SQL, same
+        // The dedicated endpoints agree with the aggregate, same SQL, same
         // numbers (deterministic across calls).
         let (status, churn) = get_json(&app, &format!("{PREDICTIVE_PATH}/churn"), &key).await;
         assert_eq!(status, StatusCode::OK);
@@ -1479,7 +1479,7 @@ mod tests {
         }
 
         // Delivery-failure spike: baseline average 1 failure/day, 4 today
-        // (> 3×) — warning severity in the dedicated endpoint.
+        // (> 3×), warning severity in the dedicated endpoint.
         sqlx::query(
             "INSERT INTO email_queue (id, tenant_id, from_address, to_addresses, subject, status, created_at, updated_at)
              VALUES (gen_random_uuid(), $1, 'sender@example.com', ARRAY['to@example.com'], 'failed', 'failed', NOW() - INTERVAL '3 days', NOW() - INTERVAL '3 days')",
@@ -1546,7 +1546,7 @@ mod tests {
         assert!(agg_types.contains(&"paid_no_activity"), "{agg}");
         assert!(
             !agg_types.contains(&"delivery_failure_spike"),
-            "the aggregate does not compute the failed-delivery spike — it must not fabricate one: {agg}"
+            "the aggregate does not compute the failed-delivery spike, it must not fabricate one: {agg}"
         );
         let paid = agg["anomalies"]
             .as_array()
@@ -1571,7 +1571,7 @@ mod tests {
     }
 
     /// Queue backlog vs the worker's configured capacity: at 1× the default
-    /// threshold the anomaly is a warning, at 2× it is critical — and the
+    /// threshold the anomaly is a warning, at 2× it is critical, and the
     /// capacity endpoint reports utilization above 1.0 with an honest
     /// `daysUntilCapacityLimit = 0`.
     #[tokio::test]

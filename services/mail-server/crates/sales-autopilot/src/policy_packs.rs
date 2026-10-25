@@ -68,16 +68,16 @@ where
 
 /// How many autonomous sends of `action` a tenant has performed since `since`.
 ///
-/// `None` means the action has NO accounting ledger yet — the budget cannot be
+/// `None` means the action has NO accounting ledger yet, the budget cannot be
 /// enforced for it, and `evaluate` must say so rather than silently pass a
 /// cap it never read (the opposite of the dead-by-omission class this repo
 /// keeps finding).
 ///
 /// Ledgers are real production writes:
-/// * `reply_autosend` — the auto-send path's in-transaction audit row
+/// * `reply_autosend`, the auto-send path's in-transaction audit row
 ///   (`control_plane.ai_draft.auto_sent`, whose `details.tenantId` names the
 ///   routed tenant; the row's own tenant_id is the system tenant);
-/// * `sequence_send` — `sales_step_executions.state = 'sent'` (the worker's
+/// * `sequence_send`, `sales_step_executions.state = 'sent'` (the worker's
 ///   executed-step ledger).
 pub async fn action_count_since(
     db: &mut sqlx::PgConnection,
@@ -167,7 +167,7 @@ pub async fn evaluate(
             tracing::warn!(
                 tenant_id,
                 action,
-                "no send ledger for this action kind — pack budget cannot be enforced"
+                "no send ledger for this action kind, pack budget cannot be enforced"
             );
         }
         return Ok(PackVerdict {
@@ -217,7 +217,7 @@ pub async fn approve(
     }
     if approved_by.trim().is_empty() {
         return Err(SalesError::InvalidInput(
-            "owner_approved_by is required — an anonymous approval is not an approval".to_string(),
+            "owner_approved_by is required, an anonymous approval is not an approval".to_string(),
         ));
     }
     let mut tx = db
@@ -290,7 +290,7 @@ mod tests {
 
     #[test]
     fn known_actions_match_the_migration_check() {
-        // Migration 270's CHECK allowlist — keep both sides in lockstep.
+        // Migration 270's CHECK allowlist, keep both sides in lockstep.
         let expected = [
             "reply_autosend",
             "sequence_send",

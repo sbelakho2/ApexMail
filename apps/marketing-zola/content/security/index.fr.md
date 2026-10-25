@@ -68,7 +68,7 @@ L'intégrité du système est vérifiée par des contrôles automatisés et réc
 | **Intégrité des artefacts de déploiement** | Les images de conteneurs sont vérifiées par digest, pas signées : chaque exécution du pipeline enregistre un manifeste de release (digests SHA-256 par image, `SHA256SUMS.images`) et génère un override compose épinglé par digest ; le déploiement refuse de démarrer toute image dont le digest ne correspond pas à ce manifeste. | Chaque déploiement | Manifeste de release + vérification des digests avant le rollout dans l'étape de déploiement |
 | **Intégrité du journal d'audit** | Les tables du journal d'audit portent une chaîne de hachage : le résumé SHA-256 de chaque ligne est chaîné à son prédécesseur. | Continu (par écriture) | Chaîne de hachage du journal d'audit |
 | **Journaux de déploiement** | Chaque exécution du pipeline enregistre un manifeste (étape, statut, code de sortie, durée) plus les journaux par étape. Ce sont des enregistrements opérationnels, pas un registre inviolable orienté client. | Chaque déploiement | Manifestes d'exécution CI (`ci/runs/<ts>/manifest.json`) |
-| **Vérification des sauvegardes** | Chaque sauvegarde est automatiquement déchiffrée et validée structurellement (`pg_restore --list`) avant suppression de la copie en clair — une sauvegarde illisible n'est jamais comptée comme bonne. Les exercices complets de restauration sont manuels et suivent la cadence trimestrielle documentée. | Chaque sauvegarde (validation automatique) ; trimestriel (exercices manuels) | Validation de restaurabilité à la sauvegarde ; registres des exercices DR |
+| **Vérification des sauvegardes** | Chaque sauvegarde est automatiquement déchiffrée et validée structurellement (`pg_restore --list`) avant suppression de la copie en clair, une sauvegarde illisible n'est jamais comptée comme bonne. Les exercices complets de restauration sont manuels et suivent la cadence trimestrielle documentée. | Chaque sauvegarde (validation automatique) ; trimestriel (exercices manuels) | Validation de restaurabilité à la sauvegarde ; registres des exercices DR |
 | **Résilience à l'exécution** | Les services s'exécutent avec healthchecks et redémarrage automatique ; une sonde de contenu échouée après le déploiement déclenche le rollback automatique vers les épinglages d'images précédents. | Continu | Healthchecks de conteneurs ; étape de vérification + rollback |
 
 ## Sécurité de l'infrastructure
@@ -85,13 +85,13 @@ L'intégrité du système est vérifiée par des contrôles automatisés et réc
 
 - Analyse automatisée des dépendances dans le pipeline CI/CD.
 - Analyse automatisée des vulnérabilités de l'infrastructure (cadence hebdomadaire).
-- Test d'intrusion annuel par un tiers (prévu — actuellement en cours d'approvisionnement ; les résultats seront publiés après le premier test et la remédiation).
+- Test d'intrusion annuel par un tiers (prévu, actuellement en cours d'approvisionnement ; les résultats seront publiés après le premier test et la remédiation).
 - Programme de divulgation responsable : [security@apexmail.ee](mailto:security@apexmail.ee)
 - Objectifs de remédiation des vulnérabilités par gravité :
   - **Critique :** Atténuation immédiate requise ; correction permanente dans les 7 jours.
   - **Élevée :** Objectif dans les 30 jours.
   - **Moyenne :** Objectif dans les 90 jours.
-  - **Faible :** Basée sur le risque — traitée dans les cycles de maintenance réguliers.
+  - **Faible :** Basée sur le risque, traitée dans les cycles de maintenance réguliers.
   - **Activément exploitée :** Processus d'urgence indépendamment de la gravité.
 
 ## Réponse aux incidents

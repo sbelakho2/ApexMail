@@ -1,7 +1,7 @@
 //! Data-plane STONITH fence gate for the worker's claim loops (SM10 F4).
 //!
 //! The HA failover coordinator places `ha:fenced:{node_id}` keys in Redis,
-//! but until now only the HA service's own HTTP routes ever read them — a
+//! but until now only the HA service's own HTTP routes ever read them, a
 //! fenced node kept claiming and completing jobs. This module is the
 //! worker-side gate: every claim loop consults it before fetching a batch,
 //! and a fenced node (or one that cannot PROVE it is not fenced) stops
@@ -9,18 +9,18 @@
 //!
 //! # Environment contract
 //!
-//! * `APEXMAIL_HA_FENCING` — `"true"`/`"1"` enables enforcement. The
+//! * `APEXMAIL_HA_FENCING`, `"true"`/`"1"` enables enforcement. The
 //!   default is OFF: a disabled gate performs no Redis reads and every
 //!   check is `Ok(())`, so deployment behavior is byte-for-byte unchanged.
-//!   When enabled, the gate FAILS CLOSED — an unreadable fence authority is
+//!   When enabled, the gate FAILS CLOSED, an unreadable fence authority is
 //!   a refusal, never an implicit allow.
-//! * `NODE_ID` — the fence identity (same variable the HA service's
+//! * `NODE_ID`, the fence identity (same variable the HA service's
 //!   `multi_region.node_id` reads; defaults to `node-{pid}`).
-//! * `REDIS_URL` — the fence authority (the same Redis the worker already
+//! * `REDIS_URL`, the fence authority (the same Redis the worker already
 //!   requires). Falls back to `REDIS_HOST`/`REDIS_PORT`/`REDIS_PASSWORD`/
 //!   `REDIS_DB`, mirroring the HA config's URL layout.
 //!
-//! The key layout itself is owned by [`ha::fence`] — this module adds the
+//! The key layout itself is owned by [`ha::fence`], this module adds the
 //! env gating and the disabled/enabled wrapper, it does not restate the
 //! protocol.
 
@@ -33,7 +33,7 @@ use ha::fence::{FenceChecker, FenceError, FenceStore, RedisFenceStore};
 /// A fence authority that is permanently unreadable. Used when fencing is
 /// ENABLED but the authority cannot be constructed (missing/unparseable
 /// `REDIS_URL`): the operator asked for enforcement, so failing closed on
-/// every write is the honest behavior — silently disabling the gate would
+/// every write is the honest behavior, silently disabling the gate would
 /// be fail-open.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct AlwaysUnreadableStore;
@@ -90,7 +90,7 @@ impl FenceGate {
     }
 
     /// Build the gate from the process environment (see the module docs).
-    /// Cheap: no Redis connection is opened here — the checker connects
+    /// Cheap: no Redis connection is opened here, the checker connects
     /// lazily on the first uncached check.
     pub fn from_env() -> Self {
         if !env_flag("APEXMAIL_HA_FENCING") {
@@ -135,7 +135,7 @@ impl FenceGate {
     }
 
     /// The claim-loop gate: `Ok(())` = serve (including "fencing disabled").
-    /// `Err(FenceError)` = refuse — the node is fenced or cannot prove it
+    /// `Err(FenceError)` = refuse, the node is fenced or cannot prove it
     /// is not; the caller must NOT claim or complete jobs and should retry
     /// after its normal poll backoff.
     pub async fn ensure_can_claim(&self) -> Result<(), FenceError> {
@@ -147,7 +147,7 @@ impl FenceGate {
 }
 
 /// `"true"`/`"1"` (case-insensitive) enables; anything else (including the
-/// variable being absent) disables — the fence is opt-in.
+/// variable being absent) disables, the fence is opt-in.
 fn env_flag(name: &str) -> bool {
     match std::env::var(name) {
         Ok(v) => {
@@ -222,7 +222,7 @@ mod tests {
     async fn disabled_gate_never_refuses_and_never_touches_the_authority() {
         let gate = FenceGate::disabled();
         assert!(!gate.is_enabled());
-        // No store is wired — there is nothing to consult.
+        // No store is wired, there is nothing to consult.
         assert!(gate.ensure_can_claim().await.is_ok());
     }
 

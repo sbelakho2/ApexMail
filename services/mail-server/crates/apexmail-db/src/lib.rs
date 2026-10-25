@@ -1,4 +1,4 @@
-//! ApexMail database layer — connection pool, repositories, transactions.
+//! ApexMail database layer, connection pool, repositories, transactions.
 //!
 //! Provides type-safe PostgreSQL access for all ApexMail services.
 

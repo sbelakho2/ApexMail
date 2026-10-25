@@ -108,7 +108,7 @@ fn verify_password_dual_scheme(
         tracing::error!(
             hash_prefix = %prefix,
             subject = %subject,
-            "unknown password hash scheme — rejecting account deletion"
+            "unknown password hash scheme, rejecting account deletion"
         );
         return Err(ApiError::Internal(
             "password verification is unavailable for this account".into(),
@@ -167,7 +167,7 @@ async fn delete_account(
 
     let now = Utc::now();
     // Schedule deletion for the 30-day grace period (recovery window; the
-    // sweeper executes what is not cancelled — see DELETION_GRACE_DAYS).
+    // sweeper executes what is not cancelled, see DELETION_GRACE_DAYS).
     let deletion_at = now + chrono::Duration::days(DELETION_GRACE_DAYS);
 
     // Mark tenant for deletion
@@ -238,7 +238,7 @@ async fn delete_account(
 // ─── Deletion cancellation (SM3 audit F1) ──────────────────────
 
 /// Grace period between scheduling and executing a deletion. MUST stay in
-/// sync with the schedule `delete_account` writes (30 days) — the promise in
+/// sync with the schedule `delete_account` writes (30 days), the promise in
 /// its response message and the sweeper's eligibility window are both keyed
 /// to it.
 const DELETION_GRACE_DAYS: i64 = 30;
@@ -258,7 +258,7 @@ pub struct CancelDeletionResponse {
     pub message: String,
 }
 
-/// `POST /v1/account/deletion/cancel` — undo a scheduled deletion inside the
+/// `POST /v1/account/deletion/cancel`, undo a scheduled deletion inside the
 /// 30-day grace period.
 ///
 /// The deletion schedule (`delete_account`) disables every user and marks
@@ -332,7 +332,7 @@ async fn cancel_account_deletion(
 
     // The schedule disabled EVERY user in the tenant; cancellation restores
     // every user in the tenant (the disabled state carried no per-user
-    // distinction to preserve — the blanket disable destroyed it).
+    // distinction to preserve, the blanket disable destroyed it).
     sqlx::query("UPDATE users SET status = 'active', updated_at = NOW() WHERE tenant_id = $1")
         .bind(&auth.tenant_id)
         .execute(&mut *tx)
@@ -398,11 +398,11 @@ fn deletion_due(scheduled_at: Option<&str>, now: chrono::DateTime<Utc>) -> bool 
 /// (`routes::admin::tenants::delete_tenant_records`, the SAME machinery the
 /// GDPR/admin tenant deletion uses: actor-attributed audit entry first,
 /// evidence tables (`audit_logs`, `cp_access_log`, `secrets_archive`)
-/// preserved, tenant row deleted last — all in one transaction).
+/// preserved, tenant row deleted last, all in one transaction).
 ///
 /// Preconditions are honoured exactly like an operator-issued deletion: a
 /// legal hold or an active retention obligation parks the erasure (logged;
-/// the next sweep re-evaluates) — evidence preservation outranks the purge.
+/// the next sweep re-evaluates), evidence preservation outranks the purge.
 /// Per-tenant failures are logged and skipped so one bad tenant cannot stop
 /// the sweep. Spawned from `bin/server.rs` alongside the process heartbeat
 /// (`pub`: the binary is a separate crate).
@@ -432,12 +432,12 @@ pub async fn sweep_due_account_deletions(
                     tenant_id = %tenant_id,
                     reason = %reason,
                     "deletion sweeper: grace period elapsed but the tenant is parked \
-                     (legal hold / retention obligation) — skipping"
+                     (legal hold / retention obligation), skipping"
                 ),
                 other => tracing::error!(
                     tenant_id = %tenant_id,
                     error = ?other,
-                    "deletion sweeper: precondition check failed — skipping"
+                    "deletion sweeper: precondition check failed, skipping"
                 ),
             }
             continue;
@@ -468,7 +468,7 @@ pub async fn sweep_due_account_deletions(
             Err(error) => tracing::error!(
                 tenant_id = %tenant_id,
                 error = %error,
-                "deletion sweeper: purge failed — will retry on the next sweep"
+                "deletion sweeper: purge failed, will retry on the next sweep"
             ),
         }
     }
@@ -489,11 +489,11 @@ mod adversarial_tests {
 
     #[test]
     fn dual_scheme_accepts_bcrypt_and_argon2id_hashes() {
-        // bcrypt ($2a$/$2b$/$2y$ prefixes) — the legacy scheme.
+        // bcrypt ($2a$/$2b$/$2y$ prefixes), the legacy scheme.
         let bcrypt_hash = bcrypt::hash(SESSION_PASSWORD, 4).expect("bcrypt hash");
         assert!(verify_password_dual_scheme(SESSION_PASSWORD, &bcrypt_hash, "unit").unwrap());
         assert!(!verify_password_dual_scheme("wrong", &bcrypt_hash, "unit").unwrap());
-        // Argon2id — the current scheme.
+        // Argon2id, the current scheme.
         let argon_hash = apexmail_lib::hash_password(SESSION_PASSWORD).expect("argon2 hash");
         assert!(verify_password_dual_scheme(SESSION_PASSWORD, &argon_hash, "unit").unwrap());
         assert!(!verify_password_dual_scheme("wrong", &argon_hash, "unit").unwrap());
@@ -513,14 +513,14 @@ mod adversarial_tests {
     #[test]
     fn dual_scheme_maps_corrupt_hash_to_internal_error() {
         // A bcrypt-PREFIXED but malformed hash makes bcrypt::verify itself
-        // error — that must surface as Internal, never as "invalid password".
+        // error, that must surface as Internal, never as "invalid password".
         let error = verify_password_dual_scheme("pw", "$2a$notavalidhash", "unit")
             .expect_err("corrupt bcrypt hash must be an error");
         assert!(
             matches!(error, ApiError::Internal(message) if message.contains("temporarily unavailable"))
         );
         // A malformed argon2 PHC string is an honest password MISMATCH
-        // (Ok(false)), not an infrastructure error — only true verifier
+        // (Ok(false)), not an infrastructure error, only true verifier
         // failures map to Internal.
         assert!(!verify_password_dual_scheme("pw", "$argon2id$garbage", "unit").unwrap());
     }
@@ -1092,7 +1092,7 @@ mod adversarial_tests {
         ));
         // Missing metadata key: never due.
         assert!(!super::deletion_due(None, now));
-        // Corrupt timestamp: never due (fail-safe — no purge on a guess).
+        // Corrupt timestamp: never due (fail-safe, no purge on a guess).
         assert!(!super::deletion_due(Some("not-a-timestamp"), now));
         assert!(!super::deletion_due(Some(""), now));
     }

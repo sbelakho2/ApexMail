@@ -1,4 +1,4 @@
-//! Worker entry point — runs all processors.
+//! Worker entry point, runs all processors.
 
 use std::collections::HashSet;
 use std::env;
@@ -67,7 +67,7 @@ impl ProcessorLiveness {
 /// `JoinHandle` for the entire attempt lifetime, so a panic surfaces as
 /// `JoinError::is_panic` instead of unwinding through (and killing) the
 /// supervisor itself. SM10 F1: the previous supervision only matched
-/// `Err` — a panic permanently killed the processor while the heartbeat,
+/// `Err`, a panic permanently killed the processor while the heartbeat,
 /// `/health`, and `/metrics` all stayed green, so Kubernetes saw a healthy
 /// worker delivering nothing. On panic the processor is logged dead, the
 /// `apexmail_processor_alive` gauge drops to 0, and the heartbeat capability
@@ -124,7 +124,7 @@ where
         }
 
         // Dead between attempts: drop the liveness registration and gauge for
-        // the backoff window — both are restored when the attempt respawns.
+        // the backoff window, both are restored when the attempt respawns.
         mark_dead(&liveness, name);
         tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
         backoff_secs = (backoff_secs * 2).min(60);
@@ -215,7 +215,7 @@ const AUTOMATION_TICK_SECS_DEFAULT: u64 = 30;
 
 /// Tick period for the customer automation executor (`AUTOMATION_TICK_SECS`),
 /// clamped to at least one second; a present-but-invalid value falls back to
-/// the default (the executor is background work — a hostile cadence must not
+/// the default (the executor is background work, a hostile cadence must not
 /// stop the worker from starting).
 fn automation_tick_secs() -> u64 {
     env::var("AUTOMATION_TICK_SECS")
@@ -227,7 +227,7 @@ fn automation_tick_secs() -> u64 {
 
 /// Capabilities advertised on the worker heartbeat: the infrastructure
 /// always present, each enabled SUPERVISED processor only while supervision
-/// has it alive (SM10 F1 — a panicked/dead processor must stop being
+/// has it alive (SM10 F1, a panicked/dead processor must stop being
 /// advertised), and the automation tick whenever enabled (its self-contained
 /// loop handles its own errors and is not supervised).
 fn heartbeat_capabilities(settings: &WorkerSettings, liveness: &ProcessorLiveness) -> Vec<String> {
@@ -317,14 +317,14 @@ fn receipt_signing_gate(run_email: bool) -> Result<()> {
                 );
             }
             warn!(
-                "{} is unset — development sends sign receipts with an EPHEMERAL per-process \
+                "{} is unset, development sends sign receipts with an EPHEMERAL per-process \
                  key; they will not verify against the published production key",
                 mail_common::routing_receipt::RECEIPT_SIGNING_KEY_ENV
             );
             Ok(())
         }
         Err(error) => anyhow::bail!(
-            "routing-receipt signing key is unusable: {error} — refusing to start (a malformed \
+            "routing-receipt signing key is unusable: {error}, refusing to start (a malformed \
              key must never degrade into unsigned receipts)"
         ),
     }
@@ -332,8 +332,8 @@ fn receipt_signing_gate(run_email: bool) -> Result<()> {
 
 /// VERP v2 secret requirement (mirrors the MTA's production gate): outbound
 /// mail may only carry an AUTHENTICATED bounce Return-Path. Without the
-/// shared secret the worker emits NO VERP at all — it never falls back to
-/// the unsigned v1 grammar — and production startup refuses the
+/// shared secret the worker emits NO VERP at all, it never falls back to
+/// the unsigned v1 grammar, and production startup refuses the
 /// configuration when the email processor is enabled.
 fn verp_secret_gate(run_email: bool) -> Result<()> {
     let verp_domain_enabled = env::var("VERP_DOMAIN")
@@ -393,7 +393,7 @@ fn connect_redis(redis_url: &str) -> Result<deadpool_redis::Pool> {
 
 /// Resolve the SMTP relay host. Only `smtp` selects SMTP; SES is the default
 /// for every other value. An empty/missing SMTP_HOST is fatal ONLY for the
-/// SMTP transport — with SES the deliberately invalid sentinel host stays in
+/// SMTP transport, with SES the deliberately invalid sentinel host stays in
 /// place so the hybrid dispatcher knows the relay is NOT configured and
 /// dedicated-route sends defer before DATA instead of routing at localhost.
 fn smtp_host_for(transport_type: &TransportType) -> Result<String> {
@@ -406,7 +406,7 @@ fn smtp_host_for(transport_type: &TransportType) -> Result<String> {
                 );
             }
             warn!(
-                "SMTP_HOST not set; SES shared-pool transport selected — dedicated \
+                "SMTP_HOST not set; SES shared-pool transport selected, dedicated \
                  delivery routes (dedicated_ips rows) will defer until a relay is configured"
             );
             Ok(SmtpConfig::default().host)
@@ -505,7 +505,7 @@ struct WorkerProcesses {
     /// it holds is leased and every write exactly-once (migration 224), so an
     /// aborted tick is recovered by a later one, never double-executed.
     automations: Option<tokio::task::JoinHandle<()>>,
-    /// The campaign send consumer's tick task — same self-contained-loop
+    /// The campaign send consumer's tick task, same self-contained-loop
     /// contract as [`WorkerProcesses::automations`]: leased claims and
     /// per-recipient idempotency keys make an aborted tick recoverable.
     campaigns: Option<tokio::task::JoinHandle<()>>,
@@ -686,7 +686,7 @@ async fn run_worker(
     // The consumer of `automation_trigger_events` (migration 224): each tick
     // claims a bounded batch of due trigger events with FOR UPDATE SKIP
     // LOCKED, evaluates the tenant's enabled rules and executes their action
-    // ladder; every send passes `SendAdmissionService` — the ONE admission
+    // ladder; every send passes `SendAdmissionService`, the ONE admission
     // gate. This is CUSTOMER automation: it runs in the worker fleet, not in
     // the owner-only sales-autopilot process, so the two trust domains stay
     // separable (the sales brain can be disabled without touching customer
@@ -815,7 +815,7 @@ async fn run_worker(
     // ── Billing maintenance (overage/PAYG cycle-close, dedicated-IP billing,
     // SLA credits) ─────────────────────────────────────────────────────────
     // These periodic jobs previously ran ONLY in the billing-service binary,
-    // which has no container in any deployed topology — so cycle-close
+    // which has no container in any deployed topology, so cycle-close
     // invoicing never executed live (dogfood finding A, 2026-10-05). The
     // worker already depends on billing-service and is the platform's
     // background-execution home, so the periodic jobs run here. A
@@ -927,7 +927,7 @@ fn health_port() -> u16 {
 /// shutdown that exceeds `timeout` logs and returns (the process exits).
 async fn shutdown_worker(processes: WorkerProcesses, shutdown_timeout: Duration) {
     // The automation and campaign ticks have no stop() handshake: abort them
-    // (safe — leased claims and exactly-once identities make an interrupted
+    // (safe, leased claims and exactly-once identities make an interrupted
     // tick recoverable) before joining the supervised processors.
     if let Some(handle) = &processes.automations {
         handle.abort();
@@ -977,8 +977,8 @@ async fn shutdown_worker(processes: WorkerProcesses, shutdown_timeout: Duration)
 
 /// A worker identity that is unique per process across replicas.
 ///
-/// The PID alone is not a valid replica identity — separate containers
-/// routinely share the same PID number — so the hostname and a random suffix
+/// The PID alone is not a valid replica identity, separate containers
+/// routinely share the same PID number, so the hostname and a random suffix
 /// are included. The automation executor's lease token is what actually
 /// fences writes; this string only makes the owner column diagnosable.
 fn unique_worker_id() -> String {
@@ -1075,7 +1075,7 @@ mod tests {
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     /// Same deterministic AWS environment the lib's test fixtures install
-    /// (metadata probing off, file-based rustls roots) — `run_worker` builds
+    /// (metadata probing off, file-based rustls roots), `run_worker` builds
     /// the SES transport via `EmailProcessor::new`.
     fn ensure_aws_test_env() {
         static INSTALL: std::sync::Once = std::sync::Once::new();
@@ -1184,7 +1184,7 @@ mod tests {
                     panic!("boom: processor exploded");
                 }
                 // The replacement attempt STAYS ALIVE until the test
-                // ends it — this is the window in which the heartbeat
+                // ends it, this is the window in which the heartbeat
                 // must advertise the processor again. (A clean `Ok(())`
                 // would legitimately clear the registration on return.)
                 std::future::pending::<worker_processors::ProcessorResult<()>>().await
@@ -1348,7 +1348,7 @@ mod tests {
             ..base
         };
         // Nothing registered alive yet: enabled-but-dead processors must NOT
-        // be advertised (SM10 F1 — the heartbeat previously advertised every
+        // be advertised (SM10 F1, the heartbeat previously advertised every
         // enabled processor unconditionally, even one that had panicked).
         assert_eq!(
             heartbeat_capabilities(&all, &liveness),
@@ -1404,11 +1404,11 @@ mod tests {
         let id = unique_worker_id();
         assert!(id.starts_with("worker-host-9:"), "{id}");
         let parts: Vec<&str> = id.split(':').collect();
-        assert_eq!(parts.len(), 3, "host:pid:uuid — {id}");
-        assert!(parts[1].parse::<u32>().is_ok(), "pid component — {id}");
+        assert_eq!(parts.len(), 3, "host:pid:uuid, {id}");
+        assert!(parts[1].parse::<u32>().is_ok(), "pid component, {id}");
         assert!(
             uuid::Uuid::parse_str(parts[2]).is_ok(),
-            "random uuid component — {id}"
+            "random uuid component, {id}"
         );
         assert_ne!(id, unique_worker_id(), "ids are unique per call");
         std::env::remove_var("HOSTNAME");
@@ -1417,7 +1417,7 @@ mod tests {
     /// B3 fail-closed: a production worker running the email processor
     /// refuses to BOOT without `RECEIPT_SIGNING_KEY` (so the refusal is not
     /// discovered at send time), a malformed key is fatal everywhere, and
-    /// dev boots with a warning (ephemeral signing — never unsigned).
+    /// dev boots with a warning (ephemeral signing, never unsigned).
     #[test]
     fn receipt_gate_refuses_production_email_without_a_signing_key() {
         let seed = "5a".repeat(32);
@@ -1950,7 +1950,7 @@ mod tests {
             None => std::env::remove_var("OTEL_EXPORTER_OTLP_ENDPOINT"),
         }
         // `None` = the fallback path ran (no OTLP guard to flush). A panic
-        // here would mean a global subscriber was already installed — an
+        // here would mean a global subscriber was already installed, an
         // environment fault, surfaced loudly instead of silently skipped.
         let guard = guard.expect("the fallback install must not panic");
         assert!(

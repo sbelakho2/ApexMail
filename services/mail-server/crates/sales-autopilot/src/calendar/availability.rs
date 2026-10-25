@@ -1,8 +1,8 @@
 //! Provider-independent availability arithmetic (audit §29).
 //!
-//! This module contains the *policy* — working hours, buffers, minimum
+//! This module contains the *policy*, working hours, buffers, minimum
 //! notice, allowed weekdays, per-day meeting caps, and round-robin
-//! salesperson selection — as pure functions over injected clock/busy data.
+//! salesperson selection, as pure functions over injected clock/busy data.
 //! Providers ([`super::internal`], [`super::google`], [`super::microsoft`])
 //! only gather busy intervals and delegate slot generation here, so the
 //! policy is identical whichever calendar is authoritative and is testable
@@ -108,7 +108,7 @@ pub struct SlotPolicy {
     pub buffer_after_minutes: i64,
     /// Minimum notice: a candidate must start STRICTLY AFTER
     /// `now + min_notice_minutes` (a slot exactly at the boundary is not
-    /// offered — see the unit tests).
+    /// offered, see the unit tests).
     pub min_notice_minutes: i64,
     /// Maximum number of meetings already booked on the local day. Once
     /// reached, no further slots are offered for that day.
@@ -236,10 +236,10 @@ pub fn pick_least_loaded<'a>(
 
 /// Generate bookable slots for a request.
 ///
-/// * `busy` — occupied intervals inside the local day (any provider).
-/// * `meetings_already_in_day` — meetings already booked on the local day,
+/// * `busy`, occupied intervals inside the local day (any provider).
+/// * `meetings_already_in_day`, meetings already booked on the local day,
 ///   compared against `policy.max_meetings_per_day`.
-/// * `loads` — per-salesperson meeting counts in the window, used for
+/// * `loads`, per-salesperson meeting counts in the window, used for
 ///   round-robin assignment.
 ///
 /// Nonexistent local times (DST spring-forward gap) are skipped; ambiguous
@@ -352,7 +352,7 @@ mod tests {
         let slots = generate_slots(&req, &[], 0, &BTreeMap::new());
         let first = slots.first().expect("a Monday must offer slots");
         assert_eq!(first.start, utc(2031, 3, 31, 7, 0));
-        // A fixed +01:00 (winter) computation would give 08:00 UTC — the
+        // A fixed +01:00 (winter) computation would give 08:00 UTC, the
         // test fails if anyone reintroduces a fixed offset.
         assert_ne!(first.start, utc(2031, 3, 31, 8, 0));
 

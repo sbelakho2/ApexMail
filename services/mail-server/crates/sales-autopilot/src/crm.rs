@@ -82,7 +82,7 @@ impl CrmService {
 
     /// Transition a lead to a new status, scoped to tenant.
     ///
-    /// Enforces the lead lifecycle state machine — see
+    /// Enforces the lead lifecycle state machine, see
     /// [`is_valid_transition`] for the allowed edges. Invalid transitions
     /// are rejected with [`SalesError::InvalidInput`].
     pub fn update_lead_status(
@@ -372,7 +372,7 @@ mod tests {
         assert_eq!(manual.len(), 1);
         assert_eq!(manual[0].name, "Bob");
 
-        // filter by status — both are New
+        // filter by status, both are New
         let new_leads = svc.list_leads("tenant-a", Some(LeadStatus::New), None);
         assert_eq!(new_leads.len(), 2);
     }
@@ -821,7 +821,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Lead scoring formula — comprehensive tests
+    // Lead scoring formula, comprehensive tests
     // -----------------------------------------------------------------------
 
     /// Verifies that each weight (40 / 30 / 30) contributes the correct

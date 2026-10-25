@@ -9,13 +9,13 @@
 //!
 //! # Classes
 //!
-//! * [`FeatureClass::RuntimeEnforced`] — the capability has a real handler
+//! * [`FeatureClass::RuntimeEnforced`], the capability has a real handler
 //!   gate. `FeatureKey::class()` for such a key is the only thing
 //!   [`crate::EntitlementSnapshot::require_feature`] will grant.
-//! * [`FeatureClass::ContractualOnly`] — a contract/deployment/support fact.
+//! * [`FeatureClass::ContractualOnly`], a contract/deployment/support fact.
 //!   It is deliberately NOT a runtime Boolean: `require_feature` refuses it
 //!   so no handler can quietly treat e.g. `hipaa_compliance` as a gate.
-//! * [`FeatureClass::NotYetImplemented`] — advertised in the pricing/type
+//! * [`FeatureClass::NotYetImplemented`], advertised in the pricing/type
 //!   surface but with no runtime implementation. `require_feature` and
 //!   `require_capacity` refuse it; presentation surfaces must render it as
 //!   unavailable rather than as an upsell.
@@ -52,24 +52,24 @@ impl FeatureClass {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FeatureKey {
-    /// `dedicated_ip` — dedicated sending IP allocation (eligibility-checked).
+    /// `dedicated_ip`, dedicated sending IP allocation (eligibility-checked).
     DedicatedIp,
-    /// `eu_only_routing` — EU-only delivery routing: the tenant's sends must
+    /// `eu_only_routing`, EU-only delivery routing: the tenant's sends must
     /// leave through ApexMail's own MTAs; the send path HOLDS a message whose
     /// own-MTA route is unavailable rather than failing over to SES.
     EuOnlyRouting,
-    /// `sso_enabled` — enterprise single sign-on.
+    /// `sso_enabled`, enterprise single sign-on.
     Sso,
-    /// `audit_logs` — customer-facing audit log access.
+    /// `audit_logs`, customer-facing audit log access.
     AuditLogs,
-    /// `api_access` — API key minting / programmatic access.
+    /// `api_access`, API key minting / programmatic access.
     ApiAccess,
-    /// `webhooks_enabled` — webhook endpoint creation.
+    /// `webhooks_enabled`, webhook endpoint creation.
     Webhooks,
-    /// `inbound_email` — inbound mailbox provisioning / inbound event
+    /// `inbound_email`, inbound mailbox provisioning / inbound event
     /// consumption.
     InboundEmail,
-    /// `mailboxes` — the Mailboxes product line (receiving mailboxes on the
+    /// `mailboxes`, the Mailboxes product line (receiving mailboxes on the
     /// mail plane), sold as a separate per-seat add-on (10-seat minimum,
     /// `platform-catalog` `addon_by_name("mailboxes")`), not included in any
     /// self-serve plan. Runtime grant: an ACTIVE
@@ -77,7 +77,7 @@ pub enum FeatureKey {
     /// purchase record the monthly seat billing reads) or a plan/override
     /// grant; the mailbox provisioning path refuses without it.
     Mailboxes,
-    /// `inbox_placement` — Inbox Placement Monitoring (seed-account
+    /// `inbox_placement`, Inbox Placement Monitoring (seed-account
     /// placement tests), sold as a separate monthly line
     /// (`platform-catalog` `addon_by_name("inbox_placement_monitoring")`),
     /// not included in any self-serve plan. Runtime grant: an ACTIVE
@@ -86,44 +86,44 @@ pub enum FeatureKey {
     /// placement create routes and the engine's execution path refuse
     /// without it.
     InboxPlacement,
-    /// `advanced_analytics` — advanced analytics endpoints (engagement,
+    /// `advanced_analytics`, advanced analytics endpoints (engagement,
     /// deliverability).
     AdvancedAnalytics,
-    /// `send_time_optimization` — send-time recommendation endpoint.
+    /// `send_time_optimization`, send-time recommendation endpoint.
     SendTimeOptimization,
-    /// `ab_testing` — experiment creation.
+    /// `ab_testing`, experiment creation.
     AbTesting,
-    /// `time_travel_debugging` — historical message state replay/debugging.
+    /// `time_travel_debugging`, historical message state replay/debugging.
     TimeTravelDebugging,
-    /// `data_export` — analytics/contact data export.
+    /// `data_export`, analytics/contact data export.
     DataExport,
-    /// `custom_tracking_domain` — custom open/click tracking domain setup.
+    /// `custom_tracking_domain`, custom open/click tracking domain setup.
     CustomTrackingDomain,
-    /// `custom_templates` — template creation/customization.
+    /// `custom_templates`, template creation/customization.
     CustomTemplates,
-    /// `template_approval_workflow` — maker/checker template publishing.
+    /// `template_approval_workflow`, maker/checker template publishing.
     TemplateApprovalWorkflow,
-    /// `white_label` — removing ApexMail branding (renderer-central).
+    /// `white_label`, removing ApexMail branding (renderer-central).
     WhiteLabel,
-    /// `powered_by_footer` — the "powered by" footer switch (renderer-central).
+    /// `powered_by_footer`, the "powered by" footer switch (renderer-central).
     PoweredByFooter,
-    /// `custom_retention` — editing message/event retention.
+    /// `custom_retention`, editing message/event retention.
     CustomRetention,
-    /// `subaccounts` — child workspaces with isolated quotas.
+    /// `subaccounts`, child workspaces with isolated quotas.
     Subaccounts,
-    /// `byoip` — bring-your-own-IP (separate infrastructure flow).
+    /// `byoip`, bring-your-own-IP (separate infrastructure flow).
     Byoip,
-    /// `sla_guarantee` — contractual SLA.
+    /// `sla_guarantee`, contractual SLA.
     SlaGuarantee,
-    /// `hipaa_compliance` — BAA eligibility review.
+    /// `hipaa_compliance`, BAA eligibility review.
     HipaaCompliance,
-    /// `soc2_compliance` — SOC 2 report availability.
+    /// `soc2_compliance`, SOC 2 report availability.
     Soc2Compliance,
-    /// `private_cloud` — dedicated deployment.
+    /// `private_cloud`, dedicated deployment.
     PrivateCloud,
-    /// `dedicated_csm` — dedicated customer success manager.
+    /// `dedicated_csm`, dedicated customer success manager.
     DedicatedCsm,
-    /// `priority_onboarding` — white-glove onboarding.
+    /// `priority_onboarding`, white-glove onboarding.
     PriorityOnboarding,
 }
 
@@ -220,15 +220,15 @@ impl FeatureKey {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CapacityKey {
-    /// `dedicated_ip_count` — included dedicated IPs.
+    /// `dedicated_ip_count`, included dedicated IPs.
     DedicatedIps,
-    /// `max_sending_domains` — sending domains per tenant.
+    /// `max_sending_domains`, sending domains per tenant.
     SendingDomains,
-    /// `max_retention_days` — retention ceiling (data/event age).
+    /// `max_retention_days`, retention ceiling (data/event age).
     RetentionDays,
-    /// `max_team_members` — seats, including invited-but-unactivated users.
+    /// `max_team_members`, seats, including invited-but-unactivated users.
     TeamMembers,
-    /// `max_subaccounts` — child workspaces.
+    /// `max_subaccounts`, child workspaces.
     Subaccounts,
 }
 
@@ -292,7 +292,7 @@ pub struct FieldClassification {
 /// (`tools/check_feature_entitlements.py`) fails otherwise.
 pub const PLAN_FEATURE_CLASSIFICATION: &[FieldClassification] = &[
     // ── Infrastructure ─────────────────────────────────────────────
-    // RuntimeEnforced — `dedicated_ips::allocate_ip` requires
+    // RuntimeEnforced, `dedicated_ips::allocate_ip` requires
     // `FeatureKey::DedicatedIp` before the provider is called.
     FieldClassification {
         field: "dedicated_ip",
@@ -300,7 +300,7 @@ pub const PLAN_FEATURE_CLASSIFICATION: &[FieldClassification] = &[
         gate: Gate::Feature(FeatureKey::DedicatedIp),
         rationale: "Dedicated IP allocation is a real handler and is gated per tenant; eligibility review remains a separate operational step.",
     },
-    // ContractualOnly — this number drives INVOICING (IPs within the count
+    // ContractualOnly, this number drives INVOICING (IPs within the count
     // are included; extras are billed as pending_charge), never a denial
     // gate. `require_capacity(CapacityKey::DedicatedIps, _)` refuses it.
     FieldClassification {
@@ -309,7 +309,7 @@ pub const PLAN_FEATURE_CLASSIFICATION: &[FieldClassification] = &[
         gate: Gate::Capacity(CapacityKey::DedicatedIps),
         rationale: "Included-IP count is a billing term: extra IPs are charged, not refused, so it must not be used as an access gate.",
     },
-    // RuntimeEnforced — the customer routing settings surface
+    // RuntimeEnforced, the customer routing settings surface
     // (`PUT /v1/routing`, api-server `routes/routing.rs`) requires
     // `FeatureKey::EuOnlyRouting` before it may activate the mode, and the
     // worker's dispatch path enforces the mode it wrote (own-MTA transport
@@ -324,7 +324,7 @@ pub const PLAN_FEATURE_CLASSIFICATION: &[FieldClassification] = &[
         gate: Gate::Feature(FeatureKey::EuOnlyRouting),
         rationale: "The routing-mode activation handler is gated on the entitlement and the worker enforces the activated mode fail-closed (own-MTA route or hold), so the plan/add-on grant is the runtime gate.",
     },
-    // RuntimeEnforced — `domains::create_domain` gates domain creation
+    // RuntimeEnforced, `domains::create_domain` gates domain creation
     // with `require_capacity(CapacityKey::SendingDomains, count + 1)`.
     FieldClassification {
         field: "max_sending_domains",
@@ -334,7 +334,7 @@ pub const PLAN_FEATURE_CLASSIFICATION: &[FieldClassification] = &[
     },
 
     // ── Auth & Security ────────────────────────────────────────────
-    // RuntimeEnforced — the SSO-enforced login path requires
+    // RuntimeEnforced, the SSO-enforced login path requires
     // `FeatureKey::Sso` before honouring `ent_sso_configurations`.
     FieldClassification {
         field: "sso_enabled",
@@ -342,7 +342,7 @@ pub const PLAN_FEATURE_CLASSIFICATION: &[FieldClassification] = &[
         gate: Gate::Feature(FeatureKey::Sso),
         rationale: "Enterprise SSO is consumed at login; a tenant that enforces SSO without the entitlement is refused instead of silently receiving it.",
     },
-    // RuntimeEnforced — the tenant routes `GET /v1/audit` and
+    // RuntimeEnforced, the tenant routes `GET /v1/audit` and
     // `GET /v1/audit/export` (api-server `routes/audit.rs`) require
     // `FeatureKey::AuditLogs` and scope `audit:read` before reading a row.
     // Seeded on Growth and above, exactly as docs/pricing.md sells it.
@@ -354,14 +354,14 @@ pub const PLAN_FEATURE_CLASSIFICATION: &[FieldClassification] = &[
     },
 
     // ── API & Integrations ─────────────────────────────────────────
-    // RuntimeEnforced — API key minting requires `FeatureKey::ApiAccess`.
+    // RuntimeEnforced, API key minting requires `FeatureKey::ApiAccess`.
     FieldClassification {
         field: "api_access",
         class: FeatureClass::RuntimeEnforced,
         gate: Gate::Feature(FeatureKey::ApiAccess),
         rationale: "Programmatic access begins at API key creation, which now requires the entitlement.",
     },
-    // RuntimeEnforced — `webhooks::create_webhook` requires
+    // RuntimeEnforced, `webhooks::create_webhook` requires
     // `FeatureKey::Webhooks`.
     FieldClassification {
         field: "webhooks_enabled",
@@ -369,7 +369,7 @@ pub const PLAN_FEATURE_CLASSIFICATION: &[FieldClassification] = &[
         gate: Gate::Feature(FeatureKey::Webhooks),
         rationale: "Webhook endpoints are customer-created rows; creation requires the entitlement.",
     },
-    // RuntimeEnforced — inbound event consumption requires
+    // RuntimeEnforced, inbound event consumption requires
     // `FeatureKey::InboundEmail` (webhook subscription to `inbound`
     // events). Raw SMTP acceptance is deliberately never gated.
     FieldClassification {
@@ -379,13 +379,13 @@ pub const PLAN_FEATURE_CLASSIFICATION: &[FieldClassification] = &[
         rationale: "Inbound consumption is gated where api-server can see it (inbound event subscriptions); raw MX acceptance must not be gated.",
     },
 
-    // RuntimeEnforced — mailbox provisioning (`routes/admin/mailboxes.rs`)
+    // RuntimeEnforced, mailbox provisioning (`routes/admin/mailboxes.rs`)
     // requires `FeatureKey::Mailboxes` OR an active Mailboxes product-line
     // contract before it creates an account, and the archive toggle uses the
     // same gate. Sold ONLY as the per-seat Mailboxes add-on (10-seat
     // minimum, `platform-catalog` `mailboxes` / `mailbox_archive_journaling`
     // rows; docs/pricing.md "Contract and non-subscription lines"), so no
-    // canonical plan seed grants it — the contract row is the purchase act
+    // canonical plan seed grants it, the contract row is the purchase act
     // and the monthly seat invoice bills from the same record.
     FieldClassification {
         field: "mailboxes",
@@ -393,13 +393,13 @@ pub const PLAN_FEATURE_CLASSIFICATION: &[FieldClassification] = &[
         gate: Gate::Feature(FeatureKey::Mailboxes),
         rationale: "Mailbox provisioning is a real operator handler gated on the Mailboxes product entitlement (an active product_line_contracts row or a plan/override grant), so a non-entitled tenant is refused by name instead of receiving unbilled mailboxes.",
     },
-    // RuntimeEnforced — the placement create routes (api-server
+    // RuntimeEnforced, the placement create routes (api-server
     // `placement_create_test` and the tenant placement read routes) require
     // `FeatureKey::InboxPlacement`, and the placement engine's execution
     // path refuses to run a test for a tenant that does not hold it. Sold
     // ONLY as the Inbox Placement Monitoring line (`platform-catalog`
     // `inbox_placement_monitoring`, €99/$109 per month), so no canonical
-    // plan seed grants it — the contract row is the purchase act and the
+    // plan seed grants it, the contract row is the purchase act and the
     // monthly line bills from the same record.
     FieldClassification {
         field: "inbox_placement",
@@ -409,7 +409,7 @@ pub const PLAN_FEATURE_CLASSIFICATION: &[FieldClassification] = &[
     },
 
     // ── Analytics ──────────────────────────────────────────────────
-    // RuntimeEnforced — `analytics::engagement`/`deliverability` require
+    // RuntimeEnforced, `analytics::engagement`/`deliverability` require
     // `FeatureKey::AdvancedAnalytics`.
     FieldClassification {
         field: "advanced_analytics",
@@ -417,7 +417,7 @@ pub const PLAN_FEATURE_CLASSIFICATION: &[FieldClassification] = &[
         gate: Gate::Feature(FeatureKey::AdvancedAnalytics),
         rationale: "Advanced endpoints are separate handlers and are now gated; the basic dashboard/volume endpoints stay available.",
     },
-    // RuntimeEnforced — `ai_insights::send_time_optimization` requires
+    // RuntimeEnforced, `ai_insights::send_time_optimization` requires
     // `FeatureKey::SendTimeOptimization`.
     FieldClassification {
         field: "send_time_optimization",
@@ -425,7 +425,7 @@ pub const PLAN_FEATURE_CLASSIFICATION: &[FieldClassification] = &[
         gate: Gate::Feature(FeatureKey::SendTimeOptimization),
         rationale: "The recommendation endpoint is the feature and now requires the entitlement.",
     },
-    // RuntimeEnforced — the campaign send pipeline assigns per-recipient
+    // RuntimeEnforced, the campaign send pipeline assigns per-recipient
     // arms (apexmail_lib::ab_testing::AB_SPLIT_SQL), the worker evaluates
     // the guarded two-proportion z-test (min 30 trials/arm, z >= 1.96) and
     // routes/campaign_experiments.rs gates the results/declaration surface
@@ -436,7 +436,7 @@ pub const PLAN_FEATURE_CLASSIFICATION: &[FieldClassification] = &[
         gate: Gate::Feature(FeatureKey::AbTesting),
         rationale: "Experiment execution (deterministic arm assignment, holdout, guarded winner selection) ships in the campaign send pipeline and the experiment results API; the entitlement is the runtime gate.",
     },
-    // RuntimeEnforced — the historical message-state replay API
+    // RuntimeEnforced, the historical message-state replay API
     // (`GET /v1/messages/:id/timeline?at=`) and the console timeline page
     // both call the gate; reconstruction reads the append-only delivery
     // sources and answers insufficient history honestly. Seeded on Growth
@@ -447,7 +447,7 @@ pub const PLAN_FEATURE_CLASSIFICATION: &[FieldClassification] = &[
         gate: Gate::Feature(FeatureKey::TimeTravelDebugging),
         rationale: "The historical message-state replay API and console page are real handlers; the entitlement is the runtime gate.",
     },
-    // RuntimeEnforced — `analytics::export`, `export_pdf`,
+    // RuntimeEnforced, `analytics::export`, `export_pdf`,
     // `download_export` and the contacts CSV form require
     // `FeatureKey::DataExport`.
     FieldClassification {
@@ -458,7 +458,7 @@ pub const PLAN_FEATURE_CLASSIFICATION: &[FieldClassification] = &[
     },
 
     // ── Customization ──────────────────────────────────────────────
-    // RuntimeEnforced — the lifecycle routes `POST/GET/DELETE
+    // RuntimeEnforced, the lifecycle routes `POST/GET/DELETE
     // /v1/tracking-domains[/:id]`, `/:id/dns-records`, `/:id/verify`
     // (api-server `routes/tracking_domains.rs`) require
     // `FeatureKey::CustomTrackingDomain` on create/verify, and the tracking
@@ -471,7 +471,7 @@ pub const PLAN_FEATURE_CLASSIFICATION: &[FieldClassification] = &[
         gate: Gate::Feature(FeatureKey::CustomTrackingDomain),
         rationale: "The tracking-domain lifecycle (create/verify/delete + DNS records) is a real gated handler surface and the tracking service serves only verified custom hosts; the entitlement is the runtime gate.",
     },
-    // RuntimeEnforced — template create/update (JSON and form) require
+    // RuntimeEnforced, template create/update (JSON and form) require
     // `FeatureKey::CustomTemplates`.
     FieldClassification {
         field: "custom_templates",
@@ -479,7 +479,7 @@ pub const PLAN_FEATURE_CLASSIFICATION: &[FieldClassification] = &[
         gate: Gate::Feature(FeatureKey::CustomTemplates),
         rationale: "Template write handlers are the customization surface and now require the entitlement.",
     },
-    // RuntimeEnforced — the enterprise service's maker/checker surface
+    // RuntimeEnforced, the enterprise service's maker/checker surface
     // (`/templates/submit|approve|reject|request-changes|stats`, enterprise
     // `routes.rs`) is gated on `FeatureKey::TemplateApprovalWorkflow`, so a
     // Business tenant passes on the entitlement rather than a tenant type.
@@ -490,7 +490,7 @@ pub const PLAN_FEATURE_CLASSIFICATION: &[FieldClassification] = &[
         gate: Gate::Feature(FeatureKey::TemplateApprovalWorkflow),
         rationale: "The submit/approve/reject workflow is implemented and now requires the entitlement on every route in the family; the gate, not the tenant type, decides access.",
     },
-    // ContractualOnly — branding is applied by the central renderer and
+    // ContractualOnly, branding is applied by the central renderer and
     // enterprise agreement, never a per-request API gate.
     FieldClassification {
         field: "white_label",
@@ -498,7 +498,7 @@ pub const PLAN_FEATURE_CLASSIFICATION: &[FieldClassification] = &[
         gate: Gate::Feature(FeatureKey::WhiteLabel),
         rationale: "White-label branding is a renderer/deployment concern delivered by contract; handlers must not branch on it.",
     },
-    // ContractualOnly — the footer is controlled by the central renderer;
+    // ContractualOnly, the footer is controlled by the central renderer;
     // the database default (`true`) is presentational only.
     FieldClassification {
         field: "powered_by_footer",
@@ -508,7 +508,7 @@ pub const PLAN_FEATURE_CLASSIFICATION: &[FieldClassification] = &[
     },
 
     // ── Retention ──────────────────────────────────────────────────
-    // RuntimeEnforced — `PUT /v1/retention` requires
+    // RuntimeEnforced, `PUT /v1/retention` requires
     // `FeatureKey::CustomRetention` (read/reset stay open so visibility and
     // downgrade cleanup always work) and the retention sweep applies the
     // stored override. Seeded Growth and above, exactly as docs/pricing.md
@@ -519,7 +519,7 @@ pub const PLAN_FEATURE_CLASSIFICATION: &[FieldClassification] = &[
         gate: Gate::Feature(FeatureKey::CustomRetention),
         rationale: "/v1/retention read/update/reset enforces the gate and the retention sweep reads the stored column; the entitlement is the runtime gate.",
     },
-    // RuntimeEnforced — the editing handler refuses values above this
+    // RuntimeEnforced, the editing handler refuses values above this
     // ceiling by name and the retention sweep clamps stored overrides to it
     // (reported per run as `retention_clamped_to_plan_ceiling`).
     FieldClassification {
@@ -530,7 +530,7 @@ pub const PLAN_FEATURE_CLASSIFICATION: &[FieldClassification] = &[
     },
 
     // ── Team ───────────────────────────────────────────────────────
-    // RuntimeEnforced — team invitations check
+    // RuntimeEnforced, team invitations check
     // `require_capacity(CapacityKey::TeamMembers, seats + 1)` inside the
     // invitation transaction.
     FieldClassification {
@@ -539,7 +539,7 @@ pub const PLAN_FEATURE_CLASSIFICATION: &[FieldClassification] = &[
         gate: Gate::Capacity(CapacityKey::TeamMembers),
         rationale: "Seats are consumed by a real invitation handler; the check runs transactionally with the insert.",
     },
-    // RuntimeEnforced — the enterprise sub-account CRUD family
+    // RuntimeEnforced, the enterprise sub-account CRUD family
     // (`/sub-accounts...`, enterprise `routes.rs`) requires
     // `FeatureKey::Subaccounts` on every route. Seeded on Business and
     // Enterprise Cloud.
@@ -549,7 +549,7 @@ pub const PLAN_FEATURE_CLASSIFICATION: &[FieldClassification] = &[
         gate: Gate::Feature(FeatureKey::Subaccounts),
         rationale: "The sub-account CRUD surface is implemented and now gated on the entitlement; the gate, not the tenant type, decides access.",
     },
-    // RuntimeEnforced — `SubAccountService::create` enforces the plan cap
+    // RuntimeEnforced, `SubAccountService::create` enforces the plan cap
     // inside its per-parent advisory-lock transaction (the same lock the
     // seeded global cap used), refusing the cap+1'th create with a message
     // naming `max_subaccounts`. Business 10, Enterprise unlimited.
@@ -561,7 +561,7 @@ pub const PLAN_FEATURE_CLASSIFICATION: &[FieldClassification] = &[
     },
 
     // ── Support ────────────────────────────────────────────────────
-    // ContractualOnly — describes the human support channel; see
+    // ContractualOnly, describes the human support channel; see
     // `docs/enterprise/support.md`. Not an access gate.
     FieldClassification {
         field: "support_level",
@@ -569,14 +569,14 @@ pub const PLAN_FEATURE_CLASSIFICATION: &[FieldClassification] = &[
         gate: Gate::None,
         rationale: "Support policy is contractual and process-delivered; never checked as a runtime Boolean.",
     },
-    // ContractualOnly — a named CSM is a staffing commitment, not a gate.
+    // ContractualOnly, a named CSM is a staffing commitment, not a gate.
     FieldClassification {
         field: "dedicated_csm",
         class: FeatureClass::ContractualOnly,
         gate: Gate::Feature(FeatureKey::DedicatedCsm),
         rationale: "Delivered by the support org per contract; the flag is advisory.",
     },
-    // ContractualOnly — onboarding is a scheduled process, not a gate.
+    // ContractualOnly, onboarding is a scheduled process, not a gate.
     FieldClassification {
         field: "priority_onboarding",
         class: FeatureClass::ContractualOnly,
@@ -585,28 +585,28 @@ pub const PLAN_FEATURE_CLASSIFICATION: &[FieldClassification] = &[
     },
 
     // ── Enterprise ─────────────────────────────────────────────────
-    // ContractualOnly — BYOIP is a separate reviewed infrastructure flow.
+    // ContractualOnly, BYOIP is a separate reviewed infrastructure flow.
     FieldClassification {
         field: "byoip",
         class: FeatureClass::ContractualOnly,
         gate: Gate::Feature(FeatureKey::Byoip),
         rationale: "Bring-your-own-IP is provisioned by a separate operational flow with legal/network review, not an API Boolean.",
     },
-    // ContractualOnly — an SLA exists only inside a signed contract.
+    // ContractualOnly, an SLA exists only inside a signed contract.
     FieldClassification {
         field: "sla_guarantee",
         class: FeatureClass::ContractualOnly,
         gate: Gate::Feature(FeatureKey::SlaGuarantee),
         rationale: "SLA commitments are contractual; the Boolean must never be read as runtime availability.",
     },
-    // ContractualOnly — the credit percentage is a contract term.
+    // ContractualOnly, the credit percentage is a contract term.
     FieldClassification {
         field: "sla_credit_percentage",
         class: FeatureClass::ContractualOnly,
         gate: Gate::None,
         rationale: "SLA credits are computed from the signed contract, not the plan JSON.",
     },
-    // ContractualOnly — BAA eligibility requires review; the Boolean never
+    // ContractualOnly, BAA eligibility requires review; the Boolean never
     // implies HIPAA certification.
     FieldClassification {
         field: "hipaa_compliance",
@@ -614,7 +614,7 @@ pub const PLAN_FEATURE_CLASSIFICATION: &[FieldClassification] = &[
         gate: Gate::Feature(FeatureKey::HipaaCompliance),
         rationale: "BAA availability is reviewed per customer; never treat the flag as compliance certification.",
     },
-    // ContractualOnly — the SOC 2 report is shared under NDA; the Boolean
+    // ContractualOnly, the SOC 2 report is shared under NDA; the Boolean
     // never implies certification.
     FieldClassification {
         field: "soc2_compliance",
@@ -622,7 +622,7 @@ pub const PLAN_FEATURE_CLASSIFICATION: &[FieldClassification] = &[
         gate: Gate::Feature(FeatureKey::Soc2Compliance),
         rationale: "SOC 2 availability is an audit/report fact; never treat the flag as certification.",
     },
-    // ContractualOnly — private cloud is a deployment fact.
+    // ContractualOnly, private cloud is a deployment fact.
     FieldClassification {
         field: "private_cloud",
         class: FeatureClass::ContractualOnly,

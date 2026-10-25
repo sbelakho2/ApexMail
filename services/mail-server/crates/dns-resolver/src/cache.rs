@@ -56,7 +56,7 @@ impl Expiry<String, CachedEntry> for PositiveRecordExpiry {
 /// attacker-controlled `DKIM-Signature` headers of inbound mail, so an
 /// unbounded `HashSet` grows without limit while the caches themselves stay
 /// capped (TTL/capacity eviction never touched the set). The cap follows the
-/// positive cache capacity — every live DKIM entry can always be tracked —
+/// positive cache capacity, every live DKIM entry can always be tracked —
 /// and eviction is FIFO: a flood of unique attacker keys drops the OLDEST
 /// tracked keys first, so recently seen legitimate keys keep their suffix
 /// invalidation. Losing a tracked key degrades gracefully to pre-E-2
@@ -122,13 +122,13 @@ impl DkimKeyIndex {
 /// Thread-safe DNS cache with TTL-based eviction.
 ///
 /// Concurrency: both internal caches are moka (thread-safe, sharded) and
-/// are accessed WITHOUT a global lock — `get` never blocks on inserts. The
+/// are accessed WITHOUT a global lock, `get` never blocks on inserts. The
 /// positive/negative cross-invalidation inside insert/insert_negative is a
 /// best-effort ordering: a `get` racing an insert may briefly observe the
 /// pre-insert state, in which case the caller simply re-queries DNS (the
 /// next lookup hits the fresh entry). The only remaining lock guards the
 /// DKIM key index, which is touched solely on `dkim:`-prefixed keys and by
-/// suffix invalidation — never on the hot lookup path.
+/// suffix invalidation, never on the hot lookup path.
 pub struct DnsCache {
     cache: Cache<String, CachedEntry>,
     negative_cache: Cache<String, ()>,

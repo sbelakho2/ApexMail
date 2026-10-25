@@ -10,7 +10,7 @@
 //! DATA lines are kept as raw BYTES end-to-end: the server advertises
 //! 8BITMIME, so a body containing octets outside US-ASCII (e.g. a UTF-8 or
 //! Latin-1 encoded message) must be stored and relayed byte-for-byte.
-//! Command lines are decoded lossily to `String` for parsing — SMTP verbs
+//! Command lines are decoded lossily to `String` for parsing, SMTP verbs
 //! and parameters are 7-bit ASCII per RFC 5321.
 
 use std::net::IpAddr;
@@ -41,7 +41,7 @@ pub(crate) const ABSOLUTE_LINE_DRAIN_LIMIT: usize = 64 * 1024 * 1024;
 /// Extract the bare address from an SMTP command line such as
 /// `RCPT TO:<user@example.com>` or `MAIL FROM: user@example.com`.
 ///
-/// The closing `>` is always searched AFTER the opening `<` — searching the
+/// The closing `>` is always searched AFTER the opening `<`, searching the
 /// whole line can find a `>` that precedes the `<` and slice out of bounds
 /// (a remote panic). Returns `None` when no `<...>` path is present.
 pub(crate) fn extract_addr_safe(line: &str) -> Option<&str> {
@@ -65,7 +65,7 @@ pub(crate) enum LineRead {
     TooLong,
     /// The line exceeded the absolute drain limit without any newline: the
     /// stream position can no longer be trusted. The caller MUST close the
-    /// connection — replying and reading on would let the attacker's bytes
+    /// connection, replying and reading on would let the attacker's bytes
     /// be parsed as commands.
     Overflow,
     /// End of stream.
@@ -77,7 +77,7 @@ pub(crate) enum LineRead {
 pub(crate) enum LineTerminator {
     /// Terminated by `<CRLF>` (RFC 5321 compliant).
     CrLf,
-    /// Terminated by a bare `<LF>` — accepted for tolerance on command
+    /// Terminated by a bare `<LF>`, accepted for tolerance on command
     /// lines, but NEVER sufficient to terminate DATA.
     BareLf,
     /// The stream ended before any terminator arrived (partial line).
@@ -96,7 +96,7 @@ pub(crate) fn split_terminator_bytes(line: &[u8]) -> LineTerminator {
 }
 
 /// Strip the terminator reported by `read_line_capped` (the authoritative
-/// tag observed while reading — no re-derivation from the bytes).
+/// tag observed while reading, no re-derivation from the bytes).
 pub(crate) fn line_content_bytes(line: &[u8], terminator: LineTerminator) -> &[u8] {
     match terminator {
         LineTerminator::CrLf => line.strip_suffix(b"\r\n").unwrap_or(line),
@@ -107,13 +107,13 @@ pub(crate) fn line_content_bytes(line: &[u8], terminator: LineTerminator) -> &[u
 
 /// Decode a raw command line for text command parsing. SMTP commands are
 /// 7-bit ASCII; any stray high bytes collapse to U+FFFD, which no command
-/// verb matches — safe for parsing, and DATA lines never go through this.
+/// verb matches, safe for parsing, and DATA lines never go through this.
 pub(crate) fn line_lossy(line: &[u8]) -> String {
     String::from_utf8_lossy(line).into_owned()
 }
 
 /// RFC 5321 §4.1.1.5 strict end-of-data: the line must be exactly
-/// `".\r\n"` — a single dot terminated by CRLF. A bare-LF `".\n"`, a
+/// `".\r\n"`, a single dot terminated by CRLF. A bare-LF `".\n"`, a
 /// space-padded `" ."`/`". "` line, or any other content is ordinary body
 /// data and must NOT terminate DATA (SMTP smuggling defence).
 pub(crate) fn is_strict_end_of_data(line: &[u8], terminator: LineTerminator) -> bool {
@@ -123,7 +123,7 @@ pub(crate) fn is_strict_end_of_data(line: &[u8], terminator: LineTerminator) -> 
 /// RFC 5321 §4.5.2 dot-unstuffing: a compliant sender doubles the leading dot
 /// of every body line that starts with one; the receiver therefore removes
 /// exactly ONE leading dot from any body line starting with `.`. (Stripping
-/// two dots — or only unstuffing `".."` — corrupts `".foo"` round-trips.)
+/// two dots, or only unstuffing `".."`, corrupts `".foo"` round-trips.)
 pub(crate) fn unstuff_dot_line_bytes(content: &[u8]) -> &[u8] {
     content.strip_prefix(b".").unwrap_or(content)
 }
@@ -132,7 +132,7 @@ pub(crate) fn unstuff_dot_line_bytes(content: &[u8]) -> &[u8] {
 ///
 /// When the cap is exceeded the remainder of the line is DRAINED until its
 /// terminating newline (bounded only by [`ABSOLUTE_LINE_DRAIN_LIMIT``]) so
-/// the session stays synchronised — an over-long line can never leave its
+/// the session stays synchronised, an over-long line can never leave its
 /// tail behind to be parsed as the next command. Only when no newline
 /// arrives within the absolute limit does the read give up with
 /// [`LineRead::Overflow`], which callers must treat as fatal for the
@@ -173,14 +173,14 @@ pub(crate) async fn read_line_capped_with_drain_limit<S: AsyncRead + AsyncWrite 
                 } else if !too_long {
                     line.extend_from_slice(&buf[..take]);
                 }
-                // A newline-terminated line is complete — return now.
+                // A newline-terminated line is complete, return now.
                 // (Action::Return breaks after consuming; looping back to
                 // fill_buf() would block until MORE data arrives, hanging
                 // the session while the client waits for a reply.)
                 Action::Return(take)
             } else if too_long {
                 // Over-long line, terminator not seen yet: keep discarding.
-                // The drain is complete — it only stops at a newline (sync
+                // The drain is complete, it only stops at a newline (sync
                 // restored) or at the absolute byte limit (Overflow).
                 drained += buf.len();
                 if drained > drain_limit {
@@ -227,7 +227,7 @@ enum Action {
 ///
 /// Every 4xx/5xx reply additionally goes through structured reject logging
 /// ([`log_smtp_reject`]), so rejects are uniformly observable across ALL
-/// four servers — routing every reject reply through this one helper makes
+/// four servers, routing every reject reply through this one helper makes
 /// the "no reject is silent" invariant structural rather than per-call-site.
 pub(crate) async fn write_reply<S: AsyncRead + AsyncWrite + Unpin>(
     stream: &mut BufStream<S>,
@@ -247,7 +247,7 @@ pub(crate) async fn write_reply<S: AsyncRead + AsyncWrite + Unpin>(
 // ── ESMTP parameter validation (RFC 5321 §4.1.1.3 / RFC 1870 / 6152 / 6531) ────
 
 /// Which optional ESMTP extensions the server advertised on the current
-/// session — parameters for extensions that were NOT advertised must be
+/// session, parameters for extensions that were NOT advertised must be
 /// refused with `555 5.5.4` rather than silently ignored.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct MailParamPolicy {
@@ -260,8 +260,8 @@ pub(crate) struct MailParamPolicy {
 /// Skip the address path tokens at the start of `MAIL FROM:` / `RCPT TO:`
 /// arguments, returning the remaining (parameter) tokens.
 ///
-/// Handles both the bracketed `<path>` form — which may span several
-/// whitespace tokens when the address itself is malformed — and the bare
+/// Handles both the bracketed `<path>` form, which may span several
+/// whitespace tokens when the address itself is malformed, and the bare
 /// address form. Nothing after the path is interpreted as part of it.
 fn params_after_address(line: &str) -> Vec<&str> {
     let rest = match line.find(':') {
@@ -301,8 +301,8 @@ fn params_after_address(line: &str) -> Vec<&str> {
 /// Validate the ESMTP parameters of a `MAIL FROM` command line.
 ///
 /// Recognised: `SIZE=<digits>` (RFC 1870), `BODY=7BIT|8BITMIME` (RFC 6152),
-/// `SMTPUTF8` (RFC 6531). Anything else — including parameters for
-/// extensions not advertised on this session — is a `555 5.5.4` (or `501`
+/// `SMTPUTF8` (RFC 6531). Anything else, including parameters for
+/// extensions not advertised on this session, is a `555 5.5.4` (or `501`
 /// for syntactically broken values) rejection, per RFC 5321 §4.1.1.11.
 pub(crate) fn validate_mail_params(
     line: &str,
@@ -366,8 +366,8 @@ pub(crate) fn mail_size_param(line: &str) -> Option<u64> {
 ///
 /// The verb is the FIRST whitespace-delimited token, uppercased for
 /// case-insensitive matching; the arg is the remainder (leading separator
-/// whitespace removed). Matching the verb as an exact token — instead of
-/// `starts_with("DATA")`-style prefix tests — stops inputs like `DATABASE`
+/// whitespace removed). Matching the verb as an exact token, instead of
+/// `starts_with("DATA")`-style prefix tests, stops inputs like `DATABASE`
 /// or `MAIL FROMX:<a@b>` from being accepted as real commands.
 pub(crate) fn split_verb(line: &str) -> (String, &str) {
     let trimmed = line.trim_start();
@@ -397,7 +397,7 @@ pub(crate) fn is_rcpt_to_arg(arg: &str) -> bool {
 }
 
 /// Whether the `MAIL FROM` line carries the `SMTPUTF8` parameter (RFC 6531)
-/// — used to record the UTF8 clause of the trace header for this hop.
+///, used to record the UTF8 clause of the trace header for this hop.
 pub(crate) fn mail_smtputf8_param(line: &str) -> bool {
     params_after_address(line)
         .iter()
@@ -437,7 +437,7 @@ pub(crate) fn received_hop_limit_exceeded(raw: &[u8]) -> bool {
 
 /// Effective per-message recipient cap: the per-server `max_recipients`
 /// intersected with the global, config-governed
-/// `rate_limit.max_recipients_per_message` — the stricter (smaller) bound
+/// `rate_limit.max_recipients_per_message`, the stricter (smaller) bound
 /// always wins, so the global budget cannot be bypassed by a per-server
 /// setting (and vice versa).
 pub(crate) fn effective_max_recipients(server_max: usize, rate_limit_max: usize) -> usize {
@@ -453,7 +453,7 @@ const WEBHOOK_QUEUE_NAMESPACE: uuid::Uuid = uuid::Uuid::from_bytes([
 
 /// Enqueue one tenant webhook event into the CANONICAL `webhook_queue` table
 /// the worker's webhook processor drains (retries, circuit breaker, SSRF
-/// guard) — one row per subscribed, enabled webhook.
+/// guard), one row per subscribed, enabled webhook.
 ///
 /// This replaces the former LPUSH onto the `mta:webhook_queue` Redis list:
 /// those events (inbound acceptance, authoritative bounces, ARF complaints)
@@ -732,7 +732,7 @@ mod tests {
     #[test]
     fn strict_end_of_data_rejects_padded_and_prefixed_dots() {
         use LineTerminator::*;
-        // " ." / ". " / " . " must remain ordinary body lines — a trim()-based
+        // " ." / ". " / " . " must remain ordinary body lines, a trim()-based
         // check used to terminate DATA on them (smuggling vector).
         assert!(!is_strict_end_of_data(b" .\r\n", CrLf));
         assert!(!is_strict_end_of_data(b". \r\n", CrLf));
@@ -775,7 +775,7 @@ mod tests {
         assert_eq!(unstuff_dot_line_bytes(b"..foo"), b".foo");
         // ".." (stuffed single dot) → ".".
         assert_eq!(unstuff_dot_line_bytes(b".."), b".");
-        // A single unstuffed leading dot is stripped too — the receiver
+        // A single unstuffed leading dot is stripped too, the receiver
         // cannot distinguish, and stripping two dots would corrupt ".foo".
         assert_eq!(unstuff_dot_line_bytes(b".foo"), b"foo");
         assert_eq!(unstuff_dot_line_bytes(b"foo"), b"foo");

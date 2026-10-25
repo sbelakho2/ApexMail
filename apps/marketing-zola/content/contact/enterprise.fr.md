@@ -19,7 +19,7 @@ Après l'envoi du formulaire, notre équipe Enterprise examine vos exigences et 
 
 <div id="enquiry-submitted" class="apex-notice apex-notice--ok" role="status">
   <b>Reçue</b>
-  <p>Merci — votre demande a bien été reçue. Notre équipe l'examine et répond sous 2 jours ouvrés.</p>
+  <p>Merci, votre demande a bien été reçue. Notre équipe l'examine et répond sous 2 jours ouvrés.</p>
 </div>
 <div id="enquiry-error" class="apex-notice apex-notice--fail" role="alert">
   <b>Non acceptée</b>
@@ -62,15 +62,15 @@ Après l'envoi du formulaire, notre équipe Enterprise examine vos exigences et 
     <div class="space-y-3 mt-3">
       <label class="apex-check">
         <input type="radio" name="deployment_model" value="shared" checked />
-        <span><strong>Cloud mutualisé</strong> — Infrastructure UE multi-tenant</span>
+        <span><strong>Cloud mutualisé</strong>, Infrastructure UE multi-tenant</span>
       </label>
       <label class="apex-check">
         <input type="radio" name="deployment_model" value="dedicated" />
-        <span><strong>Tenance dédiée</strong> — Infrastructure isolée mono-tenant, soumise à revue d'architecture et de contrat</span>
+        <span><strong>Tenance dédiée</strong>, Infrastructure isolée mono-tenant, soumise à revue d'architecture et de contrat</span>
       </label>
       <label class="apex-check">
         <input type="radio" name="deployment_model" value="byoc" />
-        <span><strong>BYOC / Déploiement privé</strong> — Déploiement géré dans votre compte cloud, soumis à revue d'architecture et de contrat</span>
+        <span><strong>BYOC / Déploiement privé</strong>, Déploiement géré dans votre compte cloud, soumis à revue d'architecture et de contrat</span>
       </label>
     </div>
   </fieldset>

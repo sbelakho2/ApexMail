@@ -32,7 +32,7 @@ async fn sweep_db(suffix: &str) -> Option<PgPool> {
 
 /// The owner + unprivileged hostile-role pairing for the PRIVILEGE-failure
 /// scenarios (audit 2026-10-02 #12a): the sweeper runs AS the hostile role
-/// so a revoked privilege fails with 42501 for real — against a superuser
+/// so a revoked privilege fails with 42501 for real, against a superuser
 /// connection `REVOKE ... FROM CURRENT_USER` is a silent no-op.
 async fn sweep_hostile_pair(suffix: &str) -> Option<migrator::test_support::HostileDb> {
     match migrator::test_support::fresh_hostile_canonical_pool(
@@ -133,7 +133,7 @@ fn category<'a>(
 // ── F5: legal holds protect unattributable rows ─────────────────────────────
 
 /// F5: while ANY legal hold is active, rows that cannot be attributed to a
-/// tenant (NULL tenant_id) must be KEPT — they might belong to the held
+/// tenant (NULL tenant_id) must be KEPT, they might belong to the held
 /// tenant. The module doc promises "fall back to keep"; the sweep must honor
 /// that for the event stores too, not only for gdpr_exports.
 #[tokio::test]
@@ -257,7 +257,7 @@ async fn missing_timestamp_column_reports_skipped_store() {
 }
 
 /// No tenants table at all: the sweep degrades to flat defaults and says so
-/// via LegalHoldCheck::TenantsTableMissing — and every batched delete still
+/// via LegalHoldCheck::TenantsTableMissing, and every batched delete still
 /// runs (the LIMIT placeholder must match the bound parameters).
 #[tokio::test]
 async fn missing_tenants_table_degrades_to_flat_defaults() {
@@ -340,7 +340,7 @@ async fn tenants_without_new_columns_still_sweep_with_defaults() {
 // ── Zero-retention overlay degradation ───────────────────────────────────────
 
 /// The zero-retention overlay degrades when its table is absent or
-/// unreadable — the purge must never stall on the enterprise table.
+/// unreadable, the purge must never stall on the enterprise table.
 #[tokio::test]
 async fn zero_retention_overlay_degrades_when_absent_or_unreadable() {
     // Absent table.
@@ -366,7 +366,7 @@ async fn zero_retention_overlay_degrades_when_absent_or_unreadable() {
 
     // Unreadable table (privilege failure). Audit #12a: the sweeper runs AS
     // the unprivileged hostile role and the OWNER revokes the overlay read
-    // from THAT role — a superuser's `REVOKE ... FROM CURRENT_USER` would be
+    // from THAT role, a superuser's `REVOKE ... FROM CURRENT_USER` would be
     // a silent no-op and the "degradation" would prove nothing.
     let Some(pair) = sweep_hostile_pair("locked_overlay").await else {
         return;
@@ -395,7 +395,7 @@ async fn zero_retention_overlay_degrades_when_absent_or_unreadable() {
 
 // ── Privilege failures and degraded optional stores ─────────────────────────
 
-/// A non-schema privilege failure on a store is a FAILED target — the report
+/// A non-schema privilege failure on a store is a FAILED target, the report
 /// says so with the error, and other stores still sweep.
 ///
 /// Audit 2026-10-02 #12a: the sweeper runs AS the unprivileged hostile role
@@ -663,7 +663,7 @@ async fn export_and_outbox_purges_respect_legal_holds() {
         .expect("export");
         // Distinct request ids per row: migration 245's
         // uq_dsr_outbox_request (tenant_id, request_id) is the queue's
-        // idempotency identity — a shared literal would (correctly) collide.
+        // idempotency identity, a shared literal would (correctly) collide.
         sqlx::query(
             "INSERT INTO dsr_verification_outbox
                (id, request_id, tenant_id, email, verification_token, verify_url, status, attempts, created_at)
@@ -712,7 +712,7 @@ async fn export_and_outbox_purges_respect_legal_holds() {
 }
 
 /// Migration 245 (gates review 2026-10-07): dsr_verification_outbox carries
-/// the same natural idempotency identity its sibling ledgers do — a replayed
+/// the same natural idempotency identity its sibling ledgers do, a replayed
 /// enqueue for the same (tenant, request_id) must NOT stage a second row
 /// (before the identity it re-sent the verification mail), while the
 /// identity stays tenant-scoped (cross-tenant placeholders must not collide).
@@ -865,7 +865,7 @@ async fn delete_passes(pool: &PgPool, table: &str) -> Vec<DeletePass> {
 /// batches of `DELETE_BATCH_ROWS` = 5,000) the new keyset walk must:
 ///   * delete every intended row and no unintended one,
 ///   * take exactly ceil(N/B) passes (no re-probing),
-///   * delete strictly ascending, disjoint id ranges per pass — the property
+///   * delete strictly ascending, disjoint id ranges per pass, the property
 ///     the ctid loop did NOT have (physical order is uncorrelated with the
 ///     random UUID primary key).
 #[tokio::test]
@@ -930,7 +930,7 @@ async fn keyset_delete_batches_are_bounded_and_disjoint() {
     assert_eq!(
         passes.len(),
         3,
-        "ceil(12000/5000) passes — one DELETE statement per batch, no re-probing"
+        "ceil(12000/5000) passes, one DELETE statement per batch, no re-probing"
     );
     let sizes: Vec<usize> = passes.iter().map(|p| p.ids.len()).collect();
     assert_eq!(sizes, vec![5_000, 5_000, 2_000], "{sizes:?}");
@@ -952,7 +952,7 @@ async fn keyset_delete_batches_are_bounded_and_disjoint() {
 }
 
 /// P3 item 7: the `considered` count still means exactly what the old
-/// `{ts} < $1 OR tenant_id = ANY($2)` predicate meant — same value, but
+/// `{ts} < $1 OR tenant_id = ANY($2)` predicate meant, same value, but
 /// computed as two disjoint single-column predicates that can each use their
 /// own index instead of one un-indexable OR. The test computes the old
 /// predicate's count with raw SQL and compares.
@@ -977,7 +977,7 @@ async fn considered_count_is_unchanged_by_the_split_predicate() {
     seed_event(&pool, Some(&default_tenant), 40).await;
     seed_event(&pool, Some(&zero_tenant), 40).await;
     // FRESH rows of the zero-retention tenant: not past the default window but
-    // still considered (counted via the tenant arm only — no double count).
+    // still considered (counted via the tenant arm only, no double count).
     seed_event(&pool, Some(&zero_tenant), 0).await;
     seed_event(&pool, Some(&zero_tenant), 1).await;
     // A fresh row of a normal tenant: not considered.

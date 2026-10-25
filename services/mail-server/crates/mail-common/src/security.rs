@@ -239,7 +239,7 @@ impl SecurityEvent {
         mac.update(&[self.action as u8]);
         mac.update(&self.risk_score.to_be_bytes());
         mac.update(&self.nonce.to_be_bytes());
-        // verify_slice uses subtle::ConstantTimeEq internally — truly constant-time.
+        // verify_slice uses subtle::ConstantTimeEq internally, truly constant-time.
         mac.verify_slice(&sig_bytes).is_ok()
     }
 
@@ -317,7 +317,7 @@ pub struct SecurityCorrelator {
     last_alerts: DashMap<String, DateTime<Utc>>,
     /// Eviction index: lazy min-heap of `(event_count, ip)` pushed on every
     /// ingest. Entries can go stale when counts drift (trim/purge), so the
-    /// evictor pops-and-revalidates against the live map — finding the
+    /// evictor pops-and-revalidates against the live map, finding the
     /// lowest-activity IP is O(log n) amortized instead of the O(n)
     /// min_by_key scan the correlator used to run per novel IP at capacity.
     eviction_index: parking_lot::Mutex<BinaryHeap<Reverse<(usize, String)>>>,
@@ -418,7 +418,7 @@ impl SecurityCorrelator {
     /// returning true uncounted (which admitted up to one uncounted event per
     /// racing thread each second boundary). After a bounded retry budget
     /// (sustained contention / clock flapping) the event is counted in the
-    /// epoch it observes — still never admitted uncounted.
+    /// epoch it observes, still never admitted uncounted.
     #[inline]
     fn check_rate_limit(&self) -> bool {
         let now = Utc::now().timestamp() as u64;
@@ -439,7 +439,7 @@ impl SecurityCorrelator {
                 self.rate_count.store(1, Ordering::Relaxed);
                 return true;
             }
-            // Lost the race — the epoch moved under us; retry so this event
+            // Lost the race, the epoch moved under us; retry so this event
             // is counted in the new epoch.
         }
 
@@ -461,7 +461,7 @@ impl SecurityCorrelator {
             CORRELATOR_DROPPED_EVENTS.fetch_add(1, Ordering::Relaxed);
             warn!(
                 counter = CORRELATOR_DROPPED_EVENTS.load(Ordering::Relaxed),
-                "Security correlator rate cap exceeded — dropping event"
+                "Security correlator rate cap exceeded, dropping event"
             );
             return None;
         }
@@ -475,7 +475,7 @@ impl SecurityCorrelator {
             return None;
         }
 
-        // Anti-OOM: don't track more IPs than configured — evict the
+        // Anti-OOM: don't track more IPs than configured, evict the
         // lowest-activity IP first (O(log n) via the lazy eviction index).
         if !self.ip_events.contains_key(&ip) && self.ip_events.len() >= self.max_tracked_ips {
             match self.evict_lowest_activity_ip() {
@@ -488,7 +488,7 @@ impl SecurityCorrelator {
                         new_ip = %ip,
                         tracked = self.ip_events.len(),
                         dropped = CORRELATOR_DROPPED_EVENTS.load(Ordering::Relaxed),
-                        "Security correlator IP limit reached — evicted lowest-activity IP to make room"
+                        "Security correlator IP limit reached, evicted lowest-activity IP to make room"
                     );
                 }
                 None => {
@@ -496,7 +496,7 @@ impl SecurityCorrelator {
                     warn!(
                         ip = %ip,
                         dropped = CORRELATOR_DROPPED_EVENTS.load(Ordering::Relaxed),
-                        "Security correlator IP limit reached — no evictable IPs found, dropping event"
+                        "Security correlator IP limit reached, no evictable IPs found, dropping event"
                     );
                     return None;
                 }
@@ -525,7 +525,7 @@ impl SecurityCorrelator {
         // entries whose counts later drift (trim/purge/eviction) are
         // revalidated against the live map when eviction runs.
         //
-        // One push per ingest would grow the heap O(total events) — eviction
+        // One push per ingest would grow the heap O(total events), eviction
         // only ever pops at IP capacity. Rebuilding from the live map once
         // stale duplicates exceed 2×max_tracked_ips keeps index memory
         // O(tracked IPs). (Safe under the lock order: no caller holds a map
@@ -665,7 +665,7 @@ impl SecurityCorrelator {
                 }
                 None => {
                     // The IP is no longer tracked; its index entry is
-                    // garbage — skip it.
+                    // garbage, skip it.
                 }
             }
         }
@@ -1015,7 +1015,7 @@ mod tests {
     fn eviction_index_stays_bounded_below_ip_capacity() {
         // 10k events across 3 IPs, far below the 100-IP capacity: the lazy
         // eviction index must stay O(tracked IPs) (bounded at 2× capacity),
-        // not O(total events) — one push per ingest used to grow it by one
+        // not O(total events), one push per ingest used to grow it by one
         // entry per event with pops only at capacity.
         let max_tracked_ips = 100;
         let correlator = SecurityCorrelator::with_limits(50, max_tracked_ips, 1_000_000);
@@ -1035,7 +1035,7 @@ mod tests {
             heap_len <= 2 * max_tracked_ips,
             "eviction index must stay bounded at 2×max_tracked_ips, got {heap_len}"
         );
-        // The rebuild keeps one entry per tracked IP — the heap still covers
+        // The rebuild keeps one entry per tracked IP, the heap still covers
         // every evictable IP.
         assert!(
             heap_len >= 3,

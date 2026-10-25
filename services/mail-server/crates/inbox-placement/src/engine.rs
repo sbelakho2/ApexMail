@@ -13,7 +13,7 @@ use crate::sender::send_test_email;
 use crate::types::*;
 
 /// Claim a test for execution: `pending` (or an in-flight `running` retry)
-/// → `running`. Check-and-set — when zero rows match, the test has already
+/// → `running`. Check-and-set, when zero rows match, the test has already
 /// reached a terminal state (typically the reaper's `failed` after
 /// `stuck_test_timeout_secs`) and must not be resurrected.
 // `pub` so the canonical-DB integration tests (a foreign test crate) can
@@ -22,7 +22,7 @@ pub const CLAIM_RUNNING_SQL: &str =
     "UPDATE placement_tests SET status = 'running' WHERE id = $1 AND status IN ('pending', 'running')";
 
 /// Finalise a finished run: progress columns are always written, but an
-/// existing terminal status (`completed`/`failed`/`cancelled` — e.g. set by
+/// existing terminal status (`completed`/`failed`/`cancelled`, e.g. set by
 /// the reaper mid-run) wins over the run's own outcome. Previously this
 /// UPDATE was unconditional and silently flipped a reaped `failed` test
 /// back to `completed`.
@@ -97,7 +97,7 @@ pub struct PlacementEngine {
     /// Optional analytics service for ClickHouse-powered trend queries.
     pub analytics: Option<Arc<analytics::inbox_placement::InboxPlacementService>>,
     /// Optional field encryptor used to decrypt stored IMAP passwords. When
-    /// `None`, passwords are read as plaintext (development only — not
+    /// `None`, passwords are read as plaintext (development only, not
     /// recommended for production).
     encryptor: Option<Arc<FieldEncryptor>>,
     /// Optional IMAP connector seam. `None` uses the real TLS connector;
@@ -220,7 +220,7 @@ impl PlacementEngine {
         // F4:the From address must be on one of the tenant's VERIFIED sending
         // domains. The internal MTA relay accepts arbitrary From headers, so
         // without this check the platform would relay (and providers would
-        // evaluate) mail for domains the tenant does not control — spoofing
+        // evaluate) mail for domains the tenant does not control, spoofing
         // via the placement-test API. Reject-as-default:no silent
         // substitution of a default sender.
         self.ensure_from_domain_verified(tenant_id, &request.from_email)
@@ -229,7 +229,7 @@ impl PlacementEngine {
         // 3. Insert the test.
         let id = Uuid::new_v4();
         let now = Utc::now();
-        // Statuses are lowercase — migration 035/054 define a CHECK constraint
+        // Statuses are lowercase, migration 035/054 define a CHECK constraint
         // (`chk_placement_tests_status`) and partial indexes over the
         // lowercase values 'pending'/'running'/'completed'/'failed'/'cancelled'.
         let status = "pending";
@@ -320,10 +320,10 @@ impl PlacementEngine {
             return Ok(());
         }
 
-        // 2. Mark as running via check-and-set (lowercase — see create_test
+        // 2. Mark as running via check-and-set (lowercase, see create_test
         // for schema notes). Zero affected rows means the test already
-        // reached a terminal state — most commonly the reaper marked it
-        // `failed` while it waited for this (serialized) run — and it must
+        // reached a terminal state, most commonly the reaper marked it
+        // `failed` while it waited for this (serialized) run, and it must
         // not be resurrected.
         let claimed = sqlx::query(CLAIM_RUNNING_SQL)
             .bind(test_id)
@@ -333,7 +333,7 @@ impl PlacementEngine {
             tracing::warn!(
                 test_id = %test_id,
                 status = %test.status,
-                "Placement test is already in a terminal state — skipping execution"
+                "Placement test is already in a terminal state, skipping execution"
             );
             return Ok(());
         }
@@ -467,7 +467,7 @@ impl PlacementEngine {
             completed += 1;
         }
 
-        // 4. Finalise test status (lowercase values — see create_test).
+        // 4. Finalise test status (lowercase values, see create_test).
         // Check-and-set: a terminal status already on the row (the reaper
         // can mark a long run `failed` mid-flight) is preserved; only the
         // progress columns are overwritten unconditionally.
@@ -505,7 +505,7 @@ impl PlacementEngine {
         );
 
         // 6. Emit webhook event for subscribers.
-        // Failures here are logged but never abort the test transition — webhook
+        // Failures here are logged but never abort the test transition, webhook
         // delivery is asynchronous and best-effort.
         if let Err(e) = self
             .emit_test_completed_webhook(&test, new_status, completed, total)
@@ -533,7 +533,7 @@ impl PlacementEngine {
         // Resolve subscribed webhook IDs for this tenant. Matches the same
         // selector contract used by tracking-service::unsubscribe.
         // NOTE: the `webhooks` table (migration 075) gates subscriptions on the
-        // `enabled` boolean column — `status` is a lifecycle label ('active'),
+        // `enabled` boolean column, `status` is a lifecycle label ('active'),
         // never 'enabled'.
         let webhook_ids: Vec<(String,)> = sqlx::query_as(
             r#"SELECT id FROM webhooks
@@ -618,7 +618,7 @@ impl PlacementEngine {
     ///
     /// This is the reader of [`Self::analytics`]: the placement report
     /// (`GET /v1/inbox-placement/tests/:id`) attaches the block when a client
-    /// is injected and omits it (None) otherwise — an absent client must never
+    /// is injected and omits it (None) otherwise, an absent client must never
     /// be rendered as a fabricated healthy summary. The queries are
     /// tenant-scoped inside the service.
     pub async fn placement_summary(
@@ -957,7 +957,7 @@ impl PlacementEngine {
             )));
         };
 
-        // domains.tenant_id is the shared VARCHAR(26) tenant key — bind as
+        // domains.tenant_id is the shared VARCHAR(26) tenant key, bind as
         // text (same as the api-server readers of this table).
         let verified: (bool,) = sqlx::query_as(
             "SELECT EXISTS( \
@@ -1231,7 +1231,7 @@ mod tests {
     #[test]
     fn final_status_write_preserves_an_existing_terminal_status() {
         // The finalize write may fill progress columns, but a status already
-        // terminal (completed/failed/cancelled — e.g. set by reap_stuck_tests
+        // terminal (completed/failed/cancelled, e.g. set by reap_stuck_tests
         // mid-run) must win over the run's own outcome.
         assert!(
             FINALIZE_STATUS_SQL

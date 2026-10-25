@@ -126,7 +126,7 @@ impl GradeCalculator {
             );
         } else {
             recs.push(
-                "DNS configuration looks good — maintain regular monitoring of your DNS records"
+                "DNS configuration looks good, maintain regular monitoring of your DNS records"
                     .into(),
             );
         }
@@ -136,11 +136,11 @@ impl GradeCalculator {
         } else if auth_score < 80 {
             recs.push("Strengthen authentication: ensure DMARC policy is set to 'reject' with 100% enforcement".into());
         } else {
-            recs.push("Email authentication is well configured — consider adding BIMI and MTA-STS for enhanced security".into());
+            recs.push("Email authentication is well configured, consider adding BIMI and MTA-STS for enhanced security".into());
         }
 
         if spam_score < 60 {
-            recs.push("High spam-likelihood detected — review email content, avoid spam trigger phrases, and maintain good sending practices".into());
+            recs.push("High spam-likelihood detected, review email content, avoid spam trigger phrases, and maintain good sending practices".into());
         }
 
         for finding in findings {

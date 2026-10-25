@@ -33,7 +33,7 @@ static IDENT_REGEX: LazyLock<Option<Regex>> =
 /// the WHITESPACE form, with optional schema qualification and an optional
 /// alias candidate (`FROM emails e`, `JOIN contacts AS c`).
 ///
-/// The alias candidate is deliberately unfiltered here — the Rust `regex`
+/// The alias candidate is deliberately unfiltered here, the Rust `regex`
 /// crate has no look-arounds, so a clause keyword directly after the table
 /// (`FROM emails WHERE …`) is captured as the candidate and rejected in
 /// Rust by [`is_alias_keyword`].
@@ -56,8 +56,8 @@ static TABLE_REF_RE: LazyLock<Option<Regex>> = LazyLock::new(|| {
 });
 
 /// Table references in the ZERO-WHITESPACE QUOTED form (audit SM5 F5):
-/// PostgreSQL accepts `SELECT * FROM"emails"` — the quote terminates the
-/// clause keyword — and the old `\s+`-only pattern never captured the
+/// PostgreSQL accepts `SELECT * FROM"emails"`, the quote terminates the
+/// clause keyword, and the old `\s+`-only pattern never captured the
 /// table, so an unscoped tenanted query validated successfully. The
 /// capture is everything between the quotes across `"`schema`".`table`"`
 /// chains; the existing rsplit/trim post-processing normalizes it.
@@ -72,7 +72,7 @@ static TABLE_REF_QUOTED_RE: LazyLock<Option<Regex>> = LazyLock::new(|| {
     .ok()
 });
 
-/// Clause keywords that terminate a table reference — an identifier
+/// Clause keywords that terminate a table reference, an identifier
 /// captured right after the table is only an ALIAS when it is not one of
 /// these (checked in Rust; the regex crate has no look-arounds).
 fn is_alias_keyword(word: &str) -> bool {
@@ -140,7 +140,7 @@ static TENANT_PREDICATE_RE: LazyLock<Option<Regex>> = LazyLock::new(|| {
     .ok()
 });
 
-/// Alias/table-QUALIFIED tenant predicate:`e.workspace_id = $N` — the
+/// Alias/table-QUALIFIED tenant predicate:`e.workspace_id = $N`, the
 /// qualifier (capture 1) is used to enforce the predicate PER TABLE
 /// reference (audit SM5 F9): a query joining two tenanted tables must
 /// scope BOTH, not just any one of them.
@@ -181,7 +181,7 @@ fn referenced_tables(query: &str) -> Vec<String> {
 /// table reference (audit SM5 F9).
 /// Comma-continued FROM-list entries (audit follow-up found during SM5
 /// remediation): PostgreSQL accepts `SELECT * FROM a, b WHERE …`, and a
-/// plain FROM/JOIN-keyword scan only captures `a` — the tenanted-table
+/// plain FROM/JOIN-keyword scan only captures `a`, the tenanted-table
 /// guard never saw `b`, so an unscoped second reference validated
 /// successfully. This pattern matches ONE continuation anchored at the
 /// comma; [`referenced_table_aliases`] walks it iteratively after each
@@ -293,7 +293,7 @@ fn referenced_table_aliases(query: &str) -> Vec<(String, Option<String>)> {
 /// contents cannot be used for evasion.
 ///
 /// Audit SM5 F5: dollar-quoting (`$$…$$`, `$tag$…$tag$`) previously fell
-/// outside the string tracker — a literal like `$q$'$q$` flipped the
+/// outside the string tracker, a literal like `$q$'$q$` flipped the
 /// stripper into single-quote mode at the `'` and swallowed the subsequent
 /// REAL `FROM emails` clause (which PostgreSQL then executed live),
 /// bypassing the tenanted-table guard. Dollar-quoted spans are now
@@ -302,11 +302,11 @@ fn referenced_table_aliases(query: &str) -> Vec<(String, Option<String>)> {
 ///
 /// Audit SM5 F9 repair: the stripped view BLANKS string-literal contents
 /// (delimiters kept, content replaced with spaces). A literal is inert
-/// text to PostgreSQL — it must never satisfy the tenant-predicate /
+/// text to PostgreSQL, it must never satisfy the tenant-predicate /
 /// qualified-predicate / RLS-binding scans, or an attacker rides an
 /// ordinary string comparison (`note = 'workspace_id=$1'`) past the guard
 /// with no real predicate at all. The ONE literal whose content is
-/// structural — the argument of a `current_setting(…)` RLS binding call —
+/// structural, the argument of a `current_setting(…)` RLS binding call —
 /// is preserved verbatim (see [`ends_with_current_setting_call`]).
 fn strip_sql_comments(query: &str) -> String {
     let mut out = String::with_capacity(query.len());
@@ -357,7 +357,7 @@ fn strip_sql_comments(query: &str) -> String {
                 // parameter placeholders used everywhere in this service)
                 // is copied through unchanged. Contents are always blanked
                 // (a dollar-quoted span is never a current_setting
-                // argument — that form is single-quoted).
+                // argument, that form is single-quoted).
                 if let Some(open_end) = dollar_tag_end(bytes, i) {
                     let tag = &query[i..open_end];
                     match query[open_end..].find(tag) {
@@ -374,7 +374,7 @@ fn strip_sql_comments(query: &str) -> String {
                         None => {
                             // Unterminated dollar quote: the query can never
                             // execute (PostgreSQL rejects it), so stay
-                            // CONSERVATIVE and copy the rest verbatim — a
+                            // CONSERVATIVE and copy the rest verbatim, a
                             // live clause after a malformed literal must
                             // still be visible to the table/predicate scans.
                             out.push_str(&query[i..]);
@@ -478,7 +478,7 @@ const DUPLICATE_OBJECT_SQLSTATE: &str = "42710";
 /// A table the Shared→DedicatedSchema copy requires in the shared schema,
 /// together with the canonical migration file that creates it today (`None`
 /// when no canonical migration creates it). No listed migration adds the
-/// required `workspace_id` column — that is exactly what the pre-flight
+/// required `workspace_id` column, that is exactly what the pre-flight
 /// reports.
 struct TenantTableRequirement {
     table: &'static str,
@@ -627,7 +627,7 @@ pub struct DataIsolationService {
     db: PgPool,
     policies: Vec<DataAccessPolicy>,
     /// Whether the policy set was successfully loaded from the database.
-    /// Requests are denied while this is false (fail-closed) — an empty or
+    /// Requests are denied while this is false (fail-closed), an empty or
     /// failed policy load must never widen access.
     policies_loaded: bool,
 }
@@ -649,11 +649,11 @@ impl DataIsolationService {
         self.policies_loaded = true;
         // F63: the access-attempt audit trail (canonical migration 195) is
         // part of this component's persistence contract. A missing relation
-        // must fail readiness honestly — every allow/deny decision would
+        // must fail readiness honestly, every allow/deny decision would
         // otherwise be warn-discarded as an audit-trail gap.
         if !self.audit_schema_ready().await {
             anyhow::bail!(
-                "iso_access_attempts relation missing — canonical migration 195 \
+                "iso_access_attempts relation missing, canonical migration 195 \
                  not applied; access-attempt auditing cannot persist"
             );
         }
@@ -673,7 +673,7 @@ impl DataIsolationService {
         .is_some()
     }
 
-    /// F63: lifecycle cleanup — delete access-attempt audit rows older than
+    /// F63: lifecycle cleanup, delete access-attempt audit rows older than
     /// `retention_days` and return how many rows were removed.
     pub async fn cleanup_access_attempts(&self, retention_days: i64) -> Result<u64, sqlx::Error> {
         let cutoff = chrono::Utc::now() - chrono::Duration::days(retention_days.max(1));
@@ -728,7 +728,7 @@ impl DataIsolationService {
             // Audit SM5 F9: the predicate requirement is PER TABLE
             // REFERENCE. A single global `workspace_id = $N` used to
             // satisfy the check even when a query joined two tenanted
-            // tables and only ONE of them carried the predicate — the
+            // tables and only ONE of them carried the predicate, the
             // other stayed unscoped and could leak cross-workspace rows.
             // Every tenanted reference now needs its own coverage:
             // - an alias-qualified predicate (`e.workspace_id = $1`),
@@ -847,7 +847,7 @@ impl DataIsolationService {
     /// `workspace_id` column makes the copy impossible. This inspects the
     /// shared schema up front and returns a typed error naming EVERY missing
     /// table/column and the migration it would need, so the refusal is
-    /// diagnosable and the caller fails before any DDL/DML — the migration
+    /// diagnosable and the caller fails before any DDL/DML, the migration
     /// can never half-apply.
     pub async fn check_migration_capability(
         &self,
@@ -1137,7 +1137,7 @@ impl DataIsolationService {
                 actor = %ctx.user_id,
                 target = %target_workspace_id,
                 allowed = allowed,
-                "SECURITY: Failed to record access attempt — audit trail gap"
+                "SECURITY: Failed to record access attempt, audit trail gap"
             );
         }
     }
@@ -1278,7 +1278,7 @@ fn quote_sql_ident(s: &str) -> String {
 /// table *owner* bypasses RLS entirely, so any code path connecting as the
 /// owning role would silently defeat tenant isolation. Service accounts that
 /// legitimately need to bypass RLS (migrations, backfills) must use a distinct
-/// role with the BYPASSRLS attribute — never the owning application role.
+/// role with the BYPASSRLS attribute, never the owning application role.
 fn rls_statements(schema_quoted: &str, table_quoted: &str) -> Vec<String> {
     vec![
         format!(
@@ -1322,7 +1322,7 @@ fn resource_to_table(resource: &str) -> String {
         "api_key" => "api_keys".into(),
         // Reject unknown resources instead of blindly pluralising user input
         other => {
-            tracing::error!(resource = %other, "Unknown resource type in data isolation — refusing to guess table name");
+            tracing::error!(resource = %other, "Unknown resource type in data isolation, refusing to guess table name");
             "__unknown__".into()
         }
     }
@@ -1469,7 +1469,7 @@ mod tests {
     fn test_validate_query_blocks_predicate_satisfied_by_comment() {
         let svc = loaded_svc();
         let ctx = make_ctx();
-        // The workspace predicate only exists inside a comment — the real
+        // The workspace predicate only exists inside a comment, the real
         // predicate is a literal comparison. Must be blocked.
         assert!(!svc.validate_query_access(
             "SELECT * FROM emails WHERE subject = 'x' /* workspace_id = $1 */",
@@ -1520,7 +1520,7 @@ mod tests {
     #[test]
     fn test_join_with_one_scoped_table_is_blocked() {
         // THE finding vector: only `contacts` carries the predicate while
-        // `emails` is joined unscoped — cross-workspace email rows leak
+        // `emails` is joined unscoped, cross-workspace email rows leak
         // through the join if the join key does not encode tenancy.
         let svc = loaded_svc();
         let ctx = make_ctx();
@@ -1576,7 +1576,7 @@ mod tests {
 
     #[test]
     fn test_zero_whitespace_quoted_table_ref_is_detected() {
-        // `FROM"emails"` is valid PostgreSQL — the quote terminates the
+        // `FROM"emails"` is valid PostgreSQL, the quote terminates the
         // keyword. The old `\s+`-only pattern never captured the table, so
         // an UNSCOPED tenanted query validated successfully.
         let svc = loaded_svc();
@@ -1606,7 +1606,7 @@ mod tests {
             "a dollar-quoted literal must not hide the live FROM clause"
         );
         // The stripper output: the FROM survives; literal contents are
-        // blanked (F9 repair) — only delimiters/tags remain.
+        // blanked (F9 repair), only delimiters/tags remain.
         let stripped = strip_sql_comments("SELECT '$q$'$q$ FROM emails");
         assert!(stripped.contains("FROM emails"), "got: {stripped}");
         assert!(
@@ -1618,7 +1618,7 @@ mod tests {
     #[test]
     fn test_dollar_quote_contents_are_blanked_not_preserved() {
         // Comment markers inside a dollar-quoted literal are literal
-        // content — they must be BLANKED so a predicate hidden inside them
+        // content, they must be BLANKED so a predicate hidden inside them
         // cannot satisfy the guard, while a real predicate after the
         // literal survives.
         let stripped =
@@ -1787,7 +1787,7 @@ mod tests {
 
     #[test]
     fn test_comma_continued_from_list_extracts_every_table() {
-        // PostgreSQL accepts `FROM a, b` — a FROM/JOIN-keyword-only scan
+        // PostgreSQL accepts `FROM a, b`, a FROM/JOIN-keyword-only scan
         // captures `a` and silently misses `b`.
         let refs = referenced_table_aliases("SELECT * FROM contacts c, emails e");
         assert!(
@@ -1809,7 +1809,7 @@ mod tests {
             );
         }
 
-        // The list ends at the next clause — nothing after WHERE is a table.
+        // The list ends at the next clause, nothing after WHERE is a table.
         let refs =
             referenced_table_aliases("SELECT * FROM contacts, emails WHERE workspace_id = $1");
         assert_eq!(refs.len(), 2, "got: {refs:?}");
@@ -1824,7 +1824,7 @@ mod tests {
     #[test]
     fn test_comma_continued_from_list_enforces_predicate_per_table() {
         // THE enforcement consequence: with `contacts c, emails e`, a
-        // predicate on contacts alone must NOT validate — emails is an
+        // predicate on contacts alone must NOT validate, emails is an
         // unscoped tenanted reference exactly like the JOIN case.
         let svc = loaded_svc();
         let ctx = make_ctx();

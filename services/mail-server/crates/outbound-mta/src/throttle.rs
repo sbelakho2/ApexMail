@@ -4,7 +4,7 @@
 //! `outbound-queue::provider_throttle` (deleted in 755580c5) and wired back
 //! into the two durable send boundaries that can actually transmit mail:
 //!
-//! * the recipient-facing relay ([`crate::relay::Relay`]) — admission happens
+//! * the recipient-facing relay ([`crate::relay::Relay`]), admission happens
 //!   beside the warmup gate, before any SMTP connection is opened;
 //! * the worker's SES transport (`worker-processors`), which returns a
 //!   deferral error instead of consuming an attempt.
@@ -16,7 +16,7 @@
 //!
 //! 1. an ACTIVE operator row in `outbound_provider_throttle_overrides`
 //!    (`expires_at IS NULL OR expires_at > NOW()`), tenant-specific before
-//!    global — `throttle_pct` wins verbatim (0 = send all, 100 = block all);
+//!    global, `throttle_pct` wins verbatim (0 = send all, 100 = block all);
 //! 2. the latest `postmaster_reputation_summary` row written by the MTA's
 //!    six-hourly postmaster scheduler, scored on the canonical 0–100 scale:
 //!    `>= 70` green → 0 %, `40..=69` amber → 50 %, `< 40` red → 90 %
@@ -28,7 +28,7 @@
 //! the send unit maps to `0..100`, and the submission defers when the roll
 //! is below the effective percentage. The roll is stable WITHIN a five-minute
 //! retry window (so a duplicated attempt gets one verdict) and re-rolls at
-//! each window boundary — a persistent 50 % throttle therefore cannot starve
+//! each window boundary, a persistent 50 % throttle therefore cannot starve
 //! one submission forever (the retired implementation rolled randomly per
 //! attempt; this keeps that liveness with cross-process determinism).
 //! Deferral never consumes a permanent attempt.
@@ -93,7 +93,7 @@ const AUDIT_FLUSH_INTERVAL: Duration = Duration::from_millis(500);
 /// Capacity/entry bound of the throttle caches (per sender/provider/tenant).
 const CACHE_MAX_CAPACITY: u64 = 10_000;
 
-/// Map a recipient domain — or a full `local@domain` address — to its
+/// Map a recipient domain, or a full `local@domain` address, to its
 /// provider bucket. Returns `None` for everything else (treated as "no
 /// provider throttle").
 pub fn classify_provider(recipient_domain: &str) -> Option<&'static str> {
@@ -517,14 +517,14 @@ impl ProviderThrottle {
                 warn!(
                     dropped_total = dropped,
                     capacity = AUDIT_QUEUE_CAPACITY,
-                    "throttle audit buffer full — decision not recorded (best-effort)"
+                    "throttle audit buffer full, decision not recorded (best-effort)"
                 );
             }
             Err(mpsc::error::TrySendError::Closed(_)) => {
                 let dropped = self.audit_dropped.fetch_add(1, Ordering::Relaxed) + 1;
                 warn!(
                     dropped_total = dropped,
-                    "throttle audit writer stopped — decision not recorded (best-effort)"
+                    "throttle audit writer stopped, decision not recorded (best-effort)"
                 );
             }
         }

@@ -1,8 +1,8 @@
-//! LLM Security Defense Layer — JULY 2026
+//! LLM Security Defense Layer, JULY 2026
 //!
 //! Implements defense-in-depth against OWASP Top 10 for LLM Applications:
 //!
-//! ## Input Defense Pipeline (LLM01 — Prompt Injection)
+//! ## Input Defense Pipeline (LLM01, Prompt Injection)
 //! 1. Unicode BIDI/zero-width stripping (prevents invisible payloads)
 //! 2. Interlinear annotation stripping (prevents hidden tokens)
 //! 3. Encoded payload detection: Base64, URL-encoded, hex-encoded
@@ -12,14 +12,14 @@
 //! 7. Multilingual injection pattern detection (中文, 日本語, العربية)
 //! 8. Length truncation to limit injection surface
 //!
-//! ## Output Defense Pipeline (LLM02 — Insecure Output Handling)
+//! ## Output Defense Pipeline (LLM02, Insecure Output Handling)
 //! 1. HTML/JS injection detection in LLM outputs
 //! 2. Stored XSS prevention (<script>, <iframe>, onclick, javascript:)
 //! 3. CSS injection detection
 //! 4. HTML entity-encoded injection detection
 //! 5. URL validation (deny non-apexmail.ee domains)
 //!
-//! ## Runtime Limits (LLM04 — Model DoS)
+//! ## Runtime Limits (LLM04, Model DoS)
 //! 1. User input length limits
 //! 2. Tool call loop limits
 //! 3. Recursive/circular prompt detection
@@ -127,11 +127,11 @@ fn strip_unicode_manipulation(input: &str) -> (String, Vec<InjectionFinding>) {
                 }
                 // Homoglyph confusables (Cyrillic 'а' looks like Latin 'a', etc.)
                 '\u{0390}'..='\u{03FF}' => {
-                    // Greek — keep but flag if used alongside Latin
+                    // Greek, keep but flag if used alongside Latin
                     true
                 }
                 '\u{0400}'..='\u{04FF}' => {
-                    // Cyrillic — keep but flag if used for homoglyph attacks
+                    // Cyrillic, keep but flag if used for homoglyph attacks
                     true
                 }
                 _ => true,
@@ -403,7 +403,7 @@ fn detect_markdown_injection(input: &str) -> Vec<InjectionFinding> {
 
     // Detect hidden markdown (same-color text: white on white, etc.).
     // The labels embed zero-width characters (ZWSP U+200B, LRM U+200E,
-    // RLM U+200F) — written as escapes so the source itself stays free of
+    // RLM U+200F), written as escapes so the source itself stays free of
     // invisible characters (clippy::invisible_characters).
     if input.contains("[\u{200B}](")
         || input.contains("[\u{200E}](")
@@ -658,7 +658,7 @@ fn classify_threat_level(findings: &[InjectionFinding], _output: &str) -> Threat
 
 /// Escalation rule complementing the additive score: two or more DIFFERENT
 /// instruction-override patterns in one input is a keyword-stuffed
-/// jailbreak by construction — no benign message stacks "ignore all
+/// jailbreak by construction, no benign message stacks "ignore all
 /// previous instructions" together with "jailbreak". Such an input is
 /// Critical regardless of the additive total (which caps at Malicious for
 /// exactly two hits).
@@ -720,7 +720,7 @@ pub fn sanitize_llm_output(raw: &str) -> OutputSanitizationResult {
 
     // SM9 #2: the stripper runs UNCONDITIONALLY. The detectors above are a
     // blocklist and now decide only violation REPORTING, never whether
-    // stripping happens — gating the stripper on detection meant any payload
+    // stripping happens, gating the stripper on detection meant any payload
     // the detectors missed (e.g. `@import 'http://…'` without `url()`, or
     // `<base>`/`<form>` tags only the stripper knows about) sailed through
     // completely untouched, i.e. the stripping layer provided zero protection
@@ -741,7 +741,7 @@ fn strip_dangerous_html_tags(html: &str) -> String {
     // `<SCRIPT>` and `ONERROR=` are the same markup as their lowercase forms;
     // a case-folding blind spot here would let uppercase payloads through the
     // UNCONDITIONAL stripper untouched (the exact "stripper adds zero
-    // protection" class this function exists to close — cf. the crate's own
+    // protection" class this function exists to close, cf. the crate's own
     // EMAIL_BODY_STRIP_PATTERNS fix for the same defect).
     static DANGEROUS_TAG_RE: Lazy<Regex> = Lazy::new(|| {
         Regex::new(r"(?i)</?(?:script|iframe|embed|object|applet|meta|link|base|form|input|button|select|textarea|style|svg|math)[^>]*>").expect("valid tag regex")
@@ -802,7 +802,7 @@ static EMAIL_BODY_STRIP_PATTERNS: Lazy<Vec<(Regex, &'static str)>> = Lazy::new(|
 /// Strips HTML injection from AI-generated email responses.
 pub fn sanitize_email_body(body: &str, allow_html: bool) -> String {
     if !allow_html {
-        // For text/plain emails, strip ALL HTML-like content — matched
+        // For text/plain emails, strip ALL HTML-like content, matched
         // ASCII-case-insensitively so case-folding cannot bypass a pattern.
         let mut s = body.to_string();
         for (pattern, replacement) in EMAIL_BODY_STRIP_PATTERNS.iter() {
@@ -815,7 +815,7 @@ pub fn sanitize_email_body(body: &str, allow_html: bool) -> String {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Recursive/Circular Prompt Detection (LLM04 — Model DoS)
+// Recursive/Circular Prompt Detection (LLM04, Model DoS)
 // ═══════════════════════════════════════════════════════════════════════════
 
 pub fn detect_recursive_prompt(input: &str, max_depth: usize) -> Vec<InjectionFinding> {
@@ -849,7 +849,7 @@ pub fn detect_recursive_prompt(input: &str, max_depth: usize) -> Vec<InjectionFi
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Tool Parameter Validation (LLM07 — Insecure Plugin Design)
+// Tool Parameter Validation (LLM07, Insecure Plugin Design)
 // ═══════════════════════════════════════════════════════════════════════════
 
 pub fn validate_tool_params(tool: &str, params: &serde_json::Value) -> Result<(), Vec<String>> {
@@ -1138,7 +1138,7 @@ mod tests {
         assert!(!result.was_modified);
     }
 
-    /// SM9 #2: stripping is UNCONDITIONAL — it no longer waits for a
+    /// SM9 #2: stripping is UNCONDITIONAL, it no longer waits for a
     /// detector hit. `<form>`/`<input>`/`<base>` are outside the detector
     /// vocabulary (XSS_PATTERN_RE lists neither), so under the old
     /// detect-then-strip gate this payload sailed through untouched; now
@@ -1156,7 +1156,7 @@ mod tests {
         );
         assert!(
             result.violations.is_empty(),
-            "this vector evades every detector — stripping is what caught it"
+            "this vector evades every detector, stripping is what caught it"
         );
         assert!(!result.sanitized.contains("<form"));
         assert!(!result.sanitized.contains("<input"));
@@ -1169,7 +1169,7 @@ mod tests {
     }
 
     /// SM9 #2 (verifier-repair): the unconditional stripper is
-    /// ASCII-case-insensitive — `<SCRIPT>` and `ONERROR=` are the same
+    /// ASCII-case-insensitive, `<SCRIPT>` and `ONERROR=` are the same
     /// markup as their lowercase forms and must not survive a case-folding
     /// blind spot (the same defect class the EMAIL_BODY_STRIP_PATTERNS fix
     /// closed for email bodies).

@@ -14,7 +14,7 @@ methodology = "Public AWS SES documentation at docs.aws.amazon.com/ses reviewed 
 volume_assumption = "100,000 emails/month"
 billing_period = "monthly"
 currency_note = "Prices are shown in EUR. Where a provider publishes only USD, the EUR figure is converted at 1 USD = €0.92 (reference rate, 2026-08-19) and the provider's published USD price is shown in parentheses. Exclude applicable taxes."
-# Feature comparison counts — update when capabilities change.
+# Feature comparison counts, update when capabilities change.
 verdict_title = "How ApexMail differs from Amazon SES"
 verdict_points = ["Managed email infrastructure with API, events, and support included vs raw capacity billing", "Per-message delivery diagnostics dashboard vs self-assembled CloudWatch + SNS", "Idempotency keys on all plans vs not natively supported", "EU/EEA-oriented deployment configuration with active regions confirmed per deployment", "Dedicated tenancy managed service vs self-managed on AWS"]
 
@@ -26,38 +26,38 @@ verdict_points = ["Managed email infrastructure with API, events, and support in
 # "none" (the winner_badge macro renders them as a spanned em-dash).
 comparison_sections = [
   { title = "EEA DATA PROCESSING", rows = [
-    { feature = "Primary hosting region", apex = 'EU data centres in Finland; core data processed in the EEA. Global sends ride AWS SES in its EU regions (which may include Germany) — EU regions of a US company; EU-only routing removes that transport (<a href="/eu-sovereign/">details</a>)', comp = 'Multiple regions including EU (Ireland eu-west-1, Frankfurt eu-central-1, etc.)<sup><a href="#src-ses1">1</a></sup>', winner = "none" },
-    { feature = "EU-only routing", apex = 'Yes — one setting: every send leaves through ApexMail’s own EU MTAs; the third-party transport is removed, and an unavailable own-MTA route holds the message (<a href="/eu-sovereign/">how it works</a>)', comp = 'Not offered — region selection changes where SES sends from; delivery still rides AWS SES<sup><a href="#src-ses1">1</a></sup>', winner = "none" },
-    { feature = "EEA data processing default", apex = 'EU/EEA-oriented default configuration; active locations are agreement-specific', comp = 'Available — must be explicitly configured; region selection required per sending domain<sup><a href="#src-ses1">1</a></sup>', winner = "none" },
-    { feature = "DPA availability", apex = 'Available under the applicable ApexMail agreement', comp = 'Available — AWS DPA (Artifact) with SCCs<sup><a href="#src-ses2">2</a></sup>', winner = "none" }
+    { feature = "Primary hosting region", apex = 'EU data centres in Finland; core data processed in the EEA. Global sends ride AWS SES in its EU regions (which may include Germany), EU regions of a US company; EU-only routing removes that transport (<a href="/eu-sovereign/">details</a>)', comp = 'Multiple regions including EU (Ireland eu-west-1, Frankfurt eu-central-1, etc.)<sup><a href="#src-ses1">1</a></sup>', winner = "none" },
+    { feature = "EU-only routing", apex = 'Yes, one setting: every send leaves through ApexMail’s own EU MTAs; the third-party transport is removed, and an unavailable own-MTA route holds the message (<a href="/eu-sovereign/">how it works</a>)', comp = 'Not offered, region selection changes where SES sends from; delivery still rides AWS SES<sup><a href="#src-ses1">1</a></sup>', winner = "none" },
+    { feature = "EEA data processing default", apex = 'EU/EEA-oriented default configuration; active locations are agreement-specific', comp = 'Available, must be explicitly configured; region selection required per sending domain<sup><a href="#src-ses1">1</a></sup>', winner = "none" },
+    { feature = "DPA availability", apex = 'Available under the applicable ApexMail agreement', comp = 'Available, AWS DPA (Artifact) with SCCs<sup><a href="#src-ses2">2</a></sup>', winner = "none" }
   ]},
   { title = "SENDING CAPABILITIES", rows = [
-    { feature = "REST API", apex = 'Yes — native <code>POST /v1/messages</code> (ApexMail API)', comp = 'Yes — AWS SDK (multiple languages) via <code>SendEmail</code>, <code>SendBulkEmail</code><sup><a href="#src-ses3">3</a></sup>', winner = "none" },
-    { feature = "SMTP relay", apex = 'Yes — smtp.apexmail.ee:587 (STARTTLS)', comp = 'Yes — email-smtp.{region}.amazonaws.com:587 (STARTTLS)<sup><a href="#src-ses3">3</a></sup>', winner = "none" },
-    { feature = "Idempotency keys", apex = 'Yes (all plans) — <code>Idempotency-Key</code> header', comp = 'Not natively supported — AWS recommends application-level message deduplication<sup><a href="#src-ses3">3</a></sup>', winner = "apexmail" },
-    { feature = "Message event tracking", apex = 'Per-message delivery diagnostics dashboard with 7-step timeline', comp = 'CloudWatch metrics (send, bounce, complaint, delivery) + SNS notifications for events — self-assembly required<sup><a href="#src-ses4">4</a></sup>', winner = "apexmail" },
-    { feature = "Inbound email", apex = 'Business and Enterprise plans', comp = 'Yes — SES receipt rules with S3, Lambda, SNS, SQS actions<sup><a href="#src-ses5">5</a></sup>', winner = "none" }
+    { feature = "REST API", apex = 'Yes, native <code>POST /v1/messages</code> (ApexMail API)', comp = 'Yes, AWS SDK (multiple languages) via <code>SendEmail</code>, <code>SendBulkEmail</code><sup><a href="#src-ses3">3</a></sup>', winner = "none" },
+    { feature = "SMTP relay", apex = 'Yes, smtp.apexmail.ee:587 (STARTTLS)', comp = 'Yes, email-smtp.{region}.amazonaws.com:587 (STARTTLS)<sup><a href="#src-ses3">3</a></sup>', winner = "none" },
+    { feature = "Idempotency keys", apex = 'Yes (all plans), <code>Idempotency-Key</code> header', comp = 'Not natively supported, AWS recommends application-level message deduplication<sup><a href="#src-ses3">3</a></sup>', winner = "apexmail" },
+    { feature = "Message event tracking", apex = 'Per-message delivery diagnostics dashboard with 7-step timeline', comp = 'CloudWatch metrics (send, bounce, complaint, delivery) + SNS notifications for events, self-assembly required<sup><a href="#src-ses4">4</a></sup>', winner = "apexmail" },
+    { feature = "Inbound email", apex = 'Business and Enterprise plans', comp = 'Yes, SES receipt rules with S3, Lambda, SNS, SQS actions<sup><a href="#src-ses5">5</a></sup>', winner = "none" }
   ]},
   { title = "DEPLOYMENT MODELS", rows = [
-    { feature = "Shared cloud", apex = 'Yes (all plans) — managed multi-tenant, EU-hosted', comp = 'Yes (all accounts) — shared IP pool by default<sup><a href="#src-ses6">6</a></sup>', winner = "none" },
-    { feature = "Dedicated IP", apex = 'Approved add-on on Pro; 1 included on Growth and Business; 3 on Enterprise Cloud', comp = 'Yes — €22.95 (US$24.95)/mo per dedicated IP; IP pool management available<sup><a href="#src-ses6">6</a></sup>', winner = "none" },
-    { feature = "Dedicated tenancy", apex = 'Subject to architecture and contract review', comp = 'Self-managed — customer architects dedicated tenancy on AWS using SES as a service component<sup><a href="#src-ses6">6</a></sup>', winner = "none" },
-    { feature = "BYOC / private deployment", apex = 'Subject to architecture and contract review', comp = 'Inherent — customer runs on own AWS account; SES is an AWS service<sup><a href="#src-ses6">6</a></sup>', winner = "none" }
+    { feature = "Shared cloud", apex = 'Yes (all plans), managed multi-tenant, EU-hosted', comp = 'Yes (all accounts), shared IP pool by default<sup><a href="#src-ses6">6</a></sup>', winner = "none" },
+    { feature = "Dedicated IP", apex = 'Approved add-on on Pro; 1 included on Growth and Business; 3 on Enterprise Cloud', comp = 'Yes, €22.95 (US$24.95)/mo per dedicated IP; IP pool management available<sup><a href="#src-ses6">6</a></sup>', winner = "none" },
+    { feature = "Dedicated tenancy", apex = 'Subject to architecture and contract review', comp = 'Self-managed, customer architects dedicated tenancy on AWS using SES as a service component<sup><a href="#src-ses6">6</a></sup>', winner = "none" },
+    { feature = "BYOC / private deployment", apex = 'Subject to architecture and contract review', comp = 'Inherent, customer runs on own AWS account; SES is an AWS service<sup><a href="#src-ses6">6</a></sup>', winner = "none" }
   ]},
   { title = "ENTERPRISE CONTROLS", rows = [
-    { feature = "SAML SSO", apex = 'Business and Enterprise plans', comp = 'Via AWS IAM Identity Center — requires AWS Organization setup and IAM configuration<sup><a href="#src-ses7">7</a></sup>', winner = "none" },
-    { feature = "Managed support", apex = 'Plan-specific support terms', comp = 'AWS Support plans (Developer, Business, Enterprise) — separate purchase from SES usage<sup><a href="#src-ses8">8</a></sup>', winner = "none" },
-    { feature = "HIPAA availability", apex = 'Not currently offered', comp = 'Yes — AWS BAA available; SES is an eligible HIPAA service<sup><a href="#src-ses9">9</a></sup>', winner = "competitor" }
+    { feature = "SAML SSO", apex = 'Business and Enterprise plans', comp = 'Via AWS IAM Identity Center, requires AWS Organization setup and IAM configuration<sup><a href="#src-ses7">7</a></sup>', winner = "none" },
+    { feature = "Managed support", apex = 'Plan-specific support terms', comp = 'AWS Support plans (Developer, Business, Enterprise), separate purchase from SES usage<sup><a href="#src-ses8">8</a></sup>', winner = "none" },
+    { feature = "HIPAA availability", apex = 'Not currently offered', comp = 'Yes, AWS BAA available; SES is an eligible HIPAA service<sup><a href="#src-ses9">9</a></sup>', winner = "competitor" }
   ]},
   { title = "PRICING AT 100K/MO (verified 2026-07-29)", rows = [
     { feature = "Plan compared", apex = 'Pro: €89/mo (150,000 emails included, managed infrastructure)', comp = 'Pay-as-you-go: ~€9.20 (US$10)/100K emails (raw sending, no management included)<sup><a href="#src-ses10">10</a></sup>', winner = "none" },
-    { feature = "Pricing model distinction", apex = 'Managed email infrastructure: API, event storage, webhook delivery, support, analytics included', comp = 'Raw capacity billing: IaaS — pay per send, plus additional AWS costs (EC2, S3, CloudWatch, SNS, support)<sup><a href="#src-ses10">10</a></sup>', winner = "none" },
+    { feature = "Pricing model distinction", apex = 'Managed email infrastructure: API, event storage, webhook delivery, support, analytics included', comp = 'Raw capacity billing: IaaS, pay per send, plus additional AWS costs (EC2, S3, CloudWatch, SNS, support)<sup><a href="#src-ses10">10</a></sup>', winner = "none" },
     { feature = "Free tier", apex = '3,000 emails/month recurring + one-time 30,000-email launch allowance (no credit card)', comp = '62,000 emails/month when sending from EC2 (first 12 months); 3,000/month otherwise<sup><a href="#src-ses10">10</a></sup>', winner = "none" }
   ]},
   { title = "AREAS WHERE AMAZON SES IS STRONGER", rows = [
-    { feature = "Raw cost per email", apex = 'See the current public catalog and checkout for applicable usage terms', comp = '€0.09 (US$0.10)/1,000 emails — lowest per-message cost among major providers<sup><a href="#src-ses10">10</a></sup>', winner = "competitor" },
+    { feature = "Raw cost per email", apex = 'See the current public catalog and checkout for applicable usage terms', comp = '€0.09 (US$0.10)/1,000 emails, lowest per-message cost among major providers<sup><a href="#src-ses10">10</a></sup>', winner = "competitor" },
     { feature = "AWS ecosystem integration", apex = 'Standalone platform with API integration', comp = 'Deep integration with AWS services: Lambda, S3, CloudWatch, SNS, SQS, IAM, KMS, Organizations<sup><a href="#src-ses3">3</a></sup>', winner = "competitor" },
-    { feature = "Maximum sending volume", apex = 'Business supports up to 2 million emails/month; Enterprise terms are contract-scoped', comp = 'Virtually unlimited — constrained by account sending limits which auto-scale with reputation<sup><a href="#src-ses6">6</a></sup>', winner = "none" },
+    { feature = "Maximum sending volume", apex = 'Business supports up to 2 million emails/month; Enterprise terms are contract-scoped', comp = 'Virtually unlimited, constrained by account sending limits which auto-scale with reputation<sup><a href="#src-ses6">6</a></sup>', winner = "none" },
     { feature = "Global regions", apex = 'Finland (EEA focus)', comp = '22+ AWS regions globally including US, EU, APAC, South America<sup><a href="#src-ses1">1</a></sup>', winner = "competitor" }
   ]}
 ]

@@ -1,7 +1,7 @@
 //! Adversarial DB-backed tests for the seed-account health machinery
 //! (`SeedManager`): permanent-vs-transient failure classification, the
 //! exponential backoff ladder, auto-disable at the threshold, and the
-//! due-for-health-check ordering — all against the REAL migration chain.
+//! due-for-health-check ordering, all against the REAL migration chain.
 
 use inbox_placement::seed_manager::SeedManager;
 use sqlx::PgPool;
@@ -47,7 +47,7 @@ async fn seed_account(pool: &PgPool, provider: Uuid, email: &str) -> Uuid {
     .expect("account")
 }
 
-/// A PERMANENT failure (mixed-case "no IMAP password configured" — the one
+/// A PERMANENT failure (mixed-case "no IMAP password configured", the one
 /// keyword that previously never matched because only one side was
 /// lower-cased) disables the account on the FIRST failure, before the
 /// threshold.
@@ -267,7 +267,7 @@ fn backoff_ladder_is_exponential_capped_and_overflow_safe() {
     assert_eq!(
         inbox_placement::seed_manager::backoff_seconds(9),
         76_800,
-        "300s * 2^8 = 76800s (21.3h) — the cap lands at streak 10"
+        "300s * 2^8 = 76800s (21.3h), the cap lands at streak 10"
     );
     assert_eq!(
         inbox_placement::seed_manager::backoff_seconds(10),

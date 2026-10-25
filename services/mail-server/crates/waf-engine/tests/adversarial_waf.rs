@@ -1,4 +1,4 @@
-//! Adversarial WAF tests — designed to CATCH bypasses, not confirm happy paths.
+//! Adversarial WAF tests, designed to CATCH bypasses, not confirm happy paths.
 //!
 //! Each test exercises a specific evasion technique. If a test passes it means
 //! the WAF correctly blocked the attack. **Failures indicate real vulnerabilities.**
@@ -58,7 +58,7 @@ fn test_sqli_union_all_select_bypass_regression() {
     };
     assert!(
         is_blocked(&e, &req),
-        "UNION ALL SELECT must be blocked — P0 regression"
+        "UNION ALL SELECT must be blocked, P0 regression"
     );
 }
 
@@ -145,7 +145,7 @@ fn test_path_allowlist_does_not_bypass_query_params_regression() {
     };
     assert!(
         is_blocked(&e, &req),
-        "Path allowlist must NOT bypass query param inspection — P1 regression"
+        "Path allowlist must NOT bypass query param inspection, P1 regression"
     );
 }
 
@@ -260,7 +260,7 @@ fn test_cmdi_in_user_agent_header_regression() {
     };
     assert!(
         is_blocked(&e, &req),
-        "Command injection in User-Agent header must be blocked — P1 regression"
+        "Command injection in User-Agent header must be blocked, P1 regression"
     );
 }
 
@@ -316,7 +316,7 @@ fn test_clean_request_not_blocked() {
 // Attackers routinely omit the space:`|whoami`, `&cat /etc/passwd`.
 // All tests below would have PASSED (attack allowed through) before the patch.
 
-/// `|whoami` — pipe directly followed by command, no space.
+/// `|whoami`, pipe directly followed by command, no space.
 #[test]
 fn test_cmdi_pipe_nospace_whoami_blocked() {
     let e = engine();
@@ -330,11 +330,11 @@ fn test_cmdi_pipe_nospace_whoami_blocked() {
     };
     assert!(
         is_blocked(&e, &req),
-        "`|whoami` (no space after pipe) must be blocked — P1 regression"
+        "`|whoami` (no space after pipe) must be blocked, P1 regression"
     );
 }
 
-/// `&cat /etc/passwd` — ampersand followed by cat immediately.
+/// `&cat /etc/passwd`, ampersand followed by cat immediately.
 #[test]
 fn test_cmdi_amp_nospace_cat_blocked() {
     let e = engine();
@@ -348,11 +348,11 @@ fn test_cmdi_amp_nospace_cat_blocked() {
     };
     assert!(
         is_blocked(&e, &req),
-        "`&cat /etc/passwd` (no space after amp) must be blocked — P1 regression"
+        "`&cat /etc/passwd` (no space after amp) must be blocked, P1 regression"
     );
 }
 
-/// `||wget` — double-pipe followed by wget immediately (OR-chain download).
+/// `||wget`, double-pipe followed by wget immediately (OR-chain download).
 #[test]
 fn test_cmdi_double_pipe_wget_blocked() {
     let e = engine();
@@ -366,11 +366,11 @@ fn test_cmdi_double_pipe_wget_blocked() {
     };
     assert!(
         is_blocked(&e, &req),
-        "`||wget ...` (no space) must be blocked — P1 regression"
+        "`||wget ...` (no space) must be blocked, P1 regression"
     );
 }
 
-/// `&&curl` — AND-chain with curl exfiltration attempt, no space.
+/// `&&curl`, AND-chain with curl exfiltration attempt, no space.
 #[test]
 fn test_cmdi_double_amp_curl_blocked() {
     let e = engine();
@@ -403,7 +403,7 @@ fn test_cmdi_pipe_nondangerous_not_blocked() {
     };
     assert!(
         !is_blocked(&e, &req),
-        "`|summary` — pipe before non-command word must NOT be blocked (false-positive guard)"
+        "`|summary`, pipe before non-command word must NOT be blocked (false-positive guard)"
     );
 }
 
@@ -412,7 +412,7 @@ fn test_cmdi_pipe_nondangerous_not_blocked() {
 // The tautology check never fired because no two equal NumberLiterals appeared.
 // After the fix hex literals parse to their numeric value (0x31 → 49.0).
 
-/// `0x31=0x31` — both sides are hex 49; should be caught as tautology.
+/// `0x31=0x31`, both sides are hex 49; should be caught as tautology.
 #[test]
 fn test_sqli_hex_tautology_blocked() {
     let e = engine();
@@ -426,11 +426,11 @@ fn test_sqli_hex_tautology_blocked() {
     };
     assert!(
         is_blocked(&e, &req),
-        "`' OR 0x31=0x31 --` hex tautology must be blocked — hex literal parsing regression"
+        "`' OR 0x31=0x31 --` hex tautology must be blocked, hex literal parsing regression"
     );
 }
 
-/// `0xFF=0xFF` — hex 255 equals hex 255; same bypass in body.
+/// `0xFF=0xFF`, hex 255 equals hex 255; same bypass in body.
 #[test]
 fn test_sqli_hex_tautology_0xff_blocked() {
     let e = engine();
@@ -454,7 +454,7 @@ fn test_sqli_hex_tautology_0xff_blocked() {
 // which didn't match, then [OpenParen, DROP] which also didn't match.
 // The forward-scan state machine now catches any dangerous keyword AFTER a semicolon.
 
-/// `'; (DROP TABLE users) --` — paren between semicolon and DROP.
+/// `'; (DROP TABLE users) --`, paren between semicolon and DROP.
 #[test]
 fn test_sqli_stacked_paren_drop_blocked() {
     let e = engine();
@@ -468,11 +468,11 @@ fn test_sqli_stacked_paren_drop_blocked() {
     };
     assert!(
         is_blocked(&e, &req),
-        "`'; (DROP TABLE users) --` paren-wrapped stacked DROP must be blocked — stacked query regression"
+        "`'; (DROP TABLE users) --` paren-wrapped stacked DROP must be blocked, stacked query regression"
     );
 }
 
-/// `'; (INSERT INTO admin_users ...) --` — insert via stacked paren.
+/// `'; (INSERT INTO admin_users ...) --`, insert via stacked paren.
 #[test]
 fn test_sqli_stacked_paren_insert_blocked() {
     let e = engine();
@@ -490,7 +490,7 @@ fn test_sqli_stacked_paren_insert_blocked() {
     );
 }
 
-/// `'; SELECT * FROM secrets --` — stacked SELECT (data exfiltration).
+/// `'; SELECT * FROM secrets --`, stacked SELECT (data exfiltration).
 #[test]
 fn test_sqli_stacked_select_blocked() {
     let e = engine();
@@ -512,7 +512,7 @@ fn test_sqli_stacked_select_blocked() {
 // Before the fix only `data:text/html` was in the data:URI blocklist.
 // `data:text/javascript` and `data:application/javascript` were allowed through.
 
-/// `<a href="data:text/javascript,alert(1)">` — JS payload via data URI.
+/// `<a href="data:text/javascript,alert(1)">`, JS payload via data URI.
 #[test]
 fn test_xss_data_text_javascript_blocked() {
     let e = engine();
@@ -526,11 +526,11 @@ fn test_xss_data_text_javascript_blocked() {
     };
     assert!(
         is_blocked(&e, &req),
-        "`data:text/javascript,alert(...)` must be blocked — data URI JS bypass regression"
+        "`data:text/javascript,alert(...)` must be blocked, data URI JS bypass regression"
     );
 }
 
-/// `<img src="data:application/javascript,alert(1)">` — app/js MIME.
+/// `<img src="data:application/javascript,alert(1)">`, app/js MIME.
 #[test]
 fn test_xss_data_application_javascript_blocked() {
     let e = engine();
@@ -548,7 +548,7 @@ fn test_xss_data_application_javascript_blocked() {
     );
 }
 
-/// `data:text/vbscript` — legacy IE VBScript via data URI.
+/// `data:text/vbscript`, legacy IE VBScript via data URI.
 #[test]
 fn test_xss_data_vbscript_blocked() {
     let e = engine();
@@ -570,7 +570,7 @@ fn test_xss_data_vbscript_blocked() {
 // Before the fix, `detect_tautology` only caught Str=Str with equal values.
 // `'z'>'a'` (always true lexicographically) and `'a'!='b'` slipped through.
 
-/// `' OR 'z'>'a' --` — string comparison that is always true.
+/// `' OR 'z'>'a' --`, string comparison that is always true.
 #[test]
 fn test_sqli_string_tautology_gt_blocked() {
     let e = engine();
@@ -584,11 +584,11 @@ fn test_sqli_string_tautology_gt_blocked() {
     };
     assert!(
         is_blocked(&e, &req),
-        "`' OR 'z'>'a' --` string comparison tautology must be blocked — string tautology regression"
+        "`' OR 'z'>'a' --` string comparison tautology must be blocked, string tautology regression"
     );
 }
 
-/// `' OR 'Z'>='A' --` — uppercase string comparison tautology.
+/// `' OR 'Z'>='A' --`, uppercase string comparison tautology.
 #[test]
 fn test_sqli_string_tautology_gte_blocked() {
     let e = engine();
@@ -606,7 +606,7 @@ fn test_sqli_string_tautology_gte_blocked() {
     );
 }
 
-/// `' OR 'x'!='y' --` — inequality between two string literals (always matches some row).
+/// `' OR 'x'!='y' --`, inequality between two string literals (always matches some row).
 #[test]
 fn test_sqli_string_tautology_neq_blocked() {
     let e = engine();
@@ -624,7 +624,7 @@ fn test_sqli_string_tautology_neq_blocked() {
     );
 }
 
-/// `' OR 'admin'='admin' --` — equal strings (existing logic, regression guard).
+/// `' OR 'admin'='admin' --`, equal strings (existing logic, regression guard).
 #[test]
 fn test_sqli_string_tautology_eq_same_blocked() {
     let e = engine();

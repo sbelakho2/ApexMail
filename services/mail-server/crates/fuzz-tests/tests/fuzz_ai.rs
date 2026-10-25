@@ -42,7 +42,7 @@ fn fuzz_click_rate_bounded() {
 
 #[test]
 fn fuzz_sentiment_bounded() {
-    // predict_unsubscribe_risk acts as our sentiment proxy — any inputs
+    // predict_unsubscribe_risk acts as our sentiment proxy, any inputs
     // must produce a value in [0.0, 1.0].
     let predictor = AnalyticsPredictor::new();
     for _ in 0..5_000 {

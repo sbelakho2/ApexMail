@@ -297,7 +297,7 @@ fn build_test_app(db: PgPool) -> axum::Router {
 }
 
 // ---------------------------------------------------------------------------
-// 1. Tenant analytics — dashboard, volume, engagement, deliverability
+// 1. Tenant analytics, dashboard, volume, engagement, deliverability
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -402,7 +402,7 @@ async fn tenant_deliverability_endpoint_works() {
 }
 
 // ---------------------------------------------------------------------------
-// 2. Admin analytics — stats, time-series, provider breakdown
+// 2. Admin analytics, stats, time-series, provider breakdown
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -531,7 +531,7 @@ async fn admin_analytics_requires_auth() {
 }
 
 // ---------------------------------------------------------------------------
-// 3. Delivery analytics — latency, provider, queue
+// 3. Delivery analytics, latency, provider, queue
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -639,7 +639,7 @@ async fn delivery_queue_endpoint_works() {
 }
 
 // ---------------------------------------------------------------------------
-// 4. Growth analytics — signups, activation, engagement, trial conversion
+// 4. Growth analytics, signups, activation, engagement, trial conversion
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -743,7 +743,7 @@ async fn growth_engagement_metrics_works() {
 }
 
 // ---------------------------------------------------------------------------
-// 5. Predictive analytics — churn, capacity, anomalies
+// 5. Predictive analytics, churn, capacity, anomalies
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -862,7 +862,7 @@ async fn predictive_anomalies_endpoint_works() {
 }
 
 // ---------------------------------------------------------------------------
-// 6. Insights — trends, recommendations
+// 6. Insights, trends, recommendations
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -944,7 +944,7 @@ async fn insights_recommendations_endpoint_works() {
 }
 
 // ---------------------------------------------------------------------------
-// 7. Cross-tenant — health, plans, growth
+// 7. Cross-tenant, health, plans, growth
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -1024,7 +1024,7 @@ async fn cross_tenant_growth_endpoint_works() {
 }
 
 // ---------------------------------------------------------------------------
-// 8. Revenue — MRR, ARR, LTV, CAC, churn
+// 8. Revenue, MRR, ARR, LTV, CAC, churn
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -1102,7 +1102,7 @@ async fn revenue_mrr_non_negative() {
 }
 
 // ---------------------------------------------------------------------------
-// 9. Admin dashboard — stats, leads, alerts, activity
+// 9. Admin dashboard, stats, leads, alerts, activity
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -1135,7 +1135,7 @@ async fn admin_dashboard_correct_structure() {
 }
 
 // ---------------------------------------------------------------------------
-// Mathematical calculations — delivery rate, bounce rate, MRR
+// Mathematical calculations, delivery rate, bounce rate, MRR
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -1343,7 +1343,7 @@ async fn tenant_isolation_no_data_leakage() {
 }
 
 // ---------------------------------------------------------------------------
-// Performance — queries complete within 500ms
+// Performance, queries complete within 500ms
 // ---------------------------------------------------------------------------
 
 #[tokio::test]

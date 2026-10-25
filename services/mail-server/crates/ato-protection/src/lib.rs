@@ -1,11 +1,11 @@
 #![allow(clippy::doc_lazy_continuation)]
-//! # ATO Protection — Account Takeover Prevention
+//! # ATO Protection, Account Takeover Prevention
 //!
 //! Multi-layered defense against account takeover attacks://!
-//! 1. **Impossible travel detection** — Haversine-distance analysis of login geolocations
-//! 2. **Session fingerprinting** — Device/browser/network signature tracking
-//! 3. **Behavioral profiling** — Login pattern modeling (time-of-day, frequency)
-//! 4. **Risk scoring** — Composite risk score driving adaptive MFA decisions
+//! 1. **Impossible travel detection**, Haversine-distance analysis of login geolocations
+//! 2. **Session fingerprinting**, Device/browser/network signature tracking
+//! 3. **Behavioral profiling**, Login pattern modeling (time-of-day, frequency)
+//! 4. **Risk scoring**, Composite risk score driving adaptive MFA decisions
 //!
 //! ## Usage
 //!

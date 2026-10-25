@@ -176,7 +176,7 @@ pub fn encode_flash_cookie(messages: &[FlashMessage], secret: &str) -> String {
 }
 
 /// Verify + deserialize a flash cookie value. Returns `None` on any
-/// tampering, malformed input, or bad signature — never panics.
+/// tampering, malformed input, or bad signature, never panics.
 pub fn decode_flash_cookie(value: &str, secret: &str) -> Option<Vec<FlashMessage>> {
     let rest = value.strip_prefix("v1.")?;
     let (payload_b64, signature) = rest.rsplit_once('.')?;
@@ -211,7 +211,7 @@ pub fn flash_clear_cookie(secure: bool) -> String {
 /// Canonical signed payload for a confirmation: the JSON tuple
 /// `[intent, resource_id, expires_at_unix]`. Unlike the historical
 /// `{intent}:{resource_id}:{expires_at}` concatenation, this serialization
-/// is unambiguous — ids or intents containing `:` cannot produce a byte
+/// is unambiguous, ids or intents containing `:` cannot produce a byte
 /// string identical to another (intent, id) split.
 fn confirmation_payload(intent: &str, resource_id: &str, expires_at_unix: i64) -> Vec<u8> {
     serde_json::to_vec(&(intent, resource_id, expires_at_unix))
@@ -225,7 +225,7 @@ fn confirmation_payload(intent: &str, resource_id: &str, expires_at_unix: i64) -
 ///
 /// Note: changing the signed payload construction (audit SM11 F9) invalidates
 /// every previously minted confirmation link. Confirmation TTLs are 15
-/// minutes, so outstanding links simply expire within that window — accepted
+/// minutes, so outstanding links simply expire within that window, accepted
 /// as part of the fix.
 pub fn sign_confirmation(
     secret: &str,
@@ -315,7 +315,7 @@ mod tests {
     #[test]
     fn flash_cookie_decoder_rejects_oversized_payloads() {
         // The ENCODER now bounds its own output (see the budget test); a
-        // hand-built oversized cookie — an older node, a hostile client —
+        // hand-built oversized cookie, an older node, a hostile client —
         // must still be refused before it is parsed.
         let payload = serde_json::to_vec(&vec![FlashMessage::info("x".repeat(64 * 1024))])
             .expect("serializes");
@@ -327,7 +327,7 @@ mod tests {
     }
 
     /// Review §5.1 flash.rs: the encoder keeps the cookie inside a
-    /// browser-safe budget — a rejected cookie loses the user's feedback
+    /// browser-safe budget, a rejected cookie loses the user's feedback
     /// entirely, so the payload is truncated instead.
     #[test]
     fn flash_cookie_stays_within_the_browser_budget() {
@@ -446,7 +446,7 @@ mod tests {
     /// Regression (audit SM11 F9): the signed payload must be
     /// delimiter-unambiguous. The old `{intent}:{resource_id}:{exp}`
     /// concatenation made a token for ("delete-campaign", "c:1") verify for
-    /// ("delete-campaign:c", "1") — both produced the same byte string. The
+    /// ("delete-campaign:c", "1"), both produced the same byte string. The
     /// canonical JSON tuple removes that alias class.
     #[test]
     fn confirmation_signature_is_delimiter_unambiguous() {

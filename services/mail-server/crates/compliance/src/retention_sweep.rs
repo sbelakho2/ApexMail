@@ -1,22 +1,22 @@
-//! Retention sweep — enforcement for the RET-001..023 registry (audit H-6).
+//! Retention sweep, enforcement for the RET-001..023 registry (audit H-6).
 //!
 //! The registry in [`crate::retention`] was previously declarative-only:
 //! nothing deleted data when a category's duration elapsed. This module is
 //! the enforcement pass for the stores the compliance crate actually owns
 //! data for, plus an honest per-run report:
 //!
-//! 1. Purge expired rows from the CANONICAL event stores — `events`
+//! 1. Purge expired rows from the CANONICAL event stores, `events`
 //!    (migration 075) per the RET-007/009/010 durations and `messages`
 //!    (migration 073) per RET-001/002 content durations. F2: the previous
 //!    targets (`message_events`/`tracking_events`/`engagement_events`)
-//!    exist only in test fixtures — production sweeps deleted nothing.
+//!    exist only in test fixtures, production sweeps deleted nothing.
 //! 2. Purge expired `gdpr_exports` (`export_expiration_days`, 7 by default —
 //!    same window as [`GdprAutomation::enforce_retention`]).
 //! 3. Trim `audit_logs` per `AUDIT_RETENTION_DAYS` via the existing
 //!    [`AuditLogger::archive`] (rows only leave the live table when they
 //!    verifiably landed in `audit_logs_archive`; conflicting originals stay).
 //! 4. Purge stale `dsr_verification_outbox` rows once their request window
-//!    (`request_expiration_days`) has passed — the raw token must not linger.
+//!    (`request_expiration_days`) has passed, the raw token must not linger.
 //! 5. Purge `mail_journal` rows older than `MAIL_JOURNAL_RETENTION_DAYS`
 //!    when the operator set a positive window. The journal is retained
 //!    indefinitely by default (0): it is the legal record the Mailboxes
@@ -31,9 +31,9 @@
 //! `ent_compliance_configs.zero_retention_mode = true` are purged immediately
 //! regardless of window.
 //!
-//! Capability wave 2 — plan ceiling: the resolved window is additionally
+//! Capability wave 2, plan ceiling: the resolved window is additionally
 //! clamped to the tenant's plan `max_retention_days` (from `plans.features`,
-//! override-aware via `plan_overrides` — the SAME precedence the entitlement
+//! override-aware via `plan_overrides`, the SAME precedence the entitlement
 //! snapshot uses). A stored override above the ceiling deletes at the
 //! ceiling, never beyond it: the editing API refuses such values and this
 //! clamp is the enforcement backstop for anything else that writes the
@@ -42,17 +42,17 @@
 //! the registry guard alone applies, exactly as before.
 //!
 //! Legal holds (F5): tenants with `tenants.legal_hold = true` (migration 121)
-//! are excluded from EVERY purge this module performs — event stores,
+//! are excluded from EVERY purge this module performs, event stores,
 //! gdpr_exports, the DSR outbox and the audit trim (the exclusion lives in
 //! [`AuditLogger::archive`]). Rows with a NULL tenant id cannot be attributed
 //! and are kept whenever any hold is active (fall back to keep).
 //!
 //! Deletes are batched (F11): `WHERE ctid IN (SELECT … LIMIT N)` loops with a
 //! per-batch `lock_timeout`, and counts come from accumulated deleted-row
-//! counts — no separate full-table COUNT + unbounded single DELETE.
+//! counts, no separate full-table COUNT + unbounded single DELETE.
 //!
 //! Stores this crate cannot reach (ClickHouse analytics, backups, mailstore
-//! blobs) are NOT silently ignored — the report lists them as out-of-scope
+//! blobs) are NOT silently ignored, the report lists them as out-of-scope
 //! with their registry durations and who enforces them.
 
 use chrono::{DateTime, Utc};
@@ -63,7 +63,7 @@ use crate::audit_logger::AuditLogger;
 use crate::legal_archive;
 use crate::retention::{seed_retention_registry, RetentionRegistry};
 
-/// Rows deleted per batch statement (F11) — bounded work per lock window.
+/// Rows deleted per batch statement (F11), bounded work per lock window.
 const DELETE_BATCH_ROWS: i64 = 5_000;
 
 /// Per-batch lock timeout: a long-running purge must not queue indefinitely
@@ -72,7 +72,7 @@ const LOCK_TIMEOUT: &str = "5s";
 
 /// Key type of a sweep target's primary key. The two canonical stores differ
 /// (`events.id` is `VARCHAR(64)`, `messages.id` is `UUID`), and the keyset
-/// delete must compare the key with its own type to use the PK index — a
+/// delete must compare the key with its own type to use the PK index, a
 /// `::text` cast would defeat it (this is exactly the mistake fixed in the
 /// legal archive).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -109,7 +109,7 @@ pub struct SweepTarget {
 
 impl SweepTarget {
     /// The effective retention (default plan tier) is the MINIMUM of the
-    /// mapped categories' `default_retention_days` — never keep data past the
+    /// mapped categories' `default_retention_days`, never keep data past the
     /// shortest applicable policy.
     pub fn retention_days(&self, registry: &RetentionRegistry) -> Option<u32> {
         self.category_ids
@@ -165,7 +165,7 @@ pub fn out_of_scope_stores(registry: &RetentionRegistry) -> Vec<OutOfScopeStore>
         (
             "clickhouse_analytics",
             &["RET-007", "RET-009", "RET-010"],
-            "Analytics store owned by the analytics pipeline; the compliance crate cannot purge it (DSR erasures DO submit best-effort ClickHouse mutations — see gdpr_automation). Registry durations apply and must be enforced by the owning service.",
+            "Analytics store owned by the analytics pipeline; the compliance crate cannot purge it (DSR erasures DO submit best-effort ClickHouse mutations, see gdpr_automation). Registry durations apply and must be enforced by the owning service.",
         ),
         (
             "backups",
@@ -198,7 +198,7 @@ pub fn out_of_scope_stores(registry: &RetentionRegistry) -> Vec<OutOfScopeStore>
 pub enum SweepStatus {
     /// Expired rows were deleted (possibly zero).
     Deleted,
-    /// Table or timestamp column absent in this deployment — reported, not
+    /// Table or timestamp column absent in this deployment, reported, not
     /// counted as deleted.
     SkippedMissingStore,
     /// The sweep failed for this store (recorded with the error; rows already
@@ -213,11 +213,11 @@ pub struct CategorySweepResult {
     pub retention_days: u32,
     pub cutoff: DateTime<Utc>,
     /// Rows past the cutoff (or belonging to zero-retention tenants) before
-    /// deletion — includes legal-held rows.
+    /// deletion, includes legal-held rows.
     pub considered: i64,
     /// Rows actually deleted (accumulated per-batch row counts, F11).
     pub deleted: i64,
-    /// Considered rows belonging to tenants on legal hold — never deleted.
+    /// Considered rows belonging to tenants on legal hold, never deleted.
     pub skipped_legal_hold: i64,
     /// How legal holds were determined.
     pub legal_hold_check: LegalHoldCheck,
@@ -226,7 +226,7 @@ pub struct CategorySweepResult {
     /// Tenants whose tenants.retention_days override was honored (F4).
     pub custom_retention_tenants: usize,
     /// Overrides that exceeded the tenant's plan `max_retention_days` and
-    /// were clamped TO the ceiling for this run (capability wave 2) — the
+    /// were clamped TO the ceiling for this run (capability wave 2), the
     /// sweep never deletes beyond the plan ceiling.
     pub retention_clamped_to_plan_ceiling: usize,
     pub status: SweepStatus,
@@ -238,7 +238,7 @@ pub struct CategorySweepResult {
 pub enum LegalHoldCheck {
     /// `tenants.legal_hold` consulted; held tenants skipped.
     TenantsTable,
-    /// No `tenants` table (or no legal_hold column) in this deployment — no
+    /// No `tenants` table (or no legal_hold column) in this deployment, no
     /// hold exclusion possible.
     TenantsTableMissing,
 }
@@ -249,11 +249,11 @@ struct TenantRetention {
     id: String,
     plan: String,
     /// tenants.retention_days override (NULL → registry plan-tier default).
-    /// INT (INT4) — the canonical migration-121 column type.
+    /// INT (INT4), the canonical migration-121 column type.
     retention_days: Option<i32>,
     /// The plan's `max_retention_days` (capability wave 2): the enforced
     /// ceiling for `retention_days`. `None` when the plans table/row cannot
-    /// be read (partial deployment) — the registry guard alone applies.
+    /// be read (partial deployment), the registry guard alone applies.
     plan_ceiling_days: Option<u32>,
     held: bool,
     zero_retention: bool,
@@ -270,7 +270,7 @@ pub struct RetentionSweepReport {
     pub gdpr_exports_deleted: u64,
     pub dsr_outbox_purged: u64,
     /// `mail_journal` rows purged this run. Zero unless the operator set a
-    /// positive `MAIL_JOURNAL_RETENTION_DAYS` — the journal is retained
+    /// positive `MAIL_JOURNAL_RETENTION_DAYS`, the journal is retained
     /// indefinitely by default because it is the paid legal record.
     pub mail_journal_purged: u64,
     /// The effective journal window (days). 0 means "retain indefinitely".
@@ -284,7 +284,7 @@ pub struct RetentionSweepReport {
     pub archive_deleted: u64,
     /// Source records (invoices) removed after their statutory expiry.
     pub archive_source_records_deleted: u64,
-    /// Rows past expiry whose source table is not owned/purgeable — reported,
+    /// Rows past expiry whose source table is not owned/purgeable, reported,
     /// never silently dropped.
     pub archive_stuck_unpurgeable: u64,
     pub out_of_scope: Vec<OutOfScopeStore>,
@@ -343,7 +343,7 @@ impl RetentionSweeper {
             categories.push(result);
         }
 
-        // gdpr_exports — same window as GdprAutomation::enforce_retention
+        // gdpr_exports, same window as GdprAutomation::enforce_retention
         // (created_at + export_expiration_days, NOT expires_at). F5/F4: rows
         // of held tenants are excluded via the central hold authority;
         // NULL-tenant rows are kept whenever any hold is active (they cannot
@@ -355,7 +355,7 @@ impl RetentionSweeper {
             )
             .await;
 
-        // dsr_verification_outbox — raw verification tokens must not outlive
+        // dsr_verification_outbox, raw verification tokens must not outlive
         // the request window they are valid for (same hold exclusion).
         let outbox_purged = self
             .purge_with_hold_filter(
@@ -364,7 +364,7 @@ impl RetentionSweeper {
             )
             .await;
 
-        // mail_journal — the Mailboxes archive + journaling legal copy.
+        // mail_journal, the Mailboxes archive + journaling legal copy.
         // Retained INDEFINITELY by default (window 0): the journal is the
         // record the add-on sells, so deletion must be an explicit operator
         // policy, never an implicit default. A positive
@@ -387,7 +387,7 @@ impl RetentionSweeper {
             0
         };
 
-        // audit_logs — trimmed via the existing archive() (transactional
+        // audit_logs, trimmed via the existing archive() (transactional
         // copy-then-verify-delete; conflicting originals stay in the live
         // table by design, see audit_logger E-2; held tenants excluded).
         let audit_cutoff = now - chrono::Duration::days(self.audit_retention_days);
@@ -443,7 +443,7 @@ impl RetentionSweeper {
 
     /// F4: per-tenant retention inputs, resolved once per run. `None` when
     /// the deployment has no `tenants` table at all (runtime-provisioned
-    /// partial schemas) — the sweep then runs with flat defaults and says so
+    /// partial schemas), the sweep then runs with flat defaults and says so
     /// via [`LegalHoldCheck::TenantsTableMissing`].
     async fn tenant_retention_context(&self) -> Option<Vec<TenantRetention>> {
         // Base shape (migration 121): legal_hold + retention_days per tenant.
@@ -454,7 +454,7 @@ impl RetentionSweeper {
         struct TenantBaseRow {
             id: String,
             plan: String,
-            // INT (INT4) — the canonical migration-121 column type.
+            // INT (INT4), the canonical migration-121 column type.
             retention_days: Option<i32>,
             legal_hold: bool,
         }
@@ -478,7 +478,7 @@ impl RetentionSweeper {
             Err(e) if is_missing_table(&e) => return None,
             Err(e) if is_missing_column(&e) => {
                 // Pre-121 tenants: plan tiers still resolve; no holds, no
-                // overrides (degrade honestly — the report says so via
+                // overrides (degrade honestly, the report says so via
                 // plan_tier "default").
                 match sqlx::query_as::<_, (String, String)>("SELECT id, plan FROM tenants")
                     .fetch_all(&self.db)
@@ -496,13 +496,13 @@ impl RetentionSweeper {
                         })
                         .collect(),
                     Err(e) => {
-                        warn!(error = %e, "retention sweep: tenants unreadable — flat defaults only");
+                        warn!(error = %e, "retention sweep: tenants unreadable, flat defaults only");
                         return None;
                     }
                 }
             }
             Err(e) => {
-                warn!(error = %e, "retention sweep: tenants query failed — no per-tenant retention");
+                warn!(error = %e, "retention sweep: tenants query failed, no per-tenant retention");
                 return None;
             }
         };
@@ -510,7 +510,7 @@ impl RetentionSweeper {
         // Plan ceilings (capability wave 2): the enforced `max_retention_days`
         // per plan, plus the active plan OVERRIDES (the same precedence the
         // entitlement snapshot resolves: override plan > tenant plan). Both
-        // degrade independently — a missing plans table must not disable
+        // degrade independently, a missing plans table must not disable
         // per-tenant retention or legal holds.
         let ceilings = self.plan_retention_ceilings().await;
         let overrides = self.active_plan_overrides().await;
@@ -535,7 +535,7 @@ impl RetentionSweeper {
             Ok(ids) => ids.into_iter().collect(),
             Err(e) if is_missing_store(&e) => Default::default(),
             Err(e) => {
-                warn!(error = %e, "retention sweep: zero-retention lookup failed — assuming none");
+                warn!(error = %e, "retention sweep: zero-retention lookup failed, assuming none");
                 Default::default()
             }
         };
@@ -548,8 +548,8 @@ impl RetentionSweeper {
     }
 
     /// Plan name → enforced `max_retention_days` ceiling (capability wave 2).
-    /// Read from `plans.features` — the same source the entitlement snapshot
-    /// resolves — with the same graceful degradation as every other
+    /// Read from `plans.features`, the same source the entitlement snapshot
+    /// resolves, with the same graceful degradation as every other
     /// auxiliary lookup in this module: a missing table/column means "no
     /// ceiling resolvable" and the registry guard alone applies.
     async fn plan_retention_ceilings(&self) -> std::collections::HashMap<String, u32> {
@@ -565,11 +565,11 @@ impl RetentionSweeper {
                 .filter_map(|(name, days)| u32::try_from(days).ok().map(|days| (name, days)))
                 .collect(),
             Err(e) if is_missing_store(&e) => {
-                warn!(error = %e, "retention sweep: plans table absent — no plan retention ceiling");
+                warn!(error = %e, "retention sweep: plans table absent, no plan retention ceiling");
                 Default::default()
             }
             Err(e) => {
-                warn!(error = %e, "retention sweep: plans unreadable — no plan retention ceiling");
+                warn!(error = %e, "retention sweep: plans unreadable, no plan retention ceiling");
                 Default::default()
             }
         }
@@ -588,7 +588,7 @@ impl RetentionSweeper {
             Ok(rows) => rows.into_iter().collect(),
             Err(e) if is_missing_store(&e) => Default::default(),
             Err(e) => {
-                warn!(error = %e, "retention sweep: plan overrides unreadable — tenant plan applies");
+                warn!(error = %e, "retention sweep: plan overrides unreadable, tenant plan applies");
                 Default::default()
             }
         }
@@ -597,10 +597,10 @@ impl RetentionSweeper {
     /// F4: the effective retention for one tenant against one target. The
     /// override is honored only when the registry accepts it for EVERY mapped
     /// category under the tenant's plan; otherwise the plan-tier default
-    /// applies (with a warning — never longer than the plan allows).
+    /// applies (with a warning, never longer than the plan allows).
     ///
     /// Capability wave 2: an accepted override is additionally CLAMPED to the
-    /// tenant's plan `max_retention_days` — the sweep never deletes data
+    /// tenant's plan `max_retention_days`, the sweep never deletes data
     /// beyond the plan ceiling even if the stored value does. Returns
     /// `(days, clamped)`.
     fn effective_retention_days(
@@ -625,7 +625,7 @@ impl RetentionSweeper {
                 tenant = %tenant.id,
                 store = target.store,
                 requested,
-                "tenants.retention_days violates the plan/registry bounds — using plan-tier default"
+                "tenants.retention_days violates the plan/registry bounds, using plan-tier default"
             );
             return (default_days, false);
         }
@@ -636,7 +636,7 @@ impl RetentionSweeper {
                     store = target.store,
                     requested,
                     ceiling,
-                    "tenants.retention_days exceeds the plan ceiling — clamped to the plan maximum"
+                    "tenants.retention_days exceeds the plan ceiling, clamped to the plan maximum"
                 );
                 return (ceiling, true);
             }
@@ -709,10 +709,10 @@ impl RetentionSweeper {
         }
 
         // Considered + held-skip counts (reporting only; derived from the
-        // DEFAULT cutoff — the shortest honest denominator).
+        // DEFAULT cutoff, the shortest honest denominator).
         //
         // PERF (audit P3): the pre-fix count used ONE predicate
-        // `{ts} < $1 OR tenant_id = ANY($2)` — an OR across two columns that
+        // `{ts} < $1 OR tenant_id = ANY($2)`, an OR across two columns that
         // no index can serve, so the COUNT scanned the whole store. The two
         // terms are now counted as disjoint, single-column predicates that
         // each use their own index (see `considered_count`).
@@ -772,7 +772,7 @@ impl RetentionSweeper {
                 // tenant-scoped: the default-days group additionally owns
                 // NULL-tenant rows; a tenant-less deployment sweeps plainly.
                 // F5: while ANY legal hold is active, NULL-tenant rows are
-                // KEPT — they cannot be attributed, so they might belong to
+                // KEPT, they cannot be attributed, so they might belong to
                 // a held tenant (the same fall-back-to-keep rule
                 // `purge_with_hold_filter` applies to gdpr_exports and the
                 // DSR outbox).
@@ -833,7 +833,7 @@ impl RetentionSweeper {
             },
             Some(e) => {
                 let mut r = failed_result(target, default_days, default_cutoff, &e);
-                // Rows deleted by earlier batches are still deleted — the
+                // Rows deleted by earlier batches are still deleted, the
                 // report keeps the honest count.
                 r.deleted = deleted;
                 r.considered = considered;
@@ -884,7 +884,7 @@ impl RetentionSweeper {
     /// F11: batched DELETE loop. Each batch runs in its own transaction with
     /// `SET LOCAL lock_timeout`, selects at most [`DELETE_BATCH_ROWS`] rows
     /// and deletes exactly those. Returns the accumulated deleted-row count
-    /// (the authoritative count — no separate COUNT query).
+    /// (the authoritative count, no separate COUNT query).
     ///
     /// P3: the selection is a KEYSET walk (`id > last ORDER BY id LIMIT n`)
     /// instead of the pre-fix `ctid IN (SELECT ctid … LIMIT n)`. Re-probing
@@ -913,7 +913,7 @@ impl RetentionSweeper {
                 .await?;
             // Placeholder ordinals follow the bound parameters: the cutoff is
             // $1, the tenant array (when present) is $2, then the optional
-            // keyset value, then LIMIT — contiguous, because the extended
+            // keyset value, then LIMIT, contiguous, because the extended
             // protocol's parameter count is the HIGHEST referenced ordinal (a
             // gap would demand an unbound parameter and fail every batch). A
             // fixed `LIMIT $3` leaves the tenant-less variant unbound, failing
@@ -965,7 +965,7 @@ impl RetentionSweeper {
     /// F5/F4: a retention purge (gdpr_exports / DSR outbox) that excludes
     /// held tenants through the ONE central legal-hold authority
     /// ([`crate::legal_hold::active_holds`]). Rows with a NULL tenant id are
-    /// KEPT whenever any hold is active — they cannot be attributed to a
+    /// KEPT whenever any hold is active, they cannot be attributed to a
     /// tenant, so they might belong to a held one (fall back to keep).
     /// Returns (deleted, ok).
     async fn purge_with_hold_filter(
@@ -977,11 +977,11 @@ impl RetentionSweeper {
             Ok(held) => held,
             Err(e) => {
                 // Fail closed: an unknown hold state must never purge.
-                warn!(error = %e, "retention sweep: legal hold lookup failed — purge skipped");
+                warn!(error = %e, "retention sweep: legal hold lookup failed, purge skipped");
                 return (0, false);
             }
         };
-        // A non-empty hold list is matched by reference — no unwrapping: an
+        // A non-empty hold list is matched by reference, no unwrapping: an
         // empty or absent list simply runs the unfiltered DELETE.
         let result = match held.as_ref().filter(|ids| !ids.is_empty()) {
             None => {
@@ -1033,7 +1033,7 @@ fn skipped_result(
     legal_hold_check: LegalHoldCheck,
     err: &sqlx::Error,
 ) -> CategorySweepResult {
-    warn!(store = target.store, error = %err, "retention sweep: store absent — skipped");
+    warn!(store = target.store, error = %err, "retention sweep: store absent, skipped");
     CategorySweepResult {
         store: target.store,
         category_ids: target.category_ids,
@@ -1104,7 +1104,7 @@ fn failedish_result(
     }
 }
 
-/// Postgres undefined_table (42P01) or undefined_column (42703) — the store
+/// Postgres undefined_table (42P01) or undefined_column (42703), the store
 /// (table or its expected column) is not present in this deployment.
 fn is_missing_store(err: &sqlx::Error) -> bool {
     err.as_database_error()
@@ -1121,7 +1121,7 @@ fn is_missing_table(err: &sqlx::Error) -> bool {
         .unwrap_or(false)
 }
 
-/// Postgres undefined_column (42703) — F2: graceful degradation where a
+/// Postgres undefined_column (42703), F2: graceful degradation where a
 /// column added by a newer migration (121) is not present yet.
 fn is_missing_column(err: &sqlx::Error) -> bool {
     err.as_database_error()
@@ -1153,7 +1153,7 @@ mod tests {
         }
     }
 
-    /// Registry durations actually drive the cutoffs — events use the
+    /// Registry durations actually drive the cutoffs, events use the
     /// 30-day minimum of RET-007/009/010, messages the 7-day RET-001/002.
     #[test]
     fn test_target_durations_come_from_the_registry() {
@@ -1189,7 +1189,7 @@ mod tests {
     ///
     /// Capability wave 2: an accepted override above the tenant's plan
     /// `max_retention_days` ceiling is CLAMPED to the ceiling (and reported
-    /// as clamped) — the sweep never deletes beyond the plan maximum.
+    /// as clamped), the sweep never deletes beyond the plan maximum.
     #[tokio::test]
     async fn test_tenant_retention_override_validation() {
         let sweeper = offline_sweeper();
@@ -1212,7 +1212,7 @@ mod tests {
 
         // RED-BEFORE (capability wave 2): 90 days is registry-acceptable for
         // pro (RET-007 plan limit 90) but EXCEEDS the plan's 60-day
-        // max_retention_days — the sweep must clamp, not delete at 90.
+        // max_retention_days, the sweep must clamp, not delete at 90.
         let pro_over_ceiling = TenantRetention {
             retention_days: Some(90),
             ..pro_tenant.clone()
@@ -1224,7 +1224,7 @@ mod tests {
         );
 
         // Without a resolvable ceiling (partial deployment) the registry
-        // decision alone applies — never MORE restrictive than before.
+        // decision alone applies, never MORE restrictive than before.
         let pro_no_ceiling = TenantRetention {
             plan_ceiling_days: None,
             ..pro_over_ceiling.clone()
@@ -1268,7 +1268,7 @@ mod tests {
         }
     }
 
-    /// Out-of-scope stores are listed with their REGISTRY durations — the
+    /// Out-of-scope stores are listed with their REGISTRY durations, the
     /// report never invents numbers.
     #[test]
     fn test_out_of_scope_stores_carry_registry_durations() {
@@ -1325,7 +1325,7 @@ mod tests {
     }
 
     /// Audit F4: the sweep's `gdpr_exports` purge excludes held tenants via
-    /// the central hold authority — a held tenant's expired export SURVIVES
+    /// the central hold authority, a held tenant's expired export SURVIVES
     /// the sweep while an unheld tenant's is purged by the same run.
     #[tokio::test]
     async fn held_tenant_exports_survive_the_sweep_purge() {
@@ -1462,7 +1462,7 @@ mod tests {
             journal_ids.push((tenant.clone(), days_old, id));
         }
 
-        // Default (0/unset): nothing is purged — the legal record persists.
+        // Default (0/unset): nothing is purged, the legal record persists.
         std::env::remove_var("MAIL_JOURNAL_RETENTION_DAYS");
         let report = sweeper
             .run_sweep(&logger)
@@ -1680,7 +1680,7 @@ mod tests {
         run(&sweeper, &pool).await;
         assert!(
             !event_exists(&pool, &row).await,
-            "after the override to the 30-day plan the row must be deleted — the ceiling tightened"
+            "after the override to the 30-day plan the row must be deleted, the ceiling tightened"
         );
     }
 

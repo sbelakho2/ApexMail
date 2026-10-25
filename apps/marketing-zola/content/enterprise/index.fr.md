@@ -39,7 +39,7 @@ Un acheteur qualifié peut demander la DPA actuelle, les informations sur les so
 
 ## Souveraineté européenne
 
-Enterprise Cloud inclut le routage EU-only : chaque envoi ne part que par les MTA européens propres d'ApexMail, avec une retenue fail-closed au lieu d'un repli tiers, et chaque message accepté porte un reçu de routage signé Ed25519. L'argument complet — société de l'UE, centres de données européens, le mode de routage et les reçus, chacun lié à sa preuve — se trouve sur la [page de souveraineté européenne](/fr/eu-sovereign/).
+Enterprise Cloud inclut le routage EU-only : chaque envoi ne part que par les MTA européens propres d'ApexMail, avec une retenue fail-closed au lieu d'un repli tiers, et chaque message accepté porte un reçu de routage signé Ed25519. L'argument complet, société de l'UE, centres de données européens, le mode de routage et les reçus, chacun lié à sa preuve, se trouve sur la [page de souveraineté européenne](/fr/eu-sovereign/).
 
 ## Cycle de facturation
 

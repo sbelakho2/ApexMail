@@ -47,7 +47,7 @@ pub enum ArcChainStatus {
 ///
 /// `message_headers` is the RAW header block: canonicalization/hashing
 /// operate on raw octets (see [`canonicalize_header_relaxed`]) so 8-bit
-/// header bytes reach the digest unchanged — a lossy UTF-8 decode would
+/// header bytes reach the digest unchanged, a lossy UTF-8 decode would
 /// rewrite them as U+FFFD and no external verifier could reconstruct the
 /// seal.
 ///
@@ -186,7 +186,7 @@ pub fn generate_arc_headers(
 
 /// Validate an ARC chain (RFC 8617 §5) with full cryptographic verification.
 ///
-/// `message_headers` is the RAW header block (octet-exact hashing — see
+/// `message_headers` is the RAW header block (octet-exact hashing, see
 /// [`generate_arc_headers`]).
 ///
 /// `key_lookup(domain, selector)` returns the DKIM public key for the AMS/AS
@@ -474,7 +474,7 @@ fn strip_b_signature(header_line: &str) -> String {
 ///
 /// Parsing-only (chain detection): ARC field names, tags and base64 are
 /// ASCII, so the lossy decode of the unfolded block cannot hide an existing
-/// chain. The DIGEST path never goes through here — it hashes raw octets.
+/// chain. The DIGEST path never goes through here, it hashes raw octets.
 pub fn parse_arc_headers(raw_headers: &str) -> Vec<ArcSet> {
     let mut sets: std::collections::BTreeMap<u32, ArcSet> = std::collections::BTreeMap::new();
 
@@ -537,7 +537,7 @@ pub fn parse_arc_headers(raw_headers: &str) -> Vec<ArcSet> {
 }
 
 /// Format an ARC set for insertion into a message: the three header fields,
-/// each terminated with CRLF, with NO trailing terminator of its own — the
+/// each terminated with CRLF, with NO trailing terminator of its own, the
 /// assembler (`build_stored_message`) supplies exactly one separator before
 /// the original message. (A trailing CRLF here used to double up into a
 /// blank line that terminated the stored header block early, demoting the
@@ -565,7 +565,7 @@ fn extract_instance(header_value: &str) -> Option<u32> {
 /// RFC 6376 §3.4.4 relaxed body canonicalization, on RAW OCTETS:
 /// trailing WSP ignored per line, interior WSP runs collapsed to one SP,
 /// trailing empty lines removed, and a completely empty body canonicalizes
-/// to a single CRLF. A lossy UTF-8 decode is forbidden here — 8BITMIME
+/// to a single CRLF. A lossy UTF-8 decode is forbidden here, 8BITMIME
 /// octets would be replaced by U+FFFD and change the digest input.
 fn canonicalize_body_relaxed(body: &[u8]) -> Vec<u8> {
     fn emit_line(result: &mut Vec<u8>, line: &[u8]) {
@@ -624,7 +624,7 @@ fn canonicalize_body_relaxed(body: &[u8]) -> Vec<u8> {
 /// #123:Canonicalize a single header field (relaxed algorithm per RFC 6376
 /// §3.4.2), on RAW OCTETS: lowercase the field name, delete WSP around the
 /// colon, collapse WSP runs (including folding CR/LF) to a single SP and
-/// drop trailing WSP. 8-bit bytes pass through untouched — a lossy UTF-8
+/// drop trailing WSP. 8-bit bytes pass through untouched, a lossy UTF-8
 /// decode would rewrite them as U+FFFD and change the digest input (the
 /// same discipline [`canonicalize_body_relaxed`] applies).
 fn canonicalize_header_relaxed(header_line: &[u8]) -> Vec<u8> {
@@ -703,7 +703,7 @@ fn extract_tag_value<'a>(header: &'a str, tag: &str) -> Option<&'a str> {
 }
 
 /// #127:Unfold RFC 2822 headers (join continuation lines starting with
-/// whitespace) — on RAW OCTETS so 8-bit header bytes survive into the
+/// whitespace), on RAW OCTETS so 8-bit header bytes survive into the
 /// digest input. Parsing-only callers decode the unfolded block lossily via
 /// [`unfold_headers_str`] (ARC field names and tags are ASCII).
 fn unfold_headers(raw: &[u8]) -> Vec<u8> {
@@ -881,7 +881,7 @@ mod tests {
     fn relaxed_body_canonicalization_is_byte_exact_for_invalid_utf8() {
         // RFC 6376 §3.4.4/§3.4.5: relaxed body canonicalization operates on
         // RAW OCTETS. An 8BITMIME body (0xE9 …) must reach the hasher
-        // unchanged — a from_utf8_lossy replaced each invalid octet with a
+        // unchanged, a from_utf8_lossy replaced each invalid octet with a
         // 3-byte U+FFFD sequence, producing digests no external verifier
         // could ever reconstruct.
         let body = b"caf\xe9  \r\nline\ttwo\t\r\n\r\n\r\n";
@@ -938,7 +938,7 @@ mod tests {
     fn relaxed_header_canonicalization_is_byte_exact_for_invalid_utf8() {
         // RFC 6376 §3.4.2: relaxed header canonicalization operates on RAW
         // OCTETS. An 8-bit Subject value (0xE9 …) must reach the hasher
-        // unchanged — the previous &str pipeline ran the whole header block
+        // unchanged, the previous &str pipeline ran the whole header block
         // through from_utf8_lossy, replacing each invalid octet with a
         // 3-byte U+FFFD sequence and breaking every externally verified seal.
         assert_eq!(
@@ -967,7 +967,7 @@ mod tests {
     #[test]
     fn parse_arc_headers_matches_field_names_case_insensitively() {
         // RFC 5322 §2.1: field names are ASCII case-insensitive. A chain
-        // written as "arc-seal:" is a chain — missing it made the inbound
+        // written as "arc-seal:" is a chain, missing it made the inbound
         // sealing path stamp i=1/cv=none over an existing chain.
         let raw = "arc-seal: i=1; cv=none; b=abc\r\narc-message-signature: i=1; a=rsa-sha256; b=def\r\narc-authentication-results: i=1; mx.test; spf=pass";
         let sets = parse_arc_headers(raw);
@@ -1233,7 +1233,7 @@ mod tests {
     #[test]
     fn test_validate_arc_chain_fails_closed_without_keys() {
         // Without a key source a real (structurally valid) chain must still
-        // fail closed — Pass requires cryptographic proof.
+        // fail closed, Pass requires cryptographic proof.
         let (private_key, _public_key) = test_keys();
         let config = test_config(private_key);
         let set = generate_arc_headers(

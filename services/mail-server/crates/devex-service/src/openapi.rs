@@ -1,4 +1,4 @@
-//! OpenAPI specification generation — produce an OpenAPI 3.1 JSON document
+//! OpenAPI specification generation, produce an OpenAPI 3.1 JSON document
 //! describing the ApexMail REST API.
 //!
 //! Generates the service OpenAPI document.
@@ -87,7 +87,7 @@ impl OpenApiGenerator {
 
     /// Generate the full OpenAPI 3.1 spec.
     ///
-    /// # O-20.1 — Missing security field
+    /// # O-20.1, Missing security field
     /// Every endpoint now declares `security: [{"apiKey": []}]` by default so that
     /// API consumers know authentication is required. The security scheme is
     /// defined in `components.securitySchemes` (apiKey + bearerAuth).

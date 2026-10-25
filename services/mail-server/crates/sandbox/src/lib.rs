@@ -1,21 +1,21 @@
 #![allow(clippy::doc_lazy_continuation)]
-//! # Sandbox — Attachment Content Inspection
+//! # Sandbox, Attachment Content Inspection
 //!
 //! Provides bounded, in-process inspection of email attachments:
-//! file-type detection, content analysis, and policy evaluation — without
+//! file-type detection, content analysis, and policy evaluation, without
 //! ever executing the inspected content.
 //!
 //! ## Architecture
 //!
 //! The sandbox operates at multiple levels://!
-//! 1. **Static analysis** — File magic detection, extension validation, hash computation
-//! 2. **Content inspection** — Archive enumeration, embedded macro detection, OLE parsing
-//! 3. **Bounded archive extraction** — ZIP containers are recursed into up to
+//! 1. **Static analysis**, File magic detection, extension validation, hash computation
+//! 2. **Content inspection**, Archive enumeration, embedded macro detection, OLE parsing
+//! 3. **Bounded archive extraction**, ZIP containers are recursed into up to
 //!    `max_nesting_depth` levels under `max_archive_entries` and
 //!    `max_total_extracted_size` budgets; every extracted entry is
 //!    re-inspected on its DECOMPRESSED content ([`archive`])
-//! 4. **Policy engine** — Configurable allowlists/blocklists, size limits, nesting depth limits
-//! 5. **Verdict generation** — Risk scoring and actionable classification
+//! 4. **Policy engine**, Configurable allowlists/blocklists, size limits, nesting depth limits
+//! 5. **Verdict generation**, Risk scoring and actionable classification
 //!
 //! ## What this is NOT (read before relying on it)
 //!

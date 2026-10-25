@@ -27,7 +27,7 @@ const MAX_DB_NAME_LEN: usize = 63;
 /// Install a process-wide TRACE subscriber exactly once. Tracing macros only
 /// evaluate their field expressions (`x = %expr`) when the callsite is
 /// enabled; without a subscriber every dynamic field line would be an
-/// uncoverable region. The formatted output goes to the sink — the point is
+/// uncoverable region. The formatted output goes to the sink, the point is
 /// evaluating the expressions, not reading logs.
 pub(crate) fn ensure_trace_subscriber() {
     static INSTALLED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
@@ -62,7 +62,7 @@ pub(crate) fn assert_soft_skip_allowed(env_var: &str) {
     }
     if std::env::var("APEXMAIL_RELEASE_TEST_MODE").as_deref() == Ok("1") {
         panic!(
-            "APEXMAIL_RELEASE_TEST_MODE: required variable {env_var} is missing — \
+            "APEXMAIL_RELEASE_TEST_MODE: required variable {env_var} is missing, \
              release CI must not skip infrastructure tests"
         );
     }
@@ -254,7 +254,7 @@ pub(crate) fn dead_redis_pool() -> deadpool_redis::Pool {
 
 /// A private, throwaway Redis on an ephemeral LOCAL port. Tests that poison
 /// shared index keys (WRONGTYPE faults, retry-ladder state) get full
-/// isolation from every other test in the binary — the server is killed on
+/// isolation from every other test in the binary, the server is killed on
 /// drop, and `kill()` forces it down early for fault injection.
 ///
 /// The server itself comes from
@@ -368,7 +368,7 @@ pub(crate) async fn seed_plan(pool: &PgPool, name: &str, plan_code: &str) {
 /// PANICS on connect or lock failure: the old silent-None behavior turned a
 /// lost lock into a silently unsynchronized suite, and exactly-once
 /// assertions then failed (or worse, passed by luck) under load. By the time
-/// a test holds a provisioned env, the database is proven reachable — a
+/// a test holds a provisioned env, the database is proven reachable, a
 /// guard that cannot be taken is an infrastructure failure, not a skip.
 pub(crate) async fn redis_keys_guard(admin_url: &str, lock_name: &str) -> sqlx::PgPool {
     let pool = sqlx::postgres::PgPoolOptions::new()

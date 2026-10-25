@@ -3,7 +3,7 @@
 //! TLSA record lookup, generation, and certificate validation.
 //!
 //! MAINTAINED-BUT-NOT-WIRED (F-16): no SMTP session path performs
-//! TLSA-validated outbound connections yet — DANE applies when the direct-MX
+//! TLSA-validated outbound connections yet, DANE applies when the direct-MX
 //! sender (tracked as finding F-16) opens TLS to a peer MX and must verify
 //! its certificate against the TLSA RRset instead of a WebPKI CA. This
 //! module is exercised only by its own unit tests until that sender lands.
@@ -178,7 +178,7 @@ where
         if cached.fetched_at.elapsed() < ttl {
             Some(cached.records.clone())
         } else {
-            // Stale entry — evict and re-fetch
+            // Stale entry, evict and re-fetch
             TLSA_CACHE.invalidate(name.as_str());
             None
         }
@@ -266,7 +266,7 @@ where
         }
     };
 
-    // Check AD flag (DNSSEC authenticated) — only enforced when dnssec_enabled is true
+    // Check AD flag (DNSSEC authenticated), only enforced when dnssec_enabled is true
     if dns_config.dnssec_enabled {
         let ad = body.get("AD").and_then(|v| v.as_bool()).unwrap_or(false);
         if !ad {
@@ -315,7 +315,7 @@ where
     }
 
     // #E-006: Fetch the live certificate chain and evaluate the records
-    // against it — supported=true only when a record actually matches.
+    // against it, supported=true only when a record actually matches.
     match fetch_chain(domain.to_string(), port).await {
         Ok(chain) => {
             result = evaluate_tlsa_records(&chain, &records, domain);
@@ -2114,7 +2114,7 @@ mod dane_wire_tests {
         TLSA_CACHE.invalidate_all();
         let (leaf, _lk, _ca, _ck) = cert_and_key();
         let tlsa = generate_tlsa_record(&leaf.pem(), "dane.test", 25, "tcp", 3, 0, 1);
-        // Provider 1: no listener at all — the request itself errors.
+        // Provider 1: no listener at all, the request itself errors.
         let dead: &'static str = Box::leak("http://127.0.0.1:1/dns-query".into());
         // Provider 2: answers HTTP 500 for everything.
         let mut failing: HashMap<String, Option<serde_json::Value>> = HashMap::new();

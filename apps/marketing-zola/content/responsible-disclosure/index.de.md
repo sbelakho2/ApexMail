@@ -1,6 +1,6 @@
 +++
 title = "Verantwortungsvolle Offenlegung"
-description = "ApexMail-Richtlinie zur verantwortungsvollen Offenlegung — wie Sie Sicherheitslücken melden."
+description = "ApexMail-Richtlinie zur verantwortungsvollen Offenlegung, wie Sie Sicherheitslücken melden."
 template = "prose.html"
 
 [extra]

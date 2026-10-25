@@ -66,7 +66,7 @@ pub fn admin_router() -> Router<Arc<AppState>> {
             "/v1/admin/hipaa/tenants/:tenant_id/active",
             get(hipaa_active_for_tenant),
         )
-        // Trust portal — admin
+        // Trust portal, admin
         .route(
             "/v1/admin/trust/documents",
             post(trust_upsert_document).get(trust_list_documents_admin),
@@ -129,15 +129,15 @@ pub fn public_trust_router() -> Router<Arc<AppState>> {
 
 /// The PUBLIC claims registry + DORA/NIS2 evidence pack (plan A-group /
 /// B6): the claims the product makes, the evidence pointer behind each one,
-/// and the control mappings — served WITHOUT auth, exactly like the trust
+/// and the control mappings, served WITHOUT auth, exactly like the trust
 /// portal's public routes, because a public claim whose proof needs an NDA is
 /// not a public proof.
 ///
-/// * `GET /v1/claims` — every claim (id, wording, status, evidence pointer +
+/// * `GET /v1/claims`, every claim (id, wording, status, evidence pointer +
 ///   kind, review/expiry dates, limitations);
-/// * `GET /v1/claims/frameworks` — the DORA + NIS2 control mappings, every
+/// * `GET /v1/claims/frameworks`, the DORA + NIS2 control mappings, every
 ///   row pointing at a repository artifact pinned by the crate's tests;
-/// * `GET /v1/claims/:id` — one claim (404 with the id echoed when absent).
+/// * `GET /v1/claims/:id`, one claim (404 with the id echoed when absent).
 ///
 /// The registry is seeded once per process (it is static data).
 pub fn public_claims_router() -> Router<Arc<AppState>> {
@@ -497,7 +497,7 @@ async fn hipaa_active_for_tenant(
     })))
 }
 
-// ─── Trust Portal — admin handlers ─────────────────────────────────────────
+// ─── Trust Portal, admin handlers ─────────────────────────────────────────
 
 async fn trust_upsert_document(
     State(state): State<Arc<AppState>>,
@@ -710,7 +710,7 @@ async fn trust_revoke_access(
     Ok(ok_json(serde_json::json!({"revoked": true})))
 }
 
-// ─── Trust Portal — questionnaire automation ─────────────────────────────
+// ─── Trust Portal, questionnaire automation ─────────────────────────────
 
 async fn trust_questionnaire_frameworks(
     State(state): State<Arc<AppState>>,
@@ -765,7 +765,7 @@ async fn build_questionnaire_context(
             err_json(StatusCode::INTERNAL_SERVER_ERROR, "control seed failed")
         })?;
         controls = state.soc2.list_controls().await.map_err(|e| {
-            // coverage: justified — the relist runs milliseconds after a
+            // coverage: justified, the relist runs milliseconds after a
             // successful SELECT + seed on the same pool; no deterministic
             // seam can fail one and not the other. Defensive total-match arm.
             error!("questionnaire relist controls: {e}");
@@ -823,7 +823,7 @@ async fn build_questionnaire_context(
     })
 }
 
-// ─── Trust Portal — public handlers (no auth) ──────────────────────────────
+// ─── Trust Portal, public handlers (no auth) ──────────────────────────────
 
 async fn public_trust_overview(
     State(state): State<Arc<AppState>>,
@@ -891,7 +891,7 @@ async fn public_trust_access_request(
     Json(input): Json<AccessRequestInput>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
     // Audit F12: the endpoint is intentionally public, so its unbounded
-    // INSERT is bounded the way the DSAR endpoints are — a two-level
+    // INSERT is bounded the way the DSAR endpoints are, a two-level
     // (per-IP + global) limiter, checked-and-consumed per attempt (an
     // anonymous caller gets no free probes). No ConnectInfo on this
     // deployment: the front-of-list X-Forwarded-For entry is the client key,
@@ -1043,7 +1043,7 @@ mod db_tests {
         r: Result<R, (StatusCode, Json<serde_json::Value>)>,
     ) -> (StatusCode, serde_json::Value) {
         match r {
-            // coverage: justified — this arm fires only when a handler that a
+            // coverage: justified, this arm fires only when a handler that a
             // test expected to fail unexpectedly succeeds; it is the panic
             // guard itself, exercised by no passing run by construction.
             Ok(_) => panic!("expected an error response"),
@@ -1758,7 +1758,7 @@ mod db_tests {
 
         // Anonymous access requests: malformed email refused, valid one stored.
         // (Audit F12: the empty HeaderMap lands in the shared "unattributed"
-        // limiter bucket — far below its per-IP cap.)
+        // limiter bucket, far below its per-IP cap.)
         assert_eq!(
             status(
                 public_trust_access_request(
@@ -1958,7 +1958,7 @@ mod db_tests {
     }
 
     /// Store-outage matrix: with a CLOSED pool every admin handler that
-    /// touches the database answers its explicit 5xx arm — never a
+    /// touches the database answers its explicit 5xx arm, never a
     /// fabricated success. (The same handler list as the auth gate above;
     /// here the token is valid but the store is gone.)
     #[tokio::test]
@@ -2153,7 +2153,7 @@ mod db_tests {
     }
 
     /// The ANONYMOUS trust routes and the questionnaire generator answer
-    /// their explicit 5xx arms when the store is gone too — public does not
+    /// their explicit 5xx arms when the store is gone too, public does not
     /// mean fabricated: an unreadable portal is an error, never an empty
     /// success. (An unknown framework stays a caller 400 even in an outage.)
     #[tokio::test]
@@ -2161,7 +2161,7 @@ mod db_tests {
         let Some(pool) =
             test_support::canonical_pool("admin_broken_public", "admin_broken_public").await
         else {
-            // coverage: justified — soft-skip arm: only taken when the shared
+            // coverage: justified, soft-skip arm: only taken when the shared
             // test database is not configured; this run has it configured.
             return;
         };
@@ -2244,7 +2244,7 @@ mod db_tests {
         };
         let state = test_support::app_state(pool.clone(), TOKEN);
 
-        // Phase D — the seed itself fails: soc2_controls is readable and
+        // Phase D, the seed itself fails: soc2_controls is readable and
         // EMPTY, but every INSERT is rejected by a sabotaging trigger. The
         // handler must answer the seed fault arm, not silently continue.
         sqlx::query(
@@ -2276,7 +2276,7 @@ mod db_tests {
             .await
             .expect("drop sabotage function");
 
-        // Phase 0 — with the sabotage gone, generation succeeds and seeds
+        // Phase 0, with the sabotage gone, generation succeeds and seeds
         // the (still empty) controls, so the later phases exercise the
         // document/subprocessor/incident faults against a POPULATED store.
         assert_eq!(
@@ -2293,7 +2293,7 @@ mod db_tests {
             "clean generation must succeed"
         );
 
-        // Phases A–C — rename ONE portal table at a time; its list fault
+        // Phases A–C, rename ONE portal table at a time; its list fault
         // must map to the section's 5xx arm while the earlier sections stay
         // readable.
         for (table, phase) in [

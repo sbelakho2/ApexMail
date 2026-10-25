@@ -25,12 +25,12 @@ Plattformen, die für Kunden E-Mails senden, erben das Reputationsrisiko jedes e
 
 ## Die ApexMail-Lösung
 
-- **Tenant-Isolation** — Jeder Tenant erhält eigene Domains, API-Keys, Webhook-Endpunkte mit HMAC-Geheimnissen je Tenant, Suppressionslisten, dedizierte IPs und Ereignisströme.
-- **Domain-Isolation** — Domain-Verifizierung und -Authentifizierung (SPF, DKIM, DMARC) pro Tenant verhindert Reputations-Kreuzkontamination.
-- **Benutzerdefiniertes RBAC** — Admin-Rollen auf Plattform- und Tenant-Ebene sowie Nur-Lese-Rollen. SCIM-Provisioning ab Enterprise.
-- **SSO** — SAML 2.0 für Plattform-Betreiber und Tenant-Administratoren.
-- **Nutzungskontingente** — Harte und weiche Limits pro Tenant für Volumen, Rate und Parallelität.
-- **White-Label** — Entfernen Sie das ApexMail-Branding aus Dashboards, E-Mail-Fußzeilen und Benachrichtigungsvorlagen.
+- **Tenant-Isolation**, Jeder Tenant erhält eigene Domains, API-Keys, Webhook-Endpunkte mit HMAC-Geheimnissen je Tenant, Suppressionslisten, dedizierte IPs und Ereignisströme.
+- **Domain-Isolation**, Domain-Verifizierung und -Authentifizierung (SPF, DKIM, DMARC) pro Tenant verhindert Reputations-Kreuzkontamination.
+- **Benutzerdefiniertes RBAC**, Admin-Rollen auf Plattform- und Tenant-Ebene sowie Nur-Lese-Rollen. SCIM-Provisioning ab Enterprise.
+- **SSO**, SAML 2.0 für Plattform-Betreiber und Tenant-Administratoren.
+- **Nutzungskontingente**, Harte und weiche Limits pro Tenant für Volumen, Rate und Parallelität.
+- **White-Label**, Entfernen Sie das ApexMail-Branding aus Dashboards, E-Mail-Fußzeilen und Benachrichtigungsvorlagen.
 
 ## Technische Umsetzung
 
@@ -61,7 +61,7 @@ Jede nicht standardisierte Bereitstellungsregelung erfordert eine separate Archi
 
 ## Bekannte Einschränkungen
 
-- Die Tenant-Isolation ist in Shared-Cloud-Tarifen logisch. Eine separat vertraglich vereinbarte Bereitstellung kann zusätzliche Isolationsanforderungen definieren — sie ist jedoch keine Berechtigung öffentlicher Tarife.
+- Die Tenant-Isolation ist in Shared-Cloud-Tarifen logisch. Eine separat vertraglich vereinbarte Bereitstellung kann zusätzliche Isolationsanforderungen definieren, sie ist jedoch keine Berechtigung öffentlicher Tarife.
 - Tenant-übergreifende Analytik erfordert, dass die Plattform die Ereignisdaten der Tenants extern aggregiert.
 - White-Label-Branding ist im Enterprise-Tarif verfügbar.
 

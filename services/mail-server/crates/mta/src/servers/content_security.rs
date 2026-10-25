@@ -1,19 +1,19 @@
-//! Inbound content security — the wiring that makes the platform's advertised
+//! Inbound content security, the wiring that makes the platform's advertised
 //! spam/phishing filtering, attachment sandboxing, and intrusion detection
 //! real on the inbound mail flow.
 //!
 //! Three engines are integrated onto the inbound DATA path (and, for the IDS,
 //! the connection/session layer):
 //!
-//! * `spam-filter` ([`SpamEngine`]) — composite Bayesian/header/content/URL
+//! * `spam-filter` ([`SpamEngine`]), composite Bayesian/header/content/URL
 //!   scoring. Verdicts are recorded as `X-Spam-Score` / `X-Spam-Verdict`
 //!   headers on the STORED message; a REJECT classification can (config
 //!   gated) refuse the message at DATA time.
-//! * `sandbox` ([`SandboxEngine`]) — static attachment inspection (magic
+//! * `sandbox` ([`SandboxEngine`]), static attachment inspection (magic
 //!   bytes, polyglot signatures, macro/ActiveX indicators, encrypted
 //!   archives, blocked extensions). One `X-Apex-Attachment-Scan` header per
 //!   attachment; `strip`/`reject` actions are config gated.
-//! * `ids-engine` ([`IdsEngine`] + [`ConnectionTracker`]) — SMTP signatures
+//! * `ids-engine` ([`IdsEngine`] + [`ConnectionTracker`]), SMTP signatures
 //!   and protocol-anomaly detection over the DATA payload plus SYN/port-scan
 //!   tracking at session admission. Verdicts are logged and recorded as an
 //!   `X-Apex-Ids-Verdict` header; refusal is config gated.
@@ -26,7 +26,7 @@
 //! * Disabled filters leave the stored message byte-identical to the
 //!   pre-integration format (trace headers + Authentication-Results only).
 //! * A strip action always leaves an `X-Apex-Attachment-Note` header naming
-//!   what was removed and why — the stored message never changes silently.
+//!   what was removed and why, the stored message never changes silently.
 
 use std::ops::Range;
 use std::sync::Arc;
@@ -66,7 +66,7 @@ fn sanitize_header_value(raw: &str, max_chars: usize) -> String {
 /// The spam-scoring seam. Production installs [`LiveSpamAnalyzer`]; tests can
 /// install a failing implementation to prove the fail-open contract.
 pub(crate) trait SpamAnalyzer: Send + Sync {
-    /// Score one message. `None` means the engine itself failed — the caller
+    /// Score one message. `None` means the engine itself failed, the caller
     /// must fail open to tag-only.
     fn analyze(
         &self,
@@ -134,7 +134,7 @@ impl SpamAnalyzer for LiveSpamAnalyzer {
 /// Outcome of the DATA-time spam scan.
 #[derive(Debug)]
 pub(crate) enum SpamScanOutcome {
-    /// Filter disabled — the stored message must stay byte-identical to the
+    /// Filter disabled, the stored message must stay byte-identical to the
     /// pre-integration format.
     Disabled,
     /// Tag the stored message with the given verdict headers.
@@ -227,7 +227,7 @@ fn extract_scoring_input(raw: &[u8]) -> (String, Vec<(String, String)>) {
         .map(|text| text.into_owned())
         .or_else(|| {
             // HTML-only mail: the URL/content analysers still want the
-            // rendered markup as text — hrefs and phrasing score.
+            // rendered markup as text, hrefs and phrasing score.
             parsed
                 .as_ref()
                 .and_then(|message| message.body_html(0))
@@ -239,7 +239,7 @@ fn extract_scoring_input(raw: &[u8]) -> (String, Vec<(String, String)>) {
 }
 
 /// Parse a raw header block into `(name, value)` pairs, unfolding RFC 5322
-/// continuation lines (leading space/tab). Malformed lines are skipped — the
+/// continuation lines (leading space/tab). Malformed lines are skipped, the
 /// scorer sees only well-formed pairs.
 fn parse_header_pairs(headers_block: &[u8]) -> Vec<(String, String)> {
     let text = String::from_utf8_lossy(headers_block);
@@ -304,7 +304,7 @@ pub(crate) struct AttachmentScanOutcome {
 /// disposition/filename, decodes base64 or identity payloads, and feeds the
 /// decoded bytes to [`SandboxEngine::analyze`]. Parts whose payload cannot be
 /// decoded safely (e.g. quoted-printable binaries) are still scanned via the
-/// sandbox when decodable and otherwise flagged as scan-impossible — they are
+/// sandbox when decodable and otherwise flagged as scan-impossible, they are
 /// never silently passed as clean.
 pub(crate) fn run_attachment_scan(
     engine: &sandbox::engine::SandboxEngine,
@@ -334,7 +334,7 @@ pub(crate) fn run_attachment_scan(
         let scan = match &decoded {
             None => {
                 // Cannot hand the sandbox real bytes (undecodable transfer
-                // encoding) — record it honestly, never invent a clean bill.
+                // encoding), record it honestly, never invent a clean bill.
                 tracing::warn!(
                     name = %name_for_header,
                     encoding = %part.transfer_encoding,
@@ -429,7 +429,7 @@ pub(crate) fn run_attachment_scan(
                 // Stripping must never corrupt a message: on any rebuild
                 // inconsistency, keep the original bytes (flag-only) and say
                 // so in the log.
-                // coverage: justified — rebuild regions derive from the same
+                // coverage: justified, rebuild regions derive from the same
                 // walk/split as the input, so the Err arm is a defensive
                 // invariant that no input can reach (see rebuild_without_parts).
                 tracing::warn!(
@@ -495,7 +495,7 @@ fn strip_note(name: &str, scan: &ScanRecord) -> String {
 /// The MIME part that replaces a stripped attachment: a neutral text part
 /// carrying the original filename (prefixed REMOVED-) and the reason, with
 /// CRLF line endings matching the surrounding message. The replacement ends
-/// WITHOUT a trailing CRLF — the CRLF before the next boundary line is not
+/// WITHOUT a trailing CRLF, the CRLF before the next boundary line is not
 /// part of the replaced region.
 fn removed_part_replacement(name: &str, scan: &ScanRecord) -> String {
     let mut part = format!(
@@ -598,7 +598,7 @@ fn is_multipart(part: &AttachmentPart) -> bool {
 }
 
 /// An attachment is any part carrying an `attachment` disposition or a
-/// filename (`filename=`/`name=`) — the same predicate mail clients use to
+/// filename (`filename=`/`name=`), the same predicate mail clients use to
 /// render a download button.
 fn is_attachment(part: &AttachmentPart) -> bool {
     if let Some(disposition) = part.header_value("content-disposition") {
@@ -791,7 +791,7 @@ fn find_blank_line(content: &[u8]) -> Option<usize> {
 }
 
 /// Decode a part payload into the bytes the sandbox must inspect. `None`
-/// means the payload cannot be decoded without guessing — recorded as
+/// means the payload cannot be decoded without guessing, recorded as
 /// scan-impossible, never as clean.
 fn decode_part_payload(part: &AttachmentPart, raw: &[u8]) -> Option<Vec<u8>> {
     let payload = part.payload(raw);
@@ -831,7 +831,7 @@ fn rebuild_without_parts(raw: &[u8], replacements: &[PartReplacement]) -> Result
     sorted.sort_by_key(|replacement| replacement.region.start);
 
     // Overlap check: a malformed walk must never corrupt a message.
-    // coverage: justified — windows(2) of one boundary walk are disjoint by
+    // coverage: justified, windows(2) of one boundary walk are disjoint by
     // construction and nested regions are bounded by their parent, so no
     // reachable input overlaps.
     for pair in sorted.windows(2) {
@@ -846,7 +846,7 @@ fn rebuild_without_parts(raw: &[u8], replacements: &[PartReplacement]) -> Result
         let start = replacement.region.start;
         let end = replacement.region.end;
         if start < cursor || end > body.len() {
-            // coverage: justified — walk regions are always within the body
+            // coverage: justified, walk regions are always within the body
             // the walk ran on (re-split identically here), so this bounds
             // violation is a defensive invariant, not a reachable state.
             return Err("attachment region outside the message body".to_string());
@@ -875,11 +875,11 @@ pub(crate) struct IdsRuntime {
 impl IdsRuntime {
     pub(crate) fn new(config: IdsIntegrationConfig) -> anyhow::Result<Self> {
         // Defaults: SMTP validation on, 64 KiB inspect cap. inline_mode
-        // follows the operator's refuse switch — detection-only
+        // follows the operator's refuse switch, detection-only
         // (MTA_IDS_REFUSE=false, the default) downgrades Drop verdicts to
         // Alert inside the engine, so refusal is only ever possible when
         // explicitly opted into. The engine's built-in tracker is left
-        // dormant — session lifecycle is tracked on `sessions` below where
+        // dormant, session lifecycle is tracked on `sessions` below where
         // established/close transitions are recordable.
         let ids_config = IdsConfig {
             inline_mode: config.refuse,
@@ -911,7 +911,7 @@ impl IdsRuntime {
     /// [`IdsRuntime::establish_session`] once the greeting is written).
     pub(crate) fn admit_session(&self, ip: std::net::IpAddr, port: u16) -> Option<&'static str> {
         let anomalies = self.sessions.record_syn(ip, port);
-        // coverage: justified — the `matches!(` line itself carries the
+        // coverage: justified, the `matches!(` line itself carries the
         // never-taken fall-through arm: every ConnectionAnomaly variant is
         // listed, so the closure can only return true (the pattern lines
         // above execute on every anomaly).
@@ -924,7 +924,7 @@ impl IdsRuntime {
             )
         });
         if blocking && self.config.refuse {
-            // coverage: justified — the warn! field-value lines (below) map
+            // coverage: justified, the warn! field-value lines (below) map
             // to zero-count macro-internal regions; the event demonstrably
             // fires (see the refuse-branch entry counts and the
             // live-subscriber test).
@@ -933,13 +933,13 @@ impl IdsRuntime {
                 anomalies = anomalies.len(),
                 "IDS connection anomaly; refusing session admission"
             );
-            // The connection is closed immediately — release the half-open
+            // The connection is closed immediately, release the half-open
             // slot it consumed so refused probes cannot accumulate.
             self.sessions.record_close(ip, port);
             Some("421 4.7.0 Rejected by intrusion prevention\r\n")
         } else {
             if !anomalies.is_empty() {
-                // coverage: justified — macro-internal field regions (see the
+                // coverage: justified, macro-internal field regions (see the
                 // refuse-arm note above); the detection-mode event fires on
                 // every port-scan/SYN-flood probe with refuse disabled.
                 tracing::warn!(
@@ -986,7 +986,7 @@ pub(crate) fn ids_inspect_payload(
 ) -> IdsScanOutcome {
     // Fail-open boundary: an engine panic is contained and treated as Pass.
     let inspected = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        // Audit SM5 F6: this is the DATA-time scan — pass the DATA phase
+        // Audit SM5 F6: this is the DATA-time scan, pass the DATA phase
         // so the NUL-byte evasion rule (3000004) stays silent. Binary
         // mail content (8BITMIME bodies, PDFs, images, zip archives)
         // legitimately contains NUL bytes and must not be refused.
@@ -1001,7 +1001,7 @@ pub(crate) fn ids_inspect_payload(
     let (verdict, alerts) = match inspected {
         Ok(result) => result,
         Err(_) => {
-            // coverage: justified — panic containment for the engine call;
+            // coverage: justified, panic containment for the engine call;
             // IdsEngine::inspect has no injected failure seam and no known
             // panicking input, so the arm exists for the fail-open contract.
             metrics::counter!("mta_content_security_ids_total", "result" => "engine_failed")
@@ -1039,7 +1039,7 @@ pub(crate) fn ids_inspect_payload(
     let refuse = runtime.config.refuse && matches!(verdict, IdsVerdict::Drop | IdsVerdict::Reject);
     if refuse {
         metrics::counter!("mta_content_security_ids_total", "result" => "refused").increment(1);
-        // coverage: justified — the warn! field-value lines map to
+        // coverage: justified, the warn! field-value lines map to
         // zero-count macro-internal regions; both events demonstrably fire
         // (branch entry counts; the live-subscriber test exercises both).
         tracing::warn!(
@@ -1050,7 +1050,7 @@ pub(crate) fn ids_inspect_payload(
         );
     } else {
         metrics::counter!("mta_content_security_ids_total", "result" => "alerted").increment(1);
-        // coverage: justified — see the refuse-arm note above.
+        // coverage: justified, see the refuse-arm note above.
         tracing::warn!(
             client_ip = %ip,
             verdict = ?verdict,
@@ -1067,14 +1067,14 @@ pub(crate) fn ids_inspect_payload(
 
 fn verdict_label(verdict: IdsVerdict) -> &'static str {
     match verdict {
-        // coverage: justified — the builtin signature set (and the SMTP
+        // coverage: justified, the builtin signature set (and the SMTP
         // protocol analyzer) only produces Alert/Drop actions, and a Pass
         // verdict with alerts would need a Pass-action signature; the match
         // must stay total over IdsVerdict.
         IdsVerdict::Pass => "pass",
         IdsVerdict::Alert => "alert",
         IdsVerdict::Drop => "drop",
-        // coverage: justified — no builtin signature or protocol anomaly
+        // coverage: justified, no builtin signature or protocol anomaly
         // carries SignatureAction::Reject; the arm keeps the match total.
         IdsVerdict::Reject => "reject",
     }
@@ -1206,12 +1206,12 @@ mod tests {
             None,
         );
         let SpamScanOutcome::Tag { headers } = outcome else {
-            // coverage: justified — refutation-only branch of the test's own
+            // coverage: justified, refutation-only branch of the test's own
             // assertion; it runs only when the property above is violated.
             panic!("tag-only config must never reject: {outcome:?}");
         };
         assert!(headers[0].starts_with("X-Spam-Score: "), "{headers:?}");
-        // Default reject threshold is 10 — the verdict must be a TAG (the
+        // Default reject threshold is 10, the verdict must be a TAG (the
         // score stays below the crate's own reject classification).
         assert!(headers[1].starts_with("X-Spam-Verdict: "), "{headers:?}");
         assert!(
@@ -1247,7 +1247,7 @@ mod tests {
             None,
         );
         let SpamScanOutcome::Reject { reason } = outcome else {
-            // coverage: justified — refutation-only branch of the test's own
+            // coverage: justified, refutation-only branch of the test's own
             // assertion; it runs only when the property above is violated.
             panic!("reject_at_data=true must refuse a REJECT classification: {outcome:?}");
         };
@@ -1298,7 +1298,7 @@ mod tests {
                 None,
             );
             let SpamScanOutcome::Tag { headers } = outcome else {
-                // coverage: justified — refutation-only branch of the test's
+                // coverage: justified, refutation-only branch of the test's
                 // own assertion; it runs only when the fail-open contract is
                 // violated.
                 panic!("a filter error must fail OPEN, never reject: {outcome:?}");
@@ -1452,7 +1452,7 @@ mod tests {
 
     #[test]
     fn undecodable_attachment_is_recorded_scan_impossible_and_never_stripped() {
-        // quoted-printable payload: no safe decode, so no strip — but the
+        // quoted-printable payload: no safe decode, so no strip, but the
         // stored header must say ERROR, never ALLOW.
         let raw = b"Subject: qp\r\nMIME-Version: 1.0\r\n\
              Content-Type: multipart/mixed; boundary=\"SCANB\"\r\n\r\n\
@@ -1672,7 +1672,7 @@ mod tests {
     fn scoring_input_falls_back_through_html_to_the_raw_body_without_text() {
         // A message with NO text/plain part anywhere (attachment-only MIME):
         // `body_text(0)` is None, so the extractor first tries `body_html(0)`
-        // and then the raw body — the scorer always receives payload bytes.
+        // and then the raw body, the scorer always receives payload bytes.
         // Pin the parser premises so a mail-parser behavior change fails
         // loudly here instead of silently skipping the fallback chain.
         let raw = b"Subject: scan\r\nMIME-Version: 1.0\r\n\
@@ -1739,7 +1739,7 @@ mod tests {
     fn threshold_only_reject_strips_with_a_note_that_omits_findings() {
         // An operator tuning `reject_threshold` to 0.0 makes EVERY attachment
         // a REJECT regardless of content: a clean-text part then has a REJECT
-        // decision with NO findings at all — the strip note must honestly
+        // decision with NO findings at all, the strip note must honestly
         // omit the findings section instead of printing an empty list.
         // (`boundary=`/`filename=` are unquoted here, exercising the raw
         // param-value path.)
@@ -1801,7 +1801,7 @@ mod tests {
     #[test]
     fn inline_disposition_with_filename_is_still_an_attachment() {
         // `Content-Disposition: inline` with a filename is still a download
-        // button in every client — the filename alone must route the part to
+        // button in every client, the filename alone must route the part to
         // the sandbox.
         let pe = vec![0x4Du8, 0x5A, 0x90, 0x00, 0x03, 0x00, 0x00, 0x00];
         let encoded = base64::engine::general_purpose::STANDARD.encode(&pe);
@@ -1921,7 +1921,7 @@ mod tests {
         );
 
         // (b) An empty part: a boundary line immediately followed by the
-        // closing marker delimits no content at all — skipped, no panic.
+        // closing marker delimits no content at all, skipped, no panic.
         let empty_part = b"Subject: t\r\nMIME-Version: 1.0\r\n\
              Content-Type: multipart/mixed; boundary=RAWB\r\n\r\n\
              --RAWB\r\n\
@@ -1935,7 +1935,7 @@ mod tests {
     #[test]
     fn part_without_blank_separator_still_walks_and_scans() {
         // Headers that run straight into the payload (no CRLFCRLF): the walk
-        // must not hang or panic — the whole content is treated as header
+        // must not hang or panic, the whole content is treated as header
         // block, the payload is empty, and the part is still scanned.
         let raw = b"Subject: t\r\nMIME-Version: 1.0\r\n\
              Content-Type: multipart/mixed; boundary=RAWB\r\n\r\n\
@@ -2046,7 +2046,7 @@ mod tests {
         fn enabled(&self, _metadata: &tracing::Metadata<'_>) -> bool {
             true
         }
-        // coverage: justified — the span-lifecycle methods below are never
+        // coverage: justified, the span-lifecycle methods below are never
         // invoked: the tests only emit events (no spans), so `event` is the
         // only callback that runs.
         fn new_span(&self, _attributes: &tracing::span::Attributes<'_>) -> tracing::Id {
@@ -2137,16 +2137,16 @@ mod tests {
     // rests on), and the ATTACK half must all classify REJECT (that is the
     // detection claim the managed default makes).
 
-    /// Ordinary business mail — the benign corpus. Deliberately varied: invoices,
+    /// Ordinary business mail, the benign corpus. Deliberately varied: invoices,
     /// auth mail, scheduling, support, developer notifications, plain greetings.
     mod benign_corpus {
         pub const MESSAGES: &[&str] = &[
-        "Hi Anna, the signed contract is attached. Let me know if anything looks off. — Tom",
+        "Hi Anna, the signed contract is attached. Let me know if anything looks off., Tom",
         "Your invoice #20261 for the September subscription is now available in the billing portal. Total: 89.00 EUR.",
         "Password reset requested. Use this link within 30 minutes: https://app.example.com/reset?token=9f8e7d6c. If you did not request this, ignore this email.",
         "Meeting reminder: weekly sync tomorrow at 10:00 in Room 4 / https://meet.example.com/weekly-sync. Agenda: roadmap, hiring plan, release window.",
         "Your verification code is 482913. It expires in 10 minutes. Do not share this code with anyone.",
-        "Thanks for the quick turnaround on the migration runbook — the cutover finished at 02:14 UTC with zero stuck queues.",
+        "Thanks for the quick turnaround on the migration runbook, the cutover finished at 02:14 UTC with zero stuck queues.",
         "Support ticket #8812 has been resolved. Summary: outbound latency was elevated between 14:02 and 14:31 UTC; the fix is deployed. Reply within 7 days to reopen.",
         "The quarterly report draft is in the shared drive under Finance/2026/Q3. Comments by Friday please.",
         "Order confirmation: 2x standing desk, delivery Thursday 08:00-12:00, tracking DHL-9244015788.",
@@ -2156,11 +2156,11 @@ mod tests {
     ];
     }
 
-    /// Phishing / spam attack corpus — each sample must reach REJECT at the
+    /// Phishing / spam attack corpus, each sample must reach REJECT at the
     /// production default threshold (10.0 composite) with reject_at_data=true.
     mod attack_corpus {
         /// (label, body). Bodies are REALISTIC attack mail: stacked phishing
-        /// phrases, multiple URLs (shorteners/lookalike TLDs), shouting — the
+        /// phrases, multiple URLs (shorteners/lookalike TLDs), shouting, the
         /// shape actual refuse-mode decisions must catch.
         pub const MESSAGES: &[(&str, &str)] = &[
         ("account-takeover phish",
@@ -2175,13 +2175,13 @@ mod tests {
           This is a limited time offer, claim today!"),
         ("crypto doubling scam",
          "DOUBLE YOUR BITCOIN GUARANTEED: send 0.5 BTC and receive 5 BTC back within 30 minutes. \
-          Verified instant payouts, thousands of happy investors. Act now, limited slots — \
-          100% risk free profit guaranteed! Claim your free bonus today — you are our lucky \
+          Verified instant payouts, thousands of happy investors. Act now, limited slots, \
+          100% risk free profit guaranteed! Claim your free bonus today, you are our lucky \
           winner, claim your prize now: http://bit.ly/double-btc and http://bit.ly/btc-bonus \
           and http://203.0.113.9/doubler. Winners get paid instantly, act now!"),
         ("gift-card phish",
          "URGENT favor needed: buy 5x $200 Apple gift cards for the client presentation and \
-          email me the codes as soon as possible. Act now, this is guaranteed reimbursement — \
+          email me the codes as soon as possible. Act now, this is guaranteed reimbursement, \
           the company pays today. Do not discuss this with anyone. Confirm here: \
           http://bit.ly/gift-cards-request or http://203.0.113.13/confirm"),
         ("delivery-fee phish",
@@ -2191,12 +2191,12 @@ mod tests {
         ("bank credential phish",
          "Security alert: unusual sign-in detected from an unknown device. Verify your account \
           and login immediately at http://bit.ly/bank-secure-verify. Update your password and \
-          payment information to avoid permanent account suspension. Act now — click here to \
+          payment information to avoid permanent account suspension. Act now, click here to \
           login and verify."),
     ];
 
         /// The AUTH failure triple real attack mail carries (and our pipeline
-        /// computes from SPF/DKIM/DMARC) — the header analyzer scores it.
+        /// computes from SPF/DKIM/DMARC), the header analyzer scores it.
         pub const AUTH_RESULTS: &str = "spf=fail; dkim=fail; dmarc=fail";
     }
 
@@ -2304,7 +2304,7 @@ mod tests {
         // refuse mode; Alert verdicts are RECORDED (header) and delivered. The
         // corpus covers both arms plus the benign set.
         let drop_class: [&[u8]; 2] = [
-            // NOP-sled shellcode (sid 2000002, Drop) — proven DATA-phase trigger.
+            // NOP-sled shellcode (sid 2000002, Drop), proven DATA-phase trigger.
             b"Subject: shellcode\r\n\r\nAAAA\x90\x90\x90\x90\x90\x90\x90\x90BBBB\r\n",
             b"Subject: payload\r\n\r\n\x90\x90\x90\x90\x90\x90\x90\x90\r\n",
         ];

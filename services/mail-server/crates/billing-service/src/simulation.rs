@@ -264,7 +264,7 @@ mod simulation {
 
     #[test]
     fn sim_proration_overflow_protection_i128() {
-        // Very large price with few remaining days — should not panic
+        // Very large price with few remaining days, should not panic
         let result = proration::prorated_amount(i64::MAX / 2, 1, 365);
         assert!(result.is_ok());
 

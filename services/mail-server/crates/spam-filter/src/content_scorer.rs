@@ -35,7 +35,7 @@ struct SpamPhraseSet {
     descriptions: Vec<&'static str>,
     /// Whether the pattern is a single common word (no whitespace). Such
     /// patterns ("urgent", "expire", "winner", …) fire on huge amounts of
-    /// legitimate mail, so their standalone weight is halved — multi-word
+    /// legitimate mail, so their standalone weight is halved, multi-word
     /// phrases keep full weight because the combination is far more specific.
     single_word: Vec<bool>,
 }
@@ -1299,7 +1299,7 @@ pub fn normalize_leet_speak(text: &str) -> String {
             continue;
         }
         // Digit and homoglyph substitutions only. Deliberately NOT
-        // mapped: 'q'→'g' (not a leet convention — it rewrote every
+        // mapped: 'q'→'g' (not a leet convention, it rewrote every
         // "quick" into "guick" and broke phrase matching), and the global
         // '!'→'i' / '|'→'l' rewrites, which mangled ordinary prose
         // ("act now!" → "act nowi") far more often than they decoded
@@ -1340,7 +1340,7 @@ pub fn normalize_leet_speak(text: &str) -> String {
 /// Bounded:the pass is skipped entirely when the text contains no `&`, an
 /// entity candidate must terminate within a 12-byte window (real entities
 /// are at most ~10 bytes), and the output can only shrink relative to the
-/// input — never expand.
+/// input, never expand.
 pub fn decode_html_entities(text: &str) -> std::borrow::Cow<'_, str> {
     use std::borrow::Cow;
 
@@ -1406,7 +1406,7 @@ pub fn score_content(body: &str) -> ContentScore {
     let mut findings = Vec::new();
 
     // ONE lowercased copy shared by every check that needs case-insensitive
-    // matching — previously the HTML-tag checks alone each allocated their
+    // matching, previously the HTML-tag checks alone each allocated their
     // own `to_lowercase()` copy of the full body.
     let lower_body = body.to_lowercase();
 
@@ -1415,7 +1415,7 @@ pub fn score_content(body: &str) -> ContentScore {
         let mut matched = vec![false; phrases.ids.len()];
 
         // Pass 1:match against the raw body (the automaton is already
-        // ASCII-case-insensitive — no lowercase copy needed here).
+        // ASCII-case-insensitive, no lowercase copy needed here).
         for mat in phrases.automaton.find_iter(body) {
             let idx = mat.pattern().as_usize();
             matched[idx] = true;
@@ -1453,7 +1453,7 @@ pub fn score_content(body: &str) -> ContentScore {
         }
     }
 
-    // 2. ALL-CAPS ratio — single pass over the chars, no intermediate
+    // 2. ALL-CAPS ratio, single pass over the chars, no intermediate
     // Vec<char> copy of every alphabetic character.
     let mut alpha_count = 0usize;
     let mut upper_count = 0usize;
@@ -1504,7 +1504,7 @@ pub fn score_content(body: &str) -> ContentScore {
         });
     }
 
-    // 5. HTML heavy (img tags, excessive links) — reuses the single
+    // 5. HTML heavy (img tags, excessive links), reuses the single
     // lowercased copy from above.
     let img_count = lower_body.matches("<img").count();
     if img_count > 3 {
@@ -1630,7 +1630,7 @@ mod tests {
             decode_html_entities("&quot;q&quot; &apos;a&apos;"),
             "\"q\" 'a'"
         );
-        // No '&' at all — borrowed, zero-copy.
+        // No '&' at all, borrowed, zero-copy.
         let plain = "no entities here";
         assert!(matches!(
             decode_html_entities(plain),
@@ -1666,7 +1666,7 @@ mod tests {
     #[test]
     fn test_entity_decode_does_not_overreach() {
         // Ordinary ampersand prose must not be mangled into matches.
-        let result = score_content("Q3 plans &amp; budgets — see attached report");
+        let result = score_content("Q3 plans &amp; budgets, see attached report");
         assert!(
             result.score < 1.0,
             "clean prose with a named entity must stay clean, got {} ({:?})",

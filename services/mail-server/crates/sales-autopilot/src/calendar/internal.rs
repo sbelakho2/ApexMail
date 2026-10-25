@@ -1,15 +1,15 @@
-//! Internal calendar provider — the **store of record** and the fallback
+//! Internal calendar provider, the **store of record** and the fallback
 //! when no external provider (Google/Microsoft) is configured.
 //!
 //! A booking writes two rows (in one transaction):
 //!
-//! * `sales_calendar_events` — the availability index. Its GiST exclusion
+//! * `sales_calendar_events`, the availability index. Its GiST exclusion
 //!   constraint `no_overlapping_events` on
 //!   `(tenant_id, tstzrange(start_at, end_at))`
 //!   (`migrations/200_sales_autopilot_v2_unification.sql:144-173`) is the
 //!   hard double-booking guarantee: two concurrent bookings for the same
 //!   slot cannot both commit, regardless of any advisory pre-check.
-//! * `sales_meetings` — the canonical meeting store of record
+//! * `sales_meetings`, the canonical meeting store of record
 //!   (`migrations/200_sales_autopilot_v2_unification.sql:716-735`), which
 //!   carries `provider`, `provider_event_id`, `timezone`, `conferencing_link`
 //!   and `status`.
@@ -383,7 +383,7 @@ impl InternalCalendarProvider {
         Ok(())
     }
 
-    /// Deterministic internal join handle — see the module docs. Never an
+    /// Deterministic internal join handle, see the module docs. Never an
     /// external https:// URL.
     pub fn deterministic_link(&self, tenant_id: &str, event_id: Uuid) -> String {
         match &self.config.conferencing_base_url {
@@ -1185,7 +1185,7 @@ mod tests {
         }
     }
 
-    /// Window 1 — the process dies at the `sales_meetings` insert of the
+    /// Window 1, the process dies at the `sales_meetings` insert of the
     /// booking transaction, AFTER the availability insert succeeded in the
     /// SAME transaction. The death must roll back BOTH rows and free the
     /// slot: no orphan row in either table, and the same wall-clock slot is
@@ -1239,7 +1239,7 @@ mod tests {
         cleanup_calendar_tenant(&pool, &tenant).await;
     }
 
-    /// Window 2 — the CONNECTION DIES after both inserts, before COMMIT. The
+    /// Window 2, the CONNECTION DIES after both inserts, before COMMIT. The
     /// Postgres server rolls back the orphaned transaction when the socket
     /// dies; the slot must be free once it does. (The two inserts are issued
     /// on a raw connection exactly as the provider issues them, then the
@@ -1263,7 +1263,7 @@ mod tests {
         url.set_path("/apexmail_sales_test");
 
         // A dedicated connection begins the booking transaction, inserts both
-        // rows, and DIES (dropped without commit — the socket closes).
+        // rows, and DIES (dropped without commit, the socket closes).
         let start = utc_at(15, 0);
         let end = start + Duration::minutes(30);
         let event_id = Uuid::new_v4();

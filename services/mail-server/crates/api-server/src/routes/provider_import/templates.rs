@@ -18,7 +18,7 @@
 //!
 //! | construct | action |
 //! |-----------|--------|
-//! | `{{ name }}` | inner whitespace trimmed to `{{name}}` — the canonical renderer looks variables up by exact name, so an untrimmed tag would never resolve |
+//! | `{{ name }}` | inner whitespace trimmed to `{{name}}`, the canonical renderer looks variables up by exact name, so an untrimmed tag would never resolve |
 //! | `{{ .name }}` | root dot dropped to `{{name}}` (Mailgun's Go-style path spelling) |
 //! | `[%name%]` (SendGrid legacy templates) | rewritten to `{{name}}` |
 //! | `{{{name}}}` | rewritten to `{{name}}` **and marked for review**: triple braces mean UNESCAPED output, the canonical renderer always escapes. Escaping is the safer reading, but the change is semantic, so it is never silent |
@@ -27,7 +27,7 @@
 //!
 //! Every imported template's report row carries the provider's original body
 //! (up to [`MAX_ORIGINAL_BODY_BYTES`], always its SHA-256), so a reviewer can
-//! see exactly what came in — the conversion is reversible by inspection.
+//! see exactly what came in, the conversion is reversible by inspection.
 //!
 //! # The `needs_review` marker
 //!
@@ -37,14 +37,14 @@
 //! SAME `templates.status` column the list/get routes serve (12 chars, fits
 //! `VARCHAR(20)`), so reviewers can find them with the surface they already
 //! use; nothing in the product filters templates by status, so an un-reviewed
-//! template still renders and sends — the marker is a review prompt, not a
+//! template still renders and sends, the marker is a review prompt, not a
 //! silent outage. Everything else lands `active`, exactly as
 //! `POST /v1/templates` creates it.
 //!
 //! # Idempotency
 //!
-//! Templates dedupe on `(tenant_id, name)`: an existing name — including one
-//! created earlier in the SAME file — is never overwritten, it is counted
+//! Templates dedupe on `(tenant_id, name)`: an existing name, including one
+//! created earlier in the SAME file, is never overwritten, it is counted
 //! `skipped_existing`. Replaying an export is a no-op.
 
 use super::{
@@ -162,7 +162,7 @@ struct ConversionOutcome {
     converted: String,
     notes: Vec<ConversionNote>,
     unconverted: Vec<String>,
-    /// A semantic change (escaping) was applied — review before sending.
+    /// A semantic change (escaping) was applied, review before sending.
     semantic_changes: usize,
 }
 
@@ -247,7 +247,7 @@ fn convert(provider: ImportProvider, source: &str, field: &str) -> ConversionOut
                     construct,
                     field,
                     format!(
-                        "rewritten to the escaped form {{{{{name}}}}} — the provider emitted this \
+                        "rewritten to the escaped form {{{{{name}}}}}, the provider emitted this \
                          value un-escaped and the canonical renderer always escapes; output that \
                          relied on raw HTML injection now escapes"
                     ),
@@ -419,7 +419,7 @@ pub(crate) async fn import_templates(
         let html = html_conversion.converted.clone();
         let text_body = text_conversion.as_ref().map(|part| part.converted.clone());
         // A missing subject falls back to the template name (the canonical
-        // schema requires one) — named, and review-marked because it is
+        // schema requires one), named, and review-marked because it is
         // synthesized, not converted.
         let subject_missing = template.subject.is_none();
         let subject = match &subject_conversion {
@@ -480,14 +480,14 @@ pub(crate) async fn import_templates(
                     needs_review,
                     conversions,
                     unconverted,
-                    "name exceeds 200 characters — rename it in the export",
+                    "name exceeds 200 characters, rename it in the export",
                 ),
             );
             continue;
         }
         let subject = match template.subject.as_deref() {
             // The converted subject is `parts[2]` when a subject existed (or
-            // the synthesized name when it did not) — computed above, so no
+            // the synthesized name when it did not), computed above, so no
             // second conversion runs here.
             Some(_) => subject.clone(),
             None => template.name.clone(),
@@ -503,7 +503,7 @@ pub(crate) async fn import_templates(
                     needs_review,
                     conversions,
                     unconverted,
-                    "subject exceeds 255 characters — shorten it in the export",
+                    "subject exceeds 255 characters, shorten it in the export",
                 ),
             );
             continue;
@@ -554,7 +554,7 @@ pub(crate) async fn import_templates(
                             // review marker is applied to the SAME
                             // templates.status column the list/get routes
                             // serve (nothing in the product filters on it, so
-                            // the template still renders — it is a prompt).
+                            // the template still renders, it is a prompt).
                             let marked = sqlx::query(
                                 "UPDATE templates SET status = 'needs_review', updated_at = NOW()
                                  WHERE id = $1 AND tenant_id = $2",

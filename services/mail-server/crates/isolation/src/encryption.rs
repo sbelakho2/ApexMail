@@ -43,7 +43,7 @@ fn fill_os_random(bytes: &mut [u8]) -> anyhow::Result<()> {
 fn ensure_master_key_configured(master_key: &str) -> anyhow::Result<()> {
     if master_key.trim().is_empty() {
         anyhow::bail!(
-            "Master encryption key is not configured — refusing to derive encryption keys"
+            "Master encryption key is not configured, refusing to derive encryption keys"
         );
     }
     Ok(())
@@ -179,7 +179,7 @@ impl EncryptionService {
             .decrypt_in_place_detached(nonce, b"", &mut buffer, tag)
             .map_err(|e| anyhow::anyhow!("Decryption failed: {}", e))?;
 
-        // Zeroize derived key — buffer is returned as plaintext and will be
+        // Zeroize derived key, buffer is returned as plaintext and will be
         // zeroized by the caller.
         derived.zeroize();
         Ok(buffer)
@@ -495,7 +495,7 @@ impl EncryptionService {
     /// passed.
     ///
     /// One set-based scan finds all due organizations (the old cron arm
-    /// iterated known orgs — in practice it did nothing), then each due
+    /// iterated known orgs, in practice it did nothing), then each due
     /// tenant's key is rotated. [`reencrypt_data`] already writes refreshed
     /// field values in batches of 250, so a rotation does not issue one
     /// UPDATE per record.
@@ -694,7 +694,7 @@ impl EncryptionService {
         let old_key = self.get_key_by_id(old_key_id).await?;
         let new_key = self.get_key_by_id(new_key_id).await?;
 
-        // Decrypt the raw key material for both keys — zeroized on drop via Zeroizing
+        // Decrypt the raw key material for both keys, zeroized on drop via Zeroizing
         let old_raw = Zeroizing::new(
             self.decrypt_data_key(&old_key.organization_id, &old_key.encrypted_key)?,
         );
@@ -1071,7 +1071,7 @@ mod tests {
     /// past its deadline and rotate exactly those. An untouched tenant's key
     /// keeps its version and id.
     ///
-    /// The old cron arm only logged "Key rotation check completed" — it never
+    /// The old cron arm only logged "Key rotation check completed", it never
     /// scanned or rotated anything, so this test fails on that code (nothing
     /// rotated).
     #[tokio::test]

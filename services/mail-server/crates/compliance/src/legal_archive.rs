@@ -1,4 +1,4 @@
-//! Legally-restricted retention archive — the holding state between an
+//! Legally-restricted retention archive, the holding state between an
 //! erasure and a statutory expiry.
 //!
 //! A customer may exercise GDPR rights while invoices / accounting / tax
@@ -15,15 +15,15 @@
 //!
 //! Properties:
 //!
-//! * **Explicit** — every retained record is a row naming the source table,
+//! * **Explicit**, every retained record is a row naming the source table,
 //!   the record, the retention class, the reason and the exact expiry date.
-//! * **Disclosed** — [`disclosure_for_subject`] returns the what/why/until
+//! * **Disclosed**, [`disclosure_for_subject`] returns the what/why/until
 //!   when that the DSAR result must carry.
-//! * **Monotonic** — [`transition_allowed`] is the pure rule; the database
+//! * **Monotonic**, [`transition_allowed`] is the pure rule; the database
 //!   trigger `trg_legal_retention_archive_guard` (migration 213) enforces the
 //!   same rule for direct SQL, so no path can move a record backwards or out
 //!   of `deleted`.
-//! * **Expiring** — [`advance_due_archives`] performs
+//! * **Expiring**, [`advance_due_archives`] performs
 //!   `statutory_expired → deleted` and removes the source record only for
 //!   tables the platform owns and only after the statutory expiry has passed.
 
@@ -95,7 +95,7 @@ pub struct ArchiveRecordInput {
     pub disclosure: serde_json::Value,
 }
 
-/// sha256 of a subject email — the archive never stores a second plaintext
+/// sha256 of a subject email, the archive never stores a second plaintext
 /// copy of the erased address.
 pub fn subject_email_hash(email: &str) -> String {
     let mut hasher = Sha256::new();
@@ -229,7 +229,7 @@ pub struct ArchiveSweepOutcome {
     pub deleted: u64,
     /// Source records actually removed (invoices past their statutory expiry).
     pub source_records_deleted: u64,
-    /// Rows past expiry whose source table is not owned/purgeable — left in
+    /// Rows past expiry whose source table is not owned/purgeable, left in
     /// `statutory_expired` and reported.
     pub stuck_unpurgeable: u64,
 }
@@ -264,7 +264,7 @@ async fn transition_archive_rows(
 /// Advance every due archive row one step, deleting source records only after
 /// statutory expiry and only for [`PURGEABLE_SOURCE_TABLES`].
 ///
-/// P3 (perf, audit): the pre-fix sweep was per-row in every phase — each
+/// P3 (perf, audit): the pre-fix sweep was per-row in every phase, each
 /// `legally_restricted → statutory_expired` move ran get + UPDATE + get, each
 /// source purge ran `DELETE … WHERE id::text = $1` (a `::text` cast on the
 /// source primary key ⇒ sequential scan) followed by another three-statement
@@ -279,7 +279,7 @@ async fn transition_archive_rows(
 /// DELETE actually removed (a source record already gone still completes the
 /// transition, exactly as before), and a row whose source record cannot be
 /// purged stays in `statutory_expired` and is accounted per row instead of
-/// failing the whole sweep — the archive is the legal audit trail, so a failed
+/// failing the whole sweep, the archive is the legal audit trail, so a failed
 /// delete must leave the state machine exactly where it was.
 pub async fn advance_due_archives(
     db: &PgPool,
@@ -312,7 +312,7 @@ pub async fn advance_due_archives(
             // Per-row fallback: one poison row must not cost the whole
             // window, and every row is accounted individually (the pre-fix
             // shape).
-            warn!(error = %e, "archive expiry: set-based transition failed — falling back to per-row");
+            warn!(error = %e, "archive expiry: set-based transition failed, falling back to per-row");
             let ids: Vec<String> = sqlx::query_scalar(
                 "SELECT id FROM legal_retention_archive
                   WHERE state = 'legally_restricted' AND statutory_expiry_at <= $1
@@ -367,7 +367,7 @@ pub async fn advance_due_archives(
         // Source keys are typed: a `::text` comparison (the pre-fix shape)
         // both defeats the primary-key index and silently rewrites the
         // comparison. Ids that cannot be a UUID primary key can therefore
-        // never match a source row — they are accounted per row here rather
+        // never match a source row, they are accounted per row here rather
         // than aborting the whole batch with a cast error.
         let mut parsed: Vec<(Uuid, String)> = Vec::with_capacity(pairs.len());
         for (archive_id, source_record_id) in &pairs {
@@ -378,7 +378,7 @@ pub async fn advance_due_archives(
                     source_table = table,
                     source_record_id = %source_record_id,
                     error = %e,
-                    "archive purge: source record id is not a UUID — row stays in statutory_expired"
+                    "archive purge: source record id is not a UUID, row stays in statutory_expired"
                 ),
             }
         }
@@ -419,7 +419,7 @@ pub async fn advance_due_archives(
                 warn!(
                     error = %e,
                     source_table = table,
-                    "archive purge: set-based source delete failed — falling back to per-row"
+                    "archive purge: set-based source delete failed, falling back to per-row"
                 );
                 for (uuid, archive_id) in &parsed {
                     let deleted = match sqlx::query(&format!("DELETE FROM {table} WHERE id = $1"))
@@ -433,7 +433,7 @@ pub async fn advance_due_archives(
                                 archive_id = %archive_id,
                                 source_table = table,
                                 error = %e,
-                                "archive purge: source delete failed — row stays in statutory_expired"
+                                "archive purge: source delete failed, row stays in statutory_expired"
                             );
                             continue;
                         }

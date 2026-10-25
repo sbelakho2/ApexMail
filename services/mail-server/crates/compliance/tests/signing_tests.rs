@@ -1345,7 +1345,7 @@ fn check_verdict_helpers_behave() {
 }
 
 /// A TSA stand-in with fully controlled HTTP status, content type and body
-/// size — drives the transport's response-shape guard arms.
+/// size, drives the transport's response-shape guard arms.
 async fn spawn_raw_tsa_server(status: u16, content_type: String, body: Vec<u8>) -> String {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -1421,7 +1421,7 @@ async fn transport_rejects_a_wrong_content_type() {
 }
 
 /// A 200 timestamp-reply larger than the configured cap maps to
-/// `ResponseTooLarge` — never an unbounded read.
+/// `ResponseTooLarge`, never an unbounded read.
 #[tokio::test]
 async fn transport_rejects_an_oversized_response() {
     let url =

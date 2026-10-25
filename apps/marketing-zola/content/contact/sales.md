@@ -18,7 +18,7 @@ For enterprise buying, security review, or private-cloud planning, complete the 
      before that flow runs they must not render as if a submission happened. -->
 <div id="enquiry-submitted" class="apex-notice apex-notice--ok" role="status" hidden>
   <b>Received</b>
-  <p>Thank you — your submission was received. Our team reviews submissions and responds within 2 business days.</p>
+  <p>Thank you, your submission was received. Our team reviews submissions and responds within 2 business days.</p>
 </div>
 <div id="enquiry-error" class="apex-notice apex-notice--fail" role="alert" hidden>
   <b>Not accepted</b>
@@ -89,19 +89,19 @@ For enterprise buying, security review, or private-cloud planning, complete the 
     <div class="space-y-3 mt-3">
       <label class="apex-check">
         <input type="radio" class="apex-checkbox apex-input" name="deployment_preference" value="shared" checked />
-        <span><strong>Shared Cloud</strong> — Multi-tenant EU infrastructure</span>
+        <span><strong>Shared Cloud</strong>, Multi-tenant EU infrastructure</span>
       </label>
       <label class="apex-check">
         <input type="radio" class="apex-checkbox apex-input" name="deployment_preference" value="dedicated" />
-        <span><strong>Dedicated Tenant</strong> — Single-tenant isolated infrastructure</span>
+        <span><strong>Dedicated Tenant</strong>, Single-tenant isolated infrastructure</span>
       </label>
       <label class="apex-check">
         <input type="radio" class="apex-checkbox apex-input" name="deployment_preference" value="byoc" />
-        <span><strong>BYOC / Private Deployment</strong> — Managed deployment in your cloud account</span>
+        <span><strong>BYOC / Private Deployment</strong>, Managed deployment in your cloud account</span>
       </label>
       <label class="apex-check">
         <input type="radio" class="apex-checkbox apex-input" name="deployment_preference" value="not_sure" />
-        <span><strong>Not sure yet</strong> — Need guidance on the best model</span>
+        <span><strong>Not sure yet</strong>, Need guidance on the best model</span>
       </label>
     </div>
   </fieldset>
@@ -145,7 +145,7 @@ For enterprise buying, security review, or private-cloud planning, complete the 
       <option value="30_days">Within 30 days</option>
       <option value="90_days">Within 90 days</option>
       <option value="6_months">Within 6 months</option>
-      <option value="exploring">Exploring options — no fixed timeline</option>
+      <option value="exploring">Exploring options, no fixed timeline</option>
     </select>
     </div>
   </div>
@@ -155,8 +155,8 @@ For enterprise buying, security review, or private-cloud planning, complete the 
     <div class="apex-select-wrap">
       <select id="security-review" name="security_review_needs">
       <option value="" selected>Select review level</option>
-        <option value="standard">Standard — security questionnaire answered case by case from current review material (no standardized SIG/CAIQ/HECVAT pack is a product entitlement)</option>
-      <option value="detailed">Detailed — Custom security questionnaire required</option>
+        <option value="standard">Standard, security questionnaire answered case by case from current review material (no standardized SIG/CAIQ/HECVAT pack is a product entitlement)</option>
+      <option value="detailed">Detailed, Custom security questionnaire required</option>
       <option value="pen_test">Penetration test report required</option>
       <option value="on_site">On-site audit or architecture review required</option>
       <option value="none">No security review required at this stage</option>

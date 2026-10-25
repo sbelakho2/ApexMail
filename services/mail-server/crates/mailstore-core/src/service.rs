@@ -44,12 +44,12 @@ use mail_proto::generated::{
 /// Mailstore gRPC service
 pub struct MailstoreServiceImpl {
     storage: Arc<MessageStorage>,
-    /// O-4.2:Per-account rate limiters — 1000 requests/second burst each.
+    /// O-4.2:Per-account rate limiters, 1000 requests/second burst each.
     ///
     /// Keyed per account (M): the previous single global limiter let one hot
     /// account exhaust the entire budget and starve every other tenant.
     /// Limiters are tracked in a bounded map; when the cap is reached the
-    /// OLDEST HALF of the entries is evicted by last-seen (F13) — the old
+    /// OLDEST HALF of the entries is evicted by last-seen (F13), the old
     /// `map.clear()` reset every legitimate account's budget the moment a
     /// key spray (e.g. pre-auth garbage account ids) filled the map.
     rate_limiters: std::sync::Mutex<HashMap<String, TrackedLimiter>>,
@@ -100,7 +100,7 @@ const MAX_TRACKED_RATE_KEYS: usize = 10_000;
 //
 //   * a per-mailbox-ROW memo keeps the value stable for the process lifetime
 //     of that row (a mailbox must not change UIDVALIDITY mid-session);
-//   * every mint is `max(previous mint + 1, ns timestamp)` — strictly greater
+//   * every mint is `max(previous mint + 1, ns timestamp)`, strictly greater
 //     than anything served before, so ties on the timestamp (or a same-second
 //     recreation) still yield fresh, increasing values;
 //   * a recreated mailbox is a NEW row id, and RENAME creates a new row for
@@ -173,7 +173,7 @@ fn sha256_hex(bytes: &[u8]) -> String {
 // encoded as `header:<field>\x01<value>`. The separator is the first \x01
 // (a control character clients cannot inject into the FIELD position), and
 // the convention only triggers when BOTH the prefix and the separator are
-// present — a genuine fulltext query that happens to start with "header:"
+// present, a genuine fulltext query that happens to start with "header:"
 // still searches as fulltext. The imap-server crate builds these queries
 // with the same convention (see its `header_search_query`).
 
@@ -198,7 +198,7 @@ pub fn parse_header_query(query: &str) -> Option<(&str, &str)> {
 //
 // The schema has boolean columns for \Seen/\Flagged/\Deleted/\Spam but none
 // for \Answered/\Draft or custom keywords. The `labels` TEXT[] column is
-// unused elsewhere, so those flags are persisted there — no migration
+// unused elsewhere, so those flags are persisted there, no migration
 // required, and they round-trip through STORE/FETCH FLAGS.
 
 const LABEL_ANSWERED: &str = "\\Answered";
@@ -257,7 +257,7 @@ struct ParsedMessageMetadata {
 /// Stored `from_address` when the message carries no usable From addr-spec
 /// (e.g. an RFC 3464 DSN's `From: <>`, an unparseable header, or a
 /// malformed body). RFC 2606 reserves `.invalid`, so the sentinel can never
-/// collide with a real mailbox — while still satisfying
+/// collide with a real mailbox, while still satisfying
 /// `chk_mail_messages_from_address`
 /// (`^[^@\s]+@[^@\s]+\.[^@\s]+$`), which the previous `unknown@localhost`
 /// default violated (no dot in the domain), making every such message fail
@@ -267,7 +267,7 @@ const UNPARSEABLE_FROM_ADDRESS: &str = "unknown@unknown.invalid";
 
 /// Mirror of the `mail_messages.from_address` CHECK constraint. Addresses
 /// that do not satisfy it (empty, `<>`, a domain without a dot, …) must be
-/// replaced by [`UNPARSEABLE_FROM_ADDRESS`] before the INSERT — otherwise
+/// replaced by [`UNPARSEABLE_FROM_ADDRESS`] before the INSERT, otherwise
 /// the whole delivery fails permanently.
 fn is_storable_from_address(address: &str) -> bool {
     if address.is_empty() || address.len() > 320 || address.chars().any(char::is_whitespace) {
@@ -477,7 +477,7 @@ impl MailstoreServiceImpl {
     }
 
     /// Drop the cached mailbox list for an account (L14(a) invalidation on
-    /// create/delete — RENAME is create+move+delete through these RPCs).
+    /// create/delete, RENAME is create+move+delete through these RPCs).
     fn invalidate_mailbox_cache(&self, account_id: &Uuid) {
         self.mailbox_cache.lock().unwrap().remove(account_id);
     }
@@ -506,7 +506,7 @@ impl MailstoreServiceImpl {
         let limiter = {
             let mut map = self.rate_limiters.lock().unwrap();
             if map.len() >= MAX_TRACKED_RATE_KEYS && !map.contains_key(key) {
-                // F13: partial eviction — drop the oldest HALF by last-seen
+                // F13: partial eviction, drop the oldest HALF by last-seen
                 // instead of clearing the map. A pre-auth key spray now only
                 // costs the quietest half of the keys their burst budget;
                 // active accounts keep their limiters (and the attacker's own
@@ -654,7 +654,7 @@ impl MailstoreServiceImpl {
     }
 
     /// L14(a): resolve a mailbox name to its id via the per-account cache.
-    /// On a cache hit neither `get_account` nor `list_mailboxes` runs — the
+    /// On a cache hit neither `get_account` nor `list_mailboxes` runs, the
     /// entry proves the account existed and carries the name→id mapping.
     /// On a miss the account existence check and the full mailbox list are
     /// loaded once and cached for the TTL.
@@ -873,15 +873,15 @@ impl MailstoreService for MailstoreServiceImpl {
 
         let limit = Self::clamp_limit(if req.limit > 0 { req.limit as i64 } else { 100 }, 100_000);
         // UID bounds are pushed into SQL so the storage LIMIT applies AFTER
-        // the bound — the previous post-filter truncated pages lossily for
+        // the bound, the previous post-filter truncated pages lossily for
         // mailboxes larger than the limit (breaking exact UID paging).
         //
         // F1: `is_deleted` stays `None`, so the listing INCLUDES soft-deleted
-        // (\Deleted) messages — the IMAP mailbox view must keep them visible
+        // (\Deleted) messages, the IMAP mailbox view must keep them visible
         // (and `SEARCH DELETED` findable) until EXPUNGE removes them. The only
         // consumer of this RPC today is the IMAP server's view construction.
         //
-        // F2: metadata-only read — no body columns are selected or decrypted;
+        // F2: metadata-only read, no body columns are selected or decrypted;
         // bodies are served by `get_message` point reads.
         let messages = self
             .storage
@@ -1013,7 +1013,7 @@ impl MailstoreService for MailstoreServiceImpl {
 
         let update_flags = req.flags.unwrap_or_default();
 
-        // F: the whole operation is one SQL statement — the boolean flags
+        // F: the whole operation is one SQL statement, the boolean flags
         // and the label-backed flags merge inside the database, so two
         // concurrent set_flags calls (e.g. adding different flags) both
         // persist instead of the second clobbering the first's read.
@@ -1043,7 +1043,7 @@ impl MailstoreService for MailstoreServiceImpl {
         );
 
         // UNSEEN (and the \Deleted flag that later feeds EXISTS) changed, so
-        // the cached mailbox snapshot is stale — the same reason create and
+        // the cached mailbox snapshot is stale, the same reason create and
         // delete invalidate it.
         self.invalidate_mailbox_cache(&account_id);
 
@@ -1121,7 +1121,7 @@ impl MailstoreService for MailstoreServiceImpl {
             .await
             .map_err(|e| Status::internal(format!("Failed to load messages: {}", e)))?;
 
-        // L10: one transaction for the whole batch — a failure at message k
+        // L10: one transaction for the whole batch, a failure at message k
         // rolls back the moves of 1..k-1 instead of leaving a partial move.
         let ids: Vec<Uuid> = messages.iter().map(|m| m.id).collect();
         let new_uids = self
@@ -1185,14 +1185,14 @@ impl MailstoreService for MailstoreServiceImpl {
                 cloned.updated_at = now;
                 // Migration 102: a user-initiated COPY must materialize a NEW
                 // row (fresh UID for COPYUID) even when the destination already
-                // holds this Message-ID — previously it aliased the existing
+                // holds this Message-ID, previously it aliased the existing
                 // row and "vanished" when that row was expunged.
                 cloned.dedup_exempt = true;
                 cloned
             })
             .collect();
 
-        // L10: one transaction for the whole batch — a failure at message k
+        // L10: one transaction for the whole batch, a failure at message k
         // (e.g. the account quota exhausts mid-copy) rolls back the copies of
         // 1..k-1 instead of returning a partial COPY.
         let stored = self
@@ -1730,7 +1730,7 @@ mod tests {
         assert!(v1 >= 1);
 
         // A recreated mailbox (new row) created in the SAME instant must
-        // still mint a strictly greater value — the old second-granularity
+        // still mint a strictly greater value, the old second-granularity
         // derivation collided here.
         let v2 = mint_uidvalidity(row2, t0);
         assert!(v2 > v1, "recreation must yield a strictly greater value");
@@ -1786,7 +1786,7 @@ mod tests {
         let metadata = parse_message_metadata(&[0xff, 0xfe, 0xfd]);
 
         // The sentinel must satisfy chk_mail_messages_from_address (a dotted
-        // domain) — `unknown@localhost` did not, so the INSERT failed and
+        // domain), `unknown@localhost` did not, so the INSERT failed and
         // the whole delivery was lost after SMTP acceptance (dogfood-2).
         assert_eq!(metadata.from_address, UNPARSEABLE_FROM_ADDRESS);
         assert!(is_storable_from_address(UNPARSEABLE_FROM_ADDRESS));
@@ -1799,7 +1799,7 @@ mod tests {
     /// addr-spec is missing/unparseable was accepted by the MTA and then
     /// failed mailstore storage with
     /// `new row for relation "mail_messages_2026_q4" violates check
-    /// constraint "chk_mail_messages_from_address"` — retried until the
+    /// constraint "chk_mail_messages_from_address"`, retried until the
     /// inbound ladder gave up, with a null reverse-path so no DSN could ever
     /// report it. The parsed metadata must always carry a storable address.
     #[test]
@@ -1856,7 +1856,7 @@ mod tests {
 
         // The hot account burns its ENTIRE per-second burst (1000 req/s).
         // On a loaded CI host the loop can take >1s, so the window refills
-        // mid-burn — keep spending (bounded) until the limiter engages
+        // mid-burn, keep spending (bounded) until the limiter engages
         // instead of asserting on exactly the 1001st request.
         let mut limited = false;
         for _ in 0..10_000 {
@@ -1867,7 +1867,7 @@ mod tests {
         }
         assert!(limited, "hot account must hit its own limit");
 
-        // The other account's budget is untouched — the old global limiter
+        // The other account's budget is untouched, the old global limiter
         // starved it here.
         for _ in 0..100 {
             assert!(svc.check_rate_limit(quiet).is_ok());
@@ -1907,7 +1907,7 @@ mod tests {
 
     #[test]
     fn message_meta_exposes_label_backed_flags() {
-        // STORE +FLAGS (\\Answered \\Draft) then FETCH FLAGS — the meta the
+        // STORE +FLAGS (\\Answered \\Draft) then FETCH FLAGS, the meta the
         // FETCH path serializes must carry the label-backed flags.
         let message = StoredMessage {
             id: Uuid::new_v4(),
@@ -2039,7 +2039,7 @@ mod tests {
             "the COPYUID must resolve to a real message in the destination"
         );
 
-        // COPY back into the SOURCE mailbox — a duplicate Message-ID in the
+        // COPY back into the SOURCE mailbox, a duplicate Message-ID in the
         // destination. The old behavior aliased the existing row (same UID,
         // no new row); with dedup_exempt the copy must be a fresh UID that
         // coexists with the original.
@@ -2221,7 +2221,7 @@ mod tests {
 
     /// Dogfood-2 P1 (accepted-then-lost mail), DB-backed: a message whose
     /// From addr-spec is missing or unparseable (the DSN shape
-    /// `From: Mailer Daemon <>` — and any message with no From at all) was
+    /// `From: Mailer Daemon <>`, and any message with no From at all) was
     /// accepted by the MTA with `250` and then failed EVERY delivery attempt
     /// with
     /// `new row for relation "mail_messages_2026_q4" violates check
@@ -2276,7 +2276,7 @@ mod tests {
             .into_inner();
         assert!(stored.uid > 0);
 
-        // The persisted column — the one the CHECK guards — must carry the
+        // The persisted column, the one the CHECK guards, must carry the
         // placeholder (this is the exact INSERT that used to fail).
         let stored_from: String = sqlx::query_scalar(
             "SELECT from_address FROM mail_messages WHERE account_id = $1 AND uid = $2",
@@ -2305,12 +2305,12 @@ mod tests {
     /// PINNED + adversarially proven (2026-09 privilege-boundary audit):
     /// mailstore-core is ACCOUNT-addressed by design. Every RPC names its
     /// `account_id` selector explicitly and every query filters by that
-    /// account — there is no tenant dimension in the storage schema
+    /// account, there is no tenant dimension in the storage schema
     /// (`mail_accounts`/`mail_mailboxes`/`mail_messages` carry no tenant_id),
     /// so there is no redundant tenant identity to bind: the shared internal
     /// service token IS the trust boundary, and the IMAP/API layers above
     /// mailstore resolve the authenticated user's account. What MUST hold —
-    /// and is pinned here — is that the account selector FAILS CLOSED: an
+    /// and is pinned here, is that the account selector FAILS CLOSED: an
     /// unknown or malformed account never degrades into an aggregate of all
     /// accounts, and account B can never observe account A's stored mail
     /// through same-named mailboxes or guessed UIDs.
@@ -2328,7 +2328,7 @@ mod tests {
         }
         let svc = MailstoreServiceImpl::new(storage);
 
-        // Two accounts, same mailbox name — the collision case a naive
+        // Two accounts, same mailbox name, the collision case a naive
         // name-only lookup would confuse.
         let account_a = svc
             .storage
@@ -2935,7 +2935,7 @@ mod tests {
             .await
             .unwrap();
 
-        // COPY both: must fail (quota) — and roll back the FIRST copy too.
+        // COPY both: must fail (quota), and roll back the FIRST copy too.
         let err = svc
             .copy_message(Request::new(CopyMessageRequest {
                 account_id: account.id.to_string(),
@@ -3812,7 +3812,7 @@ mod tests {
 
         // COPY: distinct row + a UID allocated in the DESTINATION's own UID
         // space. (UIDs are per-mailbox, so comparing the copy's UID against
-        // the source's would be wrong — an empty Archive legitimately starts
+        // the source's would be wrong, an empty Archive legitimately starts
         // at 1, which is exactly what the earlier version of this test
         // mis-asserted.)
         let archive_uidnext_before = svc

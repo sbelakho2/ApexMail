@@ -228,7 +228,7 @@ const MAX_LOG_INGEST_MESSAGE_CHARS: usize = 10_000;
 ///
 /// No `deny_unknown_fields`: internal producers may carry extra fields;
 /// unknown ones are ignored so producer evolution never breaks ingestion.
-/// The level vocabulary is validated server-side — an unknown level rejects
+/// The level vocabulary is validated server-side, an unknown level rejects
 /// the whole batch rather than silently dropping entries.
 #[derive(Debug, Deserialize)]
 struct LogIngestEntry {
@@ -277,7 +277,7 @@ struct DetailedHealthResponse {
 ///
 /// Renders the global `metrics` crate registry (Redis monitor gauges) plus
 /// the in-memory [`MetricsCollector`] (self-monitoring gauges, counters,
-/// histograms). Unauthenticated — Prometheus scrapes it on the internal
+/// histograms). Unauthenticated, Prometheus scrapes it on the internal
 /// monitoring network.
 async fn metrics(State(state): State<AppState>) -> impl IntoResponse {
     let mut body = String::new();
@@ -324,7 +324,7 @@ async fn logs_query(
     )
 }
 
-/// POST /logs — ingest structured log lines from internal services.
+/// POST /logs, ingest structured log lines from internal services.
 ///
 /// This is the producer for the `observability_log_error_rate` metric and
 /// therefore for the `high_log_error_rate` Critical alert rule: without an
@@ -445,16 +445,16 @@ fn system_alerts_severity(labels: &HashMap<String, String>) -> &'static str {
 /// stop counting toward unacknowledged risk in the CP dashboard.
 ///
 /// One UPDATE for every resolved alert and one UNNEST INSERT for every
-/// firing alert — the payload of a webhook is processed in two round trips
+/// firing alert, the payload of a webhook is processed in two round trips
 /// instead of one statement per alert.
 async fn persist_alerts_to_system_alerts(
     pool: &Option<sqlx::PgPool>,
     alerts: &[AlertmanagerAlert],
 ) {
     let Some(db) = pool else {
-        // No pool configured — the CP surfaces stay empty, logged once per
+        // No pool configured, the CP surfaces stay empty, logged once per
         // ingest so operators notice the missing DATABASE_URL wiring.
-        tracing::debug!("no database pool attached — skipping system_alerts persistence");
+        tracing::debug!("no database pool attached, skipping system_alerts persistence");
         return;
     };
     if alerts.is_empty() {
@@ -1014,7 +1014,7 @@ mod tests {
         labels.insert("severity".to_string(), "warning".to_string());
         assert_eq!(system_alerts_severity(&labels), "warning");
 
-        // Unknown labels degrade to 'info' — the column CHECK only allows
+        // Unknown labels degrade to 'info', the column CHECK only allows
         // info/warning/critical.
         labels.insert("severity".to_string(), "catastrophic".to_string());
         assert_eq!(system_alerts_severity(&labels), "info");
@@ -1025,7 +1025,7 @@ mod tests {
 
     #[tokio::test]
     async fn persist_alerts_without_pool_is_a_no_op_not_an_error() {
-        // No DB pool attached (deployment without DATABASE wiring) — the
+        // No DB pool attached (deployment without DATABASE wiring), the
         // ingest path must still succeed for every alert.
         let alert = AlertmanagerAlert {
             status: "firing".into(),
@@ -1124,7 +1124,7 @@ mod tests {
     /// system-scoped, and the system_alerts persistence writes platform
     /// rows. The all-entries `/logs` view is therefore a deliberate
     /// fleet-level operations aggregate (like compliance's /risk/stats), not
-    /// an absent-tenant-filter fallback — there is no tenant to filter by.
+    /// an absent-tenant-filter fallback, there is no tenant to filter by.
     /// What IS pinned here: the service filter keeps producers isolated, an
     /// ingested `tenant_id` key cannot smuggle a tenant dimension in
     /// (unknown fields are ignored, nothing tenant-shaped is stored), and
@@ -1407,7 +1407,7 @@ mod tests {
     // │ Postgres down │ POST /logs     │ 202 (in-memory aggregation only)
     // │ Redis down    │ /health/details│ "degraded" + redis_connected=false,
     // │               │                │ bounded by check_redis's 2 s timeout
-    // │ both down     │ /health,/metrics│ still 200 — metrics keep serving
+    // │ both down     │ /health,/metrics│ still 200, metrics keep serving
     //
     // The service has NO ClickHouse dependency (OLAP ingest lives in the
     // tracking service), so there is no ClickHouse arm for this crate.
@@ -1528,7 +1528,7 @@ mod tests {
     }
 
     /// Redis down × /health/details: honest degradation, bounded by
-    /// check_redis's 2 s timeout — never a hang, never a fake "ok".
+    /// check_redis's 2 s timeout, never a hang, never a fake "ok".
     #[tokio::test]
     async fn outage_redis_down_health_details_reports_degraded_bounded() {
         let state = outaged_state(None, Some(dead_redis_pool()));
@@ -1546,7 +1546,7 @@ mod tests {
     }
 
     /// Both dependencies down: liveness and the metrics surface keep
-    /// serving — an outage must never take observability itself down.
+    /// serving, an outage must never take observability itself down.
     #[tokio::test]
     async fn outage_both_down_health_and_metrics_keep_serving() {
         let state = outaged_state(Some(dead_pg_pool()), Some(dead_redis_pool()));
@@ -1697,8 +1697,8 @@ CREATE UNIQUE INDEX idx_system_alerts_source_fingerprint
     }
 
     /// A webhook with one resolved and three firing alerts is persisted in
-    /// TWO statements (one UPDATE, one UNNEST INSERT) — the pre-fix path
-    /// issued one statement per alert — while every row/fallback/severity
+    /// TWO statements (one UPDATE, one UNNEST INSERT), the pre-fix path
+    /// issued one statement per alert, while every row/fallback/severity
     /// rule the per-alert path applied is preserved.
     #[tokio::test]
     async fn alertmanager_persistence_batches_statements_and_preserves_rows() {

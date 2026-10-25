@@ -29,13 +29,13 @@ pub struct AppStateInner {
     pub redis: RedisPool,
     pub config: Config,
     pub http_client: Client,
-    /// SES provider — used for shared-pool sending only (no dedicated IPs).
+    /// SES provider, used for shared-pool sending only (no dedicated IPs).
     pub ses_provider: SesIpProvider,
     /// Dedicated IP provider (Hetzner Cloud). `None` if HETZNER_API_TOKEN is unset.
     pub ip_provider: Option<DedicatedIpProvider>,
     pub ddos_protector: Arc<DdosProtector>,
     /// WAF screening engine (audit F-WIRING-1 wiring). `None` when the WAF
-    /// is disabled by config — the middleware is then a pass-through.
+    /// is disabled by config, the middleware is then a pass-through.
     pub waf_engine: Option<Arc<waf_engine::WafEngine>>,
     /// Pre-built grader state (engine + config + db). `None` if grader is disabled.
     pub grader_state: Option<Arc<GraderState>>,

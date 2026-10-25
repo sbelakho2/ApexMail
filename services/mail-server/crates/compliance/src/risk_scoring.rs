@@ -1,4 +1,4 @@
-//! Risk scoring engine — assesses tenant risk profiles using 10 weighted
+//! Risk scoring engine, assesses tenant risk profiles using 10 weighted
 //! factors computed from parallel DB queries over canonical sources (the
 //! `events` table for complaint/unsubscribe/engagement signals, billing
 //! dunning for payment failures, scan_results for phishing/violations).
@@ -45,7 +45,7 @@ struct TenantMetrics {
     click_rate: f64,
     /// Abuse report count (all time).
     abuse_reports: i64,
-    /// Content violations — scans the content scanner blocked (all time).
+    /// Content violations, scans the content scanner blocked (all time).
     content_violations: i64,
     /// Phishing detections (all time).
     phishing_detections: i64,
@@ -245,7 +245,7 @@ impl RiskScoringEngine {
         .fetch_one(&self.db);
 
         // F57: payment failures read the billing dunning record (one per
-        // tenant; migrations 093/118) — `failed_payment_count` is the
+        // tenant; migrations 093/118), `failed_payment_count` is the
         // canonical failure counter maintained by billing-service. The
         // 90-day recency guard mirrors the original payment-history window.
         let payments_fut = sqlx::query_as::<_, (Option<i64>,)>(PAYMENT_FAILURES_SQL)
@@ -279,7 +279,7 @@ impl RiskScoringEngine {
                 .fetch_one(&self.db);
 
         // F57: content violations are the scans this crate's own content
-        // scanner blocked (scan_results, migration 038) — the nonexistent
+        // scanner blocked (scan_results, migration 038), the nonexistent
         // content_violations table had no producer.
         let violations_fut = sqlx::query_as::<_, (i64,)>(CONTENT_VIOLATIONS_SQL)
             .bind(tenant_id)
@@ -539,9 +539,9 @@ impl RiskScoringEngine {
 //
 // Complaint, unsubscribe and engagement signals all live in the canonical
 // `events` table (migration 075). Producers:
-//   - worker-processors (email/processor.rs)  — per-message lifecycle events
-//   - tracking-service (processor.rs)         — opened / clicked / unsubscribed
-//   - api-server ses_notifications.rs         — complained (one row per FBL hit)
+//   - worker-processors (email/processor.rs) , per-message lifecycle events
+//   - tracking-service (processor.rs)        , opened / clicked / unsubscribed
+//   - api-server ses_notifications.rs        , complained (one row per FBL hit)
 // Webhook subscriptions use the `message.*` names for the same signals
 // (migration 128); the `events` table stores the short forms below.
 
@@ -587,7 +587,7 @@ pub const CANONICAL_EVENT_COUNTS_SQL: &str = r#"
 
 /// Collect [`CanonicalEventCounts`] for one tenant. Errors propagate as
 /// `sqlx::Error` so `collect_metrics` can join it with the other required
-/// sources and map failures uniformly — the complaint/unsubscribe source
+/// sources and map failures uniformly, the complaint/unsubscribe source
 /// is a required risk input, never silently zero.
 pub async fn canonical_event_counts(
     db: &PgPool,
@@ -619,7 +619,7 @@ pub fn percent_of(part: i64, total: i64) -> f64 {
 }
 
 /// Map canonical event counts onto the rate fields of [`TenantMetrics`].
-/// Denominator is canonical delivered events in the window — the same
+/// Denominator is canonical delivered events in the window, the same
 /// complaint/engagement rate definition api-server analytics reports.
 fn apply_event_metrics(m: &mut TenantMetrics, ev: &CanonicalEventCounts) {
     m.spam_rate = percent_of(ev.complained, ev.delivered);
@@ -1262,7 +1262,7 @@ mod tests {
     }
 
     // ══════════════════════════════════════════════════════════════
-    // 6. F57 — canonical event metrics adapter
+    // 6. F57, canonical event metrics adapter
     // ══════════════════════════════════════════════════════════════
 
     #[test]
@@ -1297,7 +1297,7 @@ mod tests {
         // Tenant-scoped and windowed via bound parameters.
         assert!(CANONICAL_EVENT_COUNTS_SQL.contains("WHERE tenant_id = $1"));
         assert!(CANONICAL_EVENT_COUNTS_SQL.contains("make_interval(days => $2::int)"));
-        // Reads only the canonical events table — no phantom tables.
+        // Reads only the canonical events table, no phantom tables.
         assert!(CANONICAL_EVENT_COUNTS_SQL.contains("FROM events"));
     }
 
@@ -1403,7 +1403,7 @@ mod tests {
 
     #[test]
     fn blocklist_factor_is_skipped_when_source_unavailable() {
-        // F57: no tenant-scoped blocklist source exists — the factor must
+        // F57: no tenant-scoped blocklist source exists, the factor must
         // be explicitly skipped even if a stale flag were somehow set.
         let engine = make_engine();
         let mut m = TenantMetrics::default();
@@ -1698,7 +1698,7 @@ mod tests {
 
     #[test]
     fn test_empty_tenants_default_risk() {
-        // Empty metrics (no sending history at all) — default/zero risk factors
+        // Empty metrics (no sending history at all), default/zero risk factors
         let engine = make_engine();
         let m = TenantMetrics::default();
         let factors = engine.compute_factors(&m);

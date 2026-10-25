@@ -601,7 +601,7 @@ pub fn compare_with_benchmarks(
 
 /// Estimate percentile ranking based on known quartile values
 ///
-/// Fix J-9: the result is clamped to 0..=100 — extrapolating past the p90
+/// Fix J-9: the result is clamped to 0..=100, extrapolating past the p90
 /// anchor (e.g. a value twice the p90) previously produced "137th percentile"
 /// rankings.
 pub fn estimate_percentile(value: f64, p25: f64, median: f64, p75: f64, p90: f64) -> f64 {

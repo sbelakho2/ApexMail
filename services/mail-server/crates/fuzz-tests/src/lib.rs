@@ -53,7 +53,7 @@ pub fn fuzz_rng() -> StdRng {
     StdRng::seed_from_u64(fuzz_seed())
 }
 
-/// splitmix64 — the standard bijective 64-bit mixer (Steele et al.); used
+/// splitmix64, the standard bijective 64-bit mixer (Steele et al.); used
 /// to spread the `(seed, nonce)` pair evenly across the 64-bit seed space.
 fn splitmix64(z: u64) -> u64 {
     let mut z = z.wrapping_add(0x9E37_79B9_7F4A_7C15);
@@ -64,12 +64,12 @@ fn splitmix64(z: u64) -> u64 {
 
 /// Seed for the Nth generator call of this process: `splitmix(seed, N)`.
 ///
-/// A fresh generator per call must NOT restart at the same seed — two
+/// A fresh generator per call must NOT restart at the same seed, two
 /// consecutive `random_bytes(32)` calls would otherwise return identical
 /// buffers. The per-call nonce makes every call a distinct deterministic
 /// stream, so the whole process replay is reproducible from `FUZZ_SEED`
 /// alone. (Under parallel `cargo test`, thread interleaving decides which
-/// test consumes which nonce; CI runs nextest — one test per process —
+/// test consumes which nonce; CI runs nextest, one test per process —
 /// where each test's input stream is fully deterministic.)
 fn next_stream_seed() -> u64 {
     static NONCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -127,7 +127,7 @@ pub fn random_ascii(len: usize) -> String {
 /// excluded because they are invalid in Rust's `char` type, and other C0/C1
 /// control characters (0x7F DEL, 0x80–0x9F) are filtered out by the range
 /// start at 0x0020 (space) combined with the `!c.is_control()` guard.
-/// This is a deliberate choice for fuzz coverage — **no change needed** per
+/// This is a deliberate choice for fuzz coverage, **no change needed** per
 /// the audit recommendation.
 pub fn random_unicode(len: usize) -> String {
     let mut rng = stream_rng();

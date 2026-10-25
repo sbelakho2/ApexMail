@@ -13,7 +13,7 @@
 // ===========================================================================
 
 /// Verify the REAL `apexmail-rate-limiter` primitives: the previous version
-/// of this module incremented a local `u64` and a local `HashMap` — it never
+/// of this module incremented a local `u64` and a local `HashMap`, it never
 /// touched the crate its header claimed to test. Every test below drives the
 /// production types (`SlidingWindowCounter`, `KeyedRateLimiter`,
 /// `GovernorLimiter`).
@@ -47,7 +47,7 @@ mod rate_limiter_wiring {
         let eleventh = counter.check_and_increment();
         assert!(
             eleventh.is_denied(),
-            "the 11th request must be denied — an always-allow limiter is not wired"
+            "the 11th request must be denied, an always-allow limiter is not wired"
         );
         // A denied request must not consume budget.
         assert_eq!(counter.current_count(), 10, "denials must not count");
@@ -154,7 +154,7 @@ mod rate_limiter_wiring {
         let tiny = RateLimitConfig::new(5).with_burst(0);
         assert!(
             tiny.effective_burst().get() >= 1,
-            "effective_burst must never be zero — a zero bucket denies everything"
+            "effective_burst must never be zero, a zero bucket denies everything"
         );
     }
 }

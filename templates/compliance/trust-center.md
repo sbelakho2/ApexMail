@@ -72,17 +72,17 @@ ApexMail provides transactional email infrastructure with EU/EEA-oriented deploy
 - **[Implemented in platform]** Static analysis: SAST via Semgrep and Clippy (Rust) runs in the self-hosted pipeline on every run and fails closed on the deploy host. Rules cover OWASP Top 10 classes, injection, hardcoded secrets, and unsafe patterns; a SAST failure blocks the pipeline.
 - **[Implemented in platform]** Secret scanning: Gitleaks over the full git history plus Trivy filesystem secret scanning run in the pipeline's security stage. Pre-commit hooks are available; detected secrets are triaged in-tree or rotated.
 - **[Implemented in platform]** Dependency vulnerability scanning: cargo-audit (with a reviewed advisory ignore list), cargo-deny (advisories, bans, sources, licenses) and a Trivy CRITICAL/HIGH gate on images run on every pipeline run.
-- **[Operator policy]** Dependency updates: manual `cargo update` → full `ci/check-pr.sh` gate → push; the host pipeline deploys only green trees. There is **no Dependabot** — GitHub-based automation was retired with the self-hosted CI cutover, and no dependency-update PRs are auto-created.
-- **[Not implemented — not claimed]** Code-owner review enforcement: we do NOT claim required CODEOWNERS review, and no GitHub-side rule enforces it. This is a single-owner repository, so a required approving review from a code owner cannot be satisfied (the sole owner cannot approve their own change); branch protection on `main` was therefore removed on 2026-10-22 rather than left in place as a rule that only ever gets bypassed. `CODEOWNERS` remains as a review-routing document, not a gate. The enforced substitutes: the pre-push validate hook, `ci/check-pr.sh` for pre-merge verification, the pipeline's fail-closed stages, and the deploy-host blessing manifest that refuses a tree whose gates did not all pass.
-- **[Implemented in platform]** Deployment control: the pipeline builds, gates, migrates, deploys and verifies in one ordered run; a red stage stops the line before deploy. **[Not currently implemented]** Canary percentages and automatic canary rollback — rollback is the documented manual retag procedure (`deploy/rollback-plan.md`).
-- **[Implemented in platform]** Environment separation: production is a single Hetzner host under Docker Compose; development runs on developer machines against ephemeral containers. There are no separate staging clusters or environments — production data never leaves the production host, and CI test lanes use throwaway databases.
+- **[Operator policy]** Dependency updates: manual `cargo update` → full `ci/check-pr.sh` gate → push; the host pipeline deploys only green trees. There is **no Dependabot**, GitHub-based automation was retired with the self-hosted CI cutover, and no dependency-update PRs are auto-created.
+- **[Not implemented, not claimed]** Code-owner review enforcement: we do NOT claim required CODEOWNERS review, and no GitHub-side rule enforces it. This is a single-owner repository, so a required approving review from a code owner cannot be satisfied (the sole owner cannot approve their own change); branch protection on `main` was therefore removed on 2026-10-22 rather than left in place as a rule that only ever gets bypassed. `CODEOWNERS` remains as a review-routing document, not a gate. The enforced substitutes: the pre-push validate hook, `ci/check-pr.sh` for pre-merge verification, the pipeline's fail-closed stages, and the deploy-host blessing manifest that refuses a tree whose gates did not all pass.
+- **[Implemented in platform]** Deployment control: the pipeline builds, gates, migrates, deploys and verifies in one ordered run; a red stage stops the line before deploy. **[Not currently implemented]** Canary percentages and automatic canary rollback, rollback is the documented manual retag procedure (`deploy/rollback-plan.md`).
+- **[Implemented in platform]** Environment separation: production is a single Hetzner host under Docker Compose; development runs on developer machines against ephemeral containers. There are no separate staging clusters or environments, production data never leaves the production host, and CI test lanes use throwaway databases.
 
 ### Infrastructure Security
 
 - **[Implemented in platform]** Network boundaries: one production host; Docker networks segment frontend, backend and data-plane traffic; database services have no host port binding and are reachable only on the internal Docker networks.
 - **[Implemented in platform]** Firewalling: UFW default-deny incoming; inbound is limited to the service ports 25, 80, 443, 587 and 993 plus operator ports (22 SSH, 465 SMTPS, 2525/2526 bounce/FBL). Outbound is default-allow.
 - **[Implemented in platform]** Host hardening: `deploy/scripts/hetzner-bootstrap.sh` installs Docker, configures UFW, hardens sshd (key-only authentication, no password auth) and adds fail2ban.
-- **[Operator policy]** Administrative access: SSH with key-based authentication to the single production host by named operators. **[Not currently implemented]** Bastion hosts and session recording — there is no bastion tier to record.
+- **[Operator policy]** Administrative access: SSH with key-based authentication to the single production host by named operators. **[Not currently implemented]** Bastion hosts and session recording, there is no bastion tier to record.
 - **[Implemented in platform]** Container isolation: services run as non-root users with dropped capabilities, `no-new-privileges`, read-only root filesystems plus tmpfs mounts where practical, and per-container CPU/memory limits (`docker-compose.prod.yml`).
 - **[Operator policy]** Patch management: OS packages are patched promptly after release (critical security patches urgently); container images are rebuilt and redeployed on every pipeline deploy of the changed services.
 
@@ -97,13 +97,13 @@ ApexMail provides transactional email infrastructure with EU/EEA-oriented deploy
 
 ### Backups and Recovery
 
-- **[Implemented in platform]** Backup frequency: nightly encrypted PostgreSQL `pg_dump` backups and nightly per-table ClickHouse dumps run as dedicated compose services (`postgres-backup`, `clickhouse-backup`). **[Not currently implemented]** WAL archiving — there is no continuous archiving and no point-in-time recovery; the recovery point is the last nightly backup.
+- **[Implemented in platform]** Backup frequency: nightly encrypted PostgreSQL `pg_dump` backups and nightly per-table ClickHouse dumps run as dedicated compose services (`postgres-backup`, `clickhouse-backup`). **[Not currently implemented]** WAL archiving, there is no continuous archiving and no point-in-time recovery; the recovery point is the last nightly backup.
 - **[Implemented in platform]** Backup encryption: AES-256 with a PBKDF2-derived key from the `backup_encryption_key` Docker secret; encryption keys are separate from production data keys.
-- **[Implemented in platform]** Backup retention: PostgreSQL keeps 14 daily / 8 weekly / 6 monthly generations (bounded to the newest 30); ClickHouse keeps 14 days / 14 artifacts; pruning is automatic. **[Operator policy]** Offsite mirroring (`BACKUP_TARGET`, rsync over SSH with pinned host keys) — recommended and monitored via backup healthchecks, but its configuration is an operator decision.
-- **[Implemented in platform]** Restore verification: every backup is automatically decrypted and structurally validated (`pg_restore --list`, or the ClickHouse equivalent) before the plaintext is deleted — a backup that cannot be read is never counted as good, and each backup container's healthcheck requires a fresh artifact (< 25 h old).
+- **[Implemented in platform]** Backup retention: PostgreSQL keeps 14 daily / 8 weekly / 6 monthly generations (bounded to the newest 30); ClickHouse keeps 14 days / 14 artifacts; pruning is automatic. **[Operator policy]** Offsite mirroring (`BACKUP_TARGET`, rsync over SSH with pinned host keys), recommended and monitored via backup healthchecks, but its configuration is an operator decision.
+- **[Implemented in platform]** Restore verification: every backup is automatically decrypted and structurally validated (`pg_restore --list`, or the ClickHouse equivalent) before the plaintext is deleted, a backup that cannot be read is never counted as good, and each backup container's healthcheck requires a fresh artifact (< 25 h old).
 - **[Not currently implemented]** Fully automated restore DRILLS: full-restore exercises are manual, at the documented quarterly cadence (`docs/operations/disaster-recovery-testing.md`), on a scratch host.
-- **[Implemented in platform]** Recovery Point Objective (RPO): up to 24 hours — the last nightly backup. There is no near-real-time recovery point.
-- **[Operator policy]** Recovery Time Objective (RTO): hours, not minutes (host rebuild + backup restore); the real number is measured and recorded in the quarterly drill. [roadmap] Cross-region failover is a planned Dedicated Tenant capability — not live; recovery is restore-based on the current single-host topology.
+- **[Implemented in platform]** Recovery Point Objective (RPO): up to 24 hours, the last nightly backup. There is no near-real-time recovery point.
+- **[Operator policy]** Recovery Time Objective (RTO): hours, not minutes (host rebuild + backup restore); the real number is measured and recorded in the quarterly drill. [roadmap] Cross-region failover is a planned Dedicated Tenant capability, not live; recovery is restore-based on the current single-host topology.
 - **[Operator policy]** Geographic separation: backup locations follow the active deployment configuration and applicable agreement. Cross-region disaster recovery, where offered, is contract-specific and not a public-plan entitlement.
 
 ### Data Deletion
@@ -118,12 +118,12 @@ ApexMail provides transactional email infrastructure with EU/EEA-oriented deploy
 
 | Framework | Status | Scope | Relevant Product | Auditor / Assessor | Last Assessment | Next Milestone | Evidence Availability | Contact Process |
 |---|---|---|---|---|---|---|---|---|---|
-| GDPR Compliance | Control-aligned | All personal data processing (customer data, email metadata, account data) | ApexMail Platform (all plans) | Internal DPO / legal counsel | 2026-07 — Internal audit | Ongoing — Continuous control monitoring | DPA (public), DSR process document (upon request), Article 30 record (upon request) | privacy@apexmail.ee |
-| SOC 2 Type I | Planned — readiness assessment in progress | API, SMTP relay, dashboard, queue, auth, webhooks, billing | ApexMail Platform (multi-tenant) | To be selected (external CPA firm) | N/A — Readiness assessment in progress | Q1 2027 — Readiness assessment complete; Q3 2027 — Type I audit | Not yet available — Gated under NDA once complete | security@apexmail.ee |
-| SOC 2 Type II | Planned — after Type I completion | Scope TBD (dependent on Type I scope) | ApexMail Platform | Same as Type I auditor | N/A | Q2 2028 — Type II audit (6–12 months after Type I) | Not yet available | security@apexmail.ee |
-| ISO 27001 | Planned — evaluated based on customer demand | Scope TBD | ApexMail Platform | To be selected (accredited certification body) | N/A | Timeline dependent on customer demand | Not yet available | security@apexmail.ee |
+| GDPR Compliance | Control-aligned | All personal data processing (customer data, email metadata, account data) | ApexMail Platform (all plans) | Internal DPO / legal counsel | 2026-07, Internal audit | Ongoing, Continuous control monitoring | DPA (public), DSR process document (upon request), Article 30 record (upon request) | privacy@apexmail.ee |
+| SOC 2 Type I | Planned, readiness assessment in progress | API, SMTP relay, dashboard, queue, auth, webhooks, billing | ApexMail Platform (multi-tenant) | To be selected (external CPA firm) | N/A, Readiness assessment in progress | Q1 2027, Readiness assessment complete; Q3 2027, Type I audit | Not yet available, Gated under NDA once complete | security@apexmail.ee |
+| SOC 2 Type II | Planned, after Type I completion | Scope TBD (dependent on Type I scope) | ApexMail Platform | Same as Type I auditor | N/A | Q2 2028, Type II audit (6–12 months after Type I) | Not yet available | security@apexmail.ee |
+| ISO 27001 | Planned, evaluated based on customer demand | Scope TBD | ApexMail Platform | To be selected (accredited certification body) | N/A | Timeline dependent on customer demand | Not yet available | security@apexmail.ee |
 | HIPAA | Not currently available | N/A | Enterprise / Dedicated Tenant only | N/A | N/A | BAA template available now for regulatory alignment | BAA template (upon request, under NDA) | security@apexmail.ee |
-| PCI DSS | Not applicable | Payment processing (via Mollie) | N/A — Mollie B.V. is PCI DSS Level 1 certified | Mollie B.V. | Valid — continuous by Mollie | N/A | Mollie PCI DSS Attestation of Compliance (via Mollie Dashboard) | support@apexmail.ee |
+| PCI DSS | Not applicable | Payment processing (via Mollie) | N/A, Mollie B.V. is PCI DSS Level 1 certified | Mollie B.V. | Valid, continuous by Mollie | N/A | Mollie PCI DSS Attestation of Compliance (via Mollie Dashboard) | support@apexmail.ee |
 
 Mollie B.V. is a payment institution supervised by De Nederlandsche Bank (DNB), with its registered office at Keizersgracht 126, 1015 CW Amsterdam, The Netherlands. Payment data is processed in the Netherlands (EU); card-scheme networks may process it globally under Mollie's Data Processing Agreement.
 
@@ -159,18 +159,18 @@ ApexMail operates a responsible disclosure program with safe harbor for security
 
 | Activity | Status |
 |---|---|
-| Independent penetration test | Planned — annual external application penetration test |
-| Remediation of high/critical findings | In progress — per vulnerability management policy |
-| Penetration test executive summary | Planned — publish after first test and remediation |
-| Internal security assessment | In progress — continuous review by engineering team |
-| Third-party risk assessment | In progress — annual review of subprocessors |
+| Independent penetration test | Planned, annual external application penetration test |
+| Remediation of high/critical findings | In progress, per vulnerability management policy |
+| Penetration test executive summary | Planned, publish after first test and remediation |
+| Internal security assessment | In progress, continuous review by engineering team |
+| Third-party risk assessment | In progress, annual review of subprocessors |
 
 ### Business Continuity and Disaster Recovery
 
 - **Backup frequency**: Nightly automated encrypted backups (PostgreSQL and ClickHouse) with the documented retention generations (14 days / 8 weeks / 6 months for PostgreSQL; 14 days for ClickHouse).
-- **Recovery Time Objective (RTO)**: hours, not minutes — measured in the quarterly rebuild drill (operator policy target).
+- **Recovery Time Objective (RTO)**: hours, not minutes, measured in the quarterly rebuild drill (operator policy target).
 - **Recovery Point Objective (RPO)**: up to 24 hours for transactional data (the last nightly backup); point-in-time recovery is not implemented.
-- **Failover**: Service-level resilience on the current single-host topology — health-checked services with automatic restart; queue and message persistence to disk. [roadmap] Multi-AZ and cross-region failover are planned Dedicated Tenant capabilities, not live.
+- **Failover**: Service-level resilience on the current single-host topology, health-checked services with automatic restart; queue and message persistence to disk. [roadmap] Multi-AZ and cross-region failover are planned Dedicated Tenant capabilities, not live.
 - **Testing**: Automated restorability validation on every backup (decrypt + structural check); full disaster-recovery drills are manual at the documented quarterly cadence.
 
 ### Incident Response
@@ -193,18 +193,18 @@ The following documents are available to Customers under NDA or as part of the s
 
 | Document | Availability |
 |---|---|
-| Data Processing Agreement (DPA) | Public — see [DPA](../legal/dpa.md) |
-| Subprocessor List | Public — see [Subprocessors](subprocessors.md) |
-| Technical and Organizational Measures (TOMs) | Available upon request — see [Security Measures](security-measures.md) summary |
-| Penetration Test Summary | Gated — available under NDA after first test |
-| Architecture Diagram | Gated — available under NDA |
-| Business Continuity Summary | Gated — available under NDA |
-| Standard Information Gathering (SIG) Questionnaire | In progress — available upon request |
-| Consensus Assessments Initiative Questionnaire (CAIQ) | In progress — available upon request |
-| Higher Education Community Vendor Assessment Toolkit (HECVAT) | In progress — available upon request |
-| Business Associate Agreement (BAA) | Template available — see [BAA Template](../../docs/compliance/baa-template.md) |
-| SOC 2 Report | Not yet available — see roadmap |
-| ISO 27001 Certificate | Not yet available — see roadmap |
+| Data Processing Agreement (DPA) | Public, see [DPA](../legal/dpa.md) |
+| Subprocessor List | Public, see [Subprocessors](subprocessors.md) |
+| Technical and Organizational Measures (TOMs) | Available upon request, see [Security Measures](security-measures.md) summary |
+| Penetration Test Summary | Gated, available under NDA after first test |
+| Architecture Diagram | Gated, available under NDA |
+| Business Continuity Summary | Gated, available under NDA |
+| Standard Information Gathering (SIG) Questionnaire | In progress, available upon request |
+| Consensus Assessments Initiative Questionnaire (CAIQ) | In progress, available upon request |
+| Higher Education Community Vendor Assessment Toolkit (HECVAT) | In progress, available upon request |
+| Business Associate Agreement (BAA) | Template available, see [BAA Template](../../docs/compliance/baa-template.md) |
+| SOC 2 Report | Not yet available, see roadmap |
+| ISO 27001 Certificate | Not yet available, see roadmap |
 
 To request gated documents: contact **{{SUPPORT_EMAIL}}** with your organization details and specific document requirements.
 

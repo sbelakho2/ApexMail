@@ -255,7 +255,7 @@ pub(crate) fn sanitize_notification_text(value: &str) -> String {
 /// `email_queue.tenant_id` is a UUID column (migrations 001/050) while
 /// enterprise tenant ids are VARCHAR(26) ULID-style strings that are never
 /// valid UUIDs. Binding the string directly would make every notification
-/// INSERT fail at runtime (silently — failures are swallowed). Instead the
+/// INSERT fail at runtime (silently, failures are swallowed). Instead the
 /// column is only populated when the id happens to be UUID-shaped, and the
 /// authoritative tenant string always travels in `metadata` so notifications
 /// stay attributable either way.
@@ -268,7 +268,7 @@ pub(crate) fn notification_tenant_uuid(tenant_id: Option<&str>) -> Option<Uuid> 
 
 /// Satisfaction write path. The `AND satisfaction_rating IS NULL` guard is
 /// the immutability invariant: once a rating exists the UPDATE matches no
-/// row, and the caller surfaces ALREADY_SUBMITTED (409) — a rating can be
+/// row, and the caller surfaces ALREADY_SUBMITTED (409), a rating can be
 /// set exactly once and never overwritten.
 pub(crate) const SUBMIT_SATISFACTION_SQL: &str = "UPDATE ent_support_tickets SET
              satisfaction_rating = $2,
@@ -287,14 +287,14 @@ impl SupportNotifier {
         let default_from = "support@apexmail.ee";
         let configured = std::env::var("SUPPORT_NOTIFICATION_FROM");
         // A malformed from-address would fail the email_queue CHECK on
-        // every single insert (silently — failures are swallowed), so fall
+        // every single insert (silently, failures are swallowed), so fall
         // back to the default instead of shipping a dead notifier.
         let from_address = match configured {
             Ok(value) if is_plausible_email(value.trim()) => value.trim().to_string(),
             Ok(value) => {
                 tracing::warn!(
                     from = %sanitize_notification_text(&value),
-                    "SUPPORT_NOTIFICATION_FROM is not a valid address — using {default_from}"
+                    "SUPPORT_NOTIFICATION_FROM is not a valid address, using {default_from}"
                 );
                 default_from.to_string()
             }
@@ -305,7 +305,7 @@ impl SupportNotifier {
 
     /// Queue a plain-text notification. Best-effort: any error (missing
     /// table, FK violation, transient outage) is logged at warn level and
-    /// swallowed — ticket operations must succeed regardless.
+    /// swallowed, ticket operations must succeed regardless.
     pub async fn queue_email(
         &self,
         tenant_id: Option<&str>,
@@ -360,7 +360,7 @@ impl SupportNotifier {
                 log_missing_email_queue_once("queue_email");
             }
             Err(error) => {
-                tracing::warn!(kind, error = %error, "Failed to queue support notification — ticket operation unaffected");
+                tracing::warn!(kind, error = %error, "Failed to queue support notification, ticket operation unaffected");
             }
         }
     }
@@ -472,7 +472,7 @@ impl SupportNotifier {
                     return;
                 }
                 Err(error) => {
-                    tracing::warn!(error = %error, "Failed to queue support notification — ticket operation unaffected");
+                    tracing::warn!(error = %error, "Failed to queue support notification, ticket operation unaffected");
                     return;
                 }
             }
@@ -502,7 +502,7 @@ impl SupportService {
         category: &str,
         contact_email: Option<&str>,
     ) -> Result<ApiResult<SupportTicket>, String> {
-        // Input validation — invalid values must surface as 400s at the
+        // Input validation, invalid values must surface as 400s at the
         // route layer (code VALIDATION), never as a database CHECK failure.
         if tenant_id.trim().is_empty() || tenant_id.len() > 26 {
             return validation_err("tenant_id must be 1..=26 characters");
@@ -636,7 +636,7 @@ impl SupportService {
 
     /// List tickets with optional filters and keyset (cursor) pagination.
     ///
-    /// `cursor` (recommended) pages by `(created_at DESC, id DESC)` — a
+    /// `cursor` (recommended) pages by `(created_at DESC, id DESC)`, a
     /// stable ordering backed by idx_ent_support_tickets_tenant_created.
     /// `offset` is kept for compatibility and clamped defensively.
     pub async fn list_tickets(
@@ -824,7 +824,7 @@ impl SupportService {
 
         let now = Utc::now();
         // Fix J-6: first_response_at is only stamped when the update moves the
-        // ticket to a staff-facing status — a status set from the customer
+        // ticket to a staff-facing status, a status set from the customer
         // side (e.g. 'waiting_customer') or any non-transition no longer
         // fabricates a "first response".
         //
@@ -869,7 +869,7 @@ impl SupportService {
                 if exists {
                     Ok(ApiResult::err(
                         format!(
-                            "ticket {} was modified concurrently — retry with the current status",
+                            "ticket {} was modified concurrently, retry with the current status",
                             id
                         ),
                         "INVALID_TRANSITION",
@@ -929,7 +929,7 @@ impl SupportService {
         if !can_comment(&ticket.status, is_internal) {
             return Ok(ApiResult::err(
                 format!(
-                    "ticket {} is closed — only internal notes are accepted; reopen the ticket first",
+                    "ticket {} is closed, only internal notes are accepted; reopen the ticket first",
                     ticket_id
                 ),
                 "INVALID_TRANSITION",
@@ -948,7 +948,7 @@ impl SupportService {
         .await
         .map_err(|e| format!("Add comment: {e}"))?;
 
-        // Mark first response time only for a PUBLIC agent reply — an
+        // Mark first response time only for a PUBLIC agent reply, an
         // internal note is not a response the customer received, so it must
         // not start the first-response clock.
         if author_type == "agent" && !is_internal {
@@ -1297,7 +1297,7 @@ impl SupportService {
     /// concurrency: two workers racing the sweep can no longer notify for the
     /// same breach twice.
     ///
-    /// Notification is best-effort and runs AFTER the durable mark — the same
+    /// Notification is best-effort and runs AFTER the durable mark, the same
     /// order as the pre-batch code. A failed `queue_email` does not unmark the
     /// ticket (the mark is the operational state the dashboards read; the
     /// email is a courtesy), and a failed sweep UPDATE returns Err with
@@ -1384,14 +1384,14 @@ impl SupportService {
     ///
     /// Thresholds come from [`auto_escalation_thresholds`] so the rules and
     /// their tests can never drift apart. Every ticket the thresholds promote
-    /// also triggers the assignee notification hook — an escalation nobody
+    /// also triggers the assignee notification hook, an escalation nobody
     /// hears about is not an escalation.
     ///
     /// Set-based notification path (perf audit 2026-10-18, finding 17): the
     /// escalation UPDATEs keep their per-priority shape (the cutoff is a rule
     /// property), but assignee emails are resolved for the whole escalated
     /// set in ONE query and the notifications are enqueued with ONE multi-row
-    /// INSERT per batch — never one agent lookup + one INSERT per ticket.
+    /// INSERT per batch, never one agent lookup + one INSERT per ticket.
     /// Skips are identical: a ticket without an assignee, or whose assignee
     /// has no resolvable email row, notifies nobody, exactly as before.
     pub async fn auto_escalate(&self) -> Result<i64, String> {
@@ -1717,7 +1717,7 @@ mod tests {
     fn auto_escalation_thresholds_rank_by_urgency() {
         let t = auto_escalation_thresholds();
         assert!(t.len() >= 3);
-        // critical < high < medium — more urgent priorities escalate sooner.
+        // critical < high < medium, more urgent priorities escalate sooner.
         let get = |p: &str| {
             t.iter()
                 .find(|(k, _)| *k == p)
@@ -2119,7 +2119,7 @@ mod tests {
             );
         }
         // email_queue.tenant_id is UUID-typed; ULID-style tenants ride
-        // metadata instead (NULL column) — the row shape is unchanged.
+        // metadata instead (NULL column), the row shape is unchanged.
         let uuid_tenants: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM email_queue
              WHERE tags @> ARRAY['support-notification']::text[] AND tenant_id IS NOT NULL",
@@ -2185,7 +2185,7 @@ mod tests {
 
         assert_eq!(escalated, 4);
         // The escalated set is ONE assignee-email query and ONE multi-row
-        // INSERT — never one lookup + one INSERT per ticket.
+        // INSERT, never one lookup + one INSERT per ticket.
         assert_eq!(
             capture.count_starting_with("UPDATE ent_support_tickets"),
             3,

@@ -211,7 +211,7 @@ impl ObservabilityConfig {
         /// convention) points at a readable file, the FILE WINS over the
         /// plain `<KEY>` variable. The prod compose overlay mounts the real
         /// secret via `_FILE` while the base environment still carries the
-        /// public default value of `<KEY>` — an env-first policy would
+        /// public default value of `<KEY>`, an env-first policy would
         /// authenticate production with that public constant. Falls back to
         /// `<KEY>` (non-compose runs) and then to `default`.
         fn env_or_file(key: &str, default: &str) -> String {
@@ -222,7 +222,7 @@ impl ObservabilityConfig {
                 tracing::warn!(
                     key,
                     path = %path,
-                    "Secret file configured but unreadable — falling back to the environment variable"
+                    "Secret file configured but unreadable, falling back to the environment variable"
                 );
             }
             if let Ok(value) = std::env::var(key) {
@@ -398,7 +398,7 @@ impl ObservabilityConfig {
         if self.internal_service_token.trim().is_empty() {
             return Err("INTERNAL_SERVICE_TOKEN must be set".into());
         }
-        // F-07: Reject "off" log level — override to "warn" as minimum floor
+        // F-07: Reject "off" log level, override to "warn" as minimum floor
         let valid_levels = ["trace", "debug", "info", "warn", "error"];
         if !valid_levels.contains(&self.logging.level.as_str()) {
             return Err(format!(
@@ -556,7 +556,7 @@ mod tests {
         let _guard = env_guard();
 
         std::env::remove_var("INTERNAL_SERVICE_TOKEN");
-        let dir = std::env::temp_dir().join(format!("obs-token-{}", uuid::Uuid::new_v4())); // nosemgrep: rust.lang.security.temp-dir.temp-dir — test fixture under a unique pid/uuid path — no predictable-name temp collision
+        let dir = std::env::temp_dir().join(format!("obs-token-{}", uuid::Uuid::new_v4())); // nosemgrep: rust.lang.security.temp-dir.temp-dir, test fixture under a unique pid/uuid path, no predictable-name temp collision
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("token.txt");
         std::fs::write(&path, "file-secret-token\n").unwrap();
@@ -571,13 +571,13 @@ mod tests {
 
     /// File-wins precedence: the prod compose overlay mounts the real secret
     /// via `_FILE` while the base environment still carries the public
-    /// default of the plain variable — env-first authenticated production
+    /// default of the plain variable, env-first authenticated production
     /// with a public constant.
     #[test]
     fn test_secret_file_takes_precedence_over_env_variable() {
         let _guard = env_guard();
 
-        let dir = std::env::temp_dir().join(format!("obs-token-{}", uuid::Uuid::new_v4())); // nosemgrep: rust.lang.security.temp-dir.temp-dir — test fixture under a unique pid/uuid path — no predictable-name temp collision
+        let dir = std::env::temp_dir().join(format!("obs-token-{}", uuid::Uuid::new_v4())); // nosemgrep: rust.lang.security.temp-dir.temp-dir, test fixture under a unique pid/uuid path, no predictable-name temp collision
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("token.txt");
         std::fs::write(&path, "file-secret-wins\n").unwrap();

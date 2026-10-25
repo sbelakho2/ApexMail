@@ -74,7 +74,7 @@ async fn clickhouse_engine() -> Option<ClickHouseEngine> {
 }
 
 /// Each DB test provisions its own canonical database (private per test AND
-/// process id — a shared name has raced before).
+/// process id, a shared name has raced before).
 async fn pg_pool(test_name: &str) -> Option<PgPool> {
     match migrator::test_support::fresh_canonical_pool(
         "analytics_adversarial",
@@ -209,7 +209,7 @@ async fn clickhouse_queries_survive_hostile_filters_and_empty_datasets() {
     );
 
     // Hostile event-type filter values are dropped by the allowlist (the
-    // valid ones still apply) — no SQL is ever string-interpolated.
+    // valid ones still apply), no SQL is ever string-interpolated.
     let hostile = vec![
         "'; DROP TABLE events; --".to_string(),
         "sent".to_string(),
@@ -704,7 +704,7 @@ async fn send_time_windows_respect_tenant_offset_and_cold_start() {
     assert!(warm_utc.windows[0].confidence > 0.0);
 
     // TENANT SCOPE (wave G): the SAME address in another tenant has no events
-    // there — it must resolve the cold-start window for that tenant's offset,
+    // there, it must resolve the cold-start window for that tenant's offset,
     // never the first tenant's 14:00 histogram.
     let leak_check = optimizer
         .get_optimal_window_for_tenant(&with_offset, &warm)

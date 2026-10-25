@@ -3,7 +3,7 @@
 {# Uses Tera page variables: page.extra.competitor_name,         #}
 {#   page.extra.competitor_description                           #}
 {# Localized shared UI via data/i18n.json keys (compare.*) with  #}
-{# inline English fallbacks — see the report for the new keys.   #}
+{# inline English fallbacks, see the report for the new keys.   #}
 {# ARK hero system: left-aligned copy (kicker, title, lead,      #}
 {# actions); the geometry and the 3px bottom edge live in ark.css. #}
 {% set competitor_name = page.extra.competitor_name | default(value="this provider") %}

@@ -9,10 +9,10 @@
 //! only that *some* credential was presented to *this* service. This module
 //! produces and verifies two standard, externally checkable artefacts:
 //!
-//! * **RFC 3161 timestamps** — a TSA signs a message imprint (a SHA-2 digest
+//! * **RFC 3161 timestamps**, a TSA signs a message imprint (a SHA-2 digest
 //!   of the document) together with a nonce and a `genTime`. The token is a
 //!   CMS `SignedData` (RFC 5652) carrying a `TSTInfo` (RFC 3161).
-//! * **ASiC-E / BDOC containers** — a ZIP whose members are the signed
+//! * **ASiC-E / BDOC containers**, a ZIP whose members are the signed
 //!   documents plus `META-INF/signatures*.xml` holding XML-DSig / XAdES
 //!   signatures over those members.
 //!
@@ -37,13 +37,13 @@
 //!   `issuerAndSerialNumber` sid is compared by serial and issuer name, but
 //!   its verdict remains an optional check.
 //! * When the signature algorithm is in the supported set (RSA PKCS#1 v1.5
-//!   SHA-1/256/384/512, ECDSA P-256/P-384 SHA-256/384, Ed25519 — the set the
+//!   SHA-1/256/384/512, ECDSA P-256/P-384 SHA-256/384, Ed25519, the set the
 //!   `ring` backend of `x509-parser` implements), the CMS signature over the
 //!   signed attributes is checked against the public key of that certificate,
 //!   and the signed `messageDigest` attribute is checked against the hash of
 //!   the `TSTInfo` eContent. The signature verdict is reported separately
 //!   (`token_signature_valid`), and when it cannot be performed the check is
-//!   reported as `not_performed` with the exact reason — never as a pass.
+//!   reported as `not_performed` with the exact reason, never as a pass.
 //!
 //! # What is NOT PROVEN (timestamp)
 //!
@@ -236,7 +236,7 @@ pub fn all_passed(checks: &[CheckVerdict]) -> bool {
         .all(|check| !check.required || check.outcome.is_pass())
 }
 
-/// True when every check (required or not) is a `Pass` — the strongest claim
+/// True when every check (required or not) is a `Pass`, the strongest claim
 /// this module can make. A `not_performed` check (e.g. an unsupported
 /// signature algorithm) makes this false, and so does an EMPTY check list:
 /// "every check passed" is vacuously true over zero checks and must not back
@@ -1283,7 +1283,7 @@ pub mod timestamp {
 
         /// Read configuration from the environment.
         ///
-        /// `Ok(None)` means no TSA is configured — the caller must not
+        /// `Ok(None)` means no TSA is configured, the caller must not
         /// timestamp anything. See the module docs for the variable names.
         pub fn from_env() -> Result<Option<Self>, TimeStampError> {
             let url = std::env::var(ENV_TSA_URL)
@@ -1452,7 +1452,7 @@ pub mod timestamp {
         if values.is_empty() {
             String::new()
         } else {
-            format!(" — {}", values.join("; "))
+            format!(", {}", values.join("; "))
         }
     }
 
@@ -2742,7 +2742,7 @@ pub mod timestamp {
                 .build()
                 .expect(
                     "reqwest client construction failed: only timeout/connect_timeout are set, \
-                     so this means the TLS backend is unusable — refusing to run with a \
+                     so this means the TLS backend is unusable, refusing to run with a \
                      degraded HTTP stack",
                 );
             Ok(Self { config, http })
@@ -2907,7 +2907,7 @@ pub mod timestamp {
         use super::super::CheckOutcome;
         use super::*;
 
-        // The same certificate the OpenSSL fixture carries (DER, hex) — the
+        // The same certificate the OpenSSL fixture carries (DER, hex), the
         // unit tests cannot reach the integration fixtures.
         const CERT_HEX: &str = "3082038930820271a00302010202045a504558300d06092a864886f70d01010b0500305a310b3009060355040613024545311e301c060355040a0c15417065784d61696c20546573742046697874757265312b302906035504030c22417065784d61696c20546573742054534120284e4f542050524f44554354494f4e29301e170d3236303931323231313933375a170d3336303930393231313933375a305a310b3009060355040613024545311e301c060355040a0c15417065784d61696c20546573742046697874757265312b302906035504030c22417065784d61696c20546573742054534120284e4f542050524f44554354494f4e2930820122300d06092a864886f70d01010105000382010f003082010a0282010100b30a8b1ae3ecf5fb229dc9beb60b613cc02d86b4b9bc8f84d595984399dd8a1afa71521c6d91b63775378ba7bf2ed6d9d543faa71f777dc3c2632c5b4c8ea7d8a7cd26f7462694d721f5aefdbe4ef31878b78bccb9aa1acd89bd73252218420ef3b6fcd27ee010864862edacb2dcfe35901c71060284771986f2033c40309e716ca7ad9c7efb5c494b6dfd7a012bb0210b283cccca9e3059cb1a48d03a2bb604ebfce7bd1bd24e30efb99949b3966b09597e46e87483b1afb0b289a73c7bf7df4d489698ff37e223f83b046af65f51454ccdbe9f3442c4705cd5c397d9f2369fb513db37a20955e62384892c2bea6388d17583426fdc9284efb1c604d011df150203010001a3573055300c0603551d130101ff04023000300e0603551d0f0101ff04040302078030160603551d250101ff040c300a06082b06010505070308301d0603551d0e04160414717afd522d0495d89e78f45d59795d981a0d482a300d06092a864886f70d01010b0500038201010028e4f826146b6240f3f1d13ec21284e1dbe4494cf405cebb211aca3e90c864bd314ba83591120d7dba2cf3b497022b04630a1e1e58d8fddea0e36b47bbc91ae357cc9d5fe44e50fba8e476a9850f8017070ef10628e7fa12d41bdb03411e275055c04834419c909f1a4ee683c0e3ce96ecb5334f04398b6488bbead7c74771ec913e6d927e54261ebb67dc036762683a573b2596436e0f6370f81e0e87070a556ba33e5157388a8a5853840c834a4d53a2d0d40816c99a4b1ca06b8ba847537481be1632fce7d5ff1ea419d8bd47e9ab779beaabb5de7068a2f869befb2f43c0f34f4ef92c385630cc655f0b5e8de49c4bd43a8585a5af92dd7e4b3730fb785f";
 
@@ -3607,7 +3607,7 @@ pub mod timestamp {
             // Flip the last octet of the certificate's SKI. The signature
             // itself is untouched, because the SignerInfo identifier is not
             // covered by the CMS signature (RFC 5652 §5.3 puts the sid
-            // outside `signedAttrs`) — only this check can catch the change.
+            // outside `signedAttrs`), only this check can catch the change.
             let mut tampered = ski_fixture_key_id();
             *tampered.last_mut().expect("key id") ^= 0x01;
             let signer = ski_fixture_signer(&tampered);
@@ -3863,7 +3863,7 @@ pub mod timestamp {
 
         #[test]
         fn algorithm_identifier_with_inner_trailing_bytes_is_refused() {
-            // SEQUENCE { OID sha256WithRSA, NULL, NULL } — the third element
+            // SEQUENCE { OID sha256WithRSA, NULL, NULL }, the third element
             // is left unconsumed by AlgorithmIdentifier::from_der.
             let raw = der::sequence(&[
                 der::oid("1.2.840.113549.1.1.11").expect("oid"),
@@ -3875,7 +3875,7 @@ pub mod timestamp {
             if remaining.is_empty() {
                 // x509-parser consumes trailing elements; the guard in
                 // verify_token_signature then has nothing to fire on and the
-                // check is dead — this test pins that knowledge.
+                // check is dead, this test pins that knowledge.
                 return;
             }
             let tst = tst_info(b"20260912211944Z", false, false, true);
@@ -5784,7 +5784,7 @@ pub mod container {
                 other => panic!("expected Fail, got {other:?}"),
             }
 
-            // Unsupported signature method URI (HMAC): not performed — but
+            // Unsupported signature method URI (HMAC): not performed, but
             // only judged once a parseable certificate exists, so the
             // variant carries KeyInfo (the bare template has none, and the
             // certificate gate would otherwise mask the method verdict).

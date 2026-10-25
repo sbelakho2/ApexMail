@@ -1,4 +1,4 @@
-//! Worker PRE-SEND DLP gate — the enforcement point that makes the
+//! Worker PRE-SEND DLP gate, the enforcement point that makes the
 //! marketing/compliance "advertised data-loss prevention" claim TRUE.
 //!
 //! ## Enforcement point
@@ -9,7 +9,7 @@
 //! [`EmailProcessor::process_job_inner`](super::processor::EmailProcessor)
 //! on the fully PREPARED per-recipient copy (`PreparedEmail`: subject, text
 //! body, HTML body stripped to text, and the decoded attachment bytes) and
-//! BEFORE the durable acceptance reservation (`claim_acceptance`) — so a
+//! BEFORE the durable acceptance reservation (`claim_acceptance`), so a
 //! refusal or hold can never strand a `reserved` ledger row and can never
 //! follow an SMTP effect.
 //!
@@ -26,7 +26,7 @@
 //! | `Allow`       | clean    | deliver, untouched |
 //! | `Audit`       | low      | allow + loud structured log (findings retained) |
 //! | `Quarantine`  | medium   | HOLD: row → `deferred` + `metadata.dlp` annotation + audit row. `deferred` rows are never re-claimed by the poller, so the message stays in the queue, visible and unsent, pending operator review. The hold applies to the MESSAGE (all per-recipient copies share the content). |
-//! | `Block`       | high     | REFUSE: per-recipient terminal `bounced` (the typed DSN surface this pipeline has — the same shape `handle_hard_bounce` gives a transport 5xx) with honest sender-visible copy naming the rule classes, plus an audit row and a `bounced` recipient event. No suppression (a policy refusal proves nothing about the mailbox) and no sales sender-health feedback (a self-inflicted policy refusal is not a reputation bounce). |
+//! | `Block`       | high     | REFUSE: per-recipient terminal `bounced` (the typed DSN surface this pipeline has, the same shape `handle_hard_bounce` gives a transport 5xx) with honest sender-visible copy naming the rule classes, plus an audit row and a `bounced` recipient event. No suppression (a policy refusal proves nothing about the mailbox) and no sales sender-health feedback (a self-inflicted policy refusal is not a reputation bounce). |
 //!
 //! Per-tenant override: there is no cheap tenant-scoped DLP settings surface
 //! (no per-tenant policy table exists; adding one is a migration outside this
@@ -66,7 +66,7 @@ impl std::error::Error for DlpGateError {}
 #[derive(Debug, Clone)]
 pub struct PreSendVerdict {
     /// The WORST action across all scanned channels (Block > Quarantine >
-    /// Audit > Allow): the conservative combination — one high-severity
+    /// Audit > Allow): the conservative combination, one high-severity
     /// channel must not be averaged away by clean siblings.
     pub action: DlpAction,
     /// Highest risk score seen across channels (annotation/audit evidence).
@@ -81,7 +81,7 @@ pub struct PreSendVerdict {
 
 /// The scanner seam the email processor depends on (the same pattern the
 /// transport layer uses with `EmailTransport`). Production wires
-/// [`EngineDlpScanner`]; tests inject doubles — including an always-failing
+/// [`EngineDlpScanner`]; tests inject doubles, including an always-failing
 /// one that proves the gate fails OPEN on engine errors.
 pub trait PreSendDlpScanner: Send + Sync {
     /// Scan one fully prepared outbound copy. `Err` = engine unavailable
@@ -426,7 +426,7 @@ mod tests {
         assert!(verdict.rule_classes.is_empty());
     }
 
-    /// Every `PiiType` slugs to a stable rule class — including
+    /// Every `PiiType` slugs to a stable rule class, including
     /// `EmailAddress`, which the DEFAULT production policy never emits
     /// (`detect_email_addresses` is false) but a configured policy can,
     /// so the audit trail must still name it.
@@ -459,7 +459,7 @@ mod tests {
         // ~4.8 >= the 4.5 default threshold, base64-shaped per the
         // engine's looks_like_secret heuristic.
         let verdict = scanner.engine.scan(
-            "INTERNAL ONLY — bearer Zk9mQ2vR7tL4pW8xYbN3cJ5fD6hG — confidential payroll",
+            "INTERNAL ONLY, bearer Zk9mQ2vR7tL4pW8xYbN3cJ5fD6hG, confidential payroll",
             None,
         );
         assert!(

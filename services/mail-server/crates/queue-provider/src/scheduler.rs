@@ -1,4 +1,4 @@
-//! Fair queue scheduler — prevents tenant starvation.
+//! Fair queue scheduler, prevents tenant starvation.
 
 use std::collections::HashMap;
 use uuid::Uuid;
@@ -7,11 +7,11 @@ use crate::types::Job;
 
 /// Weighted fair scheduler that limits per-tenant share.
 ///
-/// # Callers (F10-old — deliberately unwired)
+/// # Callers (F10-old, deliberately unwired)
 ///
 /// NO production code constructs this scheduler. `queue-provider` itself is
 /// only smoke-test-wired (smoke-tests exercises `queue_provider::types`
-/// only) — no production poller dequeues from `queue_jobs`, so there is no
+/// only), no production poller dequeues from `queue_jobs`, so there is no
 /// natural place to slot a fair-scheduling pass yet. The production email
 /// path (`worker-processors/src/email/processor.rs`) polls `email_queue`
 /// directly and runs no fair-scheduling pass of its own.
@@ -19,7 +19,7 @@ use crate::types::Job;
 /// `schedule(dequeued, batch_size)` to the dequeued batch before dispatch:
 /// dispatch `outcome.selected` and release `outcome.deferred` back to
 /// pending (mirroring the release-back in worker-processors' email
-/// processor) — the API hands every non-selected job back so nothing is
+/// processor), the API hands every non-selected job back so nothing is
 /// silently discarded (audit finding 10).
 pub struct FairQueueScheduler {
     /// Maximum share of total processing a single tenant can use (0.0-1.0)
@@ -30,7 +30,7 @@ pub struct FairQueueScheduler {
 
 /// Result of one scheduling pass (audit finding 10).
 ///
-/// Every input job lands in EXACTLY one of the two vecs — the old
+/// Every input job lands in EXACTLY one of the two vecs, the old
 /// `Vec<Job>` return silently discarded jobs over the batch size, the
 /// per-tenant cap, or the tracked-tenant bound, leaving a caller that
 /// consumed the dequeued batch no way to release them back to pending.
@@ -40,7 +40,7 @@ pub struct ScheduleOutcome {
     pub selected: Vec<Job>,
     /// Jobs NOT dispatched this pass (over the batch size, over their
     /// tenant's cap, or of an un-tracked tenant). The caller MUST release
-    /// these back to pending (or otherwise account for them) — they were
+    /// these back to pending (or otherwise account for them), they were
     /// dequeued under a lease and must not vanish.
     pub deferred: Vec<Job>,
 }
@@ -61,7 +61,7 @@ impl FairQueueScheduler {
     /// Partition a batch of dequeued jobs under fair scheduling.
     ///
     /// Returns [`ScheduleOutcome`]: the jobs to process now (`selected`) and
-    /// everything else (`deferred`) — jobs over the batch size, over their
+    /// everything else (`deferred`), jobs over the batch size, over their
     /// tenant's cap, or belonging to a tenant beyond the tracking bound.
     /// Nothing is dropped: `selected.len() + deferred.len() == jobs.len()`
     /// always holds, so the caller can release the deferred jobs back to
@@ -278,7 +278,7 @@ mod tests {
 
     /// Audit finding 10 regression: `schedule` consumes the dequeued batch,
     /// so jobs it used to drop (over the batch size or a per-tenant cap)
-    /// were unrecoverable — dequeued under a lease, then silently lost.
+    /// were unrecoverable, dequeued under a lease, then silently lost.
     /// Every input job must land in EXACTLY one of selected/deferred, and
     /// the deferred vec must carry the over-cap jobs for release-back.
     #[test]

@@ -154,7 +154,7 @@ pub enum MiddlewareAction {
 /// Redemption path (audit F3c): when the request context carries a challenge
 /// id + solution (from [`CHALLENGE_ID_HEADER`]/[`CHALLENGE_SOLUTION_HEADER`]
 /// on a retry, or a `POST` to [`DDOS_VERIFY_PATH`]), the solution is
-/// verified against the server-side issuance registry — never against
+/// verified against the server-side issuance registry, never against
 /// client-claimed parameters. A valid solution marks the challenge solved
 /// (short allow-TTL), credits the client's reputation, and the request is
 /// re-evaluated; while the allow-TTL is active a re-evaluation that still
@@ -263,7 +263,7 @@ fn challenge_type_label(challenge: &crate::decision::Challenge) -> &'static str 
     }
 }
 
-/// IP extraction helper — extracts the client IP securely.
+/// IP extraction helper, extracts the client IP securely.
 ///
 /// SECURITY MODEL (mirrors `api-server`'s `extract_public_client_ip`):
 ///
@@ -281,7 +281,7 @@ fn challenge_type_label(challenge: &crate::decision::Challenge) -> &'static str 
 ///   its socket address.
 ///
 /// Priority when the peer is a trusted proxy:
-/// 1. `X-Forwarded-For` — rightmost untrusted entry
+/// 1. `X-Forwarded-For`, rightmost untrusted entry
 /// 2. `X-Real-IP`
 /// 3. `CF-Connecting-IP` (Cloudflare)
 /// 4. The proxy's own address
@@ -334,7 +334,7 @@ pub fn extract_client_ip_trusted(
 /// [`extract_client_ip_trusted`].
 ///
 /// Uses the process-wide trusted-proxy configuration (env
-/// `DDOS_TRUSTED_PROXIES`, default empty — headers are never trusted).
+/// `DDOS_TRUSTED_PROXIES`, default empty, headers are never trusted).
 /// Previously this function honored `X-Real-IP` and the LEFTMOST
 /// `X-Forwarded-For` entry unconditionally, which allowed any client to
 /// spoof its identity for reputation, session tracking and blocklisting.
@@ -359,7 +359,7 @@ pub fn extract_client_ip(
 ///
 /// Parsed once from the `DDOS_TRUSTED_PROXIES` environment variable:
 /// a comma-separated list of IPs or CIDR networks
-/// (e.g. `10.0.0.0/8,192.168.1.5,fd00::/8`). Default: empty — forwarded
+/// (e.g. `10.0.0.0/8,192.168.1.5,fd00::/8`). Default: empty, forwarded
 /// headers are never trusted.
 #[derive(Debug, Clone, Default)]
 pub struct TrustedProxyList {
@@ -402,7 +402,7 @@ impl TrustedProxyList {
         }
     }
 
-    /// True when no proxies are configured — forwarded headers are never
+    /// True when no proxies are configured, forwarded headers are never
     /// trusted and the socket peer is always the client identity.
     pub fn is_empty(&self) -> bool {
         self.networks.is_empty()
@@ -595,7 +595,7 @@ mod tests {
 
     #[test]
     fn test_untrusted_proxy_sending_xff_returns_proxy_ip() {
-        // A random host that is NOT a configured proxy sends XFF — the
+        // A random host that is NOT a configured proxy sends XFF, the
         // proxy's own address is the identity.
         let trusted = TrustedProxyList::parse(["10.0.0.0/8"]);
         let peer = ip("192.0.2.66");

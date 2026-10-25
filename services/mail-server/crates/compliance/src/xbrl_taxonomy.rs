@@ -35,7 +35,7 @@
 //! * No network fetching: the default resolver reads the filesystem and
 //!   refuses remote locations with a typed error. A caller that wants URL
 //!   entry points injects its own [`TaxonomyResolver`] (see
-//!   [`load_taxonomy_with`]) — the loader and the reference resolution are the
+//!   [`load_taxonomy_with`]), the loader and the reference resolution are the
 //!   same either way.
 //! * No guess about the official Estonian package: the entry point, the
 //!   concept binding and the extension namespace are all configuration input.
@@ -2045,7 +2045,7 @@ fn decode_text(text: &quick_xml::events::BytesText<'_>) -> Result<String, String
 ///
 /// The five predefined XML entities are resolved by name; numeric character
 /// references delegate to quick-xml. Any other (undefined) reference is an
-/// error — silently dropping it would corrupt the surrounding text.
+/// error, silently dropping it would corrupt the surrounding text.
 fn decode_general_ref(reference: &quick_xml::events::BytesRef<'_>) -> Result<String, String> {
     match reference.resolve_char_ref() {
         Ok(Some(character)) => return Ok(character.to_string()),

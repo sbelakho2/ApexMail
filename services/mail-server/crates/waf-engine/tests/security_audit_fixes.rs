@@ -16,7 +16,7 @@ fn is_blocked(engine: &WafEngine, req: &HttpRequest<'_>) -> bool {
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// FIX B — O(n²) HTML entity decode (decoder self-DoS)
+// FIX B, O(n²) HTML entity decode (decoder self-DoS)
 // ═══════════════════════════════════════════════════════════════════
 
 mod fix_b_entity_decode {
@@ -58,7 +58,7 @@ mod fix_b_entity_decode {
 
     #[test]
     fn entity_decode_long_tail_ampersand_is_linear() {
-        // '&' followed by > 32 chars then ';' — old decoder scanned the whole
+        // '&' followed by > 32 chars then ';', old decoder scanned the whole
         // tail for every '&'. Output must treat the '&' as literal.
         let input = format!("&{};", "x".repeat(200));
         assert_eq!(html_entity_decode(&input), input);
@@ -98,7 +98,7 @@ mod fix_b_entity_decode {
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// FIX C — byte-slice panic on multibyte body at truncation boundary
+// FIX C, byte-slice panic on multibyte body at truncation boundary
 // ═══════════════════════════════════════════════════════════════════
 
 mod fix_c_multibyte_truncation {
@@ -139,7 +139,7 @@ mod fix_c_multibyte_truncation {
         body.push_str("<script>alert(1)</script>");
         body.push_str(&"a".repeat(max_body_size - 2 - body.len() - 3));
         body.push('日'); // multibyte near boundary
-        body.push_str("<script>x</script>"); // past boundary — truncated
+        body.push_str("<script>x</script>"); // past boundary, truncated
         let req = HttpRequest {
             client_ip: client_ip(),
             method: "POST",
@@ -158,7 +158,7 @@ mod fix_c_multibyte_truncation {
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// FIX D — null-byte fast-path bypass
+// FIX D, null-byte fast-path bypass
 // ═══════════════════════════════════════════════════════════════════
 
 mod fix_d_null_byte_bypass {
@@ -186,7 +186,7 @@ mod fix_d_null_byte_bypass {
 
     #[test]
     fn nul_obfuscated_query_opens_sqli_gate() {
-        // `sel%00ect` decodes to `sel\0ect` — after NUL strip the value is
+        // `sel%00ect` decodes to `sel\0ect`, after NUL strip the value is
         // `select`, which must reach the SQL analyzer (rule 920400 must also
         // fire for the raw null byte in the query string).
         let engine = WafEngine::new(WafConfig::default());
@@ -247,7 +247,7 @@ mod fix_d_null_byte_bypass {
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// FIX E — SQLi fast-path exclusion bypass + GtEq/LtEq tautologies
+// FIX E, SQLi fast-path exclusion bypass + GtEq/LtEq tautologies
 // ═══════════════════════════════════════════════════════════════════
 
 mod fix_e_sqli_gate_bypass {
@@ -255,7 +255,7 @@ mod fix_e_sqli_gate_bypass {
 
     #[test]
     fn boolean_blind_no_keyword_reaches_analyzer() {
-        // `1 and 2>1` has no SQL keyword/quote — previously never reached
+        // `1 and 2>1` has no SQL keyword/quote, previously never reached
         // the AST analyzer.
         let engine = WafEngine::new(WafConfig::default());
         let req = HttpRequest {
@@ -332,7 +332,7 @@ mod fix_e_sqli_gate_bypass {
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// FIX F — path allowlist prefix bypass
+// FIX F, path allowlist prefix bypass
 // ═══════════════════════════════════════════════════════════════════
 
 mod fix_f_allowlist_prefix {
@@ -423,7 +423,7 @@ mod fix_f_allowlist_prefix {
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// FIX K6 — backslash-obfuscated command injection
+// FIX K6, backslash-obfuscated command injection
 // ═══════════════════════════════════════════════════════════════════
 
 mod fix_k6_backslash_cmdi {
@@ -431,7 +431,7 @@ mod fix_k6_backslash_cmdi {
 
     #[test]
     fn backslash_obfuscated_cat_passwd_blocked() {
-        // `;c\at /etc/passwd` — backslash inside the command name bypassed
+        // `;c\at /etc/passwd`, backslash inside the command name bypassed
         // literal command matching.
         let engine = WafEngine::new(WafConfig::default());
         let req = HttpRequest {
@@ -464,7 +464,7 @@ mod fix_k6_backslash_cmdi {
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// FIX K7 — enforce configured request size limits (dead config)
+// FIX K7, enforce configured request size limits (dead config)
 // ═══════════════════════════════════════════════════════════════════
 
 mod fix_k7_size_limits {
@@ -601,7 +601,7 @@ mod fix_k7_size_limits {
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// FIX K8 — event-handler gaps (`onpointerover`, `onanimationstart`, ws-=)
+// FIX K8, event-handler gaps (`onpointerover`, `onanimationstart`, ws-=)
 // ═══════════════════════════════════════════════════════════════════
 
 mod fix_k8_event_handlers {

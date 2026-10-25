@@ -2,7 +2,7 @@
 //! the edge-cases crate's SQL touches, with the exact column names/types the
 //! code binds and reads. If this file fails after 160 was renamed or
 //! reshaped, the crate's persistence contract has drifted from the canonical
-//! schema — update the migration (or this test) deliberately, never silently.
+//! schema, update the migration (or this test) deliberately, never silently.
 
 const MIGRATION_160: &str = include_str!("../../../migrations/160_edge_case_services.sql");
 

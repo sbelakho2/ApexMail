@@ -1,7 +1,7 @@
 //! Email transport abstraction for SMTP/SES.
 //!
-//! Two concrete implementations://! - `SmtpTransport` — sends via a relay SMTP server (mail-send crate).
-//! - `SesTransport` — sends via the AWS SES v2 `SendEmail` API.
+//! Two concrete implementations://! - `SmtpTransport`, sends via a relay SMTP server (mail-send crate).
+//! - `SesTransport`, sends via the AWS SES v2 `SendEmail` API.
 //!
 //! The factory function `create_transport` picks the right one based on
 //! the `TransportType` in `EmailConfig`.
@@ -34,7 +34,7 @@ use crate::common::{EmailConfig, SesConfig, SmtpConfig, TransportType};
 /// Each transport DECLARES whether it can carry a route whose source binding
 /// must be verifiable:
 ///
-/// * [`EmailTransport::supports_source_binding`] — true only when the
+/// * [`EmailTransport::supports_source_binding`], true only when the
 ///   transport can bind the recipient-facing socket to the requested
 ///   `source_ip` AND report the actually-bound IP in the same acceptance
 ///   contract that says the message was accepted. The processor refuses to
@@ -99,7 +99,7 @@ pub trait EmailTransport: Send + Sync {
 //   `build_message_with_route` additionally DROPS any caller-supplied
 //   header with this exact name before the transport writes its own. The
 //   receiving MTA must trust the header only because it arrived on the
-//   authenticated internal submission listener — provenance is the SESSION,
+//   authenticated internal submission listener, provenance is the SESSION,
 //   never the header value alone.
 //
 // WIRE CONTRACT (receiving side, worker version = v1):
@@ -147,7 +147,7 @@ pub const APEXMAIL_ROUTE_VALUE_PREFIX: &str = "v1 dedicated";
 /// actually bound for a dedicated route. IMPLEMENTED by the outbound relay
 /// (`crates/outbound-mta` reports the verified bound IP in its acceptance
 /// record); the legacy `SmtpTransport` still reports `actual_source_ip:
-/// None` and the processor treats that as UNVERIFIED — never as success.
+/// None` and the processor treats that as UNVERIFIED, never as success.
 pub const APEXMAIL_SOURCE_IP_REPLY_HEADER: &str = "X-ApexMail-Source-IP";
 
 /// Render the wire value for a route: `None` for the shared pool, the
@@ -173,13 +173,13 @@ fn ses_transport_supports_route(route: &DeliveryRoute) -> bool {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// VERP envelope Return-Path (C — bounce attribution)
+// VERP envelope Return-Path (C, bounce attribution)
 // ═══════════════════════════════════════════════════════════════
 
 /// Header carrying the platform message UUID (added by `prepare_email`).
 /// The MTA bounce parser resolves it back to the queue row via
 /// `email_queue.id::text = $1 OR message_id::text = $1`.
-/// F74: shared canonical constant — the SES callback handler parses the
+/// F74: shared canonical constant, the SES callback handler parses the
 /// same names case-insensitively.
 const VERP_MESSAGE_ID_HEADER: &str = apexmail_lib::email_headers::HEADER_MESSAGE_ID;
 
@@ -191,9 +191,9 @@ const VERP_MESSAGE_ID_HEADER: &str = apexmail_lib::email_headers::HEADER_MESSAGE
 /// [`Address::List`] via `Address::new_list`. The pinned mail-builder
 /// 0.3.2's `From<&str>` wraps the WHOLE string in ONE angle-bracket
 /// mailbox (`<a@x, b@y>`), so a comma-joined To/Cc string can never be
-/// handed to `MessageBuilder::to/cc` — only structured lists.
+/// handed to `MessageBuilder::to/cc`, only structured lists.
 /// The MIME `From:` mailbox for one prepared email: the display name
-/// (when present) is attached here ONLY — the envelope sender stays the
+/// (when present) is attached here ONLY, the envelope sender stays the
 /// bare `email.from` address (see `PreparedEmail::from_name`).
 fn from_mailbox(email: &PreparedEmail) -> Address<'_> {
     match email
@@ -220,13 +220,13 @@ fn mailbox_list(mailboxes: &[Mailbox]) -> Address<'_> {
 }
 
 /// F26: the envelope-fallback visible `To` for legacy single-recipient rows
-/// without a preserved mailbox list — a ONE-element list of the bare
+/// without a preserved mailbox list, a ONE-element list of the bare
 /// envelope destination.
 fn single_mailbox(email: &str) -> Address<'_> {
     Address::new_address(None::<&str>, email)
 }
 
-/// Default VERP domain — MUST stay identical to the MTA bounce server's
+/// Default VERP domain, MUST stay identical to the MTA bounce server's
 /// `default_verp_domain()` (crates/mta/src/config.rs) so generated
 /// Return-Paths land on its parser even with zero configuration.
 const DEFAULT_VERP_DOMAIN: &str = "bounces.apexmail.ee";
@@ -258,7 +258,7 @@ fn verp_domain() -> Option<String> {
 /// MUST be identical in the worker (minting) and the MTA (verifying) and at
 /// least [`apexmail_lib::verp::VERP_V2_MIN_SECRET_LEN`] bytes. When it is
 /// missing or too short this returns `None` and the send path emits NO VERP
-/// Return-Path at all — it never falls back to the unsigned v1 grammar,
+/// Return-Path at all, it never falls back to the unsigned v1 grammar,
 /// which is not suppression authority (a forged v1 bounce could otherwise
 /// suppress arbitrary recipients). Production startup rejects the
 /// configuration outright, so this branch is a development safety net.
@@ -344,7 +344,7 @@ pub fn verp_return_path(
 /// requires the authenticated queue/tenant binding carried by
 /// [`PreparedEmail::verp`], the platform message id header, the platform-managed
 /// VERP domain, and the shared `VERP_HMAC_SECRET`. Applies to the SMTP
-/// transport only — SES owns the envelope on its API path (per-message MAIL
+/// transport only, SES owns the envelope on its API path (per-message MAIL
 /// FROM is not possible there; SES bounce routing goes through SNS
 /// notifications instead).
 pub(crate) fn verp_return_path_for(email: &PreparedEmail) -> Option<String> {
@@ -378,16 +378,16 @@ pub(crate) fn verp_return_path_for(email: &PreparedEmail) -> Option<String> {
 // ═══════════════════════════════════════════════════════════════
 
 /// The message form handed to `SmtpClient::send`/`send_signed`:
-/// * `Builder` — the classic path (mail-send derives the envelope from the
+/// * `Builder`, the classic path (mail-send derives the envelope from the
 ///   built headers);
-/// * `Envelope` — the VERP path (explicit MAIL FROM / RCPT TO with the
+/// * `Envelope`, the VERP path (explicit MAIL FROM / RCPT TO with the
 ///   pre-serialized MIME as the body).
 enum Outgoing<'a> {
     Builder(MessageBuilder<'a>),
     Envelope(mail_send::smtp::message::Message<'static>),
 }
 
-/// F26: the MAIL FROM strategy for the SMTP send — VERP when attributable,
+/// F26: the MAIL FROM strategy for the SMTP send, VERP when attributable,
 /// the explicit sender address whenever preserved MIME To/Cc headers must
 /// NOT drive envelope derivation, and header derivation only for legacy
 /// single-recipient messages whose To header IS the envelope destination.
@@ -448,12 +448,12 @@ fn looks_auth_related(text: &str) -> bool {
 
 /// Redact the free-text part of an SMTP error (O-16.1):
 /// * authentication-related text is truncated to 50 chars (first line) and
-///   marked redacted — mail-send may include `username:secret` there;
+///   marked redacted, mail-send may include `username:secret` there;
 /// * other text merely drops tokens that look like base64-encoded AUTH
 ///   strings, and otherwise passes through.
 ///
-/// F-21: the reply CODE is never passed through here — it is carried in the
-/// structured `ProcessorError::Smtp` fields — so this redaction can no longer
+/// F-21: the reply CODE is never passed through here, it is carried in the
+/// structured `ProcessorError::Smtp` fields, so this redaction can no longer
 /// eat the code, no matter how long the free text is.
 fn redact_error_text(text: &str, auth_related: bool) -> String {
     if auth_related {
@@ -604,7 +604,7 @@ impl SmtpTransport {
                 if !self.config.secure {
                     return Err(ProcessorError::Config(
                         "SMTP credentials require an encrypted connection: enable \
-                         SMTP_SECURE/SMTP_TLS or remove the SMTP credentials — refusing \
+                         SMTP_SECURE/SMTP_TLS or remove the SMTP credentials, refusing \
                          to send SMTP AUTH in cleartext"
                             .into(),
                     ));
@@ -643,8 +643,8 @@ impl SmtpTransport {
     /// worker → relay contract).
     ///
     /// A caller-supplied header carrying the route header's name is DROPPED
-    /// here — defence in depth on top of the reserved `X-ApexMail-*`
-    /// namespace filter in `prepare_email`/the API boundary — so message
+    /// here, defence in depth on top of the reserved `X-ApexMail-*`
+    /// namespace filter in `prepare_email`/the API boundary, so message
     /// content can never spoof (or shadow) the transport's own route value.
     fn build_message_with_route<'a>(
         &self,
@@ -652,7 +652,7 @@ impl SmtpTransport {
         route: Option<&DeliveryRoute>,
     ) -> MessageBuilder<'a> {
         // F26: the MIME To/Cc headers show the ORIGINAL visible recipient
-        // LIST when the per-recipient expansion preserved it — structured
+        // LIST when the per-recipient expansion preserved it, structured
         // `Address::new_list`, never a comma-joined `&str` (mail-builder
         // 0.3.2 would wrap the whole string in one mailbox). The ENVELOPE
         // destination (`email.to`) is what delivery targets and is set by
@@ -751,11 +751,11 @@ impl EmailTransport for SmtpTransport {
         "smtp"
     }
 
-    /// FALSE — honestly: `SmtpTransport` injects the
+    /// FALSE, honestly: `SmtpTransport` injects the
     /// [`APEXMAIL_ROUTE_HEADER`] routing metadata, but the pinned mail-send
     /// 0.4.x client returns only `Result<()>` for DATA, so the end-of-DATA
     /// reply carrying the agreed [`APEXMAIL_SOURCE_IP_REPLY_HEADER`] cannot be
-    /// parsed — and the relay side of the contract is NOT implemented in this
+    /// parsed, and the relay side of the contract is NOT implemented in this
     /// repository (`crates/mta` has no outgoing relay connector). Binding
     /// therefore cannot be VERIFIED in the acceptance contract, and the
     /// processor refuses to submit dedicated routes on this transport. When
@@ -792,11 +792,11 @@ impl EmailTransport for SmtpTransport {
         route: &DeliveryRoute,
     ) -> ProcessorResult<DeliveryReceipt> {
         // Route admissibility. The relay serves:
-        //  * `Dedicated` — its original role. It cannot VERIFY a source
+        //  * `Dedicated`, its original role. It cannot VERIFY a source
         //    binding (`supports_source_binding() == false`), and the
         //    processor's pre-flight defers such routes before submission, so
         //    arriving here means the caller accepted the unverifiable path.
-        //  * `SesShared` — in SMTP mode (`EMAIL_TRANSPORT_TYPE=smtp`) the
+        //  * `SesShared`, in SMTP mode (`EMAIL_TRANSPORT_TYPE=smtp`) the
         //    deployment explicitly binds the shared route to this relay
         //    (Mailpit in dev, an operator relay in production); a plain
         //    relay delivering shared mail is exactly the configured
@@ -896,7 +896,7 @@ impl EmailTransport for SmtpTransport {
 
         // The relay accepted the message. `actual_source_ip` is `None`
         // because the pinned mail-send 0.4.x API returns only `Result<()>`
-        // for DATA — it does not surface the end-of-DATA reply, so the
+        // for DATA, it does not surface the end-of-DATA reply, so the
         // agreed relay report ([`APEXMAIL_SOURCE_IP_REPLY_HEADER`]) cannot
         // be parsed yet. That is why `supports_source_binding()` is false:
         // the processor refuses a DEDICATED route on this transport BEFORE
@@ -909,7 +909,7 @@ impl EmailTransport for SmtpTransport {
             // The relay MTA performs recipient MX resolution and does not
             // report it back (see the module contract above); this path
             // therefore does not know the recipient provider. It is left
-            // None — never inferred from the visible recipient domain.
+            // None, never inferred from the visible recipient domain.
             recipient_provider: None,
             provider_source: None,
         })
@@ -934,7 +934,7 @@ pub(crate) enum SesFailureDisposition {
     /// disposition that may suppress the address tenant-wide.
     AddressBounce,
     /// Permanent for THIS message, but NOT address-proving (service or
-    /// configuration refusal — sending paused, resource not found):
+    /// configuration refusal, sending paused, resource not found):
     /// dead-letter the message; retrying it through the queue cannot
     /// succeed, but the recipient must NOT be suppressed.
     PermanentNonAddress,
@@ -951,19 +951,19 @@ pub(crate) enum SesFailureDisposition {
 ///
 /// "Permanent" is split by what the failure PROVES:
 ///
-/// * [`SesFailureDisposition::AddressBounce`] — the failure proves the
+/// * [`SesFailureDisposition::AddressBounce`], the failure proves the
 ///   RECIPIENT ADDRESS is invalid: `MailboxDoesNotExist`/`InvalidRecipient`
 ///   codes surfaced through Unhandled, and `MessageRejected` (SES rejects
-///   the message as undeliverable to this recipient — malformed recipient
+///   the message as undeliverable to this recipient, malformed recipient
 ///   content). This is the only suppression-causing class.
-/// * [`SesFailureDisposition::PermanentNonAddress`] — determinate refusals
+/// * [`SesFailureDisposition::PermanentNonAddress`], determinate refusals
 ///   a retry of the same request cannot repair (`NotFoundException`,
 ///   `SendingPausedException`): dead-letter, never suppress.
-/// * Everything that can recover — `AccountSuspendedException` (accounts
+/// * Everything that can recover, `AccountSuspendedException` (accounts
 ///   are reactivated), `MailFromDomainNotVerifiedException` (the domain
 ///   gets verified), `BadRequestException` (request-shape bugs worth a
 ///   finite retry, not proof of a bad mailbox), the blanket 4xx family,
-///   5xx, and signal-less network failures — maps to
+///   5xx, and signal-less network failures, maps to
 ///   [`SesFailureDisposition::Transient`] and is retried with the standard
 ///   finite backoff ladder. The previous blanket 4xx→Permanent mapping
 ///   permanently suppressed valid recipients on any client error.
@@ -992,7 +992,7 @@ pub(crate) fn classify_ses_failure(
         }
         // AccountSuspendedException / MailFromDomainNotVerifiedException /
         // BadRequestException / *Validation*: account and request states
-        // that can be repaired — retryable-with-finite-attempts, and never
+        // that can be repaired, retryable-with-finite-attempts, and never
         // address proof. Fall through to the status mapping.
     }
     match http_status {
@@ -1018,7 +1018,7 @@ pub(crate) fn classify_ses_failure(
 /// backend serializes the message identically.
 pub(crate) fn build_raw_mime(email: &PreparedEmail) -> Vec<u8> {
     // F26: same structured MIME To/Cc/Reply-To construction as the SMTP
-    // path (see `SmtpTransport::build_message`) — `Address::new_list`
+    // path (see `SmtpTransport::build_message`), `Address::new_list`
     // mailbox arrays, never comma-joined strings.
     let mut builder = MessageBuilder::new()
         .from(from_mailbox(email))
@@ -1058,7 +1058,7 @@ pub(crate) fn build_raw_mime(email: &PreparedEmail) -> Vec<u8> {
     builder.write_to_vec().unwrap_or_default()
 }
 
-/// AWS SES v2 transport — sends via the `SendEmail` API with raw MIME content.
+/// AWS SES v2 transport, sends via the `SendEmail` API with raw MIME content.
 /// SES handles:/// - DKIM signing through the domain's configured BYODKIM identity
 /// - IP reputation management
 /// - Bounce/complaint processing (via SNS notifications)
@@ -1112,7 +1112,7 @@ impl SesTransport {
         })
     }
 
-    /// Create around an EXPLICIT credential pair — the dedicated SALES
+    /// Create around an EXPLICIT credential pair, the dedicated SALES
     /// account's `SALES_SES_ACCESS_KEY_ID`/`SALES_SES_SECRET_ACCESS_KEY`.
     ///
     /// Deliberately does NOT go through the default provider chain: the
@@ -1128,7 +1128,7 @@ impl SesTransport {
         if access_key_id.trim().is_empty() || secret_access_key.is_empty() {
             return Err(ProcessorError::Config(
                 "the dedicated sales SES account needs both SALES_SES_ACCESS_KEY_ID and \
-                 SALES_SES_SECRET_ACCESS_KEY — refusing to fall back to the customer \
+                 SALES_SES_SECRET_ACCESS_KEY, refusing to fall back to the customer \
                  account's credential chain"
                     .into(),
             ));
@@ -1164,12 +1164,12 @@ impl SesTransport {
     /// Map an already-classified SES failure onto the processor error type.
     ///
     /// Audit-4: classification happens AT THE SOURCE (in `send`, where the
-    /// typed SDK error — modeled exception code via
+    /// typed SDK error, modeled exception code via
     /// `SendEmailError::meta().code()` and the raw response's HTTP status —
     /// is still available). The processor used to substring-match the
     /// flattened `Transport("SES send failed: {msg}")` string, so every
-    /// non-throttling SES error — including permanent 400/Validation/
-    /// MailboxDoesNotExist/MessageRejected rejections — fell into the
+    /// non-throttling SES error, including permanent 400/Validation/
+    /// MailboxDoesNotExist/MessageRejected rejections, fell into the
     /// generic retry path.
     fn ses_error_to_processor_error(
         code: Option<&str>,
@@ -1206,7 +1206,7 @@ impl EmailTransport for SesTransport {
         "ses"
     }
 
-    /// FALSE — SES has no per-message dedicated source-IP binding in this
+    /// FALSE, SES has no per-message dedicated source-IP binding in this
     /// design (the shared pool is the whole point of the route), and its
     /// `SendEmail` response reports only a `MessageId`, never a bound source
     /// address. A dedicated route is refused before the API call in `send`.
@@ -1217,7 +1217,7 @@ impl EmailTransport for SesTransport {
     async fn verify(&self) -> ProcessorResult<()> {
         debug!(region = %self.config.region, "Verifying SES connectivity");
 
-        // Verify by calling GetAccount — lightweight API call that confirms credentials work
+        // Verify by calling GetAccount, lightweight API call that confirms credentials work
         self.client
             .get_account()
             .send()
@@ -1235,7 +1235,7 @@ impl EmailTransport for SesTransport {
     ) -> ProcessorResult<DeliveryReceipt> {
         // A dedicated route cannot be honoured on the SES shared pool:
         // silently sending from shared IPs would spend the warming IP's
-        // reserved capacity on an IP nothing sent from — the exact defect
+        // reserved capacity on an IP nothing sent from, the exact defect
         // this contract removes. Refuse BEFORE the API call.
         if !ses_transport_supports_route(route) {
             return Err(ProcessorError::Transport(
@@ -1300,7 +1300,7 @@ impl EmailTransport for SesTransport {
         }
 
         // Audit-4: classification happens HERE, where the typed SDK error is
-        // still available — the modeled exception code (SendEmailError's
+        // still available, the modeled exception code (SendEmailError's
         // inherent meta().code()) plus the raw response's HTTP status feed
         // classify_ses_failure, and the processor consumes the structured
         // ProcessorError::Ses/RateLimited disposition instead of
@@ -1334,7 +1334,7 @@ impl EmailTransport for SesTransport {
             transport_message_id: ses_message_id,
             actual_source_ip: None,
             // SES accepts the message; it does not report the recipient's
-            // mailbox provider. Unknown stays None — never inferred from
+            // mailbox provider. Unknown stays None, never inferred from
             // the visible recipient domain.
             recipient_provider: None,
             provider_source: None,
@@ -1342,7 +1342,7 @@ impl EmailTransport for SesTransport {
     }
 
     async fn close(&self) -> ProcessorResult<()> {
-        // SES client is stateless HTTP — nothing to close.
+        // SES client is stateless HTTP, nothing to close.
         Ok(())
     }
 }
@@ -1364,12 +1364,12 @@ impl EmailTransport for SesTransport {
 /// mail through a dedicated IP (or dedicated mail through the shared pool)
 /// would break the reputation-isolation invariant the route exists to
 /// enforce. A worker booted for one backend can still carry the other when
-/// both are configured — that is the hybrid the old single-transport
+/// both are configured, that is the hybrid the old single-transport
 /// processor could not express.
 pub struct HybridTransport {
-    /// AWS SES shared-pool transport — carries `SesShared` only.
+    /// AWS SES shared-pool transport, carries `SesShared` only.
     ses_shared: Option<Arc<dyn EmailTransport>>,
-    /// Self-hosted relay MTA transport — carries `Dedicated` only.
+    /// Self-hosted relay MTA transport, carries `Dedicated` only.
     dedicated_smtp: Option<Arc<dyn EmailTransport>>,
 }
 
@@ -1392,7 +1392,7 @@ impl HybridTransport {
         self.ses_shared.is_some()
     }
 
-    /// The shared-route backend's own transport name — "smtp" when SMTP mode
+    /// The shared-route backend's own transport name, "smtp" when SMTP mode
     /// bound the shared route to the configured relay, "ses" otherwise. Lets
     /// tests (and logs) assert WHICH backend carries the shared route, not
     /// merely that one is present.
@@ -1414,22 +1414,22 @@ impl HybridTransport {
             .is_some_and(|transport| transport.supports_source_binding())
     }
 
-    /// The ONE transport allowed to carry `route`. Fails closed — never
-    /// crosses the shared/dedicated boundary — when the route's backend is
+    /// The ONE transport allowed to carry `route`. Fails closed, never
+    /// crosses the shared/dedicated boundary, when the route's backend is
     /// not configured.
     pub fn transport_for(&self, route: &DeliveryRoute) -> ProcessorResult<&dyn EmailTransport> {
         match route {
             DeliveryRoute::SesShared => self.ses_shared.as_deref().ok_or_else(|| {
                 ProcessorError::Config(format!(
                     "delivery route {route} requires the SES shared-pool transport, \
-                     which is not configured on this worker — refusing to fall back to \
+                     which is not configured on this worker, refusing to fall back to \
                      the dedicated SMTP relay (reputation isolation)"
                 ))
             }),
             DeliveryRoute::Dedicated { .. } => self.dedicated_smtp.as_deref().ok_or_else(|| {
                 ProcessorError::Config(format!(
                     "delivery route {route} requires the dedicated SMTP transport, \
-                     which is not configured on this worker — refusing to fall back to \
+                     which is not configured on this worker, refusing to fall back to \
                      the shared SES pool (reputation isolation)"
                 ))
             }),
@@ -1450,7 +1450,7 @@ impl HybridTransport {
         if route.is_dedicated() && !transport.supports_source_binding() {
             return Err(ProcessorError::Config(format!(
                 "delivery route {route} requires a transport that can bind and report the \
-                 source IP; transport '{}' does not support verifiable source binding — \
+                 source IP; transport '{}' does not support verifiable source binding, \
                  refusing before DATA rather than submitting an unverifiable dedicated send",
                 transport.transport_name()
             )));
@@ -1578,16 +1578,16 @@ pub async fn create_transport_from_config(
 /// `transport_type` (which select the BACKEND A NEW DEPLOYMENT PREFERS, not
 /// the only one it can speak):
 ///
-/// * `ses_shared` — always built. SES client construction is credential-lazy
+/// * `ses_shared`, always built. SES client construction is credential-lazy
 ///   (the AWS provider chain resolves at request time); the shared-pool route
 ///   must never silently fall back to the SMTP relay, and a deployment
 ///   without usable AWS credentials fails the shared route loudly at send
 ///   time instead.
-/// * `dedicated_smtp` — the [`OutboundMtaTransport`] when the worker's
+/// * `dedicated_smtp`, the [`OutboundMtaTransport`] when the worker's
 ///   database pool is available (the outbound-MTA relay library is the only
 ///   backend that can BIND the recipient-facing socket and report the
 ///   verified IP back in the same idempotent acceptance). Without a pool —
-///   or when the in-process relay cannot be constructed — it falls back to
+///   or when the in-process relay cannot be constructed, it falls back to
 ///   the legacy relay `SmtpTransport` when `transport_type == Smtp` or a
 ///   concrete `SMTP_HOST` is configured; that backend honestly reports
 ///   `supports_source_binding() == false`, so dedicated routes keep deferring
@@ -1615,24 +1615,24 @@ pub async fn create_transport_from_config_with_db_and_redis(
 ) -> ProcessorResult<HybridTransport> {
     // The shared-pool route's backend is selected by the deployment's
     // configured transport. In SES mode (the production default) it is the
-    // SES client — and it must NEVER silently fall back to a relay: a
+    // SES client, and it must NEVER silently fall back to a relay: a
     // deployment without usable AWS credentials fails the shared route
     // loudly at send time instead. In SMTP mode (`EMAIL_TRANSPORT_TYPE=smtp`,
     // e.g. the dev stack's Mailpit sink or an operator-chosen relay
     // deployment) the configuration EXPLICITLY selects the SMTP backend, so
-    // the shared route binds to it directly — this is a deliberate route
+    // the shared route binds to it directly, this is a deliberate route
     // binding, not a silent fallback.
     let smtp_mode = config.transport_type == TransportType::Smtp;
     let ses_shared: Arc<dyn EmailTransport> = if smtp_mode {
         // SMTP mode with no concrete host is a configuration error: the
         // deployment has declared SMTP as its transport but given the
         // shared route nowhere to deliver. Refuse at construction (boot
-        // time, loud) — never arm a pipeline whose every send can only
+        // time, loud), never arm a pipeline whose every send can only
         // fail.
         if !smtp_relay_configured(&config.smtp) {
             return Err(ProcessorError::Config(
                 "EMAIL_TRANSPORT_TYPE=smtp requires a concrete SMTP_HOST (currently \
-                 unset or default) — the shared delivery route would have no backend"
+                 unset or default), the shared delivery route would have no backend"
                     .into(),
             ));
         }
@@ -1671,7 +1671,7 @@ pub async fn create_transport_from_config_with_db_and_redis(
             Err(error) => {
                 warn!(
                     error = %error,
-                    "outbound MTA transport unavailable — falling back to the legacy \
+                    "outbound MTA transport unavailable, falling back to the legacy \
                      relay transport, whose dedicated routes defer before DATA"
                 );
             }
@@ -1688,7 +1688,7 @@ pub async fn create_transport_from_config_with_db_and_redis(
     }
     if dedicated_smtp.is_none() {
         warn!(
-            "no dedicated transport configured — dedicated delivery routes \
+            "no dedicated transport configured, dedicated delivery routes \
              will defer before DATA instead of silently using the shared SES pool"
         );
     }
@@ -1790,9 +1790,9 @@ mod tests {
 
     /// F26 verification per the finding: build real MIME with mail-builder
     /// 0.3.2 for TWO To, TWO Cc and one Bcc (envelope-only) recipient, and
-    /// assert the visible mailbox lists are two separate entries — not the
+    /// assert the visible mailbox lists are two separate entries, not the
     /// malformed single angle-bracket mailbox `<a@x, b@y>` that
-    /// `From<&str>` used to produce — that no Bcc header exists, and that
+    /// `From<&str>` used to produce, that no Bcc header exists, and that
     /// the envelope destination stays out of the visible headers.
     #[test]
     fn mailbox_lists_render_as_separate_mailboxes_not_one_malformed_mailbox() {
@@ -1862,7 +1862,7 @@ mod tests {
             "display names survive (possibly RFC 2047-encoded): {to}"
         );
         // (The malformed joined form would show the comma INSIDE one
-        // bracket pair — already excluded by the first-mailbox check.)
+        // bracket pair, already excluded by the first-mailbox check.)
         assert!(!to.contains("a@example.com,b@example.com"));
 
         let cc = mime_header(&raw_str, "Cc").expect("Cc header present");
@@ -2086,7 +2086,7 @@ mod tests {
     fn ses_account_and_config_states_are_retryable_not_permanent() {
         // Account/configuration states say nothing about the mailbox: a
         // suspended account gets reinstated, a domain gets verified, a
-        // request-shape bug gets fixed — retryable-with-finite-attempts,
+        // request-shape bug gets fixed, retryable-with-finite-attempts,
         // and NEVER suppression-causing.
         for code in [
             "BadRequestException",
@@ -2264,7 +2264,7 @@ mod tests {
 
     /// P0 closure: with the worker's database pool available the dedicated
     /// slot is the outbound-MTA-backed transport, which HONESTLY claims
-    /// verifiable source binding — so a dedicated route passes the pre-DATA
+    /// verifiable source binding, so a dedicated route passes the pre-DATA
     /// gate instead of deferring forever.
     #[tokio::test]
     async fn outbound_mta_backed_dedicated_slot_claims_verifiable_source_binding() {
@@ -2297,7 +2297,7 @@ mod tests {
     }
 
     /// P0: a concrete `SMTP_HOST` on a SES-selected worker enables the
-    /// dedicated slot — the hybrid the single-transport processor could not
+    /// dedicated slot, the hybrid the single-transport processor could not
     /// express.
     #[test]
     fn smtp_relay_configured_requires_a_concrete_host() {
@@ -2426,7 +2426,7 @@ mod tests {
         let _ = rustls::crypto::ring::default_provider().install_default();
 
         // Minimal plaintext SMTP stub (blocking IO thread): greeting, EHLO,
-        // QUIT — the exact command sequence of connect_plain() + quit().
+        // QUIT, the exact command sequence of connect_plain() + quit().
         let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind stub");
         let port = listener.local_addr().unwrap().port();
         let server = std::thread::spawn(move || {
@@ -2486,7 +2486,7 @@ mod tests {
 
     /// mail-send surfaces relay replies through smtp-proto's Response
     /// Display ("Unexpected reply: Code: 550, Enhanced code: 5.1.1,
-    /// Message: ...") — the production shape must parse as well as the raw
+    /// Message: ..."), the production shape must parse as well as the raw
     /// audit-string shape.
     #[test]
     fn map_smtp_error_parses_mailsend_reply_display() {
@@ -2499,7 +2499,7 @@ mod tests {
         assert_eq!(message, "Mailbox full");
     }
 
-    /// The 50-char auth redaction truncates only the free-text tail — the
+    /// The 50-char auth redaction truncates only the free-text tail, the
     /// reply code is a structured field now, so arbitrarily long messages
     /// can no longer eat it.
     #[test]
@@ -2522,7 +2522,7 @@ mod tests {
     }
 
     /// Codeless errors (connection/TLS/timeout/DNS) keep the legacy
-    /// Transport classification — nothing regresses for them.
+    /// Transport classification, nothing regresses for them.
     #[test]
     fn map_smtp_error_without_reply_code_stays_transport() {
         for raw in [
@@ -2745,7 +2745,7 @@ mod tests {
 
     /// Adversarial: a caller-supplied header with the internal route name
     /// must be STRIPPED, and the transport's own value must be the only one
-    /// on the wire — message content cannot spoof the route.
+    /// on the wire, message content cannot spoof the route.
     #[test]
     fn dedicated_route_header_wins_over_a_caller_supplied_one() {
         let transport = SmtpTransport::new(SmtpConfig::default());
@@ -3029,8 +3029,8 @@ mod reply_parsing_tests {
 
     /// The secret filter is deliberately NARROW: only a long token made of
     /// base64-ALPHABET characters is dropped. A long token containing a
-    /// separator (`_`, `-`, `:`) is evidence — a message id, a queue id, a
-    /// tenant slug — and must survive redaction, or every diagnostic that
+    /// separator (`_`, `-`, `:`) is evidence, a message id, a queue id, a
+    /// tenant slug, and must survive redaction, or every diagnostic that
     /// quotes it loses its identifying payload.
     #[test]
     fn long_non_base64_tokens_are_evidence_not_secrets_and_survive() {
@@ -3292,7 +3292,7 @@ mod adversarial_batch {
     }
 
     /// When the in-process outbound MTA cannot be constructed, the factory
-    /// warns and falls back to the legacy relay transport — the dedicated
+    /// warns and falls back to the legacy relay transport, the dedicated
     /// route stays available (degraded), never silently absent.
     #[tokio::test]
     async fn transport_factory_falls_back_to_relay_when_mta_is_unavailable() {

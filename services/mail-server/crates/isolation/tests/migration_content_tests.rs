@@ -1,9 +1,9 @@
 //! F63 regression test: the canonical migrations 164-167 must define every
 //! table the isolation crate's SQL touches, with the exact column names and
-//! types the code binds and reads — and iso_workspaces must have exactly ONE
+//! types the code binds and reads, and iso_workspaces must have exactly ONE
 //! definition (tenant.rs and data_isolation.rs share it). If this file fails
 //! after those migrations were renamed or reshaped, the crate's persistence
-//! contract has drifted from the canonical schema — update the migration (or
+//! contract has drifted from the canonical schema, update the migration (or
 //! this test) deliberately, never silently.
 
 const MIGRATION_164: &str = include_str!("../../../migrations/164_isolation_tenants.sql");

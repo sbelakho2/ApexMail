@@ -87,7 +87,7 @@ impl ReconciliationWorker {
 
         // Orphaned messages:sent but no events in 5+ min
         // #189:Use NOT EXISTS instead of NOT IN (SELECT DISTINCT ...) for O(n) instead of O(n×m)
-        // The messages table has no `message_id` column — its primary key is
+        // The messages table has no `message_id` column, its primary key is
         // `id` (UUID) and events reference it as text, so the anti-join casts
         // the VALUE once (m.id::text) and leaves the indexed events.message_id
         // column untouched. The previous m.message_id reference made the whole

@@ -19,7 +19,7 @@ Tras enviar el formulario, nuestro equipo empresarial revisa sus requisitos y re
 
 <div id="enquiry-submitted" class="apex-notice apex-notice--ok" role="status">
   <b>Recibida</b>
-  <p>Gracias — su solicitud se ha recibido correctamente. Nuestro equipo la revisa y responde en un plazo de 2 días laborables.</p>
+  <p>Gracias, su solicitud se ha recibido correctamente. Nuestro equipo la revisa y responde en un plazo de 2 días laborables.</p>
 </div>
 <div id="enquiry-error" class="apex-notice apex-notice--fail" role="alert">
   <b>No aceptada</b>
@@ -62,15 +62,15 @@ Tras enviar el formulario, nuestro equipo empresarial revisa sus requisitos y re
     <div class="space-y-3 mt-3">
       <label class="apex-check">
         <input type="radio" name="deployment_model" value="shared" checked />
-        <span><strong>Nube compartida</strong> — Infraestructura multi-tenant en la UE</span>
+        <span><strong>Nube compartida</strong>, Infraestructura multi-tenant en la UE</span>
       </label>
       <label class="apex-check">
         <input type="radio" name="deployment_model" value="dedicated" />
-        <span><strong>Inquilino dedicado</strong> — Infraestructura aislada de inquilino único, sujeta a revisión de arquitectura y contractual</span>
+        <span><strong>Inquilino dedicado</strong>, Infraestructura aislada de inquilino único, sujeta a revisión de arquitectura y contractual</span>
       </label>
       <label class="apex-check">
         <input type="radio" name="deployment_model" value="byoc" />
-        <span><strong>BYOC / Implementación privada</strong> — Despliegue gestionado en su propia cuenta cloud, sujeto a revisión de arquitectura y contractual</span>
+        <span><strong>BYOC / Implementación privada</strong>, Despliegue gestionado en su propia cuenta cloud, sujeto a revisión de arquitectura y contractual</span>
       </label>
     </div>
   </fieldset>

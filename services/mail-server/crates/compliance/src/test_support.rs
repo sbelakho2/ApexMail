@@ -209,7 +209,7 @@ fn assemble_app_state(
     })
 }
 
-/// [`Self::app_state`] with a caller-supplied DSAR rate limiter — the
+/// [`Self::app_state`] with a caller-supplied DSAR rate limiter, the
 /// tenant-quota arm of the submit handler is only reachable with a
 /// purpose-built limiter configuration (per-tenant cap hit before the
 /// per-user cap, and quota pre-consumed by a DIFFERENT subject).

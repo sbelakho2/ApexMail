@@ -10,16 +10,16 @@
 //!
 //! The protocol implemented here is:
 //!
-//! * `claim_submission` — atomic INSERT ... ON CONFLICT DO NOTHING. A fresh
+//! * `claim_submission`, atomic INSERT ... ON CONFLICT DO NOTHING. A fresh
 //!   row is claimed `delivering` with attempt 1; a conflicting row is
 //!   classified (`accepted` → return the stored record; live lease →
 //!   in-flight; `pending` → already queued; `failed` → terminal).
-//! * `claim_due` — the daemon's retry claim: one atomic UPDATE ... SKIP
+//! * `claim_due`, the daemon's retry claim: one atomic UPDATE ... SKIP
 //!   LOCKED, so exactly one worker owns each due row, incrementing `attempt`
 //!   and taking a lease.
-//! * `record_accepted` / `record_retry` / `record_permanent` — terminal or
+//! * `record_accepted` / `record_retry` / `record_permanent`, terminal or
 //!   retry state transitions for the lease holder.
-//! * `reclaim_expired` — crashed `delivering` rows return to `pending`
+//! * `reclaim_expired`, crashed `delivering` rows return to `pending`
 //!   (never deleted; the attempt counter is preserved).
 
 use std::net::IpAddr;
@@ -40,7 +40,7 @@ pub struct NewSubmission {
     pub tenant_id: Option<String>,
     pub queue_id: Option<Uuid>,
     /// H(tenant || envelope_from || canonical_recipients ||
-    /// message_sha256 || requested_source_ip) — migration 230. `None` only
+    /// message_sha256 || requested_source_ip), migration 230. `None` only
     /// for callers that predate the field; the relay always sets it.
     pub request_fingerprint: Option<String>,
     /// `None` = SMTP null reverse path.
@@ -234,7 +234,7 @@ impl PgLedger {
 }
 
 /// Shared column list. INET columns are cast to text for transport and
-/// parsed back into `IpAddr` in [`LedgerRow::into_submission`] — sqlx's
+/// parsed back into `IpAddr` in [`LedgerRow::into_submission`], sqlx's
 /// Postgres driver does not provide a `Type<Postgres>` impl for
 /// `std::net::IpAddr` without extra features, and the wire form (`::text`)
 /// is unambiguous for both v4 and v6.
@@ -492,7 +492,7 @@ impl RelayLedger for PgLedger {
         })?;
 
         // Migration 230's contract: the same send_unit with a DIFFERENT
-        // delivery contract is a typed conflict — but only once the stored
+        // delivery contract is a typed conflict, but only once the stored
         // row is TERMINAL. While the stored row is still non-terminal
         // (`pending`/`delivering`) the differing fingerprint is the
         // documented worker-retry shape: the worker re-renders the MIME on
@@ -500,7 +500,7 @@ impl RelayLedger for PgLedger {
         // IVs), so the byte digest changes while the logical send does not.
         // The stored bytes are the authoritative copy the relay will
         // deliver, so ADOPT the stored row (classify_existing below) and
-        // never surface a false "corrupt ledger row" — the old behavior
+        // never surface a false "corrupt ledger row", the old behavior
         // terminalized the worker's queue row `failed` while this ledger
         // stayed `pending` and could still deliver (dogfood finding
         // 2026-10-06 P1 split-brain). A NULL stored fingerprint (a row
@@ -514,7 +514,7 @@ impl RelayLedger for PgLedger {
                         message: format!(
                             "idempotency conflict: terminal send_unit reused with a different \
                              delivery contract (stored fingerprint {stored:?}, incoming \
-                             {incoming:?}) — reconcile against the existing row; never re-route \
+                             {incoming:?}), reconcile against the existing row; never re-route \
                              under the same key"
                         ),
                     });
@@ -613,7 +613,7 @@ impl RelayLedger for PgLedger {
         // drop the deferred recipients.
         let mut tx = self.pool.begin().await?;
         // Fenced on the claimed attempt: if a daemon sweep re-claimed the
-        // expired lease, this stale acceptance must NOT land — the new owner
+        // expired lease, this stale acceptance must NOT land, the new owner
         // is delivering (or has delivered) its own copy (audit finding 2).
         let result = sqlx::query(
             "UPDATE outbound_relay_ledger \
@@ -637,7 +637,7 @@ impl RelayLedger for PgLedger {
                 send_unit = %send_unit,
                 attempt = record.attempt,
                 "record_accepted matched no row: the delivery lease was lost (expired and \
-                 re-claimed); the acceptance and its follow-up unit are NOT applied — the \
+                 re-claimed); the acceptance and its follow-up unit are NOT applied, the \
                  re-claiming owner owns the verdict now"
             );
             // Roll the (empty) transaction back: the deferred follow-up unit
@@ -1217,7 +1217,7 @@ mod tests {
     }
 
     /// Per-STATEMENT counters: a `FOR EACH STATEMENT` trigger fires once per
-    /// INSERT/UPDATE/DELETE statement, not per row — the only way to prove a
+    /// INSERT/UPDATE/DELETE statement, not per row, the only way to prove a
     /// batch stayed one round trip.
     async fn install_statement_counters(pool: &PgPool, tables: &[&str]) {
         sqlx::query(
@@ -1366,7 +1366,7 @@ mod tests {
 
         // Truncate to microseconds: Postgres stores µs while Linux clocks
         // carry nanoseconds, so the round-tripped value only compares equal
-        // when the source is µs-clean (macOS clocks are µs — this passed on
+        // when the source is µs-clean (macOS clocks are µs, this passed on
         // the dev machine and failed on the deploy host, 2026-10-11).
         let now = {
             use chrono::SubsecRound as _;
@@ -1584,7 +1584,7 @@ mod tests {
         let stored = ledger.get(&unit).await.expect("get").expect("stored row");
         assert_eq!(
             stored.message, original,
-            "the FIRST submission's bytes stay authoritative — the rebuilt copy is discarded"
+            "the FIRST submission's bytes stay authoritative, the rebuilt copy is discarded"
         );
 
         // Once the row is terminal, the strict conflict is back.
@@ -2013,7 +2013,7 @@ mod tests {
 
         let child_unit = format!("{unit}#deferred1");
         // Far future: this suite shares one database, and other tests'
-        // due-sweeps use minute/hour horizons — a near-future child row would
+        // due-sweeps use minute/hour horizons, a near-future child row would
         // be claimed by THEIR claim_due (and vice versa). The relay-level
         // tests prove the claim path; this test proves the atomic commit.
         let next_attempt_at = Utc::now() + chrono::Duration::days(90);
@@ -2202,7 +2202,7 @@ mod tests {
     /// its lease (two slow addresses already exceed the 15-minute default),
     /// so a daemon sweep re-claims the row and a second delivery runs
     /// concurrently. Every retry/terminal write is fenced on the claimed
-    /// attempt: the stale worker's verdicts must never land on — or reset —
+    /// attempt: the stale worker's verdicts must never land on, or reset —
     /// the successor's in-flight row, and the stale acceptance must not
     /// insert the deferred follow-up unit.
     #[tokio::test]
@@ -2345,7 +2345,7 @@ mod tests {
         (relay, ledger, server)
     }
 
-    /// Window 1 — crash BETWEEN THE LEDGER CLAIM AND ANY SMTP TRAFFIC. The
+    /// Window 1, crash BETWEEN THE LEDGER CLAIM AND ANY SMTP TRAFFIC. The
     /// row is 'delivering' under a lease a dead process will never renew: no
     /// byte reached the wire. Recovery (reclaim_expired → claim_due →
     /// deliver) transmits the message exactly once and pins the acceptance,
@@ -2419,7 +2419,7 @@ mod tests {
         assert!(row.acceptance.is_some());
     }
 
-    /// Window 2 — crash AFTER THE POST-DATA 250 AND ITS LEDGER COMMIT, before
+    /// Window 2, crash AFTER THE POST-DATA 250 AND ITS LEDGER COMMIT, before
     /// the caller learns the result. The committed acceptance evidence is the
     /// answer: any retry (worker resubmit, daemon re-run) returns the SAME
     /// record and never transmits a second copy.
@@ -2453,7 +2453,7 @@ mod tests {
         );
     }
 
-    /// Window 3 — a PARTIAL acceptance's deferred-retry child commits IN THE
+    /// Window 3, a PARTIAL acceptance's deferred-retry child commits IN THE
     /// SAME TRANSACTION as the parent's acceptance evidence; a crash-replay
     /// of that acceptance (the caller re-running record_accepted after losing
     /// its acknowledgment) cannot duplicate the child, and the daemon then

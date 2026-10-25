@@ -76,7 +76,7 @@ struct ImapSession {
     /// second-granular) to skip the full 100k-message re-list when the
     /// mailbox has not changed. 0 = unknown (forces one full refresh).
     mailbox_modseq: u64,
-    /// F6: session-scoped \Recent approximation — the UIDs this session
+    /// F6: session-scoped \Recent approximation, the UIDs this session
     /// considers \Recent (unseen when first observed via SELECT, plus unseen
     /// arrivals during the session). The store has no persistent
     /// first-delivery marker on the wire, so multi-session \Recent semantics
@@ -128,7 +128,7 @@ impl ImapSession {
 
     /// SM2-F2: `uid_map` is kept sorted (SELECT sorts it, APPEND re-sorts
     /// after its push, refreshes re-list sorted), so UID→MSN lookup is a
-    /// binary search instead of a linear scan — STORE's per-message echo loop
+    /// binary search instead of a linear scan, STORE's per-message echo loop
     /// on a 100k-message mailbox is O(m log n), not O(m·n).
     fn seq_for_uid(&self, uid: u64) -> Option<u32> {
         self.uid_map.binary_search(&uid).ok().map(|i| i as u32 + 1)
@@ -139,7 +139,7 @@ impl ImapSession {
     ///
     /// SM2-F2: membership tests against the sorted `uid_map` are binary
     /// searches. The previous `slice::contains` is a linear scan, which made
-    /// this O(|recent| × |view|) — on SELECT every unseen message joins
+    /// this O(|recent| × |view|), on SELECT every unseen message joins
     /// `recent_uids`, so a 100k-unseen mailbox paid ~5×10⁹ comparisons PER
     /// CALL, and the call runs on SELECT, NOOP, EXPUNGE, MOVE and APPEND.
     fn recent_count(&self) -> u32 {
@@ -159,7 +159,7 @@ impl ImapSession {
 // table is the authoritative source for LSUB and the \Subscribed LIST
 // attribute. KNOWN LIMITATION (documented deliberately): subscriptions do
 // not survive a restart and are not shared between server replicas. LSUB at
-// least reflects this table honestly — subscribed names are listed even
+// least reflects this table honestly, subscribed names are listed even
 // when the mailbox no longer exists (with no attributes).
 
 type SubscriptionTable = HashMap<String, HashSet<String>>;
@@ -220,15 +220,15 @@ async fn subscribed_mailboxes(account_id: &str) -> HashSet<String> {
 //
 // Tracks failed authentication attempts per (client IP, username). Once five
 // failures accumulate inside the lockout window, further attempts for that
-// pair are rejected immediately — before any credential check, with no
+// pair are rejected immediately, before any credential check, with no
 // artificial delay, so the response leaks nothing about the account.
 //
 // KNOWN LIMITATION (F12, documented deliberately): this state is
 // PROCESS-LOCAL. Lockout counters are not shared between server replicas and
 // do not survive a restart, so a distributed attacker rotating across
 // replicas gets per-replica budgets. Moving the counters to a shared store
-// needs a Redis client in this crate's dependency tree — none exists today
-// (only other services in the workspace depend on redis) — and adding one is
+// needs a Redis client in this crate's dependency tree, none exists today
+// (only other services in the workspace depend on redis), and adding one is
 // out of scope for this change.
 
 const AUTH_FAILURE_LIMIT: usize = 5;
@@ -255,7 +255,7 @@ fn prune_stale(failures: &mut VecDeque<std::time::Instant>, now: std::time::Inst
 
 /// F12: bounded eviction for the per-IP table. When a NEW ip would push the
 /// table past [`AUTH_IP_MAX_TRACKED`], drop the OLDEST HALF by last recorded
-/// failure instead of keeping every key forever — the table stays bounded
+/// failure instead of keeping every key forever, the table stays bounded
 /// without discarding the (recent, hostile) IPs that matter most.
 fn auth_evict_oldest_ips(ip_table: &mut AuthIpFailureTable) {
     if ip_table.len() < AUTH_IP_MAX_TRACKED {
@@ -323,7 +323,7 @@ async fn auth_record_failure(ip: &str, username: &str) {
         prune_stale(failures, now);
         !failures.is_empty()
     });
-    // F12: bounded growth by DISTINCT IP — evict the oldest half before
+    // F12: bounded growth by DISTINCT IP, evict the oldest half before
     // inserting a brand-new key (existing keys just refresh in place).
     if !ip_table.contains_key(ip) {
         auth_evict_oldest_ips(&mut ip_table);
@@ -338,7 +338,7 @@ async fn auth_record_failure(ip: &str, username: &str) {
 
 /// Clear the failure history after a successful login.
 ///
-/// F12: the per-IP AGGREGATE for this IP is cleared too — previously only the
+/// F12: the per-IP AGGREGATE for this IP is cleared too, previously only the
 /// (ip, username) pair was removed, so a legitimate user who finally logged
 /// in still left their IP at the aggregate cap (one more sprayed failure away
 /// from locking every other username from that IP, e.g. behind NAT).
@@ -439,7 +439,7 @@ fn parse_sequence_set(input: &str) -> Result<Vec<(u64, u64)>> {
 /// Bounds: intervals are sorted and merged first (dedup at the interval
 /// level), the uid_map is then walked exactly once with a moving cursor, and
 /// resolution fails once more than [`MAX_RESOLVED_UIDS`] messages would be
-/// produced — a hostile set such as `1:*,1:*,...` can no longer materialize
+/// produced, a hostile set such as `1:*,1:*,...` can no longer materialize
 /// billions of entries before dedup.
 fn resolve_intervals(
     intervals: &[(u64, u64)],
@@ -561,7 +561,7 @@ fn bye(msg: &str) -> String {
 
 fn flags_response(flags: &[String]) -> String {
     // The stored flag names already carry their leading backslash (`\Seen`),
-    // exactly as `permanent_flags_response` assumes — prepending another one
+    // exactly as `permanent_flags_response` assumes, prepending another one
     // emitted `* FLAGS (\\Seen ...)`, which is not a valid IMAP flag.
     let f = flags.join(" ");
     format!("* FLAGS ({})\r\n", f)
@@ -992,7 +992,7 @@ fn imap_pattern_match(name: &str, pattern: &str) -> bool {
 
     // dp[i][j] = does n[i..] match p[j..]?
     let mut dp = vec![vec![false; plen + 1]; nlen + 1];
-    // Base case: the name is exhausted — only trailing wildcards may remain.
+    // Base case: the name is exhausted, only trailing wildcards may remain.
     dp[nlen][plen] = true;
     for j in (0..plen).rev() {
         dp[nlen][j] = matches!(p[j], '*' | '%') && dp[nlen][j + 1];
@@ -1031,7 +1031,7 @@ fn combine_list_pattern(reference: &str, pattern: &str) -> String {
 /// LIST/LSUB/STATUS interpolate mailbox names into quoted strings; a name
 /// containing `"` (createable via literals) would terminate the quoted
 /// string and a name containing CRLF would split the response line. The
-/// backslash and double quote are escaped and CR/LF are stripped — mailbox
+/// backslash and double quote are escaped and CR/LF are stripped, mailbox
 /// names are modified UTF-7, so raw CR/LF are never legitimate content.
 fn mailbox_astring(name: &str) -> String {
     let mut out = String::with_capacity(name.len() + 2);
@@ -1188,7 +1188,7 @@ fn literal_within_budget(
 
 /// L1: read exactly `size` literal bytes INCREMENTALLY, in [`LITERAL_CHUNK`]
 /// steps. Unlike the previous `vec![0u8; size]` + single `read_exact`, the
-/// buffer only grows as data actually arrives — a client that declares a
+/// buffer only grows as data actually arrives, a client that declares a
 /// 32 MiB literal and then stalls pins memory proportional to what it sent,
 /// not to what it promised.
 async fn read_literal_chunked<R: AsyncRead + Unpin>(
@@ -1361,7 +1361,7 @@ async fn read_command_limited<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
                 if !non_sync {
                     write_line(writer, "+ Ready for literal data\r\n").await?;
                 }
-                // L1: incremental read — memory follows the bytes that
+                // L1: incremental read, memory follows the bytes that
                 // actually arrive, never the declared size up front.
                 let buf = read_literal_chunked(reader, size).await?;
                 conn.literal_bytes_total = conn.literal_bytes_total.saturating_add(buf.len());
@@ -1494,7 +1494,7 @@ async fn handle_uid_command<W: AsyncWrite + Unpin>(
         // SM2-F7: sub-args are passed through RAW; each sub-handler resolves
         // its tokens against `literals` itself (as SEARCH/COPY already did).
         // The previous whole-string resolve_token here only worked when the
-        // ENTIRE sub-args was a single literal marker — any literal embedded
+        // ENTIRE sub-args was a single literal marker, any literal embedded
         // mid-args (e.g. `UID SEARCH HEADER {7}\r\nSubject x`, or `UID FETCH
         // {3} FLAGS`) leaked the raw \x01LITk\x01 marker into item parsing
         // and surfaced as a confusing BAD.
@@ -1528,7 +1528,7 @@ fn auth_required(session: &ImapSession) -> bool {
 /// The full re-list (up to 100k `MessageMeta`s) is only needed to detect
 /// arrivals and expunges. Arrivals strictly advance `uidnext`, expunges
 /// change `exists`, and `highest_modseq` (mailbox-row updated_at, 1-second
-/// granularity) catches anything else that mutates the mailbox row — the
+/// granularity) catches anything else that mutates the mailbox row, the
 /// uidnext/exists pair has full resolution, covering the same-second
 /// window where modseq alone could alias two states. A session with no
 /// snapshot yet (`mailbox_modseq == 0`) always refreshes.
@@ -1543,15 +1543,15 @@ fn mailbox_view_changed(session: &ImapSession, mb: &mail_proto::Mailbox, modseq:
 /// numbers) stays correct even when other sessions modify the mailbox.
 ///
 /// F7: returns the untagged view diff (EXPUNGEs in descending sequence order,
-/// then EXISTS — the same `view_update_lines` NOOP/IDLE emit) between the old
+/// then EXISTS, the same `view_update_lines` NOOP/IDLE emit) between the old
 /// and the refreshed view. Command handlers that compute their own untagged
 /// responses against the refreshed view MUST write this diff FIRST, so the
 /// client's sequence numbers are corrected before the command's responses
 /// reference them; the previous silent refresh made e.g. a STORE's
 /// `* n FETCH (FLAGS ...)` point at the wrong message after another session
 /// had expunged. (RFC 3501 §5.2 discourages unsolicited EXPUNGEs during
-/// FETCH/STORE/SEARCH responses; the alternative — silently shifted sequence
-/// numbers — is strictly worse, and RFC 9051 removes the restriction.)
+/// FETCH/STORE/SEARCH responses; the alternative, silently shifted sequence
+/// numbers, is strictly worse, and RFC 9051 removes the restriction.)
 ///
 /// Cost gate: a cheap `get_mailbox_status` (one mailbox row) runs first and
 /// the 100k-message listing is skipped entirely when the mailbox is
@@ -1613,7 +1613,7 @@ async fn refresh_session_view(session: &mut ImapSession) -> String {
 }
 
 /// F8 (RFC 9051 §6.3.4): a failed SELECT/EXAMINE leaves the connection in
-/// the Authenticated state with NO mailbox selected — the previously
+/// the Authenticated state with NO mailbox selected, the previously
 /// selected mailbox is deselected. The old code kept the previous mailbox
 /// selected on failure, so a client that SELECTed a bad name kept operating
 /// on a stale view it believes it left.
@@ -2027,7 +2027,7 @@ async fn handle_select<W: AsyncWrite + Unpin>(
     let new_uid_map: Vec<u64> = msgs.iter().map(|m| m.uid).collect();
     // The session's message view is capped at the list limit, so EXISTS must
     // report the size of the resolvable view (uid_map), not the store's total
-    // count — otherwise EXISTS > highest usable sequence number and clients
+    // count, otherwise EXISTS > highest usable sequence number and clients
     // desync when fetching the phantom tail.
     let new_exists = new_uid_map.len().min(u32::MAX as usize) as u32;
 
@@ -2040,7 +2040,7 @@ async fn handle_select<W: AsyncWrite + Unpin>(
 
     // F6: session-scoped \Recent baseline. Without a persistent
     // first-delivery marker in the store, the closest honest approximation is
-    // "unseen when this session first observed the mailbox" — those UIDs stay
+    // "unseen when this session first observed the mailbox", those UIDs stay
     // \Recent for this session's lifetime (and unseen arrivals during the
     // session join the set). Multi-session semantics are best-effort; see the
     // field docs on `ImapSession::recent_uids`.
@@ -2050,7 +2050,7 @@ async fn handle_select<W: AsyncWrite + Unpin>(
         .map(|m| m.uid)
         .collect();
 
-    // All fallible work succeeded — NOW switch the session to the new view.
+    // All fallible work succeeded, NOW switch the session to the new view.
     session.mailbox = mailbox.clone();
     session.read_only = read_only;
     session.uid_validity = mb.uidvalidity.max(1);
@@ -2074,7 +2074,7 @@ async fn handle_select<W: AsyncWrite + Unpin>(
     responses.push_str(&uid_validity_response(session.uid_validity));
     responses.push_str(&uid_next_response(session.uid_next));
     // L14(e): when the store holds more messages than the session's capped
-    // view can resolve, say so — STATUS still reports the true count, and
+    // view can resolve, say so, STATUS still reports the true count, and
     // the mismatch would otherwise confuse clients silently.
     if let Some(notice) = view_capped_notice(session.exists, mb.exists) {
         responses.push_str(&notice);
@@ -2191,7 +2191,7 @@ enum FetchItem {
     Fast,
     All,
     Full,
-    /// F5: BODY / BODYSTRUCTURE — the derived MIME structure
+    /// F5: BODY / BODYSTRUCTURE, the derived MIME structure
     /// (RFC 3501 §7.4.2). `extended` selects BODYSTRUCTURE (extension data)
     /// over bare BODY. Structure items are inherently peek-only: they
     /// describe the content, they do not deliver it, so they never set
@@ -2245,7 +2245,7 @@ fn resolve_macro_item(item: &FetchItem) -> Vec<FetchLeaf> {
             FetchLeaf::Rfc822Size,
             FetchLeaf::Envelope,
         ],
-        // F5: RFC 3501 §6.4.5 — the FULL macro is ALL + BODY (the structure).
+        // F5: RFC 3501 §6.4.5, the FULL macro is ALL + BODY (the structure).
         // The old expansion returned BODY[] CONTENT and set \Seen on every
         // FULL FETCH; the structure is a peek-only derived view instead.
         FetchItem::Full => vec![
@@ -2321,7 +2321,7 @@ fn trim_header_ws(bytes: &[u8]) -> &[u8] {
 /// continuation lines stay attached to their field. The result always ends
 /// with the terminating blank line (RFC 3501 §6.4.5).
 ///
-/// SM2-F6: operates on raw octets — field-name matching is ASCII-case-
+/// SM2-F6: operates on raw octets, field-name matching is ASCII-case-
 /// insensitive byte comparison and the matched lines are copied verbatim, so
 /// 8-bit (ISO-8859-1, raw UTF-16, …) header bytes round-trip unchanged
 /// instead of being mangled through `from_utf8_lossy` into U+FFFD.
@@ -2378,7 +2378,7 @@ fn filter_header_fields(header: &[u8], fields: &[String], not: bool) -> Vec<u8> 
 
 /// Parse the boundary parameter of a multipart Content-Type header value.
 ///
-/// SM2-F6: byte-based — the value may carry 8-bit octets and the boundary
+/// SM2-F6: byte-based, the value may carry 8-bit octets and the boundary
 /// itself is ASCII (RFC 2046), so scanning happens on bytes and only the
 /// extracted boundary is materialized as a `String`.
 fn multipart_boundary(content_type: &[u8]) -> Option<String> {
@@ -2409,7 +2409,7 @@ fn multipart_boundary(content_type: &[u8]) -> Option<String> {
 /// case-insensitive name), with lines joined by single spaces.
 ///
 /// SM2-F6: the name match and the value extraction are byte operations on
-/// the raw octets — no lossy re-encoding can shift bytes before matching.
+/// the raw octets, no lossy re-encoding can shift bytes before matching.
 /// The returned octets are exact; callers that need `String` for rendering
 /// go through [`header_value_utf8`].
 fn raw_header_value(header: &[u8], name: &str) -> Option<Vec<u8>> {
@@ -2491,7 +2491,7 @@ fn split_multipart<'a>(body: &'a [u8], boundary: &str) -> Vec<MimePart<'a>> {
     }
 
     // SM2-F6: delimiter lines are compared as raw bytes (with the line's
-    // CRLF/LF stripped) — the previous from_utf8_lossy round-trip could
+    // CRLF/LF stripped), the previous from_utf8_lossy round-trip could
     // theoretically diverge on parts whose content carries 8-bit octets.
     fn line_content(line: &[u8]) -> &[u8] {
         let mut l = line;
@@ -2608,7 +2608,7 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 /// the vendored `imap-proto-patched` crate (`MAX_BODYSTRUCTURE_DEPTH = 64`,
 /// body_structure.rs). Every nesting level costs one recursion frame in the
 /// structure renderer and one O(part)-sized region copy in the section
-/// extractor, and the literal reader accepts 32 MiB APPENDs — so a single
+/// extractor, and the literal reader accepts 32 MiB APPENDs, so a single
 /// authenticated APPEND of a ~500k-deep `multipart/mixed` previously drove
 /// the FETCH to a stack-overflow SIGSEGV (whole-process crash) and the
 /// section extraction to unbounded O(depth × body) memcpy.
@@ -2646,7 +2646,7 @@ fn parse_header_param(segment: &str) -> (String, String) {
 
 /// Split a Content-Type-style value into (type, subtype, parameters):
 /// `text/plain; charset="utf-8"` → ("text", "plain", [("charset", "utf-8")]).
-/// A `;` inside a quoted parameter value would split early — accepted
+/// A `;` inside a quoted parameter value would split early, accepted
 /// approximation for structure rendering.
 fn parse_type_params(value: &str) -> (String, String, Vec<(String, String)>) {
     let mut segments = value.split(';');
@@ -2717,7 +2717,7 @@ fn format_extension_fields(header: &[u8]) -> String {
 }
 
 /// Extension data for a multipart part (BODYSTRUCTURE only):
-/// body-fld-param, body-fld-dsp, body-fld-lang, body-fld-loc — note the
+/// body-fld-param, body-fld-dsp, body-fld-lang, body-fld-loc, note the
 /// multipart's extension starts with ITS OWN Content-Type parameters
 /// (boundary included), not an MD5 field.
 fn format_multipart_extension(params: &[(String, String)], header: &[u8]) -> String {
@@ -2730,7 +2730,7 @@ fn format_multipart_extension(params: &[(String, String)], header: &[u8]) -> Str
 
 /// Build a minimal ENVELOPE for an embedded message (the BODYSTRUCTURE of a
 /// message/rfc822 part carries the encapsulated message's envelope). Header
-/// values are taken verbatim; address lists are split on commas — a
+/// values are taken verbatim; address lists are split on commas, a
 /// documented approximation of real address parsing for structure rendering.
 fn embedded_envelope(content: &[u8]) -> mail_proto::EmailEnvelope {
     let (header, _) = split_part_header(content);
@@ -2766,7 +2766,7 @@ fn embedded_envelope(content: &[u8]) -> mail_proto::EmailEnvelope {
 /// content) per RFC 3501 §7.4.2. `region` for a part is header+content
 /// concatenated; for the top-level message it is the whole raw message.
 ///
-/// SM2-F1: `depth` caps the recursion — nesting deeper than
+/// SM2-F1: `depth` caps the recursion, nesting deeper than
 /// [`MAX_MIME_DEPTH`] fails with [`StructureDepthError`] (surfaced as a
 /// tagged BAD by FETCH) instead of recursing unbounded on a hostile
 /// deeply-nested APPEND and overflowing the stack.
@@ -2873,7 +2873,7 @@ async fn handle_fetch<W: AsyncWrite + Unpin>(
         Err(e) => return write_line(writer, &tagged_bad(tag, &format!("{}", e))).await,
     };
     // L2/L13: unsupported or malformed fetch items must surface as a tagged
-    // BAD (RFC 3501) — never a silent substitution or drop.
+    // BAD (RFC 3501), never a silent substitution or drop.
     let items = match parse_fetch_items(&items_str) {
         Ok(items) => items,
         Err(e) => return write_line(writer, &tagged_bad(tag, &format!("{}", e))).await,
@@ -2888,13 +2888,13 @@ async fn handle_fetch<W: AsyncWrite + Unpin>(
     // sequence numbers against a view the client had never been told about:
     // after another session expunged message #3, `FETCH 5 FLAGS` returned
     // what the client knows as message #6, numbered `* 5 FETCH`, with no
-    // EXPUNGE ever sent — silently addressing the wrong messages.
+    // EXPUNGE ever sent, silently addressing the wrong messages.
     let view_diff = refresh_session_view(session).await;
     if !view_diff.is_empty() {
         writer.write_all(view_diff.as_bytes()).await?;
         writer.flush().await?;
     }
-    // SM2-F3: resolve against the SESSION's (just-refreshed) uid map — the
+    // SM2-F3: resolve against the SESSION's (just-refreshed) uid map, the
     // exact view the client holds once the diff above has been applied —
     // not against a separately re-listed mailbox.
     let uid_map = session.uid_map.clone();
@@ -2907,7 +2907,7 @@ async fn handle_fetch<W: AsyncWrite + Unpin>(
 
     // Metadata for the resolved UIDs. The listing runs AFTER the view
     // refresh; a message removed by another session in the (narrow) window
-    // between the two calls may have no meta — such a message is skipped
+    // between the two calls may have no meta, such a message is skipped
     // with a warn rather than fabricating a response for it (the following
     // NOOP reports the expunge normally).
     let list_req = ListMessagesRequest {
@@ -2942,12 +2942,12 @@ async fn handle_fetch<W: AsyncWrite + Unpin>(
     // MAX_RESOLVED_UIDS (100k) messages per sequence set by the resolver,
     // and each chunk's bodies stream; there is no CHANGEDSINCE-style paging.
     // A full FETCH range therefore costs one bounded metadata pass plus the
-    // streamed body fetches — accepted for an IMAP4rev1 server of this
+    // streamed body fetches, accepted for an IMAP4rev1 server of this
     // scale rather than implementing QRESYNC-style paging.
     //
     // KNOWN LIMITATION (mailstore API): a section-limited peek
     // (BODY.PEEK[HEADER.FIELDS (...)], partial <o.n>) still fetches the
-    // FULL body — GetMessageRequest exposes only `include_body: bool`, no
+    // FULL body, GetMessageRequest exposes only `include_body: bool`, no
     // section/offset parameters, so the section is sliced client-side in
     // emit_fetch_response. Extending the mailstore proto with section
     // fetch is the follow-up; the polling paths that would amplify the
@@ -2958,7 +2958,7 @@ async fn handle_fetch<W: AsyncWrite + Unpin>(
         if need_body {
             // Invariant: `uids` is a subset of `uid_map` (resolve_intervals
             // only ever returns members of the map). `meta_map` normally has
-            // the exact same key set — EXCEPT in the race window below
+            // the exact same key set, EXCEPT in the race window below
             // (message expunged between the view refresh and this listing),
             // which is why the emit loop keeps a warn+skip arm.
             for &uid in chunk {
@@ -3010,7 +3010,7 @@ async fn handle_fetch<W: AsyncWrite + Unpin>(
             // SM2-F3: `uid` comes from the session's refreshed uid_map, so
             // its sequence number is the client's corrected view; a meta can
             // still be missing if the message was expunged in the window
-            // between the refresh and the metadata listing — skip it (warn)
+            // between the refresh and the metadata listing, skip it (warn)
             // instead of fabricating a response for a message that no longer
             // exists.
             let meta = match meta_map.get(&uid) {
@@ -3057,7 +3057,7 @@ async fn handle_fetch<W: AsyncWrite + Unpin>(
         let mut seen_futures = Vec::new();
         for &uid in chunk {
             // SM2-F3 (repair): a uid can vanish between the view refresh and
-            // the metadata listing — the emit loop above skips it with a
+            // the metadata listing, the emit loop above skips it with a
             // warn. This loop MUST skip it too: the previous `meta_map[&uid]`
             // index panicked on the missing key, killing the connection task
             // (the exact failure class the skip arm was written to avoid).
@@ -3080,7 +3080,7 @@ async fn handle_fetch<W: AsyncWrite + Unpin>(
                 let mailbox = session.mailbox.clone();
                 seen_futures.push(async move {
                     // The FETCH response this chunk already wrote ADVERTISED
-                    // \Seen — a failed store would desync the client's view
+                    // \Seen, a failed store would desync the client's view
                     // of the flag. Retry once (transient mailstore/RPC
                     // blips), then surface a warn with mailbox+uid so an
                     // operator can reconcile; the error can no longer be
@@ -3092,7 +3092,7 @@ async fn handle_fetch<W: AsyncWrite + Unpin>(
                                 uid,
                                 error = %second_err,
                                 first_error = %first_err,
-                                "\\Seen flag update failed after retry — FETCH already advertised the flag"
+                                "\\Seen flag update failed after retry, FETCH already advertised the flag"
                             );
                         }
                     }
@@ -3113,7 +3113,7 @@ async fn handle_fetch<W: AsyncWrite + Unpin>(
 enum FetchSegment {
     /// A non-literal attribute (`UID 5`, `FLAGS (...)`, `ENVELOPE (...)`).
     Attr(String),
-    /// A literal-carrying attribute — a `BODY[...]` item with its exact
+    /// A literal-carrying attribute, a `BODY[...]` item with its exact
     /// octets. `name` is the response form of the section spec (including
     /// a `<origin>` suffix for partial fetches).
     Literal { name: String, payload: Vec<u8> },
@@ -3134,7 +3134,7 @@ enum FetchChunk {
 }
 
 /// Serialize one FETCH response's exact byte layout from its segments.
-/// Consumes the segments (literal payloads move into the chunk list — no
+/// Consumes the segments (literal payloads move into the chunk list, no
 /// second copy of the body).
 fn fetch_response_chunks(seq: u32, segments: Vec<FetchSegment>) -> Vec<FetchChunk> {
     let mut chunks: Vec<FetchChunk> = Vec::with_capacity(segments.len() + 2);
@@ -3223,7 +3223,7 @@ async fn emit_fetch_response<W: AsyncWrite + Unpin>(
                         format_envelope(&env)
                     )));
                 }
-                // F5: BODY (bare) / BODYSTRUCTURE — the derived structure.
+                // F5: BODY (bare) / BODYSTRUCTURE, the derived structure.
                 // SM2-F1: a nesting-depth failure propagates (as
                 // StructureDepthError) so the command answers BAD.
                 FetchLeaf::BodyStructure { extended } => {
@@ -3325,7 +3325,7 @@ fn parse_fetch_args(args: &str, literals: &[Vec<u8>]) -> Result<(String, String)
 }
 
 /// Split a `<offset.octets>` partial-fetch suffix off a fetch item name.
-/// L13: the spec must be well formed and `octets` must be > 0 — RFC 3501
+/// L13: the spec must be well formed and `octets` must be > 0, RFC 3501
 /// §6.4.5 has no zero-length partial; the old code silently treated a
 /// malformed/zero-octets spec as "return the whole tail".
 fn split_partial_spec(item: &str) -> Result<(String, Option<(usize, usize)>)> {
@@ -3379,7 +3379,7 @@ fn parse_fetch_items(items_str: &str) -> Result<Vec<FetchItem>> {
             "FULL" => items.push(FetchItem::Full),
             "ALL" => items.push(FetchItem::All),
             // F5: BODY/BODYSTRUCTURE are now implemented (derived from the
-            // raw message on demand) — the old L2 rejection is superseded;
+            // raw message on demand), the old L2 rejection is superseded;
             // the FULL macro needs them (ALL + BODYSTRUCTURE, peek).
             "BODYSTRUCTURE" => items.push(FetchItem::BodyStructure { extended: true }),
             "BODY" => items.push(FetchItem::BodyStructure { extended: false }),
@@ -3433,7 +3433,7 @@ fn parse_fetch_items(items_str: &str) -> Result<Vec<FetchItem>> {
         }
     }
     // L2: an empty item list is a client syntax error (RFC 3501 requires at
-    // least one item) — BAD, not a silent ALL substitution.
+    // least one item), BAD, not a silent ALL substitution.
     if items.is_empty() {
         bail!("FETCH requires at least one item");
     }
@@ -3502,7 +3502,7 @@ fn is_store_system_flag(token: &str) -> bool {
 /// F4: map a STORE/APPEND flag token list to proto flags.
 ///
 /// System flags match CASE-INSENSITIVELY (RFC 3501 flags are
-/// case-insensitive; APPEND already did this inline — `STORE +FLAGS
+/// case-insensitive; APPEND already did this inline, `STORE +FLAGS
 /// (\seen)` silently no-opped before). Unknown backslash tokens are NOT
 /// dropped silently: they round-trip as custom keywords via the labels
 /// column, mirroring APPEND's custom-keyword handling. `\Recent` is ignored
@@ -3554,7 +3554,7 @@ async fn handle_store<W: AsyncWrite + Unpin>(
             return write_line(writer, &tagged_bad(tag, &format!("{}", e))).await;
         }
     };
-    // F7: refresh the view and capture the diff — it is emitted BEFORE the
+    // F7: refresh the view and capture the diff, it is emitted BEFORE the
     // command's own untagged responses so the client's sequence numbers are
     // corrected first (see refresh_session_view).
     let view_diff = refresh_session_view(session).await;
@@ -3694,7 +3694,7 @@ fn parse_store_args(args: &str, literals: &[Vec<u8>]) -> Result<(String, StoreOp
 // ── SEARCH ──────────────────────────────────────────────────────────────────
 
 /// Maximum SEARCH criteria tokens per command. Without a cap, every token
-/// triggers a full retain() pass over the mailbox — 100k tokens x 100k
+/// triggers a full retain() pass over the mailbox, 100k tokens x 100k
 /// messages is 10^10 predicate evaluations.
 const MAX_SEARCH_TOKENS: usize = 64;
 
@@ -3783,7 +3783,7 @@ async fn handle_search<W: AsyncWrite + Unpin>(
             // RECENT  = in this session's recent set;
             // NEW     = RECENT and still UNSEEN (RFC 3501 §6.4.4);
             // OLD     = not RECENT.
-            // "UNRECENT" stays a BAD — it is not an IMAP criterion.
+            // "UNRECENT" stays a BAD, it is not an IMAP criterion.
             "RECENT" => keep.retain(|m| session.recent_uids.contains(&m.uid)),
             "NEW" => keep.retain(|m| session.recent_uids.contains(&m.uid) && !flags_of(m).seen),
             "OLD" => keep.retain(|m| !session.recent_uids.contains(&m.uid)),
@@ -3884,7 +3884,7 @@ async fn handle_search<W: AsyncWrite + Unpin>(
                 }
             }
             // L8: HEADER <field> <value> filters on the named header field
-            // via the mailstore's headers-JSONB containment search — the old
+            // via the mailstore's headers-JSONB containment search, the old
             // code ignored the field name and searched the subject/body
             // fulltext index on the value alone, so `HEADER Message-ID x`
             // could be satisfied by a subject containing x.
@@ -3915,7 +3915,7 @@ async fn handle_search<W: AsyncWrite + Unpin>(
 
     // L8: each HEADER criterion runs as its own mailstore headers-JSONB
     // search (field name honored; see header_search_query for the wire
-    // convention) and intersects the accumulated set — AND semantics, one
+    // convention) and intersects the accumulated set, AND semantics, one
     // RPC per criterion.
     for (field, value) in &header_criteria {
         let req = SearchMessagesRequest {
@@ -4232,7 +4232,7 @@ async fn handle_move<W: AsyncWrite + Unpin>(
 }
 
 /// Sequence numbers (in the CURRENT session view) of the given UIDs, in
-/// descending order — the order in which untagged `* n EXPUNGE` responses
+/// descending order, the order in which untagged `* n EXPUNGE` responses
 /// must be emitted so earlier numbers stay valid as later ones are removed.
 fn expunge_seqs_descending(uid_map: &[u64], removed: &[u64]) -> Vec<u32> {
     let removed_set: HashSet<u64> = removed.iter().copied().collect();
@@ -4502,7 +4502,7 @@ impl RenameApi for MailstoreClient {
 /// Core RENAME flow. Returns Ok(()) on success; Err(msg) maps to a tagged NO
 /// and guarantees the source mailbox was NOT deleted.
 ///
-/// L9: RFC 3501 §6.3.5 — RENAME INBOX moves all messages to the new mailbox
+/// L9: RFC 3501 §6.3.5, RENAME INBOX moves all messages to the new mailbox
 /// and leaves INBOX empty but existing. INBOX is never deleted (the
 /// mailstore refuses to delete the system mailbox anyway); the old flow
 /// emptied it and THEN failed on the delete, reporting an error after the
@@ -4552,7 +4552,7 @@ async fn rename_mailbox_flow(
 
     // Completeness check: only finish when the source is verifiably empty.
     // Anything left (move failure swallowed upstream, concurrent delivery,
-    // ...) is an error; the mailbox — and its messages — stay intact.
+    // ...) is an error; the mailbox, and its messages, stay intact.
     let remaining = api
         .list_page(account_id, old_name, 1, u64::MAX, 1)
         .await
@@ -4563,7 +4563,7 @@ async fn rename_mailbox_flow(
         );
     }
 
-    // L9: INBOX stays — empty but existing (RFC 3501 §6.3.5). Only regular
+    // L9: INBOX stays, empty but existing (RFC 3501 §6.3.5). Only regular
     // mailboxes are deleted after a rename.
     if !is_inbox {
         api.delete_mailbox(account_id, old_name)
@@ -4643,7 +4643,7 @@ async fn handle_list<W: AsyncWrite + Unpin>(
     // SM2-F10: snapshot the account's subscription set ONCE and test
     // membership locally. The previous per-row `is_subscribed` cloned the
     // whole HashSet under the process-global SUBSCRIPTIONS mutex once per
-    // listed mailbox — 10k lock acquisitions + clones per LIST, serialized
+    // listed mailbox, 10k lock acquisitions + clones per LIST, serialized
     // across every connection sharing the table.
     let subscribed = subscribed_mailboxes(&session.account_id).await;
 
@@ -4689,7 +4689,7 @@ async fn handle_lsub<W: AsyncWrite + Unpin>(
     let pattern = imap_utf7_decode(&combine_list_pattern(&reference, &pattern));
 
     // L13: the subscription table (see its module comment) is the
-    // authoritative source for LSUB — reflect it honestly: every subscribed
+    // authoritative source for LSUB, reflect it honestly: every subscribed
     // name matching the pattern is listed, even when the mailbox no longer
     // exists in the mailstore (reported with no attributes).
     let mut subscribed: Vec<String> = subscribed_mailboxes(&session.account_id)
@@ -4731,7 +4731,7 @@ async fn handle_lsub<W: AsyncWrite + Unpin>(
             ),
             None => (String::new(), "\"/\"".to_string()),
         };
-        // L7: escape the name — it may contain quotes (via literals).
+        // L7: escape the name, it may contain quotes (via literals).
         responses.push_str(&format!(
             "* LSUB ({}) {} {}\r\n",
             attrs,
@@ -4744,7 +4744,7 @@ async fn handle_lsub<W: AsyncWrite + Unpin>(
 }
 
 // SM2-F10: the former `is_subscribed` helper (one SUBSCRIPTIONS lock + full
-// HashSet clone per call) was removed — LIST snapshots the set once per call
+// HashSet clone per call) was removed, LIST snapshots the set once per call
 // (see handle_list) and LSUB already iterated the snapshot it had taken.
 
 fn parse_list_args(args: &str, literals: &[Vec<u8>]) -> (String, String) {
@@ -4896,7 +4896,7 @@ fn parse_append_datetime(date_str: &str) -> Result<i64> {
         .with_context(|| format!("Invalid date-time: {}", date_str))
 }
 
-/// L3: the APPEND internal-date decision — NOW when the client omitted the
+/// L3: the APPEND internal-date decision, NOW when the client omitted the
 /// date-time token (proto 0 used to stamp 1970-01-01), the exact parsed
 /// timestamp when present.
 fn append_internal_date(tokens: &[String], idx: usize, literals: &[Vec<u8>]) -> Result<i64> {
@@ -4937,7 +4937,7 @@ async fn handle_append<W: AsyncWrite + Unpin>(
             .split_whitespace()
             .map(|s| s.to_string())
             .collect();
-        // F4: shared flag-token mapping — case-insensitive system flags and
+        // F4: shared flag-token mapping, case-insensitive system flags and
         // unknown backslash tokens kept as custom keywords (previously
         // APPEND matched case-insensitively but silently DROPPED unknown
         // backslash tokens).
@@ -5105,7 +5105,7 @@ async fn handle_expunge<W: AsyncWrite + Unpin>(
             };
             if resolved.is_empty() {
                 // F7: nothing to expunge, but the refreshed view may still
-                // have shifted — emit the diff with the OK.
+                // have shifted, emit the diff with the OK.
                 return write_line(
                     writer,
                     &format!("{}{}", view_diff, tagged_ok(tag, "EXPUNGE completed")),
@@ -5236,7 +5236,7 @@ async fn handle_noop<W: AsyncWrite + Unpin>(
                 session.recent = recent_now;
             }
             // UIDNEXT is reported whenever the STORE's value differs from
-            // what the client was last told — not from the session's
+            // what the client was last told, not from the session's
             // internally advanced uid_next. The refresh above raises
             // uid_next to last+1 on an arrival, which previously suppressed
             // the very UIDNEXT update the arrival justified.
@@ -5263,7 +5263,7 @@ async fn handle_close<W: AsyncWrite + Unpin>(
 
     // CLOSE = EXPUNGE (silently) + deselect (RFC 3501 §6.4.2).
     // L13: an expunge failure is reported (NO) and the session stays
-    // selected — the old code swallowed the error and deselected anyway,
+    // selected, the old code swallowed the error and deselected anyway,
     // leaving the client with silently-unexpunged \Deleted messages.
     if !session.read_only {
         let mut client = session.client.clone();
@@ -5353,7 +5353,7 @@ fn configure_tls_with_defaults(
                 default_cert_path.to_string()
             } else {
                 warn!(
-                    "No TLS cert found at {} — running without IMAPS",
+                    "No TLS cert found at {}, running without IMAPS",
                     default_cert_path
                 );
                 return Ok(None);
@@ -5367,7 +5367,7 @@ fn configure_tls_with_defaults(
             if std::path::Path::new(default_key_path).exists() {
                 default_key_path.to_string()
             } else {
-                warn!("No TLS key found — running without IMAPS");
+                warn!("No TLS key found, running without IMAPS");
                 return Ok(None);
             }
         }
@@ -5401,7 +5401,7 @@ fn configure_tls_with_defaults(
     .with_single_cert(certs, key)
     .with_context(|| "Failed to build TLS server config")?;
 
-    // Enable TLS session tickets — some mobile clients hang during TLS
+    // Enable TLS session tickets, some mobile clients hang during TLS
     // post-handshake if no NewSessionTicket message is sent.
     config.session_storage = rustls::server::ServerSessionMemoryCache::new(256);
 
@@ -5413,7 +5413,7 @@ fn configure_tls_with_defaults(
 // While a session is idling, subscribe to the mailstore mailbox event stream
 // and emit unsolicited EXISTS/RECENT/UIDNEXT/EXPUNGE updates when the mailbox
 // changes. RFC 2177: if the client does not send DONE within a reasonable
-// time (30 minutes), the server may close the connection — we use 29 minutes.
+// time (30 minutes), the server may close the connection, we use 29 minutes.
 
 async fn process_mailbox_event<W: AsyncWrite + Unpin>(
     session: &Arc<Mutex<ImapSession>>,
@@ -5446,7 +5446,7 @@ async fn process_mailbox_event<W: AsyncWrite + Unpin>(
 
     // Cost gate: the event stream can be chattier than the view (events for
     // flag-only or same-second changes). When the status snapshot matches
-    // the session's (uidnext/exists/modseq — see mailbox_view_changed),
+    // the session's (uidnext/exists/modseq, see mailbox_view_changed),
     // this event cannot have changed the uid map the responses below are
     // computed from, so the 100k-message listing is skipped. The gate only
     // ever suppresses a listing whose diff would have been empty for the
@@ -5731,7 +5731,7 @@ async fn handle_connection(
     }));
 
     if is_tls {
-        // IMAPS (993): implicit TLS — accept then serve.
+        // IMAPS (993): implicit TLS, accept then serve.
         if let Some(acceptor) = tls {
             match acceptor.accept(stream).await {
                 Ok(tls_stream) => {
@@ -5769,7 +5769,7 @@ async fn handle_connection(
 /// Reads commands line-by-line. When the client sends STARTTLS, responds with
 /// an OK, upgrades the TCP stream to TLS, then delegates to `serve()` for the
 /// rest of the session. Before STARTTLS, only CAPABILITY/NOOP/STARTTLS are
-/// allowed per RFC 3501 §6.2.1 — except that LOGIN/AUTHENTICATE are routed
+/// allowed per RFC 3501 §6.2.1, except that LOGIN/AUTHENTICATE are routed
 /// through the normal handlers so they are refused with `[PRIVACYREQUIRED]`
 /// on a plaintext connection (unless IMAP_ALLOW_INSECURE_AUTH=true, in which
 /// case the session continues in plaintext).
@@ -5797,7 +5797,7 @@ async fn handle_plaintext_with_starttls(
 
     loop {
         // Re-read commands with literal support in case a client uses a
-        // literal for its username. L1: bounded read — a client that stalls
+        // literal for its username. L1: bounded read, a client that stalls
         // before STARTTLS gets a BYE and is dropped.
         let command = match read_command_bounded(
             &mut reader,
@@ -5813,7 +5813,7 @@ async fn handle_plaintext_with_starttls(
             Err(e) => {
                 warn!("Error reading command before STARTTLS: {}", e);
                 // Dogfood-2: a read error (e.g. an over-budget literal
-                // declaration — `LOGIN user {35651584}` with a 32 MiB cap)
+                // declaration, `LOGIN user {35651584}` with a 32 MiB cap)
                 // used to close the socket with ZERO response bytes. RFC 3501
                 // requires a BYE before a server-initiated close, and the
                 // module contract already promises one; the timeout arm of
@@ -6087,7 +6087,7 @@ impl ConnectionLimiter {
 }
 
 /// Reject an over-cap connection: say BYE and close. The write is
-/// best-effort — the socket may already be gone.
+/// best-effort, the socket may already be gone.
 async fn reject_connection(mut stream: TcpStream, reason: &str) {
     let _ = stream.write_all(bye(reason).as_bytes()).await;
     let _ = stream.shutdown().await;
@@ -6114,7 +6114,7 @@ async fn main() -> Result<()> {
         let shutdown = Arc::clone(&shutdown);
         tokio::spawn(async move {
             let _ = tokio::signal::ctrl_c().await;
-            info!("SIGINT received — shutting down");
+            info!("SIGINT received, shutting down");
             shutdown.notify_waiters();
         });
     }
@@ -6192,7 +6192,7 @@ async fn run(cli: Cli, shutdown: Shutdown) -> Result<()> {
     Ok(())
 }
 
-/// Bind the IMAP (plaintext/STARTTLS) listener and — when TLS is configured —
+/// Bind the IMAP (plaintext/STARTTLS) listener and, when TLS is configured —
 /// the IMAPS (implicit TLS) listener. Extracted from `main` so the
 /// bind-failure arms are testable without spawning the binary.
 async fn bind_listeners(
@@ -6398,7 +6398,7 @@ mod tests {
 
         assert_eq!(
             bytes,
-            // "line1\r\nline2" is 12 octets — the announcement must state
+            // "line1\r\nline2" is 12 octets, the announcement must state
             // exactly the payload length the client will read.
             b"* 1 FETCH (BODY[TEXT] {12}\r\nline1\r\nline2)\r\n".to_vec()
         );
@@ -6454,13 +6454,13 @@ mod tests {
     }
 
     /// Minimal session for pure view-gate tests. The client points at an
-    /// unroutable address — the gate test never performs an RPC.
+    /// unroutable address, the gate test never performs an RPC.
     fn test_session_skeleton() -> ImapSession {
         // connect_lazy() touches the Tokio runtime during hyper pool
         // setup. These gate tests are plain #[test]s (no ambient runtime),
         // so construct the channel under a throwaway current-thread
         // runtime; async callers with their own runtime take the direct
-        // path. The channel is never dialed — no RPC happens in these
+        // path. The channel is never dialed, no RPC happens in these
         // tests.
         let make_channel = || Channel::from_static("http://127.0.0.1:1").connect_lazy();
         let channel = if tokio::runtime::Handle::try_current().is_ok() {
@@ -6511,7 +6511,7 @@ mod tests {
         // RFC 3501 §9: descending ranges are inclusive and normalized.
         assert_eq!(parse_sequence_set("5:2").unwrap(), vec![(2, 5)]);
         assert_eq!(parse_sequence_set("*:4").unwrap(), vec![(4, u64::MAX)]);
-        // SM2-F8: seq-number = nz-number — `0` is a syntax error now.
+        // SM2-F8: seq-number = nz-number, `0` is a syntax error now.
         assert!(parse_sequence_set("0").is_err());
         assert!(parse_sequence_set("1,0").is_err());
         assert!(parse_sequence_set("0:2").is_err());
@@ -7358,7 +7358,7 @@ mod tests {
         /// stays in the source.
         keep_in_source: Option<u64>,
         /// Ignore the stored UIDs and always report a FULL page of the same
-        /// UID (the source never drains) — drives the page-cap guard.
+        /// UID (the source never drains), drives the page-cap guard.
         stubborn: bool,
     }
 
@@ -7489,7 +7489,7 @@ mod tests {
     #[tokio::test]
     async fn rename_refuses_to_delete_nonempty_source() {
         // A message that "fails to move" silently (or arrives concurrently)
-        // must prevent the source deletion — the old code cascade-deleted it.
+        // must prevent the source deletion, the old code cascade-deleted it.
         let mut api = MockRenameApi::new((1..=10).collect());
         api.keep_in_source = Some(7);
         let res = rename_mailbox_flow(&mut api, "acct", "Old", "New").await;
@@ -7504,7 +7504,7 @@ mod tests {
     fn fetch_bodystructure_and_bare_body_parse_to_structure_items() {
         // F5: both used to be a tagged BAD ("not implemented"); the FULL
         // macro requires them (ALL + BODYSTRUCTURE, peek), so they are real
-        // items now — NOT the old silent ALL substitution.
+        // items now, NOT the old silent ALL substitution.
         assert_eq!(
             parse_fetch_items("BODYSTRUCTURE").unwrap(),
             vec![FetchItem::BodyStructure { extended: true }]
@@ -7606,7 +7606,7 @@ mod tests {
             "epilogue\r\n"
         );
         let structure = format_body_structure(multipart.as_bytes(), true).unwrap();
-        // Multipart: ("MIXED" part part ext...) — no size/lines fields for
+        // Multipart: ("MIXED" part part ext...), no size/lines fields for
         // the container; "part one" is 8 octets / 0 lines. The multipart's
         // extension data starts with ITS OWN Content-Type params (boundary).
         assert!(
@@ -7828,7 +7828,7 @@ mod tests {
 
         // Global cap: fill up to the total from distinct IPs. The totals are
         // aligned (10 IPs fill exactly 500 slots), so every acquire here
-        // must succeed — a refusal would mean the accounting is wrong.
+        // must succeed, a refusal would mean the accounting is wrong.
         let mut limiter = ConnectionLimiter::default();
         let mut acquired = 0;
         'outer: for n in 1..=254u8 {
@@ -8325,7 +8325,7 @@ mod tests {
 
     #[test]
     fn header_search_query_matches_the_wire_convention() {
-        // Mirrors mailstore-core's parse_header_query — first \x01 separates
+        // Mirrors mailstore-core's parse_header_query, first \x01 separates
         // field from value; prefix + separator required.
         assert_eq!(
             header_search_query("Message-ID", "<a@b>"),
@@ -8376,7 +8376,7 @@ mod adversarial_tests;
 mod connection_tests;
 
 /// Unit-level arms of the pure helpers: parsers, formatters, budget gates and
-/// the subscription/auth tables — each line proven with a real input.
+/// the subscription/auth tables, each line proven with a real input.
 #[cfg(test)]
 mod unit_arms {
     use super::*;
@@ -9065,7 +9065,7 @@ mod unit_arms {
         let writer = tokio::spawn(async move {
             client.write_all(b"01234567").await.unwrap();
             client.flush().await.unwrap();
-            // A brief pause (no read — nothing will ever be written back),
+            // A brief pause (no read, nothing will ever be written back),
             // then drop: the server's partial literal surfaces EOF.
             tokio::time::sleep(Duration::from_millis(10)).await;
             drop(client);
@@ -9394,7 +9394,7 @@ mod unit_arms {
         if rustls::crypto::CryptoProvider::get_default().is_none() {
             let _ = rustls::crypto::ring::default_provider().install_default();
         }
-        // nosemgrep: rust.lang.security.temp-dir.temp-dir — test fixture under a unique pid/uuid path — no predictable-name temp collision
+        // nosemgrep: rust.lang.security.temp-dir.temp-dir, test fixture under a unique pid/uuid path, no predictable-name temp collision
         let dir = std::env::temp_dir().join(format!(
             "imap_tls_defaults_{}",
             std::time::SystemTime::now()
@@ -9522,7 +9522,7 @@ mod unit_arms {
     async fn run_serves_imaps_and_shuts_down_cleanly() {
         // The workspace pulls both rustls providers (aws-lc-rs via the AWS
         // SDK, ring here), so the process-level default is ambiguous and
-        // TLS init panics without an explicit install — the production run()
+        // TLS init panics without an explicit install, the production run()
         // path installs ring the same way (this test drives run() in-process).
         let _ = rustls::crypto::ring::default_provider().install_default();
 
@@ -9534,7 +9534,7 @@ mod unit_arms {
         let imap_port = reserve();
         let imaps_port = reserve();
 
-        // nosemgrep: rust.lang.security.temp-dir.temp-dir — test fixture under a unique pid/uuid path — no predictable-name temp collision
+        // nosemgrep: rust.lang.security.temp-dir.temp-dir, test fixture under a unique pid/uuid path, no predictable-name temp collision
         let dir = std::env::temp_dir().join(format!(
             "imap_run_tls_{}",
             std::time::SystemTime::now()
@@ -9678,7 +9678,7 @@ mod unit_arms {
     /// the exact shape a hostile APPEND produces (each level's single part IS
     /// the next level, so the renderer must recurse once per level). The
     /// enclosure size is inherently quadratic in `levels` (each wrap copies
-    /// its child), so the hostile case uses 1 000 levels — already 936 past
+    /// its child), so the hostile case uses 1 000 levels, already 936 past
     /// the cap, where the old code burned 1 000 recursion frames.
     fn nested_multipart(levels: usize) -> Vec<u8> {
         let mut inner = b"Content-Type: text/plain\r\n\r\nleaf".to_vec();
@@ -9744,7 +9744,7 @@ mod unit_arms {
 
     /// SM2-F2: on a 50k-message view where every message is unseen (so
     /// EVERY uid joins `recent_uids`), `recent_count` must be O(|recent|·
-    /// log|view|) binary searches — the old `slice::contains` paid
+    /// log|view|) binary searches, the old `slice::contains` paid
     /// ~2.5×10⁹ comparisons here (seconds of CPU per SELECT/NOOP in debug).
     #[tokio::test]
     async fn recent_count_is_logarithmic_on_large_views_and_still_correct() {
@@ -9777,7 +9777,7 @@ mod unit_arms {
     // ── SM2-F6: byte-exact header/section handling ─────────────────────────
 
     /// SM2-F6: 8-bit (ISO-8859-1) header octets round-trip UNCHANGED through
-    /// BODY[HEADER.FIELDS] filtering and `raw_header_value` — no
+    /// BODY[HEADER.FIELDS] filtering and `raw_header_value`, no
     /// `from_utf8_lossy` may turn them into U+FFFD on the way through.
     #[test]
     fn header_filtering_round_trips_8bit_octets() {
@@ -9798,7 +9798,7 @@ mod unit_arms {
         assert_eq!(value, b"caf\xe9 lunch".as_slice());
 
         // The RENDERING boundary (BODYSTRUCTURE/ENVELOPE strings) is the only
-        // place conversion happens — and only there.
+        // place conversion happens, and only there.
         assert_eq!(header_value_utf8(&value), "caf\u{FFFD} lunch");
     }
 
@@ -9841,7 +9841,7 @@ mod unit_arms {
             "FLAGS,silent",
             // SM2-F8 (repair): these fold to an ASCII `.SILENT`-suffixed word
             // (`ſ` → S, `ı` → I) while spanning more raw bytes than the
-            // suffix — the previous byte-arithmetic slice panicked on them
+            // suffix, the previous byte-arithmetic slice panicked on them
             // instead of answering BAD.
             "+flags.ſılent",
             "flags.ſılent",

@@ -43,7 +43,7 @@ const MAX_TRAINING_PER_MINUTE: u64 = 100;
 /// Maximum tokens [`tokenize`] will return. Consistent with the validation
 /// cap ([`MAX_TOKENS_PER_SAMPLE`] rejects samples beyond 5 000 tokens) while
 /// bounding the token-vector ALLOCATION itself for adversarial
-/// multi-megabyte inputs — previously the full vector was materialized
+/// multi-megabyte inputs, previously the full vector was materialized
 /// before validation ever ran.
 const MAX_TOKENIZE_OUTPUT: usize = 50_000;
 
@@ -338,14 +338,14 @@ impl BayesianClassifier {
     }
 
     /// Total number of training samples (spam + ham).
-    /// Cheap O(1) accessor — use this instead of [`Self::export_model`]
+    /// Cheap O(1) accessor, use this instead of [`Self::export_model`]
     /// (which deep-clones the entire vocabulary) for count checks.
     pub fn total_samples(&self) -> u64 {
         self.model.read().total_samples()
     }
 
     /// Current vocabulary size.
-    /// Cheap O(1) accessor — see [`Self::total_samples`].
+    /// Cheap O(1) accessor, see [`Self::total_samples`].
     pub fn vocab_size(&self) -> u64 {
         self.model.read().vocab_size
     }

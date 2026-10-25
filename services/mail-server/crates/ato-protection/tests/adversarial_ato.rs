@@ -1,6 +1,6 @@
 //! Adversarial ATO (Account Takeover) protection tests.
 //!
-//! Designed to catch regressions in://! - TLS fingerprint risk integration (P1 — was never wired into evaluate)
+//! Designed to catch regressions in://! - TLS fingerprint risk integration (P1, was never wired into evaluate)
 //! - FIFO eviction of UserTlsHistory (was non-deterministic HashSet-based)
 //! - Impossible travel detection
 //! - Failed-attempt lockout
@@ -196,7 +196,7 @@ fn test_tls_history_duplicate_not_double_counted() {
 #[test]
 fn test_impossible_travel_nyc_to_tokyo() {
     let engine = AtoEngine::new();
-    // NYC one hour before Tokyo — genuinely impossible (~10,850 km/h).
+    // NYC one hour before Tokyo, genuinely impossible (~10,850 km/h).
     // A same-second Tokyo login is clock-skew/PoP jitter and is
     // deliberately skipped by the geo tolerance rules.
     let mut nyc = make_event("dave", "1.1.1.1", 40.71, -74.01);
@@ -218,7 +218,7 @@ fn test_impossible_travel_nyc_to_tokyo() {
 fn test_nearby_logins_are_not_impossible() {
     let engine = AtoEngine::new();
     // NYC to Newark (same metro area, ~15km apart).
-    // Set ev2 timestamp 30 minutes later — easily drivable at 30 km/h.
+    // Set ev2 timestamp 30 minutes later, easily drivable at 30 km/h.
     // Without an elapsed-time gap, speed = ∞ and even 1m travel looks impossible.
     let mut ev1 = make_event("frank", "1.1.1.1", 40.7128, -74.0059); // NYC
     ev1.timestamp = Utc::now() - chrono::Duration::minutes(30);

@@ -1,6 +1,6 @@
 //! Coordination primitives for multi-region DDoS protection.
 //!
-//! **STATUS — cross-process propagation is NOT implemented.**
+//! **STATUS, cross-process propagation is NOT implemented.**
 //!
 //! Despite earlier documentation claiming "Redis Streams + CRDTs", every
 //! structure in this module ([`CoordinatorHub`], [`DistributedBlocklist`],
@@ -568,7 +568,7 @@ pub struct CoordinatorHub {
 /// Coordinator configuration.
 ///
 /// NOTE: the Redis-related fields below are **reserved and currently
-/// unused** — no cross-process propagation is implemented (see the module
+/// unused**, no cross-process propagation is implemented (see the module
 /// documentation). They are retained for configuration compatibility.
 #[derive(Debug, Clone)]
 pub struct CoordinatorConfig {
@@ -643,7 +643,7 @@ impl CoordinatorHub {
 
     /// Block an IP in this process's coordinator state.
     ///
-    /// NOTE: this does NOT propagate to other regions/processes — no
+    /// NOTE: this does NOT propagate to other regions/processes, no
     /// distributed transport is implemented (see module docs).
     pub async fn block_ip(&self, ip: IpAddr, reason: &str, ttl_secs: u32, threat_score: u8) {
         let mut blocklist = self.blocklist.write().await;
@@ -685,7 +685,7 @@ impl CoordinatorHub {
         // Check for duplicate
         {
             let mut seen = self.seen_events.write().await;
-            // Audit SM5 F4: monotonic-safe — a host younger than the
+            // Audit SM5 F4: monotonic-safe, a host younger than the
             // retention window must not panic the ingest path.
             let cutoff =
                 crate::adaptive::monotonic_cutoff(Instant::now(), self.config.event_retention);
@@ -769,7 +769,7 @@ impl CoordinatorHub {
 
         // Cleanup seen events using the configured deduplication retention window.
         {
-            // Audit SM5 F4: monotonic-safe — a host younger than the
+            // Audit SM5 F4: monotonic-safe, a host younger than the
             // retention window must not panic the ingest path.
             let cutoff =
                 crate::adaptive::monotonic_cutoff(Instant::now(), self.config.event_retention);
@@ -829,7 +829,7 @@ impl ThreatIntelService {
     }
 
     /// Record an IP block in the local coordinator state (no remote
-    /// propagation — see module docs).
+    /// propagation, see module docs).
     pub async fn publish_ip_block(&self, ip_str: &str, duration: Duration) -> Result<(), String> {
         let ip: IpAddr = ip_str.parse().map_err(|e| format!("Invalid IP: {}", e))?;
         // E-106 fix:Clamp to u32::MAX to prevent overflow for durations > ~136 years

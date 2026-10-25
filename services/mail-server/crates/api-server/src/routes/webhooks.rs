@@ -87,29 +87,29 @@ pub struct ListWebhooksQuery {
 // ─── Validation ────────────────────────────────────────────────
 
 /// Event types a webhook may subscribe to (audit L-2; canonicalized
-/// 2026-09-08 per the external API review §7 — exactly ONE vocabulary).
+/// 2026-09-08 per the external API review §7, exactly ONE vocabulary).
 ///
 /// Every message-scoped event uses the `message.*` namespace:
 ///
-/// - `message.accepted`   — message accepted for delivery (API 202)
-/// - `message.queued`     — message entered the outbound queue
-/// - `message.attempted`  — delivery attempt started
-/// - `message.deferred`   — recipient server deferred (4xx); retry scheduled
-/// - `message.delivered`  — recipient mail server returned a successful
+/// - `message.accepted`  , message accepted for delivery (API 202)
+/// - `message.queued`    , message entered the outbound queue
+/// - `message.attempted` , delivery attempt started
+/// - `message.deferred`  , recipient server deferred (4xx); retry scheduled
+/// - `message.delivered` , recipient mail server returned a successful
 ///   SMTP acceptance response
-/// - `message.bounced`    — permanent failure (5xx / hard bounce)
-/// - `message.complained` — feedback-loop spam complaint
-/// - `message.suppressed` — recipient added to the suppression list
-/// - `message.opened`     — open tracked
-/// - `message.clicked`    — click tracked
-/// - `message.cancelled`  — scheduled send cancelled before dispatch
+/// - `message.bounced`   , permanent failure (5xx / hard bounce)
+/// - `message.complained`, feedback-loop spam complaint
+/// - `message.suppressed`, recipient added to the suppression list
+/// - `message.opened`    , open tracked
+/// - `message.clicked`   , click tracked
+/// - `message.cancelled` , scheduled send cancelled before dispatch
 ///
 /// Non-message resources keep their own noun: `recipient.unsubscribed`,
 /// `placement_test.completed`, `inbound`. The legacy `email.*` names and
 /// `message.sent` are mapped in-place by migration 128 for stored
 /// subscriptions and are rejected at validation time. `*` is the
 /// wildcard every consumer's selector honours (`events @> '"*"'::jsonb`).
-/// Unknown names previously validated as non-empty only — a typo like
+/// Unknown names previously validated as non-empty only, a typo like
 /// `delivred` registered silently and the webhook never fired.
 ///
 /// Re-exported from ui-foundation's [`ui_foundation::WEBHOOK_EVENTS`], which
@@ -149,7 +149,7 @@ fn validate_webhook_events(events: &[String]) -> Result<(), String> {
 }
 
 /// Env var that explicitly re-enables plain-HTTP loopback webhook targets for
-/// local development (audit F). Defaults to OFF — the previous unconditional
+/// local development (audit F). Defaults to OFF, the previous unconditional
 /// localhost/127.0.0.1/::1 HTTP exemption let any authenticated tenant
 /// register an SSRF probe against services bound to the host's loopback.
 const ALLOW_LOCALHOST_WEBHOOKS_ENV: &str = "APEXMAIL_ALLOW_LOCALHOST_WEBHOOKS";
@@ -175,13 +175,13 @@ async fn require_inbound_event_entitlement(
 }
 
 /// Validate webhook URL format and security requirements (parameterised for
-/// testability — [`validate_webhook_url`] reads the env override).
+/// testability, [`validate_webhook_url`] reads the env override).
 ///
 /// Requires HTTPS (plain HTTP is only accepted for loopback hosts when
 /// `APEXMAIL_ALLOW_LOCALHOST_WEBHOOKS=true`), and rejects private/reserved
 /// hosts unless that same explicit override is set for a loopback target.
 fn validate_webhook_url_with(url_str: &str, allow_localhost: bool) -> Result<(), String> {
-    // `webhooks.url` is VARCHAR(2048) (migration 075) — reject oversized URLs
+    // `webhooks.url` is VARCHAR(2048) (migration 075), reject oversized URLs
     // here so the caller gets a clean 400 instead of a raw insert failure (500).
     if url_str.len() > MAX_WEBHOOK_URL_LEN {
         return Err(format!(
@@ -221,7 +221,7 @@ fn validate_webhook_url_with(url_str: &str, allow_localhost: bool) -> Result<(),
 /// `APEXMAIL_ALLOW_LOCALHOST_WEBHOOKS=true` is explicitly set).
 ///
 /// Shared by the JSON create/update handlers AND the zero-JS form twin
-/// (`/web/webhooks`) — the form must never run a weaker check than the
+/// (`/web/webhooks`), the form must never run a weaker check than the
 /// API surface.
 pub(crate) fn validate_webhook_url(url_str: &str) -> Result<(), String> {
     validate_webhook_url_with(url_str, localhost_webhooks_allowed())
@@ -231,7 +231,7 @@ pub(crate) fn validate_webhook_url(url_str: &str) -> Result<(), String> {
 ///
 /// Returns the first safe address to pin the connection to, rejecting the
 /// whole resolution set if ANY address is private/reserved (an attacker
-/// controlling DNS can mix public and private A records — rejecting the set,
+/// controlling DNS can mix public and private A records, rejecting the set,
 /// not skipping the bad entry, prevents partial-rebinding tricks).
 /// Loopback targets are tolerated only under the explicit dev override.
 fn select_pinned_addr(addrs: &[SocketAddr], allow_loopback: bool) -> Result<SocketAddr, String> {
@@ -257,7 +257,7 @@ fn select_pinned_addr(addrs: &[SocketAddr], allow_loopback: bool) -> Result<Sock
 }
 
 /// Build the dedicated webhook delivery client (audit F): DNS-pinned to the
-/// validated addresses and with redirects DISABLED — the shared
+/// validated addresses and with redirects DISABLED, the shared
 /// `state.http_client` follows redirects, so a webhook endpoint replying
 /// `302 → http://169.254.169.254/...` would turn the validated delivery into
 /// an SSRF hop to internal services.
@@ -280,7 +280,7 @@ fn webhook_delivery_client(
 /// and the form twin.
 pub(crate) const MAX_WEBHOOKS_PER_TENANT: i64 = 25;
 
-/// Endpoint-URL length ceiling — mirrors the `webhooks.url` VARCHAR(2048)
+/// Endpoint-URL length ceiling, mirrors the `webhooks.url` VARCHAR(2048)
 /// column (migration 075). Validating here turns an oversized URL into a
 /// clean 400 instead of a raw insert failure surfacing as a 500.
 pub(crate) const MAX_WEBHOOK_URL_LEN: usize = 2048;
@@ -345,7 +345,7 @@ async fn create_webhook(
     let secret = apexmail_lib::id::generate_webhook_secret();
 
     // Webhook secret at rest (SM4 parity): the signing secret is stored ONLY
-    // as an `enc:v1:` envelope bound to the row (AAD `webhook={id}`) — the
+    // as an `enc:v1:` envelope bound to the row (AAD `webhook={id}`), the
     // SAME convention as `apexmail_db::repos::webhooks::WebhooksRepo`, so
     // both stacks interoperate. The plaintext is returned exactly once in
     // this response and never persisted.
@@ -364,7 +364,7 @@ async fn create_webhook(
     .execute(&state.db)
     .await
     .map_err(|error| {
-        // `uq_webhooks_tenant_url` — re-registering the SAME endpoint URL was
+        // `uq_webhooks_tenant_url`, re-registering the SAME endpoint URL was
         // surfaced as a raw database 500; a duplicate is a client-correctable
         // conflict, not a server fault.
         if is_unique_webhook_url_violation(&error) {
@@ -400,10 +400,10 @@ async fn list_webhooks(
     require_scopes(&auth, &["webhooks:read"])?;
 
     // SM3 (audit F8): `cursor` used to be accepted here as a raw integer
-    // OFFSET — contradicting the crate's documented opaque-keyset contract.
+    // OFFSET, contradicting the crate's documented opaque-keyset contract.
     // The mislabeled param is gone; pagination is the honestly-named
     // `offset`. (This list returns a plain array, so a true keyset migration
-    // needs the CursorPage envelope — a breaking client contract — and is
+    // needs the CursorPage envelope, a breaking client contract, and is
     // deliberately out of this pass.)
     let offset = params.offset.clamp(0, 100_000);
     let rows = sqlx::query_as::<_, WebhookRow>(
@@ -545,7 +545,7 @@ async fn test_webhook(
         )));
     }
 
-    // RS-058 + audit F: SSRF protection — resolve DNS and verify every IP is
+    // RS-058 + audit F: SSRF protection, resolve DNS and verify every IP is
     // public BEFORE making the HTTP request, then PIN the connection to the
     // validated addresses. The previous code validated `safe_addrs` and then
     // threw them away, posting to the hostname again via the shared client —
@@ -640,7 +640,7 @@ async fn test_webhook(
 /// Rotate the webhook signing secret atomically.
 ///
 /// Generates a new HMAC signing secret and updates the database in a single
-/// transaction. The old secret is immediately invalidated — callers should
+/// transaction. The old secret is immediately invalidated, callers should
 /// update their consumer endpoint to use the new secret before the next
 /// webhook delivery.
 ///
@@ -739,7 +739,7 @@ async fn fetch_webhook(
 
 // ─── Webhook secret at rest (SM4 parity) ───────────────────────
 
-/// The AAD binding a webhook secret envelope to its row — byte-for-byte the
+/// The AAD binding a webhook secret envelope to its row, byte-for-byte the
 /// convention `apexmail_db::repos::webhooks` uses, so a row written by
 /// either stack decrypts in the other and a ciphertext cannot be relocated
 /// between rows.
@@ -748,7 +748,7 @@ pub(crate) fn webhook_secret_aad(webhook_id: &str) -> Vec<u8> {
 }
 
 /// Encrypt a signing secret for storage. Fail-closed: a missing encryption
-/// key in production is an Internal error — never a silent plaintext write
+/// key in production is an Internal error, never a silent plaintext write
 /// (the same contract `WebhooksRepo` applies).
 pub(crate) fn encrypt_webhook_secret(secret: &str, webhook_id: &str) -> Result<String, ApiError> {
     apexmail_lib::secret_at_rest::encrypt_at_rest(secret, &webhook_secret_aad(webhook_id)).map_err(
@@ -756,7 +756,7 @@ pub(crate) fn encrypt_webhook_secret(secret: &str, webhook_id: &str) -> Result<S
             tracing::error!(
                 %error,
                 webhook_id,
-                "webhook secret encryption failed — refusing to store plaintext"
+                "webhook secret encryption failed, refusing to store plaintext"
             );
             ApiError::Internal("webhook secret encryption is unavailable".into())
         },
@@ -768,7 +768,7 @@ pub(crate) fn encrypt_webhook_secret(secret: &str, webhook_id: &str) -> Result<S
 /// * Envelope rows (`enc:v1:…`) decrypt STRICTLY under the row-bound AAD —
 ///   a tampered or wrong-key envelope fails closed and never signs.
 /// * Legacy rows (plaintext written before the at-rest parity) still sign
-///   honestly — the pre-parity behavior this endpoint must keep for them —
+///   honestly, the pre-parity behavior this endpoint must keep for them —
 ///   and are best-effort MIGRATED to the envelope on this read, mirroring
 ///   the migrate-on-read `WebhooksRepo` applies on its own read paths.
 pub(crate) async fn webhook_signing_secret(
@@ -811,10 +811,10 @@ pub(crate) async fn webhook_signing_secret(
             tracing::error!(
                 %error,
                 webhook_id,
-                "webhook secret envelope failed to decrypt (tampered or wrong key) — failing closed"
+                "webhook secret envelope failed to decrypt (tampered or wrong key), failing closed"
             );
             ApiError::Internal(
-                "the webhook signing secret could not be decrypted — rotate the secret".into(),
+                "the webhook signing secret could not be decrypted, rotate the secret".into(),
             )
         },
     )
@@ -854,7 +854,7 @@ mod tests {
     #[test]
     fn webhook_events_reject_unknown_names_with_a_helpful_message() {
         // `delivered`/`bounced` (the bare names the old tests used) are NOT
-        // emitted by anything — they must now be rejected with the valid
+        // emitted by anything, they must now be rejected with the valid
         // alternatives listed.
         for bad in [
             "delivered",
@@ -893,7 +893,7 @@ mod tests {
             "*"
         ]))
         .is_ok());
-        // The legacy email.* vocabulary is retired — it must be rejected
+        // The legacy email.* vocabulary is retired, it must be rejected
         // with the canonical names listed (migration 128 remapped stored
         // subscriptions, so nothing legitimate still sends them).
         assert!(validate_webhook_events(&events(&["  email.bounced  "])).is_err());
@@ -985,7 +985,7 @@ mod tests {
         assert!(validate_webhook_url_with("http://127.0.0.1:3000/hook", false).is_err());
         assert!(validate_webhook_url_with("https://localhost:3000/hook", false).is_err());
         assert!(validate_webhook_url_with("https://[::1]/hook", false).is_err());
-        // The override only ever applies to loopback — other private ranges
+        // The override only ever applies to loopback, other private ranges
         // stay blocked even with the flag on.
         assert!(validate_webhook_url_with("http://10.0.0.5/hook", true).is_err());
         assert!(validate_webhook_url_with("https://192.168.1.10/hook", true).is_err());
@@ -1000,7 +1000,7 @@ mod tests {
 
     #[test]
     fn test_validate_webhook_url_rejects_urls_over_column_limit() {
-        // `webhooks.url` is VARCHAR(2048) — a URL one byte past the column
+        // `webhooks.url` is VARCHAR(2048), a URL one byte past the column
         // width must surface as a validation error, never a 500 insert failure.
         let at_limit = format!(
             "https://a.example/{}",
@@ -1051,7 +1051,7 @@ mod tests {
     fn test_select_pinned_addr_rejects_any_private_address_in_resolution_set() {
         // Rebinding simulation: the hostname resolves to a public IP AND a
         // private IP (attacker-controlled DNS mixing records). The whole set
-        // must be rejected — skipping only the private entry still lets the
+        // must be rejected, skipping only the private entry still lets the
         // connection race between records.
         let mixed = vec![
             socket_addr("93.184.216.34", 443),
@@ -1096,7 +1096,7 @@ mod tests {
         assert!(select_pinned_addr(&mixed, true).is_err());
     }
 
-    /// Audit F: webhook delivery must not follow redirects — a webhook
+    /// Audit F: webhook delivery must not follow redirects, a webhook
     /// endpoint replying `302 → http://127.0.0.1:1/metadata` must surface as
     /// the 302 itself, never issue the second hop.
     #[tokio::test]
@@ -1152,7 +1152,7 @@ mod tests {
         assert_eq!(
             hits.load(Ordering::SeqCst),
             1,
-            "exactly one hop — the Location target must never be requested"
+            "exactly one hop, the Location target must never be requested"
         );
     }
 }
@@ -1553,7 +1553,7 @@ mod adversarial_tests {
     // ── Webhook secret at rest (SM4 parity) ────────────────────
 
     /// SM4 parity: a created webhook's signing secret is NEVER stored as
-    /// plaintext — the row carries the row-bound `enc:v1:` envelope (AAD
+    /// plaintext, the row carries the row-bound `enc:v1:` envelope (AAD
     /// `webhook={id}`) that decrypts back to exactly the once-shown secret.
     #[tokio::test]
     async fn created_webhook_secret_is_stored_enveloped_and_round_trips() {
@@ -1727,7 +1727,7 @@ mod adversarial_tests {
             .expect("cleanup tenants");
     }
 
-    /// SM4 parity read path: an envelope is BOUND to its row — decrypting
+    /// SM4 parity read path: an envelope is BOUND to its row, decrypting
     /// one webhook's envelope under another row's AAD (a relocated
     /// ciphertext) fails closed and never yields signing material.
     #[tokio::test]

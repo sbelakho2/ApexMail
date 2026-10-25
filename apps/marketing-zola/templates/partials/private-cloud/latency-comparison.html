@@ -1,25 +1,25 @@
-{# Latency comparison — illustrative deployment scenarios with CSS-only animation #}
+{# Latency comparison, illustrative deployment scenarios with CSS-only animation #}
 {# ARK architecture rhythm: stage 01 of the deployment flow. The scenario
    rows keep their relative-bar structure (illustrative; bar widths are
-   structural w-* tokens, no inline widths, no colour utilities — paint
+   structural w-* tokens, no inline widths, no colour utilities, paint
    is the authority's business). The unpaintable legend swatches are gone.
    Scenario copy is localized via private_cloud.latency_* keys (English
    fallbacks; keys reported to R4). #}
 {% set lat_vpc_tag = "Same VPC" %}
 {% if i18n_data and i18n_data[l] and i18n_data[l]["private_cloud"] and i18n_data[l]["private_cloud"]["latency_vpc_tag"] %}{% set lat_vpc_tag = i18n_data[l]["private_cloud"]["latency_vpc_tag"] %}{% endif %}
-{% set lat_vpc_desc = "Sub-millisecond — app and API share the same network fabric" %}
+{% set lat_vpc_desc = "Sub-millisecond, app and API share the same network fabric" %}
 {% if i18n_data and i18n_data[l] and i18n_data[l]["private_cloud"] and i18n_data[l]["private_cloud"]["latency_vpc_desc"] %}{% set lat_vpc_desc = i18n_data[l]["private_cloud"]["latency_vpc_desc"] %}{% endif %}
 {% set lat_region_tag = "Same Region" %}
 {% if i18n_data and i18n_data[l] and i18n_data[l]["private_cloud"] and i18n_data[l]["private_cloud"]["latency_region_tag"] %}{% set lat_region_tag = i18n_data[l]["private_cloud"]["latency_region_tag"] %}{% endif %}
-{% set lat_region_desc = "Low single-digit milliseconds — minimal cross-AZ hops" %}
+{% set lat_region_desc = "Low single-digit milliseconds, minimal cross-AZ hops" %}
 {% if i18n_data and i18n_data[l] and i18n_data[l]["private_cloud"] and i18n_data[l]["private_cloud"]["latency_region_desc"] %}{% set lat_region_desc = i18n_data[l]["private_cloud"]["latency_region_desc"] %}{% endif %}
 {% set lat_shared_tag = "Cross-region API" %}
 {% if i18n_data and i18n_data[l] and i18n_data[l]["private_cloud"] and i18n_data[l]["private_cloud"]["latency_shared_tag"] %}{% set lat_shared_tag = i18n_data[l]["private_cloud"]["latency_shared_tag"] %}{% endif %}
-{% set lat_shared_desc = "Tens to hundreds of milliseconds — public internet traversal" %}
+{% set lat_shared_desc = "Tens to hundreds of milliseconds, public internet traversal" %}
 {% if i18n_data and i18n_data[l] and i18n_data[l]["private_cloud"] and i18n_data[l]["private_cloud"]["latency_shared_desc"] %}{% set lat_shared_desc = i18n_data[l]["private_cloud"]["latency_shared_desc"] %}{% endif %}
 {% set lat_saas_tag = "External HTTPS API" %}
 {% if i18n_data and i18n_data[l] and i18n_data[l]["private_cloud"] and i18n_data[l]["private_cloud"]["latency_saas_tag"] %}{% set lat_saas_tag = i18n_data[l]["private_cloud"]["latency_saas_tag"] %}{% endif %}
-{% set lat_saas_desc = "Variable — DNS, TLS handshake, and internet routing added" %}
+{% set lat_saas_desc = "Variable, DNS, TLS handshake, and internet routing added" %}
 {% if i18n_data and i18n_data[l] and i18n_data[l]["private_cloud"] and i18n_data[l]["private_cloud"]["latency_saas_desc"] %}{% set lat_saas_desc = i18n_data[l]["private_cloud"]["latency_saas_desc"] %}{% endif %}
 
 
@@ -35,14 +35,14 @@
         the API path stays close to your workload and is easier to measure.
       </p>
       <p class="mt-3 apex-meta">
-        Illustrative deployment scenarios — bar lengths are not measured proportional results. Actual latency depends on your network topology and region.
+        Illustrative deployment scenarios, bar lengths are not measured proportional results. Actual latency depends on your network topology and region.
       </p>
     </div>
 
     <div class="border p-8">
       <div class="space-y-8" role="region" aria-label="{% if i18n_data and i18n_data[l] and i18n_data[l]["a11y"] and i18n_data[l]["a11y"]["latency_region"] %}{{ i18n_data[l]["a11y"]["latency_region"] }}{% else %}Relative latency comparison by deployment scenario{% endif %}">
 
-        {# Private Cloud — Same VPC #}
+        {# Private Cloud, Same VPC #}
         <div class="space-y-2">
           <div class="flex justify-between items-start gap-4">
             <div>
@@ -58,7 +58,7 @@
           </div>
         </div>
 
-        {# Private Cloud — Same Region #}
+        {# Private Cloud, Same Region #}
         <div class="space-y-2">
           <div class="flex justify-between items-start gap-4">
             <div>
@@ -74,7 +74,7 @@
           </div>
         </div>
 
-        {# Shared Cloud — Cross-region API #}
+        {# Shared Cloud, Cross-region API #}
         <div class="space-y-2">
           <div class="flex justify-between items-start gap-4">
             <div>
@@ -90,7 +90,7 @@
           </div>
         </div>
 
-        {# Third-party SaaS — External HTTPS API #}
+        {# Third-party SaaS, External HTTPS API #}
         <div class="space-y-2">
           <div class="flex justify-between items-start gap-4">
             <div>
@@ -109,11 +109,11 @@
       </div>
     </div>
 
-    {# Key Points — the icon card grid became an indexed ledger. #}
+    {# Key Points, the icon card grid became an indexed ledger. #}
     <div class="apex-ledger--indexed mt-12">
       <div>
         <span class="apex-index">01</span>
-        <div><span class="apex-em">VPC-Collocated</span> App and API within the same private network — no public internet hops</div>
+        <div><span class="apex-em">VPC-Collocated</span> App and API within the same private network, no public internet hops</div>
       </div>
       <div>
         <span class="apex-index">02</span>

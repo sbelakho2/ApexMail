@@ -457,7 +457,7 @@ impl HipaaService {
 
     // ── Queries ────────────────────────────────────────────────────────────
 
-    /// True if the tenant has an active BAA.  Hot path — uses in-memory cache.
+    /// True if the tenant has an active BAA.  Hot path, uses in-memory cache.
     pub async fn is_active_for_tenant(&self, tenant_id: &str) -> bool {
         let cache = self.active_cache.read().await;
         if cache.contains_key(tenant_id) {
@@ -577,7 +577,7 @@ impl HipaaService {
         // (microsecond precision): a nanosecond `Utc::now()` would be rounded
         // by Postgres on INSERT, so the recomputed hash would differ from the
         // stored one and the chain could NEVER verify. Truncate to whole
-        // microseconds — a value Postgres stores exactly — before hashing.
+        // microseconds, a value Postgres stores exactly, before hashing.
         let now = Utc::now().trunc_subsecs(6);
         // Acquire the previous hash (cache-first, DB fallback).
         let previous_hash = {

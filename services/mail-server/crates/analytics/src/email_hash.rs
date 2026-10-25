@@ -40,7 +40,7 @@ fn analytics_hmac_key() -> String {
             );
             tracing::warn!(
                 env = ANALYTICS_STO_HMAC_KEY_ENV,
-                "ANALYTICS_STO_HMAC_KEY is not set — using an ephemeral per-process key. \
+                "ANALYTICS_STO_HMAC_KEY is not set, using an ephemeral per-process key. \
                  Hashed recipients are stable within this process but will NOT match \
                  values written after a restart. Set the env var in production."
             );
@@ -57,7 +57,7 @@ pub fn hash_for_analytics(recipient: &str) -> String {
 
 /// D: privacy-encode a recipient for the analytics `events` store.
 ///
-/// Returns `h:<hmac>:<redacted>` — the HMAC prefix keeps per-recipient
+/// Returns `h:<hmac>:<redacted>`, the HMAC prefix keeps per-recipient
 /// grouping (engagement histograms, funnels) working while only a truncated
 /// human-readable form (`a***@example.com`, via `mail_common::pii`) remains
 /// visible. Raw recipients are never stored unless a per-tenant raw opt-in

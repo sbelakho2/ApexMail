@@ -66,7 +66,7 @@ impl MockMailstore {
     /// SM2-F3 race injector: arm the mock so `uid` stops appearing in
     /// `list_messages` for (account, mailbox) from the `from_call`-th call
     /// onwards. With SELECT as call 1, `from_call = 2` hides the message from
-    /// the NEXT single listing — the metadata pass inside a FETCH whose view
+    /// the NEXT single listing, the metadata pass inside a FETCH whose view
     /// refresh was served from the (unchanged) snapshot.
     pub(crate) fn hide_uid_from_list_call(
         &self,
@@ -1338,7 +1338,7 @@ async fn plaintext_session_refuses_login_and_starttls_policy() {
         "no credential RPC may run for a refused plaintext LOGIN"
     );
 
-    // STARTTLS is not available in this harness leg (already past it) — the
+    // STARTTLS is not available in this harness leg (already past it), the
     // dispatcher answers BAD because it is only valid at the connection level.
     let out = h.cmd("STARTTLS").await;
     assert!(out.contains("BAD"), "{out:?}");
@@ -1949,7 +1949,7 @@ async fn fetch_body_section_errors_are_bad() {
 
 /// SM2-F8 (repair): a STORE operation word whose ASCII-upcase ends in
 /// `.SILENT` but whose raw suffix is multi-byte (`ſ`/`ı` upcase to `S`/`I`)
-/// must be answered with a tagged BAD — the previous byte-arithmetic slice
+/// must be answered with a tagged BAD, the previous byte-arithmetic slice
 /// in `parse_store_args` panicked inside the connection task instead. The
 /// follow-up command proves the connection survived.
 #[tokio::test]
@@ -1983,7 +1983,7 @@ async fn fetch_sequence_set_edge_cases() {
     let out = h.cmd("FETCH 2:1 UID").await;
     assert!(out.contains("UID 1") && out.contains("UID 2"), "{out:?}");
 
-    // Out-of-range numbers resolve to nothing — OK, no data.
+    // Out-of-range numbers resolve to nothing, OK, no data.
     let (tag, out) = h.cmd_tagged("FETCH 99 UID").await;
     assert_eq!(out, format!("{tag} OK FETCH completed\r\n"));
 
@@ -2035,7 +2035,7 @@ async fn fetch_emits_view_diff_before_responses_after_foreign_expunge() {
     assert!(out.contains("* 2 EXPUNGE"), "{out:?}");
 
     // The watcher's `FETCH 3 UID`: the view diff MUST be written first
-    // (`* 2 EXPUNGE` + the corrected `* 4 EXISTS`) — the old silent re-list
+    // (`* 2 EXPUNGE` + the corrected `* 4 EXISTS`), the old silent re-list
     // answered `* 3 FETCH` against a map the client had never been told
     // about, silently renumbering its view.
     let out = watcher.cmd("FETCH 3 UID").await;
@@ -2072,7 +2072,7 @@ async fn fetch_emits_view_diff_before_responses_after_foreign_expunge() {
 /// skipped by BOTH of handle_fetch's per-message loops.
 ///
 /// The emit loop already had the warn+skip arm; the `\Seen` bookkeeping loop
-/// behind it indexed `meta_map[&uid]` directly — on the missing key that
+/// behind it indexed `meta_map[&uid]` directly, on the missing key that
 /// index PANICS, killing the connection task mid-FETCH. This test arms the
 /// mock so uid 2 vanishes from the metadata listing only (call 2; SELECT was
 /// call 1 and the view refresh short-circuits on the unchanged snapshot), so
@@ -2099,7 +2099,7 @@ async fn fetch_skips_a_message_expunged_between_view_refresh_and_listing() {
 
     // SELECT was list_messages call 1 for this mailbox; the FETCH's view
     // refresh short-circuits (snapshot unchanged), so the metadata listing
-    // is call 2 — hide uid 2 from it onwards.
+    // is call 2, hide uid 2 from it onwards.
     h.mock.hide_uid_from_list_call("acct-1", "INBOX", 2, 2);
 
     // A body fetch (sets \Seen) so the bookkeeping loop actually runs over
@@ -2752,8 +2752,8 @@ async fn oversized_literal_is_refused_without_reading_the_payload() {
     // 33 MiB > MAX_LITERAL_SIZE (32 MiB): the server must refuse to read it
     // and close, never allocating or consuming the declared size.
     h.send_line("A900 APPEND INBOX {34603009}").await;
-    // Dogfood-2: the refusal is TYPED — `* BYE` (never a continuation, never
-    // a bare EOF) — and the connection is then closed.
+    // Dogfood-2: the refusal is TYPED, `* BYE` (never a continuation, never
+    // a bare EOF), and the connection is then closed.
     let mut buf = Vec::new();
     let n = tokio::time::timeout(Duration::from_secs(10), h.io.read_until(b'\n', &mut buf))
         .await
@@ -3504,7 +3504,7 @@ async fn idle_event_stream_end_then_done_still_works() {
 /// Self-signed test certificate/key pair (test-only material, generated
 /// once for the crate's TLS tests). Embedded so the test is hermetic: no
 /// fixture path can be missing at runtime.
-// nosemgrep: generic.secrets.security.detected-private-key.detected-private-key — inline test-only key material for the local IMAP TLS suite
+// nosemgrep: generic.secrets.security.detected-private-key.detected-private-key, inline test-only key material for the local IMAP TLS suite
 const TEST_CERT_PEM: &str = r#"-----BEGIN CERTIFICATE-----
 MIIDSTCCAjGgAwIBAgIUVwhxJa9wz86lWTzyVQVC9bHNeXUwDQYJKoZIhvcNAQEL
 BQAwFDESMBAGA1UEAwwJbG9jYWxob3N0MB4XDTI2MDgwOTE5MjIxMVoXDTM2MDgw
@@ -3525,7 +3525,7 @@ YzD9bl7yCpnvXHy4p7G0SYXAYkK8DG5FcS/ECTJw/gjMEDsIPLqPHNsC2uaq+C0R
 fwY+YpZkXTmxfHPbSn0EKcbKj1lHFsvSm9ckfUjEJV5vcIk5+TewmU4cEzQloK9v
 MpuYqjOkD826HkH+KCOEK4qVsx1p1MM0ASjES0E=
 -----END CERTIFICATE-----"#;
-// nosemgrep: generic.secrets.security.detected-private-key.detected-private-key — inline test-only key material for the local IMAP TLS suite
+// nosemgrep: generic.secrets.security.detected-private-key.detected-private-key, inline test-only key material for the local IMAP TLS suite
 const TEST_KEY_PEM: &str = r#"-----BEGIN PRIVATE KEY-----
 MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQDqqGeESTeTNPwo
 7NRxeFNuyjGdjHvNfBbxQ8VDhuyF7LwSVuTf5wkFvCySeEch5uInxlxo6p3MmT7m
@@ -3560,7 +3560,7 @@ async fn configure_tls_loads_a_real_pair_and_refuses_broken_inputs() {
     // Same provider the binary installs at startup (idempotent).
     let _ =
         rustls::crypto::CryptoProvider::install_default(rustls::crypto::ring::default_provider());
-    let dir = std::env::temp_dir().join(format!("imap-tls-{}", std::process::id())); // nosemgrep: rust.lang.security.temp-dir.temp-dir — test fixture under a unique pid/uuid path — no predictable-name temp collision
+    let dir = std::env::temp_dir().join(format!("imap-tls-{}", std::process::id())); // nosemgrep: rust.lang.security.temp-dir.temp-dir, test fixture under a unique pid/uuid path, no predictable-name temp collision
     std::fs::create_dir_all(&dir).unwrap();
     let cert = dir.join("cert.pem");
     let key = dir.join("key.pem");
@@ -3635,7 +3635,7 @@ async fn configure_tls_loads_a_real_pair_and_refuses_broken_inputs() {
 async fn idle_deadline_closes_with_bye() {
     // Duplex + paused clock (the repo's established pattern): every step is
     // under the test's control, so the only timer that matters is run_idle's
-    // 29-minute deadline. No test-side `timeout` wrappers are used — with a
+    // 29-minute deadline. No test-side `timeout` wrappers are used, with a
     // paused clock tokio auto-advances to the earliest timer, which must be
     // the server's deadline, not the test's own guard.
     tokio::time::pause();
@@ -3940,7 +3940,7 @@ async fn fetch_partial_offset_past_end_yields_empty_literal() {
     h.shutdown().await;
 }
 
-/// A \Seen flag store that fails (twice — the retry too) after the FETCH
+/// A \Seen flag store that fails (twice, the retry too) after the FETCH
 /// response already advertised \Seen must NOT fail the FETCH: the response
 /// was consumed; the mismatch is logged for reconciliation.
 #[tokio::test]
@@ -3967,7 +3967,7 @@ async fn fetch_seen_store_failure_does_not_fail_the_command() {
 }
 
 /// COPY/MOVE answer OK with COPYUID even when the destination's status RPC
-/// fails — the uidvalidity falls back to the source session's.
+/// fails, the uidvalidity falls back to the source session's.
 #[tokio::test]
 async fn copy_and_move_destination_status_failure_falls_back_to_source_uidvalidity() {
     let mut h = Harness::new();
@@ -4066,7 +4066,7 @@ async fn expunge_emits_exists_after_removals() {
 }
 
 /// CLOSE reports NO (and keeps the session selected) when its silent expunge
-/// fails — swallowing it would leave silently-unexpunged \Deleted mail.
+/// fails, swallowing it would leave silently-unexpunged \Deleted mail.
 #[tokio::test]
 async fn close_reports_no_when_expunge_fails_and_stays_selected() {
     let mut h = Harness::new();
@@ -4192,7 +4192,7 @@ async fn append_argument_and_target_error_arms() {
         "{out:?}"
     );
 
-    // Missing mailbox: NO [TRYCREATE] (covered elsewhere) — here break the
+    // Missing mailbox: NO [TRYCREATE] (covered elsewhere), here break the
     // status RPC instead: any non-NotFound failure is a plain NO.
     h.mock.fail("get_mailbox_status");
     let out = h.cmd("APPEND INBOX {5}\r\nhello").await;
@@ -4411,7 +4411,7 @@ async fn list_renders_an_empty_delimiter_as_nil() {
 }
 
 /// IDLE event stream: a removal and an arrival must surface as EXPUNGE (in
-/// descending order), EXISTS, RECENT and UIDNEXT — and DONE still terminates.
+/// descending order), EXISTS, RECENT and UIDNEXT, and DONE still terminates.
 #[tokio::test]
 async fn idle_events_surface_expunge_exists_recent_uidnext() {
     let mut h = Harness::new();
@@ -4672,7 +4672,7 @@ async fn search_and_move_guard_arms_answer_bad() {
 }
 
 /// RENAME without names, SUBSCRIBE/UNSUBSCRIBE without names, and LIST with
-/// a NIL delimiter — edge arms at the session level.
+/// a NIL delimiter, edge arms at the session level.
 #[tokio::test]
 async fn rename_list_subscribe_edge_arms() {
     let mut h = Harness::with_session("127.0.0.1", true, false, true);
@@ -5256,7 +5256,7 @@ async fn a_command_starting_with_a_literal_gets_the_star_tag() {
     h.login("user@x.test", "pw").await;
     // `{5}` announces 5 bytes; the payload + rest follow the continuation.
     // The server answers the COMPLETED command with the client's ANNOUNCED
-    // tag (RFC 3501: responses carry the command's tag) — TCP segmentation
+    // tag (RFC 3501: responses carry the command's tag), TCP segmentation
     // may split the lines, but the announced tag is what comes back.
     let tag = h.fresh_tag();
     h.send_line(&format!("{tag} {{5}}")).await;

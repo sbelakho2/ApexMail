@@ -46,7 +46,7 @@ struct DashboardMessageStats {
 }
 
 /// Row for the single combined resource-count query (audit: the dashboard
-/// used to run six sequential COUNT queries per request — five scalar
+/// used to run six sequential COUNT queries per request, five scalar
 /// resource counts plus the messages aggregate).
 #[derive(sqlx::FromRow)]
 struct DashboardResourceCounts {
@@ -104,7 +104,7 @@ async fn dashboard_stats(
         0.0
     };
 
-    // Resource counts — one round-trip instead of five sequential COUNTs.
+    // Resource counts, one round-trip instead of five sequential COUNTs.
     let counts = sqlx::query_as::<_, DashboardResourceCounts>(
         r#"SELECT
             (SELECT COUNT(*)::bigint FROM contacts WHERE tenant_id = $1) AS contacts,
@@ -238,7 +238,7 @@ mod adversarial_tests {
             let uuid = uuid::Uuid::new_v4();
             let name_col = if table == "contacts" { "email" } else { "name" };
             // templates ids are VARCHAR(26) (ULID-style); every other
-            // canonical resource id is a UUID — bind per table shape.
+            // canonical resource id is a UUID, bind per table shape.
             if table == "templates" {
                 // templates.subject is NOT NULL on the canonical schema.
                 sqlx::query(&format!(

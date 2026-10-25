@@ -371,7 +371,7 @@ pub struct ReplicationStats {
     /// `"async"` when empty.
     pub mode: String,
     /// The mode the startup config intends (`config.replication
-    /// .sync_replication`) — exposed next to `mode` for drift visibility.
+    /// .sync_replication`), exposed next to `mode` for drift visibility.
     pub configured_mode: String,
     /// `configured_mode != mode`: the startup config disagrees with the
     /// PostgreSQL runtime (external audit #7).

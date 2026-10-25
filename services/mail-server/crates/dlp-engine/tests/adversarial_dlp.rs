@@ -112,7 +112,7 @@ fn test_ssn_embedded_no_label() {
 
 // ── Entropy / secret detection ────────────────────────────────────────────────
 
-/// AWS-style secret key has very high entropy — must trigger entropy finding.
+/// AWS-style secret key has very high entropy, must trigger entropy finding.
 #[test]
 fn test_aws_secret_key_entropy_detected() {
     let e = engine();
@@ -126,7 +126,7 @@ fn test_aws_secret_key_entropy_detected() {
 
 /// A realistic API token (mixed-case + digits + key prefix) must trigger entropy.
 /// The scanner requires BOTH entropy >= 4.5 AND looks_like_secret.
-/// A pure lowercase hex string fails both criteria — use a mixed-case token.
+/// A pure lowercase hex string fails both criteria, use a mixed-case token.
 #[test]
 fn test_api_token_entropy_detected() {
     let e = engine();

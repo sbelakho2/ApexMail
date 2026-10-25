@@ -551,11 +551,11 @@ pub enum RequestStatus {
     Completed,
     Rejected,
     Expired,
-    /// Rectification (Art. 16) requires human review — never auto-completed.
+    /// Rectification (Art. 16) requires human review, never auto-completed.
     PendingManualReview,
     /// A processing attempt failed; the request is queued for retry.
     Retrying,
-    /// Retries exhausted or unrecoverable error — needs operator attention.
+    /// Retries exhausted or unrecoverable error, needs operator attention.
     Failed,
     /// Some data stores were erased/anonymized but others failed or were
     /// skipped; the certificate lists the exact per-store outcomes.
@@ -604,7 +604,7 @@ pub struct DataSubjectRequest {
     pub tenant_id: String,
     pub request_type: DataSubjectRequestType,
     pub email: String,
-    /// C-2: never serialized — the token hash must not leak through API
+    /// C-2: never serialized, the token hash must not leak through API
     /// responses; it lives only in the DB for verification.
     #[serde(skip)]
     pub verification_token_hash: String,
@@ -616,7 +616,7 @@ pub struct DataSubjectRequest {
     pub completed_at: Option<DateTime<Utc>>,
     pub expires_at: DateTime<Utc>,
     pub result: Option<serde_json::Value>,
-    /// When the request was RECEIVED — the GDPR Art. 12(3) clock start.
+    /// When the request was RECEIVED, the GDPR Art. 12(3) clock start.
     #[serde(default)]
     pub received_at: Option<DateTime<Utc>>,
     /// When the requester's identity was verified. Its own recorded event;
@@ -646,7 +646,7 @@ pub struct DataSubjectRequestResult {
     pub modified_records: Option<i64>,
     pub rejection_reason: Option<String>,
     /// True when some data stores were skipped (e.g. absent in this
-    /// deployment) or failed — the request is `partial`, not `completed`.
+    /// deployment) or failed, the request is `partial`, not `completed`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub partial: Option<bool>,
     /// True when the result requires human follow-up (rectification review).

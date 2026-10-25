@@ -23,7 +23,7 @@ pub struct TrackingDomainPanel {
     pub domain_id: String,
     /// The sending domain this page is about (`customer.test`).
     pub domain_name: String,
-    /// The sending domain is verified — a prerequisite per the docs.
+    /// The sending domain is verified, a prerequisite per the docs.
     pub domain_verified: bool,
     /// Whether the plan grants `custom_tracking_domain` (Pro and above).
     pub entitled: bool,
@@ -130,7 +130,7 @@ pub fn tracking_domain_panel_html(panel: &TrackingDomainPanel, csrf_token: &str)
 
 /// The full console page for `/domains/{id}/tracking`: breadcrumb, heading and
 /// the panel. `None` is the no-data fallback the route inventory sweep and
-/// the exported route fixture render — never a fabricated configured state.
+/// the exported route fixture render, never a fabricated configured state.
 pub fn web_domain_tracking_page(panel: Option<&TrackingDomainPanel>, csrf_token: &str) -> String {
     let header = "<nav aria-label=\"Breadcrumb\" class=\"mb-2\"><ol class=\"flex items-center gap-2\"><li><a href=\"/domains\" class=\"apex-link\">Domains</a></li><li class=\"\">/</li><li class=\"apex-em\">Tracking domain</li></ol></nav>\
 <div><h1 class=\"apex-page-title\">Custom tracking domain</h1>\

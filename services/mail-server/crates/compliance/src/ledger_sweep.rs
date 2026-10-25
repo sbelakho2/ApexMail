@@ -8,16 +8,16 @@
 //!
 //! # Writers are no longer missing
 //!
-//! * **Payroll** — still no payroll-run feature writes `payroll_records`;
+//! * **Payroll**, still no payroll-run feature writes `payroll_records`;
 //!   [`EstonianPayrollPolicy`] computes the statutory amounts from the
 //!   date-effective [`crate::tax_policy`] (the same formula as
 //!   `estonia_ou::query_employees`), and the sweep posts every unposted
 //!   record the moment any writer creates one.
-//! * **Expenses** — `operating_costs` is deployment-optional (migration 220
+//! * **Expenses**, `operating_costs` is deployment-optional (migration 220
 //!   deliberately does not create it). The sweep reports
 //!   `source_table_missing` when the store is absent and posts every positive
 //!   row once a deployment provisions it or an expense feature writes one.
-//! * **Bank statements** — CLOSED: `accounting_core::bank_ingest` is the
+//! * **Bank statements**, CLOSED: `accounting_core::bank_ingest` is the
 //!   writer (exposed at `POST /accounting/bank-statements/import` by this
 //!   service), and [`sweep_ledger_sources`] hosts
 //!   `sweep_unposted_bank_statement_lines` on the same tick. Ingested lines
@@ -34,7 +34,7 @@ use crate::tax_policy;
 
 /// Estonian payroll policy: per-employee II-pillar rate and exemptions from
 /// the payroll record, rates from the versioned date-effective
-/// [`crate::tax_policy`] module — never a permanent constant.
+/// [`crate::tax_policy`] module, never a permanent constant.
 ///
 /// Mirrors `estonia_ou::query_employees` exactly (employer cost = gross +
 /// social + employer unemployment; withholding base = gross − employee
@@ -99,7 +99,7 @@ impl PayrollAmountsPolicy for EstonianPayrollPolicy {
 
 /// One sweep tick for the compliance-owned financial sources: the three
 /// original compliance sources plus the billing sources (invoices, payment
-/// allocations, credit notes — audit SM7 F1) whose live write hooks are
+/// allocations, credit notes, audit SM7 F1) whose live write hooks are
 /// best-effort, so this replay sweep is what keeps the books complete.
 #[derive(Debug, Clone, Copy, Default, serde::Serialize)]
 pub struct LedgerSweepReport {
@@ -145,7 +145,7 @@ pub async fn sweep_ledger_sources(db: &PgPool) -> anyhow::Result<LedgerSweepRepo
     let payroll = sweeps::sweep_unposted_payroll(db, &config, &EstonianPayrollPolicy).await?;
     let expenses = sweeps::sweep_unposted_expenses(db, &config).await?;
     let bank_statement_lines = sweeps::sweep_unposted_bank_statement_lines(db, &config).await?;
-    // Audit SM7 F1: the billing sources have no other replay path — their
+    // Audit SM7 F1: the billing sources have no other replay path, their
     // posting hooks are best-effort by policy, so a skipped posting is only
     // repaired here. All sweeps are idempotent (unique source documents).
     let invoices = sweeps::sweep_unposted_invoices(db, &config).await?;

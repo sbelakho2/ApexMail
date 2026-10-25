@@ -1,10 +1,10 @@
-//! Admin operator management — list, create, and manage control-plane operators.
+//! Admin operator management, list, create, and manage control-plane operators.
 //!
 //! Operators are users with the `admin` or `owner` role. This module provides
 //! the API endpoints backing the control-plane Operators UI.
 //!
 //! Scoping invariants (audit P1-1/P1-2): every query is filtered by the
-//! CALLER's tenant — an operator of one tenant must never list, create, or
+//! CALLER's tenant, an operator of one tenant must never list, create, or
 //! delete operators of another. Deletion additionally refuses self-deletion
 //! and the destruction of a tenant's last remaining owner, and both
 //! mutations write actor-attributed audit entries.
@@ -49,7 +49,7 @@ pub struct CreateOperatorRequest {
 
 /// 201 body for operator creation. `tempPassword` is the ONLY place the
 /// generated password ever appears: it is hashed for storage and discarded
-/// server-side, so the client must display it once — it cannot be recovered.
+/// server-side, so the client must display it once, it cannot be recovered.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateOperatorResponse {
@@ -66,7 +66,7 @@ pub struct DeleteOperatorQuery {
     pub confirm: Option<String>,
 }
 
-/// Structural email gate for operator creation — full RFC validation is not
+/// Structural email gate for operator creation, full RFC validation is not
 /// the point here; rejecting missing-@/empty-parts/whitespace/oversized
 /// input before it reaches the UNIQUE index is.
 fn is_plausible_email(email: &str) -> bool {
@@ -97,7 +97,7 @@ fn is_unique_violation(error: &sqlx::Error) -> bool {
 }
 
 /// Actor-attributed audit entry for operator lifecycle mutations (P2-2):
-/// the acting operator's tenant AND user id — an operator deletion without
+/// the acting operator's tenant AND user id, an operator deletion without
 /// attribution is exactly the evidence gap the audit chain exists to close.
 async fn log_operator_audit(
     state: &AppState,
@@ -127,7 +127,7 @@ async fn list_operators(
 ) -> Result<Json<Vec<OperatorRow>>, ApiError> {
     require_scopes(&auth, &["*"])?;
     require_system_tenant(&state, &auth).await?;
-    // P1-1: tenant-scoped — the previous unscoped query listed every
+    // P1-1: tenant-scoped, the previous unscoped query listed every
     // tenant's admins/owners to any operator.
     let rows = sqlx::query_as::<_, OperatorRow>(
         "SELECT id::text AS id, email, role, \
@@ -151,7 +151,7 @@ async fn create_operator(
     require_system_tenant(&state, &auth).await?;
 
     let role = body.role.as_deref().unwrap_or("admin");
-    // Reject arbitrary role strings — only admin/owner may be assigned.
+    // Reject arbitrary role strings, only admin/owner may be assigned.
     if !VALID_OPERATOR_ROLES.contains(&role) {
         return Err(ApiError::Validation(vec![format!(
             "invalid role: {role} (allowed: admin, owner)"
@@ -174,7 +174,7 @@ async fn create_operator(
         .map_err(|_| ApiError::Internal("failed to hash operator password".into()))?;
 
     // E-OPS (live dogfood 2026-10-08): the created operator was never sent
-    // a verification email — login requires a verified address, so a
+    // a verification email, login requires a verified address, so a
     // product-created operator could not sign in at all. Mint the
     // verification token and queue the verification mail in the SAME
     // transaction as the insert (the register path's contract): a queue
@@ -322,7 +322,7 @@ async fn delete_operator(
             .map_err(|_| ApiError::Internal("failed to count owners".into()))?;
     if target_role == "owner" && owner_count <= 1 {
         return Err(ApiError::Validation(vec![
-            "cannot delete the last owner of this tenant — appoint another owner first".into(),
+            "cannot delete the last owner of this tenant, appoint another owner first".into(),
         ]));
     }
 
@@ -406,7 +406,7 @@ mod adversarial_tests {
         };
         let env = AdvEnv::admin(pool.clone()).await;
         // The machine credential carries the literal `system` tenant, and
-        // users.tenant_id has an FK to tenants — provision the sentinel row.
+        // users.tenant_id has an FK to tenants, provision the sentinel row.
         sqlx::query(
             "INSERT INTO tenants (id, name, slug, plan, status)
              VALUES ('system', 'System Sentinel', 'system-sentinel', 'enterprise', 'active')
@@ -460,7 +460,7 @@ mod adversarial_tests {
         assert!(bcrypt::verify(&temp_password, &stored_hash).expect("verify"));
 
         // E-OPS (live dogfood 2026-10-08): the created operator must be able
-        // to COMPLETE login — unverified with a verification token, and the
+        // to COMPLETE login, unverified with a verification token, and the
         // verification mail queued through the platform pipeline.
         let (email_verified, metadata): (bool, serde_json::Value) =
             sqlx::query_as("SELECT email_verified, metadata FROM users WHERE id = $1::uuid")
@@ -674,7 +674,7 @@ mod adversarial_tests {
 
         // Self-deletion: the CP-session gate means a machine key can never
         // carry a user_id, so this arm is driven by a direct handler call
-        // with an operator identity — the router-level gates above are
+        // with an operator identity, the router-level gates above are
         // already proven by the other tests.
         let state = crate::app::test_support::test_state_over(pool.clone()).await;
         let operator_auth = crate::middleware::auth::AuthUser {
@@ -725,8 +725,8 @@ mod adversarial_tests {
 }
 
 /// Database-outage arms for the operator lifecycle: a failed INSERT and a
-/// failed DELETE must answer the generic Internal error — never leak the
-/// driver detail — while a duplicate email still maps to 409.
+/// failed DELETE must answer the generic Internal error, never leak the
+/// driver detail, while a duplicate email still maps to 409.
 #[cfg(test)]
 mod outage_tests {
     use crate::app::test_support::adv::AdvEnv;
@@ -764,7 +764,7 @@ mod outage_tests {
             return;
         };
         // The machine credential carries the literal `system` tenant, and
-        // users.tenant_id has an FK to tenants — provision the sentinel row.
+        // users.tenant_id has an FK to tenants, provision the sentinel row.
         sqlx::query(
             "INSERT INTO tenants (id, name, slug, plan, status)
              VALUES ('system', 'System Sentinel', 'system-probe-slug', 'enterprise', 'active')

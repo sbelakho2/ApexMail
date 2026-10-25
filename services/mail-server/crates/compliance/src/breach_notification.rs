@@ -1,4 +1,4 @@
-//! Breach notification workflow — GDPR Art. 33/34 with an explicit state
+//! Breach notification workflow, GDPR Art. 33/34 with an explicit state
 //! machine, submission evidence, a mandatory authenticated human task where
 //! no authority machine API exists, and a durable subject-notification
 //! outbox.
@@ -9,7 +9,7 @@
 //! ```
 //!
 //! The defect this module replaces: `notify_dpa()` primarily flipped a status
-//! column and logged a line — it did not record what was submitted, to whom,
+//! column and logged a line, it did not record what was submitted, to whom,
 //! when, with what authority reference, or whether the authority actually
 //! acknowledged it. Now:
 //!
@@ -368,7 +368,7 @@ impl BreachNotifier {
             tenant = %input.tenant_id,
             affected = input.affected_records,
             severity = %severity,
-            "Breach report detected — 72h GDPR clock started"
+            "Breach report detected, 72h GDPR clock started"
         );
 
         self.fetch(&id)
@@ -768,7 +768,7 @@ impl BreachNotifier {
     }
 
     /// Record the authority's receipt. This is the ONLY path to
-    /// `authority_acknowledged` — without a non-empty receipt the transition
+    /// `authority_acknowledged`, without a non-empty receipt the transition
     /// is refused here and by the migration-213 CHECK constraint.
     pub async fn record_authority_receipt(
         &self,
@@ -779,7 +779,7 @@ impl BreachNotifier {
     ) -> Result<BreachReport, String> {
         if receipt.trim().is_empty() {
             return Err(
-                "an authority acknowledgement requires the authority's receipt/reference — a \
+                "an authority acknowledgement requires the authority's receipt/reference, a \
                  notification cannot be acknowledged without one"
                     .into(),
             );
@@ -844,7 +844,7 @@ impl BreachNotifier {
         self.touch_document(breach_id).await?;
         info!(
             breach_id,
-            "Authority receipt recorded — breach acknowledged"
+            "Authority receipt recorded, breach acknowledged"
         );
         self.fetch(breach_id)
             .await?
@@ -878,7 +878,7 @@ impl BreachNotifier {
         if !report.subject_notification_required {
             return Err(
                 "subject notification requires a triage decision that the breach is high-risk \
-                 (Art. 34(1)) — re-triage with risk_to_subjects = true first"
+                 (Art. 34(1)), re-triage with risk_to_subjects = true first"
                     .into(),
             );
         }
@@ -1008,7 +1008,7 @@ impl BreachNotifier {
         Ok(row)
     }
 
-    /// Park a subject notification as failed (with the reason) — never
+    /// Park a subject notification as failed (with the reason), never
     /// silently dropped.
     pub async fn mark_subject_notification_failed(
         &self,
@@ -1059,7 +1059,7 @@ impl BreachNotifier {
             BreachStatus::AuthorityAcknowledged | BreachStatus::NotNotifiable
         ) {
             return Err(format!(
-                "breach {breach_id} cannot be resolved in state {current} — it must reach \
+                "breach {breach_id} cannot be resolved in state {current}, it must reach \
                  authority_acknowledged (or be triaged not_notifiable)"
             ));
         }
@@ -1246,17 +1246,17 @@ fn build_submission_package(
         .clone()
         .or_else(|| notification_emails.first().cloned())
         .ok_or_else(|| {
-            "Art. 33(3)(b) requires a DPO/contact — set it with update_assessment before \
+            "Art. 33(3)(b) requires a DPO/contact, set it with update_assessment before \
                  queueing the authority notification"
                 .to_string()
         })?;
     let likely_consequences = report.likely_consequences.clone().ok_or_else(|| {
-        "Art. 33(3)(c) requires the likely consequences of the breach — set it with \
+        "Art. 33(3)(c) requires the likely consequences of the breach, set it with \
              update_assessment before queueing the authority notification"
             .to_string()
     })?;
     let measures_taken = report.measures_taken.clone().ok_or_else(|| {
-        "Art. 33(3)(d) requires the measures taken or proposed — set it with update_assessment \
+        "Art. 33(3)(d) requires the measures taken or proposed, set it with update_assessment \
              before queueing the authority notification"
             .to_string()
     })?;
@@ -1408,7 +1408,7 @@ pub fn build_subject_notification(report: &BreachReport) -> String {
          \n\
          Reference: {reference}\n\
          \n\
-         — ApexMail",
+         | ApexMail",
         description = report.description,
         consequences = report.likely_consequences.as_deref().unwrap_or(
             "We are still assessing the likely consequences; this notice will be updated."

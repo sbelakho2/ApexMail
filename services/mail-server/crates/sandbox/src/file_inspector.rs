@@ -1,4 +1,4 @@
-//! File inspection — magic number detection, hash computation, content analysis
+//! File inspection, magic number detection, hash computation, content analysis
 //!
 //! Performs static analysis of file contents without executing anything://! - File type identification via magic bytes
 //! - SHA-256 hash computation
@@ -232,7 +232,7 @@ pub fn compute_sha256(data: &[u8]) -> String {
 /// ending in a bare dot must not yield an empty-string extension.
 pub fn extract_extension(filename: &str) -> Option<String> {
     // Trailing dots/spaces/NULs are dropped when the file is written on the
-    // most common target platform — the *effective* name is what matters.
+    // most common target platform, the *effective* name is what matters.
     let cleaned = filename.trim_end_matches(['.', ' ', '\u{0}']);
     // Only the final path component carries the extension.
     let last_component = cleaned.rsplit(['/', '\\']).next().unwrap_or(cleaned);
@@ -431,7 +431,7 @@ pub fn inspect_file(data: &[u8], filename: Option<&str>) -> FileInspection {
                 // instead of asserting an unverifiable "not encrypted".
                 findings.push(InspectionFinding {
                     id: "ARCHIVE_HEADER_OPAQUE",
-                    description: "7-Zip start header is malformed or truncated — encryption status could not be determined (contents unverified)"
+                    description: "7-Zip start header is malformed or truncated, encryption status could not be determined (contents unverified)"
                         .into(),
                     risk: 3.0,
                 });
@@ -757,7 +757,7 @@ fn zip_central_directory_encrypted(data: &[u8]) -> bool {
     let mut offset = cd_offset;
     for _ in 0..entry_count {
         if offset + 46 > data.len() || !data[offset..].starts_with(&CDFH_SIG) {
-            break; // malformed or truncated — not evidence of encryption
+            break; // malformed or truncated, not evidence of encryption
         }
         let flags = u16::from_le_bytes([data[offset + 8], data[offset + 9]]);
         if flags & 0x0001 != 0 || flags & 0x0040 != 0 {
@@ -782,7 +782,7 @@ fn zip_central_directory_encrypted(data: &[u8]) -> bool {
 ///   and per-file encryption is an extra-area record of type 3 (FHE_CRYPT).
 ///
 /// The previous implementation scanned bytes 7..200 for any 0x04 byte —
-/// statistically guaranteed in compressed data — and tested `data[9] & 0x04`
+/// statistically guaranteed in compressed data, and tested `data[9] & 0x04`
 /// against HEAD_TYPE (which never carries the flag), flagging nearly every
 /// plain RAR while missing real header encryption.
 pub fn is_rar_encrypted(data: &[u8]) -> bool {
@@ -831,7 +831,7 @@ fn rar4_encrypted(data: &[u8]) -> bool {
         let block_flags = u16::from_le_bytes([data[pos + 3], data[pos + 4]]);
         let block_size = u16::from_le_bytes([data[pos + 5], data[pos + 6]]) as usize;
         if block_size < 7 {
-            break; // malformed — not evidence of encryption
+            break; // malformed, not evidence of encryption
         }
         // FILE_HEAD with LHD_PASSWORD: file data is encrypted.
         if head_type == 0x74 && block_flags & 0x0004 != 0 {
@@ -886,7 +886,7 @@ fn rar5_encrypted(data: &[u8]) -> bool {
         pos += n;
         // HeaderSize includes the CRC and the size field itself.
         if header_size < 5 || block_start.saturating_add(header_size as usize) > data.len() {
-            break; // malformed — not evidence of encryption
+            break; // malformed, not evidence of encryption
         }
         let Some((header_type, n)) = rar5_read_vint(data, pos) else {
             break;
@@ -967,30 +967,30 @@ fn rar5_extra_has_crypt(data: &[u8], extra_start: usize, extra_size: usize) -> b
 
 /// 7z encryption classification from the STRUCTURED start header
 /// (audit finding: the previous check scanned the AES codec marker
-/// `06 F1 07 01` anywhere in the WHOLE file — the same whole-file
+/// `06 F1 07 01` anywhere in the WHOLE file, the same whole-file
 /// false-positive the ZIP path had already fixed; four random bytes occur
 /// by chance in compressed payloads and flagged clean archives
 /// `ARCHIVE_ENCRYPTED` at risk 7.0).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SevenZEncryption {
-    /// The declared header region declares the AES-256 codec — encrypted.
+    /// The declared header region declares the AES-256 codec, encrypted.
     Encrypted,
     /// Header parsed cleanly and no AES codec is declared.
     NotEncrypted,
-    /// The start header is malformed/truncated — encryption status cannot
+    /// The start header is malformed/truncated, encryption status cannot
     /// be determined (callers apply an honest risk floor).
     Indeterminate,
 }
 
 /// Classify a 7z archive's encryption by parsing its start header.
 ///
-/// Layout (7zFormat.txt): a 32-byte signature header — the 6-byte signature
+/// Layout (7zFormat.txt): a 32-byte signature header, the 6-byte signature
 /// `37 7A BC AF 27 1C`, a 2-byte version, a 4-byte StartHeaderCRC, then the
 /// 20-byte start header holding `NextHeaderOffset(u64)`,
 /// `NextHeaderSize(u64)`, `NextHeaderCRC(u32)`. The next-header region
 /// (packed streams for encoded headers + the header metadata) lives at
 /// `32 + NextHeaderOffset`, spanning `NextHeaderSize` bytes. Only THOSE
-/// declared bytes are scanned for the AES codec id `06 F1 07 01` — codec
+/// declared bytes are scanned for the AES codec id `06 F1 07 01`, codec
 /// ids appear there whenever content streams (or an encoded header) are
 /// AES-encrypted, and compressed payload bytes outside the region can no
 /// longer produce a false verdict.
@@ -1018,7 +1018,7 @@ pub fn classify_7z_encryption(data: &[u8]) -> SevenZEncryption {
     if end > data.len() {
         return SevenZEncryption::Indeterminate;
     }
-    // An empty archive declares no next header — nothing to encrypt.
+    // An empty archive declares no next header, nothing to encrypt.
     if next_size == 0 {
         return SevenZEncryption::NotEncrypted;
     }
@@ -1262,7 +1262,7 @@ mod tests {
     #[test]
     fn test_rar4_plain_archive_not_flagged() {
         // Fail-first: the old check `data[9] & 0x04` tested HEAD_TYPE
-        // (0x73, which always has bit 2 set) — EVERY RAR4 was "encrypted".
+        // (0x73, which always has bit 2 set), EVERY RAR4 was "encrypted".
         assert!(
             !is_rar_encrypted(&make_rar4(0x0000, None)),
             "plain RAR4 must not be flagged"
@@ -1785,7 +1785,7 @@ mod tests {
         zip.extend_from_slice(&[0u8; 60]);
         let inspection = inspect_file(&zip, Some("secret.zip"));
         // Either the encrypted finding is present, or the file is too short
-        // to parse — never a panic, and never a false "clean" claim.
+        // to parse, never a panic, and never a false "clean" claim.
         let _ = inspection;
 
         // Non-archive types are Unknown, never a false "encrypted" claim.
@@ -1863,7 +1863,7 @@ mod tests {
     #[test]
     fn sevenz_aes_marker_outside_declared_header_is_not_flagged() {
         // Fail-first: the old whole-file windows(4) scan flagged ANY
-        // occurrence of the AES codec bytes — including inside compressed
+        // occurrence of the AES codec bytes, including inside compressed
         // payload bytes that are NOT part of the declared header region.
         // Four pseudo-random bytes occur by chance, so clean archives were
         // quarantined as "encrypted".
@@ -1893,7 +1893,7 @@ mod tests {
     #[test]
     fn sevenz_malformed_header_is_indeterminate_with_risk_floor() {
         // Malformed/truncated headers must yield an explicit Indeterminate
-        // verdict and an honest risk floor — never a silent "not encrypted".
+        // verdict and an honest risk floor, never a silent "not encrypted".
         assert_eq!(
             classify_7z_encryption(&[0x37, 0x7A, 0xBC, 0xAF]),
             SevenZEncryption::Indeterminate

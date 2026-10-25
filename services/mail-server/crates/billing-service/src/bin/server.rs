@@ -49,14 +49,14 @@ struct Cli {
     /// Run the canonical end-of-period overage + PAYG sweep ONCE against the
     /// live database, print the report and exit (one-shot ops entrypoint;
     /// the scheduled sweep's first tick is the next UTC midnight, so an
-    /// operator otherwise cannot close a period on demand — E-SWEEP-TRIGGER,
+    /// operator otherwise cannot close a period on demand, E-SWEEP-TRIGGER,
     /// live dogfood 2026-10-08).
     #[arg(long, env = "BILLING_SWEEP_OVERAGE_ONLY", default_value_t = false)]
     sweep_overage_only: bool,
 
     /// Run the contract product-line sweep (Platform + Mailboxes monthly
     /// invoices) ONCE against the live database, print the report and exit
-    /// — the SAME function the nightly loop calls (one code path, one
+    ///, the SAME function the nightly loop calls (one code path, one
     /// behavior; idempotent per tenant/line/month).
     #[arg(
         long,
@@ -66,14 +66,14 @@ struct Cli {
     sweep_product_lines_only: bool,
 
     /// Run the US sales-tax economic-nexus sweep ONCE against the live
-    /// database, print the report and exit — the SAME function the nightly
+    /// database, print the report and exit, the SAME function the nightly
     /// loop calls (one code path). Tracking and alerting only: it never
     /// registers a state and never charges tax.
     #[arg(long, env = "BILLING_SWEEP_US_TAX_NEXUS_ONLY", default_value_t = false)]
     sweep_us_tax_nexus_only: bool,
 
     /// Apply every period-end cancellation whose period has ended ONCE,
-    /// print the count and exit — the SAME function the daily loop calls.
+    /// print the count and exit, the SAME function the daily loop calls.
     /// The loop's first tick is 90 minutes after boot, so without this an
     /// operator cannot make a cancellation effective on demand.
     #[arg(
@@ -84,7 +84,7 @@ struct Cli {
     end_canceled_subscriptions_only: bool,
 
     /// Fetch every provider subscription this deployment holds and reconcile
-    /// the local entitlement state ONCE, then exit — the SAME function the
+    /// the local entitlement state ONCE, then exit, the SAME function the
     /// hourly loop calls. A subscription that is no longer `active` at Mollie
     /// (canceled, completed, suspended, pending) stops granting the plan; a
     /// subscription whose provider amount drifted from the catalog raises a
@@ -101,12 +101,12 @@ struct Cli {
     /// (`data/us_sales_tax.json`, or the `US_TAX_DATA_FILE` override),
     /// print the per-state freshness report and exit. Validation errors (and
     /// per-state nexus-declaration data errors) exit non-zero; no database is
-    /// touched — this is the check to run after editing the file.
+    /// touched, this is the check to run after editing the file.
     #[arg(long, env = "BILLING_CHECK_US_TAX_DATA_ONLY", default_value_t = false)]
     check_us_tax_data_only: bool,
 
     /// Generate the filing-ready per-state US sales-tax report for one
-    /// calendar month (`YYYY-MM`), print it and exit — the artifact the
+    /// calendar month (`YYYY-MM`), print it and exit, the artifact the
     /// accountant consumes. The same generator the admin read
     /// (`GET /v1/admin/billing/us-tax/report?period=…`) serves.
     #[arg(long, env = "BILLING_US_TAX_REPORT")]
@@ -150,7 +150,7 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!(listen = %cli.listen, "starting billing-service");
 
     // US sales-tax data-file check (plan WP C2): a pure, DB-free ops
-    // entrypoint — the operator runs it after editing
+    // entrypoint, the operator runs it after editing
     // `data/us_sales_tax.json` (or a `US_TAX_DATA_FILE` override), before
     // deploying. Deliberately BEFORE any database or Redis connection so it
     // works anywhere the binary runs.
@@ -184,7 +184,7 @@ async fn main() -> anyhow::Result<()> {
         .connect(&cli.database_url)
         .await?;
 
-    // F1 (audit): bootstrap reconciliation — the `plans` table is converged
+    // F1 (audit): bootstrap reconciliation, the `plans` table is converged
     // to the canonical `platform-catalog` catalog on every boot (insert
     // missing tiers, repair drifted prices/limits/features, deactivate
     // rows that are not catalog plans). Idempotent; mollie price ids
@@ -208,7 +208,7 @@ async fn main() -> anyhow::Result<()> {
     // E-SWEEP-TRIGGER: the on-demand overage sweep (the reconcile-plans
     // one-shot pattern). Deliberately BEFORE the Mollie webhook-secret
     // fail-fast: closing a period is an ops action that must work even when
-    // the inbound webhook transport secret is absent — the sweep itself
+    // the inbound webhook transport secret is absent, the sweep itself
     // needs only Postgres plus the Redis pool.
     if cli.sweep_overage_only {
         let redis =
@@ -249,7 +249,7 @@ async fn main() -> anyhow::Result<()> {
 
     // The same one-shot ops pattern for the contract product lines
     // (Platform + Mailboxes): deliberately BEFORE the Mollie fail-fast for
-    // the same reason — closing a contract month needs only Postgres plus
+    // the same reason, closing a contract month needs only Postgres plus
     // the Redis pool. Runs `maintenance::sweep_product_lines_once`, the
     // exact function the nightly loop calls.
     if cli.sweep_product_lines_only {
@@ -361,7 +361,7 @@ async fn main() -> anyhow::Result<()> {
 
     // The same one-shot ops pattern for provider subscription state: fetch
     // every `sub_…` row at Mollie and converge the local entitlement state.
-    // Deliberately BEFORE the webhook fail-fast — reconciliation only needs
+    // Deliberately BEFORE the webhook fail-fast, reconciliation only needs
     // the API key the client reads from the environment, and an unconfigured
     // client reconciles nothing (0) instead of blocking ops.
     if cli.reconcile_subscriptions_only {
@@ -426,11 +426,11 @@ async fn main() -> anyhow::Result<()> {
 
         if !table_exists {
             tracing::warn!(
-                "dunning_config table does not exist — dunning features will use \
+                "dunning_config table does not exist, dunning features will use \
                  hardcoded defaults. Run the database migrations to create this table."
             );
         } else {
-            tracing::info!("dunning_config table found — dunning schema is up-to-date");
+            tracing::info!("dunning_config table found, dunning schema is up-to-date");
         }
     }
 
@@ -461,7 +461,7 @@ async fn main() -> anyhow::Result<()> {
     let shutdown = async {
         let ctrl_c = async {
             match tokio::signal::ctrl_c().await {
-                Ok(()) => tracing::info!("received Ctrl+C — shutting down"),
+                Ok(()) => tracing::info!("received Ctrl+C, shutting down"),
                 Err(e) => {
                     tracing::error!("failed to install Ctrl+C handler: {e}");
                     std::future::pending::<()>().await;
@@ -473,7 +473,7 @@ async fn main() -> anyhow::Result<()> {
             match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
                 Ok(mut terminate) => tokio::select! {
                     _ = ctrl_c => {}
-                    _ = terminate.recv() => tracing::info!("received SIGTERM — shutting down"),
+                    _ = terminate.recv() => tracing::info!("received SIGTERM, shutting down"),
                 },
                 Err(e) => {
                     tracing::error!(

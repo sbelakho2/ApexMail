@@ -2,7 +2,7 @@
 
 **Last Updated:** 2026-10-24
 
-<!-- GENERATED FILE — do not edit by hand: `python3 tools/generate_subprocessors.py` renders this mirror from the
+<!-- GENERATED FILE, do not edit by hand: `python3 tools/generate_subprocessors.py` renders this mirror from the
      same deployment-derived register as the public page. The public register at
      https://apexmail.ee/subprocessors/ is the authoritative version. -->
 
@@ -18,7 +18,7 @@ A subprocessor is a third-party data processor engaged by ApexMail to process pe
 |---|---|---|---|---|
 | **Hetzner Online GmbH** | Cloud hosting (compute, storage, networking) | Core service data in the default shared deployment | Finland (storage: Finland) | Intra-EEA processing; GDPR Chapter V transfer rules do not apply |
 | **Amazon Web Services, Inc.** | Email-delivery transport when enabled (EMAIL_TRANSPORT_TYPE=ses) | Email content and recipient addresses in transit | Ireland (storage: Ireland) | EU Standard Contractual Clauses (AWS DPA) |
-| **Mollie B.V.** | Payment processing, subscription management, invoicing | Payment card details (tokenized — ApexMail never receives full card numbers), billing address, transaction metadata | Netherlands (storage: Netherlands) | Contracting entity is EU-established (Mollie B.V., Amsterdam); card scheme networks process globally under the Mollie Data Processing Agreement; PCI DSS Level 1 certified |
+| **Mollie B.V.** | Payment processing, subscription management, invoicing | Payment card details (tokenized, ApexMail never receives full card numbers), billing address, transaction metadata | Netherlands (storage: Netherlands) | Contracting entity is EU-established (Mollie B.V., Amsterdam); card scheme networks process globally under the Mollie Data Processing Agreement; PCI DSS Level 1 certified |
 
 ### Payment processor
 

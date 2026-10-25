@@ -8,7 +8,7 @@ use rand::Rng;
 use std::net::{IpAddr, Ipv4Addr};
 
 // ===========================================================================
-// WAF Engine — No-panic + invariant tests
+// WAF Engine, No-panic + invariant tests
 // ===========================================================================
 
 mod waf_fuzz {
@@ -161,7 +161,7 @@ mod waf_fuzz {
 }
 
 // ===========================================================================
-// IDS Engine — No-panic on arbitrary payloads
+// IDS Engine, No-panic on arbitrary payloads
 // ===========================================================================
 
 mod ids_fuzz {
@@ -220,7 +220,7 @@ mod ids_fuzz {
         let engine = make_engine();
         // 1MB payload should complete without hanging or panicking.
         // A `#[timeout]` attribute is intentionally omitted because the IDS
-        // engine performs bounded linear scans — a 1MB payload is expected to
+        // engine performs bounded linear scans, a 1MB payload is expected to
         // complete well within the test runner's default timeout (60s).
         let large = vec![0x41u8; 1_024 * 1_024];
         let _ = engine.inspect(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 80, "tcp", &large);
@@ -241,7 +241,7 @@ mod ids_fuzz {
 }
 
 // ===========================================================================
-// Spam Filter — No-panic + scoring invariants
+// Spam Filter, No-panic + scoring invariants
 // ===========================================================================
 
 mod spam_fuzz {
@@ -311,7 +311,7 @@ mod spam_fuzz {
             let text = random_ascii(text_len);
             if rng.random_bool(0.5) {
                 // Training may legitimately reject inputs (e.g. empty/too-short
-                // text) — we only assert that no panic occurs.
+                // text), we only assert that no panic occurs.
                 let _ = engine.train_spam(&text);
             } else {
                 let _ = engine.train_ham(&text);
@@ -328,7 +328,7 @@ mod spam_fuzz {
 }
 
 // ===========================================================================
-// DLP Engine — No-panic + PII detection invariants
+// DLP Engine, No-panic + PII detection invariants
 // ===========================================================================
 
 mod dlp_fuzz {
@@ -399,7 +399,7 @@ mod dlp_fuzz {
 }
 
 // ===========================================================================
-// Sandbox Engine — No-panic on arbitrary bytes
+// Sandbox Engine, No-panic on arbitrary bytes
 // ===========================================================================
 
 mod sandbox_fuzz {
@@ -439,7 +439,7 @@ mod sandbox_fuzz {
             let data = random_bytes(500);
             let filename = format!("test.{}", ext);
             let result = engine.analyze(&data, Some(&filename));
-            // Should not panic — may reject or quarantine
+            // Should not panic, may reject or quarantine
             let _ = result;
         }
     }
@@ -493,7 +493,7 @@ mod sandbox_fuzz {
 }
 
 // ===========================================================================
-// ATO Protection — No-panic + risk score invariants
+// ATO Protection, No-panic + risk score invariants
 // ===========================================================================
 
 mod ato_fuzz {
@@ -576,7 +576,7 @@ mod ato_fuzz {
 }
 
 // ===========================================================================
-// Threat Intel — No-panic on garbage IPs and domains
+// Threat Intel, No-panic on garbage IPs and domains
 // ===========================================================================
 
 mod threat_intel_fuzz {
@@ -780,7 +780,7 @@ mod stix_fuzz {
     }
 
     /// Oracle: a VALID bundle serializes, parses back, and `process_bundle`
-    /// surfaces the embedded indicator — a deserializer that always failed
+    /// surfaces the embedded indicator, a deserializer that always failed
     /// (or a processor that always returned empty) fails here.
     #[test]
     fn fuzz_stix_bundle_round_trip() {
@@ -828,7 +828,7 @@ mod stix_fuzz {
                 processed[0].indicator
             );
 
-            // Trailing whitespace is legal JSON — the parser must not
+            // Trailing whitespace is legal JSON, the parser must not
             // regress on it.
             let padded = format!("{json}  ");
             let reparsed: StixBundle =
@@ -914,6 +914,6 @@ mod combined_fuzz {
 // ===========================================================================
 // random_bytes is already exported as `pub fn random_bytes(len: usize)`
 // from fuzz_tests::lib (see src/lib.rs:62).  The private copy below was a
-// duplicate — keeping it would create confusion.  All callers should use the
+// duplicate, keeping it would create confusion.  All callers should use the
 // shared `fuzz_tests::random_bytes()` instead.  (O-28.3)
 // ===========================================================================

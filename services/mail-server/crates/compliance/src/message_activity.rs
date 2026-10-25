@@ -386,7 +386,7 @@ impl MessageTimeline {
                     .map(|d| d.classification);
                 match class {
                     Some(c) => format!(
-                        "Bounced permanently ({}) — {}. {}",
+                        "Bounced permanently ({}), {}. {}",
                         c,
                         c.description(),
                         c.suggested_action()

@@ -16,7 +16,7 @@ use ipnetwork::IpNetwork;
 
 const CP_SESSION_COOKIE_NAME: &str = "apexmail_cp_session";
 
-/// The exact denial message the MFA gate produces — both when the signed
+/// The exact denial message the MFA gate produces, both when the signed
 /// claims say MFA is off and when the live DB recheck finds it revoked.
 /// A constant (instead of two literals) so [`is_mfa_required_error`] can
 /// recognise the denial for the browser-facing HTML branch in
@@ -210,14 +210,14 @@ pub(crate) enum CpAuthOutcome {
     /// control-plane key and system-tenant API keys authenticate as
     /// NON-user identities (no user_id). They are deliberately issued
     /// operator credentials for automation, not browser sessions, so the
-    /// CP-session regime — which exists to keep human operator sessions
-    /// MFA-backed and time-bounded — does not apply.
+    /// CP-session regime, which exists to keep human operator sessions
+    /// MFA-backed and time-bounded, does not apply.
     MachineCredential,
     /// A verified human operator CP session.
     ///
     /// Boxed: the verification material (user, refreshed token, refreshed
     /// claims) dwarfs the unit variant, and this enum is returned on the
-    /// request path — clippy's `large_enum_variant` gate is the same
+    /// request path, clippy's `large_enum_variant` gate is the same
     /// observation. The box is an allocation the request path already pays
     /// for, not a semantic change.
     Verified(Box<CpSessionVerification>),
@@ -232,7 +232,7 @@ pub(crate) struct CpSessionVerification {
     pub refreshed_claims: CpSessionClaims,
 }
 
-/// Verify a CP session exactly the way the admin API gate does — one shared
+/// Verify a CP session exactly the way the admin API gate does, one shared
 /// implementation so the browser GET render path can never drift weaker than
 /// the mutation path.
 ///
@@ -240,7 +240,7 @@ pub(crate) struct CpSessionVerification {
 /// ([`AuthUser`]): the signed CP claims must name that same user and tenant,
 /// so a CP cookie cannot be paired with somebody else's session. The live
 /// row in `users` is then re-read on every call and must still be active
-/// with an admin/owner role and MFA enabled — role demotions, MFA removal,
+/// with an admin/owner role and MFA enabled, role demotions, MFA removal,
 /// and deactivation take effect immediately instead of at session expiry.
 /// The refreshed claims carry the LIVE role/MFA values.
 pub(crate) async fn verify_cp_session(
@@ -289,7 +289,7 @@ pub(crate) async fn verify_cp_session(
     // ── Machine credentials pass without a CP session ───────
     // Slug-aware (audit F1 parity): a DB-backed system-tenant API key
     // authenticates with its real tenant id (`system_internal_tenant01`),
-    // not the `system` sentinel — the same literal comparison that
+    // not the `system` sentinel, the same literal comparison that
     // `require_system_tenant` already fixed for operators. Membership
     // resolves through the SAME slug-aware check the operator gate uses;
     // a lookup failure fails CLOSED.
@@ -433,7 +433,7 @@ pub(crate) async fn verify_cp_session(
         )
         .await;
         return Err(ApiError::Unauthorized(
-            "CP session idle timeout — please log in again".into(),
+            "CP session idle timeout, please log in again".into(),
         ));
     }
 
@@ -602,8 +602,8 @@ pub async fn require_cp_auth(
 
             let cookie = refreshed_cp_cookie(&state, &verification);
             // APPEND, never insert: `insert` replaces every existing
-            // Set-Cookie value on the response — including the signed flash
-            // cookie every CP form handler sets — so "Tenant suspended /
+            // Set-Cookie value on the response, including the signed flash
+            // cookie every CP form handler sets, so "Tenant suspended /
             // Operator invited" feedback never reached the browser.
             response
                 .headers_mut()
@@ -613,7 +613,7 @@ pub async fn require_cp_auth(
         }
         // F1b: on the browser form routes (/web/admin/*) the MFA denial
         // must reach the operator as an HTML interstitial that NAMES the
-        // fix (/cp/security) — never a raw JSON dump. The API surface
+        // fix (/cp/security), never a raw JSON dump. The API surface
         // (/v1/admin/*) keeps the JSON 403 contract unchanged.
         Err(error) if is_mfa_required_error(&error) && is_browser_facing_path(&path) => {
             Ok(mfa_required_browser_response())
@@ -768,7 +768,7 @@ mod tests {
     }
 
     /// A token with no signature separator is rejected before any crypto
-    /// or base64 work — there is nothing to verify.
+    /// or base64 work, there is nothing to verify.
     #[test]
     fn token_without_a_separator_is_rejected_before_crypto() {
         let err = verify_cp_session_token_for_tests("no-dot-token", &test_secret()).unwrap_err();
@@ -789,7 +789,7 @@ mod tests {
 
         /// AppState over a canonical fixture pool with the CP knobs the
         /// individual test needs. Returns None (soft skip) without
-        /// TEST_DATABASE_URL or an reachable TEST_REDIS_URL — the gate's
+        /// TEST_DATABASE_URL or an reachable TEST_REDIS_URL, the gate's
         /// per-request user recheck and audit insert need both.
         async fn gate_state(
             test_name: &str,
@@ -807,7 +807,7 @@ mod tests {
                 .await;
             if ping.is_err() {
                 eprintln!("skipping {test_name}: TEST_REDIS_URL unreachable");
-                // coverage: justified — soft-skip guard: reachable only
+                // coverage: justified, soft-skip guard: reachable only
                 // when TEST_REDIS_URL is unreachable, which never happens
                 // in the coverage harness.
                 return None;
@@ -957,7 +957,7 @@ mod tests {
             let Some((state, db)) =
                 gate_state("cp_ip_outside_allowlist", vec!["10.0.0.0/8".to_string()]).await
             else {
-                // coverage: justified — soft-skip guard: reachable only
+                // coverage: justified, soft-skip guard: reachable only
                 // without TEST_DATABASE_URL/TEST_REDIS_URL, which the
                 // coverage harness always provides.
                 return;
@@ -993,14 +993,14 @@ mod tests {
         }
 
         /// Fix 2: a configured allowlist must FAIL CLOSED when the peer
-        /// address cannot be established — a missing ConnectInfo is a deny,
+        /// address cannot be established, a missing ConnectInfo is a deny,
         /// never an implicit allowlist pass.
         #[tokio::test]
         async fn missing_connect_info_with_allowlist_is_denied() {
             let Some((state, db)) =
                 gate_state("cp_ip_missing_connect_info", vec!["10.0.0.0/8".to_string()]).await
             else {
-                // coverage: justified — soft-skip guard: reachable only
+                // coverage: justified, soft-skip guard: reachable only
                 // without TEST_DATABASE_URL/TEST_REDIS_URL, which the
                 // coverage harness always provides.
                 return;
@@ -1194,7 +1194,7 @@ mod tests {
         }
 
         /// Fix 3: CP claims are bound to the ordinary authenticated
-        /// identity — a valid CP cookie for user A cannot authorize a
+        /// identity, a valid CP cookie for user A cannot authorize a
         /// request authenticated as user B.
         #[tokio::test]
         async fn cp_session_for_a_different_user_is_rejected() {
@@ -1221,7 +1221,7 @@ mod tests {
 
         /// F1b: an operator whose session is valid but MFA-less driving a
         /// BROWSER form post (/web/admin/*) gets a 403 HTML interstitial
-        /// that names the fix (/cp/security) — never a raw JSON dump the
+        /// that names the fix (/cp/security), never a raw JSON dump the
         /// form cannot render.
         #[tokio::test]
         async fn mfa_required_browser_post_gets_html_with_guidance() {
@@ -1306,11 +1306,11 @@ mod tests {
 
         /// The activity refresher refuses BOTH hard boundaries: a session
         /// past its absolute expiry, and a session idle beyond the idle
-        /// window — even when the other clock is fresh.
+        /// window, even when the other clock is fresh.
         #[tokio::test]
         async fn refresh_refuses_absolute_expiry_and_idle_stale_sessions() {
             let Some((state, _db)) = gate_state("cp_refresh_refusals", vec![]).await else {
-                // coverage: justified — soft-skip guard: only reachable
+                // coverage: justified, soft-skip guard: only reachable
                 // without TEST_DATABASE_URL/TEST_REDIS_URL, which the
                 // coverage harness always provides.
                 return;
@@ -1360,7 +1360,7 @@ mod tests {
         #[tokio::test]
         async fn garbage_cp_session_token_is_an_audited_401() {
             let Some((state, db)) = gate_state("cp_garbage_token", vec![]).await else {
-                // coverage: justified — soft-skip guard: only reachable
+                // coverage: justified, soft-skip guard: only reachable
                 // without TEST_DATABASE_URL/TEST_REDIS_URL, which the
                 // coverage harness always provides.
                 return;
@@ -1404,7 +1404,7 @@ mod tests {
         #[tokio::test]
         async fn non_admin_role_claims_are_refused_at_the_gate() {
             let Some((state, db)) = gate_state("cp_viewer_role", vec![]).await else {
-                // coverage: justified — soft-skip guard: only reachable
+                // coverage: justified, soft-skip guard: only reachable
                 // without TEST_DATABASE_URL/TEST_REDIS_URL, which the
                 // coverage harness always provides.
                 return;
@@ -1431,7 +1431,7 @@ mod tests {
         #[tokio::test]
         async fn expired_claims_are_refused_before_the_database() {
             let Some((state, db)) = gate_state("cp_expired_claims", vec![]).await else {
-                // coverage: justified — soft-skip guard: only reachable
+                // coverage: justified, soft-skip guard: only reachable
                 // without TEST_DATABASE_URL/TEST_REDIS_URL, which the
                 // coverage harness always provides.
                 return;
@@ -1470,7 +1470,7 @@ mod tests {
         #[tokio::test]
         async fn malformed_subject_fails_the_live_recheck_loud() {
             let Some((state, _db)) = gate_state("cp_recheck_cast_error", vec![]).await else {
-                // coverage: justified — soft-skip guard: only reachable
+                // coverage: justified, soft-skip guard: only reachable
                 // without TEST_DATABASE_URL/TEST_REDIS_URL, which the
                 // coverage harness always provides.
                 return;
@@ -1500,7 +1500,7 @@ mod tests {
         #[tokio::test]
         async fn deleted_operator_is_refused_on_recheck() {
             let Some((state, db)) = gate_state("cp_user_missing", vec![]).await else {
-                // coverage: justified — soft-skip guard: only reachable
+                // coverage: justified, soft-skip guard: only reachable
                 // without TEST_DATABASE_URL/TEST_REDIS_URL, which the
                 // coverage harness always provides.
                 return;
@@ -1541,12 +1541,12 @@ mod tests {
         }
 
         /// Without the ordinary authenticated identity (require_auth runs
-        /// before this gate in production) the CP gate fails CLOSED — bare
+        /// before this gate in production) the CP gate fails CLOSED, bare
         /// CP claims are never trusted on their own.
         #[tokio::test]
         async fn missing_bearer_identity_fails_closed() {
             let Some((state, db)) = gate_state("cp_missing_bearer", vec![]).await else {
-                // coverage: justified — soft-skip guard: only reachable
+                // coverage: justified, soft-skip guard: only reachable
                 // without TEST_DATABASE_URL/TEST_REDIS_URL, which the
                 // coverage harness always provides.
                 return;
@@ -1580,11 +1580,11 @@ mod tests {
         }
 
         /// The request extractor for `CpAuthUser` yields the middleware's
-        /// identity when present — and a hard 401 when the gate never ran.
+        /// identity when present, and a hard 401 when the gate never ran.
         #[tokio::test]
         async fn cp_user_extractor_reads_the_gate_extension() {
             let Some((state, _db)) = gate_state("cp_user_extractor", vec![]).await else {
-                // coverage: justified — soft-skip guard: only reachable
+                // coverage: justified, soft-skip guard: only reachable
                 // without TEST_DATABASE_URL/TEST_REDIS_URL, which the
                 // coverage harness always provides.
                 return;

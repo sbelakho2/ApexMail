@@ -8,25 +8,25 @@
 //!
 //! Covered:
 //!
-//! 1. **No runtime DDL** — source scan of `crates/compliance/src` (no
+//! 1. **No runtime DDL**, source scan of `crates/compliance/src` (no
 //!    `CREATE TABLE`/`CREATE INDEX`/`ALTER TABLE`/…), plus the live proof:
 //!    `compliance_boots_and_processes_with_dml_only_role` provisions a
 //!    role with no CREATE/ALTER/DROP privileges anywhere and boots the full
 //!    service through the same `compliance::bootstrap::build_state` the
 //!    binary uses, then processes a DSR, a breach (through the receipt gate)
 //!    and a retention sweep.
-//! 2. **Breach state machine** — a breach cannot reach
+//! 2. **Breach state machine**, a breach cannot reach
 //!    `authority_acknowledged` without a receipt, and no authority
 //!    submission happens without the generated package + a human task.
-//! 3. **DSAR statutory clock** — due date is one calendar month; an
+//! 3. **DSAR statutory clock**, due date is one calendar month; an
 //!    extension requires a reason AND a notification timestamp (DB CHECK).
-//! 4. **Retention/erasure interplay** — an erasure does NOT delete a
+//! 4. **Retention/erasure interplay**, an erasure does NOT delete a
 //!    seven-year invoice record, redacts it, archives it as
 //!    `legally_restricted` and discloses what/why/until when in the DSAR
 //!    result.
-//! 5. **Monotonic archive** — `legally_restricted → statutory_expired →
+//! 5. **Monotonic archive**, `legally_restricted → statutory_expired →
 //!    deleted` only, enforced in code AND by the DB trigger.
-//! 6. **Governance registry** — seeded ROPA records cover the platform's
+//! 6. **Governance registry**, seeded ROPA records cover the platform's
 //!    stores; lawful bases / DPIA outcomes / transfer mechanisms are left for
 //!    legal input instead of being invented.
 
@@ -181,7 +181,7 @@ fn no_runtime_schema_ddl_in_compliance_source() {
                 let is_clickhouse_data_mutation =
                     line.contains("events DELETE WHERE") && file.ends_with("gdpr_automation.rs");
                 // The admin table-hide maintenance feature renames a table
-                // to `<name>_gone` and back (admin_routes.rs) — an explicit,
+                // to `<name>_gone` and back (admin_routes.rs), an explicit,
                 // operator-invoked operations tool, not hidden schema
                 // evolution: both directions must appear together or the
                 // gate flags the orphan.
@@ -339,7 +339,7 @@ async fn provision_dml_role(db_name: &str) -> DmlRole {
 
 /// The finding's central demand, live: the complete compliance service boots
 /// against a role without CREATE/ALTER/DROP privileges and processes real
-/// work — a DSR access export, a breach through the full state machine, and a
+/// work, a DSR access export, a breach through the full state machine, and a
 /// retention sweep.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn compliance_boots_and_processes_with_dml_only_role() {
@@ -401,7 +401,7 @@ async fn compliance_boots_and_processes_with_dml_only_role() {
     // The router builds against the same state (no DDL in route setup).
     let _router = compliance::routes::create_router(state.clone());
 
-    // Real work #1 — a DSR access request end to end.
+    // Real work #1, a DSR access request end to end.
     let tenant = format!("t{}", &Uuid::new_v4().simple().to_string()[..20]);
     let subject = format!("dml-{}@example.com", Uuid::new_v4().simple());
     let (request, _token) = state
@@ -430,7 +430,7 @@ async fn compliance_boots_and_processes_with_dml_only_role() {
             .unwrap();
     assert_eq!(export_rows, 1, "the access export row was written");
 
-    // Real work #2 — a breach through the whole state machine.
+    // Real work #2, a breach through the whole state machine.
     let report = state
         .breach
         .report_breach(
@@ -478,7 +478,7 @@ async fn compliance_boots_and_processes_with_dml_only_role() {
         .expect("record receipt");
     assert_eq!(acknowledged.status, "authority_acknowledged");
 
-    // Real work #3 — the retention sweep writes its report.
+    // Real work #3, the retention sweep writes its report.
     let sweep = state
         .retention_sweeper
         .run_sweep(&state.audit_logger)
@@ -531,7 +531,7 @@ async fn cleanup_dml_role(db_name: &str, role: &DmlRole) {
 
 // ── 2. Breach state machine + mandatory receipt ────────────────────────────
 
-/// A breach cannot reach `authority_acknowledged` without a receipt — not
+/// A breach cannot reach `authority_acknowledged` without a receipt, not
 /// through the API (empty receipt refused), and not through direct SQL (the
 /// migration-213 CHECK constraint refuses). The authority submission also
 /// cannot happen without the generated package + completed human task.
@@ -1063,7 +1063,7 @@ async fn archive_transitions_are_monotonic() {
         source_table: "invoices".into(),
         source_record_id: format!("inv{}", &Uuid::new_v4().simple().to_string()[..22]),
         retention_class_id: "RC-STAT-ACCT-7Y".into(),
-        reason: "Statutory accounting retention — archive lifecycle test".into(),
+        reason: "Statutory accounting retention, archive lifecycle test".into(),
         statutory_expiry_at: chrono::Utc::now() + chrono::Duration::days(2555),
         disclosure: serde_json::json!({"why": "test"}),
     };
@@ -1124,7 +1124,7 @@ async fn archive_transitions_are_monotonic() {
 // ── 6. Governance registry ─────────────────────────────────────────────────
 
 /// The registry seeds a ROPA record for every store the platform owns, and
-/// does NOT invent lawful bases, DPIA outcomes or transfer mechanisms — those
+/// does NOT invent lawful bases, DPIA outcomes or transfer mechanisms, those
 /// stay explicitly `requires_legal_input` / `legal_input_required` for Legal.
 #[tokio::test]
 async fn governance_registry_seeds_stores_and_leaves_lawful_bases_to_legal() {

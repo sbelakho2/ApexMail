@@ -1,4 +1,4 @@
-//! EU jurisdiction-policy engine — the legal hard gate.
+//! EU jurisdiction-policy engine, the legal hard gate.
 //!
 //! `sales_jurisdiction_policies` is a versioned, counsel-approved lookup keyed
 //! by `(jurisdiction, channel, contact_type)`. This module resolves the
@@ -7,12 +7,12 @@
 //! engine consumes. It never decides law by itself: it applies an explicit,
 //! auditable row, and **fails closed** whenever no authoritative row exists.
 //!
-//! Fail-closed contract (release gate — "Legal-policy denial is impossible to
+//! Fail-closed contract (release gate, "Legal-policy denial is impossible to
 //! bypass through another sales route"):
 //!
 //! * an unknown / unlisted / low-confidence jurisdiction resolves to the
 //!   `UNKNOWN` policy key, and when no `UNKNOWN` row is authoritative the
-//!   verdict is `ApprovalRequired` — never `Allowed`;
+//!   verdict is `ApprovalRequired`, never `Allowed`;
 //! * a row that exists but is unapproved (`approved_by`/`approved_at` NULL) or
 //!   not currently valid (`valid_from` in the future / `valid_until` past)
 //!   is **not** authoritative and the lookup falls through to the unknown
@@ -63,7 +63,7 @@ const EU_EEA_COUNTRIES: &[&str] = &[
 /// contact type or a job title are not evidence of legal personality; the
 /// audit that produced this input explicitly forbids that inference. A caller
 /// that has no evidence of the recipient's subscriber type MUST pass
-/// [`SubscriberType::Unknown`] — the fail-closed default — and the engine will
+/// [`SubscriberType::Unknown`], the fail-closed default, and the engine will
 /// never return `Allowed` for it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -110,7 +110,7 @@ pub struct ContactPolicyInput<'a> {
     /// relationship with the sender.
     pub existing_customer: bool,
     /// The marketed product is similar to what the existing customer already
-    /// bought — the soft-opt-in precondition for the §103¹(2) exception.
+    /// bought, the soft-opt-in precondition for the §103¹(2) exception.
     pub similar_product_basis: bool,
     /// When the collector offered a clear, easy, free opt-out at the point the
     /// details were collected. `None` fails the soft-opt-in exception closed.
@@ -156,7 +156,7 @@ fn merge_disclosure(policy: Option<&serde_json::Value>) -> serde_json::Value {
 }
 
 // ---------------------------------------------------------------------------
-// Consent evidence — loaded from `sales_consent_evidence`, never taken on
+// Consent evidence, loaded from `sales_consent_evidence`, never taken on
 // trust from a boolean.
 // ---------------------------------------------------------------------------
 
@@ -240,7 +240,7 @@ fn evidence_row_is_usable(row: &ConsentEvidenceRow, now: DateTime<Utc>) -> bool 
 /// * rows that fail [`evidence_row_is_usable`] are ignored, so empty text,
 ///   `consent_version = 0`, a future `collected_at`, a `withdrawn_at` before
 ///   `collected_at`, or a missing source all fall through to
-///   [`ConsentState::None`] — fail closed, never "assume granted";
+///   [`ConsentState::None`], fail closed, never "assume granted";
 /// * among usable rows the newest by `collected_at` wins; on the exact same
 ///   timestamp a withdrawal wins over a grant, so a tie fails closed.
 pub fn current_consent_state(
@@ -477,17 +477,17 @@ fn build_verdict(
 ///
 /// | # | Condition | Verdict |
 /// |---|-----------|---------|
-/// | 1 | `consent_status` is suppressed/withdrawn/revoked/denied (including a withdrawn `sales_consent_evidence` row) | `Prohibited` — withdrawal is absolute for natural AND legal persons |
+/// | 1 | `consent_status` is suppressed/withdrawn/revoked/denied (including a withdrawn `sales_consent_evidence` row) | `Prohibited`, withdrawal is absolute for natural AND legal persons |
 /// | 2 | no authoritative, approved, currently-valid policy row | `ApprovalRequired` (fail closed) |
 /// | 3 | policy `prohibited` or basis `not_permitted` | `Prohibited` |
 /// | 4 | policy `approval_required`, basis `soft_opt_in`, and the §103¹(2) conditions below hold | `Allowed` (the one explicit lift) |
 /// | 4b | any other `approval_required` row | `ApprovalRequired` |
 /// | 5 | `subscriber_type == Unknown` in an EU/EEA jurisdiction | `ApprovalRequired`, never `Allowed` (for every basis below, including the soft-opt-in lift) |
-/// | 6 | natural person, consent basis, ACTIVE `consent_evidence_id` | `Allowed` — prior consent is the only basis; the opt-out disclosure must still be present |
-/// | 6b | natural person, consent basis, no active evidence, EU/EEA jurisdiction | `Prohibited` — §103¹ requires prior consent for natural persons |
+/// | 6 | natural person, consent basis, ACTIVE `consent_evidence_id` | `Allowed`, prior consent is the only basis; the opt-out disclosure must still be present |
+/// | 6b | natural person, consent basis, no active evidence, EU/EEA jurisdiction | `Prohibited`, §103¹ requires prior consent for natural persons |
 /// | 6c | natural person, consent basis, no active evidence, other jurisdiction | `ApprovalRequired` |
-/// | 7 | legal person, legitimate-interest basis, `legitimate_interest_assessed`, `b2b_professional`, disclosure guarantees opt-out | `Allowed` — legal-person direct marketing is permitted with a clear, easy, free refusal mechanism |
-/// | 7b | natural person on the legitimate-interest basis in an EU/EEA jurisdiction | `ApprovalRequired` — LI cannot substitute for prior consent |
+/// | 7 | legal person, legitimate-interest basis, `legitimate_interest_assessed`, `b2b_professional`, disclosure guarantees opt-out | `Allowed`, legal-person direct marketing is permitted with a clear, easy, free refusal mechanism |
+/// | 7b | natural person on the legitimate-interest basis in an EU/EEA jurisdiction | `ApprovalRequired`, LI cannot substitute for prior consent |
 /// | 7c | legal person, legitimate-interest basis, any of the above missing | `ApprovalRequired` |
 /// | 8 | soft opt-in (`existing_customer && similar_product_basis && collection_opt_out_offered_at.is_some()`) AND disclosure guarantees opt-out | `Allowed` |
 /// | 8b | soft opt-in conditions incomplete | `ApprovalRequired` |
@@ -501,7 +501,7 @@ fn build_verdict(
 /// rendered through the compliant footer and a verdict of `Allowed` is only
 /// returned when the policy disclosure asserts `opt_out == true`. Absent the
 /// collection-time evidence the exception fails closed to `ApprovalRequired`
-/// — the mere fact that we could put an unsubscribe link in the message today
+///, the mere fact that we could put an unsubscribe link in the message today
 /// does not cure a collection that offered no refusal.
 ///
 /// The legacy `soft_opt_in` boolean is **not** sufficient on its own any
@@ -513,7 +513,7 @@ fn build_verdict(
 ///
 /// `subscriber_type` is authoritative input, never inferred from a work email
 /// or a B2B persona (see [`SubscriberType`]). `Unknown` is the fail-closed
-/// default and rule 5 refuses to allow on it inside the EU/EEA — including for
+/// default and rule 5 refuses to allow on it inside the EU/EEA, including for
 /// the soft-opt-in lift in rule 4. Outside the EU/EEA the policy row remains
 /// the authority for how the recipient may be approached, so an unestablished
 /// classification does not by itself change the verdict there. `consent_status`
@@ -524,7 +524,7 @@ pub fn decide_with_state(
     channel_configured_by_jurisdiction: bool,
     input: &ContactPolicyInput<'_>,
 ) -> ContactPolicyVerdict {
-    // Rule 1 — withdrawal/refusal is absolute.
+    // Rule 1, withdrawal/refusal is absolute.
     if consent_is_prohibited(input.consent_status) {
         return build_verdict(
             ContactDecision::Prohibited,
@@ -534,7 +534,7 @@ pub fn decide_with_state(
         );
     }
 
-    // Rule 2 — fail closed without an authoritative, currently valid,
+    // Rule 2, fail closed without an authoritative, currently valid,
     // approved policy row.
     let Some(policy) = policy else {
         let reason = if channel_configured_by_jurisdiction {
@@ -556,7 +556,7 @@ pub fn decide_with_state(
         );
     };
 
-    // Rule 3 — explicit prohibition.
+    // Rule 3, explicit prohibition.
     if policy.decision == ContactDecision::Prohibited || policy.basis == "not_permitted" {
         return build_verdict(
             ContactDecision::Prohibited,
@@ -585,12 +585,12 @@ pub fn decide_with_state(
     let eu_jurisdiction = policy.jurisdiction.eq_ignore_ascii_case(EU_POLICY_KEY);
     let classification_known = subscriber != SubscriberType::Unknown;
 
-    // Rule 8 — the §103¹(2) existing-customer similar-product exception.
+    // Rule 8, the §103¹(2) existing-customer similar-product exception.
     let soft_opt_in_conditions_met = input.existing_customer
         && input.similar_product_basis
         && input.collection_opt_out_offered_at.is_some();
 
-    // Rule 5 — inside the EU/EEA an unestablished subscriber classification
+    // Rule 5, inside the EU/EEA an unestablished subscriber classification
     // is never Allowed, whatever basis the policy names (including the
     // soft-opt-in lift below). A work email address or B2B persona is not
     // evidence of legal personality; the caller must supply evidence or fail
@@ -601,12 +601,12 @@ pub fn decide_with_state(
             basis,
             "recipient subscriber type (natural person vs legal person) is not established in \
              an EU/EEA jurisdiction; a work email or B2B persona is not evidence of legal \
-             personality — fail closed",
+             personality, fail closed",
             Some(policy),
         );
     }
 
-    // Rule 4 — approval_required policy; the soft-opt-in exception is the one
+    // Rule 4, approval_required policy; the soft-opt-in exception is the one
     // explicit lift, and only with the full evidence set.
     if policy.decision == ContactDecision::ApprovalRequired {
         if basis == "soft_opt_in" && soft_opt_in_conditions_met && opt_out_guaranteed {
@@ -631,7 +631,7 @@ pub fn decide_with_state(
 
     // From here the policy says `allowed`; the basis still has to hold.
     match basis {
-        // Rule 7 — legitimate interest (legal persons only).
+        // Rule 7, legitimate interest (legal persons only).
         "legitimate_interest" => {
             if contact_type != "b2b_professional" {
                 return build_verdict(
@@ -677,7 +677,7 @@ pub fn decide_with_state(
                 Some(policy),
             )
         }
-        // Rule 6 — consent.
+        // Rule 6, consent.
         "consent" => {
             if input.consent_evidence_id.is_none() {
                 return match subscriber {
@@ -715,7 +715,7 @@ pub fn decide_with_state(
                 Some(policy),
             )
         }
-        // Rule 8 — soft opt-in.
+        // Rule 8, soft opt-in.
         "soft_opt_in" => {
             if soft_opt_in_conditions_met && opt_out_guaranteed {
                 build_verdict(
@@ -741,7 +741,7 @@ pub fn decide_with_state(
             "policy basis is 'not_permitted'",
             Some(policy),
         ),
-        // Rule 9 — unknown basis value fails closed.
+        // Rule 9, unknown basis value fails closed.
         other => build_verdict(
             ContactDecision::ApprovalRequired,
             other,
@@ -807,7 +807,7 @@ pub async fn evaluate(
 
     // Highest version for the exact triple, regardless of approval/validity:
     // an unapproved or expired top version must not silently delegate to an
-    // older row — it falls through to the unknown default instead.
+    // older row, it falls through to the unknown default instead.
     let row: Option<PolicyRow> = sqlx::query_as(
         "SELECT id, jurisdiction, channel, contact_type, decision, basis, \
                 required_disclosure, version, approved_by, approved_at, \
@@ -871,7 +871,7 @@ pub async fn evaluate(
 /// is performed per distinct `(jurisdiction, channel, contact_type)` triple
 /// with two statements (highest-version rows, then the channel-configured
 /// fallback), never per contact. It reads only the CURRENT canonical policy
-/// store — never a historical decision row.
+/// store, never a historical decision row.
 ///
 /// Fail-closed semantics are preserved exactly: the highest-version row for a
 /// triple is considered even when unapproved/expired (so it cannot silently
@@ -1647,7 +1647,7 @@ mod tests {
         assert_eq!(state.evidence_id(), Some(withdrawal.id));
 
         // Evidence belonging to a DIFFERENT contact is never this contact's
-        // consent — even if it is active.
+        // consent, even if it is active.
         let foreign = evidence_row(
             Uuid::new_v4(),
             Some(other_contact),
@@ -1923,7 +1923,7 @@ mod tests {
 
     /// The batched evaluator returns exactly the same verdicts (in input
     /// order) as calling `evaluate` once per contact, across mixed
-    /// jurisdictions — including the no-policy fail-closed case and a
+    /// jurisdictions, including the no-policy fail-closed case and a
     /// duplicated jurisdiction.
     #[tokio::test]
     async fn evaluate_batch_matches_per_contact_evaluation() {

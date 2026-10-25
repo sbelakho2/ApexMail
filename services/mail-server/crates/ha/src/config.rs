@@ -216,19 +216,19 @@ pub struct MultiRegionConfig {
 /// this service currently reads from the environment but never consults at
 /// runtime, kept here so the next reader does not have to re-derive it:
 ///
-/// * `failover.failback_delay_ms` (`FAILBACK_DELAY`) — no automatic
+/// * `failover.failback_delay_ms` (`FAILBACK_DELAY`), no automatic
 ///   failback timer exists; failback is manual (`FAILBACK_ENABLED` gates the
 ///   endpoint only).
-/// * `chaos.failure_rate` — experiments carry their own typed config; the
+/// * `chaos.failure_rate`, experiments carry their own typed config; the
 ///   process-wide rate is unused.
 /// * `multi_region.regions` / `primary_region` / `health_check_interval_ms`
-///   / `sync_interval_ms` — the multi-region service routes by the live
+///   / `sync_interval_ms`, the multi-region service routes by the live
 ///   `ha_regions` table, and there is no cross-region sync loop; only
 ///   `routing_mode` is honored.
-/// * `alerting_webhook` (`ALERTING_WEBHOOK`) — no alert dispatch path.
-/// * `rpo_target_secs` / `rto_target_secs` (`RPO_TARGET`/`RTO_TARGET`) — the
+/// * `alerting_webhook` (`ALERTING_WEBHOOK`), no alert dispatch path.
+/// * `rpo_target_secs` / `rto_target_secs` (`RPO_TARGET`/`RTO_TARGET`), the
 ///   targets are not surfaced in any report or check.
-/// * `redis.sentinel_master` (`REDIS_SENTINEL_MASTER`) — connections are
+/// * `redis.sentinel_master` (`REDIS_SENTINEL_MASTER`), connections are
 ///   built from `redis.url()`, not through Sentinel.
 ///
 /// `circuit_breaker.{threshold,timeout_ms,reset_timeout_ms}` and
@@ -486,7 +486,7 @@ impl Config {
                 });
             }
             // External audit #9: the failover↔fencing coupling is MECHANICAL
-            // — failover with replicas but without data-plane fencing is a
+            //, failover with replicas but without data-plane fencing is a
             // startup-rejected deployment, not a warning.
             self.validate_failover_fencing_coupling()?;
         } else {
@@ -508,16 +508,16 @@ impl Config {
         Ok(())
     }
 
-    /// External audit #9 — mechanical failover↔fencing coupling.
+    /// External audit #9, mechanical failover↔fencing coupling.
     ///
     /// The automatic-failover coordinator FENCES the old primary (Redis
     /// `ha:fenced:{node}`, `crate::failover::fence_node`) before promoting
     /// the target. That fence only prevents a split brain if the data plane
-    /// ENFORCES it (`APEXMAIL_HA_FENCING=true` — api-server mutating routes,
+    /// ENFORCES it (`APEXMAIL_HA_FENCING=true`, api-server mutating routes,
     /// worker claim loops and mta inbound MAIL refuse work while fenced).
     /// With failover enabled, replicas configured and enforcement off, a
     /// fenced old primary keeps accepting writes during and after the
-    /// failover — exactly the split-brain window the machinery exists to
+    /// failover, exactly the split-brain window the machinery exists to
     /// close. Production therefore REJECTS the combination, naming the fix.
     pub fn validate_failover_fencing_coupling(&self) -> Result<(), ConfigError> {
         let fencing_enabled = matches!(
@@ -527,7 +527,7 @@ impl Config {
         if self.failover.enabled && !self.database.replica_hosts.is_empty() && !fencing_enabled {
             return Err(ConfigError::SecurityCheck(
                 "FAILOVER_ENABLED=true with DB_REPLICA_HOSTS configured requires \
-                 APEXMAIL_HA_FENCING=true — without data-plane fence enforcement a \
+                 APEXMAIL_HA_FENCING=true, without data-plane fence enforcement a \
                  failover-fenced old primary keeps accepting writes (split brain). Fix \
                  ONE of: set APEXMAIL_HA_FENCING=true, or set FAILOVER_ENABLED=false, or \
                  clear DB_REPLICA_HOSTS."
@@ -552,7 +552,7 @@ mod tests {
         assert_eq!(cfg.database.pool_max, 20);
         assert_eq!(cfg.failover.threshold, 3);
         assert!(cfg.backup.enabled);
-        // Development keys are generated (or provided) — never left empty.
+        // Development keys are generated (or provided), never left empty.
         assert!(!cfg.internal_api_key.is_empty());
         assert!(!cfg.admin_api_key.is_empty());
     }
@@ -664,7 +664,7 @@ mod tests {
             "rto_target_secs": 300,
             "unexpected": true
         }"#;
-        let path = std::env::temp_dir().join(format!("ha-config-{}.json", uuid::Uuid::new_v4())); // nosemgrep: rust.lang.security.temp-dir.temp-dir — test fixture under a unique pid/uuid path — no predictable-name temp collision
+        let path = std::env::temp_dir().join(format!("ha-config-{}.json", uuid::Uuid::new_v4())); // nosemgrep: rust.lang.security.temp-dir.temp-dir, test fixture under a unique pid/uuid path, no predictable-name temp collision
         std::fs::write(&path, json).unwrap();
         let err = Config::from_file(&path).unwrap_err();
         let _ = std::fs::remove_file(&path);
@@ -685,7 +685,7 @@ mod tests {
     }
 
     /// Captures `tracing` output emitted inside `f` with a SCOPED subscriber
-    /// (no global default installed — deterministic under nextest and plain
+    /// (no global default installed, deterministic under nextest and plain
     /// `cargo test` alike).
     struct TestLogSink(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
 
@@ -761,7 +761,7 @@ mod tests {
     }
 
     /// Production + missing DB_PASSWORD → refusal (the old behavior generated
-    /// a random password that could never authenticate — worse than useless).
+    /// a random password that could never authenticate, worse than useless).
     #[test]
     fn test_production_missing_db_password_is_refused() {
         production_env_with(Some("prod-internal-key"), Some("prod-admin-key"), None);
@@ -796,7 +796,7 @@ mod tests {
     }
 
     /// The bypass is dead: with all three variables provided, harden_production
-    /// validated the REAL values and from_env returns them verbatim — no
+    /// validated the REAL values and from_env returns them verbatim, no
     /// synthetic runtime credential ever replaces them.
     #[test]
     fn test_production_uses_the_values_the_environment_provided() {
@@ -818,7 +818,7 @@ mod tests {
     }
 
     /// harden_production, directly: an empty INTERNAL_API_KEY under
-    /// production is a hard error AND the field stays empty — the old code
+    /// production is a hard error AND the field stays empty, the old code
     /// bound a generated secret BEFORE this method could ever check it.
     #[test]
     fn test_harden_production_refuses_empty_internal_api_key_without_generating() {
@@ -950,8 +950,8 @@ mod tests {
         assert_eq!(cfg.database.replica_hosts, vec!["db-replica-1".to_string()]);
     }
 
-    /// `APEXMAIL_HA_FENCING=1` — the same truthy spelling the data-plane
-    /// fence gates accept — satisfies the coupling too.
+    /// `APEXMAIL_HA_FENCING=1`, the same truthy spelling the data-plane
+    /// fence gates accept, satisfies the coupling too.
     #[test]
     fn test_production_fencing_accepts_the_same_truthy_spellings_as_the_data_plane() {
         production_env_with(
@@ -986,12 +986,12 @@ mod tests {
         unset_env("APEXMAIL_HA_FENCING");
 
         set_env("FAILOVER_ENABLED", "false");
-        let cfg = Config::from_env().expect("failover disabled — no fencing prerequisite");
+        let cfg = Config::from_env().expect("failover disabled, no fencing prerequisite");
         assert!(!cfg.failover.enabled);
 
         set_env("FAILOVER_ENABLED", "true");
         set_env("DB_REPLICA_HOSTS", "");
-        let cfg = Config::from_env().expect("no replicas — no fencing prerequisite");
+        let cfg = Config::from_env().expect("no replicas, no fencing prerequisite");
         assert!(cfg.database.replica_hosts.is_empty());
     }
 

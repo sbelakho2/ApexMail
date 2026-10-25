@@ -2,15 +2,15 @@
 //!
 //! Every gated handler calls one of:
 //!
-//! * [`require_feature`] — a boolean capability (`FeatureKey`);
-//! * [`require_capacity`] — a numeric limit (`CapacityKey`), with `amount`
+//! * [`require_feature`], a boolean capability (`FeatureKey`);
+//! * [`require_capacity`], a numeric limit (`CapacityKey`), with `amount`
 //!   the requested TOTAL (current usage + increment).
 //!
 //! Both resolve the tenant's [`EntitlementSnapshot`] from billing-service
 //! (override-aware plan lookup + tenant feature-flag overrides) and map a
 //! refusal to `403 Forbidden` (`ApiError::Forbidden`). A misclassified gate
-//! — calling `require_feature` on a `ContractualOnly`/`NotYetImplemented`
-//! field — maps to `500 Internal`: it is a server programming error, never
+//!, calling `require_feature` on a `ContractualOnly`/`NotYetImplemented`
+//! field, maps to `500 Internal`: it is a server programming error, never
 //! something a customer can trigger.
 //!
 //! UI/console surfaces may serialize [`EntitlementSnapshot::presentation`]
@@ -305,7 +305,7 @@ mod tests {
         }
     }
 
-    /// A ContractualOnly capacity (`dedicated_ip_count` — extra IPs are
+    /// A ContractualOnly capacity (`dedicated_ip_count`, extra IPs are
     /// billed, never refused) must never be usable as a gate: 500.
     #[test]
     fn contractual_capacity_maps_to_internal() {
@@ -318,8 +318,8 @@ mod tests {
 
     /// Release-gate parity in Rust: every field classified `RuntimeEnforced`
     /// must have its gate key referenced by a real handler. The customer
-    /// surface is spread across two services — api-server (`/v1/*`) and the
-    /// enterprise service (`/templates/*`, `/sub-accounts/*`) — so both
+    /// surface is spread across two services, api-server (`/v1/*`) and the
+    /// enterprise service (`/templates/*`, `/sub-accounts/*`), so both
     /// source trees are scanned. A classification that claims enforcement
     /// without wiring fails here (the Python gate checks the same invariant
     /// at release time).

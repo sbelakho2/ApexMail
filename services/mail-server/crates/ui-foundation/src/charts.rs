@@ -101,7 +101,7 @@ pub fn render_bar_chart(data: &[(String, f64)], width: u32, height: u32) -> Stri
         } else {
             bar_color(i)
         };
-        // `var()` never resolves in SVG presentation attributes — route
+        // `var()` never resolves in SVG presentation attributes, route
         // theme colors through a `style` attribute instead.
         svg.push_str(&format!(
             r##"<rect x="{x:.1}" y="{y:.1}" width="{bar_w:.1}" height="{bar_h:.1}" style="fill: {color}"><title>{title}</title></rect>"##,
@@ -210,7 +210,7 @@ pub fn render_line_chart(data: &[(String, f64)], width: u32, height: u32) -> Str
         } else {
             path_coords.push_str(&format!(" L{x:.1},{y:.1}"));
         }
-        // Data point dot — carries a <title> so hover/AT reads the point
+        // Data point dot, carries a <title> so hover/AT reads the point
         // (bar charts already did; this matches their affordance).
         let dot_color = "rgb(var(--primary))";
         let dot_stroke = "white";
@@ -627,7 +627,7 @@ fn build_svg_text_center(
 
 fn bar_color(i: usize) -> &'static str {
     // ARK rule: charts draw from the ink and baltic-blue ramps plus
-    // caution amber — the same colour vocabulary as the rest of the UI.
+    // caution amber, the same colour vocabulary as the rest of the UI.
     // No third-party palettes (the pre-ARK tailwind violet/pink/teal
     // fallbacks were removed in the ARK completion sweep 2026-10-25).
     const COLORS: &[&str] = &[
@@ -681,14 +681,14 @@ fn render_empty_chart(width: u32, height: u32, reason: &str) -> String {
 
 // ─── Spiral-Lock DNA primitives (v2, 2026-09-06) ────────────────────────────
 
-/// The ARC helper: the shackle crown as a tiny inline SVG — the section
+/// The ARC helper: the shackle crown as a tiny inline SVG, the section
 /// marker that rides every mono label (SPIRAL DNA). Pure stroke, round
 /// caps, currentColor: the mark's own geometry at 12px.
 pub fn arc_mark_svg() -> &'static str {
     r#"<svg class="" viewBox="0 0 24 14" width="17" height="11" fill="none" aria-hidden="true"><path d="M4 12 A 9 9 0 0 1 20 12" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"/></svg>"#
 }
 
-/// A receipt row marker — the same arc, rotated stepwise so the receipt
+/// A receipt row marker, the same arc, rotated stepwise so the receipt
 /// winds down the page (the pipeline as a spiral path).
 pub fn receipt_arc_svg(degrees: i32) -> String {
     format!(
@@ -698,7 +698,7 @@ pub fn receipt_arc_svg(degrees: i32) -> String {
 
 /// MONOLINE bar chart (POINT DNA): each value is a 3px round-cap stroke,
 /// not a filled bar; peak bars carry the terminal point above them. The
-/// data reads as drawn strokes — the mark's stroke discipline.
+/// data reads as drawn strokes, the mark's stroke discipline.
 pub fn render_monoline_bar_chart(data: &[(String, f64)], width: u32, height: u32) -> String {
     if data.is_empty() {
         return render_empty_chart(width, height, "No data");
@@ -940,7 +940,7 @@ mod tests {
     #[test]
     fn theme_colors_use_style_attributes_not_presentation_attributes() {
         // `var()` in an SVG presentation attribute (fill="...") never
-        // resolves — CSS custom properties only work in style attributes.
+        // resolves, CSS custom properties only work in style attributes.
         let charts = [
             render_bar_chart(&[("Jan".to_string(), 1.0)], 200, 100),
             render_line_chart(&[("Jan".to_string(), 1.0)], 200, 100),

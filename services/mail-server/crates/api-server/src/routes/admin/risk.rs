@@ -653,8 +653,8 @@ async fn get_risk_tenants(
 }
 
 /// The keys each mutation accepts. `deny_unknown_fields` cannot be honoured
-/// on an internally-tagged enum — serde buffers a tagged value and ignores the
-/// attribute — so a typo like `"limitt": "daily"` was silently dropped and the
+/// on an internally-tagged enum, serde buffers a tagged value and ignores the
+/// attribute, so a typo like `"limitt": "daily"` was silently dropped and the
 /// request appeared to succeed without applying anything. The keys are
 /// validated against this table before deserialization.
 fn risk_mutation_allowed_keys(action: &str) -> Option<&'static [&'static str]> {
@@ -1008,7 +1008,7 @@ mod adversarial_tests {
         // Mutation tags are snake_case actions with deny_unknown_fields.
         assert!(serde_json::from_str::<RiskMutation>(r#"{"action":"drop_everything"}"#).is_err());
         // serde's internally-tagged enums ignore `deny_unknown_fields` on
-        // unit variants — extra keys are accepted for run_assessment. This
+        // unit variants, extra keys are accepted for run_assessment. This
         // is the current wire contract (documented, not a security issue:
         // the extra key is dropped, no field is bound from it).
         assert!(
@@ -1251,7 +1251,7 @@ mod adversarial_tests {
         );
 
         // ResolveFlag against a real alert row flips acknowledgement.
-        // Fix (P1 swallowed outages): probes now return Result — in this test
+        // Fix (P1 swallowed outages): probes now return Result, in this test
         // the Err case means the shared fixture database is unreachable, and
         // skipping the assertion block (as before with Ok(false)) is the
         // honest degradation.
@@ -1495,11 +1495,11 @@ mod adversarial_tests {
     /// `tenant_id = ANY($1)` + one `INSERT ... FROM unnest(...)`.
     ///
     /// The test proves BOTH halves:
-    ///  * rows — for every tenant the surviving alert set equals exactly what
+    ///  * rows, for every tenant the surviving alert set equals exactly what
     ///    the old per-tenant delete/re-insert produced (unacknowledged
     ///    high/critical replaced by the current breaches; acknowledged and
     ///    non-high/critical rows untouched); and
-    ///  * statements — one DELETE statement and one INSERT statement total for
+    ///  * statements, one DELETE statement and one INSERT statement total for
     ///    three tenants (the old loop issued four of the former and four of
     ///    the latter), counted by FOR EACH STATEMENT triggers, not row counts.
     #[tokio::test]

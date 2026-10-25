@@ -4,10 +4,10 @@
 //! enterprise and pricing authority (docs/pricing-authority.md):
 //!
 //! * Enterprise impersonation start writes an `audit_logs` row AND requires
-//!   the control-plane role (wildcard scope + system tenant) — a customer
+//!   the control-plane role (wildcard scope + system tenant), a customer
 //!   tenant admin must never mint an impersonation session.
 //! * Destructive admin actions (tenant delete, operator delete) require an
-//!   explicit typed confirmation — no silent destroy.
+//!   explicit typed confirmation, no silent destroy.
 //! * SLA/credits matrix is plan-scoped (Business 30%, Enterprise 25%) and
 //!   invents no coverage for other plans.
 //! * Enterprise IP quota matches the catalog: 3 included dedicated IPs,
@@ -242,7 +242,7 @@ async fn seed_customer_tenant(pool: &PgPool, plan: &str, scopes: &[&str]) -> (St
 
 async fn seed_system_admin_key(pool: &PgPool) -> String {
     // The canonical chain (migration 072) already seeds the system tenant
-    // with id `system_internal_tenant01` / slug `system`. Use THAT id — a
+    // with id `system_internal_tenant01` / slug `system`. Use THAT id, a
     // hand-picked 'system' id never existed, so the operator FK below failed
     // (and an invented duplicate collided on the slug unique index).
     sqlx::query(
@@ -316,8 +316,8 @@ fn valid_impersonation_payload(jti: &str) -> serde_json::Value {
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// Impersonation start from the control-plane role writes the audit row
-/// naming the session and the operator. A customer tenant admin — even with
-/// the wildcard `*` scope every tenant owner carries — is refused.
+/// naming the session and the operator. A customer tenant admin, even with
+/// the wildcard `*` scope every tenant owner carries, is refused.
 #[tokio::test]
 async fn enterprise_impersonation_start_is_audited_and_requires_control_plane_role() {
     if std::env::var("TEST_REDIS_URL")
@@ -454,7 +454,7 @@ async fn enterprise_impersonation_start_is_audited_and_requires_control_plane_ro
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// Tenant delete requires the exact typed confirmation phrase
-/// `DELETE <tenant_id>` — wrong phrase, missing phrase, and another
+/// `DELETE <tenant_id>`, wrong phrase, missing phrase, and another
 /// tenant's id are all refused before any row is touched.
 #[tokio::test]
 async fn tenant_delete_requires_the_typed_confirmation_phrase() {
@@ -581,7 +581,7 @@ async fn tenant_delete_requires_the_typed_confirmation_phrase() {
     assert_eq!(gone, 0, "confirmed delete removes the tenant");
 }
 
-/// Operator delete requires `?confirm=true` — the query echo proves intent.
+/// Operator delete requires `?confirm=true`, the query echo proves intent.
 #[tokio::test]
 async fn operator_delete_requires_the_confirm_echo() {
     let Some(pool) = optional_canonical_pool("operator_confirm").await else {
@@ -667,13 +667,13 @@ async fn operator_delete_requires_the_confirm_echo() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// SLA / IP quota — plan-scoped, catalog-true
+// SLA / IP quota, plan-scoped, catalog-true
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// SLA credit caps and included IP quotas are catalog facts. This test
 /// asserts the cross-service agreement: the billing seeds (which api-server
 /// and enterprise read through `plans.features`) match the published matrix
-/// — Business 30% / 1 IP, Enterprise Cloud 25% / 3 IPs — and no other plan
+///, Business 30% / 1 IP, Enterprise Cloud 25% / 3 IPs, and no other plan
 /// invents SLA coverage or dedicated-IP capacity.
 #[test]
 fn sla_and_ip_quotas_are_plan_scoped_and_match_the_catalog() {
@@ -709,7 +709,7 @@ fn sla_and_ip_quotas_are_plan_scoped_and_match_the_catalog() {
     assert_eq!(enterprise.features.dedicated_ip_count, 3);
     assert_ne!(enterprise.features.dedicated_ip_count, 10);
 
-    // Plans without the SLA guarantee carry no credit percentage — the
+    // Plans without the SLA guarantee carry no credit percentage, the
     // matrix invents no coverage.
     for seed in billing_service::plans::default_plans() {
         if !seed.features.sla_guarantee {

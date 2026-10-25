@@ -23,7 +23,7 @@ impl Tx {
         self.inner.as_mut()
     }
 
-    /// Get a mutable reborrow of the underlying connection — the executor
+    /// Get a mutable reborrow of the underlying connection, the executor
     /// form sqlx 0.8 accepts for `query(...).execute(...)` inside the
     /// transaction (a bare `&mut Transaction` is NOT an `Executor`).
     /// Returns `None` once the transaction was committed or rolled back.
@@ -78,7 +78,7 @@ mod tests {
 
     #[test]
     fn test_tx_struct_creation() {
-        // Tx without a real connection — just verifying the type compiles.
+        // Tx without a real connection, just verifying the type compiles.
         let tx = Tx { inner: None };
         assert!(tx.inner.is_none());
     }

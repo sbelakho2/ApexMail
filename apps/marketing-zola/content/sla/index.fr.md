@@ -1,6 +1,6 @@
 +++
 title = "Accord de niveau de service (SLA)"
-description = "SLA ApexMail — engagements contractuels de disponibilité pour les clients des forfaits Business et Enterprise."
+description = "SLA ApexMail, engagements contractuels de disponibilité pour les clients des forfaits Business et Enterprise."
 template = "prose.html"
 
 [extra]
@@ -37,7 +37,7 @@ La disponibilité est mesurée par notre système de surveillance externe (Black
 
 ## 5. Crédits de service
 
-Les forfaits éligibles portent un engagement de disponibilité mensuel de 99,9 %. Lorsque la disponibilité mensuelle mesurée descend en dessous de ce seuil, un crédit de service s'applique selon la matrice spécifique au forfait ci-dessous — le pourcentage de crédit correspond aux frais récurrents mensuels du locataire pour le mois concerné.
+Les forfaits éligibles portent un engagement de disponibilité mensuel de 99,9 %. Lorsque la disponibilité mensuelle mesurée descend en dessous de ce seuil, un crédit de service s'applique selon la matrice spécifique au forfait ci-dessous, le pourcentage de crédit correspond aux frais récurrents mensuels du locataire pour le mois concerné.
 
 | Disponibilité mensuelle mesurée | Business | Enterprise Cloud / contractuel |
 |---|---:|---:|
@@ -48,8 +48,8 @@ Les forfaits éligibles portent un engagement de disponibilité mensuel de 99,9 
 
 **Notes sur les forfaits :**
 
-- **Business** — pourcentages gradués comme indiqué ; pas de plafond forfaitaire en dessous des paliers.
-- **Enterprise Cloud et déploiements contractuels** — pourcentages comme indiqué, plafonnés à 25 % (ou le chiffre contractuel lorsqu'un bon de commande en spécifie un).
+- **Business**, pourcentages gradués comme indiqué ; pas de plafond forfaitaire en dessous des paliers.
+- **Enterprise Cloud et déploiements contractuels**, pourcentages comme indiqué, plafonnés à 25 % (ou le chiffre contractuel lorsqu'un bon de commande en spécifie un).
 
 Les crédits sont calculés à partir de la disponibilité mensuelle mesurée en dessous de l'engagement et plafonnés selon le forfait du client.
 

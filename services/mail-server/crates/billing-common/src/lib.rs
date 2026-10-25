@@ -2,12 +2,12 @@
 //!
 //! This crate provides a single source of truth for:
 //!
-//! - **VAT rates** — EU member states and their standard VAT rates
+//! - **VAT rates**, EU member states and their standard VAT rates
 //!   ([`vat_rates`])
-//! - **Proration** — plan-change proration calculations ([`proration`])
-//! - **Audit** — audit log ID generation and hashing ([`audit`])
-//! - **CSV** — CSV value sanitisation ([`csv`])
-//! - **Cost throttles** — safe cross-service rate-limit overrides
+//! - **Proration**, plan-change proration calculations ([`proration`])
+//! - **Audit**, audit log ID generation and hashing ([`audit`])
+//! - **CSV**, CSV value sanitisation ([`csv`])
+//! - **Cost throttles**, safe cross-service rate-limit overrides
 //!   ([`cost_throttle`])
 
 #![deny(unsafe_code)]

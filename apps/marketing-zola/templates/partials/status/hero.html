@@ -37,7 +37,7 @@
           <div class="apex-evidence__hatch" aria-hidden="true"></div>
           <div class="apex-evidence__body">
             <p>
-              {% if i18n_data and i18n_data[l] and i18n_data[l]["status"] and i18n_data[l]["status"]["description"] %}{{ i18n_data[l]["status"]["description"] }}{% else %}This is a static export. It lists the services ApexMail tracks for monitoring — it does not assert
+              {% if i18n_data and i18n_data[l] and i18n_data[l]["status"] and i18n_data[l]["status"]["description"] %}{{ i18n_data[l]["status"]["description"] }}{% else %}This is a static export. It lists the services ApexMail tracks for monitoring, it does not assert
               component health. Live health, incidents and maintenance notices are on{% endif %}
               <a href="{{ config.extra.status_url }}" class="apex-link">status.apexmail.ee</a>.
             </p>

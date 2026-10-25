@@ -1,6 +1,6 @@
 +++
 title = "Política anti-spam"
-description = "Política anti-spam de ApexMail — requisitos para el envío con consentimiento y la prevención del spam."
+description = "Política anti-spam de ApexMail, requisitos para el envío con consentimiento y la prevención del spam."
 template = "prose.html"
 
 [extra]

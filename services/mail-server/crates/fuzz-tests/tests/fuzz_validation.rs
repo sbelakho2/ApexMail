@@ -3,13 +3,13 @@
 //! SM12 F12: the RNG is seeded from `FUZZ_SEED` (printed once per process —
 //! see `fuzz_tests::fuzz_rng`) so failures reproduce, and every loop now
 //! carries an OUTPUT ORACLE. The audit caught the old loops discarding the
-//! verdict (`let _ = is_valid_email(&input);`) — a validator that returned
+//! verdict (`let _ = is_valid_email(&input);`), a validator that returned
 //! constant `true` or constant `false` would have passed all 10,000
 //! iterations. Constant validators now fail immediately:
 //!
-//! * `fuzz_email_accepts_wellformed` — a constant-false validator fails;
-//! * `fuzz_email_rejects_malformed` — a constant-true validator fails;
-//! * `fuzz_uuid_validation_oracle` / `fuzz_sanitize_round_trip` — the same
+//! * `fuzz_email_accepts_wellformed`, a constant-false validator fails;
+//! * `fuzz_email_rejects_malformed`, a constant-true validator fails;
+//! * `fuzz_uuid_validation_oracle` / `fuzz_sanitize_round_trip`, the same
 //!   principle for the UUID and sanitization surfaces.
 
 use apexmail_lib::validation::{
@@ -20,7 +20,7 @@ use rand::Rng;
 
 #[test]
 fn fuzz_email_validation_never_panics() {
-    // 10,000 random ASCII strings — is_valid_email must never panic AND
+    // 10,000 random ASCII strings, is_valid_email must never panic AND
     // must agree with a cheap shape referee on the obvious cases.
     let mut rng = fuzz_tests::fuzz_rng();
     for _ in 0..10_000 {
@@ -98,12 +98,12 @@ fn fuzz_domain_validation_never_panics() {
     for _ in 0..10_000 {
         let input = random_ascii(rng.random::<u32>() as usize % 256);
         let verdict = is_valid_domain(&input);
-        // Oracle: a label with no dot has no TLD — never a valid domain…
+        // Oracle: a label with no dot has no TLD, never a valid domain…
         // …EXCEPT the documented domain-literal form: production routes a
         // leading `[` to DOMAIN_LITERAL_RE
         // (`^\[[^\]\s\x00-\x1f\x7f-\x9f]+\]$`,
         // apexmail-lib/src/validation.rs), which accepts printable bracketed
-        // literals regardless of dots — the very contract the email side
+        // literals regardless of dots, the very contract the email side
         // relies on for `user@[192.168.1.1]`. Random ASCII hits that shape
         // (`"[...]"` with no dot), so the oracle must not fire there.
         let is_domain_literal = input.starts_with('[');
@@ -111,7 +111,7 @@ fn fuzz_domain_validation_never_panics() {
             assert!(!verdict, "validator accepted a TLD-less domain: {input:?}");
         }
         // Control characters inside domain literals are rejected since the
-        // SM4 escalation repair — pinned by
+        // SM4 escalation repair, pinned by
         // apexmail-lib's `test_domain_literal_rejects_control_characters_and_whitespace`
         // (the generator below cannot produce control chars, so the oracle
         // does not re-assert that direction here).
@@ -138,7 +138,7 @@ fn fuzz_uuid_validation_oracle() {
     for _ in 0..10_000 {
         let input = random_ascii(rng.random::<u32>() as usize % 64);
         let verdict = is_valid_uuid(&input);
-        // Oracle: the canonical form is exactly 36 chars — nothing else is
+        // Oracle: the canonical form is exactly 36 chars, nothing else is
         // valid.
         if input.len() != 36 {
             assert!(!verdict, "validator accepted a non-36-char UUID: {input:?}");
@@ -171,7 +171,7 @@ fn fuzz_uuid_validation_oracle() {
 #[test]
 fn fuzz_sanitize_round_trip() {
     // Sanitize must ALWAYS produce NUL-free output and must NEVER alter
-    // NUL-free input — a sanitizer that mutated clean input or left NULs
+    // NUL-free input, a sanitizer that mutated clean input or left NULs
     // in place fails here (the old loop discarded its output entirely).
     let mut rng = fuzz_tests::fuzz_rng();
     for _ in 0..5_000 {
@@ -223,7 +223,7 @@ fn fuzz_null_byte_detection() {
 
 #[test]
 fn fuzz_email_with_unicode() {
-    // 1,000 Unicode emails — must never panic, and (RFC 6531 EAI being
+    // 1,000 Unicode emails, must never panic, and (RFC 6531 EAI being
     // supported) a Unicode address built purely from alphanumeric parts
     // must be ACCEPTED.
     let mut rng = fuzz_tests::fuzz_rng();
@@ -243,7 +243,7 @@ fn fuzz_email_with_unicode() {
             && domain.chars().all(char::is_alphanumeric)
             // Byte-length referee: the documented RFC caps (local ≤ 64
             // octets, total ≤ 254) are the only other rules alphanumeric
-            // parts can trip — EAI characters are 2-4 UTF-8 bytes each.
+            // parts can trip, EAI characters are 2-4 UTF-8 bytes each.
             && local.len() <= 64
             && email.len() <= 254
         {
@@ -260,7 +260,7 @@ fn fuzz_email_with_unicode() {
 
 #[test]
 fn fuzz_very_long_inputs() {
-    // Inputs up to 1 MB — must not panic or hang, and the 254-char RFC
+    // Inputs up to 1 MB, must not panic or hang, and the 254-char RFC
     // 5321 cap must reject every oversized address.
     let sizes = [1_000, 10_000, 100_000, 500_000, 1_000_000];
     for &size in &sizes {

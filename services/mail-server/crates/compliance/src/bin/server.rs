@@ -1,4 +1,4 @@
-//! Compliance server binary — a long-running service: HTTP API on port 3011
+//! Compliance server binary, a long-running service: HTTP API on port 3011
 //! (liveness `GET /health`, readiness `GET /health/ready`), 10 background
 //! cron jobs and graceful shutdown (SIGTERM/SIGINT → in-flight requests
 //! drain, DB pool closes).
@@ -9,9 +9,9 @@
 //!   overrides; CLI `--port` wins over both).
 //! * Required env: `DATABASE_URL` (Postgres), `REDIS_URL`,
 //!   `COMPLIANCE_AUTH_TOKEN` (bearer token every route requires; when
-//!   `NODE_ENV=production` the service REFUSES to start — exit 78 — when it
+//!   `NODE_ENV=production` the service REFUSES to start, exit 78, when it
 //!   is unset: no ephemeral token is ever generated in production), `AUDIT_SIGNING_KEY`
-//!   (or `AUDIT_SIGNING_KEY_FILE` when `NODE_ENV=production` — the service
+//!   (or `AUDIT_SIGNING_KEY_FILE` when `NODE_ENV=production`, the service
 //!   refuses to start on an ephemeral key), `SECRETS_ENCRYPTION_KEY` (same
 //!   production refusal), `CONSENT_SIGNING_KEY`. In development, missing
 //!   auth/encryption values are generated ephemerally with a warning.
@@ -19,7 +19,7 @@
 //!   `GDPR_VERIFY_BASE_URL`, `AUDIT_RETENTION_DAYS`, DSAR rate-limit vars,
 //!   and the ClickHouse erasure vars (`GDPR_CLICKHOUSE_ERASURE_ENABLED`,
 //!   `CLICKHOUSE_URL`, `CLICKHOUSE_DATABASE`, `CLICKHOUSE_USER`,
-//!   `CLICKHOUSE_PASSWORD`) — off unless enabled.
+//!   `CLICKHOUSE_PASSWORD`), off unless enabled.
 //!
 //! ## Schema ownership
 //!
@@ -33,20 +33,20 @@
 //! governance registry / retention classes).
 //!
 //! Cron jobs (all idempotent, retried on the next tick on failure):
-//! 1. DSR queue processing + stuck-entry recovery — every 30s
-//! 2. Secret auto-rotation — every 60min
-//! 3. GDPR request/token expiry — every 5min
-//! 4. Audit archival — daily
-//! 5. Data retention enforcement (consents/exports) — daily
-//! 6. Retention sweep (registry-driven canonical-store purges + report) — daily
-//! 7. DSR verification-outbox flush — every 60s
+//! 1. DSR queue processing + stuck-entry recovery, every 30s
+//! 2. Secret auto-rotation, every 60min
+//! 3. GDPR request/token expiry, every 5min
+//! 4. Audit archival, daily
+//! 5. Data retention enforcement (consents/exports), daily
+//! 6. Retention sweep (registry-driven canonical-store purges + report), daily
+//! 7. DSR verification-outbox flush, every 60s
 //! 8. Statutory ledger sweeps (payroll/expenses/bank statement lines unposted
-//!    → accounting-core) — every 5min. The bank ingest route
+//!    → accounting-core), every 5min. The bank ingest route
 //!    (`POST /accounting/bank-statements/import`) is the writer the sweep
 //!    posts from, so the statement ledger loop is live end to end.
-//! 9. Statutory obligation sync — daily
+//! 9. Statutory obligation sync, daily
 //! 10. Consent expiry (expired `consent_records` revoked + marketing cascade)
-//!     — every `CONSENT_EXPIRY_CHECK_INTERVAL_SECS` (default 3600s). This is
+//!    , every `CONSENT_EXPIRY_CHECK_INTERVAL_SECS` (default 3600s). This is
 //!     the job's ONE production driver: before this arm existed the module
 //!     was dead code and expired consents were never revoked.
 
@@ -75,7 +75,7 @@ struct Cli {
 
     /// Run the DSR queue + expiry sweep ONCE against the live database, print
     /// the counts and exit (one-shot ops entrypoint; the cron ticks are
-    /// otherwise the only trigger — parity with the billing-service
+    /// otherwise the only trigger, parity with the billing-service
     /// `--sweep-overage-only` flag, live dogfood 2026-10-08).
     #[arg(long, env = "COMPLIANCE_SWEEP_ONCE", default_value_t = false)]
     sweep_once: bool,
@@ -109,14 +109,14 @@ async fn main() -> anyhow::Result<()> {
     dotenvy::dotenv().ok();
 
     let cli = Cli::parse();
-    // SEC fix: from_env is fallible now — production REFUSES ephemeral
+    // SEC fix: from_env is fallible now, production REFUSES ephemeral
     // COMPLIANCE_AUTH_TOKEN / SECRETS_ENCRYPTION_KEY (EX_CONFIG, mirroring
     // the isolation crate's exit-78 convention).
     let config = match ComplianceConfig::from_env() {
         Ok(config) => config,
         Err(error) => {
             error!(
-                "SECURITY: compliance configuration refused to load: {error} — set the \
+                "SECURITY: compliance configuration refused to load: {error}, set the \
                  required environment variables and restart (exit 78 / EX_CONFIG)"
             );
             std::process::exit(78); // EX_CONFIG
@@ -158,7 +158,7 @@ async fn main() -> anyhow::Result<()> {
         state.db.close().await;
         if queue.failed + expiry.failed > 0 {
             anyhow::bail!(
-                "dsr sweep finished with {} failed step(s) — see the log lines above",
+                "dsr sweep finished with {} failed step(s), see the log lines above",
                 queue.failed + expiry.failed
             );
         }
@@ -190,7 +190,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Start background cron jobs
     let cron_state = state.clone();
-    // D: DSR verification-outbox flush — queues pending tokens as real mail
+    // D: DSR verification-outbox flush, queues pending tokens as real mail
     // through the platform's system-email path (email_queue).
     let outbox_flusher = DsrOutboxFlusher::new(state.db.clone(), config.gdpr.clone());
     let cron_handle = tokio::spawn(async move {
@@ -333,7 +333,7 @@ async fn dsr_expiry_tick(state: &AppState) -> DsrExpiryTick {
         Ok(n) if n > 0 => {
             warn!(
                 overdue = n,
-                "GDPR DSR(s) past the statutory response deadline — SLA breach open"
+                "GDPR DSR(s) past the statutory response deadline, SLA breach open"
             );
             tick.statutory_overdue = n;
         }
@@ -347,18 +347,18 @@ async fn dsr_expiry_tick(state: &AppState) -> DsrExpiryTick {
 }
 
 /// 10 background cron jobs:
-/// 1. GDPR queue processing — every 30s
-/// 2. Secret auto-rotation — every 60min
-/// 3. GDPR request expiry — every 5min
-/// 4. Audit archival — daily (every 24h)
-/// 5. Data retention enforcement (consents/exports) — daily (every 24h)
-/// 6. Retention sweep (H-6: registry-driven event-store purges + report) — daily
-/// 7. DSR verification-outbox flush (D: queue tokens as system email) — every 60s
-/// 8. Statutory ledger sweeps (payroll/expenses/bank statement lines) — every 5min
+/// 1. GDPR queue processing, every 30s
+/// 2. Secret auto-rotation, every 60min
+/// 3. GDPR request expiry, every 5min
+/// 4. Audit archival, daily (every 24h)
+/// 5. Data retention enforcement (consents/exports), daily (every 24h)
+/// 6. Retention sweep (H-6: registry-driven event-store purges + report), daily
+/// 7. DSR verification-outbox flush (D: queue tokens as system email), every 60s
+/// 8. Statutory ledger sweeps (payroll/expenses/bank statement lines), every 5min
 /// 9. Statutory obligation sync (derive/upsert `statutory_obligations` for every
-///    legal entity + mark overdue) — daily. Dogfood 2026-10-06 wave B: the
+///    legal entity + mark overdue), daily. Dogfood 2026-10-06 wave B: the
 ///    obligations engine existed only for tests and the table stayed empty.
-/// 10. Consent expiry — every `CONSENT_EXPIRY_CHECK_INTERVAL_SECS` (LIVE
+/// 10. Consent expiry, every `CONSENT_EXPIRY_CHECK_INTERVAL_SECS` (LIVE
 ///     setting, default 3600s). Dead-by-omission fix: `ConsentExpiryJob` was
 ///     declared in `lib.rs` but no production code ever constructed it, so
 ///     expired consents were never revoked. This arm is its only driver.
@@ -420,7 +420,7 @@ async fn run_cron_jobs_with_intervals(
     // arrive through the compliance route POST /accounting/bank-statements/import.
     let mut ledger_ticker = interval(intervals.ledger);
     // Statutory filing calendar: derive/upsert every entity's obligations and
-    // mark pending-but-past-due rows overdue (dogfood 2026-10-06 wave B — the
+    // mark pending-but-past-due rows overdue (dogfood 2026-10-06 wave B, the
     // engine previously had no production caller and the table stayed empty).
     let mut obligations_ticker = interval(intervals.obligations);
     // 10: consent expiry. ONE job instance for the loop's lifetime; the job
@@ -509,7 +509,7 @@ async fn run_cron_jobs_with_intervals(
                             archive_expired = report.archive_expired,
                             archive_deleted = report.archive_deleted,
                             archive_sources_deleted = report.archive_source_records_deleted,
-                            "Retention sweep completed — retention_report row written"
+                            "Retention sweep completed, retention_report row written"
                         );
                     }
                     Err(e) => error!(error = %e, "Retention sweep failed"),
@@ -636,7 +636,7 @@ mod tests {
             Err(error) => panic!("{}", error.panic_message()),
         };
         // The state (and the fixtures the tests write) must live in the
-        // per-test CLONE — never the raw TEST_DATABASE_URL database, which
+        // per-test CLONE, never the raw TEST_DATABASE_URL database, which
         // every parallel test in the suite shares: the cron-matrix sibling
         // runs 5ms expiry ticks, and in the shared database they expired
         // THIS test's fixtures between insert and assertion (host flake,
@@ -690,7 +690,7 @@ mod tests {
     /// Dead-by-omission fix: the consent-expiry job was declared but never
     /// driven. The cron loop's 10th arm must revoke an EXPIRED consent (and
     /// leave the non-expired one untouched) when driven with a millisecond
-    /// interval — proving the arm is wired, constructed and effective, not
+    /// interval, proving the arm is wired, constructed and effective, not
     /// just that the job type compiles.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn consent_expiry_cron_arm_revokes_expired_and_keeps_live_consents() {

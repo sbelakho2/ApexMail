@@ -1,4 +1,4 @@
-//! Campaign A/B experiment results — the read/declare surface over the real
+//! Campaign A/B experiment results, the read/declare surface over the real
 //! send-pipeline execution (`worker-processors::campaigns`).
 //!
 //! * `GET /v1/campaigns/:id/experiment` returns the per-arm outcome table
@@ -8,7 +8,7 @@
 //!   produced by the shared rule (`apexmail_lib::ab_testing::decide_winner`:
 //!   per-arm minimum sample + two-proportion z-test at the two-sided 95%
 //!   level). Below the guard the response carries the refusal code and the
-//!   human reason — it never names an under-powered "winner".
+//!   human reason, it never names an under-powered "winner".
 //! * `POST /v1/campaigns/:id/experiment/winner` is the audited manual
 //!   declaration for experiments the automatic rule refuses to conclude
 //!   (e.g. an audience too small to reach the minimum sample). It promotes
@@ -309,7 +309,7 @@ async fn build_experiment_response(
         .clamp(5, 1440);
 
     // Arm content + the live outcome table (the read-only twin of the
-    // worker's refresh SQL — same aggregation, same rule input).
+    // worker's refresh SQL, same aggregation, same rule input).
     let arm_content: Vec<(i32, String, Option<String>)> = sqlx::query_as(
         "SELECT arm_index, template_id, subject FROM campaign_ab_arms \
          WHERE campaign_id = $1 ORDER BY arm_index",
@@ -428,7 +428,7 @@ async fn build_experiment_response(
             metric_wire,
             match window_closes_at {
                 Some(closes) => format!(
-                    "the test window closes at {} — the winner is evaluated after it",
+                    "the test window closes at {}, the winner is evaluated after it",
                     closes.to_rfc3339()
                 ),
                 None => "the test sample has not been split yet".to_string(),
@@ -766,7 +766,7 @@ mod tests {
     }
 
     /// A non-entitled plan is refused with the named reason (the fixture
-    /// seeds NO ab_testing) — before any experiment data is touched.
+    /// seeds NO ab_testing), before any experiment data is touched.
     #[tokio::test]
     async fn experiment_results_refuse_a_non_entitled_plan_with_the_named_reason() {
         let Some((state, pool)) = state_and_pool("exp_gate_denied").await else {

@@ -1,9 +1,9 @@
 //! Health-check endpoints.
 //!
-//! - `GET /health` and `GET /health/` — liveness alias (always 200)
-//! - `GET /health/live` — liveness probe (always 200)
-//! - `GET /health/ready` — readiness:DB + Redis (uses circuit breaker for DB check)
-//! - `GET /health/deep` — comprehensive with response times
+//! - `GET /health` and `GET /health/`, liveness alias (always 200)
+//! - `GET /health/live`, liveness probe (always 200)
+//! - `GET /health/ready`, readiness:DB + Redis (uses circuit breaker for DB check)
+//! - `GET /health/deep`, comprehensive with response times
 
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -38,7 +38,7 @@ async fn liveness() -> impl IntoResponse {
 /// A health endpoint that can hang is a health endpoint that causes restart
 /// loops: the orchestrator's probe never gets an answer, so it kills the
 /// instance and tries again, forever. The bound makes the endpoint ALWAYS
-/// answer within this window — degraded is a valid, actionable answer;
+/// answer within this window, degraded is a valid, actionable answer;
 /// silence is not.
 const READINESS_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
 
@@ -65,7 +65,7 @@ async fn readiness(State(state): State<AppState>) -> impl IntoResponse {
 }
 
 async fn readiness_inner(state: &AppState) -> (StatusCode, Json<serde_json::Value>) {
-    // Use circuit breaker for DB check — if the circuit is open, we fail fast
+    // Use circuit breaker for DB check, if the circuit is open, we fail fast
     // instead of waiting for a connection timeout.
     let db_result = state
         .resilient
@@ -219,7 +219,7 @@ mod tests {
 
     /// Use-all audit (health): the readiness/deep degraded branches were
     /// only unit-tested as structs. With an unreachable database the
-    /// endpoints must answer 503 with the named component states — never a
+    /// endpoints must answer 503 with the named component states, never a
     /// fabricated "ok".
     #[tokio::test]
     async fn readiness_and_deep_check_report_a_disconnected_database() {

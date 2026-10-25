@@ -17,7 +17,7 @@ use parking_lot::RwLock;
 /// Monotonic-safe `now - window` (audit SM5 F4).
 ///
 /// Plain `Instant::now() - window` PANICS when the result precedes the
-/// monotonic epoch — i.e. on any host whose current uptime is shorter
+/// monotonic epoch, i.e. on any host whose current uptime is shorter
 /// than `window` (fresh boot, VM reprovision, container start). One such
 /// site sat on the request path (`AdaptiveRateLimiter::update`, 300 s
 /// window) and more in background loops whose panic silently kills the
@@ -32,7 +32,7 @@ pub(crate) fn monotonic_cutoff(now: Instant, window: Duration) -> Instant {
 ///
 /// `update` evicts observations older than `baseline_window`, but a single
 /// client flooding at thousands of requests/second pushes one observation
-/// per request — the deque would grow to `rate × window` entries
+/// per request, the deque would grow to `rate × window` entries
 /// (hundreds of MB for a sustained flood) before any of them expire.
 /// Statistics only need the most recent samples, so beyond the cap the
 /// oldest observations are dropped (ring behaviour), mirroring the hard
@@ -171,7 +171,7 @@ impl AdaptiveRateLimiter {
         let mut observations = self.observations.write();
 
         // Remove old observations outside the baseline window.
-        // Audit SM5 F4: monotonic-safe — see `monotonic_cutoff`.
+        // Audit SM5 F4: monotonic-safe, see `monotonic_cutoff`.
         let now = Instant::now();
         let cutoff = monotonic_cutoff(now, self.config.baseline_window);
         while observations.front().is_some_and(|o| o.timestamp < cutoff) {
@@ -234,7 +234,7 @@ impl AdaptiveRateLimiter {
         let mut attack_state = self.attack_state.write();
 
         if z_score > self.config.z_threshold {
-            // Potential attack — increment alert counter
+            // Potential attack, increment alert counter
             attack_state.consecutive_alerts += 1;
 
             if attack_state.consecutive_alerts >= self.config.consecutive_alert_trigger
@@ -268,7 +268,7 @@ impl AdaptiveRateLimiter {
                 if started.elapsed() > self.config.cooldown
                     && z_score < self.config.recovery_z_threshold
                 {
-                    // Attack subsided — restore normal operation
+                    // Attack subsided, restore normal operation
                     attack_state.is_under_attack = false;
                     attack_state.attack_started = None;
                     attack_state.consecutive_alerts = 0;
@@ -289,7 +289,7 @@ impl AdaptiveRateLimiter {
                 }
             }
         } else {
-            // Normal operation — smoothly adjust threshold
+            // Normal operation, smoothly adjust threshold
             attack_state.consecutive_alerts = 0;
 
             let current_threshold = self.threshold.load(Ordering::SeqCst) as f64;
@@ -528,7 +528,7 @@ mod tests {
         let limiter = AdaptiveRateLimiter::new(default_config());
         let initial = limiter.current_threshold();
 
-        // Feed < 10 observations — cold-start protection should provide
+        // Feed < 10 observations, cold-start protection should provide
         // conservative protection by adjusting threshold based on observed traffic.
         // With RPS=100, cold-start sets threshold to min(2*100=200, current)
         for _ in 0..9 {
@@ -737,7 +737,7 @@ mod tests {
     #[test]
     fn test_monotonic_cutoff_survives_window_longer_than_uptime() {
         // `Instant::now() - window` PANICS whenever the host has been up
-        // for less than `window` — deterministically reproducible here by
+        // for less than `window`, deterministically reproducible here by
         // using a window (10 years) longer than any plausible monotonic
         // epoch. The old code panicked on this call; the helper must fall
         // back to `now` instead.

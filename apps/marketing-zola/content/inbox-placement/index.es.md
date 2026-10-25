@@ -10,7 +10,7 @@ og_image = "/images/og-image.png"
 ## Ubicación en bandeja de entrada, respaldada por los propios proveedores de buzón
 
 La mayoría de los "paneles de entregabilidad" son teatro de listas semilla. ApexMail lee la
-señal **real** que Gmail y Outlook publican sobre su dominio — y
+señal **real** que Gmail y Outlook publican sobre su dominio, y
 actúa en consecuencia.
 
 ## Qué medimos
@@ -50,7 +50,7 @@ Cada seis horas, el planificador de reputación de ApexMail:
    - Verde → 0 % de limitación (velocidad máxima)
    - Ámbar → 50 % de limitación (aplazamiento probabilístico)
    - Rojo → 90 % de limitación (casi parada, alerta enviada)
-5. **Alerta** a las personas adecuadas — webhook, email o Slack — cuando una banda cae.
+5. **Alerta** a las personas adecuadas, webhook, email o Slack, cuando una banda cae.
 
 Cuando su reputación se recupera, la limitación se libera sin intervención humana.
 
@@ -59,7 +59,7 @@ Cuando su reputación se recupera, la limitación se libera sin intervención hu
 Un solo lote defectuoso puede meter un dominio de envío en la lista BAD de Gmail
 durante más de 30 días. La mayoría de los ESP le dan la mala noticia en su
 siguiente revisión trimestral de negocio. ApexMail limita el radio de impacto
-**en el mismo turno** — sus tenants de alto volumen siguen entregando por
+**en el mismo turno**, sus tenants de alto volumen siguen entregando por
 carriles limpios mientras el dominio afectado se enfría.
 
 ## Anulaciones de limitación por proveedor
@@ -70,6 +70,6 @@ con puntuación, banda y fuente para auditoría y transparencia ante el cliente.
 
 ## Obtenga una instantánea de reputación
 
-Podemos auditar su dominio existente en menos de una hora — usando los mismos
+Podemos auditar su dominio existente en menos de una hora, usando los mismos
 flujos de datos de Google y Microsoft que usamos en producción.
 [Reserve una revisión de entregabilidad](/es/contact/).

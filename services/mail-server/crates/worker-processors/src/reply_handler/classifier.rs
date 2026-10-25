@@ -1,12 +1,12 @@
-//! Reply classification facade — composes the three honest layers.
+//! Reply classification facade, composes the three honest layers.
 //!
-//! 1. [`deterministic`](super::deterministic) — high-certainty header/syntax
+//! 1. [`deterministic`](super::deterministic), high-certainty header/syntax
 //!    cases (DSN/bounces, Auto-Submitted/OOO, one-click unsubscribe, explicit
 //!    stop requests). Runs first and wins.
-//! 2. [`ai`](super::ai) — semantic classification for everything the
+//! 2. [`ai`](super::ai), semantic classification for everything the
 //!    deterministic layer could not prove. Provider-agnostic, with a
 //!    never-guessing fallback on outage.
-//! 3. [`policy`](super::policy) — the only place that turns a classification
+//! 3. [`policy`](super::policy), the only place that turns a classification
 //!    into an action.
 //!
 //! The legacy [`classify`] entry point (subject + body only, synchronous)
@@ -189,7 +189,7 @@ fn compile_regexes(patterns: &[&str]) -> Vec<Regex> {
 ///
 /// Runs the deterministic layer first; if nothing is provable there, falls
 /// back to the historical pattern heuristic. Callers that also have headers
-/// should use [`classify_full`] — the worker does.
+/// should use [`classify_full`], the worker does.
 pub fn classify(subject: &str, body: &str) -> ClassificationResult {
     let input = ReplyInput::new(subject, body);
     if let Some(verdict) = deterministic::classify(&input) {
@@ -258,7 +258,7 @@ fn outcome_from_ai(
 ) -> ClassificationOutcome {
     // The never-guessing fallback is itself deterministic (it is a pure
     // function of the outage), so an outage result is recorded as
-    // `deterministic` with the outage named in the reasoning — never as a
+    // `deterministic` with the outage named in the reasoning, never as a
     // model verdict.
     let outage = classification
         .reasoning
@@ -270,7 +270,7 @@ fn outcome_from_ai(
     let downgraded_from = decision.downgraded.map(|_| classification.disposition);
     // The objection sub-label: the AI's own label wins; when it returned
     // none and the verdict stands at not_interested/question, the
-    // deterministic families try to LABEL it (never to re-disposition — a
+    // deterministic families try to LABEL it (never to re-disposition, a
     // keyword match must not suppress anyone the model did not).
     let objection_class = match decision.downgraded {
         Some(_) => None,
@@ -743,7 +743,7 @@ mod tests {
     async fn full_classification_uses_deterministic_first() {
         let input = ReplyInput::new(
             "Re: proposal",
-            "This sounds great — can we schedule a call?",
+            "This sounds great, can we schedule a call?",
         )
         .with_header("Auto-Submitted", "auto-replied");
         let outcome = classify_full(&ErroringClassifier, &input).await;

@@ -6,11 +6,11 @@
 //!
 //! P3 (perf): the sweep is BATCHED and set-based. The pre-fix job selected
 //! every expired row unbounded, then opened one transaction per row (UPDATE +
-//! up to two cascade UPDATEs + an upsert + commit) — O(rows) round trips and
+//! up to two cascade UPDATEs + an upsert + commit), O(rows) round trips and
 //! row locks held one row at a time. Now each pass revokes up to
 //! [`CONSENT_EXPIRY_BATCH`] rows with ONE `UPDATE … WHERE id IN (SELECT id …
 //! ORDER BY id LIMIT n) RETURNING …`, then runs ONE set-based cascade UPDATE
-//! and a chunked cascade upsert — all in the SAME transaction as the
+//! and a chunked cascade upsert, all in the SAME transaction as the
 //! revocation. Audit logging stays per row (the hash-chained audit trail is
 //! not the storage path being fixed).
 //!
@@ -54,12 +54,12 @@ const CONSENT_EXPIRY_BATCH: i64 = 5_000;
 /// One expired `marketing` row cascades to [`MARKETING_CASCADE_TARGETS`], so a
 /// full 5,000-row batch wants up to 10,000 upsert rows. The upsert binds 6
 /// parameters per row (id, tenant, subscriber, email, type, revoked_at), and
-/// PostgreSQL rejects statements above 65,535 bound parameters — an unbounded
+/// PostgreSQL rejects statements above 65,535 bound parameters, an unbounded
 /// `push_values` silently failed the whole cascade while the revoke reported
 /// success. 5,000 rows = 30,000 binds stays under the ceiling.
 const CASCADE_UPSERT_CHUNK_ROWS: usize = 5_000;
 
-/// Cascade targets of an expired `marketing` consent — the consent hierarchy.
+/// Cascade targets of an expired `marketing` consent, the consent hierarchy.
 const MARKETING_CASCADE_TARGETS: &[&str] = &["analytics", "profiling"];
 
 /// Default tick period for the consent-expiry cron arm, in seconds.
@@ -90,10 +90,10 @@ pub fn parse_check_interval_secs(raw: Option<&str>) -> u64 {
 pub struct ConsentExpiryJob {
     db: PgPool,
     audit_logger: Arc<AuditLogger>,
-    /// Rows revoked per pass — [`CONSENT_EXPIRY_BATCH`] in production; the
+    /// Rows revoked per pass, [`CONSENT_EXPIRY_BATCH`] in production; the
     /// tests shrink it to exercise the multi-batch loop on a small fixture.
     batch_rows: i64,
-    /// Rows per cascade-upsert INSERT — [`CASCADE_UPSERT_CHUNK_ROWS`] in
+    /// Rows per cascade-upsert INSERT, [`CASCADE_UPSERT_CHUNK_ROWS`] in
     /// production; tests shrink it to cross the parameter-boundary fixture.
     cascade_chunk_rows: usize,
     /// Number of upsert statements the last pass issued (tests prove the
@@ -174,7 +174,7 @@ impl ConsentExpiryJob {
         // ONE statement revokes the whole batch. `granted = true` appears both
         // in the selecting subquery and on the outer UPDATE: a concurrent
         // revoker's row is re-checked under the row lock (EvalPlanQual) and
-        // simply not returned — the same "already revoked → skip and write no
+        // simply not returned, the same "already revoked → skip and write no
         // audit entry" behavior the per-row `rows_affected == 0` guard had.
         let revoked: Vec<ExpiredConsent> = sqlx::query_as(
             "UPDATE consent_records
@@ -213,7 +213,7 @@ impl ConsentExpiryJob {
         // Audit trail: ONE batched append per revoked batch (P2). The batch
         // writer groups by tenant, takes each tenant's advisory chain lock
         // once, reads the chain head once, computes the chained hashes in
-        // memory and writes a chunked multi-row INSERT — instead of
+        // memory and writes a chunked multi-row INSERT, instead of
         // BEGIN + lock + head read + INSERT + COMMIT per revoked consent.
         let audit_entries: Vec<AuditBatchEntry> = revoked
             .iter()
@@ -523,7 +523,7 @@ mod tests {
         .expect("cascade state")
     }
 
-    /// P3 item 8 — equivalence: an expired marketing consent revokes itself
+    /// P3 item 8, equivalence: an expired marketing consent revokes itself
     /// and cascades to analytics + profiling, an expired non-marketing consent
     /// revokes only itself, a live consent is untouched, and the audit trail
     /// gets one entry per revoked row (all exactly as the per-row job did).
@@ -626,7 +626,7 @@ mod tests {
         assert_eq!(audited_again, 2);
     }
 
-    /// P3 item 8 — >1 batch: with more expired rows than one batch holds, the
+    /// P3 item 8, >1 batch: with more expired rows than one batch holds, the
     /// sweep loops until the table is drained, leaving nothing behind and
     /// auditing every revoked row. The job is run with a shrunken batch (the
     /// loop and SQL are identical, only the LIMIT differs) so the fixture stays
@@ -762,7 +762,7 @@ mod tests {
     /// F-audit P2 (atomic cascade): the cascade upsert now shares the revoke
     /// transaction. A forced upsert failure must (a) propagate out of
     /// `check_and_revoke_expired` instead of being warned away and (b) roll
-    /// the revocations/cascades back — no revoked consent is ever left
+    /// the revocations/cascades back, no revoked consent is ever left
     /// without its cascade rows.
     ///
     /// Fail-before: the upsert ran post-commit and its error was logged, so
@@ -843,7 +843,7 @@ mod tests {
     }
 
     /// P2 consent-expiry audit chain: the pre-fix job called
-    /// `AuditLogger::log` once per revoked consent — BEGIN + advisory lock +
+    /// `AuditLogger::log` once per revoked consent, BEGIN + advisory lock +
     /// chain-head read + INSERT + COMMIT each. The batch writer must take the
     /// per-tenant lock once, read the head once and write one multi-row
     /// INSERT, so the statement count is CONSTANT in the number of revoked

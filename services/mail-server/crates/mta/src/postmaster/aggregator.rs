@@ -104,7 +104,7 @@ pub async fn recompute(db: &PgPool) -> Result<(usize, usize, usize), String> {
 
     // Build every summary row in memory first, then apply them with ONE
     // prior-band SELECT and ONE multi-row UPSERT. The old form issued
-    // SELECT + UPDATE (or INSERT) per domain/IP — a 2–3×N round-trip
+    // SELECT + UPDATE (or INSERT) per domain/IP, a 2–3×N round-trip
     // pattern even though it shared one transaction.
     let mut writes: Vec<SummaryWrite> = Vec::with_capacity(domain_rows.len() + ip_rows.len());
     for (domain, latest_band, spf, dkim, dmarc, spam) in &domain_rows {
@@ -176,7 +176,7 @@ pub async fn recompute(db: &PgPool) -> Result<(usize, usize, usize), String> {
     if !event_rows.is_empty() {
         // Every row MUST be wrapped in its own tuple parentheses. The
         // previous builder emitted `VALUES ($1, …, $9, $10, …` for multiple
-        // events — PostgreSQL rejects that with "INSERT has more expressions
+        // events, PostgreSQL rejects that with "INSERT has more expressions
         // than target columns", aborting the whole recompute transaction on
         // any run with two or more band changes.
         let mut query_builder = sqlx::QueryBuilder::new(
@@ -644,7 +644,7 @@ mod adversarial_db_tests {
     }
 
     /// Migration 227 regression: the summary table must carry a UNIQUE index
-    /// on exactly the aggregator's key — (scope, identity, provider) — so the
+    /// on exactly the aggregator's key, (scope, identity, provider), so the
     /// `ON CONFLICT (scope, identity, provider)` target resolves. Migration
     /// 061 dropped the original 3-column constraint in favour of
     /// (scope, identity, provider, computed_at), which is NOT inferrable from
@@ -896,7 +896,7 @@ mod adversarial_db_tests {
     #[tokio::test]
     async fn every_band_transition_severity_and_event_type_is_emitted_per_provider() {
         // The severity/event_type matrix: red -> critical/red_listed,
-        // amber -> warn/band_drop, green -> info/band_drop — for BOTH the
+        // amber -> warn/band_drop, green -> info/band_drop, for BOTH the
         // google and the microsoft provider paths.
         let Some(pool) = pool("postmaster_severity_matrix").await else {
             return;

@@ -115,7 +115,7 @@ where
 /// Parse `OUTBOUND_MTA_ALLOWED_SOURCE_IPS`: a comma-separated list of
 /// recipient-facing source addresses this relay instance may bind. Unset or
 /// blank = `None` (unrestricted, the shared relay's behavior). A dedicated
-/// tenant's host group sets it to the tenant's managed IPs — and a typo in
+/// tenant's host group sets it to the tenant's managed IPs, and a typo in
 /// that list must stop the daemon at startup, not silently send from the
 /// wrong address, so every entry is validated.
 fn parse_allowed_source_ips(raw: &str) -> Result<Option<Vec<IpAddr>>, String> {
@@ -366,7 +366,7 @@ async fn main() -> Result<()> {
 
 /// Await SIGINT or SIGTERM. Split out of `run` so the shutdown contract is
 /// observable: container runtimes stop daemons with SIGTERM, so listening
-/// only for SIGINT (ctrl_c) would skip the drain entirely — in-flight
+/// only for SIGINT (ctrl_c) would skip the drain entirely, in-flight
 /// delivery attempts killed mid-DATA, the health server never closed and
 /// held leases left to expire on their own.
 async fn shutdown_signal() {
@@ -388,8 +388,8 @@ async fn shutdown_signal() {
     #[cfg(not(unix))]
     let terminate = std::future::pending::<()>();
     tokio::select! {
-        _ = ctrl_c => info!("SIGINT received — shutting down"),
-        _ = terminate => info!("SIGTERM received — shutting down"),
+        _ = ctrl_c => info!("SIGINT received, shutting down"),
+        _ = terminate => info!("SIGTERM received, shutting down"),
     }
 }
 
@@ -405,7 +405,7 @@ fn build_router(app_state: AppState) -> Router {
 
 /// One queue sweep: reclaim expired leases, deliver due rows, then project
 /// daemon acceptances onto the worker acceptance ledger. Every failure
-/// increments the error counter — a broken sweep must be visible in
+/// increments the error counter, a broken sweep must be visible in
 /// /metrics, never silently swallowed.
 async fn sweep_once(relay: &Relay, pool: &sqlx::PgPool, counters: &Counters, batch_size: i64) {
     let now = Utc::now();
@@ -468,7 +468,7 @@ async fn sweep_once(relay: &Relay, pool: &sqlx::PgPool, counters: &Counters, bat
 
 /// Serve the queue relay until `shutdown` resolves. Split out of `main` so
 /// the startup sequence (bind, spawn, sweep loop, drain) is exercisable by
-/// tests with a stub ledger and an injected shutdown — the production `main`
+/// tests with a stub ledger and an injected shutdown, the production `main`
 /// passes [`shutdown_signal`].
 async fn run(
     config: DaemonConfig,
@@ -480,7 +480,7 @@ async fn run(
     // The daemon owns a Postgres pool by construction: install the
     // reputation/override throttle at the relay's effect boundary. The
     // in-process worker path installs its own instance (same engine, same
-    // audit table) — see `worker-processors/src/email/outbound_mta.rs`.
+    // audit table), see `worker-processors/src/email/outbound_mta.rs`.
     let throttle = Arc::new(outbound_mta::throttle::ProviderThrottle::new(pool.clone()));
     let relay = Arc::new(Relay::with_warmup_gate_and_throttle(
         Arc::clone(&ledger),
@@ -548,7 +548,7 @@ mod tests {
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     /// Run `body` with exactly `vars` set (all other daemon variables are
-    /// removed first), restoring nothing afterwards — the lock keeps other
+    /// removed first), restoring nothing afterwards, the lock keeps other
     /// tests from observing the mutation.
     fn with_env<T>(vars: &[(&str, &str)], body: impl FnOnce() -> T) -> T {
         let _guard = ENV_LOCK
@@ -865,7 +865,7 @@ mod tests {
     }
 
     /// The scrape must carry every gauge and every counter with a HELP/TYPE
-    /// preamble — a missing series silently breaks the pending-oldest-age
+    /// preamble, a missing series silently breaks the pending-oldest-age
     /// SLO alert (deploy/alerting-rules.yml).
     #[tokio::test]
     async fn metrics_exposes_queue_gauges_and_all_counters() {
@@ -924,7 +924,7 @@ mod tests {
     }
 
     /// A ledger outage must be visible in scrape output (`ledger_up 0`),
-    /// never masked as an empty queue — an empty queue and an unreadable
+    /// never masked as an empty queue, an empty queue and an unreadable
     /// queue look identical to an alert without the sentinel.
     #[tokio::test]
     async fn metrics_reports_a_ledger_outage_instead_of_masking_it() {
@@ -1001,7 +1001,7 @@ mod tests {
         }
     }
 
-    /// Minimal HTTP/1.0 GET over a raw socket — no client dependency needed
+    /// Minimal HTTP/1.0 GET over a raw socket, no client dependency needed
     /// to assert the daemon's endpoint contract.
     async fn http_get(addr: SocketAddr, path: &str) -> std::io::Result<(u16, String)> {
         let mut stream = tokio::net::TcpStream::connect(addr).await?;
@@ -1101,7 +1101,7 @@ mod tests {
             .expect("join");
         assert!(result.is_ok(), "clean drain: {result:?}");
 
-        // The health port is released again — the server drained.
+        // The health port is released again, the server drained.
         let rebinding = tokio::net::TcpListener::bind(addr).await;
         assert!(
             rebinding.is_ok(),
@@ -1155,7 +1155,7 @@ mod tests {
         };
         let addr = reserve_addr();
         // Lazy pool against a dead port: connect() succeeds, every real use
-        // fails — exactly what a Postgres outage mid-flight looks like.
+        // fails, exactly what a Postgres outage mid-flight looks like.
         let dead_pool = sqlx::postgres::PgPoolOptions::new()
             .max_connections(1)
             .acquire_timeout(Duration::from_secs(1))

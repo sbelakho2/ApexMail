@@ -1,6 +1,6 @@
 +++
 title = "Data Locations"
-description = "ApexMail data location matrix — where each category of customer data is stored and processed."
+description = "ApexMail data location matrix, where each category of customer data is stored and processed."
 template = "prose.html"
 
 [extra]
@@ -13,18 +13,18 @@ This matrix describes the deployed EU/EEA configuration. Core service data (rows
 
 | # | Data Category | Default Primary Location | Default Backup / Replica | Default Processing Region | Transfer Safeguard |
 |---|---|---|---|---|---|
-| 1 | Account data (name, email, company, address) | EU data centre — Finland | EU data centre — Finland (secondary site) | EEA (no third-country transfer) | Intra-EEA processing; GDPR Chapter V transfer rules do not apply |
-| 2 | API keys (hashed) | EU data centre — Finland | EU data centre — Finland (secondary site) | EEA (no third-country transfer) | Intra-EEA processing; GDPR Chapter V transfer rules do not apply |
-| 3 | Sender and recipient addresses | EU data centre — Finland | EU data centre — Finland (secondary site) | EEA (no third-country transfer) | Intra-EEA processing; GDPR Chapter V transfer rules do not apply |
-| 4 | Message content (subject, body, headers) | EU data centre — Finland | EU data centre — Finland (secondary site) | EEA (no third-country transfer) | Intra-EEA processing; GDPR Chapter V transfer rules do not apply |
-| 5 | Attachments | EU data centre — Finland | EU data centre — Finland (secondary site) | EEA (no third-country transfer) | Intra-EEA processing; GDPR Chapter V transfer rules do not apply |
-| 6 | Events and logs (delivery, open, click, bounce) | EU data centre — Finland | EU data centre — Finland (secondary site) | EEA (no third-country transfer) | Intra-EEA processing; GDPR Chapter V transfer rules do not apply |
-| 7 | Authentication (OAuth tokens, MFA secrets) | EU data centre — Finland; Google LLC / GitHub, Inc. (OAuth) | Provider-managed | EEA (core); US for OAuth providers | SCCs (OAuth providers) |
-| 8 | Billing (invoices, transactions, payment tokens) | EU data centre — Finland; Mollie B.V. (Netherlands, EU) | Provider-managed within the EU | EEA (ApexMail and Mollie); card scheme networks under the Mollie DPA | Intra-EEA processing (Mollie B.V., Amsterdam) |
-| 9 | Support tickets | EU data centre — Finland | EU data centre — Finland (secondary site) | EEA (no third-country transfer) | Intra-EEA processing; GDPR Chapter V transfer rules do not apply |
-| 10 | Analytics (aggregate delivery metrics, engagement) | EU data centre — Finland | EU data centre — Finland (secondary site) | EEA (no third-country transfer) | Intra-EEA processing; GDPR Chapter V transfer rules do not apply |
-| 11 | Security logs (audit trails, access logs) | EU data centre — Finland | EU data centre — Finland (secondary site) | EEA (no third-country transfer) | Intra-EEA processing; GDPR Chapter V transfer rules do not apply |
-| 12 | Backups (database, file storage snapshots) | EU data centre — Finland | EU data centre — Finland (encrypted cold storage) | EEA (no third-country transfer) | Intra-EEA processing; GDPR Chapter V transfer rules do not apply |
+| 1 | Account data (name, email, company, address) | EU data centre, Finland | EU data centre, Finland (secondary site) | EEA (no third-country transfer) | Intra-EEA processing; GDPR Chapter V transfer rules do not apply |
+| 2 | API keys (hashed) | EU data centre, Finland | EU data centre, Finland (secondary site) | EEA (no third-country transfer) | Intra-EEA processing; GDPR Chapter V transfer rules do not apply |
+| 3 | Sender and recipient addresses | EU data centre, Finland | EU data centre, Finland (secondary site) | EEA (no third-country transfer) | Intra-EEA processing; GDPR Chapter V transfer rules do not apply |
+| 4 | Message content (subject, body, headers) | EU data centre, Finland | EU data centre, Finland (secondary site) | EEA (no third-country transfer) | Intra-EEA processing; GDPR Chapter V transfer rules do not apply |
+| 5 | Attachments | EU data centre, Finland | EU data centre, Finland (secondary site) | EEA (no third-country transfer) | Intra-EEA processing; GDPR Chapter V transfer rules do not apply |
+| 6 | Events and logs (delivery, open, click, bounce) | EU data centre, Finland | EU data centre, Finland (secondary site) | EEA (no third-country transfer) | Intra-EEA processing; GDPR Chapter V transfer rules do not apply |
+| 7 | Authentication (OAuth tokens, MFA secrets) | EU data centre, Finland; Google LLC / GitHub, Inc. (OAuth) | Provider-managed | EEA (core); US for OAuth providers | SCCs (OAuth providers) |
+| 8 | Billing (invoices, transactions, payment tokens) | EU data centre, Finland; Mollie B.V. (Netherlands, EU) | Provider-managed within the EU | EEA (ApexMail and Mollie); card scheme networks under the Mollie DPA | Intra-EEA processing (Mollie B.V., Amsterdam) |
+| 9 | Support tickets | EU data centre, Finland | EU data centre, Finland (secondary site) | EEA (no third-country transfer) | Intra-EEA processing; GDPR Chapter V transfer rules do not apply |
+| 10 | Analytics (aggregate delivery metrics, engagement) | EU data centre, Finland | EU data centre, Finland (secondary site) | EEA (no third-country transfer) | Intra-EEA processing; GDPR Chapter V transfer rules do not apply |
+| 11 | Security logs (audit trails, access logs) | EU data centre, Finland | EU data centre, Finland (secondary site) | EEA (no third-country transfer) | Intra-EEA processing; GDPR Chapter V transfer rules do not apply |
+| 12 | Backups (database, file storage snapshots) | EU data centre, Finland | EU data centre, Finland (encrypted cold storage) | EEA (no third-country transfer) | Intra-EEA processing; GDPR Chapter V transfer rules do not apply |
 
 ## Sub-processor Locations
 
@@ -53,7 +53,7 @@ Dedicated Tenant and BYOC entries below describe a model only where a separate w
 
 ## EU-Only Routing
 
-The matrix above covers storage. Delivery transport is governed by the tenant routing mode: under EU-only routing (`eu_only`), every send leaves through ApexMail's own EU MTAs and the shared third-party transport (AWS SES in its EU region) is forbidden — an unavailable own-MTA route holds the message instead of failing over. The full transport argument, each point linked to its evidence, is on the [EU sovereignty page](/eu-sovereign/).
+The matrix above covers storage. Delivery transport is governed by the tenant routing mode: under EU-only routing (`eu_only`), every send leaves through ApexMail's own EU MTAs and the shared third-party transport (AWS SES in its EU region) is forbidden, an unavailable own-MTA route holds the message instead of failing over. The full transport argument, each point linked to its evidence, is on the [EU sovereignty page](/eu-sovereign/).
 
 ## Contact
 

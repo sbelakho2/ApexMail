@@ -125,7 +125,7 @@ impl From<BrandingConfigDbRow> for TenantBranding {
 ///
 /// Delegates to the billing authority (`get_entitlement_snapshot`) rather
 /// than re-deriving plan precedence. Lookup/storage failures are logged and
-/// degrade to `false` (stock branding) — branding must never fail a page or
+/// degrade to `false` (stock branding), branding must never fail a page or
 /// a mail.
 /// In-process cache for the render-path entitlement probe: the console
 /// renders once per page view and the snapshot loader costs three queries.
@@ -512,7 +512,7 @@ pub(crate) struct EmailAction<'a> {
 /// The presentation contract for platform mail: **callers own the HTML/text
 /// bodies they pass in**. [`queue_system_email`], [`queue_system_email_with_priority`],
 /// and [`queue_system_email_in_transaction`] store the supplied presentation
-/// verbatim — the queue layer never wraps, rebrands, or augments it, and
+/// verbatim, the queue layer never wraps, rebrands, or augments it, and
 /// there is no implicit shared shell. Builders that want the standard shell
 /// call [`render_transactional_email`] explicitly.
 pub(crate) struct TransactionalEmail<'a> {
@@ -555,7 +555,7 @@ pub(crate) fn render_transactional_email_with_branding(
     use crate::routes::helpers::html_escape;
 
     // The lockup is the tenant's identity in white-label mail: their logo
-    // when one is configured (http/https only — a `javascript:` or `data:`
+    // when one is configured (http/https only, a `javascript:` or `data:`
     // src is never emitted into mail), otherwise their company name set in
     // ink. The ApexMail wordmark appears only on stock mail; a branded
     // message that still carried it would contradict the white-label
@@ -663,7 +663,7 @@ fn is_safe_logo_url(url: &str) -> bool {
     lower.starts_with("https://") || lower.starts_with("http://")
 }
 
-/// http(s)/mailto only — mirrors the console footer rule so a hostile
+/// http(s)/mailto only, mirrors the console footer rule so a hostile
 /// `javascript:` support URL is never rendered in mail either.
 fn is_safe_support_url(url: &str) -> bool {
     let lower = url.trim().to_ascii_lowercase();
@@ -837,7 +837,7 @@ mod tests {
     #[test]
     fn transactional_email_shell_carries_viewport_background_and_fallback_url() {
         let html = render_transactional_email(&TransactionalEmail {
-            document_title: "Reset your password — ApexMail",
+            document_title: "Reset your password | ApexMail",
             heading: "Reset Your Password",
             body_html: "<p>Body copy.</p>",
             actions: &[EmailAction {
@@ -881,8 +881,8 @@ mod tests {
         assert!(code_only.contains("&copy; 2026 ApexMail"), "{code_only}");
     }
 
-    /// White-label mail carries the tenant's identity in the lockup — their
-    /// logo when the URL is http(s), otherwise their company name — and
+    /// White-label mail carries the tenant's identity in the lockup, their
+    /// logo when the URL is http(s), otherwise their company name, and
     /// never the ApexMail wordmark. A hostile logo URL degrades to the name.
     #[test]
     fn white_label_lockup_replaces_the_apexmail_wordmark() {

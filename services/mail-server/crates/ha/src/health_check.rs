@@ -1,4 +1,4 @@
-//! Health checking service — monitors DB, Redis, replication lag, and external services.
+//! Health checking service, monitors DB, Redis, replication lag, and external services.
 
 use chrono::Utc;
 use sqlx::PgPool;
@@ -14,7 +14,7 @@ use crate::types::{ClusterHealth, ComponentHealth, HealthStatus};
 ///
 /// `timeout_ms` is the deployment's `HEALTH_CHECK_TIMEOUT` (config
 /// `health.timeout_ms`). Before this was honored, a probe against a hung
-/// dependency blocked the health endpoint indefinitely — the endpoint's
+/// dependency blocked the health endpoint indefinitely, the endpoint's
 /// whole purpose is to answer promptly and report the dependency unhealthy.
 /// A zero value disables the wrapper (tests that drive probes directly).
 async fn check_component(
@@ -56,7 +56,7 @@ async fn check_component(
 ///
 /// On a PRIMARY the replay timestamp is meaningless (it tracks local
 /// commits), so the component is reported healthy regardless of the lag
-/// number — previously the check flapped unhealthy on busy primaries.
+/// number, previously the check flapped unhealthy on busy primaries.
 fn classify_replication_lag(
     in_recovery: bool,
     lag_ms: Option<f64>,
@@ -66,7 +66,7 @@ fn classify_replication_lag(
     if !in_recovery {
         return (
             HealthStatus::Healthy,
-            Some("Primary — replay-lag check not applicable".into()),
+            Some("Primary, replay-lag check not applicable".into()),
         );
     }
     match lag_ms {
@@ -81,7 +81,7 @@ fn classify_replication_lag(
         Some(lag) => (HealthStatus::Healthy, Some(format!("Lag: {lag:.0}ms"))),
         None => (
             HealthStatus::Healthy,
-            Some("Standby — no transactions replayed yet".into()),
+            Some("Standby, no transactions replayed yet".into()),
         ),
     }
 }
@@ -89,7 +89,7 @@ fn classify_replication_lag(
 /// External audit #8: the "no replication timestamp" arm is topology-aware.
 /// A deployment whose config EXPECTS replicas (`DB_REPLICA_HOSTS`) but
 /// cannot observe any replication state at all must not be reported
-/// healthy — that is a replica topology failure, not a standalone. Pure
+/// healthy, that is a replica topology failure, not a standalone. Pure
 /// helper so both arms are unit-testable.
 fn classify_missing_replay_timestamp(expects_replicas: bool) -> (HealthStatus, Option<String>) {
     if expects_replicas {
@@ -97,7 +97,7 @@ fn classify_missing_replay_timestamp(expects_replicas: bool) -> (HealthStatus, O
             HealthStatus::Unhealthy,
             Some(
                 "No replication timestamp although replicas are configured \
-                 (DB_REPLICA_HOSTS) — replication is down or unobservable"
+                 (DB_REPLICA_HOSTS), replication is down or unobservable"
                     .into(),
             ),
         )
@@ -149,7 +149,7 @@ impl HealthCheckService {
 
         // 6. Persistence schema (F63): the component's own readiness. A
         // missing ha_health_checks relation means the results of every
-        // other check are silently discarded — the component must report
+        // other check are silently discarded, the component must report
         // unhealthy instead of warn-ing the INSERT failure forever.
         components.push(self.check_persistence_schema().await);
 
@@ -192,7 +192,7 @@ impl HealthCheckService {
                 Ok((HealthStatus::Healthy, None))
             } else {
                 Err(
-                    "ha_health_checks relation missing — canonical migration 194 \
+                    "ha_health_checks relation missing, canonical migration 194 \
                      not applied; health results cannot be persisted"
                         .to_string(),
                 )
@@ -201,7 +201,7 @@ impl HealthCheckService {
         .await
     }
 
-    /// F63: lifecycle cleanup — delete health-check results older than
+    /// F63: lifecycle cleanup, delete health-check results older than
     /// `retention_days` and return how many rows were removed.
     pub async fn cleanup_history(&self, retention_days: i64) -> Result<u64, sqlx::Error> {
         let cutoff = Utc::now() - chrono::Duration::days(retention_days.max(1));
@@ -253,7 +253,7 @@ impl HealthCheckService {
         let threshold = self.config.replication.lag_threshold_ms as f64;
         let warning = self.config.replication.warning_lag_ms as f64;
         // External audit #8: whether the configured topology EXPECTS
-        // replicas — the "no replication timestamp at all" outcome is only
+        // replicas, the "no replication timestamp at all" outcome is only
         // healthy for a genuine standalone.
         let expects_replicas = !self.config.database.replica_hosts.is_empty();
         check_component("replication", self.config.health.timeout_ms, async move {
@@ -274,7 +274,7 @@ impl HealthCheckService {
                 Some((in_recovery, lag_ms)) => {
                     Ok(classify_replication_lag(in_recovery, lag_ms, threshold, warning))
                 }
-                // No row at all: healthy standalone — unless the config
+                // No row at all: healthy standalone, unless the config
                 // EXPECTS replicas, in which case this is a topology
                 // failure (external audit #8).
                 None => Ok(classify_missing_replay_timestamp(expects_replicas)),
@@ -512,7 +512,7 @@ mod tests {
     #[test]
     fn test_replication_lag_healthy_on_primary_regardless_of_lag() {
         // On a primary, pg_last_xact_replay_timestamp() is the last local
-        // commit — a large value there must NOT flag the node unhealthy.
+        // commit, a large value there must NOT flag the node unhealthy.
         let (status, msg) = classify_replication_lag(false, Some(999_999.0), 30_000.0, 10_000.0);
         assert_eq!(status, HealthStatus::Healthy);
         assert!(msg.unwrap().contains("Primary"));
@@ -546,7 +546,7 @@ mod tests {
         assert!(msg.unwrap().contains("Standalone"));
 
         // A deployment whose config EXPECTS replicas but observes no
-        // replication state at all is a topology failure — never healthy.
+        // replication state at all is a topology failure, never healthy.
         let (status, msg) = classify_missing_replay_timestamp(true);
         assert_eq!(status, HealthStatus::Unhealthy);
         let message = msg.unwrap();

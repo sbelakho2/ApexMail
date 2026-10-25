@@ -1,8 +1,8 @@
 //! Full-text search across audit logs with CSV export.
 //!
 //! Provides:
-//! - GET  /v1/admin/audit/search  — ranked FTS with tsvector/tsquery
-//! - POST /v1/admin/audit/export  — CSV export of filtered audit logs
+//! - GET  /v1/admin/audit/search , ranked FTS with tsvector/tsquery
+//! - POST /v1/admin/audit/export , CSV export of filtered audit logs
 
 // Stream combinators (chain) resolve against futures, not Iterator.
 use futures::StreamExt as _;
@@ -29,7 +29,7 @@ pub fn router() -> Router<AppState> {
 // ─── Keyset cursor helpers ─────────────────────────────────────
 //
 // The search cursor encodes the `(rank, timestamp, id)` triple of the last
-// row of the previous page — the exact leading tuple of the ORDER BY. The
+// row of the previous page, the exact leading tuple of the ORDER BY. The
 // rank component matters for the FTS path (ranked relevance ordering); on
 // the non-FTS path every row's rank is the constant 0.0, so the triple
 // degenerates to the plain (timestamp, id) keyset. The tie-break
@@ -42,7 +42,7 @@ const KEYSET_CURSOR_SEP: char = '\n';
 /// Encode a `(rank, timestamp, id)` keyset cursor as an opaque hex string.
 ///
 /// The timestamp MUST be rendered with `to_rfc3339()` and the rank with
-/// `f64`'s shortest round-trip `Display` — `parse::<f64>()` reads back the
+/// `f64`'s shortest round-trip `Display`, `parse::<f64>()` reads back the
 /// exact same value.
 fn encode_search_cursor(rank: f64, timestamp: &DateTime<Utc>, id: &str) -> String {
     encode_cursor(&format!(
@@ -53,7 +53,7 @@ fn encode_search_cursor(rank: f64, timestamp: &DateTime<Utc>, id: &str) -> Strin
 
 /// Decode and validate a `(rank, timestamp, id)` keyset cursor. Malformed
 /// encodings, unparsable numbers/timestamps, NaN ranks, or ids that cannot
-/// name an audit row are client errors (400) — an unvalidated cursor could
+/// name an audit row are client errors (400), an unvalidated cursor could
 /// otherwise surface as a database error.
 fn decode_search_cursor(encoded: &str) -> Result<(f64, DateTime<Utc>, String), ApiError> {
     let Some(decoded) = decode_cursor(encoded) else {
@@ -79,7 +79,7 @@ fn decode_search_cursor(encoded: &str) -> Result<(f64, DateTime<Utc>, String), A
     let id = parts.next().ok_or_else(|| parse_error("row id"))?;
     // The writers produce identifier-shaped ids (UUID text and short
     // prefixed forms): bounded and restricted to ASCII identifier
-    // characters — SQL metacharacters are refused at the boundary even
+    // characters, SQL metacharacters are refused at the boundary even
     // though every use binds the value as a parameter.
     if id.is_empty()
         || id.len() > 128
@@ -208,11 +208,11 @@ fn resolve_search_window(
 
 /// Fully-rendered query pair for the search endpoint. Each query owns its
 /// OWN bind list covering every placeholder after the two window
-/// timestamps — the executors bind exactly `window_start, window_end,
+/// timestamps, the executors bind exactly `window_start, window_end,
 /// ..binds (, limit, offset for the row query)` and nothing else, so the
 /// placeholder count and the bind count can never diverge (the previous
 /// shape re-bound tenant_id/action in the executors on top of the
-/// builder's binds — a guaranteed parameter-count 500).
+/// builder's binds, a guaranteed parameter-count 500).
 #[derive(Debug)]
 struct AuditSearchPlan {
     search_sql: String,
@@ -268,7 +268,7 @@ fn build_search_plan(
 
     // Both orderings are the total (rank, timestamp, id) DESC tuple: the FTS
     // path ranks by relevance, the non-FTS path gives every row the constant
-    // rank 0.0 — so the id tie-break is what keeps rows that share a
+    // rank 0.0, so the id tie-break is what keeps rows that share a
     // timestamp from being skipped or duplicated across page boundaries.
     let (search_sql, search_binds, has_fts_plan) = if has_fts {
         let q = params.q.as_deref().unwrap_or("").trim().to_string();
@@ -395,7 +395,7 @@ async fn audit_search(
     let plan = build_search_plan(&params, Utc::now())?;
 
     // Run count and search concurrently. Both executors bind from the SAME
-    // plan — the search row query appends either the keyset tuple + LIMIT
+    // plan, the search row query appends either the keyset tuple + LIMIT
     // or the LIMIT/OFFSET pair as its final binds.
     let (count_result, search_page) = tokio::try_join!(
         execute_count(&state.db, &plan),
@@ -442,7 +442,7 @@ type SearchRow = (
 
 /// Execute the search row query and resolve the keyset continuation:
 /// fetches `limit + 1` rows, truncates to `limit` and reports `(rows,
-/// has_more, next_cursor)` — the cursor minted from the last KEPT row's
+/// has_more, next_cursor)`, the cursor minted from the last KEPT row's
 /// `(rank, timestamp, id)` tuple.
 #[allow(clippy::type_complexity)]
 async fn execute_search(
@@ -478,7 +478,7 @@ async fn execute_search(
         rows.len()
     };
     // The next cursor is the (rank, timestamp, id) tuple of the last KEPT
-    // row — the exact position this page stopped at.
+    // row, the exact position this page stopped at.
     let next_cursor = if kept > 0 {
         let (id, ts, .., rank, _) = &rows[kept - 1];
         Some(encode_search_cursor(*rank, ts, id))
@@ -664,7 +664,7 @@ async fn audit_export(
     Ok(response)
 }
 
-/// Rows fetched per chunk — bounded memory per step while keeping the
+/// Rows fetched per chunk, bounded memory per step while keeping the
 /// per-query bind count trivial.
 const EXPORT_CHUNK_ROWS: i64 = 1_000;
 
@@ -683,7 +683,7 @@ struct ExportChunkState {
 
 /// Render the WHERE clause shared by every chunk; parameter order is
 /// window-start, window-end, then optional tenant/action/fts binds, then
-/// LIMIT and OFFSET — binds MUST follow exactly that sequence.
+/// LIMIT and OFFSET, binds MUST follow exactly that sequence.
 fn build_export_chunk_conditions(state: &ExportChunkState) -> String {
     let mut conditions: Vec<String> = vec!["timestamp >= $1".into(), "timestamp <= $2".into()];
     if state.tenant_id.is_some() {
@@ -706,7 +706,7 @@ fn build_export_chunk_conditions(state: &ExportChunkState) -> String {
 /// `futures::Stream` impl: a manual `poll_next` that constructs the chunk
 /// query future inline (as this stream originally did) polls it ONCE and
 /// then drops it. A Postgres fetch is pending at that first poll, so the
-/// future — and the waker it registered — was destroyed before completion
+/// future, and the waker it registered, was destroyed before completion
 /// and nothing ever re-polled the stream: `/v1/admin/audit/export` hung
 /// forever on its first chunk. `unfold` owns the async block across polls,
 /// making the Pending → wake → re-poll contract the executor's, not ours.
@@ -774,7 +774,7 @@ fn export_chunk_stream(
                 Some((Ok(buffer), state))
             }
             Err(error) => {
-                // End the body after surfacing the failure — a truncated,
+                // End the body after surfacing the failure, a truncated,
                 // error-terminated download beats a hung one.
                 state.remaining = 0;
                 Some((Err(std::io::Error::other(error)), state))
@@ -813,7 +813,7 @@ mod tests {
 
     /// Search with tenantId/action filters set previously produced a
     /// parameter-count mismatch (the filters were bound by the query
-    /// builders AND re-bound by the executors) — a guaranteed 500. The
+    /// builders AND re-bound by the executors), a guaranteed 500. The
     /// rendered SQL's placeholder count and the executed bind sequence
     /// must agree exactly, with every filter bound once.
     #[tokio::test]
@@ -1278,7 +1278,7 @@ mod adversarial_tests {
     /// Page through an FTS-ranked result set one row at a time following
     /// `nextCursor`: the cursor sweep must reproduce the offset sweep
     /// exactly (zero skips/duplicates) even though every seeded row shares
-    /// ONE timestamp AND one identical rank — the fully-tied ordering shape
+    /// ONE timestamp AND one identical rank, the fully-tied ordering shape
     /// where the id tie-break is the only total component. The tenantId
     /// filter rides every continuation page and `total` stays the full
     /// window count.
@@ -1291,7 +1291,7 @@ mod adversarial_tests {
         let tenant = format!("srch{}", &uuid::Uuid::new_v4().simple().to_string()[..16]);
         let other = format!("srch{}", &uuid::Uuid::new_v4().simple().to_string()[..16]);
 
-        // SIX matching rows for `tenant` in ONE statement — identical
+        // SIX matching rows for `tenant` in ONE statement, identical
         // timestamps AND identical fts ranks; plus one matching row of the
         // neighbour tenant and one non-matching row of `tenant`.
         sqlx::query(SEARCH_PROBE_SQL)
@@ -1419,7 +1419,7 @@ mod adversarial_tests {
             body["results"][0]["rank"], 0.0,
             "the non-FTS path pins rank 0.0"
         );
-        // Following the non-FTS cursor yields the SECOND row — the keyset
+        // Following the non-FTS cursor yields the SECOND row, the keyset
         // continues the same ordering the offset path uses.
         let minted = body["nextCursor"].as_str().unwrap().to_string();
         let (status, body) = env
@@ -1603,7 +1603,7 @@ mod coverage_residual_tests {
         .expect("export response")
         .into_response();
         assert_eq!(response.status(), StatusCode::OK);
-        // The chunk query fails: the stream ends with the error — a
+        // The chunk query fails: the stream ends with the error, a
         // truncated, error-terminated download, never a hang. The header
         // row may or may not have flushed before the failure.
         if let Ok(bytes) = axum::body::to_bytes(response.into_body(), usize::MAX).await {

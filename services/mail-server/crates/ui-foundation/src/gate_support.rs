@@ -2,7 +2,7 @@
 //! skeletons, form hygiene, link integrity). Test-only: this module is only
 //! compiled under `cfg(test)`.
 //!
-//! All renders are pure in-process SSR (`axum_router::render_route*`) — no
+//! All renders are pure in-process SSR (`axum_router::render_route*`), no
 //! DB, no network, no wall-clock-dependent assertions (the one wall-clock
 //! render artifact, the CSRF token, is either normalized away or sits
 //! outside every extracted region).
@@ -54,11 +54,11 @@ pub(crate) const STATEFUL_RENDER_VARIANTS: &[(&str, &str, &str)] = &[
 
 /// The stateful PRG variants of one surface, as (document name, rendered
 /// html). Tuple order in [`STATEFUL_RENDER_VARIANTS`] is
-/// (surface, path, query) — this helper is the ONE place that reads it, so a
+/// (surface, path, query), this helper is the ONE place that reads it, so a
 /// field-order mistake blanks the variant sweep exactly once instead of
 /// silently, per caller. (Dogfood 2026-10-06: the link gate filtered the
 /// PATH field against the surface name, matched nothing, and scanned zero
-/// variants — hiding the nested-form P0 that lived only on `/login?mfa=1`.)
+/// variants, hiding the nested-form P0 that lived only on `/login?mfa=1`.)
 pub(crate) fn stateful_variant_documents(surface: &str) -> Vec<(String, String)> {
     STATEFUL_RENDER_VARIANTS
         .iter()
@@ -80,7 +80,7 @@ pub(crate) fn stateful_variant_documents(surface: &str) -> Vec<(String, String)>
 /// exists with data (citations, escalation notices, long messages, draft
 /// rows with their action forms). Found by dogfood 2026-10-06 ui-visual:
 /// `render_route` alone cannot reach a state, so an unrepresented state
-/// cannot fail a gate. The renders come from `fixture_states` — the same
+/// cannot fail a gate. The renders come from `fixture_states`, the same
 /// code the exported browser fixtures use, so the in-crate and browser
 /// gates audit the same markup.
 pub(crate) fn bot_state_documents(surface: &str) -> Vec<(String, String)> {
@@ -333,7 +333,7 @@ pub(crate) fn title_of(html: &str) -> Option<&str> {
 
 /// Hand-mirrored registry of every browser form endpoint the api-server
 /// mounts for POST submissions. Source of truth:
-/// `crates/api-server/src/routes/web.rs` — `public_router`, `consent_router`,
+/// `crates/api-server/src/routes/web.rs`, `public_router`, `consent_router`,
 /// `authenticated_router` and `admin_router`. A `:name` segment matches any
 /// single non-empty path segment. The form-hygiene gate fails when a rendered
 /// form action is missing from this table, so both a typo'd view action and a
@@ -408,13 +408,13 @@ pub(crate) const REGISTERED_BROWSER_POST_ROUTES: &[&str] = &[
     // `discovery/run` + `outreach/launch` handlers remain.
     "/web/admin/tenants",
     "/web/admin/operators",
-    // Deferred-feature 6: START impersonation from the tenants list — the
+    // Deferred-feature 6: START impersonation from the tenants list, the
     // owner-only, system-gated twin of the JSON start-impersonation route.
     "/web/admin/tenants/:id/impersonate",
     "/web/admin/sales/discovery/run",
     "/web/admin/sales/outreach/launch",
     // Reachable only by a direct CSRF-protected POST (no page renders a form
-    // for it today) — retained because the SSR mirror exists (web.rs).
+    // for it today), retained because the SSR mirror exists (web.rs).
     "/web/admin/sales/leads/update",
     "/web/admin/alerts/ack",
     "/web/admin/alerts/ack-bulk",

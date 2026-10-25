@@ -141,7 +141,7 @@ impl LogStreamingService {
             crate::field_encryption::encryptor_from_secret(secret, LOG_STREAM_SECRET_PURPOSE).ok();
         if secret_encryptor.is_none() {
             tracing::error!(
-                "Failed to derive log-stream destination secret encryptor — secrets will NOT be encrypted at rest"
+                "Failed to derive log-stream destination secret encryptor, secrets will NOT be encrypted at rest"
             );
         }
         Self {
@@ -533,7 +533,7 @@ impl LogStreamingService {
     ///
     /// Pulls active streams (bounded batch) and delivers a bounded heartbeat
     /// event batch to each verified destination through the SSRF-guarded,
-    /// address-pinned client — wiring `get_active_streams`, `record_delivery`
+    /// address-pinned client, wiring `get_active_streams`, `record_delivery`
     /// and `hmac_sign` into a live best-effort delivery path. Delivery errors
     /// are recorded per-stream and never abort the cycle.
     pub async fn run_delivery_cycle(&self) -> Result<u64, String> {
@@ -684,7 +684,7 @@ async fn deliver_heartbeat(stream: &LogStream) -> Result<usize, String> {
             Ok(body.len())
         }
         other => Err(format!(
-            "unsupported destination type '{other}' — no delivery path configured"
+            "unsupported destination type '{other}', no delivery path configured"
         )),
     }
 }
@@ -703,18 +703,18 @@ fn is_private_or_reserved_v4(v4: &std::net::Ipv4Addr) -> bool {
         || v4.is_documentation() // 192.0.2/24, 198.51.100/24, 203.0.113/24
         || o[0] == 0 // "this" network
         || o[0] >= 240 // reserved for future use
-        // 100.64/10 — CGNAT shared address space
+        // 100.64/10, CGNAT shared address space
         || (o[0] == 100 && o[1] >= 64 && o[1] <= 127)
-        // 192.0.0/24 — IETF protocol assignments
+        // 192.0.0/24, IETF protocol assignments
         || (o[0] == 192 && o[1] == 0 && o[2] == 0)
-        // 198.18/15 — benchmarking
+        // 198.18/15, benchmarking
         || (o[0] == 198 && (o[1] == 18 || o[1] == 19))
 }
 
 /// Pure IP classification: is this address private, reserved, loopback,
 /// link-local, or otherwise unsuitable as an outbound destination?
 ///
-/// Unit-testable without DNS — tests feed addresses directly.
+/// Unit-testable without DNS, tests feed addresses directly.
 pub fn is_private_or_reserved_ip(ip: std::net::IpAddr) -> bool {
     match ip {
         std::net::IpAddr::V4(v4) => is_private_or_reserved_v4(&v4),
@@ -723,11 +723,11 @@ pub fn is_private_or_reserved_ip(ip: std::net::IpAddr) -> bool {
             v6.is_loopback() // ::1
                 || v6.is_unspecified() // ::
                 || v6.is_multicast()
-                // fe80::/10 — link-local
+                // fe80::/10, link-local
                 || (s[0] & 0xffc0) == 0xfe80
-                // fc00::/7 — unique local addresses
+                // fc00::/7, unique local addresses
                 || (s[0] & 0xfe00) == 0xfc00
-                // IPv4-mapped (::ffff:a.b.c.d) — re-check the embedded v4
+                // IPv4-mapped (::ffff:a.b.c.d), re-check the embedded v4
                 || v6
                     .to_ipv4_mapped()
                     .is_some_and(|embedded| is_private_or_reserved_v4(&embedded))
@@ -736,7 +736,7 @@ pub fn is_private_or_reserved_ip(ip: std::net::IpAddr) -> bool {
 }
 
 /// Addresses explicitly allow-listed via `LOG_STREAMING_SSRF_ALLOWLIST`
-/// (comma-separated IPs) — an escape hatch for internal test destinations.
+/// (comma-separated IPs), an escape hatch for internal test destinations.
 ///
 /// Read-from-env ONCE and cached (`None` = not yet read). The `Option`
 /// wrapper (instead of a plain `LazyLock`) exists so tests can RESET the
@@ -772,7 +772,7 @@ fn reset_ssrf_allowlist_for_tests() {
 
 /// Cached per-destination clients whose DNS is pinned to the validated
 /// address (fix F: closes the DNS-rebinding TOCTOU between validation and
-/// the actual request). Bounded cache — evicted wholesale when it grows past
+/// the actual request). Bounded cache, evicted wholesale when it grows past
 /// a small cap.
 static PINNED_CLIENTS: std::sync::LazyLock<
     std::sync::Mutex<std::collections::HashMap<(String, std::net::SocketAddr), reqwest::Client>>,
@@ -829,7 +829,7 @@ pub struct GuardedDestination {
 ///   3. rejects the URL when ANY resolved address is private/reserved
 ///      (unless explicitly allow-listed via env),
 ///   4. returns the resolved address so the caller can pin it for the actual
-///      request (pinned client) — closing DNS-rebinding TOCTOU.
+///      request (pinned client), closing DNS-rebinding TOCTOU.
 pub async fn ssrf_guard_url(url: &str) -> Result<GuardedDestination, String> {
     let parsed = reqwest::Url::parse(url).map_err(|e| format!("Invalid URL: {e}"))?;
     if parsed.scheme() != "https" {
@@ -915,7 +915,7 @@ async fn verify_splunk(stream: &LogStream) -> Result<serde_json::Value, String> 
         .ok_or("No HEC token")?;
 
     // Fix F: the Splunk verifier previously never called the SSRF guard at
-    // all — route it through the same resolving guard and pin the address.
+    // all, route it through the same resolving guard and pin the address.
     let mut base = ssrf_guard_url(url).await?;
     base.url.set_path("/services/collector/event");
     base.url.set_query(None);
@@ -945,7 +945,7 @@ async fn verify_datadog(stream: &LogStream) -> Result<serde_json::Value, String>
         .and_then(|v| v.as_str())
         .ok_or("No Datadog API key")?;
 
-    // Datadog's intake host is fixed and public — still route it through the
+    // Datadog's intake host is fixed and public, still route it through the
     // guard for uniformity (fix F: all destinations verified alike).
     let dest = ssrf_guard_url("https://http-intake.logs.datadoghq.com/api/v2/logs").await?;
 
@@ -996,12 +996,12 @@ mod tests {
 
     /// Serializes the tests that touch the `LOG_STREAMING_SSRF_ALLOWLIST`
     /// process env (or first-initialize the allowlist LazyLock) so their
-    /// windows cannot interleave — see the isolation note on
+    /// windows cannot interleave, see the isolation note on
     /// `ssrf_guard_rejects_literal_private_ip_host`.
     ///
     /// The async tests hold this guard across `.await` ON PURPOSE (the env /
     /// allowlist window spans the awaited calls), and it must stay a
-    /// `std::sync::Mutex` because sync `#[test]`s share it — so those tests
+    /// `std::sync::Mutex` because sync `#[test]`s share it, so those tests
     /// carry `clippy::await_holding_lock` allows. No awaited future ever
     /// locks this mutex, so the deadlock the lint guards against cannot
     /// occur.
@@ -1308,7 +1308,7 @@ mod tests {
         assert_eq!(mask_destination_config(&plain), plain);
     }
 
-    // Deliberate: see ssrf_env_test_lock — the guard must outlive the awaits.
+    // Deliberate: see ssrf_env_test_lock, the guard must outlive the awaits.
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn ssrf_guard_reports_each_failure_shape() {
@@ -1509,7 +1509,7 @@ mod tests {
         port
     }
 
-    // Deliberate: see ssrf_env_test_lock — the guard must outlive the awaits.
+    // Deliberate: see ssrf_env_test_lock, the guard must outlive the awaits.
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn verify_and_heartbeat_report_honest_delivery_failures() {

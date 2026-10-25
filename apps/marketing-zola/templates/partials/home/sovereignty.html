@@ -1,4 +1,4 @@
-{# ── Home — Sovereignty band (lane T, ARK round) ───────────────────────
+{# ── Home, Sovereignty band (lane T, ARK round) ───────────────────────
    Sits directly under the hero: four evidence-linked points rendered as a
    ruled ledger, plus the honest Global-vs-EU-only scope note (the Global
    default delivers through AWS SES in its EU region; EU-only routing
@@ -52,12 +52,12 @@
     </table>
   </div>
 
-  {# Honest scope note — the contrast that makes EU-only the promise. The
+  {# Honest scope note, the contrast that makes EU-only the promise. The
      i18n value carries its own localized link to the sovereignty page. #}
   <div class="apex-notice mt-8">
     <b class="apex-notice__legend">Scope</b>
     <p>
-      {% if i18n_data and i18n_data[l] and i18n_data[l]["home_sovereignty"] and i18n_data[l]["home_sovereignty"]["note"] %}{{ i18n_data[l]["home_sovereignty"]["note"] | safe }}{% else %}The Global default delivers through AWS SES in its EU regions, which may include Germany — EU regions of a US company; ApexMail's own hosting is in Finland. EU-only routing removes that transport; the full comparison is on <a href="/eu-sovereign/">the sovereignty page</a>.{% endif %}
+      {% if i18n_data and i18n_data[l] and i18n_data[l]["home_sovereignty"] and i18n_data[l]["home_sovereignty"]["note"] %}{{ i18n_data[l]["home_sovereignty"]["note"] | safe }}{% else %}The Global default delivers through AWS SES in its EU regions, which may include Germany, EU regions of a US company; ApexMail's own hosting is in Finland. EU-only routing removes that transport; the full comparison is on <a href="/eu-sovereign/">the sovereignty page</a>.{% endif %}
     </p>
   </div>
   <p class="mt-6">

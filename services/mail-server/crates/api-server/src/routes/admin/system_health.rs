@@ -1,4 +1,4 @@
-//! System health endpoint — queues, queue-writer activity, REAL service
+//! System health endpoint, queues, queue-writer activity, REAL service
 //! process liveness, IP pool addresses, alerts.
 //!
 //! **What these numbers are and are NOT**:
@@ -10,7 +10,7 @@
 //!   `stale`; a service with no rows is reported as `no_heartbeat`. Process
 //!   health is NEVER inferred from queue traffic.
 //! * `queueWriters` are queue activity OBSERVATIONS derived from `queue_jobs`
-//!   (one entry per queue with recent activity) — NOT live worker processes.
+//!   (one entry per queue with recent activity), NOT live worker processes.
 //!   They remain because queue traffic is operationally useful, but they are
 //!   labelled as observations and the `notes` field says so.
 //! * `ipPoolAddresses` are rows of `ip_pool_addresses` (sending IP
@@ -68,7 +68,7 @@ pub fn router() -> Router<AppState> {
 #[serde(rename_all = "camelCase")]
 pub struct SystemHealthResponse {
     pub queues: Vec<QueueStatus>,
-    /// Queue writers OBSERVED via `queue_jobs` activity — NOT process
+    /// Queue writers OBSERVED via `queue_jobs` activity, NOT process
     /// heartbeats. Real liveness is in `service_liveness`.
     pub queue_writers: Vec<QueueWriterStatus>,
     /// Real process heartbeat rows, newest first. Inactive instances age out
@@ -103,14 +103,14 @@ pub struct QueueStatus {
 
 /// One queue writer observed from queue activity. `last_observed_activity`
 /// is the most recent `queue_jobs.updated_at` a worker touched for that
-/// queue — it is NOT a process heartbeat.
+/// queue, it is NOT a process heartbeat.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct QueueWriterStatus {
     pub id: String,
     pub name: String,
     pub r#type: String,
-    /// "active" when the queue was touched recently, else "idle" — derived
+    /// "active" when the queue was touched recently, else "idle", derived
     /// from job activity, not a process liveness signal.
     pub status: String,
     pub last_observed_activity: Option<String>,
@@ -147,7 +147,7 @@ pub struct ServiceLiveness {
     pub last_seen_at: Option<String>,
 }
 
-/// A row of `ip_pool_addresses` — a sending IP address in an IP pool, not an
+/// A row of `ip_pool_addresses`, a sending IP address in an IP pool, not an
 /// MTA process.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -275,7 +275,7 @@ async fn system_health(
     // `queue_jobs.queue_name` is nullable (rows written before the
     // queue_name/queue split, and fixtures that populate only `queue`): the
     // raw `queue_name` decode into `String` failed with "unexpected null"
-    // and 500'd the whole health endpoint — even though the sibling
+    // and 500'd the whole health endpoint, even though the sibling
     // queue-writer query below already COALESCEs. Derive the queue identity
     // exactly like that query.
     let queue_rows = optional_relation_rows(
@@ -304,7 +304,7 @@ async fn system_health(
         .collect();
 
     // ── Queue writers (OBSERVED from queue_jobs activity) ──────
-    // queue_jobs has no worker_id column — derive one logical queue writer
+    // queue_jobs has no worker_id column, derive one logical queue writer
     // per queue from the most recent job activity. These are observations of
     // queue activity, NOT process heartbeats; real liveness is below.
     let worker_rows = optional_relation_rows(
@@ -443,7 +443,7 @@ async fn system_health(
         system_sender,
         notes: vec![
             format!(
-                "serviceHeartbeats are real process leases from service_heartbeats; status live means a beat within the last {HEARTBEAT_STALE_AFTER_SECS} seconds. A service with no rows is reported as no_heartbeat — process liveness is never inferred from queue traffic."
+                "serviceHeartbeats are real process leases from service_heartbeats; status live means a beat within the last {HEARTBEAT_STALE_AFTER_SECS} seconds. A service with no rows is reported as no_heartbeat, process liveness is never inferred from queue traffic."
             ),
             "queueWriters are queue activity observations derived from queue_jobs (one entry per queue), not process heartbeats; see serviceLiveness for process liveness."
                 .to_string(),
@@ -465,7 +465,7 @@ mod tests {
         // Mirror the notes construction in the handler.
         let notes = [
             format!(
-                "serviceHeartbeats are real process leases from service_heartbeats; status live means a beat within the last {HEARTBEAT_STALE_AFTER_SECS} seconds. A service with no rows is reported as no_heartbeat — process liveness is never inferred from queue traffic."
+                "serviceHeartbeats are real process leases from service_heartbeats; status live means a beat within the last {HEARTBEAT_STALE_AFTER_SECS} seconds. A service with no rows is reported as no_heartbeat, process liveness is never inferred from queue traffic."
             ),
             "queueWriters are queue activity observations derived from queue_jobs (one entry per queue), not process heartbeats; see serviceLiveness for process liveness."
                 .to_string(),
@@ -648,7 +648,7 @@ mod tests {
 
     /// End-to-end: the emitter writes a lease, `system_health` reports it as
     /// a LIVE process; a stale row is reported stale; a service with no row
-    /// at all is reported `no_heartbeat` — never inferred from queue
+    /// at all is reported `no_heartbeat`, never inferred from queue
     /// activity.
     #[tokio::test]
     async fn service_heartbeats_report_real_process_liveness() {

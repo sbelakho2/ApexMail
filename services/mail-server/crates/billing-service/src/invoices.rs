@@ -47,7 +47,7 @@ const S3_DEFAULT_HOST: &str = "s3.eu-central-1.amazonaws.com";
 ///
 /// `None` (unset or blank) means NO endpoint is configured and the historical
 /// AWS virtual-hosted behaviour is used. When set, its scheme, host (with
-/// port) and path prefix are honoured — see [`s3_object_target`].
+/// port) and path prefix are honoured, see [`s3_object_target`].
 fn s3_endpoint() -> Option<String> {
     std::env::var("S3_ENDPOINT")
         .ok()
@@ -91,7 +91,7 @@ pub const BILLING_ADDRESS_SNAPSHOT_VERSION: u32 = 1;
 /// and optional VAT number.
 ///
 /// Delegates to [`billing_common::vat_rates::calculate_vat`]. Reverse charge
-/// is NOT authorised by this wrapper (it carries no evidence) — use
+/// is NOT authorised by this wrapper (it carries no evidence), use
 /// [`calculate_vat_for_invoice`] / `calculate_vat_with_evidence` when
 /// authoritative VIES evidence is available.
 pub use billing_common::vat_rates::calculate_vat;
@@ -101,7 +101,7 @@ use billing_common::vat_rates::{self, VatValidationEvidence};
 /// Load the newest authoritative VAT evidence for a tenant's VAT number.
 ///
 /// Returns `None` when there is no evidence row (or the evidence cannot be
-/// authoritative) — callers then charge the normal destination rate, because
+/// authoritative), callers then charge the normal destination rate, because
 /// structural validity is not evidence. A database error (e.g. the table is
 /// absent mid-upgrade) also degrades to `None` (fail closed to normal VAT)
 /// with a warning, never to a silent zero-rate.
@@ -163,7 +163,7 @@ where
             tracing::warn!(
                 tenant_id = %tenant_id,
                 error = %error,
-                "VAT evidence lookup failed — charging normal VAT (fail closed)"
+                "VAT evidence lookup failed, charging normal VAT (fail closed)"
             );
             None
         }
@@ -237,7 +237,7 @@ pub struct CreateInvoiceInput {
     pub overage_period: Option<DateTime<Utc>>,
     /// Idempotency marker for the CONTRACT product-line sweep (migration
     /// 255): the calendar-month start the invoice settles. A separate
-    /// column from `overage_period` on purpose — a PAYG tenant can also
+    /// column from `overage_period` on purpose, a PAYG tenant can also
     /// hold a Platform/Mailboxes contract, and sharing one marker would
     /// make the second charge collide with (and be swallowed by) the first
     /// invoice's identity. `invoices.product_lines_period` is written in
@@ -376,7 +376,7 @@ pub async fn create_invoice(
 /// Create an invoice INSIDE a caller-owned transaction.
 ///
 /// The usage sweeps must claim the billing period and insert its invoice
-/// atomically (audit F29 — the old claim-then-insert-on-another-connection
+/// atomically (audit F29, the old claim-then-insert-on-another-connection
 /// sequence let two sweeps double-invoice a period). Everything this
 /// function does (address read, invoice numbering, INSERT) executes on the
 /// caller's transaction, so a unique violation on `overage_period`
@@ -452,10 +452,10 @@ pub async fn create_invoice_in_tx(
     // A US customer's invoice in a state the OPERATOR has registered carries
     // a sales-tax line computed from the committed rate file (the combined
     // rate when the row carries one), stamped with state + rate + source +
-    // retrieved date — OR, when the customer holds a valid exemption
+    // retrieved date, OR, when the customer holds a valid exemption
     // certificate for the state, no tax line and an exemption record on the
-    // snapshot. The file is loaded lazily — only once the customer is US and
-    // the state is registered — so a problem in it can never refuse an
+    // snapshot. The file is loaded lazily, only once the customer is US and
+    // the state is registered, so a problem in it can never refuse an
     // invoice that would carry no tax. A registered state with a missing or
     // stale rate row REFUSES the invoice (a named error): charging a guess,
     // or silently skipping the tax of a registered state, are both false.
@@ -523,7 +523,7 @@ pub async fn create_invoice_in_tx(
     let id = Uuid::new_v4();
     let items_json = encode_invoice_line_items(&line_items)?;
     // Immutable billing-address snapshot (audit F08). Stored as TEXT
-    // (the column's type since migration 076) — versioned JSON (the
+    // (the column's type since migration 076), versioned JSON (the
     // api-server admin writer snapshots the same contract). Null/empty
     // optional fields stay null: readers must NOT fill them from the live
     // account (F08: snapshot-vs-live is chosen once per invoice).
@@ -770,7 +770,7 @@ pub async fn create_paid_plan_invoice_in_tx(
     }
 
     let line_items = vec![InvoiceLineItem {
-        description: format!("{plan_display_name} — {interval}"),
+        description: format!("{plan_display_name}, {interval}"),
         quantity: 1,
         unit_price: net,
         amount: net,
@@ -916,7 +916,7 @@ pub fn compute_outstanding(
 
 /// Durable outstanding balance for an invoice: total minus confirmed
 /// payment allocations (migration 140) minus the DEBT-REDUCTION part of
-/// credit notes (migration 183 — only that part reduces the unpaid
+/// credit notes (migration 183, only that part reduces the unpaid
 /// obligation; the refunded part returned value that was actually paid).
 /// This is the single derivation UI, wallet application, Mollie
 /// collection, dunning and credit limits must use (audits F35/F60).
@@ -1301,7 +1301,7 @@ pub async fn get_invoice_by_id(
 }
 
 // ---------------------------------------------------------------------------
-// Invoice void (DF-5 finding B) — the missing half of the invoice state
+// Invoice void (DF-5 finding B), the missing half of the invoice state
 // machine. Status filters already reference 'void' (outstanding derivation,
 // dunning) but NO surface could express the transition; this is the one
 // writer. Operators reach it through the api-server admin billing routes
@@ -1311,7 +1311,7 @@ pub async fn get_invoice_by_id(
 /// Input for [`void_invoice`].
 #[derive(Debug, Clone)]
 pub struct VoidInvoiceInput {
-    /// Tenant owning the invoice — the lookup is tenant-scoped, so another
+    /// Tenant owning the invoice, the lookup is tenant-scoped, so another
     /// tenant's invoice id is indistinguishable from an unknown one.
     pub tenant_id: String,
     pub invoice_id: Uuid,
@@ -1335,7 +1335,7 @@ pub enum InvoiceVoidError {
     /// Only draft/pending invoices void locally. A PAID invoice voids as a
     /// provider refund of its bound payment; without a bound payment
     /// (`mollie_payment_id`) there is nothing provider-side to return, so
-    /// the refusal carries the refusing state verbatim — a wallet-settled
+    /// the refusal carries the refusing state verbatim, a wallet-settled
     /// paid invoice is refunded with a credit note instead.
     #[error(
         "invoice {invoice_id} is in status '{status}': only draft or open (pending) invoices can \
@@ -1345,7 +1345,7 @@ pub enum InvoiceVoidError {
     NotVoidable { invoice_id: Uuid, status: String },
     /// The invoice carries a Mollie payment (`mollie_payment_id`) whose
     /// refund is required, but this deployment cannot reach Mollie (no
-    /// `MOLLIE_API_KEY`/`MOLLIE_PROFILE_ID`): refused HONESTLY — the
+    /// `MOLLIE_API_KEY`/`MOLLIE_PROFILE_ID`): refused HONESTLY, the
     /// local row is left untouched rather than drifting from the provider
     /// state.
     #[error(
@@ -1364,7 +1364,7 @@ pub enum InvoiceVoidError {
     #[error("audit log failure: {0}")]
     Audit(String),
     /// The void committed but the re-read of the voided invoice failed
-    /// (e.g. corrupt line_items JSONB) — the state DID change, the response
+    /// (e.g. corrupt line_items JSONB), the state DID change, the response
     /// payload could not be built.
     #[error(transparent)]
     Readback(#[from] InvoiceError),
@@ -1409,7 +1409,7 @@ async fn mollie_refund_payment(
 }
 
 /// The locally-voidable pre-states: `draft` and `pending` (the platform's
-/// open/unpaid states — a pending invoice is issued but unsettled). Mollie
+/// open/unpaid states, a pending invoice is issued but unsettled). Mollie
 /// has no provider-side invoice object, so an unpaid invoice's provider-side
 /// "void" is a no-op and these transition locally with NO provider call.
 /// `uncollectible` refuses (a deliberate write-off state, not an open
@@ -1423,17 +1423,17 @@ fn is_voidable_status(status: &str) -> bool {
 /// * `draft`/`pending` → `void` with `closed_at` pinned, audited on the
 ///   canonical 7-segment chain (`billing.invoice_voided`). Mollie has no
 ///   provider-side invoice to void (no invoice/customer/subscription
-///   objects exist provider-side), so this is a LOCAL transition — no
+///   objects exist provider-side), so this is a LOCAL transition, no
 ///   provider call, no Mollie configuration required.
-/// * An already-`void` invoice returns the SAME invoice unchanged — the
-///   requested end-state — and writes nothing further (retries and duplicate
+/// * An already-`void` invoice returns the SAME invoice unchanged, the
+///   requested end-state, and writes nothing further (retries and duplicate
 ///   submissions are never duplicate rows or duplicate audit events).
 /// * `paid` with a bound payment (`mollie_payment_id`) voids as a
 ///   REFUND: `POST /payments/{paymentPspReference}/refunds` for the local
 ///   invoice's full amount/currency is issued FIRST (deterministic
 ///   `Idempotency-Key`, so a retried void replays the same refund), then the
 ///   local rows flip to `void`. A Mollie refusal or an unconfigured Mollie
-///   deployment leaves the local row untouched — never a fake local-only
+///   deployment leaves the local row untouched, never a fake local-only
 ///   success. The refund outcome is async at Mollie; the webhook settles it.
 /// * `paid` with NO bound payment (e.g. wallet settlement) and
 ///   `uncollectible` refuse with [`InvoiceVoidError::NotVoidable`] naming
@@ -1462,13 +1462,13 @@ pub async fn void_invoice(
         };
         if status == "void" {
             // Idempotent replay: the requested end-state is already the
-            // stored state — return it, write nothing.
+            // stored state, return it, write nothing.
             tx.commit().await.map_err(InvoiceVoidError::Db)?;
             return get_invoice_by_id(pool, input.invoice_id)
                 .await?
                 .ok_or(InvoiceVoidError::InvoiceNotFound(input.invoice_id));
         }
-        // Unpaid (draft/pending) invoices void LOCALLY — Mollie has no
+        // Unpaid (draft/pending) invoices void LOCALLY, Mollie has no
         // provider-side invoice object to void. A PAID invoice voids as a
         // provider refund, but only when a payment is BOUND
         // (`mollie_payment_id`): without one (e.g. wallet settlement)
@@ -1635,8 +1635,8 @@ struct StoredInvoiceLineItems {
 }
 
 /// Encode line items in the CANONICAL persisted shape (versioned,
-/// snake_case). Public so every writer — including the api-server admin
-/// invoice path — stores rows this module can decode back; the legacy
+/// snake_case). Public so every writer, including the api-server admin
+/// invoice path, stores rows this module can decode back; the legacy
 /// bare-array camelCase shape some admin-written rows carry still decodes
 /// through [`InvoiceLineItem`]'s aliases, but no writer may emit it again.
 pub fn encode_invoice_line_items(
@@ -1653,7 +1653,7 @@ pub fn encode_invoice_line_items(
 ///
 /// `NULL` line_items is the documented legacy shape (invoice stored before
 /// the column was populated) and yields an empty list. Present-but-invalid
-/// JSON is corruption of the invoice's monetary breakdown — rendering an
+/// JSON is corruption of the invoice's monetary breakdown, rendering an
 /// invoice with its totals but silently EMPTY items would drift the
 /// customer-facing money state, so it fails with
 /// [`InvoiceError::CorruptLineItems`] naming the invoice.
@@ -1674,7 +1674,7 @@ pub fn decode_invoice_line_items(
         tracing::error!(
             invoice_id = %invoice_id,
             error = %source,
-            "corrupt invoices.line_items JSONB — invoice decode fails closed (Fix #10 sweep)"
+            "corrupt invoices.line_items JSONB, invoice decode fails closed (Fix #10 sweep)"
         );
         InvoiceError::CorruptLineItems { invoice_id, source }
     })
@@ -1736,13 +1736,13 @@ pub enum InvoiceError {
     Recognition(String),
     /// US sales tax refused the invoice (plan WP C2): a registered state
     /// with a missing/stale rate row, or an unreadable data file. The
-    /// amount is never guessed — the caller's retry surfaces it.
+    /// amount is never guessed, the caller's retry surfaces it.
     #[error("US sales tax refusal: {0}")]
     UsSalesTax(String),
     #[error("serialization error: {0}")]
     Serialization(#[from] serde_json::Error),
     /// Fix #10 sweep: the persisted `line_items` JSONB does not decode, so
-    /// the invoice's monetary breakdown is corrupt — the lookup fails closed
+    /// the invoice's monetary breakdown is corrupt, the lookup fails closed
     /// instead of rendering the invoice with silently empty items.
     #[error(
         "corrupt persisted line items for invoice {invoice_id}: monetary breakdown fails closed \
@@ -1969,7 +1969,7 @@ mod tests {
     use billing_common::vat_rates;
 
     // ------------------------------------------------------------------
-    // Fix #10 sweep — corrupt persisted line_items fail the invoice decode
+    // Fix #10 sweep, corrupt persisted line_items fail the invoice decode
     // closed instead of rendering silently empty items.
     // ------------------------------------------------------------------
 
@@ -2100,7 +2100,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // Fix I3 — per-line VAT rounding must reconcile with the rounded total.
+    // Fix I3, per-line VAT rounding must reconcile with the rounded total.
     // ------------------------------------------------------------------
 
     #[test]
@@ -2116,7 +2116,7 @@ mod tests {
     #[test]
     fn allocate_vat_lines_absorbs_plus_one_cent_drift() {
         // Lines of 1 cent at 24 %: each line rounds to 0, but the total
-        // rounds to 1 — the final line is adjusted up by +1.
+        // rounds to 1, the final line is adjusted up by +1.
         let allocated = allocate_vat_across_lines(&[1, 1, 1], 24.0);
 
         assert_eq!(allocated, vec![0, 0, 1]);
@@ -2127,7 +2127,7 @@ mod tests {
     fn allocate_vat_lines_exact_rounding_needs_no_adjustment() {
         let allocated = allocate_vat_across_lines(&[10_000, 5_000], 24.0);
 
-        // Exact per-line rounding already reconciles — no drift to absorb.
+        // Exact per-line rounding already reconciles, no drift to absorb.
         assert_eq!(
             allocated,
             vec![(10_000 * 24 + 50) / 100, (5_000 * 24 + 50) / 100]
@@ -2237,7 +2237,7 @@ mod tests {
             vat_amount: 240,
         }];
 
-        // Fix #10 sweep: decode now returns Result — the legacy unversioned
+        // Fix #10 sweep: decode now returns Result, the legacy unversioned
         // array shape still decodes when valid.
         let decoded =
             decode_invoice_line_items(Uuid::new_v4(), serde_json::to_value(&line_items).unwrap())
@@ -2260,7 +2260,7 @@ mod tests {
         }])
         .expect("versioned invoice line items should serialize");
 
-        // Fix #10 sweep: decode now returns Result — the versioned wrapper
+        // Fix #10 sweep: decode now returns Result, the versioned wrapper
         // shape still decodes when valid.
         let decoded = decode_invoice_line_items(Uuid::new_v4(), encoded)
             .expect("versioned line items decode (Fix #10)");
@@ -2290,7 +2290,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // Bug 3 — the object target follows the CONFIGURED endpoint.
+    // Bug 3, the object target follows the CONFIGURED endpoint.
     // ------------------------------------------------------------------
 
     #[test]
@@ -2350,7 +2350,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // Audits F60/F04/F73 — ONE outstanding derivation, allocation-ledger
+    // Audits F60/F04/F73, ONE outstanding derivation, allocation-ledger
     // aware, subtracting only the DEBT-REDUCTION part of credit notes and
     // resolving legacy nullable totals canonically.
     // ------------------------------------------------------------------
@@ -2924,13 +2924,13 @@ mod coverage_adversarial {
             let tenant = "ivcov_remainder";
             seed_tenant(env, tenant).await;
 
-            // Case 1 — PAID with no allocation rows: zero.
+            // Case 1, PAID with no allocation rows: zero.
             let _paid_plain = insert_invoice(env, tenant, "paid", "EUR", 1111).await;
-            // Case 2 — UNPAID (pending/overdue) with no allocation rows: the
+            // Case 2, UNPAID (pending/overdue) with no allocation rows: the
             // full total.
             let _pending_plain = insert_invoice(env, tenant, "pending", "EUR", 5000).await;
             let _overdue_usd = insert_invoice(env, tenant, "overdue", "USD", 700).await;
-            // Case 3 — WITH allocations: total − allocated.
+            // Case 3, WITH allocations: total − allocated.
             let pending_partial = insert_invoice(env, tenant, "pending", "EUR", 4000).await;
             allocate(env, tenant, pending_partial, 1500).await;
             // A PAID invoice with a PARTIAL allocation is still fully settled
@@ -3102,7 +3102,7 @@ mod coverage_adversarial {
             assert!(error.to_string().contains("500"), "{error}");
 
             // The renderer request carries the escaped description and the
-            // frozen billing identity — never raw user markup.
+            // frozen billing identity, never raw user markup.
             let body = mock.last_body("/v1/pdf/render").expect("render call");
             assert!(
                 body.contains("&lt;script&gt;&amp;&quot;&#39;evil"),
@@ -3159,7 +3159,7 @@ mod coverage_adversarial {
             let renderer_base = spawn_mock(renderer.clone()).await;
 
             // The local S3-compatible mock, reached over PLAIN HTTP with a
-            // path prefix — both of which the old `https://{host}/…` builder
+            // path prefix, both of which the old `https://{host}/…` builder
             // discarded.
             let storage = Mock::default();
             let storage_base = spawn_mock(storage.clone()).await;
@@ -3296,7 +3296,7 @@ mod coverage_adversarial {
     }
 
     // -------------------------------------------------------------------
-    // DF-5 finding B — the invoice VOID transition (previously referenced
+    // DF-5 finding B, the invoice VOID transition (previously referenced
     // by status filters but expressible NOWHERE). The transition matrix,
     // idempotency, Mollie honesty and audit re-derivability.
     // -------------------------------------------------------------------
@@ -3513,7 +3513,7 @@ mod coverage_adversarial {
         );
 
         // Byte-exact re-derivation: the canonical 7-segment formula over the
-        // row's own columns (machine writer — empty user segment).
+        // row's own columns (machine writer, empty user segment).
         let recomputed = apexmail_lib::audit::audit_hash(
             Some(&row_tenant),
             None,
@@ -3558,7 +3558,7 @@ mod coverage_adversarial {
     });
 
     // Mollie honesty, both directions of the checkout contract:
-    // * an UNPAID (draft/pending) invoice voids LOCALLY — Mollie has no
+    // * an UNPAID (draft/pending) invoice voids LOCALLY, Mollie has no
     //   provider-side invoice object, so no provider call and no Mollie
     //   configuration is involved, even when a payment id is recorded;
     // * a PAID invoice voids as an async REFUND of its bound payment

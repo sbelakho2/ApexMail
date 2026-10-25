@@ -49,18 +49,18 @@ pub struct MarketingClaim {
 /// How a claim's `evidence_location` is to be read (the served registry must
 /// not imply that a marketing URL is a checkable artifact).
 ///
-/// * [`ClaimEvidenceKind::RepoPath`] — a path RELATIVE TO THE REPOSITORY ROOT
+/// * [`ClaimEvidenceKind::RepoPath`], a path RELATIVE TO THE REPOSITORY ROOT
 ///   that must exist (file or directory). The `claims_registry::tests::
 ///   every_repo_path_evidence_target_exists` test is the pin: a claim whose
 ///   evidence file is gone fails the suite, so a pointer cannot outlive its
 ///   artifact.
-/// * [`ClaimEvidenceKind::RuntimeSource`] — a named runtime evidence source
+/// * [`ClaimEvidenceKind::RuntimeSource`], a named runtime evidence source
 ///   (`runtime:<name>`), registered in [`RUNTIME_EVIDENCE_SOURCES`] with the
 ///   repo path of the code that produces it. Used for numbers that come from
 ///   a live system (Prometheus histograms, tenant analytics) rather than a
 ///   committed document; the name is validated against the registry, so no
 ///   claim can invent a source.
-/// * [`ClaimEvidenceKind::None`] — no evidence (prohibited claims and
+/// * [`ClaimEvidenceKind::None`], no evidence (prohibited claims and
 ///   illustrative targets that must carry "not yet achieved" limitations).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -255,8 +255,8 @@ pub fn seed_claims_registry() -> ClaimsRegistry {
 
     // Audit F10: the "EEA data processing and storage" claim (CL-001) and
     // its `docs/compliance/data-residency.md` evidence pointer were REMOVED.
-    // Nothing enforces data residency anywhere in the codebase — no routing,
-    // pinning or replication constraint reads a region selection — so the
+    // Nothing enforces data residency anywhere in the codebase, no routing,
+    // pinning or replication constraint reads a region selection, so the
     // claim (and the evidence document advertising it) were untrue. An
     // untrue compliance claim must not ship; it may only return together
     // with the mechanism that makes it true.
@@ -849,7 +849,7 @@ pub fn seed_claims_registry() -> ClaimsRegistry {
         evidence_location: Some("runtime:api_gateway_histogram".into()),
         measurement_method: Some("Server-side timing from request receipt to response transmission, measured at the API gateway over rolling 30-day windows".into()),
         measurement_period: Some("Rolling 30 days".into()),
-        environment_measured: Some("Production — EU (Helsinki)".into()),
+        environment_measured: Some("Production, EU (Helsinki)".into()),
         plan_applicability: vec!["enterprise".into()],
         geographic_scope: Some("EU region".into()),
         limitations: Some("Excludes client-side network latency, DNS resolution, and TLS handshake beyond server termination point. Excludes health-check probes, unauthenticated requests, and rate-limited (HTTP 429) requests.".into()),
@@ -868,7 +868,7 @@ pub fn seed_claims_registry() -> ClaimsRegistry {
         owner: "Engineering".into(),
         approver: None,
         evidence_location: Some("runtime:sandbox_validation_harness".into()),
-        measurement_method: Some("Internal validation latency only — no email is sent. Measures request validation, authentication, and internal queue acceptance without outbound SMTP interaction. Not an SLA.".into()),
+        measurement_method: Some("Internal validation latency only, no email is sent. Measures request validation, authentication, and internal queue acceptance without outbound SMTP interaction. Not an SLA.".into()),
         measurement_period: Some("Per-request measurement".into()),
         environment_measured: Some("Sandbox".into()),
         plan_applicability: vec!["all".into()],
@@ -1062,7 +1062,7 @@ mod tests {
                             claim.status,
                             ClaimStatus::Prohibited | ClaimStatus::Illustrative
                         ) || claim.evidence_location.is_none(),
-                        "claim {} carries no evidence but is {} — only prohibited/illustrative \
+                        "claim {} carries no evidence but is {}, only prohibited/illustrative \
                          claims may ship without a pointer",
                         claim.claim_id,
                         claim.status_string()
@@ -1073,7 +1073,7 @@ mod tests {
                     assert!(
                         target.exists(),
                         "claim {} (status {:?}) cites `{path}`, which does not exist in the \
-                         repository — fix the pointer or drop the claim",
+                         repository, fix the pointer or drop the claim",
                         claim.claim_id,
                         claim.status
                     );
@@ -1130,7 +1130,7 @@ mod tests {
         );
         assert!(
             checked >= 15,
-            "the evidence pin only checked {checked} claims — it would be vacuous"
+            "the evidence pin only checked {checked} claims, it would be vacuous"
         );
     }
 
@@ -1182,7 +1182,7 @@ mod tests {
     /// "EEA data processing and storage" with `docs/compliance/data-residency.md`
     /// as public evidence while no code path implements (or even reads) a
     /// residency selection. If this test fails, the untrue claim was
-    /// reintroduced — wire the enforcement mechanism first, then re-register
+    /// reintroduced, wire the enforcement mechanism first, then re-register
     /// the claim with real evidence.
     #[test]
     fn the_untrue_data_residency_claim_stays_removed() {
@@ -1192,7 +1192,7 @@ mod tests {
             "CL-001 (EEA data-residency claim) must not ship without an enforcement mechanism"
         );
         // No remaining claim may cite the data-residency evidence document
-        // either — the pointer died with the claim.
+        // either, the pointer died with the claim.
         for claim in r.all() {
             assert_ne!(
                 claim.evidence_location.as_deref(),

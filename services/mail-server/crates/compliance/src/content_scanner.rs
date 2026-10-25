@@ -1,4 +1,4 @@
-//! Content scanning engine — multi-layer email analysis covering spam, phishing,
+//! Content scanning engine, multi-layer email analysis covering spam, phishing,
 //! malware, and policy compliance.
 //!
 //! Spam:15 regex rules with fast-check combined alternation, caps/punctuation ratios.
@@ -174,7 +174,7 @@ static URL_REGEX: LazyLock<Option<Regex>> = LazyLock::new(|| {
                 pattern = "url_regex",
                 error = %e,
                 counter = REGEX_FAILURE_COUNTER.load(Ordering::Relaxed),
-                "CRITICAL: Invalid URL regex pattern — phishing URL detection degraded"
+                "CRITICAL: Invalid URL regex pattern, phishing URL detection degraded"
             );
             None
         }
@@ -323,7 +323,7 @@ fn compile_regex(pattern: &str, label: &str) -> Option<Regex> {
                 label,
                 error = %e,
                 counter = REGEX_FAILURE_COUNTER.load(Ordering::Relaxed),
-                "CRITICAL: Invalid regex pattern in static scanner — security scanner degraded"
+                "CRITICAL: Invalid regex pattern in static scanner, security scanner degraded"
             );
             None
         }
@@ -339,7 +339,7 @@ fn compile_aho(patterns: &[&str], label: &str) -> Option<AhoCorasick> {
                 label,
                 error = %e,
                 counter = REGEX_FAILURE_COUNTER.load(Ordering::Relaxed),
-                "CRITICAL: Invalid Aho-Corasick patterns in static scanner — security scanner degraded"
+                "CRITICAL: Invalid Aho-Corasick patterns in static scanner, security scanner degraded"
             );
             None
         }
@@ -558,7 +558,7 @@ impl ContentScanner {
             let caps = content.subject.chars().filter(|c| c.is_uppercase()).count();
             let ratio = caps as f64 / content.subject.len() as f64;
             if ratio > 0.9 {
-                // ALL CAPS (>90%) — most severe, add full penalty
+                // ALL CAPS (>90%), most severe, add full penalty
                 score += 4.0;
                 triggers.push(SpamTrigger {
                     rule: "ALL_CAPS_SUBJECT".into(),
@@ -566,7 +566,7 @@ impl ContentScanner {
                     description: "Subject line is all caps".into(),
                 });
             } else if ratio > 0.3 {
-                // EXCESSIVE CAPS (30-90%) — moderate penalty
+                // EXCESSIVE CAPS (30-90%), moderate penalty
                 score += 4.0;
                 triggers.push(SpamTrigger {
                     rule: "EXCESSIVE_CAPS".into(),
@@ -744,7 +744,7 @@ impl ContentScanner {
                         // crate IDNA-normalises hosts to punycode
                         // ("аpple.com" -> "xn--pple-43d.com"), which erases
                         // exactly the characters this detector exists to
-                        // catch — matching on the parsed host could never
+                        // catch, matching on the parsed host could never
                         // fire.
                         let raw_host = raw_host_of(url_str);
                         if raw_host.is_some_and(|raw| {
@@ -971,11 +971,11 @@ impl ContentScanner {
 
         // Tenant-specific policies from DB.
         // The canonical content_policies column is `enabled` (migration 092
-        // lineage) — the previous `active = true` predicate failed with
+        // lineage), the previous `active = true` predicate failed with
         // 42703 and propagated out of policy loading, so scans never
         // evaluated stored policies (audit F77).
         // L-04: a policy-store outage propagates as an EXPLICIT error from
-        // analyze_policy (scan_email returns Err) — it is never swallowed
+        // analyze_policy (scan_email returns Err), it is never swallowed
         // into an empty policy set that would stamp scans "clean".
         let tenant_policies: Vec<(String, serde_json::Value)> = sqlx::query_as(
             "SELECT name, rules FROM content_policies
@@ -1013,7 +1013,7 @@ impl ContentScanner {
                             .iter()
                             .filter_map(|pat| {
                                 RegexBuilder::new(pat)
-                                    .size_limit(1 << 20) // 1 MB compiled DFA limit — prevents ReDoS
+                                    .size_limit(1 << 20) // 1 MB compiled DFA limit, prevents ReDoS
                                     .build()
                                     .ok()
                                     .map(|re| (pat.clone(), re))
@@ -1259,7 +1259,7 @@ mod tests {
     }
 
     /// The regex-compile failure path increments the global counter and
-    /// degrades to "no rule" — never a panic.
+    /// degrades to "no rule", never a panic.
     ///
     /// Test-isolation note: `regex_failure_count` is a PROCESS-GLOBAL
     /// counter, and this test's sibling
@@ -1267,7 +1267,7 @@ mod tests {
     /// an exact `before + 1` delta. When the two ran concurrently, this
     /// test's own invalid compile could land inside the sibling's
     /// read-assert window and fail it spuriously. Both counter tests hold a
-    /// shared mutex so the global counter is only observed serially — the
+    /// shared mutex so the global counter is only observed serially, the
     /// assertions themselves are unchanged.
     #[test]
     fn broken_regex_is_counted_and_degrades_to_none() {
@@ -1714,11 +1714,11 @@ mod tests {
     }
 
     /// The defensive compile helpers really do degrade (and count the
-    /// failure) when handed an invalid regex — the contract every static
+    /// failure) when handed an invalid regex, the contract every static
     /// LazyLock relies on if a pattern is ever edited into invalidity.
     /// (The Aho-Corasick twin's Err arm is unreachable by construction:
     /// `AhoCorasick::new` over string slices only fails on memory limits
-    /// that `new` does not apply — asserted below for every candidate
+    /// that `new` does not apply, asserted below for every candidate
     /// failure input.)
     #[test]
     fn compile_helpers_reject_invalid_patterns_and_count_failures() {
@@ -1741,7 +1741,7 @@ mod tests {
         assert_eq!(regex_failure_count(), before + 1);
 
         // Proven unreachable: no pattern slice makes `AhoCorasick::new`
-        // fail (empty list, empty pattern, mixed) — so `compile_aho`'s
+        // fail (empty list, empty pattern, mixed), so `compile_aho`'s
         // error arm cannot be exercised through any input and the helper
         // degrades exactly like compile_regex should a future aho-corasick
         // release introduce fallible cases.

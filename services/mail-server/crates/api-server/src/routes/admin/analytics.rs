@@ -1,4 +1,4 @@
-//! Analytics endpoints — event stats, time series, provider breakdown.
+//! Analytics endpoints, event stats, time series, provider breakdown.
 //!
 //! Metric conventions (single source of truth:
 //! [`crate::analytics_metrics`]):
@@ -9,7 +9,7 @@
 //! * outcomes use `BOOL_OR` per cohort, so repeat opens/clicks on one
 //!   recipient-send can never inflate a numerator (no clamping anywhere);
 //! * rates are FRACTIONS in `0.0..=1.0`, or `null`/absent when the send
-//!   cohort is empty — never `0`, never percentages.
+//!   cohort is empty, never `0`, never percentages.
 //!
 //! Provider identity prefers a persisted normalized provider dimension on
 //! `events` (migration 202); rows without one fall back to well-known
@@ -35,7 +35,7 @@ pub use crate::analytics_metrics::{
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/", get(get_analytics))
-        // ClickHouse-backed engagement time-series — the one real consumer
+        // ClickHouse-backed engagement time-series, the one real consumer
         // of the analytics crate's QueryEngine (previously zero consumers).
         .route("/clickhouse/engagement", get(get_clickhouse_engagement))
         // Analytics-family routers are composed here rather than as separate
@@ -77,7 +77,7 @@ pub struct AnalyticsResponse {
 /// Every count is a send-cohort row count `(message_id, lower(recipient))`
 /// and every rate is a FRACTION in `0.0..=1.0` (delivered/sent etc.) over
 /// the send-cohort window. Because each numerator cohort also has a `sent`
-/// event, the ratios are `<= 1.0` by construction — they are never clamped.
+/// event, the ratios are `<= 1.0` by construction, they are never clamped.
 ///
 /// A rate is `null` when the window has no send cohort at all: absent, never
 /// a fabricated zero.
@@ -125,7 +125,7 @@ async fn get_analytics(
     let range = parse_analytics_range(&params.range);
     let columns = detect_event_columns(&state).await;
 
-    // Aggregate stats — canonical send-cohort counts over send time.
+    // Aggregate stats, canonical send-cohort counts over send time.
     let counts = system_send_cohort(&state, columns, range).await?;
 
     let stats = AnalyticsStats {
@@ -142,10 +142,10 @@ async fn get_analytics(
         complaint_rate: counts.complaint_rate(),
     };
 
-    // Time series — same convention, bucketed per send day.
+    // Time series, same convention, bucketed per send day.
     let time_series = send_cohort_time_series(&state.db, None, range, columns).await?;
 
-    // Provider breakdown — persisted dimension when present, otherwise a
+    // Provider breakdown, persisted dimension when present, otherwise a
     // labelled consumer-domain-suffix inference.
     let breakdown = provider_breakdown(&state.db, None, range.interval_sql(), columns).await?;
 
@@ -170,7 +170,7 @@ async fn get_analytics(
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ClickHouseEngagementQuery {
-    /// Tenant whose engagement series to fetch (required — the ClickHouse
+    /// Tenant whose engagement series to fetch (required, the ClickHouse
     /// engine is tenant-scoped).
     pub tenant_id: String,
     #[serde(default = "default_range")]
@@ -187,14 +187,14 @@ pub struct ClickHouseEngagementResponse {
     pub time_series: Vec<apexmail_analytics::types::TimeSeriesPoint>,
     /// Time-to-engage histogram buckets from ClickHouse.
     pub engagement_histogram: Vec<apexmail_analytics::types::EngagementBucket>,
-    /// Populated only when ClickHouse is unreachable — an honest note
+    /// Populated only when ClickHouse is unreachable, an honest note
     /// instead of fabricated zeros.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
 }
 
 /// Build the ClickHouse client configuration from the shared `CLICKHOUSE_*`
-/// environment variables — the same names tracking-service reads
+/// environment variables, the same names tracking-service reads
 /// (CLICKHOUSE_URL / _DATABASE / _USER / _PASSWORD / _TLS_ENABLED), so a
 /// deployment wires both services identically.
 pub fn clickhouse_config_from_env() -> apexmail_analytics::config::ClickHouseConfig {
@@ -223,7 +223,7 @@ fn clickhouse_window(range: &str) -> chrono::Duration {
 /// Serve a tenant's engagement time-series from ClickHouse via the analytics
 /// crate's [`apexmail_analytics::QueryEngine`]. Degrades gracefully: when
 /// ClickHouse is unreachable the response is `available: false` with empty
-/// series and an explanatory note — the Postgres endpoints above remain the
+/// series and an explanatory note, the Postgres endpoints above remain the
 /// source of truth.
 async fn get_clickhouse_engagement(
     state: State<AppState>,
@@ -264,14 +264,14 @@ async fn get_clickhouse_engagement(
         Err(error) => {
             tracing::warn!(error = %error, "ClickHouse engine unavailable for engagement route");
             return Ok(Json(unavailable(
-                "ClickHouse is unreachable — engagement series omitted (Postgres analytics remain available)".into(),
+                "ClickHouse is unreachable, engagement series omitted (Postgres analytics remain available)".into(),
             )));
         }
     };
 
     if !engine.health_check().await.unwrap_or(false) {
         return Ok(Json(unavailable(
-            "ClickHouse health check failed — engagement series omitted (Postgres analytics remain available)".into(),
+            "ClickHouse health check failed, engagement series omitted (Postgres analytics remain available)".into(),
         )));
     }
 
@@ -322,7 +322,7 @@ mod tests {
     #[test]
     fn clickhouse_config_from_env_shares_tracking_service_variable_names() {
         // Same CLICKHOUSE_* variables tracking-service reads, with the same
-        // defaults — a deployment wires both services identically.
+        // defaults, a deployment wires both services identically.
         std::env::remove_var("CLICKHOUSE_URL");
         std::env::remove_var("CLICKHOUSE_DATABASE");
         std::env::remove_var("CLICKHOUSE_USER");

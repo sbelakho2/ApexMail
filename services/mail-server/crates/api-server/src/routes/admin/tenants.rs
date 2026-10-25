@@ -73,7 +73,7 @@ enum TenantIdBind {
 /// `tenant_id` type.
 ///
 /// * `character varying`/`text`/`character` (the canonical shape after
-///   migration 064): `WHERE tenant_id = $1` — the native text comparison the
+///   migration 064): `WHERE tenant_id = $1`, the native text comparison the
 ///   `tenant_id::text = $1` cast prevented (a cast on the COLUMN disables its
 ///   index; a cast on the PARAMETER does not).
 /// * `uuid`: bind the tenant id as a UUID when it parses as one. A tenant id
@@ -123,7 +123,7 @@ const TENANT_DELETION_EVIDENCE_TABLES: [&str; 3] =
 /// retention sweeper's semantics (crates/compliance/src/retention_sweep.rs):
 ///
 /// - `tenants.legal_hold` (migration 121): a held tenant is excluded from
-///   every purge — deleting its data is evidence spoliation, so deletion is
+///   every purge, deleting its data is evidence spoliation, so deletion is
 ///   refused outright.
 /// - `tenants.retention_days` (migration 121): a per-tenant retention
 ///   override obliges the platform to keep the tenant's records for N days.
@@ -184,7 +184,7 @@ pub(crate) async fn check_tenant_deletion_preconditions(
 
     if obligations.legal_hold {
         return Err(ApiError::Forbidden(
-            "tenant is under legal hold — its records must not be deleted".into(),
+            "tenant is under legal hold, its records must not be deleted".into(),
         ));
     }
 
@@ -192,7 +192,7 @@ pub(crate) async fn check_tenant_deletion_preconditions(
         let cutoff = obligations.anchor + chrono::Duration::days(i64::from(days));
         if chrono::Utc::now() < cutoff {
             return Err(ApiError::Forbidden(format!(
-                "tenant has a {days}-day retention obligation active until {} — \
+                "tenant has a {days}-day retention obligation active until {}, \
                  clear tenants.retention_days before deleting",
                 cutoff.to_rfc3339()
             )));
@@ -212,7 +212,7 @@ fn is_missing_column(error: &sqlx::Error) -> bool {
 /// Delete every tenant-scoped row and the tenant itself, in one transaction.
 ///
 /// Ordering invariant (P1-6): the actor-attributed audit entry is written
-/// FIRST, inside the transaction — a failed audit write aborts the deletion
+/// FIRST, inside the transaction, a failed audit write aborts the deletion
 /// (an unauditable tenant deletion must not happen), and the entry itself
 /// survives because `audit_logs` is excluded from the reflection-driven
 /// delete list via [`TENANT_DELETION_EVIDENCE_TABLES`].
@@ -225,7 +225,7 @@ pub async fn delete_tenant_records(
 ) -> Result<bool, sqlx::Error> {
     let mut transaction = db.begin().await?;
 
-    // Non-optional audit: propagate failures — never delete a tenant
+    // Non-optional audit: propagate failures, never delete a tenant
     // without leaving evidence of who ordered it.
     crate::audit_log::insert_audit_log_in_tx_with_env(
         &mut transaction,
@@ -320,7 +320,7 @@ pub struct TenantRow {
     /// The column is nullable (`tenants.slug` has no NOT NULL, and the
     /// partial index `idx_tenants_slug` is `WHERE slug IS NOT NULL`) and the
     /// shipped API-explorer sandbox seed (`sbx0explorer0000000000000x`)
-    /// inserts a NULL slug — decoding into `String` 500'd the whole list
+    /// inserts a NULL slug, decoding into `String` 500'd the whole list
     /// for every operator. Surface the honest SQL NULL instead.
     pub slug: Option<String>,
     pub plan: String,
@@ -345,7 +345,7 @@ pub struct UpdateTenantRequest {
 
 /// Tenant lifecycle statuses the generic editor may write. The suspend
 /// action path and the billing subscription override keep their own
-/// (different) allowlists — this one guards the direct PATCH field.
+/// (different) allowlists, this one guards the direct PATCH field.
 const TENANT_ALLOWED_STATUSES: [&str; 3] = ["active", "suspended", "pending"];
 
 /// `tenants.name` is VARCHAR(255): an over-long (or empty) name must be a
@@ -434,7 +434,7 @@ async fn update_tenant(
     if let Some(action) = &body.action {
         // F18: lifecycle actions are TRANSITIONS, not blind writes. Suspend
         // only applies to tenants that are currently operating
-        // (pending/active — mirroring the web console's guard), and the
+        // (pending/active, mirroring the web console's guard), and the
         // recovery action ("unsuspend") only lifts a 'suspended' tenant:
         // administrative, abuse, and billing holds that use other states
         // must be released through their own flows, never by this generic
@@ -490,12 +490,12 @@ async fn update_tenant(
         return Ok(StatusCode::OK);
     }
 
-    // Direct field updates — audited like every other control-plane
+    // Direct field updates, audited like every other control-plane
     // mutation (the action path above always was). One transaction: a name
     // update succeeding while the status update fails must not leave a
     // half-applied edit; rows_affected gates the 404.
     // (Name length is already validated by `validate_generic_tenant_update`
-    // — `tenants.name` is VARCHAR(255) and an over-long name must never
+    //, `tenants.name` is VARCHAR(255) and an over-long name must never
     // reach the UPDATE as a raw 22001 database error.)
     let mut tx = state.db.begin().await?;
     let mut changed = false;
@@ -528,7 +528,7 @@ async fn update_tenant(
     tx.commit().await?;
 
     if changed {
-        // F18: a direct status edit is also a policy change — drop the
+        // F18: a direct status edit is also a policy change, drop the
         // cached auth decisions so it takes effect immediately.
         if body.status.is_some() {
             invalidate_tenant_auth_caches(&state, &id).await;
@@ -593,7 +593,7 @@ async fn delete_tenant(
 }
 
 /// Actor-attributed tenant audit (P2-2): the acting operator's tenant AND
-/// user id land in every entry — `user_id: None` left control-plane
+/// user id land in every entry, `user_id: None` left control-plane
 /// mutations recorded as "someone did this, unknown who".
 async fn log_tenant_audit(
     state: &AppState,
@@ -643,7 +643,7 @@ mod tests {
     /// The per-table delete binds the tenant id NATIVELY for text/varchar
     /// `tenant_id` columns (canonical after migration 064), parses a UUID for
     /// uuid-typed columns, and skips a uuid column when the tenant id cannot
-    /// be a UUID (no row could ever match — the old text cast matched nothing
+    /// be a UUID (no row could ever match, the old text cast matched nothing
     /// there either, it just scanned).
     #[test]
     fn tenant_delete_plan_binds_the_native_type_and_skips_impossible_matches() {
@@ -849,7 +849,7 @@ mod tests {
             scopes: vec!["*".into()],
         };
 
-        // A pending tenant is not yet operating — resuming it is refused.
+        // A pending tenant is not yet operating, resuming it is refused.
         match update_tenant(
             State(state.clone()),
             operator.clone(),
@@ -995,7 +995,7 @@ mod tests {
 
         let state = crate::app::test_support::test_state_over(pool.clone()).await;
 
-        // (a) A customer-tenant caller — even holding the wildcard scope —
+        // (a) A customer-tenant caller, even holding the wildcard scope —
         // is refused by the per-handler gate.
         let customer = AuthUser {
             tenant_id: "01HCUSTOMERTENANT0abcdefgh".into(),
@@ -1118,7 +1118,7 @@ mod adversarial_tests {
             .all(|t| t["id"].is_string() && t["slug"].is_string()));
 
         // The `tenants.slug` column is nullable and the shipped explorer
-        // sandbox seed carries a NULL slug — a NULL row must list as an
+        // sandbox seed carries a NULL slug, a NULL row must list as an
         // honest `null`, never decode-fail the endpoint into a 500.
         let null_slug_id = format!("tns{}", &uuid::Uuid::new_v4().simple().to_string()[..18]);
         sqlx::query(
@@ -1373,7 +1373,7 @@ mod adversarial_tests {
         }
         // queue_jobs.tenant_id is UUID: no canonical tenant id (<= 26 chars)
         // can equal a uuid's text form, so this row must survive the delete
-        // untouched — and the planner must SKIP the statement rather than
+        // untouched, and the planner must SKIP the statement rather than
         // scan (or error) trying to match it.
         let queue_job_id = uuid::Uuid::new_v4();
         let queue_job_tenant = uuid::Uuid::new_v4();

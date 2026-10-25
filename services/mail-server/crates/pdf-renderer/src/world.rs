@@ -66,8 +66,8 @@ pub static TEMPLATES: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
 // ---------------------------------------------------------------------------
 // Embedded fonts (OFL-licensed)
 // ---------------------------------------------------------------------------
-// Documents render in the ARK faces — Spectral (display), Overpass (text) and
-// Overpass Mono (machine data) — with Noto Sans kept as the wide-coverage
+// Documents render in the ARK faces, Spectral (display), Overpass (text) and
+// Overpass Mono (machine data), with Noto Sans kept as the wide-coverage
 // fallback for scripts the ARK faces do not carry (CJK from Noto Sans SC).
 // All are parsed once and offered through the world's font book; `typst-pdf`
 // subsets and embeds the glyphs a document actually uses.
@@ -165,7 +165,7 @@ pub fn load_template_source(template_name: &str) -> Option<String> {
                         template = template_name,
                         path = %path.display(),
                         error = %e,
-                        "Failed to read external template — falling back to embedded",
+                        "Failed to read external template, falling back to embedded",
                     );
                 })
                 .ok();
@@ -173,7 +173,7 @@ pub fn load_template_source(template_name: &str) -> Option<String> {
         warn!(
             template = template_name,
             path = %path.display(),
-            "External template not found — falling back to embedded",
+            "External template not found, falling back to embedded",
         );
     }
 
@@ -182,7 +182,7 @@ pub fn load_template_source(template_name: &str) -> Option<String> {
 }
 
 // ---------------------------------------------------------------------------
-// TypstWorld — virtual filesystem for the Typst compiler
+// TypstWorld, virtual filesystem for the Typst compiler
 // ---------------------------------------------------------------------------
 
 /// The virtual filesystem backing one render: the template source as
@@ -213,13 +213,13 @@ impl TypstWorld {
     /// the embedded `include_str!` copy.
     ///
     /// # Arguments
-    /// * `template_name` — key in `TEMPLATES` (e.g. `"invoice"`)
-    /// * `data_json` — serialized JSON data to inject as `/data.json`
+    /// * `template_name`, key in `TEMPLATES` (e.g. `"invoice"`)
+    /// * `data_json`, serialized JSON data to inject as `/data.json`
     ///
     /// # Errors
     /// Returns `Err` if the template name is not found in either location.
     pub fn new(template_name: &str, data_json: String) -> Result<Self, WorldError> {
-        // Reject path-shaped names before any filesystem join — a 400 for
+        // Reject path-shaped names before any filesystem join, a 400 for
         // the caller, not a filesystem read.
         validate_template_name(template_name)?;
         let source = load_template_source(template_name)

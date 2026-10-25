@@ -1,4 +1,4 @@
-//! Deterministic reply classification — layer 1 of 3.
+//! Deterministic reply classification, layer 1 of 3.
 //!
 //! This layer only decides what is provable from syntax and headers: delivery
 //! status notifications, auto-reply headers, one-click unsubscribe headers and
@@ -452,7 +452,7 @@ fn stop_request_verdict(input: &ReplyInput) -> Option<DeterministicVerdict> {
 }
 
 // ---------------------------------------------------------------------------
-// Objection families (plan §5.5) — the LABELLING fallback
+// Objection families (plan §5.5), the LABELLING fallback
 // ---------------------------------------------------------------------------
 //
 // These families never change a disposition. They run only when the AI layer
@@ -540,7 +540,7 @@ const OBJECTION_FAMILIES: [(&str, &[&str]); 6] = [
 ];
 
 /// The objection class a reply's words support, if any. Returns the FIRST
-/// family in taxonomy order — one class, deterministically chosen, with the
+/// family in taxonomy order, one class, deterministically chosen, with the
 /// matched token as evidence.
 pub fn label_objection_class(input: &ReplyInput) -> Option<(&'static str, String)> {
     let text = haystack(input);
@@ -574,7 +574,7 @@ static DAY_FIRST_MONTH_RE: LazyLock<Option<Regex>> = LazyLock::new(|| {
 });
 
 /// Parse a stated return date out of the body. Only absolute dates are
-/// accepted — relative phrases ("back on Monday") are deliberately left to
+/// accepted, relative phrases ("back on Monday") are deliberately left to
 /// the policy's default wait, because resolving them needs a reference date
 /// and getting it wrong would reschedule to the past or the wrong week.
 pub fn extract_return_date(body: &str) -> Option<DateTime<Utc>> {
@@ -747,7 +747,7 @@ mod tests {
     fn human_prose_mentioning_bounce_does_not_classify_as_dsn() {
         let verdict = classify(&ReplyInput::new(
             "Re: your email",
-            "I got a bounce notification but I am fine — let's talk next week",
+            "I got a bounce notification but I am fine, let's talk next week",
         ));
         assert!(
             verdict.is_none(),
@@ -1077,7 +1077,7 @@ mod tests {
 
 #[cfg(test)]
 mod return_date_tests {
-    //! Return-date extraction formats and DSN status precedence — the layer
+    //! Return-date extraction formats and DSN status precedence, the layer
     //! that decides whether an OOO reply reschedules a sequence and whether a
     //! bounce is hard or soft.
 

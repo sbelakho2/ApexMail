@@ -39,7 +39,7 @@ Un comprador cualificado puede solicitar la DPA vigente, información sobre subp
 
 ## Soberanía de la UE
 
-Enterprise Cloud incluye el enrutamiento EU-only: cada envío sale por los MTA europeos propios de ApexMail, con una retención fail-closed en lugar de un respaldo de terceros, y cada mensaje aceptado lleva un recibo de enrutamiento firmado con Ed25519. El argumento completo — empresa de la UE, centros de datos de la UE, el modo de enrutamiento y los recibos, cada uno enlazado con su evidencia — está en la [página de soberanía de la UE](/es/eu-sovereign/).
+Enterprise Cloud incluye el enrutamiento EU-only: cada envío sale por los MTA europeos propios de ApexMail, con una retención fail-closed en lugar de un respaldo de terceros, y cada mensaje aceptado lleva un recibo de enrutamiento firmado con Ed25519. El argumento completo, empresa de la UE, centros de datos de la UE, el modo de enrutamiento y los recibos, cada uno enlazado con su evidencia, está en la [página de soberanía de la UE](/es/eu-sovereign/).
 
 ## Ciclo de vida de facturación
 

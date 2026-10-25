@@ -293,7 +293,7 @@ fn database_failures_surface_as_handler_errors_on_every_endpoint() {
         let app = broken_app();
         let missing = Uuid::new_v4();
 
-        // (method, path, body) — bodies satisfy the Json extractors so each
+        // (method, path, body), bodies satisfy the Json extractors so each
         // request actually REACHES the handler's service calls.
         let endpoints: Vec<(&str, String, Option<serde_json::Value>)> = vec![
             ("GET", "/contracts".into(), None),
@@ -659,8 +659,8 @@ fn cross_tenant_overrides_and_foreign_resources_are_rejected() {
             assert_eq!(json["code"], "NOT_FOUND", "{json}");
         }
 
-        // A tenant with no whitelabel configuration gets a 404 — not an
-        // empty success — from the email-templates listing.
+        // A tenant with no whitelabel configuration gets a 404, not an
+        // empty success, from the email-templates listing.
         let (status, json) = call(
             &app,
             "GET",

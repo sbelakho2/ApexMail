@@ -3,7 +3,7 @@
 //!
 //! Source of truth: `platform-catalog` (see `docs/pricing-authority.md`).
 //! Marketing `pricing.json` is presentation-only and must never be used to
-//! grant entitlement — these tests pin the runtime catalog so drift is loud.
+//! grant entitlement, these tests pin the runtime catalog so drift is loud.
 
 use platform_catalog as catalog;
 
@@ -27,7 +27,7 @@ fn free_quota_is_3000_recurring_plus_30000_launch_allowance() {
         30,
         "launch allowance window is 30 days"
     );
-    // Free has no automatic overage — the quota gate blocks.
+    // Free has no automatic overage, the quota gate blocks.
     assert_eq!(
         free.overage_millicents_per_email, None,
         "Free must not silently overage"
@@ -35,7 +35,7 @@ fn free_quota_is_3000_recurring_plus_30000_launch_allowance() {
 }
 
 /// Perfect commercial fact: annual billing is 10 monthly payments
-/// (≈16.7% below 12 monthly payments) — NOT a 10% discount.
+/// (≈16.7% below 12 monthly payments), NOT a 10% discount.
 #[test]
 fn annual_billing_is_ten_monthly_payments_not_10_percent() {
     for plan in catalog::PLANS {
@@ -74,8 +74,8 @@ fn catalog_plans_are_unique_and_monotone() {
     for plan in catalog::PLANS {
         assert!(names.insert(plan.name), "duplicate plan id {}", plan.name);
         // The monotone ladder applies to PRICED rungs. `payg` (Pay As You Go)
-        // has a deliberately €0 base fee — it bills per email, not per month
-        // — so it is not a rung on the monthly-fee ladder and its position
+        // has a deliberately €0 base fee, it bills per email, not per month
+        //, so it is not a rung on the monthly-fee ladder and its position
         // must not weaken the ordering of the plans that do charge.
         if plan.price_monthly_cents > 0 {
             assert!(
@@ -85,7 +85,7 @@ fn catalog_plans_are_unique_and_monotone() {
             );
             last_price = plan.price_monthly_cents;
         }
-        // Retention is a real product promise — never zero.
+        // Retention is a real product promise, never zero.
         assert!(plan.max_retention_days > 0, "plan {} retention", plan.name);
     }
     assert!(names.contains("free"));

@@ -1,4 +1,4 @@
-//! Delivery analytics endpoint — transport breakdown, latency percentiles,
+//! Delivery analytics endpoint, transport breakdown, latency percentiles,
 //! bounce/complaint rates by transport, and queue health monitoring.
 //!
 //! Metric conventions (single source of truth:
@@ -15,7 +15,7 @@
 //!
 //! Latency percentiles come from `email_delivery_log` (attempt-occurrence
 //! timestamps); the queue block is an explicit CURRENT snapshot, not a
-//! windowed metric — see [`DeliveryAnalyticsResponse::notes`].
+//! windowed metric, see [`DeliveryAnalyticsResponse::notes`].
 
 use axum::extract::{Query, State};
 use axum::routing::get;
@@ -90,7 +90,7 @@ pub struct ProviderDeliveryStats {
     /// Fraction in `0.0..=1.0`, or `null` when this transport group has no
     /// sends in the window.
     pub bounce_rate: Option<f64>,
-    /// `None` — per-provider/transport latency is not derivable from the
+    /// `None`, per-provider/transport latency is not derivable from the
     /// event-based breakdown. Real percentiles are served by `/latency`
     /// (from `email_delivery_log`), so this is explicitly absent instead of
     /// a placeholder zero.
@@ -118,8 +118,8 @@ pub struct LatencyPercentileResponse {
 
 /// Latency percentiles by SENDING TRANSPORT (`messages.transport`), the real
 /// dimension recorded for each delivery attempt. (The previous code grouped
-/// by `email_delivery_log.smtp_response` — the SMTP reply text, e.g.
-/// "250 OK" — which is not a provider at all.)
+/// by `email_delivery_log.smtp_response`, the SMTP reply text, e.g.
+/// "250 OK", which is not a provider at all.)
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TransportLatencyStats {
@@ -281,7 +281,7 @@ async fn get_delivery_analytics(
 /// The delivery-analytics read model, shared by the JSON endpoints and the
 /// control-plane `/analytics` page (F12: the module was already mounted but
 /// had no product surface consuming it, so the numbers existed with no UI
-/// claimant). One implementation — the page and the API can never drift.
+/// claimant). One implementation, the page and the API can never drift.
 ///
 /// The window defaults to 7 days for unknown range tokens (see
 /// [`parse_range_interval`]); queue fields are CURRENT snapshots.
@@ -302,7 +302,7 @@ pub(crate) async fn delivery_analytics_snapshot(
     // Latency percentiles from email_delivery_log (attempt occurrence).
     let latency = compute_latency_percentiles(db, &interval).await?;
 
-    // Queue depth — CURRENT snapshot (documented in the response notes).
+    // Queue depth, CURRENT snapshot (documented in the response notes).
     let queue: Option<(i64,)> = sqlx::query_as(
         "SELECT COUNT(*)::bigint FROM email_queue
          WHERE status IN ('pending', 'processing', 'deferred')",
@@ -415,7 +415,7 @@ async fn get_queue_health(
 
     let row = sqlx::query_as::<_, QueueRow>(
         // The queue columns are `attempts` (plural) and the OLDEST row is
-        // the oldest still-actionable one (pending/processing/deferred — a
+        // the oldest still-actionable one (pending/processing/deferred, a
         // failed row is not "waiting"). AVG(numeric) casts to double so the
         // f64 decode can never silently zero the field.
         "SELECT
@@ -487,7 +487,7 @@ async fn compute_latency_percentiles(
     .fetch_optional(db)
     .await
     // A decode/store failure must surface as an error, never as silent
-    // zeros — the old `.ok()`-style fallback here is exactly what hid the
+    // zeros, the old `.ok()`-style fallback here is exactly what hid the
     // numeric-vs-double decode failure and made the endpoint report 0 for
     // every real dataset.
     .map_err(ApiError::from)?
@@ -689,7 +689,7 @@ mod adversarial_tests {
         .expect("seed event");
     }
 
-    /// Returns `(id, created_at)` — the delivery log's composite FK is
+    /// Returns `(id, created_at)`, the delivery log's composite FK is
     /// `(email_id, created_at)` into `email_queue`, so its inserts must copy
     /// the queue row's exact `created_at` (the production writer does the
     /// same via INSERT…SELECT).

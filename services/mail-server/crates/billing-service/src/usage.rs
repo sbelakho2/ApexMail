@@ -25,13 +25,13 @@ use crate::types::{MeterEventType, UsageSummary};
 pub enum UsageOperationClaim {
     /// First claim of this logical operation. `original_timestamp` is the
     /// IMMUTABLE first-claim timestamp every durable (re-)recording of the
-    /// operation must use — the partitioned metering table can never hold
+    /// operation must use, the partitioned metering table can never hold
     /// two rows for one logical operation at different timestamps.
     Claimed { original_timestamp: DateTime<Utc> },
     /// The same logical operation with the SAME bound content was already
-    /// claimed — an idempotent replay.
+    /// claimed, an idempotent replay.
     Replay { original_timestamp: DateTime<Utc> },
-    /// The logical id was reused with DIFFERENT content — rejected, never
+    /// The logical id was reused with DIFFERENT content, rejected, never
     /// silently re-counted.
     Conflict,
 }
@@ -70,7 +70,7 @@ fn usage_operation_key(tenant_id: &str, event_type: &str, event_id: Uuid) -> Str
 /// operation exactly once in the canonical ledger, on the caller's
 /// transaction, BEFORE the metering row (and its quota effects) is
 /// written. Both generic metering ([`record_usage`]) and send
-/// reservations ([`record_with_quota_check`] — preserving F22's claim
+/// reservations ([`record_with_quota_check`], preserving F22's claim
 /// ordering: Redis fast-path, reservation, then this durable fence)
 /// route through it.
 async fn claim_usage_operation_in_tx(
@@ -118,7 +118,7 @@ async fn claim_usage_operation_in_tx(
         Some((hash, original_timestamp)) if hash == payload_hash => {
             Ok(UsageOperationClaim::Replay { original_timestamp })
         }
-        // Different payload hash — or no row at all any more (a concurrent
+        // Different payload hash, or no row at all any more (a concurrent
         // delete raced between our conflict-check and this select). Both are
         // treated conservatively as a conflict so nothing is double-counted.
         Some(_) | None => Ok(UsageOperationClaim::Conflict),
@@ -131,7 +131,7 @@ async fn claim_usage_operation_in_tx(
 ///
 /// KEYS[1] = dedup key
 /// KEYS[2] = counter key
-/// ARGV[1] = dedup TTL in seconds (40 days — matches the counter TTL below
+/// ARGV[1] = dedup TTL in seconds (40 days, matches the counter TTL below
 ///           so retries outside a 24h window still dedup)
 /// ARGV[2] = quantity to increment by
 /// ARGV[3] = counter TTL in seconds (40*86400)
@@ -152,7 +152,7 @@ const RECORD_USAGE_LUA: &str = r#"
 /// real-time counters it would have incremented.
 const DEDUP_TTL_SECS: i64 = 40 * 86_400;
 
-/// Fix I2 — resolve a tenant's effective plan limits. An active admin plan
+/// Fix I2, resolve a tenant's effective plan limits. An active admin plan
 /// override (plan_overrides, migrations 069/093/098) wins over the tenant's
 /// own plan, exactly like plans::get_plan_for_tenant. Every quota path in
 /// this module (get_usage, check_quota, record_with_quota_check) reads
@@ -195,7 +195,7 @@ fn free_launch_allowance_applies(row: &TenantPlanLimitRow) -> bool {
     }
 }
 
-/// Fix E — which plan limit (if any) gates a metering event type.
+/// Fix E, which plan limit (if any) gates a metering event type.
 /// Only email and API-call quotas exist in plans.rs; the remaining metered
 /// resources (bandwidth, storage, webhooks, dedicated IP hours) are recorded
 /// without a quota gate (-1 = unlimited) rather than being blocked by the
@@ -211,7 +211,7 @@ fn quota_limit_for_event(event_type: MeterEventType, limits: &PlanLimitRow) -> i
     }
 }
 
-/// Fix I15 — month period boundaries for a tenant usage query. With no
+/// Fix I15, month period boundaries for a tenant usage query. With no
 /// timezone the historical UTC behaviour is preserved; an explicit IANA
 /// timezone shifts both boundaries to local midnight (e.g. VAT-period-
 /// consistent Europe/Tallinn reporting), which keeps DST months correct.
@@ -241,7 +241,7 @@ pub fn month_period_for_tz(
             // midnight-in-a-DST-gap recovers forward to the first existing
             // wall time, an ambiguous midnight takes the earliest instant.
             // No instant with that wall date can precede it, so a single
-            // boundary is enough — no second walk-back is needed.
+            // boundary is enough, no second walk-back is needed.
             let period_start = local_midnight(&tz, year, month)?;
 
             let (next_year, next_month) = if month == 12 {
@@ -347,7 +347,7 @@ pub async fn record_usage(
     let mut tx = pool.begin().await.map_err(UsageError::Db)?;
     let event_type_str = event_type_to_str(event_type);
     // Ok(true) = a NEW metering row was written; Ok(false) = ledger replay
-    // (the row already exists — the Redis dedup key is republished instead
+    // (the row already exists, the Redis dedup key is republished instead
     // of re-running the counter EVAL, which would otherwise double-count
     // after a Redis flush).
     let audit_result: Result<bool, UsageError> = async {
@@ -428,18 +428,18 @@ pub async fn record_usage(
     // DB outcome (audit F71): a ledger REPLAY whose Redis dedup key is
     // still present EVALs to 0 below (duplicate). If the key was lost
     // (Redis flush / post-commit compensation), the EVAL re-publishes it
-    // and restores the real-time counter — the durable ledger keeps the
+    // and restores the real-time counter, the durable ledger keeps the
     // billing-side exactly-once either way.
     let _newly_recorded = audit_result?;
 
     // Execute the atomic Lua script: SET NX dedup + INCRBY counter.
-    // Fix F8 — on a post-commit Redis failure the DB row is already durable
+    // Fix F8, on a post-commit Redis failure the DB row is already durable
     // but the transport-level error leaves the counter/dedup state unknown
     // (the Lua itself is atomic, so it either ran completely or not at all).
     // Perform the SAME compensation `record_with_quota_check` performs on
     // its failure path: decrement the counter by the attempted quantity and
     // drop the dedup key, returning Redis to its pre-call state so a retry
-    // re-records cleanly. The committed `metering_events` row stays — it is
+    // re-records cleanly. The committed `metering_events` row stays, it is
     // the source of truth for /usage aggregates and the DB fallback path of
     // `check_quota`.
     let recorded: i64 = match redis::cmd("EVAL")
@@ -471,7 +471,7 @@ pub async fn record_usage(
     };
 
     if recorded == 0 {
-        // Dedup key already existed — this is a duplicate event that somehow
+        // Dedup key already existed, this is a duplicate event that somehow
         // made it past the DB ON CONFLICT. This is not expected but harmless.
         return Ok(false);
     }
@@ -517,7 +517,7 @@ pub async fn get_usage(
         }
     }
 
-    // Look up plan limits (override-aware — Fix I2).
+    // Look up plan limits (override-aware, Fix I2).
     let limits: Option<TenantPlanLimitRow> = sqlx::query_as(TENANT_PLAN_LIMITS_SQL)
         .bind(tenant_id)
         .fetch_optional(pool)
@@ -569,8 +569,8 @@ pub async fn check_quota(
             val.unwrap_or(0)
         }
         Err(e) => {
-            tracing::warn!(error = %e, tenant_id, "Redis unavailable for quota check — falling back to DB aggregate");
-            // Fix F3 — the fallback must aggregate over the SAME period the
+            tracing::warn!(error = %e, tenant_id, "Redis unavailable for quota check, falling back to DB aggregate");
+            // Fix F3, the fallback must aggregate over the SAME period the
             // enforced counter covers: the tenant's anchored billing cycle
             // when a subscription defines one, NOT the UTC calendar month
             // (otherwise an anchored tenant got a fresh quota window in the
@@ -642,7 +642,7 @@ pub async fn check_quota(
 ///
 /// Both counter-key shapes are cleared: the plain calendar-month label
 /// (`...:{Y}-{M}`) and the ANCHORED billing-cycle label
-/// (`...:c{Y}-{M}` — see [`usage_counter_key_anchored`]). The anchored
+/// (`...:c{Y}-{M}`, see [`usage_counter_key_anchored`]). The anchored
 /// pattern was previously missed, so subscription tenants kept stale
 /// counters after a reset for the very cycle the reset was meant to clear.
 pub async fn reset_monthly_counters(
@@ -657,7 +657,7 @@ pub async fn reset_monthly_counters(
     ];
     let mut conn = redis.get().await.map_err(UsageError::Redis)?;
 
-    // Use SCAN instead of KEYS for production safety — KEYS blocks Redis.
+    // Use SCAN instead of KEYS for production safety, KEYS blocks Redis.
     let mut all_keys: Vec<String> = Vec::new();
     for pattern in &patterns {
         let mut cursor: u64 = 0;
@@ -724,7 +724,7 @@ async fn load_metering_subscription_context(
     tenant_id: &str,
     recorded_at: DateTime<Utc>,
 ) -> Result<Option<MeteringSubscriptionContext>, UsageError> {
-    // Fix C — subscription state is written exclusively by the Mollie
+    // Fix C, subscription state is written exclusively by the Mollie
     // webhook handlers into mollie_subscriptions; the legacy `subscriptions`
     // table is never populated, so enrichment must read mollie_subscriptions.
     let matched = sqlx::query_as::<_, MeteringSubscriptionContextRow>(
@@ -881,7 +881,7 @@ pub async fn record_with_quota_check(
     }
 
     // 2. Fetch plan limits from Postgres (override-aware) and select the
-    //    quota for this event type (Fix E — API calls are no longer gated by
+    //    quota for this event type (Fix E, API calls are no longer gated by
     //    the email limit; unmetered types are unlimited).
     let limit_row: Option<TenantPlanLimitRow> = sqlx::query_as(TENANT_PLAN_LIMITS_SQL)
         .bind(tenant_id)
@@ -892,7 +892,7 @@ pub async fn record_with_quota_check(
     let limit = quota_limit_for_event(event_type, &resolve_plan_limits(limit_row));
 
     // Overage soft ceiling: email sending on an ACTIVE PAID subscription is
-    // not hard-blocked at the plan limit — the published behaviour lets the
+    // not hard-blocked at the plan limit, the published behaviour lets the
     // tenant send into an overage allowance (default 200% of the included
     // volume) with the excess invoiced at period end by the overage sweep.
     // Everything else (API calls, free plan, cancelled subscriptions,
@@ -1019,7 +1019,7 @@ pub async fn record_with_quota_check(
                 });
             }
 
-            // 5. Persisted — now (and only now) publish the dedup key.
+            // 5. Persisted, now (and only now) publish the dedup key.
             let _: () = redis::cmd("SET")
                 .arg(&dedup_key)
                 .arg("1")
@@ -1037,7 +1037,7 @@ pub async fn record_with_quota_check(
             })
         }
         Err(error) => {
-            // Persist failed — compensate the counter reservation so Redis
+            // Persist failed, compensate the counter reservation so Redis
             // stays consistent with the DB.
             if let Err(rollback_error) =
                 rollback_quota_reservation(pool, redis, tenant_id, event_type, quantity, id, now)
@@ -1079,7 +1079,7 @@ pub async fn rollback_usage_record(
     // canonical `usage_operations` fence BEFORE the metering row; deleting
     // only the meter row left the claim behind, so a retry of the same
     // idempotency key hit `UsageOperationClaim::Replay` and was admitted as
-    // `duplicate: true` — allowed, unmetered and unquota'd forever (both
+    // `duplicate: true`, allowed, unmetered and unquota'd forever (both
     // the REST route and SMTP submission retry the same logical send).
     // Same transaction: the meter row, its claim and the quota counter all
     // stand or fall together, so the retry re-claims and IS metered.
@@ -1230,7 +1230,7 @@ fn usage_counter_key(tenant_id: &str, event_type: MeterEventType, at: DateTime<U
 
 /// Billing-cycle-aware counter key. When the tenant's subscription cycle
 /// anchor (the day-of-month the cycle started) is known, the counter period
-/// is labeled by the CYCLE start month, not the UTC calendar month — a
+/// is labeled by the CYCLE start month, not the UTC calendar month, a
 /// cycle starting on the 15th must not hand the tenant a fresh quota on the
 /// 1st, and the Redis counter must agree with the tz/billing-cycle-aware
 /// `/usage` report about which events belong to the current period.
@@ -1257,7 +1257,7 @@ fn usage_counter_key_anchored(
 /// `(cycle_year, cycle_month, cycle_start_utc)`. Walks back month-by-month
 /// from `at` to the most recent anchored cycle start (same day-of-month;
 /// clamped to the month's length so a 31st anchor still fires in shorter
-/// months — mirroring Mollie's own cycle proration semantics closely enough
+/// months, mirroring Mollie's own cycle proration semantics closely enough
 /// for a period LABEL). Shared by the counter-key builder, the Redis-outage
 /// fallback window (Fix F3) and the exported key helper (Fix F6) so every
 /// path agrees on the period in force.
@@ -1328,7 +1328,7 @@ async fn tenant_cycle_anchor(
     .flatten();
     // billing_cycle_start is timestamptz; the anchor is only consumed as a
     // day-of-month (see `most_recent_anchored_cycle`), so decode the instant
-    // and take its UTC date — decoding as NaiveDate directly failed and the
+    // and take its UTC date, decoding as NaiveDate directly failed and the
     // swallowed error left anchoring permanently disabled.
     start.map(|value| value.date_naive())
 }
@@ -1345,8 +1345,8 @@ async fn tenant_cycle_anchor(
 /// * Otherwise: the legacy UTC calendar-month key
 ///   `meter:rt:{tenant}:{event_type}:{year}-{month:02}`.
 ///
-/// Exported (audit F6) so external readers — api-server's
-/// `/usage/realtime` — read the counter the quota gate actually enforces
+/// Exported (audit F6) so external readers, api-server's
+/// `/usage/realtime`, read the counter the quota gate actually enforces
 /// instead of re-deriving (and drifting from) the key shape. Pass the same
 /// instant you consider "now" for the read.
 pub async fn enforced_counter_key(
@@ -1434,7 +1434,7 @@ pub enum UsageError {
     #[error("quantity must be positive, got {0}")]
     InvalidQuantity(i64),
     /// Audit F71: a logical usage operation id was reused with different
-    /// tenant/kind/payload content — rejected instead of re-counted.
+    /// tenant/kind/payload content, rejected instead of re-counted.
     #[error("usage operation {event_id} conflict: {detail}")]
     OperationConflict { event_id: Uuid, detail: String },
 }
@@ -1570,7 +1570,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // Fix E — quota gate must depend on the event type.
+    // Fix E, quota gate must depend on the event type.
     // ------------------------------------------------------------------
 
     #[test]
@@ -1620,7 +1620,7 @@ mod tests {
             api_call_limit: 1_000,
         };
 
-        // plans.rs has no per-type fields for these — they are recorded but
+        // plans.rs has no per-type fields for these, they are recorded but
         // not quota-gated (-1 = unlimited).
         for event_type in [
             MeterEventType::WebhooksDelivered,
@@ -1637,7 +1637,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // Fix I15 — explicit timezone support for usage periods.
+    // Fix I15, explicit timezone support for usage periods.
     // ------------------------------------------------------------------
 
     #[test]
@@ -1674,7 +1674,7 @@ mod tests {
 
     #[test]
     fn tenant_plan_limits_sql_resolves_plan_overrides() {
-        // Fix I2 — the shared limit SQL must consult plan_overrides before
+        // Fix I2, the shared limit SQL must consult plan_overrides before
         // the tenant's own plan.
         assert!(TENANT_PLAN_LIMITS_SQL.contains("plan_overrides"));
         assert!(TENANT_PLAN_LIMITS_SQL.contains("COALESCE(po.plan, t.plan)"));
@@ -1722,7 +1722,7 @@ mod tests {
         );
         // A 31st anchor clamps in short months: the January cycle runs
         // Jan 31 .. Feb 27 and the February cycle begins on the clamped
-        // Feb 28 — one boundary per month, never a skipped or doubled
+        // Feb 28, one boundary per month, never a skipped or doubled
         // cycle. (Mollie refreshes billing_cycle_start/end every cycle via
         // webhook, so the anchor's day self-corrects each period.)
         let anchor31 = chrono::NaiveDate::from_ymd_opt(2026, 1, 31).unwrap();
@@ -1769,7 +1769,7 @@ mod tests {
         );
     }
 
-    /// Fix F3 — the Redis-outage fallback window must be the same period the
+    /// Fix F3, the Redis-outage fallback window must be the same period the
     /// enforced counter labels: the anchored cycle START, not the calendar
     /// month, and it must agree with the `c{Y}-{M}` label of the key.
     #[test]
@@ -1880,7 +1880,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // Audit F71 — the logical usage operation is bound to its content.
+    // Audit F71, the logical usage operation is bound to its content.
     // ------------------------------------------------------------------
 
     #[test]
@@ -1898,7 +1898,7 @@ mod tests {
         let id = Uuid::new_v4();
         let base = usage_payload_hash("tenant-1", "emails_sent", 3, id, None);
         // Different tenant, kind, quantity, event id or payload content
-        // each produce a DIFFERENT hash — the ledger flags them as a
+        // each produce a DIFFERENT hash, the ledger flags them as a
         // rejected Conflict, never as a replay.
         assert_ne!(
             usage_payload_hash("tenant-2", "emails_sent", 3, id, None),
@@ -1947,7 +1947,7 @@ mod tests {
             format!("tenant-1:emails_sent:{id}")
         );
         // Different tenant or kind with the SAME event id is a DIFFERENT
-        // logical operation — but the ledger still binds the tenant/kind
+        // logical operation, but the ledger still binds the tenant/kind
         // through the payload hash.
         assert_ne!(
             usage_operation_key("tenant-2", "emails_sent", id),
@@ -1960,7 +1960,7 @@ mod tests {
     #[test]
     fn month_period_for_tz_recovers_from_a_midnight_dst_gap() {
         // America/Havana starts DST on the second Sunday of March at
-        // midnight local — midnight does not exist on 2024-03-10, so the
+        // midnight local, midnight does not exist on 2024-03-10, so the
         // period boundary recovers to the first existing wall time (01:00).
         let now = DateTime::parse_from_rfc3339("2024-03-15T12:00:00Z")
             .unwrap()
@@ -1981,7 +1981,7 @@ mod tests {
     #[test]
     fn month_period_for_tz_takes_the_earliest_ambiguous_midnight() {
         // Havana ends DST on the first Sunday of November: 2024-11-03 has
-        // midnight twice — the boundary takes the earliest instant.
+        // midnight twice, the boundary takes the earliest instant.
         let now = DateTime::parse_from_rfc3339("2024-11-15T12:00:00Z")
             .unwrap()
             .with_timezone(&Utc);
@@ -2090,7 +2090,7 @@ mod tests {
         .expect("first record");
         assert!(first);
 
-        // Same id, same content: durable ledger replay — never re-counted.
+        // Same id, same content: durable ledger replay, never re-counted.
         let replay = record_usage(
             &env.pool,
             &env.state.redis,
@@ -2283,7 +2283,7 @@ mod tests {
             .await
             .expect("restore ledger");
 
-        // The counter was compensated — the next clean record starts from 0.
+        // The counter was compensated, the next clean record starts from 0.
         let record = record_with_quota_check(
             &env.pool,
             &env.state.redis,

@@ -1,8 +1,8 @@
-{# Home page — ARK Swiss poster (lane T, 2026-10-23): nav and hero carry the
+{# Home page, ARK Swiss poster (lane T, 2026-10-23): nav and hero carry the
    poster band, sections are ruled ledgers. Five movements: hero with fact
    row, sovereignty band, capability ledger, grader strip, pricing teaser.
    The full detail lives on its own pages (/features/, /compare/, /security/,
-   /pricing/) — linked, not inlined. #}
+   /pricing/), linked, not inlined. #}
 {% extends "base.html" %}
 
 {% block content %}
@@ -24,7 +24,7 @@
   <p class="apex-lead max-w-3xl">
     {% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["email_grader_desc"] %}{{ i18n_data[l]["home"]["email_grader_desc"] }}{% else %}Transparent deliverability grade for your DNS, authentication, content, and reputation.{% endif %}
   </p>
-  <form method="POST" action="https://api.apexmail.ee/explorer/grade" class="mt-6 flex flex-col sm:flex-row gap-3 sm:items-start max-w-2xl"> {# nosemgrep: python.django.security.django-no-csrf-token.django-no-csrf-token — static Zola/Tera template, not Django; the cross-origin API endpoint owns its own CSRF handling #}
+  <form method="POST" action="https://api.apexmail.ee/explorer/grade" class="mt-6 flex flex-col sm:flex-row gap-3 sm:items-start max-w-2xl"> {# nosemgrep: python.django.security.django-no-csrf-token.django-no-csrf-token, static Zola/Tera template, not Django; the cross-origin API endpoint owns its own CSRF handling #}
     <div class="apex-field flex-1">
       <label for="grade-domain">
         {% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["email_grader_field"] %}{{ i18n_data[l]["home"]["email_grader_field"] }}{% else %}Domain{% endif %}
@@ -47,7 +47,7 @@
    data/pricing.json (the commercial UI authority); the plan order
    free/pro/business is the pinned plan order validated by
    tools/validate_pricing_drift.py. The only prose is the localized
-   unit labels — no independent numbers live in this template. #}
+   unit labels, no independent numbers live in this template. #}
 {% set pricing_teaser = load_data(path="data/pricing.json", format="json") %}
 {% set teaser_free = pricing_teaser.plans[0] %}
 {% set teaser_pro = pricing_teaser.plans[2] %}

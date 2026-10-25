@@ -32,7 +32,7 @@ curl -X POST https://api.apexmail.ee/v1/messages \
 - Use idempotency keys when your sender may retry the same write request.
 - Keep API keys server-side; never embed them in browser code.
 - Use the [API Explorer](/api-explorer/) to test payloads before wiring them into your application.
-- Score sender domains with the [Email Grader API](/docs/api/grader/) — free for ApexMail customers.
+- Score sender domains with the [Email Grader API](/docs/api/grader/), free for ApexMail customers.
 - The complete [OpenAPI 3.1 specification](/docs/api/openapi/) is downloadable and validated in CI.
 
 ## API Versioning
@@ -91,9 +91,9 @@ Example: `GET /v1/messages?page=2&limit=50`
 
 Use `?limit=` and `?cursor=` parameters. Responses include:
 
-- `limit` — maximum items per page (default 50, max 200).
-- `cursor` — opaque token for the next page of results (absent on last page).
-- `has_more` — boolean indicating whether additional results exist.
+- `limit`, maximum items per page (default 50, max 200).
+- `cursor`, opaque token for the next page of results (absent on last page).
+- `has_more`, boolean indicating whether additional results exist.
 
 Example: `GET /v1/events?limit=100&cursor=eyJpZCI6ImV2dF8xMjMifQ%3D%3D`
 
@@ -169,13 +169,13 @@ Rate limits apply per API key per second. The server returns `429 Too Many Reque
 | Enterprise | Custom | Custom |
 
 Rate-limit headers returned on every response:
-- `X-RateLimit-Limit` — requests per second allowed
-- `X-RateLimit-Remaining` — remaining in current window  
-- `X-RateLimit-Reset` — Unix timestamp when the window resets
+- `X-RateLimit-Limit`, requests per second allowed
+- `X-RateLimit-Remaining`, remaining in current window  
+- `X-RateLimit-Reset`, Unix timestamp when the window resets
 
 ## Idempotency
 
-Send `Idempotency-Key: <unique-value>` to safely retry write requests (`POST`, `PUT`, `PATCH`, `DELETE`). Idempotency is scoped to the authenticated API key — two different keys cannot replay each other's requests.
+Send `Idempotency-Key: <unique-value>` to safely retry write requests (`POST`, `PUT`, `PATCH`, `DELETE`). Idempotency is scoped to the authenticated API key, two different keys cannot replay each other's requests.
 
 ### Key Format
 

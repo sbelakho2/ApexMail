@@ -40,7 +40,7 @@ impl TemplateCache {
     }
 
     /// Force moka's pending maintenance (evictions, TTL expiry) so
-    /// `entry_count` is accurate — used by the bound test; production reads
+    /// `entry_count` is accurate, used by the bound test; production reads
     /// go through `get`, which maintains itself on access.
     pub fn run_pending_tasks(&self) {
         self.inner.run_pending_tasks();
@@ -57,7 +57,7 @@ impl TemplateCache {
 pub const SOURCE_RENDER_CACHE_KEY_VERSION: u8 = 1;
 
 /// Versioned inputs of the HTTP render cache key. Serialized to JSON and
-/// SHA-256-hashed — the SAME versioned-structure pattern as the stored
+/// SHA-256-hashed, the SAME versioned-structure pattern as the stored
 /// template path's `stored_render_cache_key` in `renderer.rs`.
 #[derive(serde::Serialize)]
 struct SourceRenderCacheKeyInputs<'a> {
@@ -138,7 +138,7 @@ pub fn source_render_cache_key(source: &str, options: &RenderOptions) -> String 
     // A serialization failure can only come from a non-serializable value;
     // the fallback marker still distinguishes the request from every other
     // one (and never collides two DIFFERENT inputs).
-    // coverage: justified — every field of SourceRenderCacheKeyInputs is a
+    // coverage: justified, every field of SourceRenderCacheKeyInputs is a
     // primitive/Option/String, so serde_json::to_string is infallible; the
     // closure guards future field types only.
     let serialized = serde_json::to_string(&inputs).unwrap_or_else(|error| {

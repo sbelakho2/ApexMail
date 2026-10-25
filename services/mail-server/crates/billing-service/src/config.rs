@@ -230,7 +230,7 @@ mod tests {
         assert_eq!(cfg.max_proration_credit_cents, 50_000);
         assert_eq!(cfg.warn_proration_charge_cents, 25_000);
         // €0.40 / 1 000 emails = 40 millicents per email. The legacy field
-        // doc claimed "0.4 millicents" — off by 100×.
+        // doc claimed "0.4 millicents", off by 100×.
         assert_eq!(cfg.overage_rate_per_email_millicents, 40);
         assert_eq!(
             cfg.overage_rate_per_email_millicents,
@@ -295,7 +295,7 @@ mod tests {
     fn payg_legacy_monthly_rounding_contract() {
         let pricing = PaygPricing::default();
 
-        // Audit item 3b — millicents now round HALF-UP to cents (the old
+        // Audit item 3b, millicents now round HALF-UP to cents (the old
         // contract truncated). 1 email = 100 millicents → 0.1 cents → 0;
         // 4 emails = 400 → 0; 5 emails = 500 millicents = exactly half a
         // cent → rounds UP to 1 cent.

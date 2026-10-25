@@ -23,7 +23,7 @@ fn compose_file(name: &str) -> String {
 }
 
 /// Extract `KEY` from the `environment:` map of a 2-space-indented compose
-/// service block. Panics when the service or key is absent — deleting the
+/// service block. Panics when the service or key is absent, deleting the
 /// wiring must fail the test, not silently pass it.
 fn service_env_value(compose: &str, service: &str, key: &str) -> String {
     let service_header = format!("  {service}:");
@@ -69,7 +69,7 @@ fn compose_api_server_points_at_the_sales_autopilot_service_name() {
         );
         assert!(
             !value.contains("0.0.0.0"),
-            "{file}: 0.0.0.0 is a bind address, not a routable peer — in-container calls \
+            "{file}: 0.0.0.0 is a bind address, not a routable peer, in-container calls \
              would fail with 503. Got {value:?}"
         );
         // A bare loopback would work on a host but not between containers;
@@ -106,7 +106,7 @@ fn compose_declares_the_sales_autopilot_service_itself() {
 fn compose_api_server_passes_the_trusted_proxy_variable_the_code_reads() {
     for file in ["docker-compose.yml", "docker-compose.prod.yml"] {
         let compose = compose_file(file);
-        // Panics (fails) when the key is missing — that IS the regression.
+        // Panics (fails) when the key is missing, that IS the regression.
         let trusted = service_env_value(&compose, "api-server", "TRUSTED_PROXIES");
         assert!(
             trusted.contains("${TRUSTED_PROXIES"),
@@ -126,7 +126,7 @@ fn compose_api_server_passes_the_trusted_proxy_variable_the_code_reads() {
 /// The api-server config must keep accepting the legacy
 /// `DDOS_TRUSTED_PROXIES` name as a fallback (D-5): a deployment that only
 /// sets the old name must still trust forwarded headers. Pins the
-/// `trusted_proxies_from_env` helper by source text — reverting to a bare
+/// `trusted_proxies_from_env` helper by source text, reverting to a bare
 /// `env_or("TRUSTED_PROXIES", "")` fails here.
 #[test]
 fn api_server_config_accepts_the_legacy_ddos_trusted_proxies_name() {
@@ -144,7 +144,7 @@ fn api_server_config_accepts_the_legacy_ddos_trusted_proxies_name() {
 /// The api-server config default for `SALES_AUTOPILOT_BASE_URL` must be a
 /// routable loopback address, never a bind address. The config test module is
 /// owned elsewhere, so this pins the exact `env_or` call in `config.rs` by
-/// source text — a regression to `http://0.0.0.0:3010` fails here.
+/// source text, a regression to `http://0.0.0.0:3010` fails here.
 #[test]
 fn api_server_sales_autopilot_default_is_loopback_not_a_bind_address() {
     const CONFIG_RS: &str = include_str!("../../api-server/src/config.rs");

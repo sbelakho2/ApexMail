@@ -29,7 +29,7 @@ struct FixtureManifest {
     /// SHA-256 of the exported console stylesheet (`assets/globals.css`),
     /// i.e. the renderer's canonical stylesheet content.
     css_sha256: String,
-    /// SHA-256 of the exported marketing stylesheet (`css/styles.css`) — the
+    /// SHA-256 of the exported marketing stylesheet (`css/styles.css`), the
     /// marketing build the fixtures were rendered against.
     marketing_sha256: String,
     /// SHA-256 over the ordered (id, html) stream of every exported fixture:
@@ -390,7 +390,7 @@ fn export_full_route_fixtures(
 //
 // `export_full_route_fixtures` renders every route's no-data fallback. On
 // the two bot surfaces that fallback is the EMPTY state, so the states the
-// owner directive calls out — the populated / long / escalated transcript,
+// owner directive calls out, the populated / long / escalated transcript,
 // a long single message, the assistant's unavailable state, its PRG flash
 // errors (rate limit / service error), the drafts queue with many rows and
 // long subjects/replies, its unavailable state and its action feedback —
@@ -444,7 +444,7 @@ fn export_state_fixtures(
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let out_dir = std::env::args() // nosemgrep: rust.lang.security.args.args — reads argv for flag detection / passes constant tool-side paths — no shell, no user-input interpolation
+    let out_dir = std::env::args() // nosemgrep: rust.lang.security.args.args, reads argv for flag detection / passes constant tool-side paths, no shell, no user-input interpolation
         .nth(1)
         .map(PathBuf::from)
         .unwrap_or_else(|| {
@@ -456,7 +456,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 /// Export every visual fixture (HTML, assets, manifest) into `out_dir`.
 /// Split out of `main` so the whole pipeline is exercisable by tests with a
-/// temporary directory and controlled env — including the
+/// temporary directory and controlled env, including the
 /// `APEX_EXPORT_ALL_UI_ROUTES` full-surface mode.
 fn run(out_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
     fs::create_dir_all(out_dir)?;
@@ -517,7 +517,7 @@ mod tests {
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn temp_dir(label: &str) -> PathBuf {
-        // nosemgrep: rust.lang.security.temp-dir.temp-dir — test fixture under a unique pid/uuid path — no predictable-name temp collision
+        // nosemgrep: rust.lang.security.temp-dir.temp-dir, test fixture under a unique pid/uuid path, no predictable-name temp collision
         let dir = std::env::temp_dir().join(format!(
             "export_fixtures_{label}_{}_{}",
             std::process::id(),

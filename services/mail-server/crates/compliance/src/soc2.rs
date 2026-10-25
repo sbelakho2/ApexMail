@@ -108,7 +108,7 @@ pub struct CollectionRunSummary {
 
 // ─── Default control catalog (TSP-100 mapping) ─────────────────────────────
 
-/// Catalog seed entry — single source of truth for which controls ApexMail
+/// Catalog seed entry, single source of truth for which controls ApexMail
 /// attests to.
 #[derive(Debug, Clone)]
 struct ControlSeed {
@@ -122,10 +122,10 @@ struct ControlSeed {
 }
 
 const DEFAULT_CONTROLS: &[ControlSeed] = &[
-    // ── Common Criteria — Control Environment (CC1) ────────────────────────
+    // ── Common Criteria, Control Environment (CC1) ────────────────────────
     ControlSeed {
         control_id: "CC1.1",
-        category: "Common Criteria — Control Environment",
+        category: "Common Criteria, Control Environment",
         title: "Demonstrates a commitment to integrity and ethical values",
         description:
             "ApexMail maintains a published code of conduct, ethical hiring policies, and \
@@ -136,7 +136,7 @@ const DEFAULT_CONTROLS: &[ControlSeed] = &[
     },
     ControlSeed {
         control_id: "CC1.2",
-        category: "Common Criteria — Control Environment",
+        category: "Common Criteria, Control Environment",
         title: "Board exercises oversight responsibility",
         description:
             "An independent security committee reviews quarterly risk reports, audit \
@@ -147,7 +147,7 @@ const DEFAULT_CONTROLS: &[ControlSeed] = &[
     },
     ControlSeed {
         control_id: "CC1.3",
-        category: "Common Criteria — Control Environment",
+        category: "Common Criteria, Control Environment",
         title: "Establishes structure, authority, and responsibility",
         description:
             "Organisational chart, job descriptions, and segregation-of-duties matrix are \
@@ -159,7 +159,7 @@ const DEFAULT_CONTROLS: &[ControlSeed] = &[
     // ── Communication and Information (CC2) ────────────────────────────────
     ControlSeed {
         control_id: "CC2.1",
-        category: "Common Criteria — Communication and Information",
+        category: "Common Criteria, Communication and Information",
         title: "Obtains or generates relevant, quality information",
         description:
             "Production systems emit audit logs (hash-chained, tamper-evident) for all \
@@ -170,7 +170,7 @@ const DEFAULT_CONTROLS: &[ControlSeed] = &[
     },
     ControlSeed {
         control_id: "CC2.2",
-        category: "Common Criteria — Communication and Information",
+        category: "Common Criteria, Communication and Information",
         title: "Internally communicates information about objectives and responsibilities",
         description:
             "Security policies, incident-response runbooks, and on-call rotations are \
@@ -182,7 +182,7 @@ const DEFAULT_CONTROLS: &[ControlSeed] = &[
     // ── Risk Assessment (CC3) ──────────────────────────────────────────────
     ControlSeed {
         control_id: "CC3.1",
-        category: "Common Criteria — Risk Assessment",
+        category: "Common Criteria, Risk Assessment",
         title: "Specifies suitable objectives",
         description:
             "Annual risk assessment identifies threats to confidentiality, integrity, \
@@ -193,7 +193,7 @@ const DEFAULT_CONTROLS: &[ControlSeed] = &[
     },
     ControlSeed {
         control_id: "CC3.2",
-        category: "Common Criteria — Risk Assessment",
+        category: "Common Criteria, Risk Assessment",
         title: "Identifies and assesses risks",
         description:
             "Tenant-level risk scoring runs continuously; flags above the critical \
@@ -205,7 +205,7 @@ const DEFAULT_CONTROLS: &[ControlSeed] = &[
     // ── Monitoring (CC4) ───────────────────────────────────────────────────
     ControlSeed {
         control_id: "CC4.1",
-        category: "Common Criteria — Monitoring Activities",
+        category: "Common Criteria, Monitoring Activities",
         title: "Selects, develops, and performs ongoing monitoring",
         description:
             "Continuous monitoring via Prometheus + Grafana; alert rules in \
@@ -216,7 +216,7 @@ const DEFAULT_CONTROLS: &[ControlSeed] = &[
     },
     ControlSeed {
         control_id: "CC4.2",
-        category: "Common Criteria — Monitoring Activities",
+        category: "Common Criteria, Monitoring Activities",
         title: "Evaluates and communicates deficiencies",
         description:
             "Quarterly internal-audit findings are tracked to closure with assigned owner \
@@ -228,7 +228,7 @@ const DEFAULT_CONTROLS: &[ControlSeed] = &[
     // ── Control Activities (CC5) ───────────────────────────────────────────
     ControlSeed {
         control_id: "CC5.1",
-        category: "Common Criteria — Control Activities",
+        category: "Common Criteria, Control Activities",
         title: "Selects and develops control activities",
         description:
             "Change-management policy requires peer review for all production deploys; \
@@ -239,7 +239,7 @@ const DEFAULT_CONTROLS: &[ControlSeed] = &[
     },
     ControlSeed {
         control_id: "CC5.2",
-        category: "Common Criteria — Control Activities",
+        category: "Common Criteria, Control Activities",
         title: "Selects and develops general controls over technology",
         description:
             "Infrastructure-as-code (Terraform/Helm) gates production changes; the \
@@ -250,7 +250,7 @@ const DEFAULT_CONTROLS: &[ControlSeed] = &[
     },
     ControlSeed {
         control_id: "CC5.3",
-        category: "Common Criteria — Control Activities",
+        category: "Common Criteria, Control Activities",
         title: "Deploys control activities through policies and procedures",
         description:
             "All security-relevant SOPs are versioned in the documentation portal and \
@@ -262,7 +262,7 @@ const DEFAULT_CONTROLS: &[ControlSeed] = &[
     // ── Logical & Physical Access (CC6) ────────────────────────────────────
     ControlSeed {
         control_id: "CC6.1",
-        category: "Common Criteria — Logical and Physical Access Controls",
+        category: "Common Criteria, Logical and Physical Access Controls",
         title: "Implements logical access security",
         description:
             "Role-based access control enforced via JWT scopes and admin-route guards; \
@@ -273,7 +273,7 @@ const DEFAULT_CONTROLS: &[ControlSeed] = &[
     },
     ControlSeed {
         control_id: "CC6.2",
-        category: "Common Criteria — Logical and Physical Access Controls",
+        category: "Common Criteria, Logical and Physical Access Controls",
         title: "Manages access registration, modification, and removal",
         description:
             "Quarterly access review enumerates active human and machine identities, \
@@ -284,7 +284,7 @@ const DEFAULT_CONTROLS: &[ControlSeed] = &[
     },
     ControlSeed {
         control_id: "CC6.3",
-        category: "Common Criteria — Logical and Physical Access Controls",
+        category: "Common Criteria, Logical and Physical Access Controls",
         title: "Manages credentials and authenticators",
         description:
             "Customer-supplied secrets are encrypted at rest with AES-256-GCM; rotation \
@@ -295,7 +295,7 @@ const DEFAULT_CONTROLS: &[ControlSeed] = &[
     },
     ControlSeed {
         control_id: "CC6.4",
-        category: "Common Criteria — Logical and Physical Access Controls",
+        category: "Common Criteria, Logical and Physical Access Controls",
         title: "Restricts physical access",
         description:
             "All production infrastructure runs in SOC 2 / ISO 27001 certified data \
@@ -306,7 +306,7 @@ const DEFAULT_CONTROLS: &[ControlSeed] = &[
     },
     ControlSeed {
         control_id: "CC6.6",
-        category: "Common Criteria — Logical and Physical Access Controls",
+        category: "Common Criteria, Logical and Physical Access Controls",
         title: "Implements boundary protection",
         description:
             "WAF, IDS, DDoS protection, and rate-limiting form the perimeter; events are \
@@ -317,7 +317,7 @@ const DEFAULT_CONTROLS: &[ControlSeed] = &[
     },
     ControlSeed {
         control_id: "CC6.7",
-        category: "Common Criteria — Logical and Physical Access Controls",
+        category: "Common Criteria, Logical and Physical Access Controls",
         title: "Restricts movement of information",
         description:
             "DLP rules block exfiltration of PHI/PII; outbound mail is scanned by the \
@@ -328,7 +328,7 @@ const DEFAULT_CONTROLS: &[ControlSeed] = &[
     },
     ControlSeed {
         control_id: "CC6.8",
-        category: "Common Criteria — Logical and Physical Access Controls",
+        category: "Common Criteria, Logical and Physical Access Controls",
         title: "Detects and prevents malicious software",
         description:
             "All inbound mail is sandboxed and scanned for malware; suspicious \
@@ -340,7 +340,7 @@ const DEFAULT_CONTROLS: &[ControlSeed] = &[
     // ── System Operations (CC7) ────────────────────────────────────────────
     ControlSeed {
         control_id: "CC7.1",
-        category: "Common Criteria — System Operations",
+        category: "Common Criteria, System Operations",
         title: "Detects and monitors changes",
         description:
             "Configuration drift detection runs hourly; unexpected changes alert on-call.",
@@ -350,7 +350,7 @@ const DEFAULT_CONTROLS: &[ControlSeed] = &[
     },
     ControlSeed {
         control_id: "CC7.2",
-        category: "Common Criteria — System Operations",
+        category: "Common Criteria, System Operations",
         title: "Monitors operations to detect security events",
         description:
             "SIEM rules trigger on anomalous patterns (failed-auth bursts, privilege \
@@ -361,7 +361,7 @@ const DEFAULT_CONTROLS: &[ControlSeed] = &[
     },
     ControlSeed {
         control_id: "CC7.3",
-        category: "Common Criteria — System Operations",
+        category: "Common Criteria, System Operations",
         title: "Evaluates security events to determine response",
         description:
             "Documented incident-response playbooks; SEV-1/2 incidents tracked in the \
@@ -372,7 +372,7 @@ const DEFAULT_CONTROLS: &[ControlSeed] = &[
     },
     ControlSeed {
         control_id: "CC7.4",
-        category: "Common Criteria — System Operations",
+        category: "Common Criteria, System Operations",
         title: "Responds to identified security events",
         description:
             "Incident triage SLAs: SEV-1 acknowledge < 15min, mitigate < 1h; tracked in \
@@ -383,7 +383,7 @@ const DEFAULT_CONTROLS: &[ControlSeed] = &[
     },
     ControlSeed {
         control_id: "CC7.5",
-        category: "Common Criteria — System Operations",
+        category: "Common Criteria, System Operations",
         title: "Identifies and develops corrective actions",
         description:
             "Post-incident reviews produce action items tracked to closure.",
@@ -394,7 +394,7 @@ const DEFAULT_CONTROLS: &[ControlSeed] = &[
     // ── Change Management (CC8) ────────────────────────────────────────────
     ControlSeed {
         control_id: "CC8.1",
-        category: "Common Criteria — Change Management",
+        category: "Common Criteria, Change Management",
         title: "Authorises, designs, develops, and approves changes",
         description:
             "All production changes are authorised via signed pull requests; emergency \
@@ -406,7 +406,7 @@ const DEFAULT_CONTROLS: &[ControlSeed] = &[
     // ── Risk Mitigation (CC9) ──────────────────────────────────────────────
     ControlSeed {
         control_id: "CC9.1",
-        category: "Common Criteria — Risk Mitigation",
+        category: "Common Criteria, Risk Mitigation",
         title: "Identifies, selects, and develops risk-mitigation activities",
         description:
             "Annual penetration test by independent third party; findings remediated by \
@@ -417,7 +417,7 @@ const DEFAULT_CONTROLS: &[ControlSeed] = &[
     },
     ControlSeed {
         control_id: "CC9.2",
-        category: "Common Criteria — Risk Mitigation",
+        category: "Common Criteria, Risk Mitigation",
         title: "Assesses and manages risks associated with vendors",
         description:
             "Subprocessors undergo security review before onboarding and annually \

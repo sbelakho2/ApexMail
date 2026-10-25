@@ -290,7 +290,7 @@ impl ConnectionTracker {
                 .ports
                 .retain(|(_, ts)| now.duration_since(*ts) < tracker_timeout);
             // Once no port in the tracking window remains the scan record is
-            // stale — drop it (flagged or not) so the map cannot grow without
+            // stale, drop it (flagged or not) so the map cannot grow without
             // bound. A still-scanning source simply re-flags on new activity.
             if tracker.ports.is_empty() {
                 removed += 1;
@@ -314,7 +314,7 @@ impl ConnectionTracker {
             connections = self.connections.len(),
             half_open_ips = self.half_open_counts.len(),
             portscan_ips = self.port_scan.len(),
-            "Connection tracker RESET — all state cleared (audit event required)"
+            "Connection tracker RESET, all state cleared (audit event required)"
         );
         self.connections.clear();
         self.half_open_counts.clear();

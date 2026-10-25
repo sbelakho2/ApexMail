@@ -271,7 +271,7 @@ async fn send_batch(State(state): State<AppState>, req: Request) -> Response {
     (StatusCode::OK, Json(Value::Array(results))).into_response()
 }
 
-/// `200 {"ErrorCode":0,"Message":"OK","MessageID":…}` — Postmark's single
+/// `200 {"ErrorCode":0,"Message":"OK","MessageID":…}`, Postmark's single
 /// send answer.
 fn accepted(message_id: &str) -> Response {
     (
@@ -337,7 +337,7 @@ fn map_message(
         if let Some(value) = map_str(root, field, issues) {
             issues.push(unsupported(
                 &format!("{field}='{value}'"),
-                "a Postmark template id is not an ApexMail template id — render the body client-side or send an ApexMail `template_id` through /v1",
+                "a Postmark template id is not an ApexMail template id, render the body client-side or send an ApexMail `template_id` through /v1",
             ));
         }
     }
@@ -433,7 +433,7 @@ fn map_message(
                 if let Some(content_id) = map_str(attachment, "ContentID", issues) {
                     issues.push(unsupported(
                         &format!("Attachments[{index}].ContentID='{content_id}'"),
-                        "the canonical send path has no inline-part concept — attach the file instead of embedding it",
+                        "the canonical send path has no inline-part concept, attach the file instead of embedding it",
                     ));
                 }
                 let filename = map_required_str(attachment, "Name", issues);

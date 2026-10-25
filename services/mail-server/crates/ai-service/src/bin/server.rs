@@ -44,7 +44,7 @@ async fn main() {
     // Mailbot runtime (SalesCloser plan §5.3): the DRAFT-ONLY email agent
     // runs in THIS process, over the same pool, model client and inference
     // governor the HTTP surfaces use. Opt-in (AI_EMAIL_AGENT_ENABLED); it
-    // refuses to start without mandatory human approval — every generated
+    // refuses to start without mandatory human approval, every generated
     // reply is stored as a pending draft for the review queue, never sent.
     match ai_service::email_agent::EmailAnswerer::from_env_with_runtime(
         state.docs_pool.clone(),
@@ -89,8 +89,8 @@ async fn main() {
         #[cfg(not(unix))]
         let terminate = std::future::pending::<()>();
         tokio::select! {
-            _ = ctrl_c => tracing::info!("received Ctrl+C — shutting down"),
-            _ = terminate => tracing::info!("received SIGTERM — shutting down"),
+            _ = ctrl_c => tracing::info!("received Ctrl+C, shutting down"),
+            _ = terminate => tracing::info!("received SIGTERM, shutting down"),
         }
     };
     if let Err(err) = axum::serve(listener, app)

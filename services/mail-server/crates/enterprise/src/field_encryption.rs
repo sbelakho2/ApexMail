@@ -3,8 +3,8 @@
 //! This module provides **envelope encryption**:each field value is encrypted
 //! with a unique Data Encryption Key (DEK), and the DEK itself is wrapped
 //! (encrypted) using the tenant's Key Encryption Key (KEK). This design://!
-//! 1. Limits blast radius — compromising one DEK exposes only one field value.
-//! 2. Enables key rotation without re-encrypting all data — only re-wrap DEKs.
+//! 1. Limits blast radius, compromising one DEK exposes only one field value.
+//! 2. Enables key rotation without re-encrypting all data, only re-wrap DEKs.
 //! 3. Meets HIPAA §164.312(a)(2)(iv) encryption-at-rest requirements.
 //!
 //! ## Wire format
@@ -64,7 +64,7 @@ pub enum EncryptionError {
     #[error("AES-GCM encryption failed")]
     EncryptionFailed,
 
-    #[error("AES-GCM decryption failed — possible data corruption or wrong key")]
+    #[error("AES-GCM decryption failed, possible data corruption or wrong key")]
     DecryptionFailed,
 
     #[error("invalid envelope: {0}")]
@@ -86,7 +86,7 @@ pub enum EncryptionError {
 // ── Key types ─────────────────────────────────────────────────────────────────
 
 /// A Key Encryption Key (KEK) used to wrap/unwrap Data Encryption Keys.
-/// Stored in memory only — never serialized. Zeroized on drop.
+/// Stored in memory only, never serialized. Zeroized on drop.
 pub struct Kek {
     /// Unique identifier for this KEK (UUID bytes).
     pub id: [u8; KEK_ID_LEN],
@@ -344,7 +344,7 @@ impl FieldEncryptor {
     ///
     /// Unlike `decrypt`, this is **strict**: a value that is not an
     /// `ENC:v1:` envelope is rejected instead of being passed through as
-    /// plaintext — the provenance of such a value is unknown, and treating it
+    /// plaintext, the provenance of such a value is unknown, and treating it
     /// as plaintext would let callers smuggle arbitrary data through a
     /// decrypt endpoint. Empty values are likewise rejected.
     pub fn decrypt_with_aad(&self, value: &str, aad: &[u8]) -> Result<String, EncryptionError> {
@@ -352,7 +352,7 @@ impl FieldEncryptor {
 
         if value.is_empty() {
             return Err(EncryptionError::InvalidEnvelope(
-                "value is empty — unknown provenance".into(),
+                "value is empty, unknown provenance".into(),
             ));
         }
 
@@ -360,7 +360,7 @@ impl FieldEncryptor {
             Some(e) => e,
             None => {
                 return Err(EncryptionError::InvalidEnvelope(
-                    "value is not an encrypted envelope — unknown provenance".into(),
+                    "value is not an encrypted envelope, unknown provenance".into(),
                 ))
             }
         };
@@ -436,7 +436,7 @@ impl FieldEncryptor {
                 },
             )
             .map_err(|e| {
-                tracing::error!(error = %e, "DEK unwrap failed — wrong KEK, wrong AAD, or tampered envelope");
+                tracing::error!(error = %e, "DEK unwrap failed, wrong KEK, wrong AAD, or tampered envelope");
                 EncryptionError::DecryptionFailed
             })?;
 
@@ -461,7 +461,7 @@ impl FieldEncryptor {
                 },
             )
             .map_err(|e| {
-                tracing::error!(error = %e, "field decryption failed — corrupted data, wrong DEK, or AAD/tenant mismatch");
+                tracing::error!(error = %e, "field decryption failed, corrupted data, wrong DEK, or AAD/tenant mismatch");
                 EncryptionError::DecryptionFailed
             })?;
 
@@ -603,7 +603,7 @@ mod tests {
         let ciphertext = enc
             .encrypt_with_aad("secret-value", b"tenant:tenant-a")
             .unwrap();
-        // Unbinding (plain decrypt) must also fail — the AAD is not optional
+        // Unbinding (plain decrypt) must also fail, the AAD is not optional
         // for AAD-bound envelopes.
         assert!(enc.decrypt(&ciphertext).is_err());
     }
@@ -724,7 +724,7 @@ mod tests {
     #[test]
     fn unicode_plaintext_roundtrip() {
         let enc = test_encryptor();
-        let plaintext = "患者@病院.jp — ñoño — 🏥";
+        let plaintext = "患者@病院.jp, ñoño, 🏥";
         let encrypted = enc.encrypt(plaintext).unwrap();
         let decrypted = enc.decrypt(&encrypted).unwrap();
         assert_eq!(decrypted, plaintext);

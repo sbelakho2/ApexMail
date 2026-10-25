@@ -5,13 +5,13 @@ template = "prose.html"
 weight = 5
 +++
 
-This page describes how the ApexMail platform is monitored and how we communicate about reliability. It deliberately does not publish internal alert rules or remediation runbooks — those live in the internal operations repository.
+This page describes how the ApexMail platform is monitored and how we communicate about reliability. It deliberately does not publish internal alert rules or remediation runbooks, those live in the internal operations repository.
 
 ## Monitoring approach
 
 - **Synthetic probes** hit the public API, SMTP, dashboard, and webhook pipeline from external regions every 60 seconds.
 - **Server-side metrics** (request latency, queue depth, delivery latency, webhook delivery health) are collected per service and drive internal alerting.
-- **Real-traffic signals** — error rates, bounce storms, deferral spikes — are monitored alongside synthetic checks so a passing probe never masks a customer-visible problem.
+- **Real-traffic signals**, error rates, bounce storms, deferral spikes, are monitored alongside synthetic checks so a passing probe never masks a customer-visible problem.
 
 Live status: [status.apexmail.ee](https://status.apexmail.ee).
 

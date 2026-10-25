@@ -983,7 +983,7 @@ mod middleware_unit_tests {
 
     // NOTE: the IP-extraction tests below were updated for the spoofing
     // fix. They previously asserted that X-Real-IP / leftmost XFF /
-    // CF-Connecting-IP were honored from ANY client — letting any caller
+    // CF-Connecting-IP were honored from ANY client, letting any caller
     // pick an arbitrary identity. Headers are now only honored behind a
     // configured trusted proxy (TrustedProxyList), and XFF selects the
     // rightmost untrusted entry.

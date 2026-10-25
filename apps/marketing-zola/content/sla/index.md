@@ -1,6 +1,6 @@
 +++
 title = "Service Level Agreement"
-description = "ApexMail SLA — our uptime and performance commitments."
+description = "ApexMail SLA, our uptime and performance commitments."
 template = "prose.html"
 
 [extra]
@@ -39,7 +39,7 @@ Uptime is measured by our external monitoring system (Blackbox exporter + Promet
 
 Eligible plans carry a 99.9% monthly availability commitment. When measured
 monthly uptime falls below it, a service credit applies per the plan-specific
-matrix below — the credit percentage is the tenant's monthly recurring charge for
+matrix below, the credit percentage is the tenant's monthly recurring charge for
 the affected month.
 
 | Measured monthly availability | Business | Enterprise Cloud / contracted |
@@ -51,8 +51,8 @@ the affected month.
 
 **Plan notes:**
 
-- **Business** — graduated percentages as shown; no flat cap below the tiers.
-- **Enterprise Cloud and contracted deployments** — percentages as shown, capped
+- **Business**, graduated percentages as shown; no flat cap below the tiers.
+- **Enterprise Cloud and contracted deployments**, percentages as shown, capped
   at 25% (or the contracted figure where an order form specifies one).
 
 Credits are calculated from measured monthly uptime below the commitment and

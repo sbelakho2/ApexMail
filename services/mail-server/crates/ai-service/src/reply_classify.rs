@@ -1,4 +1,4 @@
-//! `POST /reply/classify` — the reply pipeline's semantic classifier.
+//! `POST /reply/classify`, the reply pipeline's semantic classifier.
 //!
 //! Layer 2 of the worker's 3-layer classification (deterministic → AI →
 //! policy): the worker calls this route ONLY for messages the deterministic
@@ -24,12 +24,12 @@
 //!
 //! Truthfulness rules (enforced in [`parse_classifier_output`], not trusted
 //! to the model):
-//! - the disposition must be one of the canonical 11 — anything else is a
+//! - the disposition must be one of the canonical 11, anything else is a
 //!   502 the client turns into Unknown, never a pass-through;
 //! - confidence is clamped to [0,1]; non-finite becomes 0.0;
 //! - `objection_class` is accepted only for the two dispositions that carry
 //!   objection sub-labels (`not_interested`, `question`) and only from the
-//!   six-value taxonomy — a bogus sub-label is dropped, never invented into
+//!   six-value taxonomy, a bogus sub-label is dropped, never invented into
 //!   an outbound claim;
 //! - the route is LLM-ONLY: the deterministic first layer stays in the
 //!   worker, so a message that arrives here has already survived it.
@@ -48,7 +48,7 @@ use crate::routes::{error_response_json, required_tenant_identity, AppState, Ten
 /// by the client (worker-processors/src/reply_handler/ai.rs). Bump together.
 pub const PROMPT_VERSION: &str = "reply-classifier-v1";
 
-/// The canonical disposition taxonomy — byte-for-byte the worker's
+/// The canonical disposition taxonomy, byte-for-byte the worker's
 /// `ReplyDisposition::ALL` as_str values. A drift makes the client's parse
 /// fail closed; `TAXONOMY_DRIFT` below is pinned by a test on both sides.
 pub const TAXONOMY: [&str; 11] = [
@@ -218,7 +218,7 @@ pub fn system_prompt() -> String {
          - ooo: an out-of-office / auto-reply.\n\
          - bounce_hard: a permanent delivery failure (DSN 5.x).\n\
          - bounce_soft: a temporary delivery failure (DSN 4.x).\n\
-         - unknown: no rule applies or evidence is insufficient — NEVER guess.\n\
+         - unknown: no rule applies or evidence is insufficient, NEVER guess.\n\
          Objection classes apply only to not_interested and question: price, timing, \
          competitor, authority, trust, need. Use the SENDER's words as evidence.\n\
          Respond with ONLY a JSON object, no prose, no code fences:\n\
@@ -255,7 +255,7 @@ pub fn user_prompt(request: &ReplyClassifyRequest) -> String {
 }
 
 /// Parse and sanitize one model response. Every deviation from the contract
-/// is a [`ClassifyFailure`] — this function never fabricates a disposition.
+/// is a [`ClassifyFailure`], this function never fabricates a disposition.
 pub fn parse_classifier_output(raw: &str) -> Result<ReplyClassifyResponse, ClassifyFailure> {
     // Accept a bare object, a code-fenced object, or an object embedded in
     // prose by slicing the outermost braces first.

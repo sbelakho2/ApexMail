@@ -4,7 +4,7 @@
 //!
 //! There is deliberately NO monolithic `SCHEMA` constant or `run_migrations`
 //! helper here anymore (audit F6): the old single-file "reference schema"
-//! drifted from the canonical migration chain — it declared
+//! drifted from the canonical migration chain, it declared
 //! `campaigns.template_id UUID REFERENCES templates(id)` while `templates.id`
 //! is `VARCHAR(26)` (migrations 064/075), a foreign key PostgreSQL rejects
 //! between incompatible types. `run_migrations` therefore could never execute
@@ -19,7 +19,7 @@
 //!
 //! The per-table `CREATE_*` constants below remain only for tests that need
 //! to stand up ONE table in isolation. Several reference sibling tables and
-//! therefore require those parents to exist first — they are not a schema
+//! therefore require those parents to exist first, they are not a schema
 //! reference and MUST NOT be used to provision a database.
 
 /// Individual table DDL constant (for selective setup in tests).
@@ -151,7 +151,7 @@ CREATE TABLE IF NOT EXISTS contacts (
 /// Individual table DDL constant (for selective setup in tests).
 ///
 /// `template_id` is a bare `UUID`, exactly as canonical migration 075
-/// declares it — the former `REFERENCES templates(id)` here was the SAME
+/// declares it, the former `REFERENCES templates(id)` here was the SAME
 /// type-incompatible foreign key audit F6 removed with `SCHEMA`
 /// (`templates.id` is `VARCHAR(26)`), and no FK exists in canonical either.
 pub const CREATE_CAMPAIGNS: &str = r#"
@@ -183,7 +183,7 @@ mod tests {
 
     /// The per-table constants stay compile-checked and shape-checked; the
     /// monolithic `SCHEMA` (and its string-`contains` suite) was DELETED in
-    /// audit F6 — it could never execute against a fresh database
+    /// audit F6, it could never execute against a fresh database
     /// (`campaigns.template_id UUID` → `templates.id` VARCHAR(26) FK) and
     /// its presence invited drift from the canonical migration chain.
     #[test]
@@ -204,7 +204,7 @@ mod tests {
     }
 
     /// F6 contract: every constant is a SINGLE self-contained CREATE TABLE
-    /// statement (tests may apply one table in isolation) — never a chained
+    /// statement (tests may apply one table in isolation), never a chained
     /// bootstrap script pretending to be a schema.
     #[test]
     fn constants_are_single_table_ddl() {

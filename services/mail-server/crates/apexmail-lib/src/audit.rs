@@ -1,4 +1,4 @@
-//! Canonical audit hash-chain primitives — the ONE shared implementation of
+//! Canonical audit hash-chain primitives, the ONE shared implementation of
 //! the `audit_logs` row-hash payload, row hash and chain signature.
 //!
 //! Platform byte contract (DF-5 finding C): an `audit_logs` row's `hash` is
@@ -31,7 +31,7 @@ use sha2::{Digest, Sha256};
 type HmacSha256 = Hmac<Sha256>;
 
 /// Build the canonical 7-segment audit row-hash payload. `None` segments
-/// contribute the EMPTY string — the segment separator stays, so the payload
+/// contribute the EMPTY string, the segment separator stays, so the payload
 /// always splits into exactly 7 fields.
 pub fn audit_hash_payload(
     tenant_id: Option<&str>,
@@ -84,7 +84,7 @@ pub fn audit_hash(
 
 /// HMAC-SHA256 signature over the chain LINK (`previous_hash|hash`), keyed
 /// with the deployment's `AUDIT_SIGNING_KEY`. The chain's first entry signs
-/// the empty `previous_hash`. An unusable key is an `Err` — callers decide
+/// the empty `previous_hash`. An unusable key is an `Err`, callers decide
 /// their own fail-closed policy (production must refuse to sign with a
 /// publicly-known fallback key).
 pub fn audit_log_signature(
@@ -153,7 +153,7 @@ mod tests {
         assert_eq!(segments[6], "2026-10-04T23:00:53.250028+00:00");
     }
 
-    /// NULL segments contribute the EMPTY string — never a dropped segment
+    /// NULL segments contribute the EMPTY string, never a dropped segment
     /// (DF-7c: a 6-field payload is unre-derivable for every verifier).
     #[test]
     fn null_segments_are_empty_never_absent() {
@@ -208,7 +208,7 @@ mod tests {
             audit_log_signature(Some("other-prev"), "hash", "key-0123456789").expect("signs"),
             "the previous hash is covered by the signature"
         );
-        // The chain root signs the empty previous hash — a distinct value.
+        // The chain root signs the empty previous hash, a distinct value.
         assert_ne!(
             sig,
             audit_log_signature(None, "hash", "key-0123456789").expect("signs"),

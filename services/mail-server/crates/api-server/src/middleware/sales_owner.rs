@@ -7,7 +7,7 @@
 //!
 //! * a system-tenant ADMIN (however privileged) is not the owner;
 //! * a machine credential (static CP/system API key) is not the owner;
-//! * a customer-tenant identity — any role — is not the owner.
+//! * a customer-tenant identity, any role, is not the owner.
 //!
 //! The gate runs as a router layer AROUND both nested routers, structurally,
 //! before any handler's own scope checks:
@@ -20,7 +20,7 @@
 //! The role is re-read from the database on every request: the JWT would
 //! otherwise pin a role from before a demotion. A DB failure fails CLOSED.
 //!
-//! Machine credentials are refused outright — there is no "Sales service
+//! Machine credentials are refused outright, there is no "Sales service
 //! principal" yet; when one exists it must present a Sales-specific audience
 //! (see the architecture review), never the universal internal token.
 #![deny(unsafe_code)]
@@ -50,7 +50,7 @@ pub async fn require_sales_owner(
     next: Next,
 ) -> Result<Response, ApiError> {
     // A human CP session: the extractor proves the JWT, but the gate ALSO
-    // requires the session/user pair — machine API keys authenticate with
+    // requires the session/user pair, machine API keys authenticate with
     // `api_key_id` and no live session, and the sales surface has no
     // service principal yet.
     let Some(auth) = req.extensions().get::<AuthUser>().cloned() else {
@@ -67,7 +67,7 @@ pub async fn require_sales_owner(
         ));
     };
 
-    // System tenant (slug-aware — `web::is_system_tenant` resolves the
+    // System tenant (slug-aware, `web::is_system_tenant` resolves the
     // system-internal slug as well as the literal sentinel). Fail closed
     // (audit #16): a storage failure is not evidence of ownership.
     let system_tenant = match crate::routes::web::is_system_tenant(&state, &auth.tenant_id).await {
@@ -96,7 +96,7 @@ pub async fn require_sales_owner(
             })?
             .flatten();
     if role.as_deref() != Some(OWNER_ROLE) {
-        // Fail closed — and do not reveal WHICH condition failed beyond
+        // Fail closed, and do not reveal WHICH condition failed beyond
         // "not the owner": a demoted admin probing the surface learns only
         // that the surface is owner-only.
         tracing::warn!(
@@ -237,14 +237,14 @@ mod boundary_tests {
             "the human owner passes"
         );
 
-        // System ADMIN — the classic escalation: refused.
+        // System ADMIN, the classic escalation: refused.
         assert_eq!(
             call(&router, Some(session("system", Some(admin)))).await,
             StatusCode::FORBIDDEN,
             "a system admin is not the sales owner"
         );
 
-        // Machine credential: API key, no session, wildcard scope — refused.
+        // Machine credential: API key, no session, wildcard scope, refused.
         let machine = AuthUser {
             tenant_id: "system".into(),
             user_id: None,
@@ -336,9 +336,9 @@ mod boundary_tests {
         db.close().await;
     }
 
-    /// Structural: the gate wraps exactly the owner-only routers — the
+    /// Structural: the gate wraps exactly the owner-only routers, the
     /// sales brain, the demos presenter API (it executes real machinery and
-    /// mints viewer links) and the autopilot — and nothing else in the
+    /// mints viewer links) and the autopilot, and nothing else in the
     /// production region. Pinned by NAME, not a bare count, so adding a
     /// fourth gated router must consciously extend this list.
     #[test]

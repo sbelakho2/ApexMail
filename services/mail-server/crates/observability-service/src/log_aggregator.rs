@@ -42,7 +42,7 @@ fn map_bytes(map: &HashMap<String, serde_json::Value>) -> usize {
 
 /// Bound one ingested map to [`MAX_INGEST_MAP_BYTES`] (SM10 F15).
 ///
-/// Maps within budget pass through unchanged (the hot path — one size
+/// Maps within budget pass through unchanged (the hot path, one size
 /// computation, no copy). Over-budget maps are shed whole-key in
 /// lexicographic key order (deterministic, so logs shed the same way on
 /// every node) until the remainder fits; entries that do not fit are
@@ -85,7 +85,7 @@ fn cap_ingest_map(
 /// The store is a ring (`VecDeque`): eviction pops from the front instead of
 /// shifting the surviving half of a `Vec::drain`, and the allocation is
 /// shrunk when the ring's slack grows past half the cap again, so evicted
-/// capacity is actually returned (SM10 F15 — `Vec::drain` never shrank the
+/// capacity is actually returned (SM10 F15, `Vec::drain` never shrank the
 /// allocation).
 ///
 /// Per-entry payloads are bounded at the single point every producer passes
@@ -146,7 +146,7 @@ impl LogAggregator {
                 guard.pop_front();
             }
             // Return evicted capacity once the ring's slack passes half the
-            // cap — bounding memory at ~1.5x max entries without paying a
+            // cap, bounding memory at ~1.5x max entries without paying a
             // realloc on every insert-at-capacity.
             if guard.capacity() > self.max_entries + self.max_entries / 2 {
                 guard.shrink_to_fit();
@@ -356,7 +356,7 @@ mod tests {
         );
     }
 
-    /// Maps within budget pass through byte-for-byte — the cap must not
+    /// Maps within budget pass through byte-for-byte, the cap must not
     /// degrade healthy payloads.
     #[test]
     fn ingest_passes_reasonably_sized_maps_through_unchanged() {
@@ -372,7 +372,7 @@ mod tests {
     }
 
     /// A single value that alone exceeds the budget cannot fit even after
-    /// shedding — the map is dropped (`None`), never stored oversized.
+    /// shedding, the map is dropped (`None`), never stored oversized.
     #[test]
     fn ingest_drops_a_map_that_cannot_fit_at_all() {
         let oversized = oversized_map(1, MAX_INGEST_MAP_BYTES * 4);
@@ -430,7 +430,7 @@ mod tests {
         let guard = agg.entries.read();
         // The shrink triggers when slack passes 1.5x the cap; the ring then
         // grows back by doubling (0.9x → 1.8x), so the observed steady-state
-        // bound is 2x the cap — far below the old unbounded Vec slack.
+        // bound is 2x the cap, far below the old unbounded Vec slack.
         assert!(
             guard.capacity() <= 20,
             "ring slack must stay within ~2x the cap, got {}",

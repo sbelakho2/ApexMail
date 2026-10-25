@@ -175,31 +175,31 @@ mod tests {
         // real pages (data-backed when a session renders them), so the
         // baseline manifest now carries their canonical patterns.
         // Deferred-feature 4: /settings/suppressions joins the web manifest
-        // (data-backed list page, nav entry under Settings) — web 35 → 36.
+        // (data-backed list page, nav entry under Settings), web 35 → 36.
         // Data-locations fix: the footer-linked /data-locations page joined
         // the marketing-zola baseline (its MARKETING_DEAD_LINK_ALLOWLIST
-        // entry is emptied) — marketing-zola 36 → 37.
+        // entry is emptied), marketing-zola 36 → 37.
         // SalesCloser plan §5.2: the console assistant joins the web manifest
-        // (data-backed conversation page, nav entry under Account) — web
+        // (data-backed conversation page, nav entry under Account), web
         // 36 → 37, total 121 → 122.
         // Time-travel debugging: the message timeline page joins the web
         // manifest (data-backed /messages/{id}/timeline, linked from the
-        // delivery events surface) — web 37 → 38, total 126 → 127.
+        // delivery events surface), web 37 → 38, total 126 → 127.
         // Capability wave 2 (2026-10-08): the custom tracking-domain page
         // joins the web manifest (shared view in `ui_foundation::
         // tracking_domain`, so fixtures/goldens/gates cover it) —
         // web 38 → 39, total 127 → 128.
         // Lane R6 (review §6.2): /lists/{id}/members joins the web manifest —
-        // the list detail's subscriber count is inspectable — web 39 → 40,
+        // the list detail's subscriber count is inspectable, web 39 → 40,
         // total 130 → 131.
         // Capability wave (2026-10-17): the Mailboxes archive + journaling
         // page joins the web manifest (data-backed /settings/journal, linked
-        // from Settings) — web 40 → 41, total 131 → 132.
+        // from Settings), web 40 → 41, total 131 → 132.
         assert_eq!(declared_route_count("web"), Some(41));
         // SalesCloser plan §5.6: the CP presenter (/cp/demos) and the public
-        // demo viewer (/demo) join the baseline — control-plane 30 → 31,
+        // demo viewer (/demo) join the baseline, control-plane 30 → 31,
         // marketing 18 → 19, total 122 → 124.
-        // Plan §7: the AI-drafts review page joins the CP surface — 31 → 32.
+        // Plan §7: the AI-drafts review page joins the CP surface, 31 → 32.
         // Dogfood 2026-10-08: the typed /confirm page (CP destructive-action
         // confirmation; previously web-only, 404ing on the operator host) —
         // control-plane 32 → 33, total 128 → 129.
@@ -216,7 +216,7 @@ mod tests {
     #[test]
     fn inbox_placement_and_cp_alias_routes_require_auth() {
         // Web inbox-placement surface (audit finding: the auth gate missed
-        // these — they previously rendered for anonymous visitors).
+        // these, they previously rendered for anonymous visitors).
         for route in surface_routes("web") {
             if route.path.starts_with("/inbox-placement") {
                 assert!(route.auth_required, "web {} must require auth", route.path);

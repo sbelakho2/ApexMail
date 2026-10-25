@@ -64,7 +64,7 @@ impl SubAccountService {
     ///
     /// F10 (quota race): the count-then-insert pair ran on the pool, so two
     /// concurrent creates for the same parent both counted N, both passed the
-    /// limit check and both inserted — the quota silently drifted. The whole
+    /// limit check and both inserted, the quota silently drifted. The whole
     /// sequence runs in ONE transaction that takes a per-parent advisory
     /// xact lock BEFORE the count: creators for the same parent serialise,
     /// the count is exact, and the lock releases at commit.
@@ -87,7 +87,7 @@ impl SubAccountService {
             .map_err(|e| format!("Begin sub-account create: {e}"))?;
 
         // Serialize quota checks per parent. pg_advisory_xact_lock(bigint)
-        // is released automatically at commit/rollback — no unlock path to
+        // is released automatically at commit/rollback, no unlock path to
         // forget. hashtext keeps the key stable and parent-scoped.
         sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1))")
             .bind(&parent_id)
@@ -239,7 +239,7 @@ impl SubAccountService {
         }
     }
 
-    /// Resume a suspended sub-account — the inverse of [`Self::suspend`].
+    /// Resume a suspended sub-account, the inverse of [`Self::suspend`].
     /// Without this route suspension was a one-way door: `update()` cannot
     /// change `status` and the only remaining exits were deletion (losing
     /// the sub-account's keys and volume allocation).
@@ -321,7 +321,7 @@ impl SubAccountService {
         .map_err(|e| format!("Create API key: {e}"))?;
 
         info!(sub_account_id = %sub_account_id, "API key created");
-        // Return the raw key only once — it cannot be retrieved later
+        // Return the raw key only once, it cannot be retrieved later
         Ok(ApiResult::ok(serde_json::json!({
             "id": id,
             "key": raw_key,
@@ -331,7 +331,7 @@ impl SubAccountService {
     }
 
     /// List the API keys of a sub-account (fix J-4). Key hashes are never
-    /// returned — only the id, prefix, name, status and metadata.
+    /// returned, only the id, prefix, name, status and metadata.
     pub async fn list_api_keys(
         &self,
         sub_account_id: Uuid,
@@ -356,7 +356,7 @@ impl SubAccountService {
         Ok(ApiResult::ok(masked))
     }
 
-    /// Revoke a sub-account API key (fix J-4). Idempotent — revoking an
+    /// Revoke a sub-account API key (fix J-4). Idempotent, revoking an
     /// already-revoked key succeeds.
     pub async fn revoke_api_key(
         &self,

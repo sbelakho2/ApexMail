@@ -3,16 +3,16 @@
 //! The Mailboxes line sells "Archive + Journaling". This module is the ONE
 //! shared implementation both writers and the retrieval surface use:
 //!
-//! * **Gate** — [`tenant_journaling_enabled`] (outbound): the tenant holds an
+//! * **Gate**, [`tenant_journaling_enabled`] (outbound): the tenant holds an
 //!   ACTIVE Mailboxes product-line contract OR at least one of its mailboxes
 //!   carries `archive_enabled = true` (the per-seat switch billing reads).
 //!   [`inbound_journal_entry_tx`] applies the inbound variant: the RECIPIENT
 //!   mailbox's own `archive_enabled` flag OR the tenant contract.
-//! * **Write** — [`insert_journal_entry_tx`] runs inside the caller's
+//! * **Write**, [`insert_journal_entry_tx`] runs inside the caller's
 //!   transaction, so the outbound send effect and the inbound mailbox insert
 //!   either commit their journal copy or fail loudly; there is no
 //!   best-effort/silent-skip path.
-//! * **Read** — [`list_journal`] / [`count_journal`] / [`get_journal`] are
+//! * **Read**, [`list_journal`] / [`count_journal`] / [`get_journal`] are
 //!   ALWAYS tenant-scoped and newest-first. Reading historical entries is
 //!   deliberately NOT entitlement-gated: turning the add-on off stops new
 //!   copies but must never erase access to the legal record already written.
@@ -223,7 +223,7 @@ const INSERT_JOURNAL_SQL: &str = r#"
 "#;
 
 /// Append one journal row inside the caller's transaction. A failure
-/// propagates and aborts that transaction — the paid compliance guarantee is
+/// propagates and aborts that transaction, the paid compliance guarantee is
 /// "no send/persist without the journal copy", never a silent skip.
 ///
 /// Returns `None` when the (tenant, direction, source) identity is already
@@ -518,7 +518,7 @@ mod tests {
 
     /// Fault injection: a `mail_journal` insert failure ABORTS the inbound
     /// mailbox persistence (no message row, no journal row) and surfaces the
-    /// error — never a silent skip.
+    /// error, never a silent skip.
     #[tokio::test]
     async fn inbound_journal_insert_fault_fails_the_store() {
         let Some(pool) = canonical_pool("journal_inbound_fault").await else {

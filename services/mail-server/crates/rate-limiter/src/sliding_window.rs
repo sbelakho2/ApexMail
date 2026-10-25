@@ -44,7 +44,7 @@ impl WindowState {
         let elapsed = now.duration_since(self.curr_window_start);
 
         if elapsed >= self.window * 2 {
-            // Been idle for 2+ windows — reset everything
+            // Been idle for 2+ windows, reset everything
             self.prev_count = 0;
             self.curr_count = 0;
             self.curr_window_start = now;
@@ -165,7 +165,7 @@ impl SlidingWindowCounter {
 ///
 /// The previous denial path returned `window - elapsed`, but the weighted
 /// estimate stays `>= max_events` for the rest of the current window AND —
-/// once `curr` rotates into the previous weight — potentially through the
+/// once `curr` rotates into the previous weight, potentially through the
 /// whole next window when `curr_count` alone exceeds the limit. A client
 /// honoring the old `retry_after` re-requested up to a full window early
 /// and was denied again.
@@ -176,7 +176,7 @@ impl SlidingWindowCounter {
 /// * otherwise the current window must fully elapse; after the rotation the
 ///   current count becomes the previous weight, and (when `curr > max`) the
 ///   estimate only drops below `max` after a further
-///   `W·(curr−max)/curr` — the old code reported just `window − elapsed`.
+///   `W·(curr−max)/curr`, the old code reported just `window − elapsed`.
 ///
 /// A 1 ms floor guarantees the caller re-arrives strictly PAST the solved
 /// boundary (the estimate is a closed `>=` comparison at exactly `p*`).
@@ -204,7 +204,7 @@ fn retry_after_until_below_max(
         // ADD the floor, don't clamp to it: the estimate's `>= max` denial is
         // a CLOSED comparison, so a client arriving at exactly `p*` (the
         // solved boundary) is still denied. The old `.max(FLOOR)` clamp only
-        // protected sub-millisecond waits — for any longer solved wait the
+        // protected sub-millisecond waits, for any longer solved wait the
         // return landed exactly ON the boundary and the compliant client was
         // denied again (adversarial re-verification of audit F13).
         return needed_from_window_start
@@ -324,7 +324,7 @@ mod tests {
         // Cross the window boundary
         std::thread::sleep(window + Duration::from_millis(15));
 
-        // The previous window's count is still weighted at ~93% — at most
+        // The previous window's count is still weighted at ~93%, at most
         // a single extra event may slip in before denial.
         let mut allowed_after_boundary = 0;
         for _ in 0..3 {
@@ -365,7 +365,7 @@ mod tests {
         let tol = Duration::from_millis(2);
         let near = |a: Duration, b: Duration| a.abs_diff(b) <= tol;
 
-        // Case 1 — solvable in-window: prev=5, curr=0, max=4, elapsed=0.
+        // Case 1, solvable in-window: prev=5, curr=0, max=4, elapsed=0.
         // Need p > (5+0-4)/5 = 0.2 → 2s into the window.
         assert!(near(
             retry_after_until_below_max(5, 0, 4, Duration::ZERO, window),
@@ -377,21 +377,21 @@ mod tests {
             Duration::from_secs(1)
         ));
 
-        // Case 2 — unsolvable in-window (curr alone at the limit):
+        // Case 2, unsolvable in-window (curr alone at the limit):
         // prev=0, curr=4, max=4 → the window must rotate; 10s remaining.
         assert!(near(
             retry_after_until_below_max(0, 4, 4, Duration::ZERO, window),
             Duration::from_secs(10) + Duration::from_millis(1)
         ));
 
-        // Case 3 — curr EXCEEDS max: prev=0, curr=10, max=4 → after the
+        // Case 3, curr EXCEEDS max: prev=0, curr=10, max=4 → after the
         // rotation a further 10s·(10-4)/10 = 6s of decay is needed.
         assert!(near(
             retry_after_until_below_max(0, 10, 4, Duration::from_secs(3), window),
             Duration::from_secs(13) + Duration::from_millis(1)
         ));
 
-        // Case 4 — floor: solvable exactly now (elapsed == boundary) still
+        // Case 4, floor: solvable exactly now (elapsed == boundary) still
         // returns a positive duration.
         let d = retry_after_until_below_max(2, 0, 2, Duration::from_secs(2), window);
         assert!(d > Duration::ZERO);
@@ -399,7 +399,7 @@ mod tests {
 
     /// The old behavior for comparison: a full-window denial with
     /// `curr_count` alone over the limit used to report only the remaining
-    /// current window — less than half the real wait.
+    /// current window, less than half the real wait.
     #[test]
     fn retry_after_covers_full_window_when_curr_exceeds_limit() {
         let window = Duration::from_secs(10);
@@ -434,7 +434,7 @@ mod tests {
         );
     }
 
-    /// Behavioral: the hard rotation case (curr alone AT the limit — the
+    /// Behavioral: the hard rotation case (curr alone AT the limit, the
     /// reachable maximum, since events only count when admitted). The wait
     /// must span the current window boundary, and honoring it must admit.
     #[test]

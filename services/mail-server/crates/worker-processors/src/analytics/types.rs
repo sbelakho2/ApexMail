@@ -95,7 +95,7 @@ impl AggregatedStats {
         }
     }
 
-    /// Every counter is zero — the bucket carries no counts and can be
+    /// Every counter is zero, the bucket carries no counts and can be
     /// removed from the aggregation buffer.
     pub fn is_empty(&self) -> bool {
         self.sent == 0

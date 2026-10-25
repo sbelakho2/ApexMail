@@ -3,20 +3,20 @@
 //!
 //! The route-level export renders every route's no-data fallback. On the
 //! console assistant and the AI-drafts review queue that fallback is the
-//! EMPTY state, so the states the owner directive calls out — the
+//! EMPTY state, so the states the owner directive calls out, the
 //! populated / long / escalated transcript, a long single message, the
 //! assistant's unavailable state and its PRG flash errors (rate limit /
 //! service error), the drafts queue with real rows and long
-//! subjects/replies, its unavailable state and its action feedback — were
+//! subjects/replies, its unavailable state and its action feedback, were
 //! never inventoried by the contrast/layout gates: an unrepresented state
 //! cannot fail a gate.
 //!
 //! This module is the ONE source of truth for those states. It is consumed
 //! by:
-//!   * `bin/export_visual_fixtures` — writes one html file per state, so
+//!   * `bin/export_visual_fixtures`, writes one html file per state, so
 //!     the browser gates (contrast + layout, both manifest-driven) audit
 //!     them like any page;
-//!   * `gate_support::gate_documents` — so the in-crate markup gates
+//!   * `gate_support::gate_documents`, so the in-crate markup gates
 //!     (gate J theme contrast, gate K class integrity) scan exactly the
 //!     same state markup.
 //!
@@ -186,7 +186,7 @@ fn long_question() -> String {
 /// `<pre>`-rendered draft body is exercised for horizontal overflow.
 fn long_reply() -> String {
     let mut reply =
-        String::from("Hi Lena,\n\nThanks for the detail — here is the short version.\n\n");
+        String::from("Hi Lena,\n\nThanks for the detail, here is the short version.\n\n");
     reply.push_str(
         "1. Custom fields are matched by header name; unknown headers are ignored unless you map them.\n2. Duplicates are collapsed on the lowercased email address within the list.\n3. Suppressed addresses are skipped and reported in the import summary, never silently dropped.\n4. Retries are idempotent per row: re-running the same file re-uses the original row key.\n\n",
     );
@@ -218,7 +218,7 @@ pub fn assistant_populated() -> AssistantPageData {
                 content: "The Pro plan includes the shared IP pools, the full API and webhooks, and the standard retention window.\n\nAnnual billing is available for every paid plan; the annual price is shown on the pricing page next to the monthly price.".to_string(),
                 citations: vec![
                     serde_json::json!({
-                        "title": "Pricing — ApexMail",
+                        "title": "Pricing | ApexMail",
                         "url": "https://apexmail.ee/pricing/",
                     }),
                     serde_json::json!({
@@ -368,7 +368,7 @@ fn timeline_populated_data() -> crate::view_data::ListPageData {
         total_pages: 1,
         page: 1,
         empty_title: "No state transitions at this timestamp".to_string(),
-        empty_description: "No timeline entry exists at or before this timestamp — the message did not exist yet."
+        empty_description: "No timeline entry exists at or before this timestamp, the message did not exist yet."
             .to_string(),
         ..Default::default()
     }
@@ -405,7 +405,7 @@ fn timeline_insufficient_data() -> crate::view_data::ListPageData {
         total_pages: 1,
         page: 1,
         empty_title: "No state transitions at this timestamp".to_string(),
-        empty_description: "The delivery log rotated before this timestamp, so the sources                             cannot prove the state — ask support for the archived window if you                             need it."
+        empty_description: "The delivery log rotated before this timestamp, so the sources                             cannot prove the state, ask support for the archived window if you                             need it."
             .to_string(),
         ..Default::default()
     }
@@ -512,7 +512,7 @@ pub fn drafts_populated() -> AiDraftsPageData {
     }
 }
 
-/// The populated queue plus six more rows — the "many rows" scroll state.
+/// The populated queue plus six more rows, the "many rows" scroll state.
 pub fn drafts_many() -> AiDraftsPageData {
     let mut data = drafts_populated();
     for index in 4..=9 {
@@ -551,7 +551,7 @@ pub fn drafts_unavailable() -> AiDraftsPageData {
 pub fn render_bot_state(id: &str) -> Option<String> {
     // Every bot-surface page is an authenticated page: the fixtures carry a
     // realistic session identity (display name, long email, plan label) so
-    // the shell header renders its real width — the live header overflowed
+    // the shell header renders its real width, the live header overflowed
     // at 768 px only because no fixture had an identity (dogfood 2026-10-06
     // ui-visual). Initialised in the struct literal (not assigned after
     // `RouteData::default()`) so the construction stays clippy-clean.
@@ -559,7 +559,7 @@ pub fn render_bot_state(id: &str) -> Option<String> {
         session_identity: Some(SessionIdentity {
             display_name: "Lena Moreau".to_string(),
             email: "lena.moreau@northwind-saas.example".to_string(),
-            plan_label: Some("Free Plan — 3K / mo".to_string()),
+            plan_label: Some("Free Plan, 3K / mo".to_string()),
         }),
         ..Default::default()
     };
@@ -599,7 +599,7 @@ pub fn render_bot_state(id: &str) -> Option<String> {
         "control-plane-reviews-ai-drafts-approved-flash" => {
             data.ai_drafts = Some(drafts_populated());
             vec![FlashMessage::success(
-                "Draft approved — the reply is queued.",
+                "Draft approved, the reply is queued.",
             )]
         }
         "control-plane-reviews-ai-drafts-rejected-flash" => {
@@ -655,7 +655,7 @@ pub fn render_bot_state(id: &str) -> Option<String> {
         .find(|fixture| fixture.id == id)
         .unwrap_or_else(|| panic!("state fixture {id} missing from BOT_STATE_FIXTURES"));
 
-    // `render_route_with_data` takes flash and data together — the
+    // `render_route_with_data` takes flash and data together, the
     // flash-only helper drops data (it hardcodes `None`), which would
     // silently render the empty queue under an approval flash.
     render_route_with_data(
@@ -737,7 +737,7 @@ mod tests {
     }
 
     /// The per-tenant feature-flag-disabled state names the reason and
-    /// renders no message form — a form whose every submission is refused is
+    /// renders no message form, a form whose every submission is refused is
     /// not an honest disabled state (the page's disabled branch).
     #[test]
     fn disabled_assistant_state_names_the_reason_and_hides_the_form() {
@@ -794,7 +794,7 @@ mod tests {
         let error = render_bot_state("web-assistant-error-flash").unwrap();
         assert!(error.contains("temporarily unavailable"));
         let approved = render_bot_state("control-plane-reviews-ai-drafts-approved-flash").unwrap();
-        assert!(approved.contains("Draft approved — the reply is queued."));
+        assert!(approved.contains("Draft approved, the reply is queued."));
         let rejected = render_bot_state("control-plane-reviews-ai-drafts-rejected-flash").unwrap();
         assert!(rejected.contains("Draft rejected."));
         let handled =
@@ -804,10 +804,10 @@ mod tests {
 
     /// Layout fixes pinned at the markup (dogfood 2026-10-06 ui-visual):
     ///   * long unbreakable tokens wrap (`whitespace-pre-wrap break-words`)
-    ///     on the transcript turns and the draft reply bodies — without
+    ///     on the transcript turns and the draft reply bodies, without
     ///     `break-words` the long docs URL forced horizontal scroll inside
     ///     the `<pre>`/`<p>`;
-    ///   * the approve/reject action rows stack below `lg` — the
+    ///   * the approve/reject action rows stack below `lg`, the
     ///     side-by-side row squeezed the note input to 16-30px wide at
     ///     320-768px (the button's intrinsic 167px won the flex row).
     #[test]
@@ -849,7 +849,7 @@ mod tests {
             "the fixture header must render the session email"
         );
         // ARK law: identifiers render in full and WRAP (no ellipsis
-        // truncation) — the identity cell shrinks (min-w-0) and its text
+        // truncation), the identity cell shrinks (min-w-0) and its text
         // carries the wrapping primitive.
         assert!(
             html.contains("min-w-0") && !html.contains("truncate"),
@@ -919,7 +919,7 @@ mod tests {
         assert!(editing.contains("Edit rule"));
         assert!(editing.contains("Emails near plan limit"));
         assert!(
-            editing.contains("fixed — delete and recreate"),
+            editing.contains("fixed, delete and recreate"),
             "the edit form names the fixed fields"
         );
         assert!(editing.contains("Cancel"));
@@ -971,7 +971,7 @@ mod tests {
         assert!(failed.contains("Verify DNS now"));
 
         // The shared page wrapper owns the breadcrumb and the page's single
-        // h1 — the live handler composes through it, so live and the
+        // h1, the live handler composes through it, so live and the
         // fixture/golden cannot drift (the bare-panel live composition had
         // NO h1: dogfood 2026-10-08 styled re-capture, 0 live vs 1 fixture).
         // The route-level (no-data) fixture renders through the plain route

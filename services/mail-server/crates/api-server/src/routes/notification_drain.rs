@@ -9,31 +9,31 @@
 //!
 //! Before this module NOTHING read the table: the live stack carried 64
 //! pending `usage_alert` rows, the oldest two days old, all with
-//! `attempts = 0` — every billing notification was silently never sent.
+//! `attempts = 0`, every billing notification was silently never sent.
 //!
 //! This module is the missing consumer. Contract:
 //!
-//! * **Claim** — pending rows (plus `processing` rows abandoned by a crashed
+//! * **Claim**, pending rows (plus `processing` rows abandoned by a crashed
 //!   drainer) are claimed with `FOR UPDATE SKIP LOCKED`, so any number of
 //!   api-server replicas may run the drainer concurrently without double
 //!   delivery. `attempts` increments at claim time: a process death cannot
 //!   lose the attempt record.
-//! * **Backoff** — a row that failed is only re-claimable after
+//! * **Backoff**, a row that failed is only re-claimable after
 //!   `attempts² × 60 s` (capped at [`MAX_RETRY_BACKOFF_SECS`]), so a transient
 //!   mail-pipeline outage cannot hot-loop. After `max_attempts` the row is
-//!   parked as `failed` with the last error — never deleted, never a silent
+//!   parked as `failed` with the last error, never deleted, never a silent
 //!   drop.
-//! * **Deliver** — the notification is rendered and handed to the SAME
+//! * **Deliver**, the notification is rendered and handed to the SAME
 //!   platform mail pipeline account mail uses
 //!   ([`crate::routes::system_sender::queue_system_email_in_transaction`]:
 //!   DKIM-ready system sender, `email_queue` + `messages` rows, worker
 //!   pickup). The queue row and the queued message commit in ONE transaction,
 //!   so a crash can never mark a notification sent without the message.
-//! * **Recipient** — the tenant's owner (the billing contact). A tenant with
+//! * **Recipient**, the tenant's owner (the billing contact). A tenant with
 //!   no owner address fails loudly and retries rather than vanishing.
 //!
 //! Unknown notification types are still delivered with a generic rendering
-//! (type + payload) — a new producer type must never be a silent drop.
+//! (type + payload), a new producer type must never be a silent drop.
 
 use chrono::Utc;
 use sqlx::PgPool;
@@ -175,7 +175,7 @@ fn payload_i64(payload: &serde_json::Value, key: &str) -> Option<i64> {
 }
 
 /// Render one notification. Known types get a product-specific message; any
-/// other type gets a generic rendering naming the type only — the raw payload
+/// other type gets a generic rendering naming the type only, the raw payload
 /// stays in `notification_queue` (and the drainer's logs) for operators and is
 /// **never** the customer-facing presentation.
 fn render_notification(
@@ -402,7 +402,7 @@ async fn record_failure(db: &PgPool, row: &ClaimedNotification, error: &str) {
 /// Drain one batch of the notification queue.
 ///
 /// Returns the pass's counters. A per-row delivery failure is recorded on the
-/// row (retry/park) and does NOT fail the pass — one bad tenant cannot block
+/// row (retry/park) and does NOT fail the pass, one bad tenant cannot block
 /// the queue for everyone.
 pub async fn drain_notification_queue(db: &PgPool, batch: i64) -> Result<DrainStats, ApiError> {
     let ClaimOutcome { rows, mut stats } = claim_batch(db, batch).await?;
@@ -527,7 +527,7 @@ mod tests {
     }
 
     /// Seed the system sender domain (apexmail.ee) with real DKIM material so
-    /// the platform mail pipeline accepts the message — the same convention
+    /// the platform mail pipeline accepts the message, the same convention
     /// as `routes::web`'s coverage fixture. Callers hold
     /// [`crate::test_db::DKIM_ENV_MUTEX`].
     async fn seed_system_sender(db: &PgPool) {
@@ -582,7 +582,7 @@ mod tests {
     /// drainer existed the row stayed `pending` forever.
     #[tokio::test]
     // The DKIM env guard serializes a PROCESS-GLOBAL env var whose
-    // mutation must span the awaited code under test — the documented
+    // mutation must span the awaited code under test, the documented
     // clippy::await_holding_lock allowance (metering_monitor precedent).
     #[allow(clippy::await_holding_lock)]
     async fn pending_notification_is_delivered_to_the_owner_and_marked_sent() {
@@ -692,7 +692,7 @@ mod tests {
         db.close().await;
     }
 
-    /// A retryable failure stays pending with backoff — and is NOT re-claimed
+    /// A retryable failure stays pending with backoff, and is NOT re-claimed
     /// on the immediate next pass.
     #[tokio::test]
     async fn retryable_failure_backs_off_before_the_next_claim() {
@@ -740,7 +740,7 @@ mod tests {
     }
 
     /// Unknown notification types are still delivered (generic rendering) —
-    /// a producer added later must never be a silent drop — but the raw
+    /// a producer added later must never be a silent drop, but the raw
     /// payload is NOT the customer presentation: the reader is pointed at
     /// the console, and the payload stays in `notification_queue` for
     /// operators.

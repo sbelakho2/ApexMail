@@ -13,16 +13,16 @@ ApexMail stellt qualifizierten Enterprise-Interessenten und Kunden Sicherheitsdo
 
 ## Was wir bereitstellen
 
-- **SIG / CAIQ / HECVAT** — Standardisierte Antworten für Sicherheitsbewertungen für qualifizierte Enterprise-Kunden.
-- **Penetrationstest-Zusammenfassung** — Eine Zusammenfassung der Befunde und Behebungsmaßnahmen wird verfügbar sein, sobald der erste externe Penetrationstest der Anwendung abgeschlossen ist.
-- **Sicherheitsarchitektur-Review** — Ein gemeinsamer Durchgang durch die Sicherheitskontrollen, die Verschlüsselungsarchitektur, die Audit-Protokollierung und die Bereitstellungs-Isolationsmodelle von ApexMail.
-- **Datenflussdiagramme** — Visuelle Dokumentation der Datenverarbeitung, der Speicherorte und der Unterauftragsverarbeiter-Beziehungen.
+- **SIG / CAIQ / HECVAT**, Standardisierte Antworten für Sicherheitsbewertungen für qualifizierte Enterprise-Kunden.
+- **Penetrationstest-Zusammenfassung**, Eine Zusammenfassung der Befunde und Behebungsmaßnahmen wird verfügbar sein, sobald der erste externe Penetrationstest der Anwendung abgeschlossen ist.
+- **Sicherheitsarchitektur-Review**, Ein gemeinsamer Durchgang durch die Sicherheitskontrollen, die Verschlüsselungsarchitektur, die Audit-Protokollierung und die Bereitstellungs-Isolationsmodelle von ApexMail.
+- **Datenflussdiagramme**, Visuelle Dokumentation der Datenverarbeitung, der Speicherorte und der Unterauftragsverarbeiter-Beziehungen.
 
 ## Formular zur Anforderung eines Sicherheitsfragebogens
 
 <div id="enquiry-submitted" class="apex-notice apex-notice--ok" role="status">
   <b>Übermittelt</b>
-  <p>Vielen Dank — Ihre Eingabe wurde übermittelt. Unser Team prüft die Anfrage und antwortet innerhalb von 2 Werktagen.</p>
+  <p>Vielen Dank, Ihre Eingabe wurde übermittelt. Unser Team prüft die Anfrage und antwortet innerhalb von 2 Werktagen.</p>
 </div>
 <div id="enquiry-error" class="apex-notice apex-notice--fail" role="alert">
   <b>Nicht angenommen</b>

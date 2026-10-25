@@ -1,8 +1,8 @@
 //! Autonomy control state.
 //!
 //! `sales_autonomy_state` replaces the old `safe_mode: bool`. A boolean could
-//! not express the state that matters most — "run the whole brain and generate
-//! the copy, but do not send" — so the most valuable validation dataset was
+//! not express the state that matters most, "run the whole brain and generate
+//! the copy, but do not send", so the most valuable validation dataset was
 //! thrown away every time an operator reached for safe mode.
 //!
 //! The mode is read on every decision (never cached across requests) so an
@@ -16,7 +16,7 @@ use crate::types::{AutonomyMode, AutonomyState, SalesError};
 
 /// Load the autonomy state for a tenant.
 ///
-/// A tenant with no row gets [`AutonomyState::default`] — `Disabled`, the
+/// A tenant with no row gets [`AutonomyState::default`], `Disabled`, the
 /// fail-closed value. It is never persisted by a read, so simply asking the
 /// question cannot grant authority.
 pub async fn load(db: &PgPool, tenant_id: &str) -> Result<AutonomyState, SalesError> {

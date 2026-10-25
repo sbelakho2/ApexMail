@@ -58,7 +58,7 @@ Jede dieser Konstruktionen wird in SendGrids eigener Fehlerform `{"errors": [{"m
 
 | SendGrid-Konstrukt | Ablehnung |
 |---|---|
-| Mehr als ein `personalizations`-Eintrag | `more than one 'personalizations' entry is not supported by the ApexMail compatibility surface: per-personalization subject/headers would be dropped — send one request per personalization` |
+| Mehr als ein `personalizations`-Eintrag | `more than one 'personalizations' entry is not supported by the ApexMail compatibility surface: per-personalization subject/headers would be dropped, send one request per personalization` |
 | `personalizations[].substitutions`, `.dynamic_template_data` | Feld hat kein kanonisches Äquivalent |
 | `template_id`, `dynamic_template_data` | SendGrid-Vorlagen-IDs sind keine ApexMail-Vorlagen-IDs |
 | `attachments[].content_id`, `disposition: "inline"` | Der kanonische Sendepfad kennt kein Inline-Teil; hängen Sie die Datei an, statt sie einzubetten |

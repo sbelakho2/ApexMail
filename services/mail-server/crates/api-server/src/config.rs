@@ -114,7 +114,7 @@ pub struct Config {
     /// internal requests. If set, X-API-Key matching this value bypasses
     /// the normal api_keys DB lookup and returns a super-admin identity.
     pub control_plane_api_key: Option<String>,
-    /// Base URL of the sales-autopilot service — the canonical sales brain the
+    /// Base URL of the sales-autopilot service, the canonical sales brain the
     /// control plane proxies to.
     ///
     /// Overridden by `SALES_AUTOPILOT_BASE_URL`; the compose stacks set it to
@@ -141,7 +141,7 @@ pub struct Config {
     /// consumed by the analytics PDF export.
     pub pdf_renderer_auth_token: Option<String>,
     /// Dedicated credential for template-renderer
-    /// (`TEMPLATE_RENDERER_AUTH_TOKEN`) — reserved for the template-renderer
+    /// (`TEMPLATE_RENDERER_AUTH_TOKEN`), reserved for the template-renderer
     /// outbound wiring (no api-server call site yet).
     pub template_renderer_auth_token: Option<String>,
     /// Dedicated credential for devex-service (`DEVEX_AUTH_TOKEN`) —
@@ -204,7 +204,7 @@ pub struct Config {
 
     // ── KiwiCaptcha (native Rust proof-of-work CAPTCHA) ────
     /// KiwiCaptcha is a first-party, self-contained proof-of-work
-    /// CAPTCHA — no external services, no iframe, no external JS.
+    /// CAPTCHA, no external services, no iframe, no external JS.
     /// Enable KiwiCaptcha verification on auth routes (login, signup).
     pub kiwi_enabled: bool,
     /// WAF request screening (audit F-WIRING-1). Monitor mode by default:
@@ -324,7 +324,7 @@ fn env_required_pem(key: &str) -> Result<String, ConfigError> {
 /// `-----END …-----` final line that is not newline-terminated. Quoting a
 /// multi-line PEM in a `.env` file (`JWT_PUBLIC_KEY_PEM="…END KEY-----"`)
 /// swallows the closing newline, and every authenticated request then fails
-/// key decoding — normalize here so the config layer is tolerant of that
+/// key decoding, normalize here so the config layer is tolerant of that
 /// widespread packaging style.
 fn normalize_pem_value(raw: &str) -> String {
     let unescaped = raw.replace("\\n", "\n");
@@ -724,7 +724,7 @@ impl Config {
         let webhook_signing_secret = env_required("WEBHOOK_SIGNING_SECRET")?;
         // The default must be a REACHABLE address: this value is composed
         // into outbound email links (verification, reset, tracking) and
-        // OAuth redirects — an unspecified-address default bakes
+        // OAuth redirects, an unspecified-address default bakes
         // undialable http://0.0.0.0/... URLs into real messages. `localhost`
         // is the useful dev default; production configurations are pinned
         // to https by `validate_https_url` and must name a real host.
@@ -786,7 +786,7 @@ impl Config {
             });
         }
 
-        // Validate rate limiting configuration — zero or negative values would
+        // Validate rate limiting configuration, zero or negative values would
         // silently disable rate limiting, leaving the API unprotected.
         let rate_limit_max_requests = parse_u64(
             "RATE_LIMIT_MAX_REQUESTS",
@@ -886,7 +886,7 @@ impl Config {
             .parse()
             .unwrap_or(0);
         // v5 issuance contract: argon2id t must be 3..=6 (crate MIN_ARGON_TIME,
-        // browser driver ceiling 6 — the OLD default of 1 is rejected by both).
+        // browser driver ceiling 6, the OLD default of 1 is rejected by both).
         let kiwi_argon_t = env_or("KIWI_ARGON_T", "3").parse().unwrap_or(3);
         let kiwi_argon_p = env_or("KIWI_ARGON_P", "1").parse().unwrap_or(1);
         // 20-bit difficulty = ~1M expected SHA-256 hashes = ~2-5s on a browser.
@@ -935,7 +935,7 @@ impl Config {
             .min(SOLVER_MAX_TARGET_BITS);
         if !environment.is_production() && kiwi_secret_key == "dev" {
             tracing::info!(
-                "KiwiCaptcha configured with dev key — debug builds bypass \
+                "KiwiCaptcha configured with dev key, debug builds bypass \
                  verification; release builds still verify (HMAC under the dev key)"
             );
         }
@@ -945,7 +945,7 @@ impl Config {
             tracing::error!(
                 m_kib = kiwi_argon_m_kib,
                 p = kiwi_argon_p,
-                "KiwiCaptcha: Argon2id requires m_kib >= 8 * p — refusing to issue impossible challenges"
+                "KiwiCaptcha: Argon2id requires m_kib >= 8 * p, refusing to issue impossible challenges"
             );
             return Err(ConfigError::Invalid {
                 var: "KIWI_ARGON_M_KIB".into(),
@@ -961,12 +961,12 @@ impl Config {
             tracing::warn!(
                 m_kib = kiwi_argon_m_kib,
                 max = SOLVER_MAX_ARGON2_M_KIB,
-                "KiwiCaptcha: Argon2id m_kib exceeds the browser-solvable ceiling — clamping"
+                "KiwiCaptcha: Argon2id m_kib exceeds the browser-solvable ceiling, clamping"
             );
         }
         // The v5 contract (crate MIN_ARGON_TIME=3, driver ceiling t<=6, p==1
         // for libsodium cross-verification): an out-of-range t would make
-        // issue_challenge error on EVERY request — fail fast at startup.
+        // issue_challenge error on EVERY request, fail fast at startup.
         if kiwi_algorithm == kiwicaptcha::PoWAlgorithm::Argon2id
             && (!(3..=6).contains(&kiwi_argon_t) || kiwi_argon_p != 1)
         {
@@ -1201,7 +1201,7 @@ impl Config {
             // this process's outbound calls. The services themselves REFUSE
             // TO BOOT in production without their dedicated token, so an
             // unset caller token here means the outbound call would present
-            // the universal token — refused with a loud log on the service
+            // the universal token, refused with a loud log on the service
             // side. Warn (do not fail the api-server boot): the affected
             // routes degrade honestly with a 500 either way.
             for (service, env_name, wired) in [
@@ -1210,7 +1210,7 @@ impl Config {
                     "PDF_RENDERER_AUTH_TOKEN",
                     true,
                 ),
-                // No api-server outbound call sites yet — the config fields
+                // No api-server outbound call sites yet, the config fields
                 // exist so deployments can pre-provision; nothing to warn
                 // about while no call presents a credential.
                 ("template-renderer", "TEMPLATE_RENDERER_AUTH_TOKEN", false),
@@ -1222,7 +1222,7 @@ impl Config {
                     .is_some_and(|v| !v.trim().is_empty());
                 if wired && !dedicated_set {
                     tracing::warn!(
-                        "{env_name} is not set — the outbound call to {service} still \
+                        "{env_name} is not set, the outbound call to {service} still \
                          authenticates with the universal INTERNAL_SERVICE_TOKEN. \
                          REQUIRED-SOON: the service refuses the universal token once its \
                          dedicated per-workload credential is provisioned"
@@ -1428,7 +1428,7 @@ impl Config {
             // floor comes from the crate's key-derivation minimum
             // (`kiwicaptcha::keys::MIN_MASTER_BYTES`, currently 32): a shorter
             // secret is refused at ISSUANCE time (`SignError::KeyTooShort`),
-            // which would surface every auth page as a captcha outage — so the
+            // which would surface every auth page as a captcha outage, so the
             // deployment config rejects it up front.
             validate_secret(
                 "KIWI_SECRET_KEY",

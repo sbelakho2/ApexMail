@@ -3,7 +3,7 @@
 //! Mailboxes are the RECEIVING side of the mail plane: `mail_accounts` rows
 //! are what the MTA's inbound directory resolves (`PgMailboxDirectory`) and
 //! what IMAP authenticates against (via mailstore). Before this module the
-//! only way to create one was SQL — inbound reception and IMAP shipped with
+//! only way to create one was SQL, inbound reception and IMAP shipped with
 //! no provisioning surface at all.
 //!
 //! Provisioning is atomic: the account row AND its INBOX folder are written
@@ -20,7 +20,7 @@
 //!
 //! * the owning TENANT is recorded on the account, taken from the
 //!   `domains` row that makes the domain platform-managed (the same table
-//!   the provisioning path already trusts — the operator never types a
+//!   the provisioning path already trusts, the operator never types a
 //!   tenant id that could disagree with the domain's owner). A mailbox on a
 //!   domain with no owning tenant (platform-internal domains) keeps
 //!   `tenant_id = NULL` and is therefore NOT billed, stated plainly;
@@ -35,7 +35,7 @@
 //! add-on bills, and `archive_enabled_at` is the retention MARKER the flag
 //! starts. Enabling it also ensures the account's `Archive` folder exists
 //! in the same transaction (the mail plane's storage target for retained
-//! messages — mailstore COPY/move already work against it). Journaling is
+//! messages, mailstore COPY/move already work against it). Journaling is
 //! built (`mail_journal`, migration 264): the worker copies outbound raw MIME
 //! and the mailstore copies inbound messages at persist time for add-on
 //! tenants, and `/settings/journal` + `GET /v1/journal` provide the
@@ -177,7 +177,7 @@ fn validate_create(body: &CreateMailboxRequest) -> Result<(String, String, i64),
 /// toggle. Entitled when the tenant's plan/override grants
 /// `FeatureKey::Mailboxes` OR the tenant holds an ACTIVE Mailboxes
 /// product-line contract (`billing_service::product_lines::mailboxes_contract_active`
-/// — the purchase record the monthly seat invoice reads). The refusal NAMES
+///, the purchase record the monthly seat invoice reads). The refusal NAMES
 /// the plan and the product (a named refusal on non-entitled plans), and a
 /// tenant-less platform mailbox can never subscribe to the billed add-on.
 async fn require_mailboxes_entitlement(
@@ -387,7 +387,7 @@ async fn create_mailbox(
     Ok((StatusCode::CREATED, Json(row)))
 }
 
-/// `POST /v1/admin/mailboxes/:id/archive` — subscribe or unsubscribe the
+/// `POST /v1/admin/mailboxes/:id/archive`, subscribe or unsubscribe the
 /// seat to the archive + journaling add-on.
 ///
 /// Enabling ensures the `Archive` folder exists (idempotent) and stamps
@@ -427,7 +427,7 @@ async fn set_archive(
 }
 
 /// The archive-toggle core (shared by the route and its tests): gate,
-/// flag + marker write, Archive folder materialization — all under the
+/// flag + marker write, Archive folder materialization, all under the
 /// mailbox row lock.
 async fn toggle_archive(
     state: &AppState,
@@ -624,7 +624,7 @@ mod tests {
         }
     }
 
-    /// Grant the tenant an ACTIVE Mailboxes product-line contract — the
+    /// Grant the tenant an ACTIVE Mailboxes product-line contract, the
     /// purchase record both the entitlement gate and the monthly seat invoice
     /// read.
     async fn grant_mailboxes_contract(pool: &sqlx::PgPool, tenant: &str) {
@@ -812,7 +812,7 @@ mod tests {
 
     /// The seat is bound to the domain's owning tenant, the archive
     /// subscription stamps the retention marker AND materializes the
-    /// Archive folder — the mail-plane storage target of the add-on.
+    /// Archive folder, the mail-plane storage target of the add-on.
     #[tokio::test]
     async fn provisioning_binds_the_tenant_and_the_archive_flag_stamps_the_marker() {
         #[rustfmt::skip]

@@ -65,7 +65,7 @@ async fn incident_reopen_clears_resolved_and_reappears_in_active_list() {
         "resolved incidents leave the active list"
     );
 
-    // Reopen: the SAME typed transition clears resolved_at — the incident
+    // Reopen: the SAME typed transition clears resolved_at, the incident
     // reappears in list_active instead of staying invisible.
     let reopened = IncidentRepo::transition(&pool, "inc_f86_1", IncidentStatus::Investigating)
         .await
@@ -109,7 +109,7 @@ async fn legacy_resolved_incidents_are_backfilled() {
         return;
     };
     // Simulate a legacy row exactly as migration 115 created them (no
-    // resolved_at) — insert via SQL so the column is omitted.
+    // resolved_at), insert via SQL so the column is omitted.
     sqlx::query(
         "INSERT INTO status_page_incidents (id, title, status, impact, affected_components, created_at, updated_at) \
          VALUES ('inc_legacy', 'Legacy outage', 'resolved', 'major', '{\"web\"}', \
@@ -158,7 +158,7 @@ async fn legacy_resolved_incidents_are_backfilled() {
     pool.close().await;
 }
 
-// ── F87/audit-26: warmup — ADVISORY catalog only ─────────────────────────────
+// ── F87/audit-26: warmup, ADVISORY catalog only ─────────────────────────────
 
 /// The advisory ISP warmup catalog round-trips CRUD on the canonical
 /// migrations. This test intentionally exercises STORAGE ONLY: the former

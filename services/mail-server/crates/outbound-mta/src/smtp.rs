@@ -2,7 +2,7 @@
 //!
 //! One [`SmtpClient`] is one TCP connection: greeting, `EHLO` (with `HELO`
 //! fallback), optional `STARTTLS` upgrade, `MAIL FROM`, `RCPT TO`, `DATA`.
-//! It deliberately does not interpret policy — the relay classifies replies
+//! It deliberately does not interpret policy, the relay classifies replies
 //! via [`crate::response`] and decides retries/refusals.
 //!
 //! TLS upgrade consumes `self` (the stream type changes from plain TCP to a
@@ -284,7 +284,7 @@ impl SmtpClient {
 
     /// Perform the DATA exchange. Returns the FINAL reply (post-DATA 250 when
     /// accepted). If the peer refuses the DATA command itself, that reply is
-    /// returned instead — the caller classifies it the same way (4xx
+    /// returned instead, the caller classifies it the same way (4xx
     /// transient, 5xx whole-message permanent).
     pub async fn data(&mut self, message: &[u8]) -> Result<SmtpReply, SmtpError> {
         let reply = self.send_command("DATA", SmtpStage::Data).await?;

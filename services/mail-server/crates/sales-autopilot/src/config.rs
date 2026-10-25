@@ -48,7 +48,7 @@ pub struct SalesConfig {
 
     /// System-tenant restriction (`SALES_ALLOWED_TENANTS`, comma separated).
     /// The service authenticates callers with a single shared internal token
-    /// and then reads the `x-tenant-id` header — so the deployment MUST pin
+    /// and then reads the `x-tenant-id` header, so the deployment MUST pin
     /// the only tenant this owner-only service may act on. Since the customer
     /// automation executor moved to `worker-processors`, that tenant is
     /// exactly [`SYSTEM_TENANT_ID`]: any other value is a boot failure, and
@@ -149,7 +149,7 @@ impl Default for DispatchConfig {
 
 impl DispatchConfig {
     /// Are the mandatory production-dispatcher inputs present and minimally
-    /// valid? (A more complete validation — verified sender domain — happens
+    /// valid? (A more complete validation, verified sender domain, happens
     /// per tenant at dispatch time.)
     pub fn is_configured(&self) -> bool {
         !self.from_email.trim().is_empty()
@@ -227,7 +227,7 @@ pub fn require_system_tenant_scope(
             } else {
                 Err(format!(
                     "SALES_ALLOWED_TENANTS must contain exactly the system tenant \
-                     ('{SYSTEM_TENANT_ID}') — sales-autopilot serves no other tenant. Got: {tenants:?}"
+                     ('{SYSTEM_TENANT_ID}'), sales-autopilot serves no other tenant. Got: {tenants:?}"
                 ))
             }
         }
@@ -247,7 +247,7 @@ impl SalesConfig {
     /// A variable that is *absent* (or empty) falls back to its default.
     /// A variable that is *present but invalid* (e.g. a non-numeric port)
     /// is treated as a configuration error and returns `Err` instead of
-    /// being silently ignored — misconfigured deployments should fail fast
+    /// being silently ignored, misconfigured deployments should fail fast
     /// rather than run with unexpected defaults.
     pub fn from_env() -> anyhow::Result<Self> {
         let config = Self {
@@ -356,7 +356,7 @@ impl SalesConfig {
             return Err("LEAD_SCORE_*_WEIGHT sum must be > 0".into());
         }
         // Dispatch settings: when a partial configuration IS provided it must
-        // be internally valid — a malformed from address or a too-short HMAC
+        // be internally valid, a malformed from address or a too-short HMAC
         // secret is a configuration error, not a silent fallback.
         let d = &self.dispatch;
         if !d.from_email.is_empty() && !apexmail_lib::validation::is_valid_email(&d.from_email) {
@@ -396,7 +396,7 @@ fn read_env(names: &[&str]) -> anyhow::Result<Option<String>> {
                     Some(trimmed.to_string())
                 });
             }
-            // Not set under this name — try the next alias.
+            // Not set under this name, try the next alias.
             Err(std::env::VarError::NotPresent) => continue,
             Err(err) => {
                 return Err(anyhow::anyhow!(
@@ -437,7 +437,7 @@ mod tests {
         assert_eq!(cfg.max_campaigns, 50);
         assert_eq!(cfg.calendar_sync_interval_secs, 300);
         assert_eq!(cfg.scraper_rpm, 30);
-        // The default base URL must NOT include a trailing /v1 — the
+        // The default base URL must NOT include a trailing /v1, the
         // HttpEnrichmentProvider appends the versioned path itself, so a
         // /v1 suffix here would produce a doubled /v1/v1 request path.
         assert_eq!(cfg.enrichment_api_url, "https://enrich.apexmail.ee");
@@ -831,7 +831,7 @@ mod from_env_tests {
         cfg.allowed_tenants = Some(vec![SYSTEM_TENANT_ID.into()]);
         assert!(require_system_tenant_scope(&cfg, true).is_ok());
         assert!(require_system_tenant_scope(&cfg, false).is_ok());
-        // ANY broader or different list is refused — even in non-production:
+        // ANY broader or different list is refused, even in non-production:
         // the service physically cannot serve other tenants, so a broader
         // allowlist could never be honoured.
         cfg.allowed_tenants = Some(vec!["tenant-a".into()]);

@@ -1,11 +1,11 @@
-//! US sales-tax nexus administration — the operator surface for
+//! US sales-tax nexus administration, the operator surface for
 //! `billing_service::us_tax` (plan WP C2).
 //!
 //! Two truths, both shown: the COMMITTED rate/threshold data file
 //! (`billing-service/data/us_sales_tax.json`, validated and freshness-checked
 //! on every read) and the per-state status rows the nexus sweep maintains
 //! (`us_tax_nexus_states`). This module is the ONLY surface that can write
-//! `status = 'registered'` — the sweep flips `below`/`threshold_crossed` and
+//! `status = 'registered'`, the sweep flips `below`/`threshold_crossed` and
 //! raises the finance alert, but registering with a state is a legal act by
 //! the owner/accounting, and only registration makes sales tax compute on new
 //! invoices.
@@ -13,7 +13,7 @@
 //! Routes (mounted under `/v1/admin/*`, i.e. the system-tenant control plane
 //! with the CP session policy and the `["*"]` operator scope):
 //!
-//! * `GET  /v1/admin/billing/us-tax/states` — the tracked states (both nexus
+//! * `GET  /v1/admin/billing/us-tax/states`, the tracked states (both nexus
 //!   measures, the declared criteria, the warning record), the rate-file rows
 //!   (taxability, rates, freshness), the reported-not-assigned sales
 //!   (unknown-state and non-USD invoices) and the open threshold alerts.
@@ -23,12 +23,12 @@
 //!   otherwise every invoice in that state would be refused) or unregister
 //!   (deliberately independent of the file: a rate-file problem must never
 //!   block REMOVING a tax).
-//! * `GET  /v1/admin/billing/us-tax/exemptions[?tenantId=…]` — the customer
+//! * `GET  /v1/admin/billing/us-tax/exemptions[?tenantId=…]`, the customer
 //!   exemption certificates on file.
 //! * `POST /v1/admin/billing/us-tax/exemptions` —
 //!   `{"tenantId","state","certificateId","expiresAt"?,"note"?}`: store
 //!   (insert or replace) one certificate for (tenant, state).
-//! * `DELETE /v1/admin/billing/us-tax/exemptions/:id` — remove one.
+//! * `DELETE /v1/admin/billing/us-tax/exemptions/:id`, remove one.
 //! * `GET  /v1/admin/billing/us-tax/report?period=YYYY-MM[&format=csv]` —
 //!   the filing-ready per-state report (JSON, or CSV with `format=csv`).
 //!
@@ -125,7 +125,7 @@ async fn audit_registration(
     .await;
 }
 
-/// `GET /v1/admin/billing/us-tax/states` — the tracked states, the committed
+/// `GET /v1/admin/billing/us-tax/states`, the tracked states, the committed
 /// rate-file rows and the open threshold alerts.
 async fn list_states(
     State(state): State<AppState>,
@@ -208,14 +208,14 @@ async fn list_states(
 
     // The invoices the sweep can only REPORT: a US invoice whose billing
     // address carries no recognisable state, or one in a currency other than
-    // USD (never converted — the thresholds are USD figures). Shown here so
+    // USD (never converted, the thresholds are USD figures). Shown here so
     // "reported, never assigned" is visible to the operator, not just in logs.
     let reported = billing_service::us_tax::unassigned_us_sales(&state.db, chrono::Utc::now())
         .await
         .map_err(ApiError::Internal)?;
 
     // Both open incident kinds: the exactly-once crossing alert (high) and
-    // the early warning at the configured fraction (medium) — the operator
+    // the early warning at the configured fraction (medium), the operator
     // sees the lead time, not just the crossing.
     let alerts: Vec<serde_json::Value> = sqlx::query_as::<
         _,
@@ -272,7 +272,7 @@ async fn list_states(
     })))
 }
 
-/// `POST /v1/admin/billing/us-tax/states/:state/registration` — register the
+/// `POST /v1/admin/billing/us-tax/states/:state/registration`, register the
 /// state (tax now computes on new invoices there) or unregister it.
 async fn set_registration(
     State(state): State<AppState>,
@@ -415,7 +415,7 @@ fn exemption_json(row: &billing_service::us_tax::UsTaxExemptionRow) -> serde_jso
     })
 }
 
-/// `GET /v1/admin/billing/us-tax/exemptions` — every certificate on file,
+/// `GET /v1/admin/billing/us-tax/exemptions`, every certificate on file,
 /// optionally filtered to one tenant.
 async fn list_exemptions(
     State(state): State<AppState>,
@@ -433,7 +433,7 @@ async fn list_exemptions(
     })))
 }
 
-/// `POST /v1/admin/billing/us-tax/exemptions` — store (insert or replace) one
+/// `POST /v1/admin/billing/us-tax/exemptions`, store (insert or replace) one
 /// certificate for (tenant, state). Applied to invoices issued from now on.
 async fn create_exemption(
     State(state): State<AppState>,
@@ -487,7 +487,7 @@ async fn create_exemption(
     })))
 }
 
-/// `DELETE /v1/admin/billing/us-tax/exemptions/:id` — remove one certificate;
+/// `DELETE /v1/admin/billing/us-tax/exemptions/:id`, remove one certificate;
 /// new invoices in the state are taxable again.
 async fn delete_exemption(
     State(state): State<AppState>,
@@ -529,7 +529,7 @@ pub struct ReportQuery {
     pub format: Option<String>,
 }
 
-/// `GET /v1/admin/billing/us-tax/report?period=YYYY-MM[&format=csv]` — the
+/// `GET /v1/admin/billing/us-tax/report?period=YYYY-MM[&format=csv]`, the
 /// filing-ready per-state report the accountant consumes; `format=csv`
 /// returns the CSV rendering.
 async fn read_report(

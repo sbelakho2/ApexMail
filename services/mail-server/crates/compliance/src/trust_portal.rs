@@ -1,10 +1,10 @@
-//! Trust Portal — public security posture, subprocessor registry, incident
+//! Trust Portal, public security posture, subprocessor registry, incident
 //! status page, and gated document download.
 //!
 //! The Trust Portal is ApexMail's public-facing compliance face. It serves:
-//!   * `/trust/*` — anonymous, public-only views (whitepapers, policy index,
+//!   * `/trust/*`, anonymous, public-only views (whitepapers, policy index,
 //!     subprocessor list, status page, public incidents).
-//!   * `/v1/admin/trust/*` — internal CRUD over every artifact.
+//!   * `/v1/admin/trust/*`, internal CRUD over every artifact.
 //!
 //! All data lives in the `trust_portal_*` tables created in migration
 //! `039_soc2_hipaa_trust_portal.sql`.  This module is the single owner of
@@ -541,7 +541,7 @@ impl TrustPortalService {
         &self,
         input: AccessRequestInput,
     ) -> Result<AccessRequest, String> {
-        // Audit F12: shape + length validation, not just "contains @" — an
+        // Audit F12: shape + length validation, not just "contains @", an
         // unauthenticated row-spam vector previously accepted arbitrary
         // megabyte "emails" (bounded by the body limit) into the compliance
         // database. Same bar the OIDC email assurance uses: exactly one `@`,
@@ -874,9 +874,9 @@ impl From<AccessRequestRow> for AccessRequest {
 // rate limit.
 
 /// Maximum accepted requester-email length (RFC 5321 limit is 254; a little
-/// headroom is pointless — the same bound the OIDC email bar uses).
+/// headroom is pointless, the same bound the OIDC email bar uses).
 pub const MAX_REQUESTER_EMAIL_LEN: usize = 254;
-/// Free-text field bounds — an anonymous request does not need an essay.
+/// Free-text field bounds, an anonymous request does not need an essay.
 const MAX_FIELD_LEN: usize = 512;
 
 /// Shape + length validation for the anonymous requester email (audit F12).
@@ -1041,7 +1041,7 @@ mod tests {
     fn access_request_limiter_is_two_level() {
         let limiter = TrustAccessRateLimiter::new();
         let ip = "203.0.113.50";
-        // Per-IP cap: allowed up to the cap, then refused — even though the
+        // Per-IP cap: allowed up to the cap, then refused, even though the
         // global bucket is nowhere near ITS cap.
         for attempt in 0..TRUST_ACCESS_MAX_PER_IP {
             assert!(
@@ -1427,7 +1427,7 @@ mod db_tests {
             return;
         };
         // Malformed email is refused and writes nothing (audit F12: the
-        // refusal names the field — shape + length, not just "@").
+        // refusal names the field, shape + length, not just "@").
         let err = svc
             .submit_access_request(AccessRequestInput {
                 document_slug: "soc2-report".into(),
@@ -1501,7 +1501,7 @@ mod db_tests {
             return;
         };
         // A pristine trust portal returns explicit empty collections plus the
-        // company's own attestations — never an error, never fabricated docs.
+        // company's own attestations, never an error, never fabricated docs.
         let overview = svc.overview().await.expect("overview");
         assert!(overview.published_documents.is_empty());
         assert!(overview.subprocessors.is_empty());

@@ -6,10 +6,10 @@
 //! On-disk encodings:
 //! - Encrypted (current): `enc:v2:<keyid>:<base64(version || nonce || ciphertext+tag)>`
 //!   where `keyid` is an 8-hex-char digest of the key material (first 4 bytes
-//!   of SHA-256 over the 32-byte key) — see "Key rotation" below.
+//!   of SHA-256 over the 32-byte key), see "Key rotation" below.
 //! - Encrypted (legacy): `enc:v1:<base64(version || nonce || ciphertext+tag)>`.
 //!   Still decrypted transparently; reads lazily migrate it to `enc:v2:`.
-//! - Dev fallback plaintext: `plain:v1:<plaintext>` — a machine-readable
+//! - Dev fallback plaintext: `plain:v1:<plaintext>`, a machine-readable
 //!   marker distinguishing deliberately-unencrypted values from legacy rows.
 //! - Legacy plaintext: no prefix at all (see Read compatibility below).
 //!
@@ -22,7 +22,7 @@
 //! hex). It is cached for the process lifetime so we only pay the parse cost
 //! once.
 //!
-//! Resolution order (E — fail-closed hardening):
+//! Resolution order (E, fail-closed hardening):
 //! 1. `MFA_SECRET_ENCRYPTION_KEY` set → always used; new writes encrypted.
 //! 2. Production with the key unset → **error** (`KeyMissing`). Secrets are
 //!    never silently stored as plaintext in production.
@@ -37,7 +37,7 @@
 //! A single static key made rotation a brick: every `enc:v1:` envelope
 //! decrypts ONLY with the current key, so swapping
 //! `MFA_SECRET_ENCRYPTION_KEY` made every enrolled account undecryptable at
-//! login — permanently, and with no recovery path.
+//! login, permanently, and with no recovery path.
 //!
 //! The fix is key-id versioned envelopes plus an OPTIONAL previous-key
 //! list:
@@ -46,17 +46,17 @@
 //! - `MFA_SECRET_ENCRYPTION_KEY_PREVIOUS` holds the key material that was
 //!   current BEFORE the rotation (and, additively, keys before that).
 //!   Format: comma-separated entries, each either
-//!   - `<keyid>:<32-byte hex key>` — the key id MAY be spelled out, in which
+//!   - `<keyid>:<32-byte hex key>`, the key id MAY be spelled out, in which
 //!     case it must equal the digest of the key material (a mismatched entry
 //!     is rejected at parse with an error log and can never match an
-//!     envelope — fail closed), or
-//!   - `<32-byte hex key>` — the key id is computed from the material.
+//!     envelope, fail closed), or
+//!   - `<32-byte hex key>`, the key id is computed from the material.
 //! - `decrypt_at_rest` resolves `enc:v2:` envelopes by key-id lookup across
 //!   current + previous keys; legacy `enc:v1:` envelopes (which carry no key
 //!   id) try the current key and then each previous key. A keyid with no
 //!   configured key fails closed with [`SecretEncryptionError::UnknownKeyId`];
 //!   a keyid whose configured material does not decrypt (collision/mismatch)
-//!   fails closed with `DecryptionFailed` — never garbage output.
+//!   fails closed with `DecryptionFailed`, never garbage output.
 //! - [`migrate_at_rest`] re-encrypts on read: any successful decrypt under a
 //!   NON-current key (or any legacy `enc:v1:` / plaintext row) is returned
 //!   as a fresh `enc:v2:` envelope under the CURRENT key, so a rotation
@@ -91,7 +91,7 @@ const KEY_SIZE: usize = 32;
 const PREFIX: &str = "enc:v1:";
 const PREFIX_V2: &str = "enc:v2:";
 /// Length of the hex key id stamped into `enc:v2:` envelopes (first 4 bytes
-/// of SHA-256 over the key material — 32 bits of digest is ample to
+/// of SHA-256 over the key material, 32 bits of digest is ample to
 /// distinguish a handful of operator-configured keys; the envelope remains
 /// authenticated by the GCM tag either way).
 const KEY_ID_HEX_LEN: usize = 8;
@@ -112,7 +112,7 @@ const KEY_FILE_NAME: &str = "apexmail-secret-at-rest.key";
 pub enum SecretEncryptionError {
     #[error("encryption key not configured")]
     KeyMissing,
-    #[error("{ENV_VAR} is required in production — refusing to store secrets as plaintext")]
+    #[error("{ENV_VAR} is required in production, refusing to store secrets as plaintext")]
     KeyMissingProduction,
     #[error("invalid encrypted envelope: {0}")]
     InvalidEnvelope(&'static str),
@@ -191,7 +191,7 @@ fn key_id_hex(key: &[u8; KEY_SIZE]) -> String {
 /// Parse one entry of `MFA_SECRET_ENCRYPTION_KEY_PREVIOUS`. Accepted shapes:
 /// `<keyid>:<hexkey>` (declared id must equal the material's digest) or a
 /// bare `<hexkey>` (id computed). Malformed entries return `None` with an
-/// error log — they can never silently match an envelope.
+/// error log, they can never silently match an envelope.
 fn parse_previous_entry(raw: &str) -> Option<KeyMaterial> {
     let entry = raw.trim();
     if entry.is_empty() {
@@ -206,7 +206,7 @@ fn parse_previous_entry(raw: &str) -> Option<KeyMaterial> {
         Ok(_) => {
             tracing::error!(
                 env_var = PREVIOUS_ENV_VAR,
-                "{PREVIOUS_ENV_VAR} entries must decode to 32 bytes — entry ignored"
+                "{PREVIOUS_ENV_VAR} entries must decode to 32 bytes, entry ignored"
             );
             return None;
         }
@@ -214,7 +214,7 @@ fn parse_previous_entry(raw: &str) -> Option<KeyMaterial> {
             tracing::error!(
                 error = %e,
                 env_var = PREVIOUS_ENV_VAR,
-                "invalid hex in {PREVIOUS_ENV_VAR} entry — entry ignored"
+                "invalid hex in {PREVIOUS_ENV_VAR} entry, entry ignored"
             );
             return None;
         }
@@ -233,7 +233,7 @@ fn parse_previous_entry(raw: &str) -> Option<KeyMaterial> {
                 declared_key_id = %declared,
                 computed_key_id = %material.key_id,
                 "{PREVIOUS_ENV_VAR} entry declares a key id that does not match its key \
-                 material — entry ignored"
+                 material, entry ignored"
             );
             return None;
         }
@@ -250,7 +250,7 @@ fn warn_once_dev_plaintext() {
     WARN.call_once(|| {
         tracing::warn!(
             env_var = ENV_VAR,
-            "{ENV_VAR} is not set and no cache file could be written — secrets at rest are \
+            "{ENV_VAR} is not set and no cache file could be written, secrets at rest are \
              stored as MARKED PLAINTEXT ({PLAIN_MARKER}...) for this process only. Configure a \
              32-byte hex key to enable encryption."
         );
@@ -323,7 +323,7 @@ fn resolve_key_state() -> KeyState {
                 Ok(_) => {
                     tracing::error!(
                         env_var = ENV_VAR,
-                        "{ENV_VAR} must decode to 32 bytes — encryption disabled until fixed"
+                        "{ENV_VAR} must decode to 32 bytes, encryption disabled until fixed"
                     );
                 }
                 Err(e) => {
@@ -369,7 +369,7 @@ fn resolve_key_state() -> KeyState {
                     key.copy_from_slice(&bytes);
                     tracing::warn!(
                         cache_file = %path.display(),
-                        "using a DEVELOPMENT ephemeral at-rest key from the cache file — set \
+                        "using a DEVELOPMENT ephemeral at-rest key from the cache file, set \
                          {ENV_VAR} for stable production encryption"
                     );
                     return KeyState {
@@ -380,14 +380,14 @@ fn resolve_key_state() -> KeyState {
                 }
             }
         }
-        // Not found — try to create it.
+        // Not found, try to create it.
         let mut key = [0u8; KEY_SIZE];
         if OsRng.try_fill_bytes(&mut key).is_ok() {
             let hex_key = hex::encode(key);
             if write_private_file(&path, hex_key.as_bytes()).is_ok() {
                 tracing::warn!(
                     cache_file = %path.display(),
-                    "generated a DEVELOPMENT ephemeral at-rest key (persisted) — set {ENV_VAR} \
+                    "generated a DEVELOPMENT ephemeral at-rest key (persisted), set {ENV_VAR} \
                      for stable production encryption"
                 );
                 return KeyState {
@@ -538,7 +538,7 @@ fn decrypt_with(
 /// one is available. In production a missing key is a typed error (never
 /// silent plaintext). In development without a persistable key the plaintext
 /// is returned wrapped in the `plain:v1:` marker with a per-process warning.
-/// `aad` is bound into the GCM tag — pass a stable scope identifier such as
+/// `aad` is bound into the GCM tag, pass a stable scope identifier such as
 /// `format!("user={user_id}")` so a ciphertext cannot be relocated.
 pub fn encrypt_at_rest(plaintext: &str, aad: &[u8]) -> Result<String, SecretEncryptionError> {
     let key = match load_key()? {
@@ -555,7 +555,7 @@ pub fn encrypt_at_rest(plaintext: &str, aad: &[u8]) -> Result<String, SecretEncr
 
 /// Decrypt an `enc:v1:` legacy envelope: no key id is stamped, so try the
 /// current key and then each previous key. All candidates failing is a
-/// typed failure — never garbage output.
+/// typed failure, never garbage output.
 fn decrypt_v1(
     stored_b64: &str,
     keys: &ResolvedKeys,
@@ -633,7 +633,7 @@ fn decrypt_v2(
 /// `enc:v1:<base64>` envelopes, `plain:v1:` marked values, and legacy
 /// unmarked plaintext (so a database can be migrated row-by-row). Pass the
 /// same `aad` used at encryption time. A malformed or tampered envelope, an
-/// unknown key id, or a wrong key fails closed with a typed error — never
+/// unknown key id, or a wrong key fails closed with a typed error, never
 /// silently returns garbage.
 pub fn decrypt_at_rest(stored: &str, aad: &[u8]) -> Result<String, SecretEncryptionError> {
     if let Some(plaintext) = stored.strip_prefix(PLAIN_MARKER) {
@@ -662,7 +662,7 @@ pub fn decrypt_at_rest(stored: &str, aad: &[u8]) -> Result<String, SecretEncrypt
 ///   - plaintext rows (legacy unmarked or `plain:v1:` marked),
 ///   - legacy `enc:v1:` envelopes (key-id-less format), and
 ///   - `enc:v2:` envelopes whose key id is NOT the current key's (a row last
-///     written under a since-rotated key — lazy rotation on read).
+///     written under a since-rotated key, lazy rotation on read).
 ///
 /// Returns `None` when the value is already an `enc:v2:` envelope under the
 /// current key or no current key is available. The writer should persist the
@@ -790,7 +790,7 @@ mod tests {
         let _guard = KEY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         force_key(TEST_KEY_HEX);
 
-        // 1. Roundtrip with AAD succeeds — and lands in the v2 format.
+        // 1. Roundtrip with AAD succeeds, and lands in the v2 format.
         let aad_good = b"user=u1";
         let enc = encrypt_at_rest("topsecret-totp", aad_good).unwrap();
         let (key_id, _) = parse_v2_envelope(&enc);
@@ -867,7 +867,7 @@ mod tests {
     #[test]
     fn no_key_dev_writes_marked_plaintext_and_migrates_later() {
         let _guard = KEY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        // Simulate the dev no-key mode (production errors instead — covered
+        // Simulate the dev no-key mode (production errors instead, covered
         // below). EphemeralMemory = "no persistable key" dev mode.
         force_key_state(None, KeySource::EphemeralMemory);
         let saved = std::env::var("NODE_ENV").ok();
@@ -910,7 +910,7 @@ mod tests {
         let enc = encrypt_at_rest("secret-value", b"user=u6").unwrap();
         force_key("ffeeddccbbaa99887766554433221100ffeeddccbbaa99887766554433221100");
         // Without the old key configured this is the honest "unknown key id"
-        // failure — the exact brick the rotation support removes.
+        // failure, the exact brick the rotation support removes.
         let err = decrypt_at_rest(&enc, b"user=u6").unwrap_err();
         assert!(matches!(err, SecretEncryptionError::UnknownKeyId(_)));
     }
@@ -940,7 +940,7 @@ mod tests {
         let aad = b"user=v1";
         let legacy = seal_legacy_v1(TEST_KEY_HEX, "pre-rotation secret", aad);
 
-        // No previous keys configured — the pre-FX-2 rollout shape.
+        // No previous keys configured, the pre-FX-2 rollout shape.
         force_key(TEST_KEY_HEX);
         assert_eq!(
             decrypt_at_rest(&legacy, aad).unwrap(),
@@ -1053,7 +1053,7 @@ mod tests {
 
         // A key id that resolves to a configured key whose material does NOT
         // authenticate the envelope (digest collision / relabeled key) fails
-        // closed with DecryptionFailed — never garbage output. The envelope
+        // closed with DecryptionFailed, never garbage output. The envelope
         // was sealed under A; C's id is stamped on it instead: the lookup
         // finds C, GCM refuses the wrong key.
         let enc = encrypt_at_rest("guarded", aad).unwrap();

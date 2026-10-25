@@ -7,7 +7,7 @@
 //! |------|--------|-----------|
 //! | 25 | [`TlsPolicy::Opportunistic`] | STARTTLS when advertised; if not advertised the message MAY proceed in cleartext and `tls_used=false` is recorded on the acceptance record and logged. |
 //! | 465 | [`TlsPolicy::ImplicitTlsRequired`] | TLS from the first byte; no cleartext phase exists. |
-//! | 587, 2525 | [`TlsPolicy::StartTlsRequired`] | STARTTLS must be advertised AND must complete. If it cannot be negotiated the relay REFUSES before MAIL FROM — it never downgrades to cleartext. |
+//! | 587, 2525 | [`TlsPolicy::StartTlsRequired`] | STARTTLS must be advertised AND must complete. If it cannot be negotiated the relay REFUSES before MAIL FROM, it never downgrades to cleartext. |
 //!
 //! A STARTTLS handshake that fails after the peer advertised it also aborts
 //! the attempt (no silent cleartext continuation): a downgrade there would

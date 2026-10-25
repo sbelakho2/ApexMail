@@ -5,7 +5,7 @@
 //! joined through `placement_tests` / `seed_accounts` / `seed_providers`,
 //! migrations 033–036): a seed message sent, an IMAP observation, and the
 //! folder it landed in. SMTP delivery events (`events`), complaints and
-//! bounces are reported as their own distinct metrics — a delivery event
+//! bounces are reported as their own distinct metrics, a delivery event
 //! does not establish the folder a message was placed in, and a complaint is
 //! a user action, not a seed measurement. Unknown placement (seed delivered
 //! but never observed) is represented explicitly, never folded into a rate.
@@ -16,7 +16,7 @@ use sqlx::PgPool;
 use crate::types::*;
 
 /// Major providers for classification of recipient domains from canonical
-/// events (delivery metrics only — measured placement grouping uses the
+/// events (delivery metrics only, measured placement grouping uses the
 /// seed_providers relation).
 const MAJOR_PROVIDERS: &[&str] = &[
     "gmail.com",
@@ -54,7 +54,7 @@ impl InboxPlacementService {
         days: i64,
     ) -> anyhow::Result<PlacementSummary> {
         // placement_tests.tenant_id is the canonical VARCHAR(26) tenant
-        // domain (migration 064 standardized every tenant_id column) — the
+        // domain (migration 064 standardized every tenant_id column), the
         // same identity the events table carries, bound as text.
         let since = Utc::now() - chrono::Duration::days(days.max(0));
 
@@ -294,7 +294,7 @@ pub fn classify_provider(domain: &str) -> String {
 }
 
 /// Generate recommendations based on MEASURED placement data. An unknown
-/// overall rate (no measurements) is stated explicitly — it is never treated
+/// overall rate (no measurements) is stated explicitly, it is never treated
 /// as a healthy (or unhealthy) zero.
 pub fn generate_recommendations(
     overall_rate: Option<f64>,
@@ -304,7 +304,7 @@ pub fn generate_recommendations(
 
     match overall_rate {
         None => recs.push(
-            "No seed-placement measurements in this window — inbox placement is unknown, \
+            "No seed-placement measurements in this window, inbox placement is unknown, \
              not zero. Run an inbox-placement test to measure it."
                 .into(),
         ),
@@ -340,7 +340,7 @@ pub fn generate_recommendations(
             }
         } else if p.delivered > 0 && p.inbox + p.spam + p.other_folders + p.unknown == 0 {
             recs.push(format!(
-                "{}: {} deliveries recorded but no seed measurements — placement unknown.",
+                "{}: {} deliveries recorded but no seed measurements, placement unknown.",
                 p.provider, p.delivered
             ));
         }

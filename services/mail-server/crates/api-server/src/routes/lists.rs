@@ -50,7 +50,7 @@ fn default_opt_in() -> String {
     "double_opt_in".into()
 }
 
-/// The only accepted `opt_in_mode` values — the field is stored verbatim, so
+/// The only accepted `opt_in_mode` values, the field is stored verbatim, so
 /// an arbitrary string used to silently disappear from every opt-in-aware
 /// consumer.
 const VALID_OPT_IN_MODES: &[&str] = &["single_opt_in", "double_opt_in"];
@@ -108,7 +108,7 @@ pub struct ListResponse {
 }
 
 /// Map a list write's SQL error: the unique index `idx_lists_tenant_name`
-/// makes a duplicate (tenant, name) a CLIENT conflict — the API must answer
+/// makes a duplicate (tenant, name) a CLIENT conflict, the API must answer
 /// an honest 409 instead of leaking a generic database 500.
 fn map_list_write_error(error: sqlx::Error) -> ApiError {
     if let sqlx::Error::Database(ref db_error) = error {
@@ -440,7 +440,7 @@ async fn list_subscribers(
     })))
 }
 
-/// Maximum contact ids accepted by [`add_subscribers`] — the previous
+/// Maximum contact ids accepted by [`add_subscribers`], the previous
 /// per-id INSERT loop made this an unbounded-work endpoint.
 const MAX_ADD_SUBSCRIBERS: usize = 10_000;
 
@@ -645,7 +645,7 @@ mod adversarial_tests {
         assert_eq!(list_a.subscriber_count, 0);
         assert_eq!(list_a.opt_in_mode, "single_opt_in");
 
-        // Duplicate name in the SAME tenant is a constraint violation — it
+        // Duplicate name in the SAME tenant is a constraint violation, it
         // must be an honest 409, never a database 500.
         let duplicate = create_list(
             State(state.clone()),

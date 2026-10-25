@@ -100,7 +100,7 @@ async fn canonical_event_counts_window_excludes_stale_events() {
     let tenant = "tenant_events_window";
 
     seed_event(&pool, "fresh", tenant, "complained", 10).await;
-    // Outside the 90-day window — must not count.
+    // Outside the 90-day window, must not count.
     seed_event(
         &pool,
         "stale",

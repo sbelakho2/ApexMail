@@ -1,4 +1,4 @@
-//! §38 — account-level contact coordination.
+//! §38, account-level contact coordination.
 //!
 //! Automation that independently contacts five people at one company does not
 //! read as a person; it reads as a machine and it burns the account. Every
@@ -10,7 +10,7 @@
 //!
 //! | # | Rule | Source | Verdict |
 //! |---|---|---|---|
-//! | R1 | Stop the whole account after a strong objection | account flag / `complaint`/`unsubscribe` classification | `Denied`, unconditional — even for referrals |
+//! | R1 | Stop the whole account after a strong objection | account flag / `complaint`/`unsubscribe` classification | `Denied`, unconditional, even for referrals |
 //! | R2 | Cooldown after a negative reply | `sales_accounts.negative_reply_cooldown_hours` × `not_interested` classification time | `Deferred { until }`, unless referral |
 //! | R3 | Priority persona ordering | requested persona vs personas of active enrollments | `Denied`, unless referral |
 //! | R4 | Multi-threading only at defined tiers | `sales_accounts.multi_thread_allowed` | `Denied` when a second concurrent thread is requested at a non-multi-thread tier |
@@ -213,7 +213,7 @@ pub fn decide(
     is_referral: bool,
     now: DateTime<Utc>,
 ) -> CoordinationVerdict {
-    // R1 — a strong objection stops the whole account, unconditionally.
+    // R1, a strong objection stops the whole account, unconditionally.
     if has_strong_objection {
         return CoordinationVerdict::Denied(
             "account stopped: a strong objection (complaint/unsubscribe or disqualified \
@@ -224,7 +224,7 @@ pub fn decide(
 
     // R6 exceptions: a referral skips the cooldown and persona ordering.
     if !is_referral {
-        // R2 — negative-reply cooldown.
+        // R2, negative-reply cooldown.
         if let Some(last) = last_negative_reply_at {
             if let Some(until) = cooldown_until(last, account.negative_reply_cooldown_hours) {
                 if now < until {
@@ -233,7 +233,7 @@ pub fn decide(
             }
         }
 
-        // R3 — priority persona ordering (only relevant when someone is
+        // R3, priority persona ordering (only relevant when someone is
         // already active).
         if active_contacts > 0 && !account.priority_persona_selected {
             return CoordinationVerdict::Denied(
@@ -244,7 +244,7 @@ pub fn decide(
         }
     }
 
-    // R5 (guard) — a non-positive budget denies everything, referrals too.
+    // R5 (guard), a non-positive budget denies everything, referrals too.
     if account.max_active_contacts <= 0 {
         return CoordinationVerdict::Denied(
             "account contact budget is zero or negative; no contact attempts are permitted \
@@ -255,7 +255,7 @@ pub fn decide(
     let cap = account.max_active_contacts as usize;
 
     if !is_referral {
-        // R4 — multi-threading only at defined tiers.
+        // R4, multi-threading only at defined tiers.
         if !account.multi_thread_allowed && active_contacts >= 1 {
             return CoordinationVerdict::Denied(
                 "multi-threading not permitted at this account tier \
@@ -263,7 +263,7 @@ pub fn decide(
                     .to_string(),
             );
         }
-        // R5 — contact cap.
+        // R5, contact cap.
         if active_contacts >= cap {
             return CoordinationVerdict::Denied(format!(
                 "contact cap reached ({active_contacts} of {} active contacts); \
@@ -274,7 +274,7 @@ pub fn decide(
         return CoordinationVerdict::Allowed;
     }
 
-    // R6 — referral promotion. Past the cap only a multi-threading tier may
+    // R6, referral promotion. Past the cap only a multi-threading tier may
     // open an additional thread; otherwise the referral still has to wait for
     // a free slot, but at a non-multi-thread tier it cannot be a second
     // simultaneous thread at all.
@@ -326,7 +326,7 @@ pub async fn active_contact_count(
 /// run [`decide`]. The returned verdict is operator-readable.
 ///
 /// This wrapper takes the account row `FOR UPDATE`, counts active contacts
-/// and releases the lock — it does not itself reserve a slot. Callers that
+/// and releases the lock, it does not itself reserve a slot. Callers that
 /// must reserve a slot atomically (insert the enrollment before releasing the
 /// lock) use [`request_contact_slot_in_tx`].
 pub async fn request_contact_slot(

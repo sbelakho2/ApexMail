@@ -77,7 +77,7 @@ struct RedisFailStore {
 /// Build the counter-increment pipeline as ONE atomic MULTI/EXEC block
 /// (audit finding 8): INCR and EXPIRE must apply together or not at all.
 /// The old separate INCR-then-EXPIRE calls left a counter WITHOUT a TTL
-/// behind whenever the process died (or EXPIRE errored) in between — an
+/// behind whenever the process died (or EXPIRE errored) in between, an
 /// immortal counter that trends the (IP, account) pair toward a permanent
 /// lockout.
 fn incr_expire_pipeline(full_key: &str, ttl_secs: i64) -> redis::Pipeline {
@@ -122,7 +122,7 @@ impl FailStore for RedisFailStore {
     }
 }
 
-/// Injectable in-memory [`FailStore`] with TTL semantics — used by tests
+/// Injectable in-memory [`FailStore`] with TTL semantics, used by tests
 /// to prove restart/replica persistence of lockout state deterministically
 /// (no live Redis required).
 pub struct SharedMemoryFailStore {
@@ -198,7 +198,7 @@ pub struct AuthFailTracker {
     per_ip: Cache<IpAddr, u32>,
     /// Serializes the in-memory counter increments (moka has no atomic
     /// RMW; see `bump_memory_counters`). Never contended on the hot auth
-    /// path — only on failure recording.
+    /// path, only on failure recording.
     counters_lock: Mutex<()>,
     store: Option<std::sync::Arc<dyn FailStore>>,
 }
@@ -277,7 +277,7 @@ impl AuthFailTracker {
         for key in [Self::ip_key(ip), Self::account_key(ip, &account)] {
             match store.get(&key).await {
                 // ip: keys threshold at MAX_AUTH_FAILURES_PER_IP, acct:
-                // keys at MAX_AUTH_FAILURES_PER_ACCOUNT — check both
+                // keys at MAX_AUTH_FAILURES_PER_ACCOUNT, check both
                 // thresholds against both readings; only the matching
                 // key can realistically reach the other bound.
                 Ok(count) => {
@@ -576,7 +576,7 @@ mod tests {
     #[tokio::test]
     async fn per_ip_threshold_enforced_through_durable_store() {
         // 20 failures across DIFFERENT accounts from one IP lock the IP
-        // (not any single account) — verified through a fresh tracker
+        // (not any single account), verified through a fresh tracker
         // sharing the durable store, i.e. after a "restart".
         let store = std::sync::Arc::new(SharedMemoryFailStore::new());
         let writer = AuthFailTracker::with_store(store.clone());
@@ -624,7 +624,7 @@ mod tests {
         // Optional integration check against a real Redis (skipped when
         // unreachable, so CI without Redis stays green). Started via
         // `redis-server` locally it proves the Redis code path end-to-end.
-        // F6: no ambient 6379 default — the variable must name the Redis
+        // F6: no ambient 6379 default, the variable must name the Redis
         // under test explicitly; unset means skip.
         migrator::test_support::assert_soft_skip_allowed("TEST_REDIS_URL");
         let Ok(url) = std::env::var("TEST_REDIS_URL") else {
@@ -689,7 +689,7 @@ mod tests {
     #[test]
     fn durable_counter_increment_is_a_single_atomic_multi_exec_block() {
         // Audit finding 8 (hermetic half): INCR and EXPIRE must be applied
-        // atomically. The wire encoding proves the wrap — the server parses
+        // atomically. The wire encoding proves the wrap, the server parses
         // MULTI first and EXEC last, so it applies both commands or neither.
         // The old separate calls could persist an increment WITHOUT its TTL
         // when the process died (or EXPIRE errored) in between: an immortal

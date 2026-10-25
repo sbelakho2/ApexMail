@@ -3,7 +3,7 @@
 //! Recipient-facing outbound MTA for ApexMail.
 //!
 //! This crate retired the gap marker that used to sit in
-//! `worker-processors/src/email/transport.rs` (retired 2026-09 — the relay
+//! `worker-processors/src/email/transport.rs` (retired 2026-09, the relay
 //! now owns the receiving side of that contract): the relay that receives an
 //! internal submission (the `X-ApexMail-Route` contract), binds the
 //! recipient-facing socket to the requested dedicated source IP, resolves the
@@ -18,12 +18,12 @@
 //! separately), so the small wire constants are re-declared here and kept in
 //! lockstep with `worker-processors/src/email/transport.rs`:
 //!
-//! * [`APEXMAIL_ROUTE_HEADER`] — `X-ApexMail-Route`, the reserved internal
+//! * [`APEXMAIL_ROUTE_HEADER`], `X-ApexMail-Route`, the reserved internal
 //!   submission header. Value grammar `v1 dedicated <id> <ip>`, parsed by
 //!   [`parse_route_header`]. The relay must strip this (and every reserved
 //!   `X-ApexMail-*` header) before the message reaches a recipient server —
 //!   [`strip_internal_headers`] does exactly that.
-//! * [`APEXMAIL_SOURCE_IP_REPLY_HEADER`] — `X-ApexMail-Source-IP`, the token
+//! * [`APEXMAIL_SOURCE_IP_REPLY_HEADER`], `X-ApexMail-Source-IP`, the token
 //!   carrying the actually-bound source IP in the end-of-DATA reply
 //!   ([`source_ip_reply_header`] renders it from an [`relay::AcceptanceRecord`]).
 //!
@@ -89,7 +89,7 @@ pub use relay::{
 /// Reserved internal SMTP header carrying the dedicated delivery route.
 ///
 /// Duplicated (not imported) from
-/// `worker-processors/src/email/transport.rs::APEXMAIL_ROUTE_HEADER` — see
+/// `worker-processors/src/email/transport.rs::APEXMAIL_ROUTE_HEADER`, see
 /// the module docs for why the wire contract is duplicated instead of
 /// coupling the worker to this crate. The reserved `X-ApexMail-*` namespace
 /// is blocked at the public submission boundary, so this header is only ever
@@ -110,14 +110,14 @@ const RESERVED_INTERNAL_HEADER_PREFIX: &str = "x-apexmail-";
 /// Parsed `X-ApexMail-Route: v1 dedicated <id> <ip>` value.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RouteMetadata {
-    /// `dedicated_ips.id` — the warmup-state owner.
+    /// `dedicated_ips.id`, the warmup-state owner.
     pub dedicated_ip_id: String,
     /// The literal source IP the relay must bind.
     pub source_ip: IpAddr,
 }
 
 /// Parse the [`APEXMAIL_ROUTE_HEADER`] value. Returns `None` for any value
-/// that is not exactly the v1 grammar — including unknown versions, extra
+/// that is not exactly the v1 grammar, including unknown versions, extra
 /// fields, unparseable IPs and empty ids. A malformed route header is a
 /// REFUSAL, never a silent fall-back to the shared pool.
 pub fn parse_route_header(value: &str) -> Option<RouteMetadata> {

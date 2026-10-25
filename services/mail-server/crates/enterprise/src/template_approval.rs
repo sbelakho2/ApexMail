@@ -56,7 +56,7 @@ impl TemplateApprovalService {
     /// submission is auto-REJECTED. There is deliberately no auto-approve
     /// threshold (audit M-01: every submission requires a human review), and
     /// since dogfood 2026-10-06 wave B there is no `_auto_approve_threshold`
-    /// parameter either — the env knob that fed it was removed because M-01
+    /// parameter either, the env knob that fed it was removed because M-01
     /// makes every value unhonorable.
     pub fn new(db: PgPool, auto_reject_threshold: i32) -> Self {
         Self {
@@ -78,7 +78,7 @@ impl TemplateApprovalService {
         let id = Uuid::new_v4();
         let spam_result = calculate_spam_score(html_content, subject);
 
-        // M-01: Never auto-approve — always require human review.
+        // M-01: Never auto-approve, always require human review.
         // Auto-reject only if spam score exceeds the reject threshold.
         let status = if spam_result.score >= self.auto_reject_threshold as f64 {
             "rejected"
@@ -154,7 +154,7 @@ impl TemplateApprovalService {
     ///
     /// Maker-checker (brief-live-capabilities P7): the submission's
     /// `submitted_by` is the MAKER; the authenticated reviewer is the
-    /// CHECKER. The same principal cannot be both — the guard lives in the
+    /// CHECKER. The same principal cannot be both, the guard lives in the
     /// UPDATE predicate so two concurrent requests cannot slip a self-review
     /// between a read and the write, and the refusal names why.
     async fn review_refusal(
@@ -174,7 +174,7 @@ impl TemplateApprovalService {
             Some((submitted_by,)) if submitted_by == reviewed_by => Ok(ApiResult::err(
                 format!(
                     "maker-checker refused: the submitter cannot {action} their own template \
-                     submission — a different reviewer must act on it (submitted_by == reviewed_by)"
+                     submission, a different reviewer must act on it (submitted_by == reviewed_by)"
                 ),
                 "VALIDATION",
             )),

@@ -93,7 +93,7 @@ mod tests {
     #[test]
     fn test_api_keys_repo_is_stateless() {
         let _repo = ApiKeysRepo;
-        // Repo has no fields — purely a method namespace.
+        // Repo has no fields, purely a method namespace.
     }
 
     #[test]

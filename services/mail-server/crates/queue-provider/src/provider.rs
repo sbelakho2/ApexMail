@@ -77,7 +77,7 @@ impl PostgresQueueProvider {
         // Serialize the payload (without __hmac__) to CANONICAL JSON bytes:
         // object keys sorted recursively. The payload makes a Postgres JSONB
         // round trip between enqueue and dequeue, and JSONB re-orders keys
-        // (by length, then bytewise) and normalizes numbers — signing the
+        // (by length, then bytewise) and normalizes numbers, signing the
         // raw serde_json serialization would therefore fail verification on
         // read-back. Canonicalizing on BOTH sides makes the signed bytes
         // stable across the round trip.
@@ -110,7 +110,7 @@ impl PostgresQueueProvider {
             // `__hmac__`. A non-object payload (array/string/number/null) has
             // nowhere to carry it: the code below used to compute the
             // signature and then silently drop it for non-objects, so the job
-            // was stored unsigned while enqueue() reported success — and the
+            // was stored unsigned while enqueue() reported success, and the
             // next dequeue routed the "missing signature" job to dead_letter.
             // Silent enqueue-then-lose. Reject at the boundary instead so the
             // caller learns immediately that the payload cannot be signed.
@@ -197,7 +197,7 @@ impl PostgresQueueProvider {
     /// `priority + LEAST(age_in_hours, 100)`. This prevents low‑priority
     /// jobs from starving while maintaining priority ordering for recent jobs.
     ///
-    /// F15:index shape — the inner WHERE leads with exactly the predicates
+    /// F15:index shape, the inner WHERE leads with exactly the predicates
     /// of the partial dequeue index (`idx_queue_jobs_dequeue ON queue_jobs
     /// (queue, scheduled_at) WHERE status = 'pending'`, see
     /// [`crate::schema::QUEUE_SCHEMA`]): `queue = $1 AND status = 'pending'
@@ -254,7 +254,7 @@ impl PostgresQueueProvider {
         // field as an arbitrary permutation, e.g. [5, 1, 10]). Re-apply the
         // documented dequeue ordering here so callers can rely on it:
         // effective priority (priority + LEAST(age_hours, 100)) DESC, FIFO by
-        // created_at ASC — the exact expression the claim query sorts by.
+        // created_at ASC, the exact expression the claim query sorts by.
         rows.sort_by(|a, b| {
             let key = |r: &JobRow| {
                 let age_hours = (now - r.created_at).num_seconds() as f64 / 3600.0;
@@ -318,8 +318,8 @@ impl PostgresQueueProvider {
 
     /// Dead-letter a job whose payload failed HMAC verification at dequeue
     /// time (audit finding 9: the old inline comment said "revert to pending"
-    /// while the SQL dead-letters, and that UPDATE — unlike `complete`/`fail`/
-    /// `dead_letter` — carried no lease fence). This now goes through the same
+    /// while the SQL dead-letters, and that UPDATE, unlike `complete`/`fail`/
+    /// `dead_letter`, carried no lease fence). This now goes through the same
     /// fenced [`Self::dead_letter`] transition as every other terminal path:
     /// it requires `status = 'processing' AND lease_token = $token`, so a job
     /// whose lease was already lost (visibility timeout recovered and
@@ -385,7 +385,7 @@ impl PostgresQueueProvider {
 
     /// Mark a job as completed.
     ///
-    /// K: exact lease fencing (migration 103) — the update requires
+    /// K: exact lease fencing (migration 103), the update requires
     /// `status = 'processing' AND lease_token = $token`, so a stale worker
     /// that lost the job (recovered and re-dequeued under a new token)
     /// cannot complete somebody else's attempt; it sees NotFound.
@@ -412,7 +412,7 @@ impl PostgresQueueProvider {
 
     /// Mark a job as failed with exponential backoff for retry.
     ///
-    /// K: exact lease fencing (migration 103) — every update below requires
+    /// K: exact lease fencing (migration 103), every update below requires
     /// `status = 'processing' AND lease_token = $token`, so a call for a job
     /// whose lease was lost (recovered to pending, re-claimed by another
     /// worker, or already finished) is a no-op instead of corrupting the
@@ -479,7 +479,7 @@ impl PostgresQueueProvider {
             .await?;
 
             if result.rows_affected() == 0 {
-                // Lost the lease between the SELECT and the UPDATE — treat
+                // Lost the lease between the SELECT and the UPDATE, treat
                 // as a no-op, the new owner decides.
                 return Ok(());
             }
@@ -497,7 +497,7 @@ impl PostgresQueueProvider {
     /// Move a job to dead letter queue.
     ///
     /// K: exactly fenced on `status = 'processing' AND lease_token = $token`
-    /// (migration 103) — dead-lettering a job that is no longer leased by
+    /// (migration 103), dead-lettering a job that is no longer leased by
     /// this worker is a no-op.
     pub async fn dead_letter(
         &self,
@@ -533,21 +533,21 @@ impl PostgresQueueProvider {
 
     /// Recover stale processing jobs (visibility timeout expired).
     ///
-    /// J: zombie routing — a job whose lease expired at or beyond its
+    /// J: zombie routing, a job whose lease expired at or beyond its
     /// attempt limit can never be dequeued again (the dequeue filter is
     /// `attempts < max_attempts`), so recovering it to `pending` would make
     /// it invisible forever. Such jobs are routed straight to dead_letter.
     /// A sweep also dead-letters any pre-existing pending zombies so
     /// nothing sits invisible in the queue.
     ///
-    /// # Callers (F10 — deliberately unwired)
+    /// # Callers (F10, deliberately unwired)
     ///
     /// NO production code calls this method. This crate's only consumer is
     /// `smoke-tests`, which exercises `queue_provider::types` only; the
     /// production email path (`worker-processors`) polls `email_queue`
     /// directly with its own lease reclaim, not `queue_jobs`. Wiring this
     /// sweep therefore requires first adopting `PostgresQueueProvider` in a
-    /// production poller — until then a periodic caller would sweep a table
+    /// production poller, until then a periodic caller would sweep a table
     /// nothing reads, which is noise, not recovery. If/when a production
     /// owner appears (e.g. a `queue_jobs`-based processor in
     /// worker-processors), call this on a ~30-60s interval from that
@@ -726,7 +726,7 @@ fn jittered_backoff_secs(job_id: Uuid, attempts: i32) -> i64 {
 }
 
 /// K: a completion-path call may only act while the job is leased for
-/// processing by THIS caller — the stored token must equal the presented
+/// processing by THIS caller, the stored token must equal the presented
 /// one. Anything else (pending = recovered/re-claimed, completed,
 /// dead_letter, or a stale worker holding the previous token) means the
 /// caller lost ownership.
@@ -752,7 +752,7 @@ fn write_canonical(value: &serde_json::Value, out: &mut Vec<u8>) -> Result<(), s
         serde_json::Value::Bool(true) => out.extend_from_slice(b"true"),
         serde_json::Value::Bool(false) => out.extend_from_slice(b"false"),
         serde_json::Value::Number(n) => {
-            // Number Display: integers via itoa, floats via ryu — the same
+            // Number Display: integers via itoa, floats via ryu, the same
             // formatting serde_json's serializer produces, and identical on
             // both sides because both parse through serde_json first.
             out.extend_from_slice(n.to_string().as_bytes());
@@ -974,7 +974,7 @@ mod tests {
         // F15:the inner WHERE must carry the exact predicates of the
         // partial dequeue index (schema.rs): equality on `queue`, the
         // partial predicate `status = 'pending'`, and the range on
-        // `scheduled_at` — so the index pre-filters before the computed
+        // `scheduled_at`, so the index pre-filters before the computed
         // effective-priority sort. Pinned by test because reordering or
         // dropping these predicates silently degrades to a full scan.
         let index = crate::schema::QUEUE_SCHEMA;
@@ -1196,7 +1196,7 @@ mod tests {
         assert!(source.contains("lease_token = gen_random_uuid()"));
         // Audit finding 9: the dequeue-time HMAC dead-letter path must go
         // through the SAME fenced transition (`dead_letter`), never an
-        // unfenced ad-hoc UPDATE — and its comment must not lie about the
+        // unfenced ad-hoc UPDATE, and its comment must not lie about the
         // SQL ("revert to pending" while dead-lettering).
         assert!(
             source.contains("self.dead_letter(row.id, lease_token, reason)"),
@@ -1255,7 +1255,7 @@ mod tests {
         }
         if std::env::var("APEXMAIL_RELEASE_TEST_MODE").as_deref() == Ok("1") {
             panic!(
-                "APEXMAIL_RELEASE_TEST_MODE: required variable {env_var} is missing — \
+                "APEXMAIL_RELEASE_TEST_MODE: required variable {env_var} is missing, \
              release CI must not skip infrastructure tests"
             );
         }
@@ -1271,7 +1271,7 @@ mod tests {
         // DDL plus migration 103's column/index. Both are BEST-EFFORT: on a
         // pre-provisioned database owned by the migrator role, every DDL
         // statement fails with "must be owner" even though the schema is
-        // already complete — that must not silently skip the test, so the
+        // already complete, that must not silently skip the test, so the
         // schema is verified below instead.
         sqlx::raw_sql(crate::schema::QUEUE_SCHEMA)
             .execute(&pool)
@@ -1474,7 +1474,7 @@ mod tests {
     /// [`optional_pool`] (skip without TEST_DATABASE_URL) but tolerant of a
     /// PRE-PROVISIONED database owned by another role: the DDL is only needed
     /// to bootstrap a fresh scratch database, and every statement fails with
-    /// "must be owner" when a migrator role already created the table — which
+    /// "must be owner" when a migrator role already created the table, which
     /// must NOT silently skip the tests. After applying the DDL best-effort
     /// (one retry for the CREATE INDEX IF NOT EXISTS lock race), the schema
     /// is verified and the tests proceed whenever the table is actually
@@ -1510,7 +1510,7 @@ mod tests {
         .await
         .ok();
 
-        // Usability is the actual gate — not DDL success. Every column the
+        // Usability is the actual gate, not DDL success. Every column the
         // provider's queries touch must exist; extra/legacy columns are fine.
         let usable: bool = sqlx::query_scalar(
             "SELECT COUNT(*) = 17 FROM information_schema.columns
@@ -1624,7 +1624,7 @@ mod tests {
     /// BUG FIX (W6a campaign): with signing enabled, a non-object payload
     /// (array/string/number/null) cannot carry the embedded `__hmac__`
     /// signature. The old code computed a signature and then silently dropped
-    /// it for non-objects — enqueue() returned Ok, the job was stored
+    /// it for non-objects, enqueue() returned Ok, the job was stored
     /// unsigned, and the next dequeue() routed it to dead_letter as "Missing
     /// HMAC signature": a silently lost job. The fix fails fast at enqueue.
     #[tokio::test]

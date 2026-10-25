@@ -101,7 +101,7 @@ async fn report_client_error(
 
 /// Truncate a string to at most `max` bytes without panicking on multibyte
 /// UTF-8: `&s[..max]` slices at a raw byte offset and panics when `max`
-/// lands inside a multibyte character (an authenticated remote crash — a
+/// lands inside a multibyte character (an authenticated remote crash, a
 /// client only needs to send a long CJK/emoji payload). This helper walks
 /// back to the nearest char boundary instead.
 fn truncate(s: &str, max: usize) -> String {
@@ -152,7 +152,7 @@ mod tests {
 
     #[test]
     fn truncate_two_byte_payload_does_not_panic() {
-        // 'é' is 2 bytes; 2049 % 2 = 1 offsets would be invalid — probe
+        // 'é' is 2 bytes; 2049 % 2 = 1 offsets would be invalid, probe
         // several odd/even limits around multibyte content.
         let input = "é".repeat(2000);
         for max in [2047usize, 2048, 2049] {

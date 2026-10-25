@@ -5,7 +5,7 @@
 //! - **Layer 2**:Protocol-level defense (TLS fingerprinting, protocol validation)
 //! - **Layer 3**:Application-level protection (rate limiting, challenges)
 //! - **Layer 4**:Behavioral analysis & ML (anomaly detection, adaptive thresholds)
-//! - **Layer 5**:Coordination primitives (CRDTs, blocklists) — cross-process
+//! - **Layer 5**:Coordination primitives (CRDTs, blocklists), cross-process
 //!   propagation is NOT implemented; see `coordinator` module docs
 //!
 //! ## Quick Start
@@ -32,7 +32,7 @@
 //! - `challenges`:Proof-of-work and JS challenges
 //! - `coordinator`:In-process coordination primitives (CRDTs, blocklist
 //!   hub). NOTE: cross-process/cross-region propagation is NOT
-//!   implemented — the Redis knobs in `coordinator::CoordinatorConfig`
+//!   implemented, the Redis knobs in `coordinator::CoordinatorConfig`
 //!   are reserved placeholders.
 //! - `full`:All features enabled
 
@@ -225,7 +225,7 @@ impl DdosProtector {
         // the limiter was never constructed nor consulted). Thresholds are
         // converted from the per-IP RPM knobs to requests/second, the unit
         // the limiter works in.
-        // Audit SM5 F2: one bounded table of PER-IP limiters — each
+        // Audit SM5 F2: one bounded table of PER-IP limiters, each
         // canonical client key gets its own baseline/threshold.
         let adaptive_min_rps = (config.per_ip_min_rpm / 60).max(1);
         let adaptive_max_rps = (config.per_ip_max_rpm / 60).max(adaptive_min_rps);
@@ -308,7 +308,7 @@ impl DdosProtector {
         //
         // A liveness/readiness/metrics probe must ALWAYS be answered. The
         // orchestrator reads a non-200 as "this instance is unhealthy" and
-        // restarts a healthy service — and it keeps doing so, because a
+        // restarts a healthy service, and it keeps doing so, because a
         // restart does not change the client's rate. The same holds for a
         // load balancer's health check and a Prometheus scrape. These routes
         // do no database work and return a constant, so exempting them
@@ -330,7 +330,7 @@ impl DdosProtector {
 
         // Canonical client key (audit F2d): IPv6 addresses are truncated to
         // their /64 (and IPv4-mapped IPv6 mapped back to IPv4) for every
-        // protection table — cost buckets, sessions, reputation and the
+        // protection table, cost buckets, sessions, reputation and the
         // blocklist. Without this, an attacker rotating the interface ID of
         // a single /64 minted a fresh budget, session and reputation for
         // every request. The full address continues to be used in logs
@@ -363,7 +363,7 @@ impl DdosProtector {
         // Layer 1:Fingerprint-based reputation penalty.
         //
         // Audit F2b: the full penalty requires `ctx.tls_fingerprint`, which
-        // HTTP callers never set — Layer 1 could therefore never lower a
+        // HTTP callers never set, Layer 1 could therefore never lower a
         // reputation from this arm. The missing-fingerprint penalty is
         // gated on `penalize_missing_fingerprint` (default OFF, audit
         // F-DDOS-1): with no fingerprint-populating proxy in this repo and
@@ -423,7 +423,7 @@ impl DdosProtector {
         // `enable_per_ip_adaptive` never influenced any decision.
         //
         // Audit SM5 F2: the limiter consulted (and fed) here belongs to
-        // THIS canonical client key alone — other clients' rates cannot
+        // THIS canonical client key alone, other clients' rates cannot
         // move its baseline or threshold.
         if let Some(ref adaptive_table) = self.adaptive_limiters {
             let adaptive = adaptive_table.limiter_for(&ctx.ip);
@@ -451,7 +451,7 @@ impl DdosProtector {
         if let Some(ref detector) = self.anomaly_detector {
             // Build fully-populated feature vector from session and request context.
             // Previously several fields were left as 0.0 which degraded the
-            // Isolation Forest's decision boundary — see security audit report.
+            // Isolation Forest's decision boundary, see security audit report.
             let iat_cov = session.inter_arrival_cov;
             // Estimate IAT mean from requests_per_minute:if RPM > 0 then
             // mean IAT (ms) ≈ 60_000 / RPM, else default to 1000 ms.
@@ -472,9 +472,9 @@ impl DdosProtector {
             // Time-of-day factor:distance from business hours (9-17)
             let hour = chrono::Utc::now().hour() as f64;
             let time_factor = if (9.0..17.0).contains(&hour) {
-                0.0 // Business hours — normal
+                0.0 // Business hours, normal
             } else {
-                ((hour - 13.0).abs() / 12.0).min(1.0) // Night — higher factor
+                ((hour - 13.0).abs() / 12.0).min(1.0) // Night, higher factor
             };
 
             let features = ml::FeatureVector {
@@ -683,7 +683,7 @@ impl DdosProtector {
         if !self.reputation_db.contains_key(ip) {
             self.enforce_reputation_capacity();
         }
-        // Audit SM5 F13: honor `initial_reputation` — the knob previously
+        // Audit SM5 F13: honor `initial_reputation`, the knob previously
         // did nothing because every new entry hardcoded the neutral 50.
         let mut entry = self.reputation_db.entry(*ip).or_insert_with(|| {
             ReputationScore::with_initial_reputation(self.config.initial_reputation)
@@ -877,7 +877,7 @@ impl DdosProtector {
     ///
     /// Only the challenge id is taken from the client; the data, difficulty
     /// and expiry used for verification are the values the server stored
-    /// when it ISSUED the challenge — client-supplied difficulty/expiry
+    /// when it ISSUED the challenge, client-supplied difficulty/expiry
     /// claims are never trusted. On success the challenge is marked solved
     /// in the registry (short allow-TTL) and the client IP's reputation is
     /// credited so the re-evaluated request is not immediately re-challenged.
@@ -937,7 +937,7 @@ impl DdosProtector {
     /// Background cleanup task.
     ///
     /// Fix #7b: each iteration now also runs [`CostBasedLimiter::cleanup`]
-    /// (Bug E-105) so the per-tenant budget map is bounded — previously
+    /// (Bug E-105) so the per-tenant budget map is bounded, previously
     /// only the refill loop ran and ephemeral tenants leaked entries
     /// forever.
     pub async fn run_cleanup_loop(&self, interval: Duration) {
@@ -976,7 +976,7 @@ impl DdosProtector {
 
         // Decay reputation scores toward neutral and evict stale entries.
         // Fix G: entries are ALSO evicted by last-seen regardless of
-        // score — previously any IP with a non-neutral score was pinned
+        // score, previously any IP with a non-neutral score was pinned
         // in the table forever (unbounded memory under IP floods).
         let eviction_threshold = if self.config.reputation_stale_after.is_zero() {
             Duration::from_secs(3600)
@@ -986,7 +986,7 @@ impl DdosProtector {
         self.reputation_db.retain(|_ip, entry| {
             // Decay toward neutral. Audit SM5 F13: route through
             // `decay_toward_neutral` so the trusted/flagged EXEMPTIONS the
-            // type documents actually hold — the previous inline decay
+            // type documents actually hold, the previous inline decay
             // dragged an admin-set trusted entry (90) back to 50 within
             // ~40 cleanup ticks.
             entry.decay_toward_neutral(1);
@@ -1059,7 +1059,7 @@ fn cost_bucket_key(tenant_id: Option<&str>, ip: Option<&IpAddr>) -> String {
 const FINGERPRINT_PENALTY: u8 = 10;
 
 /// Smaller fixed reputation penalty applied when NO TLS fingerprint is
-/// available (audit F2b) — Layer 1 must still be able to lower reputation
+/// available (audit F2b), Layer 1 must still be able to lower reputation
 /// for unattributed clients instead of being permanently inert.
 const MISSING_FINGERPRINT_PENALTY: u8 = 1;
 
@@ -1097,7 +1097,7 @@ pub(crate) fn canonical_client_key(ip: &IpAddr) -> IpAddr {
 /// This is the trailing-window rate, NOT `request_count / age`. The old
 /// estimate was a cumulative average over the whole session: monotonically
 /// non-decreasing for any client that keeps making requests, and therefore
-/// useless as an anomaly signal — a Z-score against its own history crosses
+/// useless as an anomaly signal, a Z-score against its own history crosses
 /// any threshold by construction. Live run 2026-10-22: ordinary console
 /// browsing (~12 requests) declared the browser "under attack", collapsed
 /// the threshold to half the baseline rate and 429'd every following
@@ -1384,7 +1384,7 @@ mod tests {
         assert_eq!(protector.cost_limiter.tracked_tenants(), 2);
 
         // One pass of the (formerly loop-only) cleanup must evict the
-        // stale tenant budget entry — before fix #7b the loop never called
+        // stale tenant budget entry, before fix #7b the loop never called
         // CostBasedLimiter::cleanup and ephemeral tenants leaked forever.
         protector.run_cleanup_once();
         assert_eq!(
@@ -1642,7 +1642,7 @@ mod tests {
             .expect("test should succeed");
 
         // Audit F3: verification goes through the server-side issuance
-        // registry — a client-fabricated challenge (any id/data/difficulty
+        // registry, a client-fabricated challenge (any id/data/difficulty
         // the client likes) must be rejected outright, and a replayed
         // solution to a REAL server-issued challenge must be rejected via
         // the replay cache.
@@ -1833,7 +1833,7 @@ mod tests {
     async fn test_missing_fingerprint_still_lowers_reputation() {
         // Audit F2b + F-DDOS-1: a missing fingerprint is the NORM for every
         // HTTP caller (rustls never exposes the JA4 inputs), so the default
-        // MUST NOT penalize it — the unconditional penalty drained every
+        // MUST NOT penalize it, the unconditional penalty drained every
         // legitimate client. The penalty exists only for deployments that
         // opt in via `penalize_missing_fingerprint` (a proxy forwards
         // fingerprints AND redemption is wired).
@@ -2125,12 +2125,12 @@ mod tests {
 
     /// Live run 2026-10-22 (P0): a real browser opening the console was
     /// throttled on its FIRST page load. The adaptive per-IP limiter was fed
-    /// `request_count / session_age` — a cumulative average, monotonically
+    /// `request_count / session_age`, a cumulative average, monotonically
     /// non-decreasing for any client that keeps requesting. A Z-score against
     /// a baseline built from that same monotone history crosses any threshold
     /// by construction, so ordinary browsing was declared "under attack", the
     /// threshold collapsed to half the baseline rate, and every following
-    /// request got 429 — including the page's own `/assets/globals.css`,
+    /// request got 429, including the page's own `/assets/globals.css`,
     /// which the browser then refused as a stylesheet (wrong MIME type),
     /// leaving the console blank and unstyled.
     ///
@@ -2226,7 +2226,7 @@ mod tests {
 
     /// Live run 2026-10-22 (P0): the protector throttled its OWN health
     /// endpoints. `/health/live` answered 429 to all 250 polls of a
-    /// liveness-probe cadence and `/health/ready` to 150 of 250 — an
+    /// liveness-probe cadence and `/health/ready` to 150 of 250, an
     /// orchestrator reads a non-200 as "unhealthy" and restarts a healthy
     /// service, forever, because a restart does not change the client's rate.
     ///

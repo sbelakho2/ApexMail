@@ -7,7 +7,7 @@
 //!   3. Runs `aggregator::recompute()` to refresh summaries / emit events.
 //!   4. Updates `postmaster_credentials.last_polled_at` / `last_error`.
 //!
-//! Failure of a single credential never aborts the whole tick — partial data
+//! Failure of a single credential never aborts the whole tick, partial data
 //! is still useful and the next tick will retry.
 
 use std::time::Duration;
@@ -18,7 +18,7 @@ use tracing::{error, info, warn};
 
 use super::{aggregator, google, snds};
 
-/// Configuration knob — defaults to 6 hours.
+/// Configuration knob, defaults to 6 hours.
 #[derive(Debug, Clone)]
 pub struct ScheduleConfig {
     pub interval: Duration,
@@ -66,7 +66,7 @@ pub fn spawn(
     })
 }
 
-/// Single tick — public so tests / on-demand admin endpoints can invoke it.
+/// Single tick, public so tests / on-demand admin endpoints can invoke it.
 pub async fn run_once(db: &PgPool, resolver: &SecretResolver) -> Result<(), String> {
     let creds: Vec<CredentialRow> = sqlx::query_as(
         "SELECT id, provider, label, secret_ref, enabled
@@ -368,7 +368,7 @@ mod tests {
     #[tokio::test]
     async fn spawn_survives_a_failing_tick_and_keeps_polling() {
         // A tick whose DB access fails (here: a closed pool) must be logged
-        // and must NOT kill the spawned poller — the next tick retries.
+        // and must NOT kill the spawned poller, the next tick retries.
         let Some(pool) = test_pool("scheduler_spawn_error").await else {
             return;
         };
@@ -516,8 +516,8 @@ mod tests {
             Some(v) => std::env::set_var("GOOGLE_OAUTH_TOKEN_URL", v),
             None => std::env::remove_var("GOOGLE_OAUTH_TOKEN_URL"),
         }
-        // run_once never fails for a PER-CREDENTIAL failure — the tick must
-        // survive — but the failure must be recorded on the credential row.
+        // run_once never fails for a PER-CREDENTIAL failure, the tick must
+        // survive, but the failure must be recorded on the credential row.
         result.expect("the tick itself must succeed");
         let last_error = credential_state(&pool, "g-parse").await.0;
         assert!(

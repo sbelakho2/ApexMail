@@ -142,7 +142,7 @@ async fn list_warmup(
     }
 
     // Fetch addresses for all pools. Canonical ip_pool_addresses ids are
-    // UUIDs and ip_address is INET — both cast to text at the boundary so
+    // UUIDs and ip_address is INET, both cast to text at the boundary so
     // the String row decode matches the canonical schema.
     let addr_rows: Vec<(String, String, String, String)> = sqlx::query_as(
         "SELECT id::text AS id, pool_id, ip_address::text AS ip_address, status \
@@ -152,7 +152,7 @@ async fn list_warmup(
     .fetch_all(db)
     .await?;
 
-    // Fetch schedules for all pools (canonical ids are UUIDs — cast to text).
+    // Fetch schedules for all pools (canonical ids are UUIDs, cast to text).
     let schedule_rows: Vec<(String, String, i32, i64, Option<i64>, String)> = sqlx::query_as(
         "SELECT id::text AS id, pool_id, day, target_volume, actual_volume, status \
          FROM isp_warmup_schedules WHERE pool_id = ANY($1) ORDER BY day ASC",
@@ -293,7 +293,7 @@ async fn warmup_action(
         "admissionControl": false,
         "status": new_status,
         "message": format!(
-            "Advisory warmup plan for pool {} set to {} — this does not control send admission",
+            "Advisory warmup plan for pool {} set to {}, this does not control send admission",
             body.pool_id, new_status
         )
     })))

@@ -2,7 +2,7 @@
 //! contact_persons table that estonia_ou.rs register_contact_person writes
 //! (INSERT ... ON CONFLICT (email) ... RETURNING). If this file fails after
 //! 168 was renamed or reshaped, the crate's persistence contract has drifted
-//! from the canonical schema — update the migration (or this test)
+//! from the canonical schema, update the migration (or this test)
 //! deliberately, never silently.
 
 const MIGRATION_168: &str = include_str!("../../../migrations/168_compliance_contact_persons.sql");
@@ -59,7 +59,7 @@ fn migration_199_defines_payroll_records_with_per_employee_tax_inputs() {
     assert!(MIGRATION_199.contains("pension_exemption                 BOOLEAN"));
     assert!(MIGRATION_199.contains("unemployment_insurance_exemption  BOOLEAN"));
 
-    // Rates themselves are NOT stored as constants here — they come from
+    // Rates themselves are NOT stored as constants here, they come from
     // the versioned date-effective tax policy module per payment period.
     assert!(MIGRATION_199.contains("pay_period                        TIMESTAMPTZ NOT NULL"));
     assert!(

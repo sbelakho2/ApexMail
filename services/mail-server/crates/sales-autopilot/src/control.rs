@@ -1,7 +1,7 @@
 //! Control-plane surface.
 //!
 //! This is the authenticated read/steer API the ApexMail control plane proxies
-//! to. It exists so the CP never needs — and never gets — its own sales brain:
+//! to. It exists so the CP never needs, and never gets, its own sales brain:
 //! every read here is a view over the canonical tables, and every write is an
 //! operator intent (mode, kill switch, review, replay) rather than a decision.
 //!
@@ -67,7 +67,7 @@ fn default_limit() -> i64 {
 // Reads
 // ---------------------------------------------------------------------------
 
-/// `GET /control/overview` — is the machine generating qualified pipeline
+/// `GET /control/overview`, is the machine generating qualified pipeline
 /// profitably and safely right now? This is the primary question the CP page
 /// answers, so it leads with autonomy state and exceptions, not lead counts.
 pub async fn overview(
@@ -86,7 +86,7 @@ fn control_json<T: serde::Serialize>(snapshot: T) -> Result<serde_json::Value, S
     serde_json::to_value(snapshot).map_err(|error| SalesError::Internal(error.into()))
 }
 
-/// `GET /control/decisions` — what did it decide, and why?
+/// `GET /control/decisions`, what did it decide, and why?
 pub async fn decisions(
     State(state): State<Arc<AppState>>,
     headers: axum::http::HeaderMap,
@@ -105,12 +105,12 @@ pub async fn decisions(
     })))
 }
 
-/// `GET /control/exceptions` — decisions a human must act on.
+/// `GET /control/exceptions`, decisions a human must act on.
 ///
 /// Two kinds qualify: decisions a hard gate refused
 /// (`enforcement = 'denied'`) and decisions waiting for an operator
 /// (`enforcement = 'await_approval'`, or any decision whose review is still
-/// `pending`). The predicate is the decision's OWN recorded state — autonomy
+/// `pending`). The predicate is the decision's OWN recorded state, autonomy
 /// mode is context, not authority, and an `execute` decision recorded under an
 /// old mode must not surface as an exception forever.
 pub async fn exceptions(
@@ -136,7 +136,7 @@ pub async fn exceptions(
     })))
 }
 
-/// `GET /control/actions` — the durable queue's visible state.
+/// `GET /control/actions`, the durable queue's visible state.
 pub async fn actions(
     State(state): State<Arc<AppState>>,
     headers: axum::http::HeaderMap,
@@ -164,7 +164,7 @@ pub struct ModeBody {
     pub mode: String,
 }
 
-/// `POST /control/mode` — grant or reduce autonomy.
+/// `POST /control/mode`, grant or reduce autonomy.
 pub async fn set_mode(
     State(state): State<Arc<AppState>>,
     headers: axum::http::HeaderMap,
@@ -197,7 +197,7 @@ pub async fn set_mode(
     })))
 }
 
-/// `POST /control/pause` — stop new outbound work.
+/// `POST /control/pause`, stop new outbound work.
 ///
 /// Pausing is expressed as `shadow`: the brain keeps running and recording
 /// decisions (so the validation dataset keeps growing) while execution stops.
@@ -215,7 +215,7 @@ pub async fn pause(
     })))
 }
 
-/// `POST /control/resume` — return to the pre-pause operating mode.
+/// `POST /control/resume`, return to the pre-pause operating mode.
 ///
 /// Resuming never guesses upward: it restores `approval_required`, the
 /// lowest-authority mode that can actually send. An operator who wants
@@ -241,7 +241,7 @@ pub struct KillSwitchBody {
     pub engaged: bool,
 }
 
-/// `POST /control/kill-switch` — immediate stop for new outbound actions.
+/// `POST /control/kill-switch`, immediate stop for new outbound actions.
 pub async fn kill_switch(
     State(state): State<Arc<AppState>>,
     headers: axum::http::HeaderMap,
@@ -274,7 +274,7 @@ pub struct ReviewBody {
 /// The operator's requested review outcome.
 ///
 /// Public (with [`apply_review`]) because the api-server's control-plane
-/// sales page mounts a native SSR approve/reject form — the same visibility
+/// sales page mounts a native SSR approve/reject form, the same visibility
 /// pattern [`crate::actions::ActionQueue::replay`] already follows for the
 /// dead-letter replay control.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -420,7 +420,7 @@ fn request_has_valid_service_token(headers: &axum::http::HeaderMap, service_toke
 /// * the canonical header is `x-operator-id` (legacy alias: `x-user-id`, used
 ///   only when `x-operator-id` is absent);
 /// * it is honoured only when the request carries the sales service token
-///   (`x-api-key`, or `Authorization: Bearer`) — the same credential
+///   (`x-api-key`, or `Authorization: Bearer`), the same credential
 ///   `routes::require_service_token` enforces on every `/control/*` route;
 /// * the value is trimmed and must then be a non-empty identifier of at most
 ///   [`MAX_OPERATOR_ID_LEN`] bytes containing only printable ASCII characters
@@ -579,7 +579,7 @@ async fn write_review_status_tx(
 ///    other state is a hard error, never a fallback to replaying actions;
 /// 2. on approve, re-run every gate with
 ///    [`crate::decision_engine::revalidate_execution_tx`] on this same
-///    transaction — approval is not a bypass;
+///    transaction, approval is not a bypass;
 /// 3. transition the linked actions (`awaiting_approval` → `queued` when the
 ///    gates pass, → `cancelled` on reject or on a revalidation refusal);
 /// 4. write the terminal `review_status` + `reviewed_by` + `reviewed_at` +
@@ -765,12 +765,12 @@ async fn apply_review_tx(
     }
 }
 
-/// `POST /control/decisions/:id/review` — operator review of one decision.
+/// `POST /control/decisions/:id/review`, operator review of one decision.
 ///
 /// The decision's `review_status` is the authority: only a decision recorded
 /// as `await_approval` with `review_status = 'pending'` can be decided, and
 /// only the atomic transaction in `apply_review` releases (or cancels) its
-/// linked actions. Approval re-runs the hard gates first — an approval that
+/// linked actions. Approval re-runs the hard gates first, an approval that
 /// the gates now refuse cancels the work and is recorded as a rejection with
 /// the reasons.
 ///
@@ -809,7 +809,7 @@ pub async fn review_decision(
     })))
 }
 
-/// `POST /control/actions/:id/replay` — retry one dead-lettered or failed action.
+/// `POST /control/actions/:id/replay`, retry one dead-lettered or failed action.
 ///
 /// Deliberately restricted to `failed`/`dead_letter`
 /// ([`crate::actions::ActionQueue::replay`]): actions in `awaiting_approval`
@@ -844,7 +844,7 @@ pub async fn replay_action(
 // Enrollments (the CP's outreach command and campaign read model)
 // ---------------------------------------------------------------------------
 
-/// `POST /enrollments` — the canonical outreach command.
+/// `POST /enrollments`, the canonical outreach command.
 pub async fn start_outreach(
     State(state): State<Arc<AppState>>,
     headers: axum::http::HeaderMap,
@@ -855,7 +855,7 @@ pub async fn start_outreach(
     // The durable action worker refuses to start without the production
     // dispatcher (`SALES_CAMPAIGN_FROM_EMAIL` + `SALES_UNSUBSCRIBE_SECRET`),
     // so on an unwired deployment this route used to accept (`accepted:1`),
-    // queue real work and leave it queued forever with no consumer — the
+    // queue real work and leave it queued forever with no consumer, the
     // whole decision/kill-switch machinery was unobservable (dogfood
     // 2026-10-06 P1). Refuse with the NAMED reason; never an accept that can
     // never run.
@@ -873,7 +873,7 @@ pub async fn start_outreach(
     Ok(Json(response))
 }
 
-/// `GET /enrollments` — the CP's campaign/enrollment list.
+/// `GET /enrollments`, the CP's campaign/enrollment list.
 pub async fn list_enrollments(
     State(state): State<Arc<AppState>>,
     headers: axum::http::HeaderMap,
@@ -905,7 +905,7 @@ pub async fn list_enrollments(
     })))
 }
 
-/// `POST /enrollments/:id/pause|resume|cancel` — stop or restart one
+/// `POST /enrollments/:id/pause|resume|cancel`, stop or restart one
 /// enrollment's queued work.
 pub async fn set_enrollment_state(
     State(state): State<Arc<AppState>>,
@@ -1386,8 +1386,8 @@ mod tests {
         cleanup(&pool, &tenant).await;
     }
 
-    /// (a) Atomicity: a failure AFTER revalidation passed — the requeue refuses
-    /// because the parked action carries lease ownership — must roll back the
+    /// (a) Atomicity: a failure AFTER revalidation passed, the requeue refuses
+    /// because the parked action carries lease ownership, must roll back the
     /// whole review. Before this fix, `review_status` was committed as
     /// `approved` before the release ran, so the action stayed parked and the
     /// retry was rejected as "already approved".
@@ -1948,7 +1948,7 @@ mod tests {
                 .unwrap();
         assert_eq!(mode, "shadow");
 
-        // Resume restores approval_required — never guarded.
+        // Resume restores approval_required, never guarded.
         let Json(resumed) = resume(State(state.clone()), tenant_headers(&tenant))
             .await
             .unwrap();

@@ -4,22 +4,22 @@
 //! plan, the provider mints the mandate, and a Mollie SUBSCRIPTION
 //! (`sub_…`) is what grants and renews it. This module owns that lifecycle:
 //!
-//! * [`activate_from_paid_checkout`] — a settled checkout payment is mapped
+//! * [`activate_from_paid_checkout`], a settled checkout payment is mapped
 //!   back to an active catalog plan ONLY when its amount matches the catalog
 //!   for the paid interval/currency; a Mollie subscription is created and its
 //!   id is stored; the charge becomes a PAID invoice (VAT extracted from the
 //!   gross) with its allocation and statutory postings; the tenant plan
 //!   changes in the same transaction as the subscription row.
-//! * [`renew_from_paid_subscription`] — a Mollie subscription charge settles
+//! * [`renew_from_paid_subscription`], a Mollie subscription charge settles
 //!   the NEXT period: one paid invoice per payment (idempotent on the payment
 //!   id), the cycle advances, the tenant stays active.
-//! * [`mark_subscription_payment_failed`] — a failed subscription charge
+//! * [`mark_subscription_payment_failed`], a failed subscription charge
 //!   moves the row to `past_due`; Mollie retries its own charges, so the local
 //!   dunning retry path deliberately does not charge these rows.
-//! * [`sweep_provider_subscription_state`] — provider state is reconciled
+//! * [`sweep_provider_subscription_state`], provider state is reconciled
 //!   from authenticated fetches: only `active` grants the plan; `canceled`,
 //!   `completed`, `suspended` and `pending` resolve the tenant to Free.
-//! * [`cancel_provider_subscription`] — cancellation stops Mollie's own
+//! * [`cancel_provider_subscription`], cancellation stops Mollie's own
 //!   charge generation (`DELETE …/subscriptions/{sub}`) and revokes the
 //!   mandate.
 //!
@@ -107,7 +107,7 @@ pub struct ActivationOutcome {
 /// serialization point must come BEFORE any provider mutation: two verified
 /// checkouts for the same tenant arriving together would otherwise both read
 /// the old subscription, both create a distinct Mollie `sub_…` (their
-/// idempotency keys differ by payment id) and both adopt it — leaving an
+/// idempotency keys differ by payment id) and both adopt it, leaving an
 /// orphan provider subscription the reconciliation sweep can never discover.
 /// The lock is a SESSION advisory lock held on one dedicated connection for
 /// the whole operation (provider I/O included); the inner transaction then
@@ -144,7 +144,7 @@ async fn run_under_tenant_billing_lock<T>(
         tracing::error!(
             lock = %key,
             error = %error,
-            "tenant billing lock release failed — closing the pooled connection"
+            "tenant billing lock release failed, closing the pooled connection"
         );
         let _ = conn.close().await;
     }
@@ -187,7 +187,7 @@ pub(crate) async fn raise_billing_incident(
 /// 2. create the NEW provider subscription (its idempotency key replays on
 ///    retry instead of minting a second object),
 /// 3. adopt it locally in ONE transaction (row upsert, tenant plan, paid
-///    invoice, allocation, postings, audit) — the old subscription is still
+///    invoice, allocation, postings, audit), the old subscription is still
 ///    intact if any step fails, so the customer's billing never lapses,
 /// 4. only after the commit, retire the superseded provider subscriptions; a
 ///    failed retirement raises an incident and the sweep's orphan detection
@@ -215,7 +215,7 @@ pub async fn activate_from_paid_checkout(
     if gross_cents != expected {
         return Err(format!(
             "checkout payment {payment_id} charged {gross_cents} {currency} but the catalog price for \
-             {plan_name} ({interval}) is {expected} — refusing to grant a mismatched entitlement"
+             {plan_name} ({interval}) is {expected}, refusing to grant a mismatched entitlement"
         ));
     }
     let (Some(customer_id), Some(mandate_id)) = (customer_id, mandate_id) else {
@@ -523,7 +523,7 @@ async fn activate_locked(
     }
     .await;
 
-    // The adoption is durable — NOW the superseded provider subscriptions
+    // The adoption is durable, NOW the superseded provider subscriptions
     // may stop charging. A failed retirement is an incident (the customer
     // would keep paying the old plan) and the sweep's orphan detection
     // cancels the straggler on its next pass.
@@ -536,7 +536,7 @@ async fn activate_locked(
                     tenant_id = %tenant_id,
                     subscription_id = %previous_subscription,
                     error = %error,
-                    "superseded Mollie subscription could not be retired after adoption — \
+                    "superseded Mollie subscription could not be retired after adoption, \
                      incident raised; the reconciliation sweep cancels it"
                 );
                 raise_billing_incident(
@@ -565,7 +565,7 @@ async fn activate_locked(
                 tenant_id = %tenant_id,
                 subscription_id = %provider_id,
                 error = %cancel_error,
-                "activation failed and the compensating provider cancellation also failed — \
+                "activation failed and the compensating provider cancellation also failed, \
                  a live provider subscription has no local plan; the reconciliation sweep reports it"
             );
         }
@@ -644,7 +644,7 @@ pub async fn renew_from_paid_subscription(
     };
     let plan_name = plan.ok_or_else(|| {
         format!(
-            "subscription {provider_subscription_id} carries no local plan — reconciled separately"
+            "subscription {provider_subscription_id} carries no local plan, reconciled separately"
         )
     })?;
     let interval = interval.unwrap_or_else(|| "monthly".to_string());
@@ -971,7 +971,7 @@ pub async fn sweep_provider_subscription_state(pool: &PgPool) -> Result<u64, Str
         // The local cancel is committed before the provider DELETE (so a
         // provider outage can never leave the customer entitled but
         // uncanceled locally). If that DELETE did not land, the provider
-        // object is still active and charging — retry it here.
+        // object is still active and charging, retry it here.
         if local_status.as_deref() == Some("canceled") {
             if provider.status == "active" {
                 match cancel_provider_subscription_object(&customer_id, &subscription_id).await {
@@ -1020,7 +1020,7 @@ pub async fn sweep_provider_subscription_state(pool: &PgPool) -> Result<u64, Str
             }
         }
         if provider.status == "active" {
-            // The healthy case — and the ONLY place an orphan can hide: a
+            // The healthy case, and the ONLY place an orphan can hide: a
             // live provider subscription for this customer that the local
             // table does not reference (e.g. the losing side of a superseded
             // activation whose retirement failed). Enumerate the customer's
@@ -1064,7 +1064,7 @@ pub async fn sweep_provider_subscription_state(pool: &PgPool) -> Result<u64, Str
                                     tenant_id = %tenant_id,
                                     orphan = %stray.id,
                                     error = %error,
-                                    "orphan Mollie subscription cancellation failed — incident raised"
+                                    "orphan Mollie subscription cancellation failed, incident raised"
                                 );
                                 raise_billing_incident(
                                     pool,

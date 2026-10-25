@@ -32,7 +32,7 @@ Navegue a [app.apexmail.ee/signup](https://app.apexmail.ee/signup).
 
 **Casos de error:**
 - **`Email already registered`**: Use el flujo de restablecimiento de contraseña en [app.apexmail.ee/reset-password](https://app.apexmail.ee/reset-password).
-- **`Password too weak`**: Use 15+ caracteres (las frases de contraseña más largas están bien — no se requiere mezcla de símbolos o dígitos). Evite contraseñas comunes y patrones simples de repetición/secuencia.
+- **`Password too weak`**: Use 15+ caracteres (las frases de contraseña más largas están bien, no se requiere mezcla de símbolos o dígitos). Evite contraseñas comunes y patrones simples de repetición/secuencia.
 
 ---
 
@@ -74,7 +74,7 @@ En la barra lateral del panel, navegue a **Settings → API Keys**.
 
 **Qué sucede:** Se genera una nueva clave API y se muestra una sola vez.
 
-**Advertencia de seguridad:** Copie la clave de inmediato. No se volverá a mostrar. Guárdela en un gestor de contraseñas o en una variable de entorno — nunca la suba al control de versiones.
+**Advertencia de seguridad:** Copie la clave de inmediato. No se volverá a mostrar. Guárdela en un gestor de contraseñas o en una variable de entorno, nunca la suba al control de versiones.
 
 ```bash
 export APEXMAIL_API_KEY="am_live_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
@@ -160,24 +160,24 @@ Elija su método de integración:
 
 ### Opción A: SDK (compilar desde el código fuente)
 
-> **Aún no en registros públicos.** Los SDK de ApexMail **aún no están publicados en PyPI, pkg.go.dev, Packagist, RubyGems ni Maven Central** — `pip install apexmail`, `go get github.com/apexmail/apexmail-go` y `composer require apexmail/apexmail-php` fallarán hasta la primera versión estable. Hasta entonces, instale desde el código fuente del monorepo y fije un commit específico, y **verifique el fuente que incorpora** antes de publicar. Vea [SDKs](/docs/sdks/) para el estado por lenguaje.
+> **Aún no en registros públicos.** Los SDK de ApexMail **aún no están publicados en PyPI, pkg.go.dev, Packagist, RubyGems ni Maven Central**, `pip install apexmail`, `go get github.com/apexmail/apexmail-go` y `composer require apexmail/apexmail-php` fallarán hasta la primera versión estable. Hasta entonces, instale desde el código fuente del monorepo y fije un commit específico, y **verifique el fuente que incorpora** antes de publicar. Vea [SDKs](/docs/sdks/) para el estado por lenguaje.
 
-El código fuente del SDK es actualmente privado y está disponible para clientes de vista previa aprobados mientras se preparan los paquetes para su primera publicación en un registro público — escriba a [support@apexmail.ee](mailto:support@apexmail.ee) (o a su gestor de cuenta) y recibirá el paquete de código fuente fijado para su lenguaje, con suma de verificación, bajo la licencia del SDK. Cada directorio de SDK incluye sus propias instrucciones de compilación y prueba.
+El código fuente del SDK es actualmente privado y está disponible para clientes de vista previa aprobados mientras se preparan los paquetes para su primera publicación en un registro público, escriba a [support@apexmail.ee](mailto:support@apexmail.ee) (o a su gestor de cuenta) y recibirá el paquete de código fuente fijado para su lenguaje, con suma de verificación, bajo la licencia del SDK. Cada directorio de SDK incluye sus propias instrucciones de compilación y prueba.
 
-**Python** (`packages/sdk-python` — instale desde la ruta local, o incorpore el directorio):
+**Python** (`packages/sdk-python`, instale desde la ruta local, o incorpore el directorio):
 
 ```bash
 pip install ./packages/sdk-python
 ```
 
-**Go** (`packages/sdk-go` — fije el módulo al código fuente incorporado con una directiva `replace`):
+**Go** (`packages/sdk-go`, fije el módulo al código fuente incorporado con una directiva `replace`):
 
 ```bash
 go mod edit -replace github.com/apexmail/apexmail-go=./packages/sdk-go
 go mod tidy
 ```
 
-**PHP** (`packages/sdk-php` — apunte Composer al directorio local):
+**PHP** (`packages/sdk-php`, apunte Composer al directorio local):
 
 ```bash
 composer config repositories.apexmail path ./packages/sdk-php
@@ -188,7 +188,7 @@ composer require apexmail/apexmail-php:@dev
 
 ### Opción B: cURL (prueba rápida)
 
-No requiere instalación — use la terminal:
+No requiere instalación, use la terminal:
 
 ```bash
 # Verify your key works
@@ -305,7 +305,7 @@ Navegue a **Settings → Webhooks** en el panel.
 **Campos:**
 - **URL:** La URL receptora de su webhook (p. ej., `https://your-app.example.com/webhooks/apexmail`)
 - **Events:** Seleccione al menos `message.delivered`, `message.bounced`, `message.complained`
-- **Secret:** Genere un secreto de firma — guárdelo de forma segura
+- **Secret:** Genere un secreto de firma, guárdelo de forma segura
 
 **Qué sucede:** ApexMail comienza a entregar los eventos coincidentes a su URL con firmas HMAC-SHA256.
 
@@ -344,9 +344,9 @@ Antes de pasar a producción:
 1. **Actualice desde el plan Free** si supera 3.000 emails/mes recurrentes (o su asignación de lanzamiento única de 30.000 emails). Vea [Precios](/es/pricing/).
 3. **Configure DMARC** para su dominio de envío con una política de al menos `p=none` inicialmente, avanzando a `p=quarantine` o `p=reject`.
 4. **Configure la alineación SPF** asegurando que su dominio `Return-Path` coincida con su dominio `From`.
-5. **Rote las claves API** — cree claves específicas de producción con scopes mínimos y fechas de caducidad.
-6. **Configure el monitoreo** — establezca alertas para tasas de rebote superiores al 2 % y tasas de queja superiores al 0,1 %.
-7. **Pruebe la idempotencia del webhook** — verifique que su manejador deduplica correctamente los eventos usando el campo `event_id`.
+5. **Rote las claves API**, cree claves específicas de producción con scopes mínimos y fechas de caducidad.
+6. **Configure el monitoreo**, establezca alertas para tasas de rebote superiores al 2 % y tasas de queja superiores al 0,1 %.
+7. **Pruebe la idempotencia del webhook**, verifique que su manejador deduplica correctamente los eventos usando el campo `event_id`.
 8. **Revise la [Referencia de la API](/docs/api/)** para envío por lotes, plantillas y funciones avanzadas.
 
 ### Lista de verificación de preparación para producción
@@ -365,8 +365,8 @@ Antes de pasar a producción:
 
 ## Siguientes pasos
 
-- [Referencia de la API](/docs/api/) — documentación completa de endpoints con esquemas de solicitud/respuesta
-- [Webhooks](/docs/webhooks/) — catálogo completo de eventos, seguridad y documentación de entrega
-- [SDKs](/docs/sdks/) — instalación del SDK, autenticación y ejemplos de uso
-- [Analytics](/docs/analytics/) — métricas de entrega, clasificación de rebotes e informes
-- [API Explorer](/api-explorer/) — ejecute solicitudes reales contra el sandbox en vivo aislado
+- [Referencia de la API](/docs/api/), documentación completa de endpoints con esquemas de solicitud/respuesta
+- [Webhooks](/docs/webhooks/), catálogo completo de eventos, seguridad y documentación de entrega
+- [SDKs](/docs/sdks/), instalación del SDK, autenticación y ejemplos de uso
+- [Analytics](/docs/analytics/), métricas de entrega, clasificación de rebotes e informes
+- [API Explorer](/api-explorer/), ejecute solicitudes reales contra el sandbox en vivo aislado

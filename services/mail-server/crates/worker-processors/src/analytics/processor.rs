@@ -26,10 +26,10 @@ const MAX_AGGREGATION_BUFFER_SIZE: usize = 10_000;
 const MIN_FLUSH_BATCH_SIZE: usize = 50;
 
 /// Maximum age of the oldest buffered event before a flush is forced even
-/// below MIN_FLUSH_BATCH_SIZE — low-volume tenants must not wait forever.
+/// below MIN_FLUSH_BATCH_SIZE, low-volume tenants must not wait forever.
 const MAX_BUFFER_AGE: Duration = Duration::from_secs(30);
 
-/// Wall-clock hour bucket for an event — the single source of the
+/// Wall-clock hour bucket for an event, the single source of the
 /// `period_start` used to derive aggregation keys, shared by the increment
 /// (`update_aggregation`) and the shed-side decrement (`remove_aggregation`)
 /// paths so both always address the SAME buckets.
@@ -110,13 +110,13 @@ pub struct AnalyticsProcessor {
     event_buffer: Arc<RwLock<VecDeque<AnalyticsEvent>>>,
     aggregation_buffer: Arc<RwLock<HashMap<String, AggregatedStats>>>,
     /// Wall-clock time when the event buffer last went from empty to
-    /// non-empty — drives the age-based flush. `None` while the buffer is
+    /// non-empty, drives the age-based flush. `None` while the buffer is
     /// empty.
     oldest_buffered_at: Arc<std::sync::Mutex<Option<std::time::Instant>>>,
     is_flushing: AtomicBool,
     /// SM10 F4: data-plane STONITH gate. With `APEXMAIL_HA_FENCING=true`
     /// the claim loop refuses to fetch (and aggregate) queue rows while
-    /// this node's `ha:fenced:{node}` key stands — or while the fence
+    /// this node's `ha:fenced:{node}` key stands, or while the fence
     /// authority cannot be read (fail closed). Default off: zero change.
     fence_gate: crate::fence::FenceGate,
     shutdown_notify: Arc<Notify>,
@@ -294,7 +294,7 @@ impl AnalyticsProcessor {
     ///
     /// The reset-processing arm that used to live here was REMOVED as dead
     /// (and had it ever fired, wrong) code: `process_events_inner` cannot
-    /// fail — a flush write failure is deliberately swallowed, with the
+    /// fail, a flush write failure is deliberately swallowed, with the
     /// buffers restored and the rows left CLAIMED so the flush loop retries
     /// them without a re-fetch. Resetting `processing` there would have
     /// re-claimed rows whose events were still buffered and re-aggregated
@@ -315,12 +315,12 @@ impl AnalyticsProcessor {
     /// Inner processing logic (separated for borrow checker).
     ///
     /// Events are only marked `processed` AFTER a flush that included them
-    /// has written to the DB (see `flush_buffers_inner`) — never here. Until
+    /// has written to the DB (see `flush_buffers_inner`), never here. Until
     /// then they stay claimed in `analytics_queue` and owned by the in-memory
     /// buffer, so a write failure cannot lose or double-count them.
     ///
     /// SM10 F8: the buffer caps no longer evict inline. Hitting either cap
-    /// forces a SYNCHRONOUS flush first — the flush writes every counted
+    /// forces a SYNCHRONOUS flush first, the flush writes every counted
     /// aggregation exactly once and marks its events processed exactly once,
     /// so cap pressure is relieved without corrupting counts. Only when that
     /// flush itself fails do we shed, and shedding removes an event from the
@@ -332,7 +332,7 @@ impl AnalyticsProcessor {
     /// still marked processed (silent undercount).
     async fn process_events_inner(&self, events: Vec<AnalyticsEvent>) -> ProcessorResult<()> {
         // Add to event buffer (sync operation). Ids already present are
-        // skipped — a restored flush buffer can overlap with re-claimed rows.
+        // skipped, a restored flush buffer can overlap with re-claimed rows.
         let should_flush = {
             let mut buffer = self.event_buffer.write().unwrap_or_else(|e| e.into_inner());
             let was_empty = buffer.is_empty();
@@ -356,7 +356,7 @@ impl AnalyticsProcessor {
         };
 
         // Update aggregation counters (sync operation). No cap enforcement
-        // here — see the module doc on `process_events_inner` (SM10 F8).
+        // here, see the module doc on `process_events_inner` (SM10 F8).
         for event in &events {
             self.update_aggregation(event);
         }
@@ -430,7 +430,7 @@ impl AnalyticsProcessor {
     /// holds, and for each removed event subtracts its aggregation
     /// contributions (`AggregatedStats::decrement`; buckets that empty are
     /// deleted). An event is therefore either fully in memory until a
-    /// successful flush marks it processed, or fully gone — never counted
+    /// successful flush marks it processed, or fully gone, never counted
     /// while dropped.
     ///
     /// Dropped events' queue rows stay CLAIMED (only a flush that included
@@ -472,7 +472,7 @@ impl AnalyticsProcessor {
 
     /// Update aggregation buffer with an event.
     ///
-    /// SM10 F8: this no longer evicts under cap pressure — an eviction here
+    /// SM10 F8: this no longer evicts under cap pressure, an eviction here
     /// silently destroyed counts whose events were still buffered and got
     /// marked processed by the next flush. Cap pressure is handled by the
     /// forced-flush + per-event shed in `process_events_inner`.
@@ -507,7 +507,7 @@ impl AnalyticsProcessor {
     /// Remove one event's aggregation contributions (SM10 F8 load shed):
     /// decrement every bucket the event touched and delete buckets that
     /// emptied. A bucket a concurrent flush already drained is simply absent
-    /// — `decrement` clamps, and a missing key is a no-op.
+    ///, `decrement` clamps, and a missing key is a no-op.
     fn remove_aggregation(&self, event: &AnalyticsEvent) {
         let period_start = period_start_for(event);
         let period_key = period_start.timestamp_millis().to_string();
@@ -527,11 +527,11 @@ impl AnalyticsProcessor {
         }
     }
 
-    /// Periodic flush loop — flushes when either:
+    /// Periodic flush loop, flushes when either:
     /// 1. The flush interval has elapsed AND there are MIN_FLUSH_BATCH_SIZE events, OR
     /// 2. The buffer exceeds the configured batch_size (size-based trigger, see process_events_inner), OR
     /// 3. The oldest buffered event is older than MAX_BUFFER_AGE (age-based
-    ///    trigger — low-volume tenants must not have events stuck in a
+    ///    trigger, low-volume tenants must not have events stuck in a
     ///    too-small batch indefinitely).
     ///
     /// This prevents tiny flushes that waste ClickHouse write throughput while still
@@ -563,7 +563,7 @@ impl AnalyticsProcessor {
                             buffer_len = buffer_len,
                             min_flush = MIN_FLUSH_BATCH_SIZE,
                             oldest_age = ?oldest_age,
-                            "Skipping flush — buffer below minimum batch size and age"
+                            "Skipping flush, buffer below minimum batch size and age"
                         );
                     }
                 }
@@ -583,7 +583,7 @@ impl AnalyticsProcessor {
     /// Flush event and aggregation buffers, reporting whether THIS call ran.
     ///
     /// SM10 F8: the cap-pressure path must distinguish "flushed" from
-    /// "skipped because a concurrent flush holds the mutex" — a skipped
+    /// "skipped because a concurrent flush holds the mutex", a skipped
     /// caller must not conclude the buffers were drained (nor shed on their
     /// behalf).
     async fn flush_buffers_forced(&self) -> ProcessorResult<bool> {
@@ -624,7 +624,7 @@ impl AnalyticsProcessor {
             return Ok(());
         }
 
-        // The buffers were drained — reset the age-based flush clock; it is
+        // The buffers were drained, reset the age-based flush clock; it is
         // restarted by restore_buffers() on failure or by the next buffered
         // event.
         *self
@@ -641,7 +641,7 @@ impl AnalyticsProcessor {
         );
 
         // Write aggregations to DB. On failure the drained buffers are
-        // RESTORED so the flush loop retries them — events are never lost.
+        // RESTORED so the flush loop retries them, events are never lost.
         if let Err(e) = self.write_aggregations(&aggregations).await {
             error!(error = %e, "Aggregation write failed; restoring buffers for retry");
             self.restore_buffers(events, aggregations);
@@ -655,7 +655,7 @@ impl AnalyticsProcessor {
         }
 
         // Mark the flushed events processed ONLY AFTER the DB write
-        // succeeded. A marking failure is logged but not restored — the
+        // succeeded. A marking failure is logged but not restored, the
         // aggregations were already persisted and restoring would double-write.
         if let Err(e) = self.mark_events_processed(&event_ids).await {
             let count = event_ids.len();
@@ -903,7 +903,7 @@ impl AnalyticsProcessor {
     /// the previous `= EXCLUDED.x` REPLACE semantics made the two writers
     /// clobber each other depending on ordering (a late flush after this
     /// rollup added on top of replaced totals, and this rollup wiped
-    /// flush-written counts). The rollup also groups `campaign_id` — the
+    /// flush-written counts). The rollup also groups `campaign_id`, the
     /// flush path maintains campaign-keyed buckets, which the old
     /// `NULL as campaign_id` rollup neither reconciled nor represented.
     async fn run_hourly_aggregation(&self) -> ProcessorResult<()> {
@@ -1102,7 +1102,7 @@ mod tests {
         }
     }
 
-    /// Sum of a metric across every aggregation bucket — the count the DB
+    /// Sum of a metric across every aggregation bucket, the count the DB
     /// would receive if the buffer flushed right now.
     fn total_sent(proc: &AnalyticsProcessor) -> i64 {
         proc.aggregation_buffer
@@ -1115,7 +1115,7 @@ mod tests {
 
     /// The old event-cap path DROPPED the oldest events after
     /// `update_aggregation` had already counted them, and the 10-minute
-    /// reclaim re-aggregated them — a double count. The replacement
+    /// reclaim re-aggregated them, a double count. The replacement
     /// contract: a cap hit forces a flush and, when the flush fails, sheds
     /// each event TOGETHER WITH its aggregation contributions, so the
     /// buffered total always equals the counted total (no double count via
@@ -1199,7 +1199,7 @@ mod tests {
     }
 
     /// The old `update_aggregation` silently evicted the oldest buckets when
-    /// the map crossed its cap while the events stayed buffered — the flush
+    /// the map crossed its cap while the events stayed buffered, the flush
     /// then marked those events processed with their counts never written
     /// (the mirror-image silent undercount). Aggregation growth must now be
     /// eviction-free: the cap decision belongs to the forced-flush path.
@@ -1400,7 +1400,7 @@ mod adversarial_db_tests {
             .expect("hourly totals")
     }
 
-    /// The tenant-level (`domain_id`/`campaign_id` NULL) bucket only — the
+    /// The tenant-level (`domain_id`/`campaign_id` NULL) bucket only, the
     /// flush path writes the same event into up to four key shapes, so the
     /// un-shaped SUM above would multiply-count it.
     async fn tenant_bucket_total(pool: &PgPool, tenant: &str, metric: &str) -> i64 {
@@ -1827,7 +1827,7 @@ mod adversarial_db_tests {
     /// and were then marked processed by the next flush (a mirror-image
     /// undercount). Growth past the cap is now intentional: the
     /// forced-flush path (flush first; shed events WITH their counts only
-    /// when the flush itself fails) owns cap pressure — see
+    /// when the flush itself fails) owns cap pressure, see
     /// `cap_hit_with_failing_flush_sheds_events_and_their_counts_together`
     /// in the unit module for the full shed invariant.
     #[tokio::test]
@@ -1861,7 +1861,7 @@ mod adversarial_db_tests {
         assert_eq!(
             buffer.len(),
             MAX_AGGREGATION_BUFFER_SIZE + 1,
-            "growth past the cap must be eviction-free — update_aggregation never sheds"
+            "growth past the cap must be eviction-free, update_aggregation never sheds"
         );
         // The fresh entry survives (nothing was evicted)…
         assert!(
@@ -1875,7 +1875,7 @@ mod adversarial_db_tests {
     }
 
     /// At the event cap the processor SHEDS the oldest buffered events —
-    /// together with their aggregation contributions — after the cap-forced
+    /// together with their aggregation contributions, after the cap-forced
     /// flush failed (SM10 F8; the pool here cannot flush). The newest event
     /// survives, the oldest leave WITH their counts (their queue rows stay
     /// claimed and the 10-minute reclaim re-processes them from scratch).
@@ -2098,7 +2098,7 @@ mod adversarial_db_tests {
             .expect("flush loop exits")
             .expect("join ok");
 
-        // The events were never written — they must still be buffered.
+        // The events were never written, they must still be buffered.
         assert_eq!(
             processor
                 .event_buffer
@@ -2202,7 +2202,7 @@ mod residual_arms {
     }
 
     /// When the claim reset itself fails (injected UPDATE fault on
-    /// analytics_queue), the failure is logged and counted — the pipeline
+    /// analytics_queue), the failure is logged and counted, the pipeline
     /// error is still surfaced to the caller.
     #[tokio::test]
     async fn claim_reset_failure_is_logged_and_counted() {
@@ -2251,7 +2251,7 @@ mod residual_arms {
         let events = processor.fetch_events(10).await.expect("claim");
         assert_eq!(events.len(), 1);
         // The flush write fails under the outage; process_events still
-        // returns Ok — the failure is carried by the retained buffers and
+        // returns Ok, the failure is carried by the retained buffers and
         // the still-claimed rows (the removed reset arm would have re-queued
         // already-buffered events and double-counted them).
         let result = processor.process_events(events).await;
@@ -2342,7 +2342,7 @@ mod residual_arms {
 
     /// `stop()`'s final flush with NON-EMPTY buffers under a write outage
     /// hits the failure arm: the flush error is reported (logged), stop
-    /// still succeeds, and — the invariant — the drained buffers are
+    /// still succeeds, and, the invariant, the drained buffers are
     /// RESTORED, so a broken shutdown flush loses nothing. (An empty-buffer
     /// stop no-ops before touching the database and cannot prove this.)
     #[tokio::test]
@@ -2377,7 +2377,7 @@ mod residual_arms {
                 .unwrap_or_else(|e| e.into_inner())
                 .len(),
             1,
-            "a failed final flush restores the buffer — nothing is lost"
+            "a failed final flush restores the buffer, nothing is lost"
         );
 
         sqlx::query("ALTER TABLE analytics_hourly_gone RENAME TO analytics_hourly")
@@ -2402,7 +2402,7 @@ mod residual_arms {
 
     /// The flush loop's AGE trigger: a single buffered event (far below
     /// MIN_FLUSH_BATCH_SIZE) whose clock exceeds MAX_BUFFER_AGE is flushed
-    /// on the next tick — low-volume tenants must not wait for a full batch.
+    /// on the next tick, low-volume tenants must not wait for a full batch.
     #[tokio::test] // real time: the loop parks on a real interval
     async fn age_based_flush_pushes_sub_minimum_batches() -> Result<(), Box<dyn std::error::Error>>
     {
@@ -2482,7 +2482,7 @@ mod residual_arms {
 
     /// The `mark_events_processed` failure arm: with the claim table gone,
     /// the flush still SUCCEEDS (the aggregations are already persisted)
-    /// and the buffer stays drained — the marking bookkeeping failure is
+    /// and the buffer stays drained, the marking bookkeeping failure is
     /// logged, never allowed to fail or unwind the persisted write.
     #[tokio::test]
     async fn mark_processed_failure_degrades_without_failing_the_flush(
@@ -2515,7 +2515,7 @@ mod residual_arms {
                 .read()
                 .unwrap_or_else(|e| e.into_inner())
                 .is_empty(),
-            "the persisted events stay drained (NOT restored — that would double-write)"
+            "the persisted events stay drained (NOT restored, that would double-write)"
         );
         let sent = sqlx::query_scalar::<_, i64>(
             "SELECT COALESCE(SUM(sent), 0)::bigint FROM analytics_hourly WHERE tenant_id = $1",

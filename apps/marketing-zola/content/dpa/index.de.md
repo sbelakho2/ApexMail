@@ -1,6 +1,6 @@
 +++
 title = "Vereinbarung zur Auftragsverarbeitung"
-description = "ApexMail-Auftragsverarbeitungsvereinbarung — Datenverarbeitungsbedingungen nach Art. 28 DSGVO."
+description = "ApexMail-Auftragsverarbeitungsvereinbarung, Datenverarbeitungsbedingungen nach Art. 28 DSGVO."
 template = "prose.html"
 
 [extra]

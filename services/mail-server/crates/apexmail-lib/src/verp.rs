@@ -1,4 +1,4 @@
-//! VERP v2 — cryptographically authenticated bounce envelope tokens.
+//! VERP v2, cryptographically authenticated bounce envelope tokens.
 //!
 //! The legacy (v1) VERP return path
 //! `bounces+{message_id}={recipient_domain}={recipient_local}@{verp_domain}`
@@ -14,12 +14,12 @@
 //! ```
 //!
 //! Contract:
-//! * the token is bound to (queue/send id, tenant, recipient, expiry) — all
+//! * the token is bound to (queue/send id, tenant, recipient, expiry), all
 //!   four claims are covered by the MAC;
 //! * a verifier recomputes the MAC over the exact decoded payload bytes
 //!   (never over a re-serialization) and rejects the token on any mismatch;
 //! * an expired token is rejected even when the MAC is valid;
-//! * on ANY failure the embedded claims must not be trusted — the caller may
+//! * on ANY failure the embedded claims must not be trusted, the caller may
 //!   record the attempt as an observation but must not suppress or otherwise
 //!   act on it;
 //! * v1 addresses stay parseable for read-compatibility only. They carry no
@@ -89,7 +89,7 @@ struct VerpV2Payload {
 pub enum VerpV2Error {
     /// Not `bounces+v2.`-shaped, bad base64, bad JSON, missing/empty claims.
     Malformed,
-    /// MAC recomputation did not match — forged or corrupted token.
+    /// MAC recomputation did not match, forged or corrupted token.
     BadSignature,
     /// MAC valid but the expiry claim is at/before the supplied `now`.
     Expired,

@@ -979,7 +979,7 @@ fn obtained_timestamp_record_round_trips_with_the_required_evidence() {
 
     // The fixture response is the genuine granted reply for this document and
     // nonce (`signing_tests.rs`), so all checks pass and the evidence is a
-    // real RFC 3161 record — not a placeholder.
+    // real RFC 3161 record, not a placeholder.
     let document: &[u8] =
         b"ApexMail statutory filing fixture document.\nPeriod: 2026-01-01..2026-12-31\n";
     let evidence = verify_response(
@@ -1130,7 +1130,7 @@ where
 // ── Adversarial wave 2: submittable gate, byte-stable digests, named gaps ──
 
 /// The submission gate: a package with any named gap must never be
-/// submittable, and the refusal must name EVERY offending field — a gap
+/// submittable, and the refusal must name EVERY offending field, a gap
 /// silently dropped would let an incomplete return be filed.
 #[test]
 fn submittable_gate_refuses_named_gaps_and_names_every_field() {

@@ -6,9 +6,9 @@
 //! Values come exclusively from migration 220's views restricted to a CLOSED
 //! fiscal period:
 //!
-//! * `v_accounting_trial_balance` — per-account debit/credit/balance (the
+//! * `v_accounting_trial_balance`, per-account debit/credit/balance (the
 //!   account-level snapshot persisted in `annual_report_lines`);
-//! * `v_accounting_posted_entries` — the posted-entry count and provenance.
+//! * `v_accounting_posted_entries`, the posted-entry count and provenance.
 //!
 //! The operational tables (`invoices`, `payroll_records`, …) are evidence,
 //! not the ledger, and are never read here. This replaces the previous
@@ -39,7 +39,7 @@
 //! * An approved/submitted report is frozen: regeneration is only possible
 //!   while `draft`.
 //!
-//! # XBRL / structured output — taxonomy-driven, never invented
+//! # XBRL / structured output, taxonomy-driven, never invented
 //!
 //! The repository vendors no Estonian e-aruande (Äriregister) taxonomy, and
 //! the official package is not reachable from the build environment. The
@@ -56,14 +56,14 @@
 //! The state of the claim is derived, recorded in
 //! `annual_reports.structured_document.xbrl.readiness` and auditable later:
 //!
-//! * **no taxonomy configured** — the report is NOT submission-ready; the
+//! * **no taxonomy configured**, the report is NOT submission-ready; the
 //!   readiness report names exactly what is missing (the taxonomy entry
 //!   point);
-//! * **taxonomy loaded, binding resolved, every fact validated** — the report
+//! * **taxonomy loaded, binding resolved, every fact validated**, the report
 //!   is submission-ready *for that taxonomy*, and the readiness report
 //!   records the taxonomy identity (entry point, target namespace, digest of
 //!   the loaded documents);
-//! * **any validation failure** — the report is NOT submission-ready and the
+//! * **any validation failure**, the report is NOT submission-ready and the
 //!   failures are listed with the concepts and amounts involved. The emitted
 //!   instance then falls back to the extension-only container (still
 //!   well-formed, still self-describing) so no invalid official-namespace
@@ -339,7 +339,7 @@ pub fn ledger_hash(
 }
 
 // ---------------------------------------------------------------------------
-// XBRL emission — taxonomy-driven
+// XBRL emission, taxonomy-driven
 // ---------------------------------------------------------------------------
 
 /// Annual-report slots the XBRL emitter can map onto taxonomy concepts.

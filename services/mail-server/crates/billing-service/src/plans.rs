@@ -62,7 +62,7 @@ pub struct PlanSeed {
     pub description: &'static str,
     pub price_monthly: i64,
     pub price_yearly: i64,
-    /// Monthly USD list price in cents — the published USD ladder (the
+    /// Monthly USD list price in cents, the published USD ladder (the
     /// checkout still charges the EUR `price_monthly`). Mirrors
     /// `platform_catalog::PlanRow::price_monthly_usd_cents`.
     pub price_monthly_usd: i64,
@@ -99,7 +99,7 @@ pub struct PlanUpsertInput {
 /// `billing-entitlements::PLAN_FEATURE_CLASSIFICATION` are deliberately NOT
 /// seeded: the audit found `time_travel_debugging` (and other flags) sold as
 /// pricing metadata with no runtime implementation, which this catalog no
-/// longer does. Re-add a flag only together with its runtime gate — the
+/// longer does. Re-add a flag only together with its runtime gate, the
 /// capability waves re-added `audit_logs`, `ab_testing`,
 /// `time_travel_debugging` (Growth+), `custom_tracking_domain` (Pro+),
 /// `custom_retention` (Growth+), the `template_approval_workflow` and
@@ -109,7 +109,7 @@ pub struct PlanUpsertInput {
 /// the next advertised-but-unbuilt flag.
 ///
 /// 2026-09-08 pricing review: the Free tier moved from 30,000/mo to
-/// 3,000/mo — 30k/month forever gave away a meaningful production
+/// 3,000/mo, 30k/month forever gave away a meaningful production
 /// workload (competitors: Resend 3k, Scaleway €80/100k). New free
 /// tenants instead get a ONE-TIME 30-day launch allowance of 30,000
 /// emails (enforced in usage.rs `resolve_plan_limits`: the effective
@@ -117,7 +117,7 @@ pub struct PlanUpsertInput {
 ///
 /// 2026-10-15 owner price table: Developer €20 (was €29), Pro €89 /
 /// $99, Growth €229 / $249, Business €699 / $749, Enterprise Cloud
-/// from €1,750 / $1,950 — the USD ladder rides the same seeds
+/// from €1,750 / $1,950, the USD ladder rides the same seeds
 /// (`price_monthly_usd` / `price_yearly_usd`, migration 253) and annual
 /// is 10 monthly payments in both currencies.
 fn free_plan_seed() -> PlanSeed {
@@ -265,7 +265,7 @@ pub fn default_plans() -> Vec<PlanSeed> {
                 data_export: true,
                 custom_templates: true,
                 // Business+ sells audit read/export, the maker/checker
-                // template approval workflow, subaccounts (10 — the
+                // template approval workflow, subaccounts (10, the
                 // canonical number from the pricing prompts/tables), a
                 // custom tracking domain and custom retention.
                 audit_logs: true,
@@ -292,7 +292,7 @@ pub fn default_plans() -> Vec<PlanSeed> {
             name: "enterprise",
             display_name: "Enterprise Cloud",
             description:
-                "From €1,750/month — annual-contract platform plan for large organizations",
+                "From €1,750/month, annual-contract platform plan for large organizations",
             price_monthly: 175_000,
             price_yearly: 1_750_000,
             price_monthly_usd: 195_000,
@@ -379,7 +379,7 @@ pub fn default_plans() -> Vec<PlanSeed> {
 }
 
 /// Per-plan overage rate in millicents per email (review 2026-09-08 §9),
-/// DERIVED from the canonical [`platform_catalog::PLANS`] rows — never a
+/// DERIVED from the canonical [`platform_catalog::PLANS`] rows, never a
 /// second hardcoded ladder.
 ///
 /// A single universal rate made Developer economically preferable to Pro
@@ -396,7 +396,7 @@ pub fn default_plans() -> Vec<PlanSeed> {
 ///   is applied via the existing per-tenant overage-rate override).
 ///
 /// Returns None when the plan has no automatic overage (Free, PAYG,
-/// unknown names) — the caller must skip invoicing for those.
+/// unknown names), the caller must skip invoicing for those.
 pub fn plan_overage_rate_millicents(plan_name: &str) -> Option<i64> {
     platform_catalog::plan_by_name(plan_name)
         .and_then(|catalog_row| catalog_row.overage_millicents_per_email)
@@ -442,7 +442,7 @@ pub fn builtin_quota_limits(plan_name: Option<&str>) -> (i64, i64) {
 /// overage sweep needs the stricter variant: a missing `plans` row must be
 /// resolved to the builtin limit by name, and an UNKNOWN name must surface
 /// as unknown (skip with a warning) rather than silently borrowing the free
-/// plan's 30 000-email limit — or worse, the historical `unwrap_or(0)`
+/// plan's 30 000-email limit, or worse, the historical `unwrap_or(0)`
 /// which billed the tenant's entire volume as overage.
 pub fn builtin_email_limit_for_plan(plan_name: &str) -> Option<i64> {
     default_plans()
@@ -468,7 +468,7 @@ pub fn is_builtin_plan_name(plan_name: &str) -> bool {
 /// admin-configured values.
 ///
 /// Live P1 (capability flips): the BOOLEAN capability flags are catalog
-/// facts — the grant list a plan sells — not operator preferences. Every
+/// facts, the grant list a plan sells, not operator preferences. Every
 /// [`billing_entitlements::FeatureKey`] value in the seed is overlaid onto
 /// the existing `features` object (`$13` names exactly those keys), so an
 /// environment whose rows predate a capability wave gains the new grants on
@@ -527,7 +527,7 @@ const SEED_PLAN_UPSERT_SQL: &str = r#"
 /// canonical catalog (and the pricing/AI tables pinned to it) sell Business
 /// 10 / Enterprise unlimited, and `billing_entitlements` reads the numeric
 /// capacity from this very column. A stale numeric therefore makes a sold
-/// capability ungrantable by plan — the live 2026-10-08 dogfood found the
+/// capability ungrantable by plan, the live 2026-10-08 dogfood found the
 /// `scale` row still carrying `max_subaccounts: 0` from a pre-capability
 /// seed, so no Business tenant could create even one subaccount. Numeric
 /// FEATURE limits that are genuinely operator-tunable (`max_team_members`,
@@ -544,12 +544,12 @@ fn capability_flag_keys() -> Vec<String> {
 
 /// Upsert a plan seed into the database.
 ///
-/// Fix I1 — seeding must never clobber prices, limits, or numeric capacity
+/// Fix I1, seeding must never clobber prices, limits, or numeric capacity
 /// settings an operator has already configured (e.g. a custom Enterprise
 /// price set via the admin PATCH route): existing values win for those
 /// columns.
 ///
-/// Live P1 — capability flags DO sync: the boolean flags are catalog facts,
+/// Live P1, capability flags DO sync: the boolean flags are catalog facts,
 /// so every [`billing_entitlements::FeatureKey`] field is overlaid from the
 /// seed onto the existing `features` JSON. An environment that predates a
 /// capability wave therefore converges on re-seed (a plan that is sold must
@@ -578,7 +578,7 @@ pub async fn upsert_plan(pool: &PgPool, seed: &PlanSeed) -> Result<Plan, sqlx::E
         .await?;
 
     // The seed we just wrote round-trips through `PlanFeatures`, so a
-    // corrupt read here means storage mangled it — surface it (Fix #10).
+    // corrupt read here means storage mangled it, surface it (Fix #10).
     row.try_into_plan().map_err(BillingError::into_sqlx_decode)
 }
 
@@ -648,7 +648,7 @@ pub struct PlanReconcileReport {
 /// This pass:
 /// 1. upserts every catalog plan, FORCING the catalog values (prices,
 ///    limits, display name, description, sort order, `is_active = true`,
-///    and the whole `features` object — retention/team limits included, and
+///    and the whole `features` object, retention/team limits included, and
 ///    every capability boolean, so a row that predates a capability wave
 ///    converges its grant list; the live P1 is pinned by
 ///    `reconcile_repairs_drifted_capability_flags`);
@@ -888,7 +888,7 @@ pub async fn get_plan_for_tenant(
 
 /// Derive quota/rate-limit info for a tenant from their current plan.
 ///
-/// Fix I2 — quota resolution honours active admin plan overrides exactly
+/// Fix I2, quota resolution honours active admin plan overrides exactly
 /// like [`get_plan_for_tenant`], instead of only consulting `tenants.plan`.
 pub async fn get_quota_for_tenant(
     pool: &PgPool,
@@ -925,7 +925,7 @@ pub async fn get_quota_for_tenant(
     } else {
         fallback_plan.name.to_string()
     };
-    // Fix #10 — "features NULL" (legacy row) uses the builtin seed features;
+    // Fix #10, "features NULL" (legacy row) uses the builtin seed features;
     // "features present but invalid" is corruption and fails the lookup with
     // a typed error naming plan and tenant. The previous
     // `.and_then(from_value.ok()).unwrap_or_else(fallback)` silently repaired
@@ -937,7 +937,7 @@ pub async fn get_quota_for_tenant(
                 plan = %row.plan_name,
                 tenant_id = %row.tenant_id,
                 error = %source,
-                "corrupt plans.features JSONB — quota resolution fails closed (Fix #10)"
+                "corrupt plans.features JSONB, quota resolution fails closed (Fix #10)"
             );
             BillingError::CorruptTenantPlanFeatures {
                 plan: row.plan_name.clone(),
@@ -972,7 +972,7 @@ pub async fn get_quota_for_tenant(
 // Entitlements (runtime feature/capacity gates)
 // ---------------------------------------------------------------------------
 
-/// Resolve a tenant's [`EntitlementSnapshot`] — the authorization input for
+/// Resolve a tenant's [`EntitlementSnapshot`], the authorization input for
 /// every gated customer handler.
 ///
 /// Resolution order mirrors [`get_quota_for_tenant`] exactly (Fix I2):
@@ -980,11 +980,11 @@ pub async fn get_quota_for_tenant(
 /// 1. effective plan: active, unexpired `plan_overrides` row wins over
 ///    `tenants.plan`; a missing `plans` row falls back to the builtin seed
 ///    for that plan name;
-/// 2. `plans.features` (JSONB) deserialized as `PlanFeatures` — NULL is the
+/// 2. `plans.features` (JSONB) deserialized as `PlanFeatures`, NULL is the
 ///    legacy fallback (builtin seed features); present-but-invalid JSON
 ///    fails the whole resolution closed with [`BillingError`] (Fix #10);
 /// 3. tenant `feature_flag_overrides` rows whose `flag_key` names a
-///    `FeatureKey`, latest row per key, JSON booleans only — anything else
+///    `FeatureKey`, latest row per key, JSON booleans only, anything else
 ///    fails closed to the plan value (same rule as `FeatureFlagService`).
 ///
 /// `Ok(None)` means the tenant does not exist.
@@ -1014,7 +1014,7 @@ pub async fn get_entitlement_snapshot(
     let Some(row) = row else { return Ok(None) };
 
     let fallback = builtin_plan_seed(Some(&row.plan_name));
-    // Fix #10 — same rule as [`get_quota_for_tenant`]: NULL features is the
+    // Fix #10, same rule as [`get_quota_for_tenant`]: NULL features is the
     // documented legacy fallback; present-but-invalid features is corruption
     // and must fail the entitlement lookup closed, never silently fall back
     // to the builtin seed (that would re-grade a paying tenant without any
@@ -1026,7 +1026,7 @@ pub async fn get_entitlement_snapshot(
                 plan = %row.plan_name,
                 tenant_id = %row.tenant_id,
                 error = %source,
-                "corrupt plans.features JSONB — entitlement resolution fails closed (Fix #10)"
+                "corrupt plans.features JSONB, entitlement resolution fails closed (Fix #10)"
             );
             BillingError::CorruptTenantPlanFeatures {
                 plan: row.plan_name.clone(),
@@ -1095,10 +1095,10 @@ pub fn entitlement_snapshot_for_features(
     features: &PlanFeatures,
 ) -> EntitlementSnapshot {
     let features_json = serde_json::to_value(features).unwrap_or_else(|error| {
-        // PlanFeatures is a plain struct of bools/i32/an enum — serialization
+        // PlanFeatures is a plain struct of bools/i32/an enum, serialization
         // cannot fail. Fail closed to an empty object (deny-all) if it ever
         // does, rather than granting by accident.
-        // coverage: justified — serde_json::to_value over a struct of
+        // coverage: justified, serde_json::to_value over a struct of
         // bools/i32/an enum is infallible; the arm keeps the deny-all
         // fallback in place should the type ever grow a lossy field.
         tracing::error!(error = %error, tenant_id, "PlanFeatures serialization failed; denying all entitlements");
@@ -1120,7 +1120,7 @@ pub const DEFAULT_OVERAGE_RATE_MILLICENTS: i64 = 40;
 /// WARNING: no canonical plan has a 40-millicent rate (the catalog ladder is
 /// 80/60/35/35). This wrapper exists only for the config-default math
 /// ([`crate::config::BillingConfig::overage_rate_per_email_millicents`]) and
-/// historical tests — it must NEVER back a customer-facing quote. Pricing
+/// historical tests, it must NEVER back a customer-facing quote. Pricing
 /// surfaces quote the plan's canonical rate through
 /// [`calculate_plan_overage_cost`].
 pub fn calculate_overage_cost(emails_sent: i64, email_limit: i64) -> i64 {
@@ -1128,7 +1128,7 @@ pub fn calculate_overage_cost(emails_sent: i64, email_limit: i64) -> i64 {
 }
 
 /// Calculate overage cost in cents using an explicit per-email rate in
-/// millicents (Fix I10 — the rate is config-driven, defaulting to 40).
+/// millicents (Fix I10, the rate is config-driven, defaulting to 40).
 pub fn calculate_overage_cost_with_rate(
     emails_sent: i64,
     email_limit: i64,
@@ -1193,7 +1193,7 @@ impl PlanRow {
             None => {
                 tracing::debug!(
                     plan = %self.name,
-                    "plans row has NULL features (legacy row) — using documented PlanFeatures default"
+                    "plans row has NULL features (legacy row), using documented PlanFeatures default"
                 );
                 PlanFeatures::default()
             }
@@ -1204,7 +1204,7 @@ impl PlanRow {
                 tracing::error!(
                     plan = %self.name,
                     error = %source,
-                    "corrupt plans.features JSONB — plan resolution fails closed (Fix #10)"
+                    "corrupt plans.features JSONB, plan resolution fails closed (Fix #10)"
                 );
                 BillingError::CorruptPlanFeatures {
                     plan: self.name.clone(),
@@ -1382,7 +1382,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // Fix I10 — overage rate is configurable (default 40 millicents).
+    // Fix I10, overage rate is configurable (default 40 millicents).
     // ------------------------------------------------------------------
 
     #[test]
@@ -1418,7 +1418,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // Fix I1 — seeding preserves operator-configured plan values.
+    // Fix I1, seeding preserves operator-configured plan values.
     // ------------------------------------------------------------------
 
     #[test]
@@ -1458,7 +1458,7 @@ mod tests {
         }
         assert!(
             !SEED_PLAN_UPSERT_SQL.contains("COALESCE(plans.features, EXCLUDED.features)"),
-            "features must no longer be preserved wholesale — capability flags sync"
+            "features must no longer be preserved wholesale, capability flags sync"
         );
     }
 
@@ -1503,7 +1503,7 @@ mod tests {
     }
 
     /// EU-only routing is INCLUDED on Enterprise Cloud (and the Compliance
-    /// contract line) and NOT granted by any self-serve plan seed — those
+    /// contract line) and NOT granted by any self-serve plan seed, those
     /// tenants activate it through the `eu_only_routing` add-on flag the
     /// billing flow records as `settings.addons.euOnlyRouting`
     /// (`mail_common::eu_only_addon_enabled`). This pins the mapping the
@@ -1522,7 +1522,7 @@ mod tests {
         for seed in plans.iter().filter(|p| p.name != "enterprise") {
             assert!(
                 !seed.features.eu_only_routing,
-                "{} must NOT include EU-only routing in the plan itself — on self-serve it is the \
+                "{} must NOT include EU-only routing in the plan itself, on self-serve it is the \
                  eu_only_routing add-on (settings.addons.euOnlyRouting)",
                 seed.name
             );
@@ -1553,7 +1553,7 @@ mod tests {
         for field in object.keys() {
             assert!(
                 billing_entitlements::classification_for_field(field).is_some(),
-                "PlanFeatures field `{field}` has no classification — add it to \
+                "PlanFeatures field `{field}` has no classification, add it to \
                  billing-entitlements/src/classify.rs and gate the handler (or remove the field)"
             );
         }
@@ -1593,7 +1593,7 @@ mod tests {
         }
     }
 
-    /// Capability waves 1–2: the seeds are true to `docs/pricing.md` — audit
+    /// Capability waves 1–2: the seeds are true to `docs/pricing.md`, audit
     /// logs, A/B testing, time-travel debugging and custom retention on
     /// Growth and above, a custom tracking domain on Pro and above, template
     /// approval and subaccounts on Business and Enterprise Cloud, with the
@@ -1746,7 +1746,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // Fix #10 — corrupt persisted plan features fail closed with a typed,
+    // Fix #10, corrupt persisted plan features fail closed with a typed,
     // plan-naming error + alert-grade log; NULL stays the documented legacy
     // default; valid JSON keeps resolving.
     // ------------------------------------------------------------------
@@ -1770,7 +1770,7 @@ mod tests {
                 Ok(buf.len())
             }
             fn flush(&mut self) -> std::io::Result<()> {
-                // coverage: justified — the tracing fmt layer never flushes
+                // coverage: justified, the tracing fmt layer never flushes
                 // this in-memory writer; the trait requires the method.
                 Ok(())
             }
@@ -1825,7 +1825,7 @@ mod tests {
                     "the serde source error is preserved"
                 );
             }
-            // coverage: justified — assertion arm: only reachable if the
+            // coverage: justified, assertion arm: only reachable if the
             // typed error contract regresses, which fails this test loudly.
             other => panic!("expected CorruptPlanFeatures, got {other:?}"),
         }
@@ -1851,7 +1851,7 @@ mod tests {
         let plan = row
             .try_into_plan()
             .expect("NULL features is not corruption");
-        // PlanFeatures has no PartialEq — compare canonical serializations.
+        // PlanFeatures has no PartialEq, compare canonical serializations.
         assert_eq!(
             serde_json::to_value(&plan.features).expect("serializes"),
             serde_json::to_value(PlanFeatures::default()).expect("serializes")
@@ -1904,7 +1904,7 @@ mod coverage_adversarial {
                 .await;
                 admin.close().await;
             }
-            // coverage: justified — implicit else: the admin connection in
+            // coverage: justified, implicit else: the admin connection in
             // teardown has never failed (the drop-the-clone path above runs
             // on every test); the arm keeps teardown best-effort instead of
             // panicking after a green test.
@@ -1953,7 +1953,7 @@ mod coverage_adversarial {
                     count += 1;
                     newest = newest.max(version);
                 }
-                // coverage: justified — the migrations directory holds only
+                // coverage: justified, the migrations directory holds only
                 // numbered SQL files, so the non-numeric-prefix fall-through
                 // of this scan has no input to execute on.
             }
@@ -2002,7 +2002,7 @@ mod coverage_adversarial {
             #[tokio::test]
             async fn $name() {
                 let Some(owned) = provision(stringify!($name)).await else {
-                    // coverage: justified — soft-skip arm: only taken when
+                    // coverage: justified, soft-skip arm: only taken when
                     // TEST_DATABASE_URL is unset; this run has it configured.
                     return;
                 };
@@ -2080,7 +2080,7 @@ mod coverage_adversarial {
         }
     );
 
-    // Live P1 (capability waves) — the SEED path must converge capability
+    // Live P1 (capability waves), the SEED path must converge capability
     // flags too: an existing row from an environment seeded before a
     // capability wave carries every flag false; `upsert_plan` with the
     // canonical seed overlays the `FeatureKey` booleans while the
@@ -2280,7 +2280,7 @@ mod coverage_adversarial {
     env_test!(unknown_custom_plan_maps_to_the_standard_tier, |env| {
         // An admin-created plan outside the builtin name set is real for
         // quotas (its row exists) but has no dedicated rate-limit tier: the
-        // catch-all maps it to Standard — never Unlimited, never a panic.
+        // catch-all maps it to Standard, never Unlimited, never a panic.
         upsert_plan_input(&env.pool, &upsert("plcov_mystery", 5_000, 6_000))
             .await
             .expect("custom plan");
@@ -2400,7 +2400,7 @@ mod coverage_adversarial {
     }
 
     // ------------------------------------------------------------------
-    // Fix #10 (DB backed) — corrupt persisted features fail plan, quota and
+    // Fix #10 (DB backed), corrupt persisted features fail plan, quota and
     // entitlement lookups closed; NULL features stay the documented legacy
     // default.
     // ------------------------------------------------------------------
@@ -2475,7 +2475,7 @@ mod coverage_adversarial {
     env_test!(
         null_plan_features_are_schema_forbidden_legacy_shape_only,
         |env| {
-            // The current schema forbids NULL features outright — the "NULL
+            // The current schema forbids NULL features outright, the "NULL
             // features" branch is defense-in-depth for legacy rows predating
             // the NOT NULL constraint (covered by the in-memory unit test
             // `try_into_plan_null_features_is_documented_legacy_default`).
@@ -2563,7 +2563,7 @@ mod catalog_drift_tests {
 
     /// The owner's 2026-10-15 price table pinned through the RUNTIME seeds,
     /// EUR and USD: Developer 20/20, Pro 89/99, Growth 229/249,
-    /// Business 699/749, Enterprise Cloud 1,750/1,950 — annual = 10×
+    /// Business 699/749, Enterprise Cloud 1,750/1,950, annual = 10×
     /// monthly in both currencies.
     #[test]
     fn seeds_pin_the_owner_price_table_in_both_currencies() {

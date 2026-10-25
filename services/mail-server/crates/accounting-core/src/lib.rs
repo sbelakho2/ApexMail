@@ -6,7 +6,7 @@
 //! (`invoices`, `payroll_records`, `operating_costs`) with a hard-coded
 //! company identity and no journal, no balancing rule and no retention
 //! guarantee. Estonian law (RPS §12, MKS §25) requires source documents and
-//! accounting registers — journals and ledgers — to be retained for seven
+//! accounting registers, journals and ledgers, to be retained for seven
 //! years.
 //!
 //! # Invariants and where they are enforced
@@ -53,7 +53,7 @@
 //! [`bank_ingest`] validates and stores CSV statements (migration 225), and
 //! the compliance cron hosts the bank sweep. For sources without a writer,
 //! [`sweeps`] posts every unposted row with the same `FOR UPDATE SKIP
-//! LOCKED` discipline as the projectors, so a future writer — or `psql` — is
+//! LOCKED` discipline as the projectors, so a future writer, or `psql`, is
 //! posted with no further wiring; see the module docs for the exact claim
 //! protocol and the per-source gap statement. [`sweeps`] also replays the
 //! billing sources (invoices, payment allocations, credit notes) whose live
@@ -65,7 +65,7 @@
 //!
 //! * `#![deny(unsafe_code)]`
 //! * no panics / unwraps outside tests
-//! * no runtime DDL — the schema in migration 220 is deploy-time only
+//! * no runtime DDL, the schema in migration 220 is deploy-time only
 
 #![deny(unsafe_code)]
 #![cfg_attr(

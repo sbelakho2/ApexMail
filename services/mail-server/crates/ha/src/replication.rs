@@ -1,4 +1,4 @@
-//! PostgreSQL replication monitoring — replica status, slots, lag tracking, promotion.
+//! PostgreSQL replication monitoring, replica status, slots, lag tracking, promotion.
 
 use axum::http::StatusCode;
 use chrono::Utc;
@@ -34,7 +34,7 @@ impl ReplicationService {
 
     /// Query pg_stat_replication for all connected replicas.
     ///
-    /// `lag_ms` is computed from `replay_lag` in the SAME query — the
+    /// `lag_ms` is computed from `replay_lag` in the SAME query, the
     /// service is connected to the primary, whose `pg_stat_replication`
     /// view carries each replica's replay lag directly. Previously
     /// `lag_ms` was hard-coded `None`, so monitoring recorded 0.0 for
@@ -188,7 +188,7 @@ impl ReplicationService {
 
     /// The standby topology this deployment intends to run (audit #2 a):
     /// the `DB_REPLICA_HOSTS` list plus the legacy singular
-    /// `DB_REPLICA_HOST` / `DB_STANDBY_HOST` entries — de-duplicated,
+    /// `DB_REPLICA_HOST` / `DB_STANDBY_HOST` entries, de-duplicated,
     /// order-stable.
     pub fn configured_standbys(&self) -> Vec<String> {
         let mut hosts: Vec<String> = Vec::new();
@@ -210,7 +210,7 @@ impl ReplicationService {
     }
 
     /// The `application_name`s currently connected in a VALID replication
-    /// state (`streaming`) — audit #2 b.
+    /// state (`streaming`), audit #2 b.
     pub async fn streaming_standbys(&self) -> Result<Vec<String>, String> {
         #[cfg(test)]
         if let Some(overridden) = self.streaming_overrides.read().await.as_ref() {
@@ -225,7 +225,7 @@ impl ReplicationService {
         Ok(rows.into_iter().map(|(name,)| name).collect())
     }
 
-    /// The LIVE `synchronous_standby_names` value — the PostgreSQL runtime
+    /// The LIVE `synchronous_standby_names` value, the PostgreSQL runtime
     /// truth the status endpoint exposes (external audit #7).
     pub async fn show_synchronous_standby_names(&self) -> Result<String, String> {
         let (value,): (String,) = sqlx::query_as("SHOW synchronous_standby_names")
@@ -241,7 +241,7 @@ impl ReplicationService {
     /// cannot take bind parameters), so it is restricted beforehand: this
     /// service only ever writes the EMPTY value, a NAMED list built from
     /// [`valid_standby_name`]s, or a rollback value that passed
-    /// [`is_restorable_setting_value`] — and NEVER the `'*'` wildcard.
+    /// [`is_restorable_setting_value`], and NEVER the `'*'` wildcard.
     async fn apply_synchronous_standby_names(&self, value: &str) -> Result<(), String> {
         if value.trim() == "*" {
             return Err("refusing to write the '*' wildcard to synchronous_standby_names".into());
@@ -266,14 +266,14 @@ impl ReplicationService {
     /// Switch between synchronous and asynchronous replication (external
     /// audits #2 and #10).
     ///
-    /// Audit #2 — the synchronous direction is guarded BEFORE anything is
+    /// Audit #2, the synchronous direction is guarded BEFORE anything is
     /// mutated: the request must NAME the exact standby(s) (the `'*'`
     /// wildcard form is refused), each name must belong to the configured
     /// topology, and each named standby must be currently connected in a
     /// streaming state. Refusals are deterministic
     /// ([`SetSyncModeError::Refused`] → 409/422).
     ///
-    /// Audit #10 — the mode is explicit durable configuration: the desired
+    /// Audit #10, the mode is explicit durable configuration: the desired
     /// state is persisted in Redis (namespaced per cluster) BEFORE the
     /// PostgreSQL mutation, the previous live value is recorded for the
     /// rollback, the applied value is always a NAMED list (never `'*'`),
@@ -286,7 +286,7 @@ impl ReplicationService {
         synchronous: bool,
         standbys: Vec<String>,
     ) -> Result<(), SetSyncModeError> {
-        // 1. Validate the candidates FIRST (audit #2) — nothing mutated yet.
+        // 1. Validate the candidates FIRST (audit #2), nothing mutated yet.
         if synchronous {
             let configured = self.configured_standbys();
             let streaming = self
@@ -297,7 +297,7 @@ impl ReplicationService {
                 .map_err(SetSyncModeError::Refused)?;
         }
 
-        // 2. Observe the previous live value — the rollback source (#10).
+        // 2. Observe the previous live value, the rollback source (#10).
         let previous = self
             .show_synchronous_standby_names()
             .await
@@ -389,7 +389,7 @@ impl ReplicationService {
                 warn!(
                     live = %live,
                     desired = %target,
-                    "synchronous_standby_names not yet reloaded — the reconcile loop keeps watching"
+                    "synchronous_standby_names not yet reloaded, the reconcile loop keeps watching"
                 );
             }
             Ok(_) => {}
@@ -432,7 +432,7 @@ impl ReplicationService {
         .transpose()
     }
 
-    /// Persist the durable desired sync-mode state (audit #10) — written
+    /// Persist the durable desired sync-mode state (audit #10), written
     /// BEFORE the PostgreSQL mutation so a crash leaves the operator's
     /// intent behind. Deliberately NO TTL: this is configuration, not an
     /// ephemeral claim.
@@ -460,7 +460,7 @@ impl ReplicationService {
         Ok(())
     }
 
-    /// External audit #10 — reconcile the durable desired mode against the
+    /// External audit #10, reconcile the durable desired mode against the
     /// LIVE PostgreSQL setting. Returns `Ok(true)` when drift was detected
     /// and repaired. A missing desired state means nothing to reconcile.
     pub async fn reconcile_sync_mode(&self) -> Result<bool, String> {
@@ -475,14 +475,14 @@ impl ReplicationService {
             live = %live,
             desired = %desired.desired_setting,
             desired_updated_at = %desired.updated_at,
-            "replication sync-mode drift detected — repairing from the durable desired state"
+            "replication sync-mode drift detected, repairing from the durable desired state"
         );
         self.apply_synchronous_standby_names(&desired.desired_setting)
             .await?;
         Ok(true)
     }
 
-    /// Bounded reconcile loop (audit #10) — the same cron pattern the other
+    /// Bounded reconcile loop (audit #10), the same cron pattern the other
     /// background jobs in `ha-server` use. Wired by the server binary.
     pub async fn run_sync_mode_reconcile_loop(&self, interval: std::time::Duration) {
         let mut ticker = tokio::time::interval(interval);
@@ -501,11 +501,11 @@ impl ReplicationService {
     /// External audit #7: `mode` is PostgreSQL RUNTIME truth
     /// (`SHOW synchronous_standby_names`; `current_setting` is the same
     /// read, fetched in one round-trip together with
-    /// `synchronous_commit`) — not the immutable startup config. The
+    /// `synchronous_commit`), not the immutable startup config. The
     /// configured mode is returned next to it for drift visibility, as is
     /// the durable desired mode from Redis (audit #10).
     ///
-    /// External audit #8: health is topology-aware — the empty-replica fold
+    /// External audit #8: health is topology-aware, the empty-replica fold
     /// no longer reports a replica-expected deployment healthy.
     pub async fn get_stats(&self) -> Result<ReplicationStats, String> {
         let replicas = self.get_replicas().await?;
@@ -521,7 +521,7 @@ impl ReplicationService {
             .map_err(|e| format!("Read live replication settings: {e}"))?;
 
         // Audit #10: desired↔actual drift visibility. An unreadable Redis
-        // degrades to "no desired state recorded" — the status endpoint
+        // degrades to "no desired state recorded", the status endpoint
         // stays available.
         let (desired_sync_mode, desired_drift) = match self.read_desired_state().await {
             Ok(desired) => {
@@ -533,7 +533,7 @@ impl ReplicationService {
             Err(e) => {
                 warn!(
                     error = %e,
-                    "unable to read the desired sync-mode state — drift unknown"
+                    "unable to read the desired sync-mode state, drift unknown"
                 );
                 (None, false)
             }
@@ -640,7 +640,7 @@ fn sync_mode_state_key(cluster_id: &str) -> String {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SyncModeDesiredState {
     /// The exact `synchronous_standby_names` value the desired mode
-    /// implies. Always a NAMED list (or the empty async value) — never
+    /// implies. Always a NAMED list (or the empty async value), never
     /// `'*'`.
     pub desired_setting: String,
     /// Whether the desired mode is synchronous replication.
@@ -672,12 +672,12 @@ impl std::fmt::Display for SyncModeDesiredState {
     }
 }
 
-/// External audit #2 — deterministic policy refusals for a
+/// External audit #2, deterministic policy refusals for a
 /// `synchronous=true` transition. Mapped onto 409/422 at the route; never
 /// a 500.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SyncModeRefusal {
-    /// `synchronous=true` without naming standbys — the `'*'` wildcard
+    /// `synchronous=true` without naming standbys, the `'*'` wildcard
     /// form is refused; the request must name the exact standby(s).
     WildcardFormRefused,
     /// A named standby is not a syntactically valid standby name.
@@ -709,13 +709,13 @@ impl SyncModeRefusal {
     pub fn message(&self) -> String {
         match self {
             Self::WildcardFormRefused => {
-                "synchronous=true must NAME the exact standby(s) — the '*' wildcard form \
+                "synchronous=true must NAME the exact standby(s), the '*' wildcard form \
                  is refused"
                     .into()
             }
             Self::InvalidStandbyName(names) => format!("invalid standby name(s): {names:?}"),
             Self::NoStandbyConfigured => {
-                "no standby is configured (DB_REPLICA_HOSTS) — synchronous replication \
+                "no standby is configured (DB_REPLICA_HOSTS), synchronous replication \
                  requires at least one configured standby"
                     .into()
             }
@@ -734,9 +734,9 @@ impl SyncModeRefusal {
 /// Outcome of a [`ReplicationService::set_sync_mode`] attempt.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SetSyncModeError {
-    /// Deterministic policy refusal (audit #2) — 409/422 at the route.
+    /// Deterministic policy refusal (audit #2), 409/422 at the route.
     Refused(SyncModeRefusal),
-    /// Infrastructure failure (PostgreSQL/Redis) — 500 at the route.
+    /// Infrastructure failure (PostgreSQL/Redis), 500 at the route.
     Failed(String),
 }
 
@@ -753,7 +753,7 @@ impl std::fmt::Display for SetSyncModeError {
 
 impl std::error::Error for SetSyncModeError {}
 
-/// Audit #2 — pure gate for a `synchronous=true` transition, applied
+/// Audit #2, pure gate for a `synchronous=true` transition, applied
 /// BEFORE any mutation: the request must name the exact standby(s) (no
 /// `'*'` wildcard), every name must be part of the configured topology,
 /// and every named standby must be currently connected in a streaming
@@ -796,7 +796,7 @@ fn validate_sync_standbys(
     Ok(())
 }
 
-/// A standby name may only carry hostname-like characters — it is spliced
+/// A standby name may only carry hostname-like characters, it is spliced
 /// into the `synchronous_standby_names` setting string.
 fn valid_standby_name(name: &str) -> bool {
     !name.is_empty()
@@ -805,7 +805,7 @@ fn valid_standby_name(name: &str) -> bool {
             .all(|c| c.is_alphanumeric() || matches!(c, '-' | '_' | '.'))
 }
 
-/// Format a NAMED synchronous list — PostgreSQL's explicit-priority form,
+/// Format a NAMED synchronous list, PostgreSQL's explicit-priority form,
 /// e.g. `FIRST 2 ("db-replica-1", "db-replica-2")`. Never `'*'`.
 ///
 /// Each name is DOUBLE-QUOTED: standby names follow SQL identifier rules,
@@ -818,7 +818,7 @@ fn named_sync_standby_list(names: &[String]) -> String {
 }
 
 /// A rollback (restored) `synchronous_standby_names` value may only
-/// contain the characters a legal name-list/quorum form is made of — it is
+/// contain the characters a legal name-list/quorum form is made of, it is
 /// written into postgresql.auto.conf via ALTER SYSTEM. `'*'` is excluded:
 /// this service never reintroduces the wildcard.
 fn is_restorable_setting_value(value: &str) -> bool {
@@ -843,7 +843,7 @@ fn effective_mode(sync_standby_names: &str) -> &'static str {
 /// Topology classification for the replication stats (external audit #8).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TopologyStatus {
-    /// No replicas expected, none connected — a healthy standalone.
+    /// No replicas expected, none connected, a healthy standalone.
     Standalone,
     /// Replicas expected and all present.
     Healthy,
@@ -1255,7 +1255,7 @@ mod tests {
     }
 
     /// External audit #10: the durable desired state outlives the service
-    /// object — written through one instance, read back through a FRESH
+    /// object, written through one instance, read back through a FRESH
     /// instance (a simulated restart), then cleared. Skipped (like the
     /// fence-guard test) when no local redis-server is available.
     #[tokio::test]
@@ -1263,7 +1263,7 @@ mod tests {
         // A private throwaway Redis for this test: the `redis-server`
         // binary when available, else a throwaway container (the deploy
         // host ships Redis as an image only, so the old binary-only spawn
-        // silently skipped this test there — deploy 2026-10-11). The guard
+        // silently skipped this test there, deploy 2026-10-11). The guard
         // kills the server at scope end, including on panic.
         let mut redis_server = migrator::test_support::spawn_isolated_redis();
         let port = redis_server.port();

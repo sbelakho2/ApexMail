@@ -27,7 +27,7 @@ fn child_env() -> Option<Vec<(String, String)>> {
     // Parse ALL of them out of the workspace TEST_REDIS_URL: the CI/deploy
     // endpoint is an ephemeral Redis on a random port, and hardcoding
     // 127.0.0.1:6379 pointed the startup connectivity probe at a closed
-    // port on the deploy host (which runs no host-level Redis) — the binary
+    // port on the deploy host (which runs no host-level Redis), the binary
     // then refused to start (deploy 2026-10-11).
     let (redis_host, redis_port, redis_db, redis_password) = {
         let rest = redis
@@ -106,7 +106,7 @@ fn child_env() -> Option<Vec<(String, String)>> {
         ("CLICKHOUSE_USER".into(), "probe".into()),
         ("CLICKHOUSE_PASSWORD".into(), "probe".into()),
         // Config load REQUIRES the RS256 stream-token public key (the child's
-        // dotenv only finds it if the ancestor .env carries one — the deploy
+        // dotenv only finds it if the ancestor .env carries one, the deploy
         // host's does not, and the binary exited before binding: "JWT_PUBLIC_
         // KEY_PEM environment variable is required", deploy 2026-10-11). A
         // stub is enough for the boot/lifecycle path (no verification runs);

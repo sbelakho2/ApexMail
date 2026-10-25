@@ -1,7 +1,7 @@
 //! Shared tracking-token shape validation and safe log-prefix extraction.
 //!
 //! A tracking/unsubscribe/preferences token is ALWAYS
-//! `base64url(IV||tag||ct)` produced by [`crate::codec::TrackingCodec`] — a
+//! `base64url(IV||tag||ct)` produced by [`crate::codec::TrackingCodec`], a
 //! strict ASCII alphabet of `[A-Za-z0-9_-]` with no padding. Hoisted here
 //! (SM2-F4) from the unsubscribe handlers' F37 guard so EVERY route that
 //! slices or logs a client-supplied token shares one implementation:
@@ -13,7 +13,7 @@
 //!   `Path<String>` is percent-decoded UTF-8, so a hostile id such as
 //!   `aaaaaaaaaaaaaaaaaaaé…` splits a multibyte char at byte 20 and the old
 //!   `&token[..token.len().min(n)]` panicked ("byte index 20 is not a char
-//!   boundary") inside a `warn!` field — killing the connection task per
+//!   boundary") inside a `warn!` field, killing the connection task per
 //!   request.
 
 /// Minimum accepted token length (bytes). Matches the codec bounds.
@@ -33,7 +33,7 @@ pub fn is_valid_token_shape(token: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
-/// SM2-F4:char-boundary-safe prefix of `token` for logging — the honest
+/// SM2-F4:char-boundary-safe prefix of `token` for logging, the honest
 /// replacement for `&token[..token.len().min(n)]`, which panics when byte
 /// `n` falls inside a multi-byte UTF-8 scalar (e.g. 19 ASCII bytes + `é`).
 /// Never panics for any `&str` and any `max`; when truncation would split a
@@ -68,7 +68,7 @@ mod tests {
     }
 
     /// SM2-F4 regression:19 ASCII bytes + a two-byte `é` puts byte 20 inside
-    /// the character — the exact input that panicked the old
+    /// the character, the exact input that panicked the old
     /// `&id[..id.len().min(20)]` logging slices.
     #[test]
     fn prefix_stops_at_char_boundary_on_multibyte_input() {

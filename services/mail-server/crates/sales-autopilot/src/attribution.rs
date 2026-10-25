@@ -1,4 +1,4 @@
-//! §19 — the revenue attribution chain.
+//! §19, the revenue attribution chain.
 //!
 //! The engine must be able to answer: *which discovery source, segment,
 //! evidence pattern, offer, message angle and sequence actually created paid
@@ -19,7 +19,7 @@
 //!   same logical outcome updates the existing row instead of adding revenue
 //!   a second time. Postgres treats `NULL`s as distinct in a UNIQUE
 //!   constraint, so rows recorded **without** a `step_execution_id` have no
-//!   database-enforced idempotency — pass the step execution whenever one
+//!   database-enforced idempotency, pass the step execution whenever one
 //!   exists.
 //! * `attribute_revenue` is read-only and tenant-scoped.
 //!
@@ -40,7 +40,7 @@ use uuid::Uuid;
 
 use crate::types::SalesError;
 
-/// Outcome vocabulary — exact wire strings of the `sales_outcomes.outcome`
+/// Outcome vocabulary, exact wire strings of the `sales_outcomes.outcome`
 /// CHECK constraint (migration 200_sales_autopilot_v2_unification.sql:768-771).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -321,7 +321,7 @@ pub struct AttributionReport {
     pub cac_eur: Option<f64>,
     pub enrichment_cost_eur: Option<f64>,
     /// Cumulative `sales_provider_stats.total_cost_eur` for provider rows
-    /// last touched in the window — a snapshot, not a per-call ledger.
+    /// last touched in the window, a snapshot, not a per-call ledger.
     pub provider_cost_eur: Option<f64>,
     pub total_cost_eur: Option<f64>,
     /// Revenue − total recorded cost; `None` when revenue is unknown.

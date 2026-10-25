@@ -1,4 +1,4 @@
-//! # Property-Based Tests (SM12 F2 — retargeted at production types)
+//! # Property-Based Tests (SM12 F2, retargeted at production types)
 //!
 //! Every `proptest!` block in this file exercises REAL workspace crates:
 //!
@@ -12,26 +12,26 @@
 //!
 //! Audit finding 2: this suite previously declared `PropertyRateLimiter`,
 //! `PropertyCircuitBreaker`, `xor_encrypt`, a local `is_valid_email`,
-//! `DefaultHasher`, and a toy `BoundedQueue` INSIDE the test file — all 23
+//! `DefaultHasher`, and a toy `BoundedQueue` INSIDE the test file, all 23
 //! properties exercised those toys, so a regression in the real rate
 //! limiter or circuit breaker could never fail a test here. The toys are
 //! gone:
 //!
-//! * the `DefaultHasher` module tested the Rust standard library — deleted
+//! * the `DefaultHasher` module tested the Rust standard library, deleted
 //!   (no production counterpart);
 //! * the `BoundedQueue` module had no production counterpart either
 //!   (`queue-provider` is Postgres-backed, `worker-processors::common`
-//!   ships `Backpressure` — a permit semaphore, not a queue) — deleted per
+//!   ships `Backpressure`, a permit semaphore, not a queue), deleted per
 //!   the audit directive; its invariants (bounded concurrency, no leaked
 //!   permits) are covered against the real `Backpressure` in the
 //!   load-tests crate instead.
 //! * the SQL-sanitization property had no production counterpart
-//!   (production uses parameterized queries) — deleted.
+//!   (production uses parameterized queries), deleted.
 
 use proptest::prelude::*;
 
 // ===========================================================================
-// 1. RATE LIMITER — real apexmail_rate_limiter::SlidingWindowCounter
+// 1. RATE LIMITER, real apexmail_rate_limiter::SlidingWindowCounter
 // ===========================================================================
 
 mod rate_limiter_properties {
@@ -48,7 +48,7 @@ mod rate_limiter_properties {
         #![proptest_config(ProptestConfig::with_cases(256))]
 
     /// Property: the limiter admits EXACTLY `limit` requests and then
-    /// denies, for ANY limit — the contract every caller relies on.
+    /// denies, for ANY limit, the contract every caller relies on.
         #[test]
         fn allows_exactly_limit_requests(limit in 1u64..300) {
             let counter = SlidingWindowCounter::from_params(NO_ROLLOVER, limit);
@@ -72,7 +72,7 @@ mod rate_limiter_properties {
             );
         }
 
-    /// Property: a denial always carries a positive retry_after — a caller
+    /// Property: a denial always carries a positive retry_after, a caller
     /// honoring it must never busy-loop on a zero wait.
         #[test]
         fn denied_decision_carries_positive_retry_after(limit in 1u64..100) {
@@ -131,7 +131,7 @@ mod rate_limiter_properties {
             );
         }
 
-    /// Property: limit=0 denies EVERYTHING — a misconfigured limit must
+    /// Property: limit=0 denies EVERYTHING, a misconfigured limit must
     /// fail closed, never open.
         #[test]
         fn limit_zero_denies_everything(requests in 1u64..50) {
@@ -144,7 +144,7 @@ mod rate_limiter_properties {
             }
         }
 
-    /// Property: reset restores full capacity — an operator clearing a
+    /// Property: reset restores full capacity, an operator clearing a
     /// limiter must get a budget identical to a fresh instance.
         #[test]
         fn reset_restores_full_capacity(limit in 1u64..100, exhaust in 1u64..100) {
@@ -171,7 +171,7 @@ mod rate_limiter_properties {
         #![proptest_config(ProptestConfig::with_cases(8))]
 
     /// Property (window rollover): after 2+ idle windows the budget resets
-    /// completely — old events age out and the client is admitted again.
+    /// completely, old events age out and the client is admitted again.
     /// Short real-time windows (40–80 ms) keep the property fast; the
     /// proptest case count is capped because each case sleeps.
         #[test]
@@ -198,7 +198,7 @@ mod rate_limiter_properties {
 }
 
 // ===========================================================================
-// 2. CIRCUIT BREAKER — real worker_processors CircuitBreaker
+// 2. CIRCUIT BREAKER, real worker_processors CircuitBreaker
 // ===========================================================================
 
 mod circuit_breaker_props {
@@ -289,7 +289,7 @@ mod circuit_breaker_props {
             prop_assert!(cb.is_allowed());
         }
 
-    /// Property: ANY failure while half-open reopens the circuit — a
+    /// Property: ANY failure while half-open reopens the circuit, a
     /// half-open probe must never be allowed to fail silently.
         #[test]
         fn half_open_failure_reopens(open_ms in 5u64..15) {
@@ -307,7 +307,7 @@ mod circuit_breaker_props {
     /// Property: `success_threshold` consecutive successes in half-open
     /// close the circuit, and a CLOSED breaker that just recovered needs a
     /// FULL new threshold of failures to reopen (the failure count was
-    /// reset — recovery must not be a one-failure relapse).
+    /// reset, recovery must not be a one-failure relapse).
         #[test]
         fn half_open_successes_close_and_rearm(
             threshold in 2u32..10,
@@ -316,7 +316,7 @@ mod circuit_breaker_props {
             open_ms in 5u64..15,
         ) {
             let cb = breaker(threshold, recovery, Duration::from_millis(open_ms));
-            // Open the circuit with the FULL failure threshold first — a
+            // Open the circuit with the FULL failure threshold first, a
             // partial failure count keeps it closed.
             for _ in 0..threshold {
                 cb.record_failure();
@@ -335,7 +335,7 @@ mod circuit_breaker_props {
                 prop_assert_eq!(
                     cb.state(),
                     expected,
-                    "success {} of {} — circuit must be {:?}",
+                    "success {} of {}, circuit must be {:?}",
                     i + 1,
                     recovery,
                     expected
@@ -350,7 +350,7 @@ mod circuit_breaker_props {
             prop_assert!(cb.is_allowed());
 
             // Re-armed: the failure count was reset on close, so a single
-            // failure is below the (≥2) threshold — no instant relapse.
+            // failure is below the (≥2) threshold, no instant relapse.
             cb.record_failure();
             prop_assert_eq!(
                 cb.state(),
@@ -376,7 +376,7 @@ mod circuit_breaker_props {
 }
 
 // ===========================================================================
-// 3. CRYPTO — real apexmail_lib::crypto (HMAC-SHA256 / SHA-256)
+// 3. CRYPTO, real apexmail_lib::crypto (HMAC-SHA256 / SHA-256)
 // ===========================================================================
 
 mod crypto_properties {
@@ -389,7 +389,7 @@ mod crypto_properties {
         #![proptest_config(ProptestConfig::with_cases(512))]
 
     /// Property: HMAC is deterministic and full-length for ANY key/message
-    /// — including the empty key, which the historical code path silently
+    ///, including the empty key, which the historical code path silently
     /// turned into an empty signature string.
         #[test]
         fn hmac_deterministic_and_full_length(
@@ -411,7 +411,7 @@ mod crypto_properties {
     /// message must change the signature. A verifier comparing with the
     /// production timing-safe comparator must reject every such forgery.
     /// (A 256-bit MAC colliding on a one-bit flip has probability ~2^-256
-    /// — a failure here is a broken MAC, not bad luck.)
+    ///, a failure here is a broken MAC, not bad luck.)
         #[test]
         fn hmac_detects_single_bit_flips(
             key in prop::collection::vec(any::<u8>(), 1..64),
@@ -453,7 +453,7 @@ mod crypto_properties {
                 "a non-empty string never equals the empty string"
             );
 
-            // Flip one ASCII character — the comparator must differ.
+            // Flip one ASCII character, the comparator must differ.
             let mut b = a.clone();
             let pos = flip % b.len();
             let original = b.as_bytes()[pos];
@@ -492,7 +492,7 @@ mod crypto_properties {
 }
 
 // ===========================================================================
-// 4. AEAD — real apexmail_lib::secret_at_rest (AES-256-GCM)
+// 4. AEAD, real apexmail_lib::secret_at_rest (AES-256-GCM)
 // ===========================================================================
 
 mod aead_properties {
@@ -501,7 +501,7 @@ mod aead_properties {
 
     /// The at-rest key cache is process-global; serialize the property and
     /// pin the key through the same env var production reads. (CI runs
-    /// nextest — one process per test — so this cannot race other tests.)
+    /// nextest, one process per test, so this cannot race other tests.)
     fn test_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(()))
@@ -540,7 +540,7 @@ mod aead_properties {
         }
 
     /// Property (AEAD tamper detection): flipping any byte of the envelope
-    /// must fail the decryption closed with a TYPED error — never garbage
+    /// must fail the decryption closed with a TYPED error, never garbage
     /// output, never a panic.
         #[test]
         fn envelope_tamper_fails_closed(
@@ -576,7 +576,7 @@ mod aead_properties {
                 .expect_err("a tampered envelope must NOT decrypt");
             // Every failure shape is TYPED and fail-closed: a flipped
             // version byte is InvalidEnvelope, a mangled payload/tag is
-            // DecryptionFailed, corrupted base64 is Base64 — never silent
+            // DecryptionFailed, corrupted base64 is Base64, never silent
             // garbage output, never a panic.
             prop_assert!(
                 matches!(
@@ -589,7 +589,7 @@ mod aead_properties {
             );
         }
 
-    /// Property: an AAD scope mismatch must be rejected — a ciphertext
+    /// Property: an AAD scope mismatch must be rejected, a ciphertext
     /// cannot be relocated from one tenant/user scope to another.
         #[test]
         fn aad_mismatch_is_rejected(
@@ -619,7 +619,7 @@ mod aead_properties {
 }
 
 // ===========================================================================
-// 5. INPUT VALIDATION — real apexmail_lib::validation
+// 5. INPUT VALIDATION, real apexmail_lib::validation
 // ===========================================================================
 
 mod validation_properties {
@@ -654,7 +654,7 @@ mod validation_properties {
         #[test]
         fn missing_at_invalid(local in "[a-z]{1,20}", domain in "[a-z]{1,20}") {
             let invalid = format!("{}{}", local, domain);
-            prop_assert!(!is_valid_email(&invalid), "'{invalid}' has no @ — must be invalid");
+            prop_assert!(!is_valid_email(&invalid), "'{invalid}' has no @, must be invalid");
         }
 
     /// Property: two unquoted '@'s make the address invalid (the first @
@@ -662,11 +662,11 @@ mod validation_properties {
         #[test]
         fn multiple_at_invalid(p1 in "[a-z]{1,10}", p2 in "[a-z]{1,10}", p3 in "[a-z]{1,10}") {
             let invalid = format!("{}@{}@{}", p1, p2, p3);
-            prop_assert!(!is_valid_email(&invalid), "'{invalid}' has two @ — must be invalid");
+            prop_assert!(!is_valid_email(&invalid), "'{invalid}' has two @, must be invalid");
         }
 
     /// Property: the RFC 5321 length cap (254) is enforced by the real
-    /// validator — well-formed 63-char labels stack the address across the
+    /// validator, well-formed 63-char labels stack the address across the
     /// boundary and acceptance flips to rejection exactly there.
         #[test]
         fn length_cap_enforced(labels in 1usize..4) {
@@ -684,20 +684,20 @@ mod validation_properties {
             if email.len() <= 254 {
                 prop_assert!(
                     is_valid_email(&email),
-                    "'{email}' (len {}) is within the 254 cap — must be valid",
+                    "'{email}' (len {}) is within the 254 cap, must be valid",
                     email.len()
                 );
             } else {
                 prop_assert!(
                     !is_valid_email(&email),
-                    "'{email}' (len {}) exceeds the 254 cap — must be invalid",
+                    "'{email}' (len {}) exceeds the 254 cap, must be invalid",
                     email.len()
                 );
             }
         }
 
     /// Property: control characters in an unquoted local part are rejected
-    /// — header injection via email fields must never validate.
+    ///, header injection via email fields must never validate.
         #[test]
         fn control_chars_rejected(
             prefix in "[a-z]{1,8}",
@@ -728,7 +728,7 @@ mod validation_properties {
         }
 
     /// Property: sanitize removes every NUL (and the literal \\u0000 text)
-    /// — the production counterpart of detection, used before storage.
+    ///, the production counterpart of detection, used before storage.
         #[test]
         fn sanitize_removes_nulls(
             input in prop::collection::vec(

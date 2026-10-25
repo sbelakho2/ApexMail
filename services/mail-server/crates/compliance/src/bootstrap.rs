@@ -1,4 +1,4 @@
-//! Service bootstrap — the one construction path shared by the HTTP binary
+//! Service bootstrap, the one construction path shared by the HTTP binary
 //! and the release test that boots the service under a DML-only database
 //! role.
 //!
@@ -47,7 +47,7 @@ pub struct BootSeedReport {
 /// Build every service the compliance server serves, run the idempotent
 /// seeds, and return the complete [`AppState`].
 ///
-/// Fails — rather than degrading — when the database schema is not the
+/// Fails, rather than degrading, when the database schema is not the
 /// migration-owned canonical one (or the role cannot write), so a broken
 /// deployment cannot report "ready" while its request pipeline is dead.
 pub async fn build_state(
@@ -123,7 +123,7 @@ pub async fn build_state(
     );
 
     // GDPR governance registry: ROPA + retention classes. Lawful bases, DPIA
-    // outcomes and transfer mechanisms are NOT seeded — they await Legal.
+    // outcomes and transfer mechanisms are NOT seeded, they await Legal.
     let summary = governance::seed_registry(&db)
         .await
         .map_err(|e| format!("GDPR governance registry seed failed: {e}"))?;
@@ -139,7 +139,7 @@ pub async fn build_state(
     if summary.awaiting_legal_input > 0 {
         warn!(
             count = summary.awaiting_legal_input,
-            "GDPR registry records await Legal input (lawful basis / DPIA / transfer mechanism) — \
+            "GDPR registry records await Legal input (lawful basis / DPIA / transfer mechanism), \
              see processing_activities.review_status and lawful_basis_records.basis_status"
         );
     }

@@ -1,4 +1,4 @@
-//! Hash-chain audit logger — tamper-proof audit trail with SHA-256 hash chains,
+//! Hash-chain audit logger, tamper-proof audit trail with SHA-256 hash chains,
 //! HMAC-SHA-256 signatures, chain verification, JSON/CSV export, and archival.
 //!
 //! Each audit entry stores the SHA-256 hash of the previous entry in its chain
@@ -17,7 +17,7 @@ use uuid::Uuid;
 use crate::config::AuditConfig;
 use crate::types::*;
 
-/// Truncate a timestamp to whole microseconds — the exact precision Postgres
+/// Truncate a timestamp to whole microseconds, the exact precision Postgres
 /// `TIMESTAMPTZ` stores. Entry hashes cover the rfc3339 timestamp, so any
 /// sub-microsecond digit would be lost on the write/read round-trip and the
 /// hash could never be re-verified (E-3).
@@ -31,7 +31,7 @@ fn truncate_to_micros(ts: DateTime<Utc>) -> DateTime<Utc> {
 ///
 /// On the canonical chain `audit_logs` has 18 columns (the live-only
 /// `created_at` and `fts_vector` additions) while `audit_logs_archive`
-/// has 16 — every `SELECT *` UNION between them was invalid with SQLSTATE
+/// has 16, every `SELECT *` UNION between them was invalid with SQLSTATE
 /// 42601 ("each UNION query must have the same number of columns"),
 /// breaking search, export, statistics and integrity checks even when both
 /// tables were empty. Pinning ONE column list keeps the live search indexes
@@ -102,7 +102,7 @@ impl AuditLogger {
 
     /// Initialize by loading last hashes from the live table AND the archive.
     ///
-    /// F12: the chain head used to be loaded from `audit_logs` only — once a
+    /// F12: the chain head used to be loaded from `audit_logs` only, once a
     /// chain was fully archived (the retention trim's normal outcome), a
     /// restart found no head and the next append built on `previous_hash =
     /// NULL`, silently forking the chain. The archive is part of the chain
@@ -127,7 +127,7 @@ impl AuditLogger {
             Ok(rows) => rows,
             Err(e) if is_undefined_table(&e) => {
                 tracing::warn!(
-                    "audit_logs_archive absent — chain heads loaded from the live table only"
+                    "audit_logs_archive absent, chain heads loaded from the live table only"
                 );
                 sqlx::query_as(
                     "SELECT DISTINCT ON (COALESCE(tenant_id, 'global')) tenant_id, hash
@@ -145,7 +145,7 @@ impl AuditLogger {
         for (tenant_id, hash) in rows {
             // The "global" key exists ONLY for pre-existing NULL-tenant rows
             // (history cannot be rewritten). P1-SECURITY: new appends can no
-            // longer land there — `log` refuses unattributed entries, so the
+            // longer land there, `log` refuses unattributed entries, so the
             // global chain is frozen legacy state, never a mixing point for
             // per-tenant trails.
             let chain_key = tenant_id.unwrap_or_else(|| "global".into());
@@ -167,12 +167,12 @@ impl AuditLogger {
     /// service instances: two loggers (or two pods) that both cached the
     /// same head used to INSERT two entries with the same `previous_hash`,
     /// forking the chain. Inside the lock the chain head is re-read from the
-    /// DATABASE (live ∪ archive) — the authoritative value — instead of
+    /// DATABASE (live ∪ archive), the authoritative value, instead of
     /// trusting the in-memory cache.
     ///
     /// The entry timestamp is truncated to whole microseconds (Postgres
     /// `TIMESTAMPTZ` stores exactly microseconds) BEFORE hashing, so the
-    /// hashed value survives the write/read round-trip bit-for-bit — a
+    /// hashed value survives the write/read round-trip bit-for-bit, a
     /// nanosecond-precision clock (Linux vDSO) otherwise produced hashes
     /// that could never be re-verified from the stored row. It is also
     /// floored to `head.timestamp + 1µs`, keeping timestamps strictly
@@ -210,7 +210,7 @@ impl AuditLogger {
             })?;
         let chain_key = tenant_id.to_string();
 
-        // E-1: serialize chain appends per chain in-process — cheap fast path
+        // E-1: serialize chain appends per chain in-process, cheap fast path
         // that also cuts advisory-lock churn; correctness comes from the DB
         // lock below.
         let lock = self.chain_lock(&chain_key).await;
@@ -234,7 +234,7 @@ impl AuditLogger {
         query_count::bump("audit.db.lock");
 
         // Authoritative chain head (live ∪ archive, F12) under the lock.
-        // The VALIDATED tenant is used everywhere below — never the raw
+        // The VALIDATED tenant is used everywhere below, never the raw
         // context value (a padded value must not fork the chain key).
         let head: Option<(String, DateTime<Utc>)> =
             Self::chain_head(&mut tx, Some(tenant_id)).await?;
@@ -304,7 +304,7 @@ impl AuditLogger {
     /// Append a whole batch of audit entries with a BOUNDED number of
     /// statements per tenant (P2): one advisory lock, one chain-head read
     /// and one multi-row INSERT (chunked at
-    /// [`AUDIT_BATCH_INSERT_CHUNK_ROWS`]) — never one transaction/lock/head
+    /// [`AUDIT_BATCH_INSERT_CHUNK_ROWS`]), never one transaction/lock/head
     /// read/INSERT per entry.
     ///
     /// Semantics are identical to calling [`Self::log`] once per entry, in
@@ -317,7 +317,7 @@ impl AuditLogger {
     ///   chain, so `verify_chain`'s timestamp ordering can never disagree
     ///   with the `previous_hash` links;
     /// * ONE transaction covers every tenant's inserts (a failure rolls the
-    ///   whole batch back — the caller's best-effort audit policy decides
+    ///   whole batch back, the caller's best-effort audit policy decides
     ///   what to do, exactly as with a failed single append).
     ///
     /// Returns the persisted entries in INPUT order. An empty batch is a
@@ -468,7 +468,7 @@ impl AuditLogger {
 
     /// The current chain head `(hash, timestamp)` for a tenant (or the
     /// global chain when `tenant_id` is `None`), spanning BOTH the live
-    /// table and the archive (F12 — the chain continues across archival).
+    /// table and the archive (F12, the chain continues across archival).
     /// Deployments without an archive table fall back to the live-only head.
     /// Caller must already hold the chain's advisory lock.
     async fn chain_head(
@@ -497,14 +497,14 @@ impl AuditLogger {
         {
             Ok(row) => row,
             Err(e) if is_undefined_table(&e) => {
-                tracing::warn!("audit_logs_archive absent — chain head read from live table only");
+                tracing::warn!("audit_logs_archive absent, chain head read from live table only");
                 sqlx::query_as(LIVE_ONLY)
                     .bind(tenant_id)
                     .fetch_optional(&mut *tx)
                     .await
                     .map_err(|e| format!("DB error: {e}"))?
             }
-            // coverage: justified — reached only by a live-connection fault
+            // coverage: justified, reached only by a live-connection fault
             // that is NOT an undefined-table fault (e.g. a mid-flight SELECT
             // privilege revocation); reproducing it would require runtime
             // DDL, which this crate's governance gate forbids in src.
@@ -816,7 +816,7 @@ impl AuditLogger {
 
             // Verify HMAC signature over the chain link (previous_hash|hash)
             // with the same key the canonical writers sign under.
-            // coverage: justified — HMAC-SHA256 accepts EVERY key length, so
+            // coverage: justified, HMAC-SHA256 accepts EVERY key length, so
             // signing with the configured key cannot fail; the
             // arm only keeps the match total.
             let expected_sig =
@@ -864,11 +864,11 @@ impl AuditLogger {
 
     /// Verify chain from DB for optional tenant scope.
     ///
-    /// E-2: verification spans BOTH the live table and the archive — archived
+    /// E-2: verification spans BOTH the live table and the archive, archived
     /// rows used to vanish from verification after archival.
     ///
     /// DF-5 finding C: verification runs on the RAW column projection, not on
-    /// typed decodes — the canonical api-server/billing writers store
+    /// typed decodes, the canonical api-server/billing writers store
     /// free-form action/resource vocabularies (`wallet.credit`,
     /// `metering_event`) outside this crate's enum set, and a typed decode
     /// ahead of the hash made `verify_chain` ERROR OUT on exactly the mixed-
@@ -939,7 +939,7 @@ impl AuditLogger {
                 };
             }
 
-            // coverage: justified — HMAC-SHA256 accepts EVERY key length, so
+            // coverage: justified, HMAC-SHA256 accepts EVERY key length, so
             // signing with the configured key cannot fail; the arm only keeps
             // the match total.
             let expected_sig = match self.compute_signature(row.previous_hash.as_deref(), &row.hash)
@@ -1108,18 +1108,18 @@ impl AuditLogger {
     /// E-2: the copy and the delete happen in ONE transaction, and rows are
     /// deleted only when they verifiably exist in the archive afterwards.
     /// Rows that failed to copy (e.g. pre-existing conflicting archive rows)
-    /// are preserved in the live table — they no longer vanish from
+    /// are preserved in the live table, they no longer vanish from
     /// verify/export.
     ///
     /// F5 (legal-hold aware): rows belonging to tenants with an active
-    /// `tenants.legal_hold` are never archived away — removing them from the
+    /// `tenants.legal_hold` are never archived away, removing them from the
     /// live (or any) table under a hold is evidence spoliation. Rows with a
     /// NULL tenant_id cannot be attributed and are KEPT whenever any hold is
     /// active (fall back to keep). Both the copy and the delete apply the
     /// same exclusion, so held rows simply stay live.
     pub async fn archive(&self, older_than: DateTime<Utc>) -> Result<i64, String> {
         // F5/F4: held tenants via the ONE central legal-hold authority
-        // (`legal_hold::active_holds`) — previously this carried its own
+        // (`legal_hold::active_holds`), previously this carried its own
         // inline copy of the same lookup. No tenants table / no legal_hold
         // column (pre-121) → no exclusion possible, behave as before.
         let held: Option<Vec<String>> = crate::legal_hold::active_holds(&self.db).await?;
@@ -1171,7 +1171,7 @@ impl AuditLogger {
         // Delete only rows that verifiably landed in the archive: same id AND
         // same chain hash, AND no conflicting archive row for the same id
         // (different content). A pre-existing conflicting archive row means
-        // the copy did NOT verifiably happen for that row — the live original
+        // the copy did NOT verifiably happen for that row, the live original
         // is preserved. The second NOT EXISTS is what enforces that on the
         // canonical archive, which has no unique id constraint for
         // `ON CONFLICT` to fire on.
@@ -1216,7 +1216,7 @@ impl AuditLogger {
         if parsed.scheme() != "https" {
             return Err("webhook url must use https".into());
         }
-        // coverage: justified — `https` is a special scheme in the url crate:
+        // coverage: justified, `https` is a special scheme in the url crate:
         // a successful parse ALWAYS carries a host (an empty one is an
         // EmptyHost parse error), so this guard can never fire; it documents
         // the invariant rather than filtering a real input class.
@@ -1251,14 +1251,14 @@ impl AuditLogger {
     ///
     /// DF-5 finding C: this writer previously hashed a sorted-key JSON object
     /// that folded `previousHash` (and, transitively, the whole chain state)
-    /// into the row hash — a formula NO canonical verifier could re-derive
+    /// into the row hash, a formula NO canonical verifier could re-derive
     /// from the stored row (live dogfood: 0/40 compliance-written rows
     /// matched the canonical formula). If compliance ever appended to the
     /// shared `audit_logs` chain again, every row after it would have been
     /// unverifiable. The chain formula is now the canonical one.
     ///
     /// Deliberately NOT part of the hashed payload (matching every canonical
-    /// writer — the platform chain's byte contract): `id`, `session_id`,
+    /// writer, the platform chain's byte contract): `id`, `session_id`,
     /// `ip_address`, `user_agent`, `outcome` and `error_message`. They remain
     /// stored, queryable columns; the `previous_hash` linkage and the HMAC
     /// signature over `previous_hash|hash` are what make rewrites detectable,
@@ -1266,7 +1266,7 @@ impl AuditLogger {
     ///
     /// Legacy compliance-formula rows: NONE exist (0/40 live at the fix),
     /// so the canonical verifier rejecting any such row is correct-by-
-    /// construction — the legacy shape never shipped.
+    /// construction, the legacy shape never shipped.
     #[allow(clippy::too_many_arguments)]
     fn compute_hash(
         &self,
@@ -1312,7 +1312,7 @@ impl AuditLogger {
     /// keyed with the configured signing key (deployment
     /// `AUDIT_SIGNING_KEY`). This is exactly how the canonical api-server and
     /// billing-service writers sign: the signature rides ALONGSIDE the row —
-    /// covering the link the row hash deliberately excludes — never inside
+    /// covering the link the row hash deliberately excludes, never inside
     /// the hash payload.
     fn compute_signature(&self, previous_hash: Option<&str>, hash: &str) -> Result<String, String> {
         apexmail_lib::audit::audit_log_signature(
@@ -1322,7 +1322,7 @@ impl AuditLogger {
         )
     }
 
-    /// Persist an entry INSIDE the caller's transaction — the INSERT commits
+    /// Persist an entry INSIDE the caller's transaction, the INSERT commits
     /// atomically with the advisory chain lock held by `log()`, so the head
     /// read and the append are one indivisible critical section.
     async fn persist_entry(
@@ -1410,7 +1410,7 @@ fn is_undefined_table(err: &sqlx::Error) -> bool {
         .unwrap_or(false)
 }
 // (the former `is_undefined_column` helper died with archive()'s inline
-// legal-hold lookup — that logic now lives in `legal_hold::active_holds`)
+// legal-hold lookup, that logic now lives in `legal_hold::active_holds`)
 
 #[derive(Debug, Clone)]
 pub struct ExportResult {
@@ -1422,8 +1422,8 @@ pub struct ExportResult {
 fn csv_escape(value: &str) -> String {
     let mut escaped = value.replace('"', "\"\"");
     // Protect against CSV formula injection:
-    // 1. Leading special characters (=, +, -, @, tab, CR) — prefix with single quote
-    // 2. Mid-string formulas containing these characters — also prefix
+    // 1. Leading special characters (=, +, -, @, tab, CR), prefix with single quote
+    // 2. Mid-string formulas containing these characters, also prefix
     // 3. DDE (Dynamic Data Exchange) expressions like `=cmd|` anywhere in cell
     let needs_formula_prefix = matches!(
         escaped.chars().next(),
@@ -1501,7 +1501,7 @@ fn generate_simple_pdf(entries: &[AuditLogEntry]) -> String {
 
 // ─── DB row helper ─────────────────────────────────────────────
 
-/// Raw column projection for chain verification — NO typed decode of
+/// Raw column projection for chain verification, NO typed decode of
 /// action/resource/outcome, because canonical writers outside this crate
 /// store free-form vocabularies (see [`AuditLogger::verify_chain`]).
 #[derive(sqlx::FromRow)]
@@ -1687,7 +1687,7 @@ mod tests {
         let details = serde_json::json!({"key": "value"});
 
         // The canonical payload hashes tenant|user|action|resource|
-        // resource_id|details|timestamp — the row id is a stored column, NOT
+        // resource_id|details|timestamp, the row id is a stored column, NOT
         // part of the hash (a re-derivable hash can only cover columns every
         // canonical verifier reads). Any HASHED field changing must move the
         // hash.
@@ -1826,7 +1826,7 @@ mod tests {
             &Some("prev-hash".into()),
         );
 
-        // Independent hand-built canonical payload — note that the row's
+        // Independent hand-built canonical payload, note that the row's
         // id/session/ip/user-agent/outcome/error_message/previous_hash are
         // deliberately NOT hashed (the platform chain's byte contract).
         let hand_built = format!(
@@ -1859,7 +1859,7 @@ mod tests {
             )
         );
 
-        // The signature covers previous_hash|hash — the same bytes the
+        // The signature covers previous_hash|hash, the same bytes the
         // canonical api-server writer signs (link rides alongside, never
         // inside the row hash).
         use hmac::Mac;
@@ -2466,7 +2466,7 @@ mod db_tests {
 
     /// P1-SECURITY: audit hash chains are per-tenant by design, so an
     /// unattributed append is REFUSED instead of silently merging into the
-    /// legacy NULL-tenant "global" chain — where a tenant-scoped event would
+    /// legacy NULL-tenant "global" chain, where a tenant-scoped event would
     /// vanish from the chain meant to attest it and tenants would share one
     /// interleaved chain. Nothing may be written without a tenant.
     #[tokio::test]
@@ -2701,7 +2701,7 @@ mod db_tests {
     /// F12 hard-error arms: a dead database makes `initialize` and `archive`
     /// fail LOUD (never a silent empty-chain boot), and a live database whose
     /// audit tables cannot be resolved makes the append's chain-head read
-    /// take the live-only fallback and STILL refuse — a refused append
+    /// take the live-only fallback and STILL refuse, a refused append
     /// writes nothing instead of forking the chain.
     #[tokio::test]
     async fn audit_integrity_fails_loud_when_the_store_is_unreadable() {
@@ -2733,12 +2733,12 @@ mod db_tests {
         );
 
         // A LIVE pool whose sessions resolve tables in a missing schema
-        // (session state via SET — never schema DDL, which this crate's
+        // (session state via SET, never schema DDL, which this crate's
         // governance gate rightly keeps out of runtime code): the archive
         // read errors as undefined-table, the head read falls back to the
         // live-only query, that errors too, and the append is refused.
         let Some((pool, _logger)) = logger("headfault").await else {
-            // coverage: justified — soft-skip arm: only taken when the shared
+            // coverage: justified, soft-skip arm: only taken when the shared
             // test database is not configured; this run has it configured.
             return;
         };
@@ -2781,13 +2781,13 @@ mod db_tests {
     }
 
     /// P1-SECURITY history clause: `initialize` must still be able to load
-    /// pre-existing NULL-tenant rows — they map onto the frozen "global"
+    /// pre-existing NULL-tenant rows, they map onto the frozen "global"
     /// chain key (appends there are refused, but the chain stays loadable
     /// and verifiable), while attributed rows map onto their own chains.
     #[tokio::test]
     async fn initialize_maps_legacy_null_tenant_rows_to_the_frozen_global_chain() {
         let Some((pool, _)) = logger("globalmap").await else {
-            // coverage: justified — soft-skip arm: only taken when the shared
+            // coverage: justified, soft-skip arm: only taken when the shared
             // test database is not configured; this run has it configured.
             return;
         };
@@ -2836,7 +2836,7 @@ mod db_tests {
     #[tokio::test]
     async fn future_dated_head_bumps_the_next_append_timestamp() {
         let Some((pool, logger)) = logger("futurehead").await else {
-            // coverage: justified — soft-skip arm: only taken when the shared
+            // coverage: justified, soft-skip arm: only taken when the shared
             // test database is not configured; this run has it configured.
             return;
         };
@@ -2877,9 +2877,9 @@ mod db_tests {
         pool.close().await;
     }
 
-    /// DF-5 finding C — ONE canonical chain across writers. An api-server /
+    /// DF-5 finding C, ONE canonical chain across writers. An api-server /
     /// billing-service-style canonical row (hash + signature through the
-    /// shared `apexmail_lib::audit` formula — those crates' own tests pin
+    /// shared `apexmail_lib::audit` formula, those crates' own tests pin
     /// their writers to exactly these functions) is followed by a REAL
     /// compliance `log()` append. The compliance row must LINK onto the
     /// canonical row, the mixed-writer chain must verify green, and both
@@ -3020,7 +3020,7 @@ mod db_tests {
 
     /// Legacy compliance-formula rows NEVER shipped (0/40 live at the fix):
     /// a row whose stored hash does not re-derive under the canonical
-    /// formula is REJECTED by the canonical verifier — documented decision,
+    /// formula is REJECTED by the canonical verifier, documented decision,
     /// not an accident.
     #[tokio::test]
     async fn canonical_verifier_rejects_non_canonical_legacy_rows() {
@@ -3058,7 +3058,7 @@ mod db_tests {
     #[tokio::test]
     async fn archived_entries_stay_readable_and_signature_forgery_breaks_verification() {
         let Some((pool, logger)) = logger("sigforge").await else {
-            // coverage: justified — soft-skip arm: only taken when the shared
+            // coverage: justified, soft-skip arm: only taken when the shared
             // test database is not configured; this run has it configured.
             return;
         };
@@ -3128,8 +3128,8 @@ mod db_tests {
     }
 
     /// `log_batch` must take ONE advisory lock, read ONE chain head and issue
-    /// ONE (chunked) multi-row INSERT PER TENANT — constant in the number of
-    /// entries — and every per-tenant chain must re-derive.
+    /// ONE (chunked) multi-row INSERT PER TENANT, constant in the number of
+    /// entries, and every per-tenant chain must re-derive.
     ///
     /// Fail-before: per-entry `log()` -> (10 entries, 2 tenants) costs
     /// (10, 10, 10), not (2, 2, 2).

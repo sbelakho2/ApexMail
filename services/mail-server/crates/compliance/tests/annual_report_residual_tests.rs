@@ -224,7 +224,7 @@ fn xbrl_config_source_and_env_loader_arms() {
 fn a_binding_to_a_non_item_concept_is_refused() {
     // A concept declared with substitutionGroup="xbrli:tuple" (not an item)
     // parses into the taxonomy but must fail slot validation with an
-    // explicit FAIL_BINDING_INVALID refusal — items are the only concepts
+    // explicit FAIL_BINDING_INVALID refusal, items are the only concepts
     // that can carry a reported fact.
     let dir = std::env::temp_dir().join(format!("annual_res_tuple_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -411,7 +411,7 @@ async fn approve_and_submit_state_machine_refusals() {
         .expect_err("submission before approval refused");
     assert!(err.contains("management_approved"), "{err}");
 
-    // Approve once — then a second approval is an illegal transition.
+    // Approve once, then a second approval is an illegal transition.
     approve_annual_report(&pool, report_id, "approver", None)
         .await
         .expect("first approval");

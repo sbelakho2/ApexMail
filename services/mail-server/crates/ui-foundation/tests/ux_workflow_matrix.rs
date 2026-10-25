@@ -1,4 +1,4 @@
-//! UX workflow combinations and persona journeys — the “perfect” product
+//! UX workflow combinations and persona journeys, the “perfect” product
 //! contract for every user path, not a page-by-page smoke list.
 //!
 //! PERFECT means each combination below is true simultaneously:
@@ -41,7 +41,7 @@ fn shell() -> String {
 #[test]
 fn persona_customer_shell_destinations_all_render() {
     // The shell chrome carries the SIDEBAR destinations (the shipped IA puts
-    // Team/Profile on the Settings hub page, not in the sidebar — review §6.4
+    // Team/Profile on the Settings hub page, not in the sidebar, review §6.4
     // groups them there deliberately).
     let chrome = shell();
     for href in [
@@ -128,7 +128,7 @@ fn workflow_create_schedule_edit_preview_share_one_contract() {
     }
 
     // Preview is a sibling action on the same form (formaction), not a
-    // separate app — keeps workflow combo in one submission context.
+    // separate app, keeps workflow combo in one submission context.
     assert!(
         create.contains("formaction=\"/web/campaigns/preview\""),
         "{create}"

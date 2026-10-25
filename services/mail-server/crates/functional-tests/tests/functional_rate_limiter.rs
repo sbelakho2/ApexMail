@@ -67,7 +67,7 @@ fn concurrent_access_does_not_panic() {
         h.join().expect("thread panicked");
     }
 
-    // Just ensure we didn't panic — the count should be roughly 1000
+    // Just ensure we didn't panic, the count should be roughly 1000
     let count = counter.current_count();
     assert!(count > 0, "some events should have been counted");
 }

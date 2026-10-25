@@ -5,7 +5,7 @@
 //! outgoing message; earlier revisions of the SES callback handler looked up
 //! `X-ApexMail-MessageId` / `X-ApexMail-TenantId` with a case-sensitive
 //! `==`, losing attribution, while the reserved-header lists blocked only the
-//! hyphenated spellings — letting caller-supplied aliases through to be
+//! hyphenated spellings, letting caller-supplied aliases through to be
 //! trusted as tenant authority. This module is the ONE shared source of truth
 //! for those names, the namespace reservation rule, and the compatibility
 //! alias parser used when reading provider-echoed headers.
@@ -29,7 +29,7 @@ pub const HEADER_CAMPAIGN_ID: &str = "X-ApexMail-Campaign-ID";
 /// Historical spellings that appear in provider-echoed header lists. They are
 /// PARSE-ONLY compatibility aliases: reservation still blocks them at every
 /// submission boundary, and callbacks must never authorize anything from
-/// them alone (provider signature ≠ header trustworthiness — the caller
+/// them alone (provider signature ≠ header trustworthiness, the caller
 /// controls the submitted custom headers).
 pub const HEADER_ALIASES_MESSAGE_ID: &[&str] = &["X-ApexMail-MessageId"];
 pub const HEADER_ALIASES_TENANT_ID: &[&str] = &["X-ApexMail-TenantId"];
@@ -49,7 +49,7 @@ pub const QUEUE_HEADER_REPLY_TO: &str = "reply_to";
 /// The RFC 5322 wire spelling (`Reply-To`, lowercased) the SMTP-submission
 /// parser sees. It is a PARSE-ONLY alias: the canonical queue key is
 /// [`QUEUE_HEADER_REPLY_TO`], and a hyphenated key is never stored as a custom
-/// header (the worker drops it as protected — which used to silently lose the
+/// header (the worker drops it as protected, which used to silently lose the
 /// header, dogfood finding 2026-10-06 P2).
 pub const MIME_HEADER_REPLY_TO: &str = "reply-to";
 
@@ -59,7 +59,7 @@ const RESERVED_NAMESPACE_PREFIX: &str = "x-apexmail-";
 /// True when `name` falls inside the reserved `X-ApexMail-*` namespace,
 /// compared case-insensitively. Every external submission boundary (send API
 /// custom headers, worker custom-header merge) AND the pre-transport filter
-/// must reject these — the platform generates the namespace exclusively from
+/// must reject these, the platform generates the namespace exclusively from
 /// authenticated persisted job context.
 pub fn is_reserved_internal_header(name: &str) -> bool {
     name.to_ascii_lowercase()
@@ -75,7 +75,7 @@ pub enum IdentityHeaderLookup<'a> {
     /// Exactly one (case-insensitive) spelling matched.
     Found(&'a str),
     /// Two or more headers map to the same logical identity header with
-    /// different values — ambiguous, must be rejected rather than guessed.
+    /// different values, ambiguous, must be rejected rather than guessed.
     Ambiguous,
 }
 
@@ -127,7 +127,7 @@ pub mod message_category {
 
     /// Operational category: invoices, password resets, security notices.
     /// EXEMPT from per-category preference opt-outs (but never from global
-    /// suppression) — recipients must receive transactional mail they
+    /// suppression), recipients must receive transactional mail they
     /// triggered even after a marketing opt-out.
     pub const TRANSACTIONAL: &str = "transactional";
 
@@ -184,11 +184,11 @@ pub mod message_category {
 /// * some recipient rows terminal AND some still non-terminal → `partial`
 ///   (partial progress: delivery work is still owed);
 /// * no recipient row terminal yet and some non-terminal → `processing`
-///   (mid-flight, still cancellable — a soft-bounce requeue must NOT
+///   (mid-flight, still cancellable, a soft-bounce requeue must NOT
 ///   strand the parent in a non-cancellable state);
 /// * every recipient row terminal AND at least one
 ///   `bounced`/`failed`/`suppressed`/`cancelled` → `partial`
-///   (final partial success — including the all-failed case, which
+///   (final partial success, including the all-failed case, which
 ///   previously stayed `processing` forever because only successes
 ///   reconciled);
 /// * every recipient row `sent` and at least one not yet confirmed
@@ -202,7 +202,7 @@ pub mod message_category {
 /// are distinct events with distinct timestamps; each is stamped only once
 /// (the `m.<col> IS NULL` guard preserves the original event time under
 /// concurrent or replayed transitions). A parent with NO recipient rows is
-/// never touched (the EXISTS guard) — there is nothing to aggregate.
+/// never touched (the EXISTS guard), there is nothing to aggregate.
 ///
 /// Concurrency safety: a single derived UPDATE is atomic per parent row, so
 /// concurrently finishing recipients each recompute the aggregate from the
@@ -275,7 +275,7 @@ pub const RECONCILE_MESSAGE_PROGRESS_SQL: &str = r#"
 
 /// Restart/missed-event reconciliation (audit F25): the same derivation
 /// applied to every parent whose recipient rows are ALL terminal but whose
-/// aggregate status is not — the exact residue of a crash between a
+/// aggregate status is not, the exact residue of a crash between a
 /// recipient transition and its parent reconciliation. The worker runs this
 /// on start and periodically; it is idempotent.
 pub const RECONCILE_STUCK_PARENTS_SQL: &str = r#"

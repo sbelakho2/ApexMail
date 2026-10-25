@@ -54,7 +54,7 @@ mod simulation {
     /// When the cache returns None, the system queries the database.
     #[test]
     fn sim_api_key_cache_miss_fallback_to_db() {
-        // Cache lookup returns Err(()) — simulates cache miss or Redis down
+        // Cache lookup returns Err(()), simulates cache miss or Redis down
         let cache_result: Result<crate::middleware::auth::AuthUser, ()> = Err(());
         assert!(cache_result.is_err(), "cache miss triggers DB fallback");
 
@@ -153,7 +153,7 @@ mod simulation {
     // JWT AUTHENTICATION FLOW SIMULATION (RS256)
     // =========================================================================
 
-    /// Simulates JWT claims roundtrip — serialization/deserialization.
+    /// Simulates JWT claims roundtrip, serialization/deserialization.
     #[test]
     fn sim_jwt_claims_roundtrip() {
         use crate::middleware::auth::JwtClaims;
@@ -1516,7 +1516,7 @@ mod simulation {
             // Redis failure: silent skip, no panic
         }
 
-        // Verify the pattern is safe — no panic
+        // Verify the pattern is safe, no panic
         assert!(!redis_available, "Redis down must be handled gracefully");
     }
 

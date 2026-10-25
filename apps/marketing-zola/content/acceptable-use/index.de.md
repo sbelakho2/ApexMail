@@ -1,13 +1,13 @@
 +++
 title = "Richtlinie zur akzeptablen Nutzung"
-description = "ApexMail-Richtlinie zur akzeptablen Nutzung — Regeln für die Nutzung des E-Mail-Dienstes, geordnet nach Nachrichtenkategorie."
+description = "ApexMail-Richtlinie zur akzeptablen Nutzung, Regeln für die Nutzung des E-Mail-Dienstes, geordnet nach Nachrichtenkategorie."
 template = "prose.html"
 
 [extra]
 last_updated = "2026-07-30"
 +++
 
-Diese Richtlinie zur akzeptablen Nutzung („AUP") definiert verbotene und akzeptable Nutzungen der ApexMail-E-Mail-Infrastruktur. Verstöße können zur Aussetzung oder Kündigung führen. Diese AUP unterscheidet zwischen Marketing- und Werbe-E-Mails und Transaktions- und Service-E-Mails — jede Kategorie unterliegt unterschiedlichen Einwilligungs-, Abmelde- und Versandpflichten wie unten beschrieben.
+Diese Richtlinie zur akzeptablen Nutzung („AUP") definiert verbotene und akzeptable Nutzungen der ApexMail-E-Mail-Infrastruktur. Verstöße können zur Aussetzung oder Kündigung führen. Diese AUP unterscheidet zwischen Marketing- und Werbe-E-Mails und Transaktions- und Service-E-Mails, jede Kategorie unterliegt unterschiedlichen Einwilligungs-, Abmelde- und Versandpflichten wie unten beschrieben.
 
 ## Welche Regeln für Ihre Nachricht gelten
 

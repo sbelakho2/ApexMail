@@ -12,8 +12,8 @@ use uuid::Uuid;
 
 /// HMAC-SHA256 signature over the audit hash (and its chain link), keyed
 /// with the same `AUDIT_SIGNING_KEY` the compliance crate uses for chain
-/// verification. In production the key MUST be configured — a
-/// publicly-known fallback would make every signature forgeable — so the
+/// verification. In production the key MUST be configured, a
+/// publicly-known fallback would make every signature forgeable, so the
 /// function fails closed there. Development keeps a fallback with a warning.
 ///
 /// `is_production` must come from the loaded `Config::environment`, NOT a
@@ -39,7 +39,7 @@ fn audit_log_signature(
                 )));
             }
             tracing::warn!(
-                "AUDIT_SIGNING_KEY not set — using development fallback for audit signatures"
+                "AUDIT_SIGNING_KEY not set, using development fallback for audit signatures"
             );
             "apexmail-audit-fallback-key".to_string()
         }
@@ -70,7 +70,7 @@ fn state_is_production() -> bool {
 /// (microsecond) one makes every row's hash UNREPRODUCIBLE from storage —
 /// no verifier can re-derive it, which defeats the chain's purpose. Both the
 /// hash input and the bound column therefore use the same microsecond-
-/// truncated instant (the ONE shared implementation — the same discipline
+/// truncated instant (the ONE shared implementation, the same discipline
 /// `compliance::audit_logger` applies).
 fn truncate_to_micros(ts: DateTime<Utc>) -> DateTime<Utc> {
     apexmail_lib::audit::truncate_timestamp_to_micros(ts)
@@ -85,7 +85,7 @@ fn compute_hash(
     details: &Value,
     timestamp: DateTime<Utc>,
 ) -> String {
-    // The ONE canonical implementation (apexmail_lib::audit) — byte-for-byte
+    // The ONE canonical implementation (apexmail_lib::audit), byte-for-byte
     // the 7-segment `tenant|user|action|resource|resource_id|details|
     // timestamp` payload this function always hashed (NULL ids contribute
     // the empty string; the chain link is NOT hashed into the row hash).
@@ -108,7 +108,7 @@ fn compute_hash(
 /// Chain linking goes through the dedicated `audit_chain_head` single-row
 /// table (migration 105), advanced atomically in the same transaction as the
 /// insert, so tampering, deletion, or reordering breaks the chain instead of
-/// passing silently — without serialising writers on `audit_logs` rows.
+/// passing silently, without serialising writers on `audit_logs` rows.
 ///
 /// DEPRECATED call shape: resolves "production" via the raw `ENVIRONMENT`
 /// env var, which misses config-file production deployments (see
@@ -143,7 +143,7 @@ pub async fn insert_audit_log(
 
 /// Canonical standalone audit write. `is_production` MUST come from the
 /// loaded config (`Config::environment.is_production()`), never from a raw
-/// env read — in production the signature step fails closed without
+/// env read, in production the signature step fails closed without
 /// `AUDIT_SIGNING_KEY`, and a false negative here would silently sign audit
 /// evidence with the public development fallback key.
 #[allow(clippy::too_many_arguments)]
@@ -250,7 +250,7 @@ pub(crate) async fn advance_chain_head(
     executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>,
     new_hash: &str,
 ) -> Result<Option<String>, sqlx::Error> {
-    // `prev_hash` is NULL for a chain's FIRST entry — decode the scalar as
+    // `prev_hash` is NULL for a chain's FIRST entry, decode the scalar as
     // nullable (Option<Option<String>> distinguishes no-row from NULL
     // column), otherwise every fresh database's first audit insert fails
     // to decode and is silently dropped by the best-effort writer.
@@ -347,7 +347,7 @@ pub async fn insert_audit_log_in_tx_with_env(
     // Chain the audit entry: advance the head (atomically capturing the hash
     // it replaced) in the same transaction as the insert. Concurrent appenders
     // serialise on the single head row; the loser links onto the winner. A
-    // failure here means migration 105 has not been applied — propagate
+    // failure here means migration 105 has not been applied, propagate
     // rather than silently unlinking the chain.
     let previous_hash: Option<String> = advance_chain_head(&mut **tx, &hash).await?;
     let signature = audit_log_signature(
@@ -506,7 +506,7 @@ mod tests {
     /// Serialises every test in this module that mutates the process-global
     /// `AUDIT_SIGNING_KEY` / `ENVIRONMENT` env vars (mirrors
     /// `test_db::DKIM_ENV_MUTEX`): the fail-closed test REMOVES the signing
-    /// key while the chain tests need it set — without the lock, in-process
+    /// key while the chain tests need it set, without the lock, in-process
     /// `cargo test` threads would race each other's signatures.
     static AUDIT_ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -588,7 +588,7 @@ mod tests {
 
     /// DF-5 finding C parity pin: this writer's row hash is byte-identical
     /// to the shared canonical formula (`apexmail_lib::audit`) and to an
-    /// independently hand-built 7-segment payload — the exact bytes every
+    /// independently hand-built 7-segment payload, the exact bytes every
     /// other writer (billing-service, compliance) and every verifier must
     /// reproduce from the stored columns.
     #[test]
@@ -638,7 +638,7 @@ mod tests {
             )
         );
 
-        // A machine row (no user) keeps the empty user SEGMENT — the exact
+        // A machine row (no user) keeps the empty user SEGMENT, the exact
         // shape billing-service's machine writer hashes (DF-7c regression).
         let machine = compute_hash(
             Some("ten_abc26chars123456789abc"),
@@ -704,7 +704,7 @@ CREATE TABLE IF NOT EXISTS audit_chain_head (
     /// Dedicated per-test database (the compliance crate's 50-way test
     /// pattern): these tests assert the hash-chain writer against its own
     /// fresh DDL (isolated chain per test, no interference with the rows
-    /// other suites seed into the shared `<db>_api` database — which, since
+    /// other suites seed into the shared `<db>_api` database, which, since
     /// audit F01, carries the full canonical migration chain). Skips unless
     /// TEST_DATABASE_URL is set (workspace convention).
     async fn audit_chain_test_pool(db_suffix: &str) -> Option<PgPool> {
@@ -1007,7 +1007,7 @@ CREATE TABLE IF NOT EXISTS audit_chain_head (
         mac.update(b"hash-b|hash-a");
         assert_eq!(fallback, hex::encode(mac.finalize().into_bytes()));
 
-        // A configured key overrides the fallback — also in production.
+        // A configured key overrides the fallback, also in production.
         std::env::set_var("AUDIT_SIGNING_KEY", "w6a-configured-key");
         let configured = audit_log_signature("hash-a", "hash-b", true)
             .expect("configured key must sign in production");
@@ -1167,7 +1167,7 @@ CREATE TABLE IF NOT EXISTS audit_chain_head (
     }
 
     /// Production append without a signing key: the error must surface AND
-    /// the transaction must leave zero partial state — no row, and the chain
+    /// the transaction must leave zero partial state, no row, and the chain
     /// head must not have advanced (it is advanced inside the same tx,
     /// BEFORE the signature step).
     #[tokio::test]
@@ -1215,7 +1215,7 @@ CREATE TABLE IF NOT EXISTS audit_chain_head (
         );
 
         // With the key present the very same append succeeds and roots the
-        // chain — proving the failure was purely the fail-closed guard.
+        // chain, proving the failure was purely the fail-closed guard.
         std::env::set_var("AUDIT_SIGNING_KEY", "w6a-signing-key-0123456789");
         insert_audit_log_with_env(
             &pool,
@@ -1398,7 +1398,7 @@ CREATE TABLE IF NOT EXISTS audit_chain_head (
     }
 
     /// A caller rolling back its transaction must also undo the chain-head
-    /// advance — the head must never point at a hash that was never appended.
+    /// advance, the head must never point at a hash that was never appended.
     #[tokio::test]
     async fn caller_rollback_undoes_the_chain_head_advance() {
         {
@@ -1515,7 +1515,7 @@ CREATE TABLE IF NOT EXISTS audit_chain_head (
     }
 
     /// The FTS upkeep UPDATE (migration-081 expression) must actually fill
-    /// `fts_vector` when the column exists — appended rows must be searchable.
+    /// `fts_vector` when the column exists, appended rows must be searchable.
     #[tokio::test]
     async fn fts_vector_is_maintained_when_the_column_exists() {
         {

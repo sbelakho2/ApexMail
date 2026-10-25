@@ -43,7 +43,7 @@ pub struct AppState {
 /// SM9 #6: resolve the tenant scope for `/vectors` and `/search`.
 ///
 /// The gateway-asserted [`TENANT_HEADER`] is REQUIRED: absent (or empty) is
-/// a 401 and a mismatch with the body `tenant_id` is a 403 — both fail
+/// a 401 and a mismatch with the body `tenant_id` is a 403, both fail
 /// closed. `trust_body_tenant` (the `AI_EMBEDDINGS_TRUST_BODY_TENANT`
 /// escape hatch) restores the old body-trusting behavior for local,
 /// gateway-less dev runs only.
@@ -75,7 +75,7 @@ fn resolve_tenant_scope(
             StatusCode::FORBIDDEN,
             format!(
                 "{TENANT_HEADER} ({asserted}) does not match the body tenant_id \
-                 ({body_tenant}) — refusing a cross-tenant scope"
+                 ({body_tenant}), refusing a cross-tenant scope"
             ),
         ));
     }
@@ -93,7 +93,7 @@ pub fn router(state: Arc<AppState>) -> Router {
             state.clone(),
             require_service_token,
         ))
-        .layer(DefaultBodyLimit::max(5 * 1024 * 1024)) // 5 MB — embedding batches / vectors
+        .layer(DefaultBodyLimit::max(5 * 1024 * 1024)) // 5 MB, embedding batches / vectors
         .layer(TimeoutLayer::new(Duration::from_secs(30)))
         .with_state(state)
 }
@@ -117,12 +117,12 @@ async fn require_service_token(
                 .and_then(|raw| raw.trim().strip_prefix("Bearer ").map(String::from))
         });
     let provided = provided.as_deref().unwrap_or("");
-    // INTERNAL_SERVICE_TOKEN no longer authorizes anything here — call out
+    // INTERNAL_SERVICE_TOKEN no longer authorizes anything here, call out
     // the unmigrated caller loudly (it is refused either way).
     if state.service_auth.is_refused_universal_attempt(provided) {
         tracing::warn!(
             "request refused: the universal INTERNAL_SERVICE_TOKEN was presented but \
-             AI_EMBEDDINGS_AUTH_TOKEN is configured — migrate this caller to the \
+             AI_EMBEDDINGS_AUTH_TOKEN is configured, migrate this caller to the \
              dedicated per-workload token"
         );
     }
@@ -235,7 +235,7 @@ async fn add_vector_handler(
     Json(req): Json<AddVectorRequest>,
 ) -> (StatusCode, Json<serde_json::Value>) {
     // SM9 #6: the caller's tenant scope is gateway-asserted, not just
-    // body-asserted — fail closed on absence/mismatch.
+    // body-asserted, fail closed on absence/mismatch.
     if let Err((status, msg)) =
         resolve_tenant_scope(&headers, &req.tenant_id, state.trust_body_tenant)
     {
@@ -264,7 +264,7 @@ async fn search_handler(
     headers: HeaderMap,
     Json(req): Json<SearchRequest>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    // SM9 #6: identity before capability — the tenant scope is validated
+    // SM9 #6: identity before capability, the tenant scope is validated
     // before any search work happens.
     if let Err((status, msg)) =
         resolve_tenant_scope(&headers, &req.tenant_id, state.trust_body_tenant)
@@ -297,7 +297,7 @@ async fn stats_handler(
     match serde_json::to_value(&stats) {
         Ok(value) => (StatusCode::OK, Json(value)),
         Err(err) => {
-            // coverage: justified — StoreStats derives Serialize over plain
+            // coverage: justified, StoreStats derives Serialize over plain
             // numeric fields, so to_value is infallible; the arm guards
             // future field types only.
             (
@@ -347,7 +347,7 @@ mod tests {
             embedding_service: EmbeddingService::new(config.inference.clone()).unwrap(),
             vector_store: VectorStore::new(384, 1000, 900, vec![]),
             config,
-            // P1 #6: tests build the resolved per-workload `ServiceAuth` — a
+            // P1 #6: tests build the resolved per-workload `ServiceAuth`, a
             // single credential, the universal token refuses.
             service_auth: crate::auth::ServiceAuth::resolve(Some("test-key"), None, false)
                 .expect("test auth resolves"),
@@ -357,7 +357,7 @@ mod tests {
         let _router = router(state);
     }
 
-    /// F11:top_k is clamped to 1..=100 — 0 and >100 are rejected.
+    /// F11:top_k is clamped to 1..=100, 0 and >100 are rejected.
     #[test]
     fn test_validate_top_k_range() {
         assert!(validate_top_k(0).is_err(), "top_k=0 must be rejected");
@@ -586,7 +586,7 @@ mod tests {
     }
 
     /// Legacy fallback (dedicated env unset): the universal token still
-    /// authenticates outside production — migration-safe behavior.
+    /// authenticates outside production, migration-safe behavior.
     #[tokio::test]
     async fn unset_dedicated_token_keeps_universal_token_working() {
         use tower::ServiceExt;
@@ -850,7 +850,7 @@ mod tests {
     }
 
     /// SM9 #6: WITHOUT the gateway-asserted header both tenant routes fail
-    /// closed with 401 — a holder of the shared service token can no longer
+    /// closed with 401, a holder of the shared service token can no longer
     /// name an arbitrary tenant in the body and act as it.
     #[tokio::test]
     async fn missing_tenant_header_is_unauthorized_on_vectors_and_search() {
@@ -913,7 +913,7 @@ mod tests {
     }
 
     /// SM9 #6: the `AI_EMBEDDINGS_TRUST_BODY_TENANT` escape hatch (dev-only)
-    /// removes the header requirement — that is exactly why it must default
+    /// removes the header requirement, that is exactly why it must default
     /// to false and never run outside a local, gateway-less environment.
     #[tokio::test]
     async fn trust_body_tenant_escape_hatch_removes_the_header_requirement() {
@@ -945,7 +945,7 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
     }
 
-    /// SM9 #6: the scope resolver unit contract — trim-tolerant, empty
+    /// SM9 #6: the scope resolver unit contract, trim-tolerant, empty
     /// header values count as absent, whitespace-only body tenants must
     /// match exactly after trimming.
     #[test]

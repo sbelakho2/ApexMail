@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 const STARTUP_DEADLINE: Duration = Duration::from_secs(60);
 const STOP_DEADLINE: Duration = Duration::from_secs(30);
 
-/// Deterministic 2048-bit RSA test pair (PKCS#8) — only ever used by the
+/// Deterministic 2048-bit RSA test pair (PKCS#8), only ever used by the
 /// spawned test server to boot its JWT wiring; no token is ever issued here.
 const TEST_JWT_PRIVATE_KEY_PEM: &str = "-----BEGIN PRIVATE KEY-----
 MIIEvAIBADANBgkqhkiG9w0BAQEFAASCBKYwggSiAgEAAoIBAQCigFuI5W8l0h25
@@ -64,7 +64,7 @@ fn reserve_addr() -> SocketAddr {
 
 /// The suite's Redis coordinates as `(host, port, password)`.
 ///
-/// `TEST_REDIS_URL` is the endpoint the CI/deploy environment provides — an
+/// `TEST_REDIS_URL` is the endpoint the CI/deploy environment provides, an
 /// ephemeral Redis on a random port. 127.0.0.1:6379 is only the local dev
 /// default; pinning it made the readiness assertion false-fail on the
 /// deploy host, which runs no host-level Redis at all (the spawned server
@@ -199,7 +199,7 @@ fn output_of(child: &mut Child) -> String {
 
 /// The API server boots against the real Postgres + Redis, serves its
 /// liveness and readiness endpoints plus the Prometheus listener, and drains
-/// to exit code 0 on SIGTERM — the container stop signal.
+/// to exit code 0 on SIGTERM, the container stop signal.
 #[test]
 fn api_server_serves_health_and_metrics_and_sigterm_exits_cleanly() {
     // Self-provisioning: the server boots against a canonical-schema
@@ -225,7 +225,7 @@ fn api_server_serves_health_and_metrics_and_sigterm_exits_cleanly() {
     runtime.block_on(pool.close());
 
     // Point the spawned server at that database (and the caller's
-    // credentials — never a hardcoded password that can drift).
+    // credentials, never a hardcoded password that can drift).
     let (server_credentials, _db) = base_url
         .rsplit_once('/')
         .expect("TEST_DATABASE_URL carries a database segment");
@@ -297,7 +297,7 @@ fn api_server_serves_health_and_metrics_and_sigterm_exits_cleanly() {
 }
 
 /// A missing required variable (JWT private key) must refuse startup with
-/// exit code 1 and an error naming the variable — never a half-booted API.
+/// exit code 1 and an error naming the variable, never a half-booted API.
 #[test]
 fn api_server_refuses_an_incomplete_configuration() {
     let port = reserve_addr();

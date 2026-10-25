@@ -3,16 +3,16 @@
 //!
 //! Unlike `gdpr_compliance_db_tests.rs` (which creates minimal hand-written
 //! table shapes), these tests provision throwaway databases carrying the
-//! REAL production migration chain through `migrator::test_support` — so a
+//! REAL production migration chain through `migrator::test_support`, so a
 //! green test proves the statements work against the 18-column
 //! `audit_logs` / 16-column `audit_logs_archive` split and the
 //! `content_policies.enabled` column that a deploy actually installs.
 //!
 //! Coverage:
 //! - F76: search / count / stats / export / chain-integrity queries against
-//!   empty, live-only, archived-only and mixed data — the exact UNION
+//!   empty, live-only, archived-only and mixed data, the exact UNION
 //!   column-count failure mode (42601 even when both tables are empty).
-//! - F77: the canonical `content_policies.enabled` predicate — an ENABLED
+//! - F77: the canonical `content_policies.enabled` predicate, an ENABLED
 //!   policy affects scan output, a DISABLED one does not, and a policy-store
 //!   outage surfaces as an explicit scan error (never a silent empty policy
 //!   set stamping the scan clean).
@@ -103,7 +103,7 @@ fn query_for(tenant: &str) -> AuditLogQuery {
 // ── F76: search / count / stats / export / integrity across live + archive ──
 
 /// The exact F76 failure mode: every live ∪ archive consumer must succeed
-/// against a FRESH canonical database — with both tables empty the old
+/// against a FRESH canonical database, with both tables empty the old
 /// `SELECT *` unions already failed to PREPARE (42601: each UNION query
 /// must have the same number of columns).
 #[tokio::test]
@@ -334,7 +334,7 @@ async fn f77_enabled_policy_flags_content_and_disabled_does_not() {
     let scanner = ContentScanner::new(pool.clone(), scanning_config());
 
     // Enabled policy: the blocked pattern produces a policy violation and
-    // a suspicious/blocked verdict — the scan entry REALLY evaluated it.
+    // a suspicious/blocked verdict, the scan entry REALLY evaluated it.
     let flagged = scanner
         .scan_email(&scan_content(
             tenant_enabled,
@@ -381,7 +381,7 @@ async fn f77_enabled_policy_flags_content_and_disabled_does_not() {
     pool.close().await;
 }
 
-/// A policy-store OUTAGE is an explicit scan failure — never a swallowed
+/// A policy-store OUTAGE is an explicit scan failure, never a swallowed
 /// empty policy set that would stamp content clean (F77 required change;
 /// the L-04 error propagation from policy loading).
 #[tokio::test]

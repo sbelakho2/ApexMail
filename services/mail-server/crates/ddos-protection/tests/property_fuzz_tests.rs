@@ -1,7 +1,7 @@
 //! # Property-Based & Fuzz Tests for DDoS Protection System
 //!
 //! Uses deterministic randomized inputs to verify system invariants.
-//! No external proptest dependency — pure std::collections randomization patterns.
+//! No external proptest dependency, pure std::collections randomization patterns.
 
 use ddos_protection::{
     adaptive::{AdaptiveConfig, AdaptiveRateLimiter, TrafficObservation},
@@ -129,7 +129,7 @@ fn property_smtp_state_machine_always_valid() {
 
             let result = prot.process_command(cmd);
 
-            // The result must be Ok or a known error — never panic
+            // The result must be Ok or a known error, never panic
             match result {
                 Ok(_action) => {
                     // After QUIT, state must be Quit (even under tarpit)
@@ -151,7 +151,7 @@ fn property_smtp_state_machine_always_valid() {
                     // Expected after hitting recipient limit
                 }
                 Err(SmtpProtectionError::Timeout(_)) => {
-                    // State timeout — shouldn't normally happen in fast tests
+                    // State timeout, shouldn't normally happen in fast tests
                 }
                 Err(SmtpProtectionError::InvalidSequence { .. }) => {
                     // Expected in strict mode
@@ -447,7 +447,7 @@ fn property_connection_count_never_negative() {
             _ => unreachable!(),
         }
 
-        // Count should never be negative (u64, so it wraps — check for very large values)
+        // Count should never be negative (u64, so it wraps, check for very large values)
         for check_ip in &ips {
             let count = tracker.active_count(check_ip);
             assert!(
@@ -461,7 +461,7 @@ fn property_connection_count_never_negative() {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// INVARIANT 10:Slowloris detection is monotonic — lower rates always flagged
+// INVARIANT 10:Slowloris detection is monotonic, lower rates always flagged
 // ═══════════════════════════════════════════════════════════════
 
 #[test]

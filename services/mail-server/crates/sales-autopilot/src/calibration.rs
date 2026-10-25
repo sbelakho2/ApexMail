@@ -1,4 +1,4 @@
-//! §36 — automatic model calibration.
+//! §36, automatic model calibration.
 //!
 //! Every probability the system emits is measured against reality. The three
 //! fields on [`crate::types::OpportunityScore`] are calibrated here:

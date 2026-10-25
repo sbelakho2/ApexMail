@@ -115,7 +115,7 @@ pub struct ScimMember {
 
 /// SCIM User create (POST) / replace (PUT) body (F40). Ordinary IdP create
 /// requests carry only `userName` (plus optional attributes); `id` is
-/// absent by design — the server generates it. Unknown attributes
+/// absent by design, the server generates it. Unknown attributes
 /// (including a client-supplied `id`) are ignored, mirroring SCIM's
 /// tolerant resource model.
 #[derive(Debug, Deserialize)]
@@ -185,7 +185,7 @@ const SCIM_PATCH_OP_SCHEMA: &str = "urn:ietf:params:scim:api:messages:2.0:PatchO
 /// Maximum allowed count parameter for list operations.
 const MAX_SCIM_COUNT: i64 = 200;
 
-/// Upper bound on accepted filter strings — filters are parsed into bound
+/// Upper bound on accepted filter strings, filters are parsed into bound
 /// SQL parameters, so pathological inputs are rejected up front instead of
 /// parsed (F42).
 const MAX_SCIM_FILTER_LEN: usize = 512;
@@ -321,7 +321,7 @@ async fn log_scim_audit(
 
 // ─── Shared write-path helpers ─────────────────────────────────
 
-/// Structural email gate shared by SCIM create/update/patch — SCIM clients
+/// Structural email gate shared by SCIM create/update/patch, SCIM clients
 /// send whatever the IdP holds; a blank or @-less value must never reach the
 /// UNIQUE index or the login lookup.
 fn is_plausible_email(email: &str) -> bool {
@@ -412,7 +412,7 @@ fn status_for_active(active: bool) -> &'static str {
     }
 }
 
-/// The canonical SCIM User resource for a stored user state — used by
+/// The canonical SCIM User resource for a stored user state, used by
 /// create/get/replace/patch alike so responses always reflect exactly what
 /// was persisted (server id, stored email/name, stored lifecycle).
 fn canonical_scim_user(id: String, email: String, name: Option<String>, active: bool) -> ScimUser {
@@ -494,7 +494,7 @@ async fn insert_scim_user(
     name: Option<&str>,
     active: bool,
 ) -> Result<(), ApiError> {
-    // users.id is UUID on the canonical schema (audit 1.6) — the previous
+    // users.id is UUID on the canonical schema (audit 1.6), the previous
     // text-id insert (generate_id) failed at runtime exactly like the SSO
     // twin did before its fix.
     // SCIM users must authenticate via SSO; direct password login is blocked
@@ -614,7 +614,7 @@ async fn apply_user_patch_changes(
 ) -> Result<Option<(String, Option<String>, String)>, sqlx::Error> {
     let Some((sql, binds)) = build_user_patch_update(changes) else {
         // Nothing to change: return the current row (the caller already
-        // holds it) — no write, no timestamp churn.
+        // holds it), no write, no timestamp churn.
         let row: Option<(String, Option<String>, String)> = sqlx::query_as(
             "SELECT email, name, status FROM users WHERE id = $1::uuid AND tenant_id = $2",
         )
@@ -638,7 +638,7 @@ async fn apply_user_patch_changes(
 
 /// Session revocation on SCIM deactivation (F41): writes the
 /// `apexmail:session_revoked_after:{tenant}:{user}` marker the auth
-/// middleware checks on every request — same mechanism as the password
+/// middleware checks on every request, same mechanism as the password
 /// change / admin disable flows (see the private
 /// `routes::web::revoke_user_sessions`; the key builder itself is shared
 /// via `middleware::auth::session_revocation_key`).
@@ -667,7 +667,7 @@ async fn enforce_lifecycle_authz(state: &AppState, tenant_id: &str, user_id: &st
 /// Bounded SCIM filter for Users. `userName` and `emails.value` are both
 /// backed by the stored (lowercased) `email` column; `externalId` is
 /// syntactically supported but matches nothing because ApexMail does not
-/// persist external ids — reporting zero results is more honest than
+/// persist external ids, reporting zero results is more honest than
 /// silently ignoring the parameter.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ScimUserFilter {
@@ -681,7 +681,7 @@ enum ScimUserFilter {
 
 /// Parse a bounded `<attribute> eq "<literal>"` filter (RFC 7644 §3.4.2.2).
 ///
-/// Everything outside that grammar — other operators, `and`/`or`,
+/// Everything outside that grammar, other operators, `and`/`or`,
 /// unquoted or unterminated literals, unknown escapes, oversized input —
 /// is rejected with a descriptive error instead of being half-applied.
 /// The literal never reaches SQL as text: handlers bind it as a parameter.
@@ -994,7 +994,7 @@ async fn list_users(
         // externalId has no stored values, so an eq filter matches nothing.
         Some(ScimUserFilter::NeverMatches) => (0, Vec::new()),
         Some(ScimUserFilter::Email(value)) => {
-            // Binds only — the literal never becomes SQL text (F42).
+            // Binds only, the literal never becomes SQL text (F42).
             let total = sqlx::query_scalar::<_, i64>(
                 "SELECT COUNT(*) FROM users WHERE tenant_id = $1 AND LOWER(email) = $2",
             )
@@ -1111,7 +1111,7 @@ async fn create_user(
 
 /// Validate a SCIM user path id before any `$1::uuid` bind: `users.id` is
 /// UUID, so a malformed id can never name a resource and must be the SCIM
-/// 404 (RFC 7644 §3.12) — not a database 500 from an invalid-input-syntax
+/// 404 (RFC 7644 §3.12), not a database 500 from an invalid-input-syntax
 /// cast.
 fn require_scim_user_id(id: &str) -> Result<(), ScimError> {
     if Uuid::parse_str(id).is_err() {
@@ -1170,7 +1170,7 @@ async fn update_user(
         .and_then(|name| name.given_name.clone());
 
     // Privilege-surface guard (P2-1): rewriting an admin/owner's email
-    // moves their identity to an address the SCIM caller controls — an
+    // moves their identity to an address the SCIM caller controls, an
     // in-tenant takeover primitive for any scim:write holder. Members may
     // be re-emailed by the IdP; privileged roles must be changed through
     // the console, not SCIM.
@@ -1192,7 +1192,7 @@ async fn update_user(
 
     // F41: PUT maps `active` through the same lifecycle mapping as create
     // and PATCH, and deactivation revokes sessions + invalidates caches.
-    // PUT is REPLACE semantics — the whole writable row is written.
+    // PUT is REPLACE semantics, the whole writable row is written.
     let rows = replace_user_row(
         &state.db,
         &auth.tenant_id,
@@ -1247,7 +1247,7 @@ async fn patch_user(
         return Err(ScimError::not_found("user not found"));
     };
 
-    // F42 atomicity: every operation is validated before any mutation — a
+    // F42 atomicity: every operation is validated before any mutation, a
     // single invalid op rejects the whole request and leaves the user
     // untouched.
     let changes = plan_user_patch(&request).map_err(ScimError::bad_request)?;
@@ -1271,7 +1271,7 @@ async fn patch_user(
 
     // F42 concurrency: a parameterized UPDATE that changes ONLY the fields
     // the PATCH explicitly supplied. The stale snapshot above is used solely
-    // for validation/response — omitted fields are never written, so a
+    // for validation/response, omitted fields are never written, so a
     // concurrent name-only patch can no longer restore `active=true` after
     // a deactivation (read-modify-write of the whole row was the defect).
     let applied = apply_user_patch_changes(&state.db, &auth.tenant_id, &id, &changes).await?;
@@ -1435,7 +1435,7 @@ async fn create_group(
     let display_name = request.display_name.clone().unwrap_or_default();
 
     // F40: the SCIM-visible id is server-generated (UUID) and opaque
-    // (RFC 7643 §3.1) — it lives in the 255-char `scim_id` column. The row's
+    // (RFC 7643 §3.1), it lives in the 255-char `scim_id` column. The row's
     // PRIMARY KEY `scim_groups.id` is VARCHAR(26) (migration 093, the same
     // 26-char text-id convention as tenants): binding a 36-char UUID there
     // overflowed the column and made every group create fail with a 500.
@@ -1444,7 +1444,7 @@ async fn create_group(
     let now = Utc::now();
 
     // Audit C: verify every member belongs to the caller's tenant BEFORE the
-    // group row is written — foreign-tenant user UUIDs must be rejected with
+    // group row is written, foreign-tenant user UUIDs must be rejected with
     // a 400 and leave no group row behind, instead of being silently
     // enrolled and later exposed via list/get (their emails leak through the
     // users JOIN display fallback).
@@ -1571,7 +1571,7 @@ async fn update_group(
 
     // Validate the REPLACEMENT member list BEFORE any mutation (P3): the
     // previous order deleted the existing members first and validated
-    // after — a bad replacement list left the group permanently emptied.
+    // after, a bad replacement list left the group permanently emptied.
     // Audit C: every replacement member must belong to the caller's tenant.
     let member_ids = validate_members_in_tenant(
         &state.db,
@@ -1655,7 +1655,7 @@ async fn patch_group(
     .ok_or_else(|| ScimError::not_found("group not found"))?;
 
     let mut display_name = row.display_name.clone();
-    // Count of operations that actually mutated the group — the audit entry
+    // Count of operations that actually mutated the group, the audit entry
     // distinguishes "nothing applied" (bad paths) from real changes.
     let mut applied_ops = 0u32;
 
@@ -1684,7 +1684,7 @@ async fn patch_group(
                             }
                         }
                         // Audit C: added members must belong to the caller's
-                        // tenant — same rule as create/update.
+                        // tenant, same rule as create/update.
                         let validated =
                             validate_members_in_tenant(&state.db, &auth.tenant_id, &values).await?;
                         let member_pairs: Vec<(Uuid, Option<String>)> = members
@@ -1715,7 +1715,7 @@ async fn patch_group(
             "remove" => {
                 if let Some(path) = &op.path {
                     // Path like: members[value eq "user-uuid"]. Parse EXACTLY
-                    // once (parse_member_removal_path) — the previous
+                    // once (parse_member_removal_path), the previous
                     // repeated trim matches mangled ids containing '"' or ']'
                     // into silently-wrong deletions.
                     if let Some(user_id_str) = parse_member_removal_path(path) {
@@ -1805,7 +1805,7 @@ async fn delete_group(
 
 // ─── Handlers: capabilities ────────────────────────────────────
 
-/// RFC 7644 ServiceProviderConfig document — advertises exactly what these
+/// RFC 7644 ServiceProviderConfig document, advertises exactly what these
 /// routes implement (F42): PATCH on Users and Groups, bounded `eq`
 /// filtering on Users, and no sort/bulk/etag/changePassword support.
 fn service_provider_config_document() -> serde_json::Value {
@@ -1969,7 +1969,7 @@ struct GroupScimRow {
 
 #[derive(sqlx::FromRow)]
 struct GroupMemberRow {
-    /// `scim_group_members.user_id` is UUID on the canonical schema — a
+    /// `scim_group_members.user_id` is UUID on the canonical schema, a
     /// String field makes sqlx reject the row (`mismatched types; Rust type
     /// String is not compatible with SQL type UUID`) and turned every
     /// GET/list of a group WITH members into a 500.
@@ -2034,7 +2034,7 @@ mod tests {
 
     #[test]
     fn test_scim_user_rejects_wrong_schema_type() {
-        // F40: the schemas attribute is validated application-side — a User
+        // F40: the schemas attribute is validated application-side, a User
         // body declaring the Group schema is a client error.
         let request: UserUpsertRequest = serde_json::from_value(json!({
             "schemas": [SCIM_GROUP_SCHEMA], // Wrong schema!
@@ -2106,7 +2106,7 @@ mod tests {
     #[test]
     fn create_user_body_requires_no_id_and_defaults_active_true() {
         // A minimal, ordinary IdP create body: userName only. No id, no
-        // active, no emails — previously this failed deserialization
+        // active, no emails, previously this failed deserialization
         // because the shared DTO required the server-assigned id.
         let request: UserUpsertRequest =
             serde_json::from_value(json!({ "userName": "carol@example.com" })).unwrap();
@@ -2146,7 +2146,7 @@ mod tests {
     #[test]
     fn client_supplied_id_is_ignored_by_request_dto() {
         // RFC 7643 §7: id is read-only / server-assigned. A client that
-        // (incorrectly) sends one must not break the request — and must not
+        // (incorrectly) sends one must not break the request, and must not
         // get its own id back: the DTO simply has no id field.
         let request: UserUpsertRequest = serde_json::from_value(json!({
             "id": "attacker-chosen-id",
@@ -2275,7 +2275,7 @@ mod tests {
 
     #[test]
     fn status_for_active_maps_the_scim_lifecycle() {
-        // The single mapping shared by create/replace/patch — a
+        // The single mapping shared by create/replace/patch, a
         // provisioned-inactive user must land deactivated, not active.
         assert_eq!(status_for_active(true), "active");
         assert_eq!(status_for_active(false), "deactivated");
@@ -2487,7 +2487,7 @@ mod tests {
 
     #[test]
     fn plan_user_patch_invalid_op_rejects_whole_request() {
-        // F42 atomicity: one invalid operation rejects everything — because
+        // F42 atomicity: one invalid operation rejects everything, because
         // planning happens before any write, nothing is applied.
         let request = patch_body(json!([
             { "op": "replace", "path": "active", "value": false },
@@ -2553,7 +2553,7 @@ mod tests {
     // ── F42: RFC 7644 §3.5.2 PatchOp schemas attribute ──────────
 
     /// A standard IdP PATCH body (with the required schemas attribute)
-    /// deserializes cleanly — it used to be rejected wholesale by
+    /// deserializes cleanly, it used to be rejected wholesale by
     /// deny_unknown_fields.
     #[test]
     fn patch_request_accepts_the_rfc_schemas_attribute() {
@@ -2580,7 +2580,7 @@ mod tests {
 
     // ── F42: parameterized user-patch UPDATE ─────────────────────
 
-    /// The SET clause of a built UPDATE (between SET and WHERE) — the only
+    /// The SET clause of a built UPDATE (between SET and WHERE), the only
     /// place a column may be written.
     fn set_clause_of(sql: &str) -> String {
         sql.split_once(" WHERE ")
@@ -2588,7 +2588,7 @@ mod tests {
             .unwrap_or_else(|| sql.to_string())
     }
 
-    /// A name-only patch writes ONLY the name column — omitted fields are
+    /// A name-only patch writes ONLY the name column, omitted fields are
     /// preserved under concurrency, so a stale folded snapshot can never
     /// restore a deactivated status.
     #[test]
@@ -2612,7 +2612,7 @@ mod tests {
         assert_eq!(binds.len(), 1);
     }
 
-    /// A deactivation patch writes ONLY the status column — the concurrent
+    /// A deactivation patch writes ONLY the status column, the concurrent
     /// name patch scenario from the finding can no longer resurrect
     /// active=true, and vice versa.
     #[test]
@@ -2727,7 +2727,7 @@ mod tests {
     fn list_response_metadata_reports_normalized_start_and_actual_count() {
         // Metadata must not contradict the query (F43): startIndex is the
         // normalized value and itemsPerPage is the number of resources
-        // actually returned — never the raw requested count.
+        // actually returned, never the raw requested count.
         let two = vec![
             canonical_scim_user("u-1".into(), "a@example.com".into(), None, true),
             canonical_scim_user("u-2".into(), "b@example.com".into(), None, false),
@@ -2991,10 +2991,10 @@ mod tests {
         }
 
         // The shared `<db>_api` database now carries the canonical production
-        // chain (users.id UUID — matching this route's `Uuid::parse_str`
+        // chain (users.id UUID, matching this route's `Uuid::parse_str`
         // convention), so the tenant-scoping DB assertions always run.
 
-        // tenants.id is VARCHAR(26) — keep the generated IDs within bounds.
+        // tenants.id is VARCHAR(26), keep the generated IDs within bounds.
         let tenant_a = format!("ten_scm_{}", &Uuid::new_v4().simple().to_string()[..18]);
         let tenant_b = format!("ten_scn_{}", &Uuid::new_v4().simple().to_string()[..18]);
         for tenant_id in [&tenant_a, &tenant_b] {
@@ -3075,7 +3075,7 @@ mod tests {
 
     /// Create a throwaway database carrying the REAL production schema:
     /// the full canonical migration chain applied through the production
-    /// migrator (`migrator::test_support::fresh_canonical_db` — audit F01),
+    /// migrator (`migrator::test_support::fresh_canonical_db`, audit F01),
     /// i.e. the exact users.id UUID / tenant_id VARCHAR(26) shape the SCIM
     /// `$1::uuid` casts and status writes target, plus every constraint a
     /// deploy installs. Returns the pool plus what `drop_test_database`
@@ -3579,7 +3579,7 @@ mod tests {
     }
 
     /// RFC 7644 §3.1 + docs/api/endpoints/scim.md: create/replace/patch
-    /// bodies arrive as `Content-Type: application/scim+json` — the media
+    /// bodies arrive as `Content-Type: application/scim+json`, the media
     /// type every IdP sends. `ScimBody` must retag it onto the standard JSON
     /// extractor instead of refusing it with 415.
     #[tokio::test]
@@ -3906,7 +3906,7 @@ mod tests {
             assert_eq!(body["detail"], "user not found");
         }
 
-        // PATCH: an invalid operation is rejected ATOMICALLY — nothing in
+        // PATCH: an invalid operation is rejected ATOMICALLY, nothing in
         // the request may be applied.
         let target = seed_router_user(
             pool,
@@ -3997,7 +3997,7 @@ mod tests {
         fixture.cleanup().await;
     }
 
-    /// An admin/owner's identity must not be movable by a SCIM write — for
+    /// An admin/owner's identity must not be movable by a SCIM write, for
     /// PUT and PATCH alike, and the row must be unchanged after the refusal.
     #[tokio::test]
     async fn scim_privileged_email_change_is_refused_and_row_is_untouched() {

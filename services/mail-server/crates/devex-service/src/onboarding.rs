@@ -1,4 +1,4 @@
-//! Developer onboarding — quickstart guides, checklists, API key setup instructions.
+//! Developer onboarding, quickstart guides, checklists, API key setup instructions.
 
 use serde::{Deserialize, Serialize};
 
@@ -42,7 +42,7 @@ pub struct OnboardingChecklist {
 
 // ── Service ──────────────────────────────────────────────────────────────────
 
-/// Onboarding service — stateless helpers (state stored externally).
+/// Onboarding service, stateless helpers (state stored externally).
 #[derive(Debug, Clone)]
 pub struct OnboardingService;
 
@@ -127,7 +127,7 @@ client.emails().send(SendEmailParams.builder()
 
         QuickstartGuide {
             language: language.to_string(),
-            title: format!("ApexMail Quickstart — {}", language),
+            title: format!("ApexMail Quickstart, {}", language),
             estimated_minutes: 5,
             steps: vec![
                 QuickstartStep {
@@ -259,14 +259,14 @@ client.emails().send(SendEmailParams.builder()
 3. Click **Create API Key**.
 4. Give it a descriptive name (e.g. "Production Backend").
 5. Select the scopes you need:
-   - `messages:write` — Send emails
-   - `messages:read` — Read email status
-   - `domains:read` — List domains
-   - `domains:write` — Manage domains
-   - `analytics:read` — View analytics
-   - `webhooks:write` — Manage webhooks
-   - `templates:write` — Manage templates
-6. Click **Create** and copy the key immediately — it won't be shown again.
+   - `messages:write`, Send emails
+   - `messages:read`, Read email status
+   - `domains:read`, List domains
+   - `domains:write`, Manage domains
+   - `analytics:read`, View analytics
+   - `webhooks:write`, Manage webhooks
+   - `templates:write`, Manage templates
+6. Click **Create** and copy the key immediately, it won't be shown again.
 
 ## Using Your API Key
 Include the key in the `Authorization` header:

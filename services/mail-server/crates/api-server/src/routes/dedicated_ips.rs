@@ -7,8 +7,8 @@
 //! Only plans with `dedicated_ip = true` in their feature set may
 //! allocate IPs. IPs within the plan's `dedicated_ip_count` are
 //! marked `included` (no charge); additional IPs are `pending_charge`
-//! and billed at the canonical add-on ladder — €49/mo for the first
-//! address, €69/mo for each additional (USD $55/$75) — via the billing
+//! and billed at the canonical add-on ladder, €49/mo for the first
+//! address, €69/mo for each additional (USD $55/$75), via the billing
 //! service.
 //!
 //! ## Hetzner Cloud integration
@@ -138,7 +138,7 @@ pub struct ListIpsQuery {
     pub offset: i64,
 }
 
-/// Dedicated IP add-on price in cents/month — the canonical catalog's
+/// Dedicated IP add-on price in cents/month, the canonical catalog's
 /// first-address price (owner price table 2026-10-15; the same constant the
 /// `ip_provider` module exposes, so all modules quote one ladder).
 const ADD_ON_PRICE_CENTS: i32 = platform_catalog::DEDICATED_IP_FIRST_CENTS as i32;
@@ -148,7 +148,7 @@ const ADD_ON_ADDITIONAL_PRICE_CENTS: i32 = platform_catalog::DEDICATED_IP_ADDITI
 
 // ─── Handlers ──────────────────────────────────────────────────
 
-/// `POST /v1/dedicated-ips` — Allocate a new dedicated IP for the tenant.
+/// `POST /v1/dedicated-ips`, Allocate a new dedicated IP for the tenant.
 /// Plan-gated:checks subscription → plan → `dedicated_ip` feature flag.
 /// IPs within `dedicated_ip_count` are `included`; extras are `pending_charge`.
 async fn allocate_ip(
@@ -159,8 +159,8 @@ async fn allocate_ip(
     require_scopes(&auth, &["dedicated_ips:write"])?;
 
     // Entitlement gate: dedicated IPs are a plan capability (403 Forbidden
-    // without `dedicated_ip`). `dedicated_ip_count` is NOT a hard limit — it
-    // is a billing inclusion count (extras are charged) — so it is not used
+    // without `dedicated_ip`). `dedicated_ip_count` is NOT a hard limit, it
+    // is a billing inclusion count (extras are charged), so it is not used
     // as a capacity gate here.
     crate::entitlements::require_feature(&state, &auth.tenant_id, FeatureKey::DedicatedIp).await?;
 
@@ -204,7 +204,7 @@ async fn allocate_ip(
     Ok((StatusCode::CREATED, Json(row.into_response())))
 }
 
-/// `GET /v1/dedicated-ips` — List tenant's dedicated IPs with allocation summary.
+/// `GET /v1/dedicated-ips`, List tenant's dedicated IPs with allocation summary.
 /// Returns the enriched `ListResponse` envelope expected by the console.
 async fn list_ips(
     State(state): State<AppState>,
@@ -284,7 +284,7 @@ async fn list_ips(
     }))
 }
 
-/// `DELETE /v1/dedicated-ips/:id` — Release a dedicated IP.
+/// `DELETE /v1/dedicated-ips/:id`, Release a dedicated IP.
 /// Deletes the Hetzner floating IP, marks billing as `pending_cancel`,
 /// and retires the DB record. If this was the tenant's last dedicated IP,
 /// the routing cache trigger reverts them to SES shared sending.
@@ -313,7 +313,7 @@ async fn release_ip(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// `POST /v1/dedicated-ips/:id/warmup` — Start or resume IP warmup.
+/// `POST /v1/dedicated-ips/:id/warmup`, Start or resume IP warmup.
 /// Updates the warmup tracking in the database. Warmup is enforced by
 /// the unified delivery worker's IP rotation and warmup schedule.
 async fn start_warmup(
@@ -436,7 +436,7 @@ fn calculate_reputation_score(
 fn ip_provider_to_api_error(e: IpProviderError) -> ApiError {
     match e {
         IpProviderError::PlanNotEligible => ApiError::Forbidden(
-            "your plan does not include dedicated IP access — please upgrade to Pro or above"
+            "your plan does not include dedicated IP access, please upgrade to Pro or above"
                 .into(),
         ),
         IpProviderError::LimitReached { limit, .. } => ApiError::BadRequest(format!(
@@ -451,7 +451,7 @@ fn ip_provider_to_api_error(e: IpProviderError) -> ApiError {
             ApiError::Internal("failed to communicate with IP provisioning service".into())
         }
         IpProviderError::NotConfigured => ApiError::ServiceUnavailable(
-            "dedicated IP provisioning is not configured — set HETZNER_API_TOKEN".into(),
+            "dedicated IP provisioning is not configured, set HETZNER_API_TOKEN".into(),
         ),
         IpProviderError::Database(err) => {
             tracing::error!(error = %err, "database error in dedicated IP operation");
@@ -460,30 +460,30 @@ fn ip_provider_to_api_error(e: IpProviderError) -> ApiError {
         IpProviderError::InvalidStateTransition { from, to } => {
             tracing::warn!(from = %from, to = %to, "dedicated IP state transition refused");
             ApiError::Conflict(
-                "dedicated IP is not ready for this operation — complete provisioning first".into(),
+                "dedicated IP is not ready for this operation, complete provisioning first".into(),
             )
         }
         IpProviderError::NoVerifiedDomain { ref tenant_id } => {
             tracing::warn!(tenant_id = %tenant_id, "dedicated IP allocation refused: no verified domain");
             ApiError::BadRequest(
-                "verify a sending domain before allocating a dedicated IP — rDNS cannot be configured without one"
+                "verify a sending domain before allocating a dedicated IP, rDNS cannot be configured without one"
                     .into(),
             )
         }
         IpProviderError::AttachFailed(msg) => {
             tracing::error!(error = %msg, "dedicated IP attach failed; provider resource released");
             ApiError::ServiceUnavailable(
-                "could not attach the dedicated IP to an MTA server — the address was released, please retry"
+                "could not attach the dedicated IP to an MTA server, the address was released, please retry"
                     .into(),
             )
         }
         IpProviderError::AttachTargetUnavailable => ApiError::ServiceUnavailable(
-            "dedicated IP provisioning has no MTA server configured — contact support".into(),
+            "dedicated IP provisioning has no MTA server configured, contact support".into(),
         ),
         IpProviderError::RdnsNotVerified { ip, reason } => {
             tracing::error!(ip = %ip, reason = %reason, "dedicated IP rDNS verification failed");
             ApiError::ServiceUnavailable(
-                "the dedicated IP's reverse DNS could not be verified — the address was released, please retry"
+                "the dedicated IP's reverse DNS could not be verified, the address was released, please retry"
                     .into(),
             )
         }
@@ -500,10 +500,10 @@ fn ip_provider_to_api_error(e: IpProviderError) -> ApiError {
                 ip = %ip,
                 provider_resource_id = ?provider_resource_id,
                 reason = %reason,
-                "dedicated IP provider cleanup failed — orphaned resource recorded as cleanup_failed"
+                "dedicated IP provider cleanup failed, orphaned resource recorded as cleanup_failed"
             );
             ApiError::Internal(
-                "provisioning failed and provider cleanup is pending — support has been alerted"
+                "provisioning failed and provider cleanup is pending, support has been alerted"
                     .into(),
             )
         }
@@ -824,7 +824,7 @@ mod tests {
     #[test]
     fn test_add_on_price_matches_the_canonical_catalog_ladder() {
         // Owner price table 2026-10-15: €49 first / €69 additional
-        // (USD $55/$75) — the retired flat $30 add-on must never return.
+        // (USD $55/$75), the retired flat $30 add-on must never return.
         assert_eq!(
             ADD_ON_PRICE_CENTS, 4_900,
             "add-on price must be €49.00 = 4900 cents"
@@ -1265,7 +1265,7 @@ mod adversarial_tests {
             assert!(body["estimatedCompletion"].as_str().is_some());
         } else {
             // The provider's state machine may refuse from a non-startable
-            // state — prove it refused with a mapped error, never a 500.
+            // state, prove it refused with a mapped error, never a 500.
             assert!(
                 status == StatusCode::CONFLICT || status == StatusCode::BAD_REQUEST,
                 "{status}: {body}"
@@ -1378,8 +1378,8 @@ mod adversarial_tests {
     }
 
     /// The allocation route through the full provider wire: create →
-    /// attach → PTR set, and then — because this suite never resolves real
-    /// DNS — the PTR verification fails and the provider compensates by
+    /// attach → PTR set, and then, because this suite never resolves real
+    /// DNS, the PTR verification fails and the provider compensates by
     /// releasing the floating IP. The route must map that to a 503, never
     /// leak a 500, and the tenant must end with NO occupying IP row.
     #[tokio::test]
@@ -1411,7 +1411,7 @@ mod adversarial_tests {
         );
 
         // The failed provisioning leaves at most a terminal bookkeeping row
-        // (cleanup_failed/retired) — never an occupying one.
+        // (cleanup_failed/retired), never an occupying one.
         let statuses: Vec<(String,)> =
             sqlx::query_as("SELECT status FROM dedicated_ips WHERE tenant_id = $1")
                 .bind(&tenant)
@@ -1485,7 +1485,7 @@ mod adversarial_tests {
     }
 
     /// `build_allocation_summary` reports no allocation for a tenant that
-    /// has vanished (defensive NULL arm — reachable only across a
+    /// has vanished (defensive NULL arm, reachable only across a
     /// concurrent tenant deletion).
     #[tokio::test]
     async fn allocation_summary_for_a_missing_tenant_is_none() {

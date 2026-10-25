@@ -241,12 +241,12 @@ pub fn token_blacklist_key(token: &str) -> String {
 //
 // P1 fix (swallowed outages): both probes used to end in
 // `.await.unwrap_or(false)`, making "table absent" indistinguishable from
-// "database unreachable / pool exhausted / permission denied" — an outage
+// "database unreachable / pool exhausted / permission denied", an outage
 // masqueraded as a healthy empty state. They now return the probe error and
 // every caller decides explicitly:
 //
-// * `Ok(false)` — genuine absence → the legacy / empty / fallback SQL path;
-// * `Err(_)`    — degraded → the caller's honest error contract (a 5xx for
+// * `Ok(false)`, genuine absence → the legacy / empty / fallback SQL path;
+// * `Err(_)`   , degraded → the caller's honest error contract (a 5xx for
 //   admin APIs, a "Data unavailable" render for the web layer), NEVER a
 //   fabricated healthy zero.
 //
@@ -254,12 +254,12 @@ pub fn token_blacklist_key(token: &str) -> String {
 // schema is fixed for the life of the process (the real migrator runs before
 // `up`), so a probe result is a *capability*. The first successful probe for
 // a given database is memoized in [`CAPABILITY_CACHE`] and every later call
-// — including per-request probes on hot admin paths — reads the cached
+//, including per-request probes on hot admin paths, reads the cached
 // capability instead of re-querying the catalog. Probe ERRORS are never
 // cached: a degraded database must stay detectable on every call. (The cache
 // is populated lazily on first use rather than at state build: `state.rs` is
-// outside this fix's ownership boundary, and the observable behavior — one
-// catalog query per database per capability per process — is identical.)
+// outside this fix's ownership boundary, and the observable behavior, one
+// catalog query per database per capability per process, is identical.)
 
 /// Memoized schema capabilities keyed by (database identity, probe kind).
 static CAPABILITY_CACHE: std::sync::OnceLock<
@@ -296,7 +296,7 @@ pub(crate) fn pool_identity(db: &sqlx::PgPool) -> String {
 /// Check whether a table exists in the `public` schema.
 ///
 /// `Ok(false)` is a definitive answer (memoized per process per database);
-/// `Err` means the catalog itself could not be consulted — propagate it, do
+/// `Err` means the catalog itself could not be consulted, propagate it, do
 /// not treat the table as absent.
 pub async fn table_exists(db: &sqlx::PgPool, name: &str) -> Result<bool, sqlx::Error> {
     let key = (pool_identity(db), format!("table:{name}"));
@@ -438,7 +438,7 @@ mod tests {
         assert_eq!(etag, "etag-2");
         assert_eq!(body, b"body-2");
 
-        // `Default` builds the same empty cache — never a shared global.
+        // `Default` builds the same empty cache, never a shared global.
         let default: ResponseCache = ResponseCache::default();
         assert!(default.get("key").is_none());
     }
@@ -493,7 +493,7 @@ mod tests {
     fn decode_cursor_rejects_odd_length_and_non_hex_input() {
         // An odd-length string can never be split into byte-sized hex pairs.
         assert_eq!(decode_cursor("abc"), None, "odd length is malformed");
-        // Even length but not valid hex is refused too — never a panic.
+        // Even length but not valid hex is refused too, never a panic.
         assert_eq!(decode_cursor("zz"), None, "non-hex pairs are rejected");
         // The empty cursor decodes to the empty string (first page).
         assert_eq!(decode_cursor(""), Some(String::new()));
@@ -526,7 +526,7 @@ mod tests {
             axum::http::HeaderValue::from_static("theme=dark; session = abc123 "),
         );
         // A second Cookie header (RFC 6265 allows several) containing a
-        // pair with NO `=` at all — it must be skipped, never panic.
+        // pair with NO `=` at all, it must be skipped, never panic.
         headers.append(
             "cookie",
             axum::http::HeaderValue::from_static("junk-noequals"),
@@ -543,7 +543,7 @@ mod tests {
             "the matching pair wins across separators"
         );
         // "missing" walks every pair: the two named pairs miss (per-pair
-        // None arm) and "junk-noequals" has no `=` (skip arm) — still a
+        // None arm) and "junk-noequals" has no `=` (skip arm), still a
         // clean absence, never a panic.
         assert_eq!(extract_cookie(&headers, "missing"), None);
         assert_eq!(extract_cookie(&headers, "junk-noequals"), None);

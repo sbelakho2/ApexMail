@@ -233,10 +233,10 @@ impl DeliveryService {
     /// SM10 F16: ONE schedule for every retryable (4xx) response, matching
     /// the email processor's ACTUAL soft-bounce requeue
     /// (`worker-processors` `handle_soft_bounce`: `retry_delay * 2^attempt`
-    /// with a ±20% anti-herd jitter applied THERE — this oracle answers the
+    /// with a ±20% anti-herd jitter applied THERE, this oracle answers the
     /// canonical base). The previous per-type branches promised a fixed
     /// 300 s greylist delay and server-honoured rate-limit delays that no
-    /// delivery path ever used — a classification oracle whose answers
+    /// delivery path ever used, a classification oracle whose answers
     /// drift from the behavior it mirrors is negative value. The parsed
     /// `suggested_retry_delay` stays on [`SMTPResponse`] as metadata.
     pub fn calculate_retry_schedule(
@@ -943,7 +943,7 @@ mod tests {
         let svc = offline_service();
         // SM10 F16: the schedule matches the email processor, which requeues
         // EVERY 4xx on the same exponential base and ignores server retry
-        // hints — so a parsed "retry after 2 minutes" no longer bends the
+        // hints, so a parsed "retry after 2 minutes" no longer bends the
         // schedule (it stays on SMTPResponse as metadata).
         let mut resp = svc.parse_smtp_response(421, "retry after 2 minutes");
         resp.response_type = ResponseType::RateLimit;
@@ -1000,7 +1000,7 @@ mod tests {
 
     // ── SM10 F16: parity with the email processor's ACTUAL behavior ────────
     //
-    // SOURCE OF TRUTH duplicated by value — a shared constant would need a
+    // SOURCE OF TRUTH duplicated by value, a shared constant would need a
     // mail-common coupling that is out of bounds for this fix. If the email
     // processor's schedule changes, these duplicated constants (and the
     // worker's own tests) must move together:
@@ -1028,7 +1028,7 @@ mod tests {
     }
 
     /// EVERY retryable (4xx) response type must produce the email
-    /// processor's schedule — the worker classifies greylisted, rate-limited
+    /// processor's schedule, the worker classifies greylisted, rate-limited
     /// and plain-temporary replies alike as Soft and requeues them on ONE
     /// exponential ladder; past the retry budget nothing is scheduled (the
     /// worker hard-bounces).
@@ -1072,7 +1072,7 @@ mod tests {
 
     /// Classification parity: the worker's `classify_send_failure` sends
     /// every 4xx to the retryable Soft arm and every 5xx to the terminal
-    /// Hard arm — `parse_smtp_response` must agree across the full ranges.
+    /// Hard arm, `parse_smtp_response` must agree across the full ranges.
     #[test]
     fn smtp_code_ranges_classify_like_the_worker() {
         let svc = TestDelivery::new();

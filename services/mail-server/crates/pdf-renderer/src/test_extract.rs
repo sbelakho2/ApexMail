@@ -9,7 +9,7 @@ use crate::world::TypstWorld;
 
 /// Extract the reading-order text of a rendered PDF with an independent
 /// extractor. Panics with the extractor's error when the bytes are not a
-/// readable PDF — a render that cannot be extracted is a failure, not a skip.
+/// readable PDF, a render that cannot be extracted is a failure, not a skip.
 pub fn extract_text(pdf: &[u8]) -> String {
     pdf_extract::extract_text_from_mem(pdf).expect("the rendered PDF must be extractable")
 }

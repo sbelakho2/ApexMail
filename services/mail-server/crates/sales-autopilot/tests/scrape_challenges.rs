@@ -4,7 +4,7 @@
 //! What these tests pin (the plan's closing invariant):
 //!
 //! * every challenge family creates a blocked-source queue row and ZERO
-//!   candidate rows — the fixtures embed a plausible JSON-LD `Organization`,
+//!   candidate rows, the fixtures embed a plausible JSON-LD `Organization`,
 //!   so "zero data rows" proves the blocked body was never parsed;
 //! * a challenge is never counted as an empty result (the run status is the
 //!   classification, not `succeeded` with zero items);
@@ -654,7 +654,7 @@ async fn ordinary_page_yields_normalized_deduped_candidates_with_provenance() {
         rows.len(),
         3,
         "exactly three rows: the merged Acme, the name-only organization and the \
-         unclaimed mailto address — no duplicate of the page's own repetition"
+         unclaimed mailto address, no duplicate of the page's own repetition"
     );
 
     cleanup(&pool, &tenant).await;
@@ -860,7 +860,7 @@ async fn transient_blocks_retry_then_the_host_backoff_refuses_the_next_fetch() {
     assert!(consecutive_blocks >= 1);
     assert!(blocked_until.unwrap() > chrono::Utc::now(), "a real window");
 
-    // The very next fetch is refused by the backoff — and no request is made.
+    // The very next fetch is refused by the backoff, and no request is made.
     let refused = client
         .fetch(&fixture.url("/page"))
         .await
@@ -870,7 +870,7 @@ async fn transient_blocks_retry_then_the_host_backoff_refuses_the_next_fetch() {
     assert_eq!(fixture.hit_count("/page"), 2, "no request past the backoff");
 
     // A FRESH client (a new process, or the per-request runner the service
-    // builds) hydrates the persisted window and is refused too — a restart
+    // builds) hydrates the persisted window and is refused too, a restart
     // does not hand the host a clean slate.
     let restarted = ScrapeClient::new(config).expect("client");
     let source = PublicWebSource::new(pool.clone(), &tenant, vec![fixture.url("/page")], restarted);

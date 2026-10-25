@@ -9,11 +9,11 @@
 //! declared here, making their features unreachable while the scope-guard
 //! test still scanned (and passed on) the dead files. Those were either
 //! mounted (see above) or deleted:
-//! - `health.rs` — deleted: overlapped the live `system_health` router and
+//! - `health.rs`, deleted: overlapped the live `system_health` router and
 //!   depended on a background loop that was never spawned.
-//! - `estonia_ou.rs` — deleted: VAT/KMD filings are served live by `vat`,
+//! - `estonia_ou.rs`, deleted: VAT/KMD filings are served live by `vat`,
 //!   `compliance_overview`, and `calendar`.
-//! - `reports.rs` — deleted: depended on the never-declared crate-level
+//! - `reports.rs`, deleted: depended on the never-declared crate-level
 //!   `admin_report_scheduler` module; report export is served live by
 //!   `analytics_export`.
 
@@ -72,7 +72,7 @@ mod tests {
     ///
     /// The guard below deliberately checks DECLARED modules (the set the
     /// compiler actually builds and mounts), not "whatever .rs files happen
-    /// to lie in this directory" — scanning the directory produced false
+    /// to lie in this directory", scanning the directory produced false
     /// assurance while unreachable modules sat on disk.
     fn declared_modules() -> Vec<String> {
         let source = include_str!("mod.rs");
@@ -145,7 +145,7 @@ mod tests {
     /// `needless_borrow` cleanup legitimately rewrites `require_scopes(&auth,
     /// …)` to `require_scopes(auth, …)` when the parameter is already a
     /// reference, and a literal-substring gate would fail a guarded file
-    /// (2026-10-09 review fold — the `mailboxes` false positive).
+    /// (2026-10-09 review fold, the `mailboxes` false positive).
     fn missing_scope_guards_of(module_sources: &[(String, String)]) -> Vec<String> {
         module_sources
             .iter()
@@ -194,7 +194,7 @@ mod tests {
 
         // The scope-scan decision: a module source with the wildcard guard
         // passes (in either spelling clippy allows); one without the guard —
-        // and one guarding only a NARROW scope — is flagged by name.
+        // and one guarding only a NARROW scope, is flagged by name.
         let sources = vec![
             (
                 "audit".to_string(),

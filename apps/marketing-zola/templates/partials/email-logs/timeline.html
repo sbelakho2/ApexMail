@@ -1,13 +1,13 @@
 {# The flagship timeline (review §28): a real-shaped message trace with the
    right-side context panel and action bar. Timestamps, providers, SMTP
-   codes, TLS state, pool names — real technical detail, no decorative
+   codes, TLS state, pool names, real technical detail, no decorative
    technicality. Numeric columns are tabular with zero tracking (§6).
-   The rows are static markup: the data never varies per render — the section
+   The rows are static markup: the data never varies per render, the section
    is labelled as a worked EXAMPLE and the action strip is illustrative, not a
    live control surface. #}
 {# ARK alignment: dense tool section + container; the trace keeps its
    structure (timeline rows, context panel, illustrative action strip);
-   inline width styles are gone — tabular-nums carries the numerals. #}
+   inline width styles are gone, tabular-nums carries the numerals. #}
 <section id="message-timeline" class="apex-mkt-section apex-mkt-section--dense scroll-mt-20" aria-label="Message timeline example">
   <div class="apex-mkt-container">
     <div class="flex flex-wrap items-baseline justify-between gap-3 mb-6">
@@ -69,7 +69,7 @@
     <p class="mt-4 max-w-3xl">
       This is a worked example of the console timeline. Every row in a real trace is backed by a stored event:
       SMTP transcripts, TLS state, pool and selector are recorded per attempt. Diagnostics prove that the recipient
-      mail server accepted the message — recipient-MX acceptance is not inbox placement: acceptance says the
+      mail server accepted the message, recipient-MX acceptance is not inbox placement: acceptance says the
       receiving server took the message, not which folder it landed in. Use a placement test for folder outcomes.
     </p>
   </div>

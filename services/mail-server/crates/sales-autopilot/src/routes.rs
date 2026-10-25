@@ -63,10 +63,10 @@ pub struct AppState {
     pub config: SalesConfig,
     /// In-memory rate limit fallback used when Redis is unavailable.
     pub rate_limit_fallback: Arc<Mutex<HashMap<String, RateLimitEntry>>>,
-    /// §12 — the configured evidence-grounded intelligence provider (or the
+    /// §12, the configured evidence-grounded intelligence provider (or the
     /// deterministic offline implementation when no AI service is configured).
     pub intelligence: Arc<dyn SalesIntelligence>,
-    /// §13/§14 — the structured message strategist, bound to the canonical
+    /// §13/§14, the structured message strategist, bound to the canonical
     /// verified knowledge base.
     pub strategist: Arc<MessageStrategist>,
 }
@@ -84,7 +84,7 @@ const ENRICH_RATE_LIMIT_WINDOW_SECS: u64 = 60;
 const RATE_LIMITER_REDIS_PREFIX: &str = "apexmail:enrichment_rate:";
 
 // ---------------------------------------------------------------------------
-// Tenant-ID extractor — reads `x-tenant-id` from request headers.
+// Tenant-ID extractor, reads `x-tenant-id` from request headers.
 // ---------------------------------------------------------------------------
 
 /// A validated tenant ID extracted from the `x-tenant-id` request header.
@@ -150,7 +150,7 @@ pub fn router(state: AppState) -> Router {
         .route("/campaigns/:id/pause", post(pause_campaign))
         .route("/campaigns/:id/dry-run", post(dry_run_campaign))
         // Public unsubscribe endpoints (CAN-SPAM / RFC 8058). Auth is by
-        // HMAC-signed token, not the shared service token — see
+        // HMAC-signed token, not the shared service token, see
         // `require_service_token`'s path exemption and the handlers below.
         .route("/u/:token", get(unsubscribe_get).post(unsubscribe_post))
         // F39 (batch 2): the manual unsubscribe is a two-step, no-JS flow —
@@ -268,7 +268,7 @@ async fn require_service_token(
 ) -> Result<Response, StatusCode> {
     // Skip auth for health checks and the PUBLIC unsubscribe endpoints
     // (`/u/:token` and, batch 2, its `/u/:token/confirm` confirmation
-    // submit) — recipient clicks arrive from mail clients with no service
+    // submit), recipient clicks arrive from mail clients with no service
     // token; authenticity comes from the HMAC token signature. The
     // `/u/` prefix match covers BOTH routes.
     let path = req.uri().path();
@@ -297,7 +297,7 @@ async fn require_service_token(
         // the CALLER; the tenant claim in `x-tenant-id` is then hard-checked
         // against the system tenant. Customer automation execution lives in
         // `worker-processors`, so there is no customer surface left to serve
-        // — a non-system tenant claim cannot be honoured and is refused
+        //, a non-system tenant claim cannot be honoured and is refused
         // outright. Boot enforces the same restriction for the deployment
         // configuration (`config::require_system_tenant_scope`).
         if let Some(tenant) = req
@@ -350,7 +350,7 @@ async fn enforce_enrichment_rate_limit(
         Err(e) => {
             warn!(
                 error = %e,
-                "redis pool unavailable — using in-memory fallback rate limiter"
+                "redis pool unavailable, using in-memory fallback rate limiter"
             );
             return enforce_in_memory_rate_limit(fallback, tenant_id);
         }
@@ -411,8 +411,8 @@ fn enforce_in_memory_rate_limit(
     let guard = match fallback {
         Some(g) => g,
         None => {
-            // No fallback available — allow the request (fully degraded).
-            warn!("rate limit fallback not configured — allowing enrichment request");
+            // No fallback available, allow the request (fully degraded).
+            warn!("rate limit fallback not configured, allowing enrichment request");
             return Ok(());
         }
     };
@@ -516,7 +516,7 @@ async fn create_lead(
             .await?;
 
         // SA-1: Wire lead scoring into the creation pipeline.
-        // Previously, `score_lead()` existed as dead code — it was defined
+        // Previously, `score_lead()` existed as dead code, it was defined
         // in `crm.rs` and re-exported by `crm_pg.rs` but never called from
         // any route handler, so all leads were created with score: 0.
         //
@@ -579,7 +579,7 @@ async fn compute_lead_score(
     let csw = config.lead_scoring.company_size_weight;
     let rw = config.lead_scoring.recency_weight;
 
-    // Attempt enrichment. This is best-effort — failure is non-fatal.
+    // Attempt enrichment. This is best-effort, failure is non-fatal.
     let company = enrichment.enrich_lead(email).await.ok();
 
     if let Some(ref c) = company {
@@ -795,7 +795,7 @@ async fn enrich(
         //
         // When the database is unavailable the enrichment answer is still
         // returned (matching the historical non-fatal cache-write semantics),
-        // but it is explicitly unpersisted and logged — never silent.
+        // but it is explicitly unpersisted and logged, never silent.
         let company = match state
             .enrichment
             .enrich_persisted(&state.db, &tenant_id, &domain, email, None)
@@ -807,7 +807,7 @@ async fn enrich(
                     tenant_id = %tenant_id,
                     domain = %domain,
                     error = %error,
-                    "enrichment persistence unavailable — returning unpersisted company"
+                    "enrichment persistence unavailable, returning unpersisted company"
                 );
                 state.enrichment.enrich_company(&domain).await?
             }
@@ -862,7 +862,7 @@ fn trimmed_terms(values: Option<Vec<String>>, max_terms: usize) -> Vec<String> {
         .collect()
 }
 
-/// `POST /discovery/jobs` — create a queued discovery job.
+/// `POST /discovery/jobs`, create a queued discovery job.
 async fn create_discovery_job(
     State(state): State<Arc<AppState>>,
     tenant_id: TenantId,
@@ -910,7 +910,7 @@ async fn create_discovery_job(
     .await
 }
 
-/// `GET /discovery/jobs/:id` — tenant-scoped job status.
+/// `GET /discovery/jobs/:id`, tenant-scoped job status.
 async fn get_discovery_job(
     State(state): State<Arc<AppState>>,
     tenant_id: TenantId,
@@ -946,7 +946,7 @@ async fn get_discovery_job(
     .await
 }
 
-/// `POST /discovery/jobs/:id/run` — execute one bounded batch (resumes from
+/// `POST /discovery/jobs/:id/run`, execute one bounded batch (resumes from
 /// the persisted cursor; a batch may complete the job).
 async fn run_discovery_job(
     State(state): State<Arc<AppState>>,
@@ -999,7 +999,7 @@ struct HostHealthQuery {
     limit: Option<i64>,
 }
 
-/// `GET /discovery/blocked-sources` — the persisted blocked-source queue,
+/// `GET /discovery/blocked-sources`, the persisted blocked-source queue,
 /// newest evidence first. Every row carries the classification, the HTTP
 /// status, the challenge markers that matched and the occurrence count.
 async fn list_scrape_blocked_sources(
@@ -1046,14 +1046,14 @@ async fn list_scrape_blocked_sources(
 struct ReviewBlockedSourceBody {
     /// `solved` | `dismissed` | `reopen`.
     action: String,
-    /// Who decided — required, because an unattributed scraping decision is
+    /// Who decided, required, because an unattributed scraping decision is
     /// not auditable.
     reviewer: String,
     #[serde(default)]
     note: Option<String>,
 }
 
-/// `POST /discovery/blocked-sources/:id/review` — record an operator's
+/// `POST /discovery/blocked-sources/:id/review`, record an operator's
 /// decision on one blocked source.
 async fn review_scrape_blocked_source(
     State(state): State<Arc<AppState>>,
@@ -1100,7 +1100,7 @@ struct SolveBody {
     operator: Option<String>,
 }
 
-/// `POST /discovery/blocked-sources/:id/solve` — attempt the operator-gated
+/// `POST /discovery/blocked-sources/:id/solve`, attempt the operator-gated
 /// solver hook. Every attempt (including every refusal) is audited; the hook
 /// itself is disabled unless `SCRAPE_CAPTCHA_SOLVER_URL` is configured AND
 /// the host has been opted in through `/discovery/hosts/:host/solver-optin`.
@@ -1143,7 +1143,7 @@ async fn solve_scrape_blocked_source(
     .await
 }
 
-/// `GET /discovery/hosts` — persistent per-host scraping health: consecutive
+/// `GET /discovery/hosts`, persistent per-host scraping health: consecutive
 /// blocks, the backoff window, the last classification/status and the solver
 /// opt-in.
 async fn list_scrape_host_health(
@@ -1174,12 +1174,12 @@ async fn list_scrape_host_health(
 #[serde(deny_unknown_fields)]
 struct SolverOptInBody {
     enabled: bool,
-    /// Who enabled it — required (the opt-in is a deliberate operator act and
+    /// Who enabled it, required (the opt-in is a deliberate operator act and
     /// is stored with the host).
     operator: String,
 }
 
-/// `POST /discovery/hosts/:host/solver-optin` — enable or revoke this host's
+/// `POST /discovery/hosts/:host/solver-optin`, enable or revoke this host's
 /// eligibility for the solver hook. Disabling never deletes the audit trail.
 async fn set_scrape_solver_optin(
     State(state): State<Arc<AppState>>,
@@ -1258,7 +1258,7 @@ async fn create_conversion(
     Json(body): Json<CreateConversionBody>,
 ) -> Result<Json<serde_json::Value>, SalesError> {
     // Fix I-3: header/payload tenant consistency is enforced on EVERY
-    // mutation — this handler previously missed the check.
+    // mutation, this handler previously missed the check.
     let tenant_id = required_tenant_id(&tenant_id.0, body.tenant_id.as_deref())?;
     let span = tracing::info_span!("create_conversion", tenant_id = %tenant_id, operation = "create_conversion");
     async move {
@@ -1278,7 +1278,7 @@ async fn create_conversion(
 
         // Verify the lead exists and belongs to this tenant. `sales_leads` is
         // the derived view and `id` is TEXT (lead ids use several formats),
-        // so the Uuid must be bound as its string form — binding the raw Uuid
+        // so the Uuid must be bound as its string form, binding the raw Uuid
         // produced `operator does not exist: text = uuid` (HTTP 500).
         let lead_exists: bool = sqlx::query_scalar::<_, i64>(
             "SELECT COUNT(*) FROM sales_leads WHERE id = $1 AND tenant_id = $2",
@@ -1620,7 +1620,7 @@ async fn start_campaign(
         // A legacy campaign no longer dispatches mail itself: starting it
         // materializes canonical enrollments, which the durable action worker
         // then executes through the Decision Packet. There is therefore no
-        // dispatcher requirement here any more — the old 503 guard existed only
+        // dispatcher requirement here any more, the old 503 guard existed only
         // because this route used to flip the campaign to 'active' and send
         // from its own loop.
         //
@@ -1728,10 +1728,10 @@ async fn dry_run_campaign(
 /// Token resolution only (v2 → legacy v1). Shared by the side-effect-free
 /// GET (which must verify without suppressing) and the suppression path.
 ///
-/// 1. **v2 opaque token** — decoded (strict 43-char URL-safe base64, no
+/// 1. **v2 opaque token**, decoded (strict 43-char URL-safe base64, no
 ///    database use for malformed shapes), SHA-256'd, looked up in
 ///    `sales_unsubscribe_tokens` (only the hash is stored).
-/// 2. **v1 legacy token** — read-only compatibility for links already
+/// 2. **v1 legacy token**, read-only compatibility for links already
 ///    delivered in email (see `apply_unsubscribe` for the retirement plan).
 ///
 /// Neither the raw token nor the decoded PII is logged; the only log line
@@ -1742,7 +1742,7 @@ async fn resolve_unsubscribe(
 ) -> Result<crate::dispatcher::UnsubscribeTokenData, SalesError> {
     // v2 first: a malformed/unknown v2 token is `Ok(None)`, a DB failure is
     // an `Err` (never silently fall through to the legacy verifier on a
-    // transient outage — that could reject a valid v2 link).
+    // transient outage, that could reject a valid v2 link).
     match crate::dispatcher::resolve_unsubscribe_token(&state.db, token).await? {
         Some(data) => Ok(data),
         None => {
@@ -1776,7 +1776,7 @@ async fn resolve_unsubscribe(
 
 /// Verify the token AND perform the suppression (the consent-changing step).
 /// Idempotent by construction (`ON CONFLICT DO NOTHING` in both suppression
-/// stores) — a second click succeeds without duplicating rows.
+/// stores), a second click succeeds without duplicating rows.
 async fn apply_unsubscribe(
     state: &AppState,
     token: &str,
@@ -1800,7 +1800,7 @@ async fn apply_unsubscribe(
 }
 
 /// Minimal HTML escaping for values interpolated into the unsubscribe pages
-/// (token, email) — no template-engine dependency.
+/// (token, email), no template-engine dependency.
 fn html_escape(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     for ch in value.chars() {
@@ -1821,7 +1821,7 @@ fn html_escape(value: &str) -> String {
 const BACK_LINK: &str = r#"<p class="back-link"><a href="/">Return to ApexMail</a></p>"#;
 
 /// Shared card shell for the public unsubscribe pages (confirmation,
-/// completion, error) — one ARK document on every browser-facing surface.
+/// completion, error), one ARK document on every browser-facing surface.
 /// Paper and ink, Spectral display, Overpass text, a 3px rule, square
 /// corners; the destructive action carries the red rule and word, never a
 /// red fill, and the dark block mirrors `ark.css`'s media tokens.
@@ -1829,7 +1829,7 @@ fn unsubscribe_page_shell(title: &str, body: &str) -> String {
     format!(
         r#"<!doctype html>
 <html lang="en">
-<head><meta charset="utf-8"><title>{title} — ApexMail</title>
+<head><meta charset="utf-8"><title>{title} | ApexMail</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="color-scheme" content="light dark">
 <style>
@@ -1871,7 +1871,7 @@ fn unsubscribed_page() -> axum::response::Html<String> {
     ))
 }
 
-/// F39 (batch 2): the GET render — a plain no-JS HTML form whose submit
+/// F39 (batch 2): the GET render, a plain no-JS HTML form whose submit
 /// POSTs to `/u/:token/confirm`. GET itself changes NOTHING, so prefetching
 /// mail clients and link scanners can no longer unsubscribe anyone by
 /// fetching a URL.
@@ -1903,8 +1903,8 @@ fn unsubscribe_error_page(message: &str) -> axum::response::Html<String> {
     ))
 }
 
-/// GET /u/:token — manual (link click) unsubscribe, step 1. F39 (batch 2):
-/// SIDE-EFFECT FREE — verifies the token and renders the confirmation form;
+/// GET /u/:token, manual (link click) unsubscribe, step 1. F39 (batch 2):
+/// SIDE-EFFECT FREE, verifies the token and renders the confirmation form;
 /// consent changes only on the confirmed POST (`/u/:token/confirm`).
 async fn unsubscribe_get(
     State(state): State<Arc<AppState>>,
@@ -1939,7 +1939,7 @@ struct UnsubscribeConfirmForm {
     confirm: Option<String>,
 }
 
-/// POST /u/:token/confirm — manual unsubscribe, step 2 (batch 2, F39): the
+/// POST /u/:token/confirm, manual unsubscribe, step 2 (batch 2, F39): the
 /// ONLY browser-driven path that suppresses the recipient. Distinct from the
 /// RFC 8058 one-click POST (which requires the exact
 /// `List-Unsubscribe=One-Click` body) so both contracts stay separate.
@@ -1982,7 +1982,7 @@ async fn unsubscribe_confirm_post(
     }
 }
 
-/// POST /u/:token — RFC 8058 one-click unsubscribe (mail clients). The body
+/// POST /u/:token, RFC 8058 one-click unsubscribe (mail clients). The body
 /// MUST be exactly `List-Unsubscribe=One-Click` (CRLF-tolerant).
 async fn unsubscribe_post(
     State(state): State<Arc<AppState>>,
@@ -2077,7 +2077,7 @@ async fn list_inbox(
             "support" => MessageCategory::Support,
             "spam" => MessageCategory::Spam,
             "unsubscribe" => MessageCategory::Unsubscribe,
-            // Fix #19: the review bucket must be listable — this is the one
+            // Fix #19: the review bucket must be listable, this is the one
             // consumer that READS low-confidence classifications (humans
             // resolving them); it never drives an action.
             "needs_review" => MessageCategory::NeedsReview,
@@ -2254,7 +2254,7 @@ struct ReplyBody {
 /// is 256 KB; this keeps individual replies civil).
 const REPLY_BODY_MAX_CHARS: usize = 100_000;
 
-/// POST /inbox/:id/reply — compose a reply to an inbound message and enqueue
+/// POST /inbox/:id/reply, compose a reply to an inbound message and enqueue
 /// it through the platform pipeline (`messages` + `email_queue`), exactly
 /// like the REST send path.
 ///
@@ -2267,7 +2267,7 @@ const REPLY_BODY_MAX_CHARS: usize = 100_000;
 /// (`SALES_CAMPAIGN_FROM_EMAIL` + verified/DKIM-ready sender domain): the
 /// reply is composed ("Re: {subject}", HTML-escaped body) and enqueued with
 /// quota reservation, platform-suppression check and a deterministic
-/// idempotency key (`sareply:{inbox_message_id}` — one enqueued reply per
+/// idempotency key (`sareply:{inbox_message_id}`, one enqueued reply per
 /// message; the `replied` flag commits atomically with the enqueue).
 ///
 /// When NO sender identity is resolvable (dispatcher unconfigured) the
@@ -2301,7 +2301,7 @@ async fn reply_inbox_message(
         // Sender identity resolution: the production dispatcher carries the
         // configured From address and resolves the verified sender domain
         // per tenant at enqueue time. Without it there is no honest email
-        // path — 501 before mutating anything.
+        // path, 501 before mutating anything.
         let Some(dispatcher) = state.dispatcher.clone() else {
             return Err(SalesError::NotImplemented(
                 "reply delivery not available: no sender identity is configured \
@@ -2322,11 +2322,11 @@ async fn reply_inbox_message(
         .map_err(|e| SalesError::Database(e.to_string()))?;
         let (sender, original_subject, category) = row.ok_or(SalesError::MessageNotFound(id))?;
 
-        // Fix #19 — irreversible-action guard: the reply enqueue is an
+        // Fix #19, irreversible-action guard: the reply enqueue is an
         // outbound send. A message whose classifier confidence fell below
         // the automation threshold (or a legacy non-concrete row) MUST NOT
         // drive it: it goes to human review instead. `is_concrete` is the
-        // structural gate — NeedsReview and Other can never pass it, so a
+        // structural gate, NeedsReview and Other can never pass it, so a
         // low-confidence classification can never fire this action no
         // matter how the consumer matches.
         let category = crate::types::MessageCategory::from_str(&category);
@@ -2337,7 +2337,7 @@ async fn reply_inbox_message(
             )));
         }
 
-        // The correspondent's address is the reply recipient — validate it
+        // The correspondent's address is the reply recipient, validate it
         // syntactically before spending a quota reservation.
         if !apexmail_lib::validation::is_valid_email(sender.trim()) {
             return Err(SalesError::InvalidInput(format!(
@@ -2404,7 +2404,7 @@ mod tests {
     use tower::ServiceExt;
 
     /// App harness on the canonical provisioned test database. Async so it can
-    /// be awaited directly inside `#[tokio::test]` — the previous
+    /// be awaited directly inside `#[tokio::test]`, the previous
     /// `Runtime::new().block_on(..)` inside the test runtime panicked with
     /// "Cannot start a runtime from within a runtime". `None` means the
     /// environment is unconfigured → the test soft-skips.
@@ -2415,8 +2415,8 @@ mod tests {
     /// App harness for campaign-start flows.
     ///
     /// Previously this attached a test dispatcher to get past the Fix I-1 503
-    /// short-circuit. Campaign start no longer dispatches mail — it
-    /// materializes enrollments — so no dispatcher is involved and this is now
+    /// short-circuit. Campaign start no longer dispatches mail, it
+    /// materializes enrollments, so no dispatcher is involved and this is now
     /// the same harness as [`test_app`].
     async fn test_app_with_dispatcher(test_name: &str) -> Option<Router> {
         test_app_impl(test_name, "test-key", false).await
@@ -2459,7 +2459,7 @@ mod tests {
 
     /// A per-run unique mailbox under the example zone.
     ///
-    /// batch: system-tenant restriction — every API test now runs as the ONE
+    /// batch: system-tenant restriction, every API test now runs as the ONE
     /// system tenant on the SHARED, reused canonical database, so the
     /// per-tenant unique email index (`sales_leads`,
     /// `sales_contact_points`) needs a run-unique local part where
@@ -2518,7 +2518,7 @@ mod tests {
     /// silently sent nothing. Campaign start now materializes canonical
     /// enrollments and the durable action worker performs the sending, so the
     /// correct behaviour on an unwired deployment is a normal error from the
-    /// enrollment path — never the old blanket 503, which would refuse a start
+    /// enrollment path, never the old blanket 503, which would refuse a start
     /// that can legitimately succeed.
     #[tokio::test]
     async fn test_campaign_start_no_longer_requires_a_dispatcher() {
@@ -2554,7 +2554,7 @@ mod tests {
     }
 
     /// Fix I-4: inbox reply without a resolvable sender identity (dispatcher
-    /// unconfigured) must stay an HONEST 501 — never `{replied:true}` with
+    /// unconfigured) must stay an HONEST 501, never `{replied:true}` with
     /// nothing sent, and not a silent fallback either.
     #[tokio::test]
     async fn test_inbox_reply_returns_501_when_sender_identity_unresolvable() {
@@ -2646,13 +2646,13 @@ mod tests {
     /// System-tenant hard restriction: the shared token can only ever act on
     /// the system tenant. The middleware refuses any other tenant claim
     /// outright, regardless of the deployment allowlist (which boot requires
-    /// to be exactly the system tenant — `config::require_system_tenant_scope`).
+    /// to be exactly the system tenant, `config::require_system_tenant_scope`).
     #[tokio::test]
     async fn test_system_tenant_only_scoping() {
         let app = lazy_test_app();
 
         // The system tenant passes the middleware (then fails on the dead DB
-        // with 500 — proving it got PAST the scope check).
+        // with 500, proving it got PAST the scope check).
         let allowed = app
             .clone()
             .oneshot(
@@ -2710,7 +2710,7 @@ mod tests {
         let Some(app) = test_app("routes::tests::test_create_and_list_leads").await else {
             return;
         };
-        // batch: system-tenant restriction — the router middleware refuses
+        // batch: system-tenant restriction, the router middleware refuses
         // every tenant but `config::SYSTEM_TENANT_ID`, so the create/list
         // pair runs as the system tenant; `unique_email` replaces the unique
         // tenant id as the collision guard on the shared database.
@@ -2748,7 +2748,7 @@ mod tests {
             .unwrap();
         assert_eq!(resp2.status(), StatusCode::OK);
 
-        // batch: scoped cleanup — the system tenant is SHARED by every test
+        // batch: scoped cleanup, the system tenant is SHARED by every test
         // in the suite, so cleanup must key on this test's unique email and
         // never on tenant_id.
         if let Some(db) = crate::test_db::canonical_test_pool(
@@ -2770,7 +2770,7 @@ mod tests {
         let Some(app) = test_app("routes::tests::test_enrich_endpoint").await else {
             return;
         };
-        // batch: system-tenant restriction — the gate only admits
+        // batch: system-tenant restriction, the gate only admits
         // `config::SYSTEM_TENANT_ID`; the fixed domains are safe because
         // enrichment persistence upserts on (tenant_id, domain).
         let tenant = config::SYSTEM_TENANT_ID;
@@ -2823,7 +2823,7 @@ mod tests {
         else {
             return;
         };
-        // batch: system-tenant restriction — the whole lifecycle runs as
+        // batch: system-tenant restriction, the whole lifecycle runs as
         // `config::SYSTEM_TENANT_ID`; the seeded contact points get
         // run-unique addresses because `sales_contact_points` is UNIQUE on
         // (tenant_id, channel, normalized_value) and the tenant is now fixed.
@@ -2963,7 +2963,7 @@ mod tests {
         .unwrap();
         assert_eq!(paused["status"], "paused");
 
-        // batch: scoped cleanup — the system tenant is shared, so remove only
+        // batch: scoped cleanup, the system tenant is shared, so remove only
         // this campaign's rows (by id) and this run's contact fixtures (by
         // id), never by tenant_id.
         let campaign_uuid = Uuid::parse_str(campaign_id).expect("campaign id is a uuid");
@@ -2999,7 +2999,7 @@ mod tests {
         else {
             return;
         };
-        // batch: system-tenant restriction — the campaign is created as the
+        // batch: system-tenant restriction, the campaign is created as the
         // system tenant (the only one the gate admits); the foreign claim is
         // kept as a `unique_test_tenant` string precisely because the gate
         // must refuse it.
@@ -3044,12 +3044,12 @@ mod tests {
             )
             .await
             .unwrap();
-        // batch: system-tenant restriction — the gate refuses foreign tenants
+        // batch: system-tenant restriction, the gate refuses foreign tenants
         // with 403 (the security property is enforced earlier than the old
         // data-layer tenant-scoped 404).
         assert_eq!(cross_tenant_resp.status(), StatusCode::FORBIDDEN);
 
-        // batch: scoped cleanup — only this run's campaign, never by
+        // batch: scoped cleanup, only this run's campaign, never by
         // tenant_id on the shared system tenant.
         if let Some(db) = crate::test_db::canonical_test_pool(
             "routes::tests::test_campaign_routes_reject_cross_tenant_mutation::cleanup",
@@ -3069,7 +3069,7 @@ mod tests {
         let Some(app) = test_app("routes::tests::test_list_leads_respects_pagination").await else {
             return;
         };
-        // batch: system-tenant restriction — the pagination run happens as
+        // batch: system-tenant restriction, the pagination run happens as
         // the system tenant; `unique_email` keeps the three seeds colliding
         // with neither concurrent tests nor previous runs (the shared
         // database reuses the per-tenant unique email index).
@@ -3119,7 +3119,7 @@ mod tests {
         .unwrap();
         assert_eq!(leads.len(), 1);
 
-        // batch: scoped cleanup — delete this run's three leads by their
+        // batch: scoped cleanup, delete this run's three leads by their
         // unique emails; tenant_id deletes would race concurrent tests on
         // the shared system tenant.
         if let Some(db) = crate::test_db::canonical_test_pool(
@@ -3424,7 +3424,7 @@ mod tests {
         }
 
         // Authenticated + tenant-scoped: the database is lazy, so a 5xx (or a
-        // body-validation 4xx) proves the handler was reached — never 404.
+        // body-validation 4xx) proves the handler was reached, never 404.
         let list = app
             .clone()
             .oneshot(
@@ -3721,7 +3721,7 @@ mod tests {
     }
 
     /// A tampered v2 token is rejected by the handler (400) and suppresses
-    /// nothing — the v2 path is checked BEFORE the legacy v1 fallback.
+    /// nothing, the v2 path is checked BEFORE the legacy v1 fallback.
     #[tokio::test]
     async fn tampered_v2_token_is_rejected_by_the_public_handler() {
         let Some(db) = crate::test_db::canonical_test_pool("unsub_v2_http_bad").await else {
@@ -3836,7 +3836,7 @@ mod tests {
         assert_eq!(wrong_bearer.status(), StatusCode::UNAUTHORIZED);
 
         // The public unsubscribe route is NOT behind the token (it answers on
-        // its own terms — a malformed token is a 400/404, never a 401).
+        // its own terms, a malformed token is a 400/404, never a 401).
         let public_unsubscribe = app
             .clone()
             .oneshot(
@@ -3853,7 +3853,7 @@ mod tests {
         );
 
         // A valid credential passes the middleware (then fails on the dead
-        // lazy database with a 500 — proving it got past auth).
+        // lazy database with a 500, proving it got past auth).
         let authed = app
             .oneshot(
                 Request::get("/leads")
@@ -3876,7 +3876,7 @@ mod tests {
         let Some(app) = test_app("routes_lead_lifecycle").await else {
             return;
         };
-        // batch: system-tenant restriction — the whole lifecycle runs as the
+        // batch: system-tenant restriction, the whole lifecycle runs as the
         // system tenant; `other` stays a unique foreign claim because the
         // gate must refuse it (header/payload mismatch and cross-tenant
         // reads below).
@@ -3999,7 +3999,7 @@ mod tests {
             )
             .await
             .unwrap();
-        // batch: system-tenant restriction — the gate refuses foreign tenants
+        // batch: system-tenant restriction, the gate refuses foreign tenants
         // with 403 (previously the data layer answered a tenant-scoped 404;
         // the isolation property is now enforced at the router).
         assert_eq!(foreign.status(), StatusCode::FORBIDDEN);
@@ -4080,7 +4080,7 @@ mod tests {
         let Some(app) = test_app("routes_enrich_input").await else {
             return;
         };
-        // batch: system-tenant restriction — enrichment runs as the system
+        // batch: system-tenant restriction, enrichment runs as the system
         // tenant (the fixed domains are upsert-idempotent on
         // (tenant_id, domain)).
         let tenant = config::SYSTEM_TENANT_ID;
@@ -4171,7 +4171,7 @@ mod tests {
             .unwrap();
         assert_eq!(no_tenant.status(), StatusCode::BAD_REQUEST);
 
-        // batch: scoped cleanup — the system tenant is shared, so delete only
+        // batch: scoped cleanup, the system tenant is shared, so delete only
         // the facts/evidence/projection produced for THIS test's domains (the
         // sales_accounts rows are intentionally left: they are upsert targets
         // that other tenants of the suite never read).
@@ -4214,7 +4214,7 @@ mod tests {
         let Some(app) = test_app("routes_conversions").await else {
             return;
         };
-        // batch: system-tenant restriction — lead, campaign and conversion
+        // batch: system-tenant restriction, lead, campaign and conversion
         // are all created as the system tenant; `other` stays a unique
         // foreign claim for the gate refusal below.
         let tenant = config::SYSTEM_TENANT_ID;
@@ -4305,7 +4305,7 @@ mod tests {
         assert_eq!(created["revenue"], 1234.5);
         assert_eq!(created["campaign_id"], campaign_id.to_string());
 
-        // batch: system-tenant restriction — the system tenant is shared by
+        // batch: system-tenant restriction, the system tenant is shared by
         // the whole suite, so the unfiltered listing is only asserted to
         // CONTAIN this conversion (concurrent tests may own others); the
         // campaign/lead/limit-scoped listings stay exact.
@@ -4335,7 +4335,7 @@ mod tests {
             assert_eq!(rows.as_array().unwrap().len(), 1, "{url}: {rows}");
         }
 
-        // batch: system-tenant restriction — the gate refuses foreign tenants
+        // batch: system-tenant restriction, the gate refuses foreign tenants
         // with 403 (previously another tenant simply saw an empty list at the
         // data layer; the isolation property is enforced at the router now).
         let foreign = app
@@ -4351,7 +4351,7 @@ mod tests {
             .unwrap();
         assert_eq!(foreign.status(), StatusCode::FORBIDDEN);
 
-        // batch: scoped cleanup — the system tenant is shared, so delete by
+        // batch: scoped cleanup, the system tenant is shared, so delete by
         // this test's ids/emails, never by tenant_id.
         if let Some(db) = crate::test_db::canonical_test_pool("routes_conversions_cleanup").await {
             let _ =
@@ -4498,10 +4498,10 @@ mod gate_and_validation_tests {
         let Some(app) = test_app("routes_validation_campaign").await else {
             return;
         };
-        // batch: system-tenant restriction — the campaign draft is created as
+        // batch: system-tenant restriction, the campaign draft is created as
         // the system tenant (the only tenant the gate admits).
         let tenant = config::SYSTEM_TENANT_ID;
-        // A campaign draft first (create succeeds — recipients gate only the
+        // A campaign draft first (create succeeds, recipients gate only the
         // send path).
         let create_body = serde_json::json!({
             "name": "No recipients",
@@ -4566,7 +4566,7 @@ mod gate_and_validation_tests {
         let Some(app) = test_app("routes_list_campaigns").await else {
             return;
         };
-        // batch: system-tenant restriction — the listing runs as the system
+        // batch: system-tenant restriction, the listing runs as the system
         // tenant.
         let tenant = config::SYSTEM_TENANT_ID;
         let resp = app
@@ -4589,7 +4589,7 @@ mod gate_and_validation_tests {
         .unwrap();
         assert!(body.get("campaigns").is_some() || body.is_array(), "{body}");
 
-        // batch: system-tenant restriction — a DIFFERENT tenant claim is
+        // batch: system-tenant restriction, a DIFFERENT tenant claim is
         // refused by the gate with 403 (previously it saw its own disjoint
         // list at the data layer; the isolation property is enforced at the
         // router now).
@@ -4612,7 +4612,7 @@ mod gate_and_validation_tests {
         let Some(app) = test_app("routes_discovery_404").await else {
             return;
         };
-        // batch: system-tenant restriction — the request must reach the
+        // batch: system-tenant restriction, the request must reach the
         // handler (the gate only admits the system tenant), so the unknown
         // job's client error below is the runner's contract, not the 403.
         let tenant = config::SYSTEM_TENANT_ID;
@@ -4721,7 +4721,7 @@ mod coverage_wave_routes {
     ///
     /// The extra seam exists for the enrichment rate-limit proof: the
     /// limiter keys on the tenant id, and every route test now shares the ONE
-    /// system tenant — pointing this harness at a dedicated logical Redis db
+    /// system tenant, pointing this harness at a dedicated logical Redis db
     /// keeps the 30-request window exact against concurrent `/enrich` tests
     /// on the default db.
     async fn canonical_app_with_redis_url(
@@ -4844,7 +4844,7 @@ mod coverage_wave_routes {
     async fn unsubscribe_post_guards_the_one_click_body_and_invalid_tokens() {
         // Wrong body shapes are refused before anything is redeemed. (A
         // CRLF/whitespace-padded correct body is deliberately ACCEPTED —
-        // the handler trims — so it is not in the hostile list.)
+        // the handler trims, so it is not in the hostile list.)
         for hostile in ["", "List-Unsubscribe=Two-Click", "GET"] {
             let Some(app) = test_app("routes_wave_unsub_body").await else {
                 return;
@@ -4868,7 +4868,7 @@ mod coverage_wave_routes {
         }
 
         // The correct body with an invalid token is an honest 400 that names
-        // the problem — with no legacy secret configured the v1 verifier is
+        // the problem, with no legacy secret configured the v1 verifier is
         // skipped, but that must not become a 5xx.
         let Some(app) = test_app("routes_wave_unsub_invalid").await else {
             return;
@@ -4893,7 +4893,7 @@ mod coverage_wave_routes {
         );
     }
 
-    /// FIXED (batch 2, F39): GET /u/:token no longer suppresses — it renders
+    /// FIXED (batch 2, F39): GET /u/:token no longer suppresses, it renders
     /// the side-effect-free confirmation form. A configured
     /// `SALES_UNSUBSCRIBE_REDIRECT_URL` is honoured by the CONFIRM POST (the
     /// consent-changing step): confirm → suppress → redirect to the
@@ -4991,12 +4991,12 @@ mod coverage_wave_routes {
 
     // ── Redis-backed enrichment rate limit through the real router ──────
 
-    /// 30 enrichment calls per tenant per minute — enforced through the REAL
+    /// 30 enrichment calls per tenant per minute, enforced through the REAL
     /// Redis Lua path (the in-memory fallback is covered elsewhere). Request
     /// 31 is a 429; the limiter counts BEFORE input validation, so the cheap
     /// bad-email body proves the window without 31 persisted enrichments.
     ///
-    /// batch: system-tenant restriction — every `/enrich` caller shares the
+    /// batch: system-tenant restriction, every `/enrich` caller shares the
     /// ONE system tenant, so the limiter key would be shared with concurrent
     /// enrich tests; this proof therefore runs on a dedicated PRIVATE Redis
     /// server, keeping the exact 30/31 window deterministic.
@@ -5069,7 +5069,7 @@ mod coverage_wave_routes {
         }
         assert!(saw_429_early, "the 31st request must be the 429");
 
-        // batch: system-tenant restriction — the per-tenant window can no
+        // batch: system-tenant restriction, the per-tenant window can no
         // longer be probed with a second tenant through the router: the gate
         // refuses any non-system tenant with 403 before the limiter runs.
         let other = crate::test_db::unique_test_tenant("routes-ratelimit-b");
@@ -5098,7 +5098,7 @@ mod coverage_wave_routes {
     /// GET /inbox filters by category (the unknown category lands in
     /// `other`), is tenant-scoped, and paginates with clamping.
     ///
-    /// batch: system-tenant restriction — the listing runs as the system
+    /// batch: system-tenant restriction, the listing runs as the system
     /// tenant on the SHARED database, so the fixture clears its own fixed
     /// senders first (determinism across runs) and asserts with
     /// concurrency-tolerant shapes where sibling tests may add system-tenant
@@ -5162,7 +5162,7 @@ mod coverage_wave_routes {
 
         // Sibling tests (inbox replies) may add system-tenant rows while this
         // runs, so the unfiltered shape is asserted to contain THIS fixture's
-        // four senders — all under the system tenant.
+        // four senders, all under the system tenant.
         let all = json_body(get("/inbox", tenant.to_string()).await).await;
         let all_rows = all.as_array().unwrap();
         assert!(all_rows.len() >= 4, "{all}");
@@ -5208,7 +5208,7 @@ mod coverage_wave_routes {
             json_body(get("/inbox?limit=-5&offset=99999", tenant.to_string()).await).await;
         assert!(clamped.as_array().unwrap().is_empty(), "{clamped}");
 
-        // batch: system-tenant restriction — the gate refuses foreign tenants
+        // batch: system-tenant restriction, the gate refuses foreign tenants
         // with 403 (previously the foreign tenant simply saw its own
         // data-layer-isolated list).
         let other = crate::test_db::unique_test_tenant("routes-inbox-other");
@@ -5237,7 +5237,7 @@ mod coverage_wave_routes {
         let Some(app) = canonical_app_with_dispatcher("routes_wave_reply").await else {
             return;
         };
-        // batch: system-tenant restriction — the fixture and the reply both
+        // batch: system-tenant restriction, the fixture and the reply both
         // run as the system tenant on the shared database, so every write and
         // cleanup below is keyed by ids/emails, never by tenant_id alone.
         let tenant = config::SYSTEM_TENANT_ID;
@@ -5268,7 +5268,7 @@ mod coverage_wave_routes {
             &inbox_id.simple().to_string()[..8]
         );
         // Fix #19: the fixture previously seeded the legacy category
-        // 'positive' (which parses to the non-concrete `Other`) — the new
+        // 'positive' (which parses to the non-concrete `Other`), the new
         // irreversible-action guard refuses replies to non-concrete rows,
         // so the fixture uses a concrete, classifier-emitted category
         // (`lead`). All assertions below are unchanged.
@@ -5314,7 +5314,7 @@ mod coverage_wave_routes {
         let message_id = body["messageId"].as_str().expect("messageId").to_string();
 
         // The platform rows exist and the flag committed with the enqueue.
-        // (batch: scoped counts — the platform tables are shared under the
+        // (batch: scoped counts, the platform tables are shared under the
         // system tenant, so count only THIS inbox message's reply.)
         let replied: bool =
             sqlx::query_scalar("SELECT replied FROM sales_inbox_messages WHERE id = $1")
@@ -5356,7 +5356,7 @@ mod coverage_wave_routes {
         .unwrap();
         assert_eq!(messages, 1, "exactly one reply per inbox message");
 
-        // batch: system-tenant restriction — the gate refuses foreign tenants
+        // batch: system-tenant restriction, the gate refuses foreign tenants
         // with 403 (previously the data layer answered a tenant-scoped 404).
         let foreign = app
             .oneshot(
@@ -5376,7 +5376,7 @@ mod coverage_wave_routes {
             .unwrap();
         assert_eq!(foreign.status(), StatusCode::FORBIDDEN, "gate-refused");
 
-        // batch: scoped cleanup — delete only this fixture's rows; the shared
+        // batch: scoped cleanup, delete only this fixture's rows; the shared
         // system tenants row (and the other tests' rows) must survive.
         let _ = sqlx::query("DELETE FROM email_queue WHERE message_id = $1")
             .bind(message_id.parse::<Uuid>().unwrap())
@@ -5407,7 +5407,7 @@ mod coverage_wave_routes {
         let Some(app) = canonical_app_with_dispatcher("routes_wave_reply_bad").await else {
             return;
         };
-        // batch: system-tenant restriction — the fixture runs as the system
+        // batch: system-tenant restriction, the fixture runs as the system
         // tenant on the shared database; writes and cleanups are keyed by
         // ids/emails, never by tenant_id alone.
         let tenant = config::SYSTEM_TENANT_ID;
@@ -5499,7 +5499,7 @@ mod coverage_wave_routes {
                 .await
                 .unwrap();
         assert!(!replied, "a refused reply leaves the message unanswered");
-        // batch: scoped count — the messages table is shared under the system
+        // batch: scoped count, the messages table is shared under the system
         // tenant, so assert on THIS inbox message's (non-)reply only.
         let messages: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM messages WHERE metadata->>'inbox_message_id' = $1",
@@ -5555,7 +5555,7 @@ mod coverage_wave_routes {
         );
 
         // (e) Fix #19: a NeedsReview (below automation confidence) message
-        // is refused BEFORE any enqueue work — no irreversible outbound send
+        // is refused BEFORE any enqueue work, no irreversible outbound send
         // may fire from a low-confidence classification. The refusal names
         // the review requirement and leaves the row unanswered.
         let resp = reply(
@@ -5592,7 +5592,7 @@ mod coverage_wave_routes {
         .unwrap();
         assert_eq!(messages, 0, "no reply is enqueued for a review-bucket row");
 
-        // batch: scoped cleanup — only this fixture's rows; the shared system
+        // batch: scoped cleanup, only this fixture's rows; the shared system
         // tenants row (and the other tests' rows) must survive.
         for id in [suppressed_inbox, invalid_inbox, needs_review_inbox] {
             let _ = sqlx::query("DELETE FROM sales_inbox_messages WHERE id = $1")
@@ -5619,7 +5619,7 @@ mod coverage_wave_routes {
         let Some(app) = test_app("routes_wave_calendar").await else {
             return;
         };
-        // batch: system-tenant restriction — the booking runs as the system
+        // batch: system-tenant restriction, the booking runs as the system
         // tenant on the shared database. The title and the start time are
         // run-unique because `create_event` refuses OVERLAPPING events for
         // the tenant regardless of title/status, and the canonical database
@@ -5751,7 +5751,7 @@ mod coverage_wave_routes {
             .unwrap();
         assert_eq!(listed.status(), StatusCode::OK);
         let events = json_body(listed).await;
-        // batch: system-tenant restriction — the system tenant is shared, so
+        // batch: system-tenant restriction, the system tenant is shared, so
         // scope the listing assertion to THIS run's uniquely titled event
         // instead of the whole window's array.
         let own_events = events
@@ -5776,7 +5776,7 @@ mod coverage_wave_routes {
         .await;
         assert!(paged.as_array().unwrap().is_empty(), "{paged}");
 
-        // batch: system-tenant restriction — the gate refuses foreign tenants
+        // batch: system-tenant restriction, the gate refuses foreign tenants
         // with 403 (previously the foreign tenant saw an empty data-layer
         // list; the isolation property is enforced at the router now).
         let foreign = app
@@ -5808,7 +5808,7 @@ mod coverage_wave_routes {
                 .unwrap()
             }
         };
-        // batch: system-tenant restriction — the gate refuses foreign tenants
+        // batch: system-tenant restriction, the gate refuses foreign tenants
         // with 403 (previously a data-layer tenant-scoped 404).
         let foreign_cancel = cancel(event_id.parse().unwrap(), other.clone()).await;
         assert_eq!(foreign_cancel.status(), StatusCode::FORBIDDEN);
@@ -5820,7 +5820,7 @@ mod coverage_wave_routes {
         assert_eq!(body["cancelled"], true);
         assert_eq!(body["id"], event_id);
 
-        // batch: scoped cleanup — the system tenant is shared, so delete only
+        // batch: scoped cleanup, the system tenant is shared, so delete only
         // this run's event (by unique title / id), never by tenant_id.
         let _ = sqlx::query("DELETE FROM sales_calendar_events WHERE id = $1")
             .bind(event_id.parse::<Uuid>().unwrap())
@@ -5846,7 +5846,7 @@ mod coverage_wave_routes {
         let Some(app) = test_app("routes_wave_slots").await else {
             return;
         };
-        // batch: system-tenant restriction — slot discovery runs as the
+        // batch: system-tenant restriction, slot discovery runs as the
         // system tenant (slot computation reads no cross-test data on the
         // queried weekday).
         let tenant = config::SYSTEM_TENANT_ID;
@@ -5905,7 +5905,7 @@ mod coverage_wave_routes {
             serde_json::from_value(slots[15]["end"].clone()).unwrap();
         assert_eq!(last_end.format("%H:%M").to_string(), "17:00");
 
-        // IANA mode: a Sunday is outside the Mon–Fri working week — empty,
+        // IANA mode: a Sunday is outside the Mon–Fri working week, empty,
         // not an error; a weekday yields DST-correct local slots labelled
         // with the requested zone.
         let resp = get_slots(format!("date={}&timezone=Europe/Tallinn", query_ts(sunday))).await;
@@ -5941,7 +5941,7 @@ mod coverage_wave_routes {
         let Some(app) = test_app("routes_wave_disc").await else {
             return;
         };
-        // batch: system-tenant restriction — the job runs as the system
+        // batch: system-tenant restriction, the job runs as the system
         // tenant on the shared database; the seeded account gets a run-unique
         // domain (enrichment tests create other system-tenant accounts
         // concurrently) and every count/cleanup below is scoped to it.
@@ -6005,7 +6005,7 @@ mod coverage_wave_routes {
             .unwrap();
         assert_eq!(status.status(), StatusCode::OK);
         assert_eq!(json_body(status).await["status"], "queued");
-        // batch: system-tenant restriction — the gate refuses foreign tenants
+        // batch: system-tenant restriction, the gate refuses foreign tenants
         // with 403 (previously the data layer answered a tenant-scoped miss).
         let foreign = app
             .clone()
@@ -6027,7 +6027,7 @@ mod coverage_wave_routes {
 
         // One bounded batch completes the first-party job and surfaces the
         // tenant's own account as a candidate. `imported` counts only
-        // PROMOTIONS (candidates turned into NEW accounts) — a first-party
+        // PROMOTIONS (candidates turned into NEW accounts), a first-party
         // candidate already IS the account, so it must be discovered without
         // being re-imported.
         let run = app
@@ -6053,7 +6053,7 @@ mod coverage_wave_routes {
             ran["imported"], 0,
             "a first-party candidate must not be re-imported over the live account: {ran}"
         );
-        // batch: scoped count — the system tenant is shared, so assert on
+        // batch: scoped count, the system tenant is shared, so assert on
         // THIS run's uniquely-domained account only.
         let accounts: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM sales_accounts WHERE tenant_id = $1 AND domain = $2",
@@ -6083,7 +6083,7 @@ mod coverage_wave_routes {
             rerun.status()
         );
 
-        // batch: scoped cleanup — only this suite writes discovery rows under
+        // batch: scoped cleanup, only this suite writes discovery rows under
         // the system tenant; the seeded account is removed by its run-unique
         // domain (never by tenant_id).
         for statement in [
@@ -6108,7 +6108,7 @@ mod coverage_wave_routes {
         let Some(app) = test_app("routes_wave_disc_unknown").await else {
             return;
         };
-        // batch: system-tenant restriction — the request must reach the
+        // batch: system-tenant restriction, the request must reach the
         // handler (the gate only admits the system tenant) so the 400 below
         // is the source-name validation, not the gate.
         let tenant = config::SYSTEM_TENANT_ID;
@@ -6151,7 +6151,7 @@ mod coverage_wave_routes {
         let Some(app) = test_app("routes_wave_companies").await else {
             return;
         };
-        // batch: system-tenant restriction — the fixture runs as the system
+        // batch: system-tenant restriction, the fixture runs as the system
         // tenant on the shared database, so the row gets a run-unique domain
         // (enrichment tests create other system-tenant rows concurrently)
         // and every assertion is scoped to it.
@@ -6186,7 +6186,7 @@ mod coverage_wave_routes {
                 .unwrap()
             }
         };
-        // batch: scoped assertion — filter every listing to THIS run's
+        // batch: scoped assertion, filter every listing to THIS run's
         // uniquely-domained row instead of counting the shared tenant's
         // whole result set.
         let ours = |resp: serde_json::Value| {
@@ -6218,7 +6218,7 @@ mod coverage_wave_routes {
         let substring = json_body(get("industry=sa".to_string(), tenant.to_string()).await).await;
         assert_eq!(ours(substring.clone()), 1, "{substring}");
 
-        // batch: system-tenant restriction — the gate refuses foreign tenants
+        // batch: system-tenant restriction, the gate refuses foreign tenants
         // with 403 (previously the foreign tenant saw an empty data-layer
         // list).
         let foreign = get(String::new(), other.clone()).await;
@@ -6233,7 +6233,7 @@ mod coverage_wave_routes {
 
     // ── Honest health + tenant-header shapes ─────────────────────────────
 
-    /// With an unreachable database `/health` reports 503 degraded — the
+    /// With an unreachable database `/health` reports 503 degraded, the
     /// k8s probe must see the degradation, not a green 200.
     #[tokio::test]
     async fn health_reports_degraded_when_the_database_is_unreachable() {
@@ -6255,12 +6255,12 @@ mod coverage_wave_routes {
     /// filters non-blank claims) and is rejected by the handler's `TenantId`
     /// extractor with 400; a padded NON-system tenant is trimmed and then
     /// gate-refused with 403; a padded SYSTEM tenant is trimmed and admitted
-    /// past auth (failing on the dead lazy database — proving the padding
+    /// past auth (failing on the dead lazy database, proving the padding
     /// did not leak into the tenant id).
     #[tokio::test]
     async fn tenant_header_whitespace_is_trimmed_and_blank_is_rejected() {
         let app = lazy_test_app();
-        // batch: system-tenant restriction — the middleware no longer filters
+        // batch: system-tenant restriction, the middleware no longer filters
         // the blank header out; the 400 now comes from the handler layer
         // (`TenantId` extractor: trim → empty → BAD_REQUEST).
         let blank = app
@@ -6276,7 +6276,7 @@ mod coverage_wave_routes {
             .unwrap();
         assert_eq!(blank.status(), StatusCode::BAD_REQUEST);
 
-        // batch: system-tenant restriction — "  tenant-a  " trims to
+        // batch: system-tenant restriction, "  tenant-a  " trims to
         // `tenant-a`, which the gate refuses with 403 before any handler runs
         // (previously it fell through to the dead-database 500).
         let padded_foreign = app
@@ -6298,7 +6298,7 @@ mod coverage_wave_routes {
 
         // Trimming is what lets the padded SYSTEM tenant through the gate:
         // taken literally, "  system  " would be a 403 like the foreign
-        // claim above. Past auth it fails on the dead lazy database — a 4xx
+        // claim above. Past auth it fails on the dead lazy database, a 4xx
         // would mean the padding leaked into the tenant id.
         let padded_system = app
             .oneshot(
@@ -6321,7 +6321,7 @@ mod coverage_wave_routes {
 
     /// A start whose every recipient is rejected reports the durable
     /// verification_pending phase AND the per-recipient enrollment outcome in
-    /// the HTTP response — an operator must see a partial start, not a bare
+    /// the HTTP response, an operator must see a partial start, not a bare
     /// status. A retry resumes the SAME durable operation id.
     #[tokio::test]
     async fn campaign_start_reports_verification_pending_and_enrollment_outcome() {
@@ -6331,7 +6331,7 @@ mod coverage_wave_routes {
         let Some(app) = test_app("routes_wave_start").await else {
             return;
         };
-        // batch: system-tenant restriction — the start flow runs as the
+        // batch: system-tenant restriction, the start flow runs as the
         // system tenant; the campaign/recipients cleanup at the end is
         // already scoped by campaign id, so the shared tenant stays intact.
         let tenant = config::SYSTEM_TENANT_ID;
@@ -6521,7 +6521,7 @@ mod coverage_wave_routes {
     }
 
     /// BATCH-2 FIX TARGET: the completion page renders no link back to a
-    /// safe path (`/` or `/login`) — the recipient hits a dead end.
+    /// safe path (`/` or `/login`), the recipient hits a dead end.
     #[test]
     fn contract_sales_unsubscribed_page_offers_a_safe_path_back() {
         let html = unsubscribed_page().0;
@@ -6535,7 +6535,7 @@ mod coverage_wave_routes {
     /// BATCH-2 FIX TARGET: a browser hitting `GET /u/:token` with a bad or
     /// expired token receives raw JSON (`{"error": ...}`), not an HTML page.
     /// The contract: browser-facing unsubscribe errors render the HTML error
-    /// page. (The RFC 8058 one-click POST keeps its JSON contract — that is
+    /// page. (The RFC 8058 one-click POST keeps its JSON contract, that is
     /// a mail-client surface, not a browser.) RED until batch 2.
     #[tokio::test]
     async fn contract_sales_unsubscribe_errors_render_html_not_json() {
@@ -6563,7 +6563,7 @@ mod coverage_wave_routes {
         assert!(
             content_type.starts_with("text/html"),
             "BATCH-2 FIX TARGET: a browser unsubscribe FAILURE rendered content-type \
-             {content_type:?} — it must render the HTML error page (text/html), not raw JSON"
+             {content_type:?}, it must render the HTML error page (text/html), not raw JSON"
         );
         let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
             .await
@@ -6590,7 +6590,7 @@ mod coverage_wave_routes {
         let email = "sales.get@example.com";
         // Determinism hygiene (batch 2, F39 fix): the old GET-suppressing
         // handler (and this test's own confirmed POST) leave rows on the
-        // SHARED scratch database for this fixed tenant — clear them so the
+        // SHARED scratch database for this fixed tenant, clear them so the
         // assertions below hold on every run, not just the first. No
         // contract assertion is changed.
         let _ = sqlx::query("DELETE FROM sales_unsubscribes WHERE tenant_id = $1 AND email = $2")
@@ -6651,7 +6651,7 @@ mod coverage_wave_routes {
         assert_eq!(
             suppression_count(&db).await,
             0,
-            "BATCH-2 FIX TARGET: GET /u/:token created a suppression row — a plain link \
+            "BATCH-2 FIX TARGET: GET /u/:token created a suppression row, a plain link \
              click (or prefetcher) must never change consent; only a confirmed POST may"
         );
 

@@ -26,20 +26,20 @@ La migration de fournisseur email est une opération à haut risque. Toute livra
 
 ## La solution ApexMail
 
-- **Réchauffement IP géré** — Calendrier de réchauffement automatisé pour les IP dédiées, avec bridage et supervision de la réputation.
-- **Guide de transition de domaine** — Configuration DNS pas à pas pour SPF, DKIM, DMARC et return-path personnalisé.
-- **Import de modèles** — Mappez vos modèles existants vers le format d'ApexMail en préservant les variables et les layouts.
-- **Compatibilité webhook** — Types d'événements normalisés avec documentation de mappage des payloads.
-- **Validation par envoi parallèle** — Routez un pourcentage configurable du trafic via ApexMail tout en conservant votre fournisseur actuel.
+- **Réchauffement IP géré**, Calendrier de réchauffement automatisé pour les IP dédiées, avec bridage et supervision de la réputation.
+- **Guide de transition de domaine**, Configuration DNS pas à pas pour SPF, DKIM, DMARC et return-path personnalisé.
+- **Import de modèles**, Mappez vos modèles existants vers le format d'ApexMail en préservant les variables et les layouts.
+- **Compatibilité webhook**, Types d'événements normalisés avec documentation de mappage des payloads.
+- **Validation par envoi parallèle**, Routez un pourcentage configurable du trafic via ApexMail tout en conservant votre fournisseur actuel.
 
 ## Guides de migration par fournisseur
 
 Quatre fournisseurs disposent d'un guide dédié : point d'accès de compatibilité, bascule de l'authentification, correspondance champ par champ avec les éléments refusés nommément, liste de contrôle DNS, noms d'événements webhook à réabonner, et un plan de bascule en six étapes avec retour arrière.
 
-- [Migrer depuis SendGrid](/fr/migrate/sendgrid/) — `POST /v3/mail/send` servi avec votre clé ApexMail dans l'emplacement bearer Authorization.
-- [Migrer depuis Mailgun](/fr/migrate/mailgun/) — `POST /v3/{domain}/messages` servi avec l'emplacement Basic auth ; `messages.mime` répond un 501 nommé.
-- [Migrer depuis Postmark](/fr/migrate/postmark/) — `POST /email` et `POST /email/batch` servis avec l'en-tête `X-Postmark-Server-Token`.
-- [Migrer depuis Resend](/fr/migrate/resend/) — `POST /emails` et `POST /emails/batch` servis avec l'emplacement bearer Authorization que vous envoyez déjà.
+- [Migrer depuis SendGrid](/fr/migrate/sendgrid/), `POST /v3/mail/send` servi avec votre clé ApexMail dans l'emplacement bearer Authorization.
+- [Migrer depuis Mailgun](/fr/migrate/mailgun/), `POST /v3/{domain}/messages` servi avec l'emplacement Basic auth ; `messages.mime` répond un 501 nommé.
+- [Migrer depuis Postmark](/fr/migrate/postmark/), `POST /email` et `POST /email/batch` servis avec l'en-tête `X-Postmark-Server-Token`.
+- [Migrer depuis Resend](/fr/migrate/resend/), `POST /emails` et `POST /emails/batch` servis avec l'emplacement bearer Authorization que vous envoyez déjà.
 
 ## Implémentation technique
 
@@ -58,7 +58,7 @@ Avancez dans ces phases dans l'ordre ; chacune a un critère d'entrée, des crit
 
 | Phase | Critère d'entrée | Critères d'acceptation | Déclencheur de retour arrière |
 |---|---|---|---|
-| 1. Préparation | Compte créé ; domaine d'envoi ajouté ; modèles inventoriés | Enregistrements DNS émis et vérifiés ; correspondance des modèles documentée | Aucun — aucun trafic de production encore |
+| 1. Préparation | Compte créé ; domaine d'envoi ajouté ; modèles inventoriés | Enregistrements DNS émis et vérifiés ; correspondance des modèles documentée | Aucun, aucun trafic de production encore |
 | 2. Validation en parallèle | DKIM et SPF ApexMail coexistent avec le fournisseur actuel ; DMARC à `p=none` | Les messages de test sont livrés avec une authentification valide ; événements webhook reçus et signature vérifiée | Échecs d'authentification ou écarts de signature webhook qui persistent après correction |
 | 3. Basculer une part du trafic | Validation parallèle terminée ; métriques de livraison mesurables par fournisseur | Les métriques de livraison correspondent au fournisseur précédent dans la tolérance convenue sur la fenêtre d'observation | Le taux de rebond ou de plainte dépasse les seuils de la politique d'utilisation acceptable (2 % rebonds / 0,1 % plaintes) |
 | 4. Bascule complète | Acceptation soutenue à la part convenue | 100 % du trafic via ApexMail ; enregistrements de l'ancien fournisseur supprimés seulement après la fenêtre de conservation | Dégradation de la livraison qui ne se rétablit pas après le budget de nouvelles tentatives et les ajustements de chauffe |

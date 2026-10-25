@@ -80,7 +80,7 @@ fn entry_from_value(entry: &Value) -> Option<TokenEntry> {
 // `ui-design-token-baseline.json` is a SNAPSHOT (it is kept in sync by the
 // tests below, but it is not the authority). The authority is the authored
 // `assets/globals.input.css`, and the served sheet is the compiled
-// `assets/globals.css` — both embedded in the crate, so the drift check is
+// `assets/globals.css`, both embedded in the crate, so the drift check is
 // hermetic (no filesystem, no build step).
 
 /// Token name → value pairs for one named block of a stylesheet. The block
@@ -219,7 +219,7 @@ mod tests {
     fn live_tokens_come_from_the_current_authority() {
         let tokens = source_tokens();
         // ARK: paper canvas, ink foreground, interaction blue, destruction
-        // red — and interaction is NEVER destruction.
+        // red, and interaction is NEVER destruction.
         assert_eq!(
             tokens.get("--background").map(String::as_str),
             Some("255 255 255")
@@ -263,7 +263,7 @@ mod tests {
             tokens.get("--wordmark-mail").map(String::as_str),
             Some("9 9 11")
         );
-        // Radius 0 everywhere — the arch tokens are gone.
+        // Radius 0 everywhere, the arch tokens are gone.
         assert_eq!(tokens.get("--radius").map(String::as_str), Some("0px"));
         assert_eq!(tokens.get("--radius-lg").map(String::as_str), Some("0px"));
         assert!(!tokens.contains_key("--radius-arch"));
@@ -275,7 +275,7 @@ mod tests {
     }
 
     /// Review P1-9/§5.1 tokens.rs: the compiled artifact must not drift from
-    /// the authored source — rebuilding may not discard token fixes.
+    /// the authored source, rebuilding may not discard token fixes.
     #[test]
     fn source_and_artifact_tokens_do_not_drift() {
         let drift = source_artifact_drift();

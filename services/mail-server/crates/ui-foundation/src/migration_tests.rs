@@ -78,7 +78,7 @@ fn assert_no_mollie_browser_embed(label: &str, html: &str) {
 fn assert_surface_wrapper(route: &ssr::SsrRoute, html: &str) {
     match route.surface {
         "web" => {
-            // Batch-2 titles fix: the document title is "{Page} — ApexMail"
+            // Batch-2 titles fix: the document title is "{Page} | ApexMail"
             // per route, no longer the hardcoded "ApexMail".
             assert!(
                 html.contains(&format!(
@@ -140,7 +140,7 @@ fn assert_surface_wrapper(route: &ssr::SsrRoute, html: &str) {
         }
         "control-plane" => {
             // Batch-2 titles fix: the CP document title follows the route
-            // context ("Page — ApexMail").
+            // context ("Page | ApexMail").
             assert!(
                 html.contains(&format!(
                     "<title>{}</title>",
@@ -845,7 +845,7 @@ fn migration_critical_css_classes_preserved() {
     let flat: Vec<&String> = classes.iter().flat_map(|c| c.iter()).collect();
 
     // Essential structure (ARK): the viewport shell, the page band and the
-    // button primitive — and NO typography/colour utilities (the authority
+    // button primitive, and NO typography/colour utilities (the authority
     // owns every design decision; cssgen cannot compile them).
     let required = ["min-h-screen", "apex-page-title", "apex-btn"];
     for cls in &required {
@@ -1060,7 +1060,7 @@ fn migration_total_route_count() {
 ///
 /// This test used to WRITE the renders to a machine-specific absolute path
 /// (`/Users/.../reports/visual-parity/current_html`) on every normal test
-/// run — an unconditional side effect whose output silently rotted, and a
+/// run, an unconditional side effect whose output silently rotted, and a
 /// path that cannot exist on any other checkout. File output is the explicit
 /// exporter's job (`export_visual_fixtures`, or the browser suite's
 /// screenshots); the parity ASSERTION stays here.

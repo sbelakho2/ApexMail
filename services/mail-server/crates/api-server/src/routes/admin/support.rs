@@ -65,7 +65,7 @@ fn build_support_update_audit_metadata(body: &UpdateTicketRequest) -> serde_json
 }
 
 /// Actor-attributed support audit (P2-2): ticket mutations record the
-/// acting operator's tenant AND user id — `None, None` left every support
+/// acting operator's tenant AND user id, `None, None` left every support
 /// action anonymous in the compliance trail.
 async fn log_support_audit(
     state: &AppState,

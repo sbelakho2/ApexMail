@@ -41,7 +41,7 @@ pub struct OtlpConfig {
     pub service_version: Option<String>,
     /// Optional environment (e.g., "production", "staging")
     pub environment: Option<String>,
-    /// Sampling ratio (0.0 to 1.0) — 1.0 = sample all traces
+    /// Sampling ratio (0.0 to 1.0), 1.0 = sample all traces
     pub sample_rate: f64,
     /// Batch config:max export batch size
     pub batch_size: usize,
@@ -152,7 +152,7 @@ fn resolve_sample_rate() -> f64 {
                 return 0.1;
             }
             _ => {
-                // Unknown sampler type — fall through to legacy env var
+                // Unknown sampler type, fall through to legacy env var
             }
         }
     }

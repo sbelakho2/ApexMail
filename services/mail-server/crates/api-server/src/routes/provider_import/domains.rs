@@ -9,13 +9,13 @@
 //!   the exact records `GET /v1/domains/:id/dns-records` serves (single source
 //!   of truth, so this report can never drift from the product's guidance);
 //! * the DELETE candidates are the records the OLD provider's documented
-//!   sender-authentication setup publishes (pattern-level, "if present" — we
+//!   sender-authentication setup publishes (pattern-level, "if present", we
 //!   hold no zone file, so each row says exactly which provider pattern it
 //!   describes and why it is obsolete after the cutover);
 //! * the EDITS are the records that must not simply be deleted (an SPF TXT
 //!   that must lose the old `include:`, a DMARC policy to reconcile).
 //!
-//! The report never claims a record EXISTS — it cannot know without a DNS
+//! The report never claims a record EXISTS, it cannot know without a DNS
 //! lookup, which this surface deliberately does not perform. Every delete row
 //! is a candidate to check, which is why the fields are `hostname` patterns
 //! and the notes say "if present".
@@ -143,7 +143,7 @@ fn delete_candidates(provider: ImportProvider, domain: &str) -> Vec<RecordInstru
 }
 
 /// The records that must not simply be deleted: the shared root-domain SPF
-/// (one TXT per domain — a second SPF record breaks SPF entirely) and the
+/// (one TXT per domain, a second SPF record breaks SPF entirely) and the
 /// DMARC policy (ours if the customer has none).
 fn edit_instructions(provider: ImportProvider, domain: &str) -> Vec<RecordInstruction> {
     let include = match provider {
@@ -203,7 +203,7 @@ pub(crate) async fn import_domain_report(
     // domains.id is UUID (canonical schema): parse the query as a UUID and
     // compare `id = $3::uuid` natively, so the primary key is usable. A query
     // that is not UUID-shaped (a domain name, or garbage) binds NULL there and
-    // resolves through `name = $2` — the same rows the old
+    // resolves through `name = $2`, the same rows the old
     // `id::text = $2 OR name = $2` predicate matched, with the id arm now
     // indexable and normalized (uuid spellings are compared as UUIDs).
     let domain_id = uuid::Uuid::parse_str(query).ok();
@@ -239,7 +239,7 @@ pub(crate) async fn import_domain_report(
                 .as_deref()
                 .is_some_and(|key| !key.trim().is_empty())
         })
-        .unwrap_or("<not provisioned yet — POST /v1/domains/:id/verify>");
+        .unwrap_or("<not provisioned yet, POST /v1/domains/:id/verify>");
 
     let keep: Vec<RecordInstruction> = required_sender_dns_records(
         &name,
@@ -290,7 +290,7 @@ pub(crate) async fn import_domain_report(
             if candidate_selector == selector {
                 conflicts.push(format!(
                     "your ApexMail DKIM selector is `{selector}` and the old {provider} setup \
-                     published a DKIM record on the SAME hostname `{}` — the new key must replace \
+                     published a DKIM record on the SAME hostname `{}`, the new key must replace \
                      the old value, not sit beside it",
                     candidate.hostname,
                     provider = provider.name()
@@ -310,7 +310,7 @@ pub(crate) async fn import_domain_report(
     report.counts.imported = 0;
     report.warnings.push(
         "the domains report is read-only: no domain or provider state was touched and no \
-         provider API or DNS lookup ran (only this receipt is stored, and only on commit) — the \
+         provider API or DNS lookup ran (only this receipt is stored, and only on commit), the \
          delete rows are the old provider's documented patterns, to check against your actual \
          zone"
             .to_string(),

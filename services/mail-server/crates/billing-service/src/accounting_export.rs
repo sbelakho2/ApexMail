@@ -1,4 +1,4 @@
-//! Estonian accounting CSV export — produces a CSV file formatted for
+//! Estonian accounting CSV export, produces a CSV file formatted for
 //! Estonian bookkeeping (raamatupidamine) and the KMD VAT return reconciliation.
 //!
 //! The output follows the Eesti standard arve (invoice) layout with fields
@@ -55,7 +55,7 @@ struct AccountingExportRow {
 
 /// Raw fetched row: the join fields above PLUS the invoice's immutable
 /// billing-address snapshot (audit F08). Issued invoices are legal
-/// documents — the export must show the address captured AT ISSUE TIME.
+/// documents, the export must show the address captured AT ISSUE TIME.
 #[derive(Debug, sqlx::FromRow)]
 struct FetchedAccountingRow {
     invoice_number: String,
@@ -117,13 +117,13 @@ const SUPPORTED_SNAPSHOT_VERSION: u32 = 1;
 /// made ONCE per invoice, never per field).
 #[derive(Debug, PartialEq, Eq)]
 enum SnapshotSource {
-    /// The invoice carries a valid issued snapshot — every field comes
+    /// The invoice carries a valid issued snapshot, every field comes
     /// from it; null/empty fields REMAIN null/empty.
     Snapshot,
-    /// Legacy invoice issued before snapshotting — the explicitly
+    /// Legacy invoice issued before snapshotting, the explicitly
     /// labelled live-address fallback applies.
     LegacyLiveFallback,
-    /// The snapshot is present but malformed — surfaced for repair (the
+    /// The snapshot is present but malformed, surfaced for repair (the
     /// export row is emitted with a repair marker, live data is NOT
     /// silently substituted).
     RepairRequired,
@@ -165,7 +165,7 @@ impl FetchedAccountingRow {
                             tracing::warn!(
                                 invoice_number = %self.invoice_number,
                                 version,
-                                "accounting export: unknown billing-address snapshot version — interpreting as v1"
+                                "accounting export: unknown billing-address snapshot version, interpreting as v1"
                             );
                         }
                     }
@@ -176,7 +176,7 @@ impl FetchedAccountingRow {
                     source = SnapshotSource::RepairRequired;
                     tracing::error!(
                         invoice_number = %self.invoice_number,
-                        "accounting export: malformed billing-address snapshot — row emitted with a repair marker"
+                        "accounting export: malformed billing-address snapshot, row emitted with a repair marker"
                     );
                 }
             }
@@ -185,7 +185,7 @@ impl FetchedAccountingRow {
         let mut export = match source {
             SnapshotSource::Snapshot => {
                 // Valid snapshot: fields come ONLY from it; null/empty
-                // stays null/empty — the live account can never refill a
+                // stays null/empty, the live account can never refill a
                 // historical document.
                 AccountingExportRow {
                     invoice_number: self.invoice_number,
@@ -210,7 +210,7 @@ impl FetchedAccountingRow {
             }
             SnapshotSource::LegacyLiveFallback | SnapshotSource::RepairRequired => {
                 // Explicitly labelled LEGACY fallback (pre-snapshot
-                // invoices) — or a corrupt snapshot, where the live values
+                // invoices), or a corrupt snapshot, where the live values
                 // are NOT silently substituted: the row ships empty with a
                 // repair marker in the customer-name column so operators
                 // see exactly which documents need repair.
@@ -275,7 +275,7 @@ pub async fn export_accounting_csv(
 /// Audit F08: the invoice's immutable `billing_address` snapshot (captured
 /// at issue time, versioned contract incl. the registry identity frozen
 /// via `billing_registry_code`) is the address source for issued
-/// documents — chosen ONCE per invoice in `into_export_row`. The
+/// documents, chosen ONCE per invoice in `into_export_row`. The
 /// live-address LATERAL join feeds only the explicitly labelled legacy
 /// fallback for invoices issued before snapshotting.
 /// `billing_addresses.state` exists since migration 132.
@@ -534,7 +534,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // Audit F08 — snapshot versus live is chosen ONCE per invoice. A
+    // Audit F08, snapshot versus live is chosen ONCE per invoice. A
     // valid snapshot supplies every field (nulls stay null); only legacy
     // rows without any snapshot use the live join; malformed snapshots
     // surface for repair instead of silently degrading to live values.
@@ -575,7 +575,7 @@ mod tests {
         assert_eq!(row.company_name.as_deref(), Some("Snapshot OÜ"));
         assert_eq!(row.city.as_deref(), Some("Tartu"));
         assert_eq!(row.state.as_deref(), Some("Tartumaa"));
-        // F08: a field ABSENT from a valid snapshot stays null — the live
+        // F08: a field ABSENT from a valid snapshot stays null, the live
         // join no longer refills it.
         assert_eq!(row.address_line1, None);
     }

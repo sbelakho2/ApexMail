@@ -31,7 +31,7 @@ const DEFAULT_EU_COUNTRIES: &[&str] = &[
 /// Default standard VAT rates for all 27 EU member states.
 ///
 /// Rates are percent and may be fractional: Finland's standard rate has been
-/// 25.5 % since 1 September 2024 and must not be rounded — overcharging a
+/// 25.5 % since 1 September 2024 and must not be rounded, overcharging a
 /// statutory rate is a legal defect, not a cosmetic one.
 const DEFAULT_VAT_RATES: &[(&str, f64)] = &[
     ("AT", 20.0),
@@ -199,7 +199,7 @@ impl std::error::Error for VatRateMapMissError {}
 
 /// How an explicit EU-country → VAT-rate map miss is handled. A miss can
 /// only happen with a custom `EU_COUNTRIES`/`EU_VAT_RATES` environment
-/// override that lists a country without a rate — never with the built-in
+/// override that lists a country without a rate, never with the built-in
 /// 27-member tables.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VatMapMissPolicy {
@@ -208,7 +208,7 @@ pub enum VatMapMissPolicy {
     /// the default; it is rate-identical to the historical silent-Estonia
     /// behaviour but explicitly logged and configurable.
     FallbackCountry,
-    /// Refuse to compute a rate — the caller must surface the error
+    /// Refuse to compute a rate, the caller must surface the error
     /// instead of silently charging an arbitrary country's rate.
     Error,
 }
@@ -233,7 +233,7 @@ impl VatMapMissPolicy {
 }
 
 /// Resolve the rate for an EU country that has no `EU_VAT_RATES` entry.
-/// Pure — unit-tested. `fallback_country` is the configurable default
+/// Pure, unit-tested. `fallback_country` is the configurable default
 /// country (`VAT_FALLBACK_COUNTRY`, default `EE`); if the fallback country
 /// itself has no rate, the built-in Estonian rate is the last resort (and
 /// is always logged as a miss).
@@ -276,7 +276,7 @@ pub static VAT_FALLBACK_COUNTRY: LazyLock<String> = LazyLock::new(|| {
 /// - starts with a two-letter country prefix followed by 8–12 alphanumeric
 ///   characters (the common EU format, e.g. `DE123456789`);
 /// - when `country` (the billing country) is provided, the prefix must match
-///   it — Greece's `EL` prefix is accepted for country `GR`.
+///   it, Greece's `EL` prefix is accepted for country `GR`.
 ///
 /// # Structural validity is NOT evidence
 ///
@@ -285,7 +285,7 @@ pub static VAT_FALLBACK_COUNTRY: LazyLock<String> = LazyLock::new(|| {
 /// authorise a 0 % reverse charge. Reverse charge requires authoritative
 /// evidence ([`reverse_charge_authorised`] with a [`VatValidationEvidence`]
 /// row recorded from VIES), and every invoice snapshots the evidence id it
-/// relied on. The previous behaviour — treating this structural check as
+/// relied on. The previous behaviour, treating this structural check as
 /// sufficient, with a comment claiming VIES validation happened
 /// "out-of-band in vat_emta" where no such production validator existed —
 /// permitted under-collected VAT on every structurally-shaped fake number.
@@ -380,7 +380,7 @@ pub enum VatValidationOutcome {
     Invalid,
     /// The authority could not answer (member state unavailable, timeout,
     /// global concurrency limit, ...). Documented behaviour: an outage is
-    /// NEVER valid evidence — the charge falls back to the normal
+    /// NEVER valid evidence, the charge falls back to the normal
     /// destination/local VAT (fail closed), and the outage marker is stored
     /// on the evidence row so it can be retried once VIES recovers.
     Outage,
@@ -389,7 +389,7 @@ pub enum VatValidationOutcome {
 /// One dated, persisted piece of authoritative VAT-number evidence.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VatValidationEvidence {
-    /// `vat_validation_evidence.id` — snapshotted onto the invoice.
+    /// `vat_validation_evidence.id`, snapshotted onto the invoice.
     pub id: Option<Uuid>,
     /// The verified VAT number, as returned/normalised by the authority.
     pub vat_number: String,
@@ -505,7 +505,7 @@ pub fn countries_match(left: &str, right: &str) -> bool {
 /// `country` with `vat_number`, on the basis of persisted, authoritative
 /// evidence.
 ///
-/// Returns `false` — normal destination/local VAT is charged — when:
+/// Returns `false`, normal destination/local VAT is charged, when:
 /// - the sale is local (`EE`) or outside the EU;
 /// - the VAT number fails the structural shape check;
 /// - there is no evidence;
@@ -568,10 +568,10 @@ pub fn calculate_vat_with_evidence(
 
     if EU_COUNTRIES.contains(&country) {
         if vat_number.is_some_and(|vat| reverse_charge_authorised(&country, vat, evidence, at)) {
-            // EU B2B — reverse charge (0 %) against authoritative evidence.
+            // EU B2B, reverse charge (0 %) against authoritative evidence.
             return (0.0, 0);
         }
-        // EU B2C (or unverified B2B) — destination-country VAT. An explicit
+        // EU B2C (or unverified B2B), destination-country VAT. An explicit
         // map miss goes through the deployed policy (audit item 3d): never
         // again a silent Estonian rate.
         let rate = match EU_VAT_RATES.get(&country).copied() {
@@ -585,7 +585,7 @@ pub fn calculate_vat_with_evidence(
                             country = %country,
                             fallback_country = %*VAT_FALLBACK_COUNTRY,
                             fallback_rate,
-                            "VAT rate map miss with VAT_MAP_MISS_POLICY=error — charging \
+                            "VAT rate map miss with VAT_MAP_MISS_POLICY=error, charging \
                              fallback-country rate; fix EU_VAT_RATES"
                         );
                         fallback_rate
@@ -595,7 +595,7 @@ pub fn calculate_vat_with_evidence(
                             country = %country,
                             fallback_country = %*VAT_FALLBACK_COUNTRY,
                             fallback_rate,
-                            "VAT rate map miss — charging fallback-country rate \
+                            "VAT rate map miss, charging fallback-country rate \
                              (controlled by VAT_FALLBACK_COUNTRY / VAT_MAP_MISS_POLICY)"
                         );
                         fallback_rate
@@ -607,7 +607,7 @@ pub fn calculate_vat_with_evidence(
         return (rate, amt);
     }
 
-    // Non-EU — 0 %
+    // Non-EU, 0 %
     (0.0, 0)
 }
 
@@ -709,7 +709,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // vat_amount_half_up — rounding must be half-AWAY-FROM-ZERO, symmetric
+    // vat_amount_half_up, rounding must be half-AWAY-FROM-ZERO, symmetric
     // in the sign of the base (audit SM7 F8). All current callers pass
     // non-negative bases, but this is the platform's single VAT helper and
     // credit-side VAT bases are one refactor away.
@@ -832,7 +832,7 @@ mod tests {
     #[test]
     fn calculate_vat_eu_b2b_reverse_charge_requires_evidence() {
         let subtotal = 1000_i64;
-        // No evidence — the well-formed VAT number does NOT zero-rate.
+        // No evidence, the well-formed VAT number does NOT zero-rate.
         let (rate, amount) = calculate_vat(subtotal, "DE", Some("DE123456789"));
         assert_eq!(rate, 19.0, "reverse charge requires authoritative evidence");
         assert_eq!(amount, 190);
@@ -883,7 +883,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // Fix D — reverse charge only on structurally valid VAT numbers.
+    // Fix D, reverse charge only on structurally valid VAT numbers.
     // ------------------------------------------------------------------
 
     #[test]
@@ -915,7 +915,7 @@ mod tests {
         assert!(is_valid_vat_number("de123456789", Some("de")));
         // Greek VAT numbers use the EL prefix while the country is GR.
         assert!(is_valid_vat_number("EL123456789", Some("GR")));
-        // Mismatched prefix — not zero-rated.
+        // Mismatched prefix, not zero-rated.
         assert!(!is_valid_vat_number("DE123456789", Some("FR")));
         assert!(!is_valid_vat_number("US123456789", Some("FR")));
     }
@@ -1018,7 +1018,7 @@ mod tests {
     #[test]
     fn calculate_vat_vies_outage_charges_normal_rate() {
         // Documented outage behaviour: VIES being down is NOT silent
-        // validity — the sale fails to normal destination VAT.
+        // validity, the sale fails to normal destination VAT.
         let at = d(2026, 6, 15);
         let evidence = VatValidationEvidence {
             id: Some(Uuid::new_v4()),
@@ -1156,7 +1156,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // Audit item 3d — explicit map-miss policy.
+    // Audit item 3d, explicit map-miss policy.
     // ------------------------------------------------------------------
 
     #[test]
@@ -1195,7 +1195,7 @@ mod tests {
             .expect("fallback policy resolves");
         assert_eq!(rate, 19.0);
 
-        // Default fallback (EE) charges 24 % — rate-identical to the old
+        // Default fallback (EE) charges 24 %, rate-identical to the old
         // silent behaviour, but now an explicit, logged, configurable
         // decision rather than a hidden default.
         let rate = resolve_map_miss_rate("XX", VatMapMissPolicy::FallbackCountry, "EE")

@@ -4,15 +4,15 @@
 //! which is not the same as "the invoice row currently has status paid".
 //! The old KMD aggregation (`PAID_INVOICE_FILTER = "status = 'paid'"`)
 //! modelled a cash-receipts tax that does not generally exist: the default
-//! Estonian/EU rule is accrual — VAT becomes chargeable when the supply is
+//! Estonian/EU rule is accrual, VAT becomes chargeable when the supply is
 //! made (KMS §11), regardless of payment.
 //!
 //! This module owns the two accounting bases the platform supports and the
 //! date each one recognises:
 //!
-//! * [`VatAccountingScheme::General`] — VAT is recognised on the supply
+//! * [`VatAccountingScheme::General`], VAT is recognised on the supply
 //!   (invoice issue / supply date). No authorisation needed.
-//! * [`VatAccountingScheme::CashSpecial`] — the special cash-accounting
+//! * [`VatAccountingScheme::CashSpecial`], the special cash-accounting
 //!   scheme. VAT is recognised when payment is received, **but** an unpaid
 //!   supply becomes taxable on the first day of the third calendar month
 //!   following the supply (KMS §11¹; the Estonian cash-accounting rule).
@@ -72,7 +72,7 @@ pub struct VatAccountingBasis {
     /// When the cash-accounting authorisation was granted.
     pub authorised_at: Option<NaiveDate>,
     /// The tax authority's authorisation reference. Mandatory for
-    /// [`VatAccountingScheme::CashSpecial`] — an unauthorised cash basis is
+    /// [`VatAccountingScheme::CashSpecial`], an unauthorised cash basis is
     /// ignored by [`resolve_accounting_scheme`] and the supply falls back to
     /// the general scheme.
     pub authorisation_reference: Option<String>,
@@ -275,7 +275,7 @@ mod tests {
     fn cash_special_boundary_last_day_of_month_two_vs_first_day_of_month_three() {
         let supply = d(2026, 1, 15);
         // Payment on the last day of the second following month (March 31)
-        // recognises in March — the fallback has NOT fired yet.
+        // recognises in March, the fallback has NOT fired yet.
         assert_eq!(
             cash_special_recognition_date(supply, Some(d(2026, 3, 31))),
             d(2026, 3, 31)

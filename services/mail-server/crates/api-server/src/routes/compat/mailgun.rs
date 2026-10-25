@@ -30,10 +30,10 @@
 //!
 //! * `inline` (no canonical inline part), `template` (Mailgun-stored
 //!   templates), `o:campaign`, `o:require-tls`, `o:skip-verification`,
-//!   `o:dkim=no`, `o:testmode=true` and `o:tracking*=no/false` — delivery
+//!   `o:dkim=no`, `o:testmode=true` and `o:tracking*=no/false`, delivery
 //!   semantics this surface cannot honour;
 //! * any other `o:*`, `h:*`-shape or unknown form field;
-//! * `POST /v3/{domain}/messages.mime` — answered `501` with the reason
+//! * `POST /v3/{domain}/messages.mime`, answered `501` with the reason
 //!   (`messages.mime` takes a raw MIME document, and this surface maps
 //!   structured fields only; see [`mime_not_implemented`]).
 
@@ -157,8 +157,8 @@ async fn send(State(state): State<AppState>, Path(domain): Path<String>, req: Re
 /// `html`/`attachments`), and this compatibility layer is a field mapping —
 /// it deliberately does not parse a caller-supplied MIME document (that would
 /// mean a second, unreviewed MIME parser in the request path). The route is
-/// therefore wired and answers a named `501` — after authentication, so the
-/// caller learns the surface exists and why it is not implemented — instead
+/// therefore wired and answers a named `501`, after authentication, so the
+/// caller learns the surface exists and why it is not implemented, instead
 /// of a bare 404 that would look like a routing failure.
 async fn send_mime(
     State(_state): State<AppState>,
@@ -170,7 +170,7 @@ async fn send_mime(
     }
     // Drain the (usually large) MIME upload under the platform's send-body
     // ceiling so the refusal is a clean 501/413 instead of a connection reset
-    // mid-upload — the body itself is deliberately never parsed (see the
+    // mid-upload, the body itself is deliberately never parsed (see the
     // rationale below).
     if let Err(refusal) = read_compat_request(PROVIDER, req).await {
         return refusal;
@@ -298,7 +298,7 @@ fn map_message(
             }),
             "inline" => issues.push(unsupported(
                 "inline",
-                "the canonical send path has no inline-part concept — attach the file instead of embedding it",
+                "the canonical send path has no inline-part concept, attach the file instead of embedding it",
             )),
             other => issues.push(unsupported(
                 &format!("file field '{other}'"),
@@ -308,7 +308,7 @@ fn map_message(
     }
     // A form-encoded `attachment` text value is not a Mailgun feature:
     // attachments travel as multipart file parts, so a text field would be
-    // silently dropped — name it instead.
+    // silently dropped, name it instead.
     for _ in fields.all("attachment") {
         issues.push(unsupported(
             "attachment",
@@ -316,7 +316,7 @@ fn map_message(
         ));
     }
 
-    // ── headers (h:*) — Reply-To folds into the dedicated field ─────
+    // ── headers (h:*), Reply-To folds into the dedicated field ─────
     let mut headers = Map::new();
     let mut reply_to: Option<String> = None;
     for (key, value) in &fields.pairs {
@@ -429,7 +429,7 @@ fn map_message(
 
 /// Mailgun toggles whose PROVIDER DEFAULT is already the platform
 /// behaviour: an explicit `yes` is satisfied (a no-op), while `no` asks for
-/// something this surface cannot disable — a named refusal, never a silent
+/// something this surface cannot disable, a named refusal, never a silent
 /// "yes".
 const DEFAULT_ON_TOGGLES: [&str; 4] = [
     "o:tracking",
@@ -440,10 +440,10 @@ const DEFAULT_ON_TOGGLES: [&str; 4] = [
 
 /// Mailgun toggles whose PROVIDER DEFAULT is OFF: an explicit OFF value is a
 /// no-op, while turning one ON asks for behaviour (suppressed delivery) this
-/// surface does not implement — a named refusal, never a silent send.
+/// surface does not implement, a named refusal, never a silent send.
 const DEFAULT_OFF_TOGGLES: [&str; 1] = ["o:testmode"];
 
-/// Mailgun fields this surface understands but cannot honour — named
+/// Mailgun fields this surface understands but cannot honour, named
 /// refusals with the caller's own value echoed.
 const UNSUPPORTED_FIELDS: [&str; 4] = [
     "template",
@@ -475,7 +475,7 @@ fn map_toggles(fields: &FormFields, issues: &mut MappingIssues) {
                 "" | "no" | "false" | "0" | "off" => {}
                 "yes" | "true" | "1" | "on" => issues.push(unsupported(
                     &format!("{field}={value}"),
-                    "the canonical send path has no per-message suppressed-delivery mode — use the platform test-mode surface instead of silently sending",
+                    "the canonical send path has no per-message suppressed-delivery mode, use the platform test-mode surface instead of silently sending",
                 )),
                 other => issues.push(unsupported(
                     &format!("{field}={other}"),

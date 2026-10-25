@@ -80,7 +80,7 @@ fn sanitize_log_string(value: Option<&str>, fallback: &str, max_len: usize) -> S
                 fallback.into()
             } else if cleaned.len() > max_len {
                 // `cleaned[..max_len]` panics when max_len lands inside a
-                // multibyte UTF-8 character — an unauthenticated remote crash
+                // multibyte UTF-8 character, an unauthenticated remote crash
                 // via a long CJK/emoji reason string. Cut back to the nearest
                 // char boundary instead.
                 let mut end = max_len;

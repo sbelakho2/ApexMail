@@ -34,7 +34,7 @@ pub enum AccountingError {
 
     #[error(
         "source document {source_type}/{source_table}/{source_id} already exists with a \
-         different evidence hash — divergent replay refused"
+         different evidence hash, divergent replay refused"
     )]
     SourceHashMismatch {
         source_type: String,
@@ -51,7 +51,7 @@ pub enum AccountingError {
         role: &'static str,
     },
 
-    #[error("no default legal entity configured — run the accounting bootstrap first")]
+    #[error("no default legal entity configured, run the accounting bootstrap first")]
     NoDefaultLegalEntity,
 
     #[error("source table '{0}' is absent in this deployment")]

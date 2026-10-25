@@ -1,7 +1,7 @@
 //! Deep adversarial coverage suite for the enterprise crate: support ticket
 //! state machine + SLA/escalation jobs + notification queue, deployment/IP
 //! lifecycle, log streaming, white-label, sub-accounts, QBR, templates,
-//! contracts, compliance and SSO — including every refusal arm.
+//! contracts, compliance and SSO, including every refusal arm.
 //!
 //! Harness convention (workspace): each DB-backed test provisions its OWN
 //! canonical database through `migrator::test_support::fresh_canonical_pool`;
@@ -82,7 +82,7 @@ async fn seed_agent(pool: &PgPool, name: &str, email: &str, specialties: &[&str]
 }
 
 /// `FOR EACH STATEMENT` DML counters: one bump per SQL statement, not per
-/// row — the only observable that distinguishes a batched sweep from the old
+/// row, the only observable that distinguishes a batched sweep from the old
 /// per-ticket UPDATE loop.
 async fn install_statement_counters(pool: &PgPool, tables: &[&str]) {
     sqlx::query(
@@ -358,7 +358,7 @@ db_test!(
         // hooks indirectly is possible, but the invalid-recipient arm is only
         // reachable when a caller passes one. `SupportNotifier` is pub(crate), so
         // exercise via create_ticket with a contact address that passes creation
-        // validation but whose trimmed form is still plausible — instead the
+        // validation but whose trimmed form is still plausible, instead the
         // direct seam is the public service: skip invalid recipient by using an
         // address the create path accepts (single @, dotted domain).
         let ticket = ok(svc
@@ -1661,7 +1661,7 @@ db_test!(
         assert_eq!(code, "IP_NOT_AVAILABLE");
 
         // Reputation: a fresh allocation has no stored score, so it is DERIVED
-        // from the observed rates — exact integer-safe arithmetic, and the
+        // from the observed rates, exact integer-safe arithmetic, and the
         // zero-delivery case must not divide by zero.
         let rep = ok(svc.get_ip_reputation("203.0.113.10").await);
         assert_eq!(rep.reputation_score, 100.0, "no data → no penalty");

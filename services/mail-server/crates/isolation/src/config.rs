@@ -216,12 +216,12 @@ impl Config {
     ///
     /// SEC (external audit): production refusal for missing
     /// `TENANT_ENCRYPTION_KEY` / `ISOLATION_INTERNAL_API_KEY` used to run
-    /// `std::process::exit(78)` from INSIDE this loader — untestable — and
+    /// `std::process::exit(78)` from INSIDE this loader, untestable, and
     /// the dev/test fallback generated ephemeral keys SILENTLY. `from_env`
     /// is now fallible (the same shape as the `ha`/`compliance` crates):
     /// the raw environment values are read BEFORE anything is bound,
     /// production REFUSES (returning [`ConfigError::MissingVar`] naming the
-    /// variable — the server binary logs it and exits 78 / EX_CONFIG), and
+    /// variable, the server binary logs it and exits 78 / EX_CONFIG), and
     /// development/test generation is ephemeral AND logged. No synthetic
     /// production credential is ever generated.
     pub fn from_env() -> Result<Self, ConfigError> {
@@ -263,8 +263,8 @@ impl Config {
             }
         }
 
-        // Development/test: ephemeral values are acceptable — every restart
-        // rotates them — but they must be loud.
+        // Development/test: ephemeral values are acceptable, every restart
+        // rotates them, but they must be loud.
         let encryption_key = encryption_key_env.unwrap_or_else(|| {
             tracing::warn!(
                 "SECURITY: TENANT_ENCRYPTION_KEY missing in development; generated an \
@@ -293,7 +293,7 @@ impl Config {
             environment,
             internal_api_key,
             internal_api_keys,
-            // Audit SM5 F15: fail-closed default — production REQUIRES the
+            // Audit SM5 F15: fail-closed default, production REQUIRES the
             // org claim header; an explicit env knob can force either mode.
             require_org_claim: std::env::var("ISOLATION_REQUIRE_ORG_CLAIM")
                 .ok()
@@ -427,7 +427,7 @@ mod tests {
     }
 
     /// Captures `tracing` output emitted inside `f` with a SCOPED subscriber
-    /// (no global default installed — deterministic under nextest and plain
+    /// (no global default installed, deterministic under nextest and plain
     /// `cargo test` alike).
     struct TestLogSink(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
 
@@ -534,7 +534,7 @@ mod tests {
     }
 
     /// Production accepts `ISOLATION_INTERNAL_API_KEYS` alone (pre-existing
-    /// behavior): the first list entry becomes the primary key — no
+    /// behavior): the first list entry becomes the primary key, no
     /// generation, no refusal.
     #[test]
     fn test_production_accepts_key_list_without_single_key() {

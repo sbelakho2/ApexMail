@@ -109,7 +109,7 @@ fn summarize_gdpr_request_counts(rows: &[(String, i64)], overdue: i64) -> GdprRe
 
 /// Count OPEN GDPR requests whose SLA deadline has passed (audit F78).
 ///
-/// `gdpr_requests.sla_deadline` does not exist in the canonical model — the
+/// `gdpr_requests.sla_deadline` does not exist in the canonical model, the
 /// old query failed to prepare with 42703 after the table-existence guard
 /// passed. Deadlines are deliberately DERIVED from the recorded creation
 /// timestamp through the ONE shared calendar-aware policy installed by
@@ -145,7 +145,7 @@ async fn get_compliance_overview(
 
     let db = &state.db;
     // Slug-aware system-tenant resolution (audit F1): operators live in
-    // `system_internal_tenant01`, not the literal `system` sentinel — the
+    // `system_internal_tenant01`, not the literal `system` sentinel, the
     // literal comparison rendered this overview empty for every human operator.
     let tenant_scoped = !crate::routes::web::is_system_tenant(&state, &auth.tenant_id).await?;
 
@@ -228,7 +228,7 @@ async fn get_compliance_overview(
         };
 
         // Overdue: derived SLA deadlines via the shared calendar-aware
-        // policy (audit F78) — no sla_deadline column exists.
+        // policy (audit F78), no sla_deadline column exists.
         let overdue = gdpr_overdue_request_count(
             db,
             if tenant_scoped {
@@ -667,7 +667,7 @@ mod tests {
     }
 
     /// F78: the shared calendar-aware SLA derivation installed by
-    /// migration 172 — one calendar month after creation (short months and
+    /// migration 172, one calendar month after creation (short months and
     /// leap Februaries included), never a fixed 30x24h interval.
     #[tokio::test]
     async fn f78_sla_deadline_policy_is_calendar_aware_on_canonical_schema() {
@@ -701,7 +701,7 @@ mod tests {
     }
 
     /// F78: the overdue count derives deadlines from request timestamps on
-    /// the canonical schema — the empty overview succeeds (the old
+    /// the canonical schema, the empty overview succeeds (the old
     /// sla_deadline query failed to prepare even with no rows), and counts
     /// agree with the per-request derivation across calendar boundaries,
     /// statuses and tenants.
@@ -803,7 +803,7 @@ mod tests {
         );
 
         // The count AGREES with the per-request derivation of the same
-        // rows — the definition both overview queries share.
+        // rows, the definition both overview queries share.
         let (recomputed,): (i64,) = sqlx::query_as(
             "SELECT count(*) FROM gdpr_requests              WHERE tenant_id = $1 AND status NOT IN ('completed', 'rejected')                AND gdpr_request_sla_deadline(created_at) < NOW()",
         )

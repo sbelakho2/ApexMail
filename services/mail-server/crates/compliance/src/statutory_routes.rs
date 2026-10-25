@@ -6,27 +6,27 @@
 //! test: no route exposed them. The builders now have a real operator
 //! surface:
 //!
-//! * `GET  /statutory/filings/human-tasks` — the open manual-submission queue
+//! * `GET  /statutory/filings/human-tasks`, the open manual-submission queue
 //!   (`open_human_tasks`).
-//! * `GET  /statutory/filings/:kind/:return_id/package` — the exact validated
+//! * `GET  /statutory/filings/:kind/:return_id/package`, the exact validated
 //!   submission payload for an OSS/VD return (`build_package_payload`),
 //!   refused with the named problems when the form contract fails.
-//! * `POST /statutory/filings/packages/:id/verify` — re-verify a stored
+//! * `POST /statutory/filings/packages/:id/verify`, re-verify a stored
 //!   package against its recorded digest (`verify_package_row`).
-//! * `GET  /statutory/tsd/:registry_code/:year/:month/package` — the TSD
+//! * `GET  /statutory/tsd/:registry_code/:year/:month/package`, the TSD
 //!   package derived from the posted ledger (`tsd_ledger` ->
 //!   `build_tsd_package`), returning EITHER the validated package OR the
 //!   builder's named refusal (the TSD payment-type gap makes a valid package
 //!   non-submittable; that is stated, never hidden).
-//! * `POST /statutory/annual-reports/:id/approve` — the management approval
+//! * `POST /statutory/annual-reports/:id/approve`, the management approval
 //!   act (`approve_annual_report`).
-//! * `POST /statutory/annual-reports/:id/submit` — the submission act with
+//! * `POST /statutory/annual-reports/:id/submit`, the submission act with
 //!   the authority receipt reference (`record_annual_report_submission`).
 //!
 //! Authentication is the service bearer token (`verify_bearer`), the same
 //! gate every other route in this service uses. Actor identities travel
 //! explicitly in the request bodies (they are recorded on the legal acts and
-//! must be identities the CALLER has authenticated upstream — the service
+//! must be identities the CALLER has authenticated upstream, the service
 //! token is shared).
 
 use axum::extract::{Path, Query, State};
@@ -74,7 +74,7 @@ pub struct LimitQuery {
     pub limit: Option<i64>,
 }
 
-/// `GET /statutory/filings/human-tasks` — open manual filing tasks.
+/// `GET /statutory/filings/human-tasks`, open manual filing tasks.
 async fn list_human_tasks(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -93,7 +93,7 @@ async fn list_human_tasks(
     }
 }
 
-/// `GET /statutory/filings/:kind/:return_id/package` — the validated
+/// `GET /statutory/filings/:kind/:return_id/package`, the validated
 /// submission payload for a return (`kind` = `oss` | `vd`).
 async fn build_return_package(
     State(state): State<Arc<AppState>>,
@@ -172,7 +172,7 @@ async fn build_return_package(
     }
 }
 
-/// `POST /statutory/filings/packages/:package_id/verify` — recompute the
+/// `POST /statutory/filings/packages/:package_id/verify`, recompute the
 /// stored package digest and report whether the row still matches.
 async fn verify_package(
     State(state): State<Arc<AppState>>,
@@ -197,11 +197,11 @@ async fn verify_package(
     }
 }
 
-/// `GET /statutory/tsd/:registry_code/:year/:month/package` — the TSD
+/// `GET /statutory/tsd/:registry_code/:year/:month/package`, the TSD
 /// package derived from the entity's posted ledger.
 ///
 /// The response is either the validated package (`"package"`) or the
-/// builder's named refusal (`"refusal"`) — an unbooked month and the
+/// builder's named refusal (`"refusal"`), an unbooked month and the
 /// payment-type gap are stated, never papered over.
 async fn tsd_package(
     State(state): State<Arc<AppState>>,
@@ -243,7 +243,7 @@ async fn tsd_package(
     }
 }
 
-/// `POST /statutory/kmd-inf/validate` — validate a caller-supplied KMD INF
+/// `POST /statutory/kmd-inf/validate`, validate a caller-supplied KMD INF
 /// annex through `filing_package::build_kmd_inf_package`.
 ///
 /// The annex has no repository derivation (the field-level source is the
@@ -291,7 +291,7 @@ pub struct AnnualSubmitBody {
     pub receipt_reference: String,
 }
 
-/// `POST /statutory/annual-reports/:report_id/approve` — the management
+/// `POST /statutory/annual-reports/:report_id/approve`, the management
 /// approval act (draft -> management_approved).
 async fn approve_annual_report(
     State(state): State<Arc<AppState>>,
@@ -331,7 +331,7 @@ async fn approve_annual_report(
     }
 }
 
-/// `POST /statutory/annual-reports/:report_id/submit` — the submission act
+/// `POST /statutory/annual-reports/:report_id/submit`, the submission act
 /// (management_approved -> submitted) with the authority receipt reference.
 async fn submit_annual_report(
     State(state): State<Arc<AppState>>,
@@ -377,7 +377,7 @@ async fn submit_annual_report(
 }
 
 /// A "not found" is a 404; every other refusal is a state-machine/validation
-/// conflict the caller can act on (409) — never a masked 500.
+/// conflict the caller can act on (409), never a masked 500.
 fn classify_annual_error(error: String) -> (StatusCode, Json<serde_json::Value>) {
     let lower = error.to_ascii_lowercase();
     if lower.contains("not found") {

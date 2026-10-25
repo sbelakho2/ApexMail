@@ -1,4 +1,4 @@
-//! Sender-pool selection — the reputation-isolation invariant and the
+//! Sender-pool selection, the reputation-isolation invariant and the
 //! per-sender daily capacity reservation.
 //!
 //! Sales reputation must never be able to reach the transactional/customer
@@ -12,7 +12,7 @@
 //! * every selection query below additionally filters `pool` to a sales pool
 //!   and `status = 'active'`;
 //! * a caller that asks for a non-sales pool gets a loud
-//!   [`SalesError::PolicyDenied`] — never a silent coercion, because asking a
+//!   [`SalesError::PolicyDenied`], never a silent coercion, because asking a
 //!   sales path for a transactional sender is a bug that must not hide.
 //!
 //! Release gate: **no sales action can select a transactional/customer sender
@@ -32,8 +32,8 @@
 //!    `daily_limit`. A `NULL` `daily_limit` means **unlimited capacity**: the
 //!    identity is never excluded for capacity and its utilisation ranks as
 //!    `0.0`. A limit of `0` excludes the identity for the whole day;
-//! 2. the remaining candidates are ranked by [`rank_sender_candidates`] — the
-//!    single pure ranking rule — instead of alphabetically;
+//! 2. the remaining candidates are ranked by [`rank_sender_candidates`], the
+//!    single pure ranking rule, instead of alphabetically;
 //! 3. for each candidate in rank order the atomic upsert of
 //!    `sales_sender_daily_usage` is attempted. That upsert is the decision:
 //!    `INSERT ... ON CONFLICT DO UPDATE SET sent = sent + 1 ... WHERE sent <
@@ -46,14 +46,14 @@
 //!
 //! ## Reservation lifecycle
 //!
-//! * **reserve** — [`reserve_sales_sender`] / [`reserve_sales_sender_with_fallback`]
+//! * **reserve**, [`reserve_sales_sender`] / [`reserve_sales_sender_with_fallback`]
 //!   perform the atomic upsert before returning the identity. The returned
 //!   identity is already consuming one daily slot.
-//! * **settle** — when the send happens, nothing else is required: the
+//! * **settle**, when the send happens, nothing else is required: the
 //!   reservation row *is* the consumption. There is deliberately no separate
 //!   settle call (the table carries no state; a second writer would only add a
 //!   race).
-//! * **release** — when the send does not happen after selection (a refusal
+//! * **release**, when the send does not happen after selection (a refusal
 //!   downstream: decision denied/shadowed/awaiting approval, dispatcher
 //!   failure, lease loss), the caller must call
 //!   [`release_sender_reservation`] so the slot returns to the pool. The
@@ -61,7 +61,7 @@
 //!
 //! The sequence worker is the production caller of the resolver; its call
 //! site must release on every non-send exit path (see the report accompanying
-//! this change — this crate file cannot own the worker).
+//! this change, this crate file cannot own the worker).
 
 use chrono::{DateTime, NaiveDate, Utc};
 use sqlx::PgPool;
@@ -74,7 +74,7 @@ use crate::types::{SalesError, SenderIdentity, SenderPool};
 ///
 /// Defaults to **off** (production posture). Sandbox/development deployments
 /// may set `SALES_ALLOW_SENDER_POOL_FALLBACK=1`; even then the fallback can
-/// only ever be the *other sales pool* — never a transactional pool.
+/// only ever be the *other sales pool*, never a transactional pool.
 pub const SENDER_POOL_FALLBACK_ENV: &str = "SALES_ALLOW_SENDER_POOL_FALLBACK";
 
 /// Pure predicate: may a sales action use this pool at all?
@@ -83,7 +83,7 @@ pub fn is_permitted_for_sales(pool: SenderPool) -> bool {
 }
 
 /// The other sales pool, used only when fallback is explicitly enabled.
-/// Returns `None` for every non-sales pool — there is no cross-class fallback.
+/// Returns `None` for every non-sales pool, there is no cross-class fallback.
 pub fn fallback_pool(preferred: SenderPool) -> Option<SenderPool> {
     match preferred {
         SenderPool::SalesOutbound => Some(SenderPool::SalesWarmup),
@@ -237,14 +237,14 @@ pub fn health_tier(state: Option<&str>) -> u8 {
 ///
 /// Order (best first):
 ///
-/// 1. [`health_tier`] — prefer `healthy` over `warming` over unassessed over
+/// 1. [`health_tier`], prefer `healthy` over `warming` over unassessed over
 ///    `throttled`/unrecognised;
-/// 2. [`sender_utilisation`] — prefer the identity that has consumed the
+/// 2. [`sender_utilisation`], prefer the identity that has consumed the
 ///    smallest fraction of its daily capacity (a `NULL` limit counts as 0.0),
 ///    which spreads a day's volume across the pool instead of exhausting one
 ///    identity;
 /// 3. higher `health_score` first;
-/// 4. `from_email`, then id, as a stable deterministic tie-break — never the
+/// 4. `from_email`, then id, as a stable deterministic tie-break, never the
 ///    primary key (the defect this replaced).
 ///
 /// The function is total: it never panics, and `f64::total_cmp` gives a strict
@@ -395,7 +395,7 @@ const SELECT_RANKABLE_CANDIDATES: &str = "SELECT i.id, i.tenant_id, i.pool, i.fr
 /// A single identity by id, with the SAME projection as the ranking query.
 ///
 /// `SenderIdentityRow` carries `sent_today` and the health signals, so a
-/// narrower select here fails to decode at runtime — which is exactly how this
+/// narrower select here fails to decode at runtime, which is exactly how this
 /// broke the dispatcher's sealed-sender path. One struct demands one column
 /// set.
 const SELECT_BY_ID: &str = "SELECT i.id, i.tenant_id, i.pool, i.from_email, i.from_name, \
@@ -527,7 +527,7 @@ pub async fn reserve_sales_sender_with_fallback(
     )))
 }
 
-/// Resolve a sender identity for a sales send — the sequence worker's entry
+/// Resolve a sender identity for a sales send, the sequence worker's entry
 /// point. Since the capacity-reservation change this name **reserves**: it is
 /// an alias of [`reserve_sales_sender`] kept for existing callers.
 ///
@@ -624,7 +624,7 @@ mod tests {
             fallback_pool(SenderPool::SalesWarmup),
             Some(SenderPool::SalesOutbound)
         );
-        // No fallback for transactional pools — this is the isolation invariant.
+        // No fallback for transactional pools, this is the isolation invariant.
         assert_eq!(fallback_pool(SenderPool::TransactionalCustomer), None);
         assert_eq!(fallback_pool(SenderPool::InternalTransactional), None);
     }
@@ -790,7 +790,7 @@ mod tests {
             "the by-id lookup must stay tenant-scoped: {SELECT_BY_ID}"
         );
         // Both queries feed the same row struct, so both must project the same
-        // columns — a narrower select decodes as a runtime error rather than a
+        // columns, a narrower select decodes as a runtime error rather than a
         // compile error, which is exactly how it broke the sealed-sender path.
         assert!(
             SELECT_BY_ID.contains("AS sent_today") && SELECT_BY_ID.contains("health_score"),
@@ -1397,7 +1397,7 @@ mod residual_tests {
     // carries the canonical CHECK constraint
     // (`sales_sender_identities_pool_check`), so no row with an unknown pool
     // text can exist through the schema. The arm is defense-in-depth against
-    // schema drift and is unreachable through the canonical database — no test
+    // schema drift and is unreachable through the canonical database, no test
     // can reach it without corrupting the schema itself.
     #[tokio::test]
     async fn unknown_identity_ids_are_loud_policy_denials() {

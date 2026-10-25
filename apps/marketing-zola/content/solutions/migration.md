@@ -26,20 +26,20 @@ Email provider migration is a high-risk operation. Dropped delivery during cutov
 
 ## ApexMail Solution
 
-- **Managed IP Warm-Up** — Automated warm-up schedule for dedicated IPs, with throttling and reputation monitoring.
-- **Domain Transition Guide** — Step-by-step DNS configuration for SPF, DKIM, DMARC, and custom return-path.
-- **Template Import** — Map existing templates to ApexMail's template format with variable and layout preservation.
-- **Webhook Compatibility** — Standardized event types with payload mapping documentation.
-- **Parallel Send Validation** — Route a configurable percentage of traffic through ApexMail while maintaining your existing provider.
+- **Managed IP Warm-Up**, Automated warm-up schedule for dedicated IPs, with throttling and reputation monitoring.
+- **Domain Transition Guide**, Step-by-step DNS configuration for SPF, DKIM, DMARC, and custom return-path.
+- **Template Import**, Map existing templates to ApexMail's template format with variable and layout preservation.
+- **Webhook Compatibility**, Standardized event types with payload mapping documentation.
+- **Parallel Send Validation**, Route a configurable percentage of traffic through ApexMail while maintaining your existing provider.
 
 ## Per-Provider Migration Guides
 
 Four providers have a dedicated guide covering the compatibility endpoint, the auth swap, the field-by-field mapping with the constructs refused by name, the DNS checklist, the webhook event names to re-subscribe, and a six-step cutover with rollback.
 
-- [Migrate from SendGrid](/migrate/sendgrid/) — `POST /v3/mail/send` served with your ApexMail key in the Authorization bearer slot.
-- [Migrate from Mailgun](/migrate/mailgun/) — `POST /v3/{domain}/messages` served with the Basic auth slot; `messages.mime` answers a named 501.
-- [Migrate from Postmark](/migrate/postmark/) — `POST /email` and `POST /email/batch` served with the `X-Postmark-Server-Token` header.
-- [Migrate from Resend](/migrate/resend/) — `POST /emails` and `POST /emails/batch` served with the Authorization bearer slot you already send.
+- [Migrate from SendGrid](/migrate/sendgrid/), `POST /v3/mail/send` served with your ApexMail key in the Authorization bearer slot.
+- [Migrate from Mailgun](/migrate/mailgun/), `POST /v3/{domain}/messages` served with the Basic auth slot; `messages.mime` answers a named 501.
+- [Migrate from Postmark](/migrate/postmark/), `POST /email` and `POST /email/batch` served with the `X-Postmark-Server-Token` header.
+- [Migrate from Resend](/migrate/resend/), `POST /emails` and `POST /emails/batch` served with the Authorization bearer slot you already send.
 
 ## Technical Implementation
 
@@ -58,7 +58,7 @@ Move through these phases in order; each has an explicit entry gate, acceptance 
 
 | Phase | Entry criteria | Acceptance criteria | Rollback trigger |
 |---|---|---|---|
-| 1. Prepare | Account created; sending domain added; templates inventoried | DNS records issued and reviewed; template mapping documented | None — no production traffic yet |
+| 1. Prepare | Account created; sending domain added; templates inventoried | DNS records issued and reviewed; template mapping documented | None, no production traffic yet |
 | 2. Validate in parallel | ApexMail DKIM and SPF coexist with the current provider; DMARC at `p=none` | Test messages deliver with valid authentication; webhook events received and signature-verified | Authentication failures or webhook signature mismatches that persist after correction |
 | 3. Shift a share of traffic | Parallel validation complete; delivery metrics measurable per provider | Delivery metrics match the incumbent within the agreed tolerance for the observation window | Bounce or complaint rate breaches the AUP thresholds (2% bounce / 0.1% complaint) |
 | 4. Cut over | Sustained acceptance at the agreed share | 100% of traffic through ApexMail; legacy provider records removed only after the retention window | Delivery degradation that does not recover after the retry budget and warm-up adjustments |

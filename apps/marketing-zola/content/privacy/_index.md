@@ -1,6 +1,6 @@
 +++
 title = "Privacy Policy"
-description = "ApexMail Privacy Policy — how we collect, use, and protect your data."
+description = "ApexMail Privacy Policy, how we collect, use, and protect your data."
 template = "prose-section.html"
 page_template = "prose.html"
 
@@ -18,7 +18,7 @@ Bel Consulting OÜ (trading as ApexMail) ("we", "us") is committed to protecting
 
 ## 2. Data We Collect
 
-- **Website visitors (marketing site):** IP address, browser type and user agent, device information, pages visited, referring URL, and timestamps — collected automatically from server access logs. The marketing site runs no analytics scripts and embeds no tracking pixels or advertising cookies.
+- **Website visitors (marketing site):** IP address, browser type and user agent, device information, pages visited, referring URL, and timestamps, collected automatically from server access logs. The marketing site runs no analytics scripts and embeds no tracking pixels or advertising cookies.
 - **Prospects:** name, email address, company name, phone number (if provided), and communication history, provided via contact forms or email.
 - **Account data:** name, email, company, billing address, VAT number, payment method tokens (card details are processed by Mollie and never reach our servers), API key metadata, login timestamps, IP addresses, and audit log entries.
 - **Usage data:** API calls, email sending volumes, delivery events, and engagement events (opens and clicks) for messages you send.
@@ -38,10 +38,10 @@ The supplied configuration targets EEA regions for core email-service data and t
 
 | Data Category | Primary Location | Backup / Replica | Processing |
 |---|---|---|---|
-| Core email infrastructure (messages, delivery metadata, account data) | EU data centre — Finland | EU data centre — Finland (secondary site) | EEA — no third-country transfer |
+| Core email infrastructure (messages, delivery metadata, account data) | EU data centre, Finland | EU data centre, Finland (secondary site) | EEA, no third-country transfer |
 | OAuth authentication tokens | Google LLC / GitHub, Inc. (US entities, SCCs) | Provider-managed | US (SCCs) |
-| Payment and billing records | Mollie B.V. (Netherlands, EU) | Provider-managed within the EU | EEA — no third-country transfer (card scheme networks under the Mollie DPA) |
-| Support tickets | EU data centre — Finland | EU data centre — Finland (secondary site) | EEA — no third-country transfer |
+| Payment and billing records | Mollie B.V. (Netherlands, EU) | Provider-managed within the EU | EEA, no third-country transfer (card scheme networks under the Mollie DPA) |
+| Support tickets | EU data centre, Finland | EU data centre, Finland (secondary site) | EEA, no third-country transfer |
 
 We do not transfer personal data outside the EEA without adequate safeguards (Standard Contractual Clauses or an adequacy decision under Article 45).
 
@@ -69,16 +69,16 @@ See our [Data Retention Policy](/compliance/#data-retention) for full details.
 
 Under GDPR, you have the following rights:
 
-- **Right of access** (Art. 15) — obtain confirmation of whether we process your data and access that data.
-- **Right to rectification** (Art. 16) — request correction of inaccurate data.
-- **Right to erasure** (Art. 17) — request deletion of your data ("right to be forgotten").
-- **Right to restriction of processing** (Art. 18) — restrict processing under certain conditions.
-- **Right to data portability** (Art. 20) — receive your data in a structured, machine-readable format.
-- **Right to object** (Art. 21) — object to processing based on legitimate interests.
+- **Right of access** (Art. 15), obtain confirmation of whether we process your data and access that data.
+- **Right to rectification** (Art. 16), request correction of inaccurate data.
+- **Right to erasure** (Art. 17), request deletion of your data ("right to be forgotten").
+- **Right to restriction of processing** (Art. 18), restrict processing under certain conditions.
+- **Right to data portability** (Art. 20), receive your data in a structured, machine-readable format.
+- **Right to object** (Art. 21), object to processing based on legitimate interests.
 
 To exercise any of these rights, contact us at **privacy@apexmail.ee**. We will respond within 30 days.
 
-California residents: see our [Do Not Sell My Personal Information](/privacy/do-not-sell/) notice — ApexMail does not sell personal information.
+California residents: see our [Do Not Sell My Personal Information](/privacy/do-not-sell/) notice, ApexMail does not sell personal information.
 
 ## 7. Complaints
 

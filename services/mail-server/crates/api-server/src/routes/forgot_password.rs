@@ -28,7 +28,7 @@ pub fn router() -> Router<AppState> {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-// `kiwi__token` is KiwiCaptcha's literal wire field name — kept verbatim
+// `kiwi__token` is KiwiCaptcha's literal wire field name, kept verbatim
 // (same convention as LoginRequest) so the hidden form field deserializes.
 #[allow(non_snake_case)]
 pub struct ForgotPasswordRequest {
@@ -81,7 +81,7 @@ async fn forgot_password(
     )
     .await?;
 
-    // F-11: Dual rate-limiting — IP-based and email-based.
+    // F-11: Dual rate-limiting, IP-based and email-based.
     // IP-based prevents single-source flooding; email-based prevents
     // multi-IP botnet attacks targeting a specific user's inbox.
     let window_secs: u64 = 15 * 60; // 15 minutes
@@ -97,7 +97,7 @@ async fn forgot_password(
         Ok(mut conn) => {
             let ip_rate_key = format!("apexmail:forgot_password_rate:ip:{client_ip}");
             // Audit J: hash the address in the Redis key (like the login lockout
-            // does) — storing raw emails as key names pollutes Redis with PII,
+            // does), storing raw emails as key names pollutes Redis with PII,
             // leaks addresses to anyone with Redis list/scan access, and keeps
             // the victim's mailbox address resident long after the window.
             let email_rate_key =
@@ -149,12 +149,12 @@ async fn forgot_password(
         }
         Err(error) => {
             if state.config.environment.is_production() {
-                tracing::error!(error = %error, ip = %client_ip, "forgot-password rate limiter unavailable — failing closed in production");
+                tracing::error!(error = %error, ip = %client_ip, "forgot-password rate limiter unavailable, failing closed in production");
                 return Err(ApiError::ServiceUnavailable(
                     "password reset is temporarily unavailable; please retry shortly".into(),
                 ));
             }
-            tracing::warn!(error = %error, ip = %client_ip, "forgot-password rate limiter unavailable — failing open outside production");
+            tracing::warn!(error = %error, ip = %client_ip, "forgot-password rate limiter unavailable, failing open outside production");
         }
     }
 
@@ -163,7 +163,7 @@ async fn forgot_password(
     // account-enumeration oracle.
     ensure_system_sender_ready(&state.db).await?;
 
-    // Look up user — always return success to avoid email enumeration
+    // Look up user, always return success to avoid email enumeration
     let user: Option<(String, String)> = sqlx::query_as(
         "SELECT id::text, email FROM users WHERE LOWER(email) = LOWER($1) AND status = 'active' LIMIT 1",
     )
@@ -207,7 +207,7 @@ async fn forgot_password(
         let reset_link = format!("{}/reset-password/{}", state.config.base_url, encoded_token,);
         let safe_email = html_escape(&email);
         let html_body = render_transactional_email(&TransactionalEmail {
-            document_title: "Reset your password — ApexMail",
+            document_title: "Reset your password | ApexMail",
             heading: "Reset Your Password",
             body_html: &format!(
                 "<p>We received a request to reset the password for <strong>{safe_email}</strong>.</p>\n\
@@ -223,7 +223,7 @@ async fn forgot_password(
             footer_link: true,
         });
         let text_body = format!(
-            "Reset Your Password\n\nWe received a request to reset the password for {email}.\n\nReset your password by visiting: {reset_link}\n\nThis link expires in 1 hour. If you didn't request this, you can safely ignore this email.\n\n© 2026 ApexMail — https://apexmail.ee",
+            "Reset Your Password\n\nWe received a request to reset the password for {email}.\n\nReset your password by visiting: {reset_link}\n\nThis link expires in 1 hour. If you didn't request this, you can safely ignore this email.\n\n© 2026 ApexMail, https://apexmail.ee",
         );
 
         let msg_id = queue_system_email_in_transaction(
@@ -310,7 +310,7 @@ mod tests {
             "key must not contain the local part"
         );
         assert!(key.starts_with("apexmail:forgot_password_rate:email:"));
-        // Deterministic — the same address maps to the same bucket.
+        // Deterministic, the same address maps to the same bucket.
         let again = format!("apexmail:forgot_password_rate:email:{}", hash_token(email));
         assert_eq!(key, again);
         // Distinct addresses map to distinct buckets.
@@ -618,7 +618,7 @@ mod adversarial_tests {
     ///
     /// The action base asserted here is the TEST config base
     /// (`http://localhost:3000`): the contract pinned is that the CTA is an
-    /// absolute link derived from the configured action base — never
+    /// absolute link derived from the configured action base, never
     /// relative, never query-string-tokenized. The https property of the
     /// action base itself is proven against the https seam in auth.rs's
     /// `verification_email_carries_shell_metadata_and_action_link`; prod
@@ -682,7 +682,7 @@ mod adversarial_tests {
         assert!(html.contains("lang=\"en\""), "must declare lang=\"en\"");
         // Batch-2 email-title fix: the reset email carries a real <title>.
         assert!(
-            html.contains("<title>Reset your password — ApexMail</title>"),
+            html.contains("<title>Reset your password | ApexMail</title>"),
             "reset email must carry its <title>: {html}"
         );
         assert!(
@@ -696,7 +696,7 @@ mod adversarial_tests {
 
         // Exactly ONE primary CTA anchor: the second <a> is the apexmail.ee
         // footer. The CTA URL additionally appears as VISIBLE TEXT (the
-        // fallback line) — never as a second anchor — so a link-stripping
+        // fallback line), never as a second anchor, so a link-stripping
         // client still shows the reader where to go.
         assert_eq!(
             html.matches("<a href=").count(),

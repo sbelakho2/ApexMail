@@ -13,7 +13,7 @@ fn test_prediction_throughput() {
     let iterations = 10_000;
     let predictor = AnalyticsPredictor::new();
     let subjects = [
-        "Great deals inside — don't miss out!",
+        "Great deals inside, don't miss out!",
         "Your weekly newsletter",
         "Important account update",
         "🎉 Special offer just for you",
@@ -85,7 +85,7 @@ fn test_subject_scoring_throughput() {
         "🔥 Last chance: 50% off everything today only!",
         "Hi {{name}}, check out our new features",
         "Q4 results",
-        "Don't miss this limited time offer — act now!",
+        "Don't miss this limited time offer, act now!",
         "Your monthly digest for December",
         "Introducing our redesigned dashboard experience",
     ];

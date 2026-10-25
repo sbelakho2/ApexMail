@@ -72,7 +72,7 @@ async fn main() -> anyhow::Result<()> {
 
 /// Spawn background jobs for enterprise features
 fn spawn_background_jobs(state: Arc<AppState>, db: sqlx::PgPool) {
-    // Job 0:QBR sending-metrics rollup — aggregates yesterday's events into
+    // Job 0:QBR sending-metrics rollup, aggregates yesterday's events into
     // ent_sending_metrics daily so generated QBRs carry real numbers (the
     // hourly cadence catches up after downtime; the rollup is idempotent).
     let qbr_db = db.clone();

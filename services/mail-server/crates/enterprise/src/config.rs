@@ -260,10 +260,10 @@ pub struct SubAccountConfig {
 // Audit F10 removed `data_residency` / `data_residency_regions` from it for
 // being parsed-but-never-read. The remaining three knobs had the same
 // defect and are now gone too:
-//  * `HIPAA_ENABLED` / `ZERO_RETENTION_ENABLED` — `ComplianceService::new`
+//  * `HIPAA_ENABLED` / `ZERO_RETENTION_ENABLED`, `ComplianceService::new`
 //    takes only a PgPool; framework enablement and zero-retention mode are
 //    per-tenant rows written by the API, never global env defaults.
-//  * `AUDIT_RETENTION_DAYS` — the CANONICAL consumer is the compliance
+//  * `AUDIT_RETENTION_DAYS`, the CANONICAL consumer is the compliance
 //    service (`compliance::config` → `retention_sweep`); this crate's copy
 //    was never read.
 // A knob that does nothing is configuration theater; each may only return
@@ -283,8 +283,8 @@ pub struct LogStreamEnvConfig {
 /// Dogfood 2026-10-06 wave B: `require_review_for_new` (env
 /// `TEMPLATE_REQUIRE_REVIEW_NEW`) and `auto_approve_threshold` (env
 /// `TEMPLATE_AUTO_APPROVE_THRESHOLD`) were REMOVED. Audit M-01
-/// (`template_approval.rs`) forbids auto-approval outright — every submission
-/// requires a human review — so no value of either knob could ever be
+/// (`template_approval.rs`) forbids auto-approval outright, every submission
+/// requires a human review, so no value of either knob could ever be
 /// honored. `max_spam_score` remains: it is the real auto-REJECT threshold
 /// consumed by `TemplateApprovalService`.
 #[derive(Debug, Clone)]
@@ -366,7 +366,7 @@ impl Config {
         };
 
         // Canonical SSO console sessions (audit P1-3): the SAME RS256 private
-        // key the api-server signs `am_session` cookies with. Optional — an
+        // key the api-server signs `am_session` cookies with. Optional, an
         // unset key degrades to enterprise-session-only callbacks.
         let jwt_private_key_pem = env::var("JWT_PRIVATE_KEY_PEM")
             .ok()
@@ -380,7 +380,7 @@ impl Config {
             .unwrap_or(false);
         if is_production && allow_sha1 {
             return Err(
-                "SAML_ALLOW_SHA1 is enabled which is insecure — SHA-1 signatures are deprecated. "
+                "SAML_ALLOW_SHA1 is enabled which is insecure, SHA-1 signatures are deprecated. "
                     .into(),
             );
         }
@@ -536,7 +536,7 @@ impl Config {
         }
 
         // Fix H-2: log-stream destination secrets cannot be protected at rest
-        // without a key — require one in production instead of silently
+        // without a key, require one in production instead of silently
         // storing credentials in plaintext.
         if self.node_env == "production" && self.log_stream.encryption_key.trim().is_empty() {
             return Err(
@@ -767,7 +767,7 @@ mod tests {
         // Dogfood 2026-10-06 wave B (continuing audit F10): every knob below
         // was parsed into a field with zero readers. They are gone from the
         // struct entirely, so a stale environment can no longer pretend to
-        // configure behaviour — the assertion is that the vars are inert.
+        // configure behaviour, the assertion is that the vars are inert.
         for knob in [
             "DATA_RESIDENCY",
             "DATA_RESIDENCY_REGIONS",

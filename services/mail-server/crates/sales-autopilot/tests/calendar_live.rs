@@ -49,7 +49,7 @@ async fn live_pool(test_name: &str) -> Option<PgPool> {
         Ok(Some(pool)) => pool,
         Ok(None) => return None,
         // The URL is configured, so provisioning failure is infrastructure
-        // breakage — never a silent skip.
+        // breakage, never a silent skip.
         Err(error) => panic!("{test_name}: {}", error.panic_message()),
     };
     sales_autopilot::routes::initialize_schema(&pool)
@@ -129,7 +129,7 @@ fn request_for(
 }
 
 // ---------------------------------------------------------------------------
-// 6. Double-booking race — the DB exclusion constraint must decide
+// 6. Double-booking race, the DB exclusion constraint must decide
 // ---------------------------------------------------------------------------
 
 #[tokio::test]

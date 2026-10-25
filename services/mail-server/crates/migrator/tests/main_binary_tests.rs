@@ -1,6 +1,6 @@
 //! Deploy-gate binary tests: exercise the REAL `migrator` binary as a
-//! subprocess — the exact code path `docker compose --profile migrate run`
-//! executes — against private throwaway databases derived from the canonical
+//! subprocess, the exact code path `docker compose --profile migrate run`
+//! executes, against private throwaway databases derived from the canonical
 //! chain (never the shared base).
 //!
 //! The binary is reached through `CARGO_BIN_EXE_migrator`, so under

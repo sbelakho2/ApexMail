@@ -1,6 +1,6 @@
 +++
 title = "Unterauftragsverarbeiter"
-description = "ApexMail-Unterauftragsverarbeiter-Register — die Liste der autorisierten Dienstleister, die Daten in unserem Auftrag verarbeiten."
+description = "ApexMail-Unterauftragsverarbeiter-Register, die Liste der autorisierten Dienstleister, die Daten in unserem Auftrag verarbeiten."
 template = "prose.html"
 
 [extra]
@@ -10,7 +10,7 @@ last_updated = "2026-07-29"
 
 Diese Seite listet Drittanbieter auf, die von der Bel Consulting OÜ (handelnd als ApexMail) beauftragt werden und im Rahmen der Erbringung des ApexMail-Dienstes personenbezogene Daten von Kunden verarbeiten können. Dieses Register wird gemäß Artikel 28 der DSGVO und Abschnitt 5 der ApexMail-Auftragsverarbeitungsvereinbarung geführt.
 
-Unter EU-only-Routing trägt der AWS-SES-Eintrag keine Mail eines Mandanten: Nachrichten verlassen das System ausschließlich über die eigenen MTAs von ApexMail auf Hetzner-Infrastruktur. EU-only-Routing und seine Belege — samt der Unterscheidung zum globalen Standard, der AWS SES in dessen EU-Region nutzt — sind auf der [EU-Souveränitätsseite](/de/eu-sovereign/) dargelegt.
+Unter EU-only-Routing trägt der AWS-SES-Eintrag keine Mail eines Mandanten: Nachrichten verlassen das System ausschließlich über die eigenen MTAs von ApexMail auf Hetzner-Infrastruktur. EU-only-Routing und seine Belege, samt der Unterscheidung zum globalen Standard, der AWS SES in dessen EU-Region nutzt, sind auf der [EU-Souveränitätsseite](/de/eu-sovereign/) dargelegt.
 
 ### Infrastruktur-Unterauftragsverarbeiter
 
@@ -19,11 +19,11 @@ Die folgenden Drittunternehmen verarbeiten personenbezogene Daten von Kunden im 
 | Juristische Person | Marke | Dienst | Zweck | Datenkategorien | Verarbeitungsland | Speicherland | Unternehmenssitz | Übermittlungsmechanismus | Erforderlich |
 |---|---|---|---|---|---|---|---|---|---|
 | Hetzner Online GmbH | Hetzner | Cloud-Hosting | Compute, Storage, Networking | Kerndienstdaten in der standardmäßigen Shared-Bereitstellung | Konfigurierte EU/EWR-Region | Konfigurierte EU/EWR-Region | Finnland | Verarbeitung innerhalb des EWR; die Übermittlungsregeln nach Kapitel V DSGVO gelten nicht | Ja |
-| Amazon Web Services, Inc. | AWS S3 | Telemetrie-Objektspeicher | Telemetrie-Objektspeicher, wenn aktiviert | Loki-Logs und Tempo-Traces können Betriebsmetadaten enthalten | Konfigurierte S3-Region (Standard: `eu-central-1`) | Konfigurierte S3-Region (Standard: `eu-central-1`) | USA | EU-Standardvertragsklauseln (AWS-DPA) | Nein — nur wenn die aktive Bereitstellung S3-Speicher verwendet |
-| Amazon Web Services, Inc. | AWS SES | E-Mail-Zustelltransport | E-Mail-Zustellung, wenn aktiviert | E-Mail-Inhalte und Empfängeradressen | Konfigurierte SES-Region | Konfigurierte SES-Region | USA | EU-Standardvertragsklauseln (AWS-DPA) | Nein — nur wenn die aktive Bereitstellung SES verwendet |
-| Google LLC | Google | OAuth-Authentifizierung | Anmeldung über Google OAuth | OAuth-Tokens, E-Mail-Adresse, Name | Global (EU-Daten) | Nutzer mit Sitz im EWR: EWR | USA | Standardvertragsklauseln (SCCs) | Nein — nur wenn der Kunde Google OAuth aktiviert |
-| GitHub, Inc. | GitHub | OAuth-Authentifizierung | Anmeldung über GitHub OAuth | OAuth-Tokens, Benutzername, E-Mail-Adresse | Global (EU-Daten) | Nutzer mit Sitz im EWR: EWR | USA | Standardvertragsklauseln (SCCs) | Nein — nur wenn der Kunde GitHub OAuth aktiviert |
-| Mollie B.V. | Mollie | Zahlungsabwicklung | Abonnement-Abrechnung, Rechnungsstellung, Speicherung von Zahlungsmethoden | Tokens für Zahlungsmethoden, Transaktionsmetadaten, Rechnungsdaten | Niederlande | Niederlande | Niederlande | Vertragspartei mit Sitz in der EU (Mollie B.V., Amsterdam); Kartennetzwerke verarbeiten global gemäß dem Mollie-DPA; PCI DSS Level 1 zertifiziert | Ja — erforderlich für kostenpflichtige Tarife |
+| Amazon Web Services, Inc. | AWS S3 | Telemetrie-Objektspeicher | Telemetrie-Objektspeicher, wenn aktiviert | Loki-Logs und Tempo-Traces können Betriebsmetadaten enthalten | Konfigurierte S3-Region (Standard: `eu-central-1`) | Konfigurierte S3-Region (Standard: `eu-central-1`) | USA | EU-Standardvertragsklauseln (AWS-DPA) | Nein, nur wenn die aktive Bereitstellung S3-Speicher verwendet |
+| Amazon Web Services, Inc. | AWS SES | E-Mail-Zustelltransport | E-Mail-Zustellung, wenn aktiviert | E-Mail-Inhalte und Empfängeradressen | Konfigurierte SES-Region | Konfigurierte SES-Region | USA | EU-Standardvertragsklauseln (AWS-DPA) | Nein, nur wenn die aktive Bereitstellung SES verwendet |
+| Google LLC | Google | OAuth-Authentifizierung | Anmeldung über Google OAuth | OAuth-Tokens, E-Mail-Adresse, Name | Global (EU-Daten) | Nutzer mit Sitz im EWR: EWR | USA | Standardvertragsklauseln (SCCs) | Nein, nur wenn der Kunde Google OAuth aktiviert |
+| GitHub, Inc. | GitHub | OAuth-Authentifizierung | Anmeldung über GitHub OAuth | OAuth-Tokens, Benutzername, E-Mail-Adresse | Global (EU-Daten) | Nutzer mit Sitz im EWR: EWR | USA | Standardvertragsklauseln (SCCs) | Nein, nur wenn der Kunde GitHub OAuth aktiviert |
+| Mollie B.V. | Mollie | Zahlungsabwicklung | Abonnement-Abrechnung, Rechnungsstellung, Speicherung von Zahlungsmethoden | Tokens für Zahlungsmethoden, Transaktionsmetadaten, Rechnungsdaten | Niederlande | Niederlande | Niederlande | Vertragspartei mit Sitz in der EU (Mollie B.V., Amsterdam); Kartennetzwerke verarbeiten global gemäß dem Mollie-DPA; PCI DSS Level 1 zertifiziert | Ja, erforderlich für kostenpflichtige Tarife |
 
 ### Selbst gehostete Infrastruktur (keine Drittanbieter-Unterauftragsverarbeiter)
 

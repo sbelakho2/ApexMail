@@ -34,7 +34,7 @@ const SUCCESS_FLUSH_CHUNK: usize = 500;
 
 // ── Webhook secret at rest (SM3/SM10 addendum: decrypt-or-migrate) ──────
 
-/// The AAD binding a webhook secret envelope to its row — byte-for-byte the
+/// The AAD binding a webhook secret envelope to its row, byte-for-byte the
 /// convention `apexmail_db::repos::webhooks` AND the api-server's
 /// `webhook_secret_aad` use, so a row written or read by any of the three
 /// stacks decrypts identically and a ciphertext cannot be relocated between
@@ -47,12 +47,12 @@ fn webhook_secret_aad(webhook_id: &str) -> Vec<u8> {
 ///
 /// A byte-level mirror of the api-server's `webhook_signing_secret`
 /// (crates/api-server/src/routes/webhooks.rs), which itself mirrors
-/// `WebhooksRepo` — keep the three in lockstep:
+/// `WebhooksRepo`, keep the three in lockstep:
 ///
 /// * Envelope rows (`enc:v1:…`) decrypt STRICTLY under the row-bound AAD —
 ///   a tampered or wrong-key envelope fails closed and never signs.
 /// * `plain:v1:`-marked and legacy unmarked plaintext still sign honestly —
-///   the pre-parity behavior — and are best-effort MIGRATED to the envelope
+///   the pre-parity behavior, and are best-effort MIGRATED to the envelope
 ///   on this read (a failed rewrite is logged, never fatal).
 async fn webhook_signing_secret(
     db: &sqlx::PgPool,
@@ -61,7 +61,7 @@ async fn webhook_signing_secret(
 ) -> Result<String, apexmail_lib::secret_at_rest::SecretEncryptionError> {
     if !apexmail_lib::secret_at_rest::is_encrypted(stored) {
         // Legacy row: sign with the exact stored material, then migrate
-        // best-effort — the same migrate-on-read the repo applies.
+        // best-effort, the same migrate-on-read the repo applies.
         let material = stored.to_string();
         match apexmail_lib::secret_at_rest::migrate_at_rest(stored, &webhook_secret_aad(webhook_id))
         {
@@ -93,7 +93,7 @@ async fn webhook_signing_secret(
             error!(
                 %error,
                 webhook_id,
-                "webhook secret envelope failed to decrypt (tampered or wrong key) — \
+                "webhook secret envelope failed to decrypt (tampered or wrong key), \
                  delivery refused, failing closed"
             );
             error
@@ -111,7 +111,7 @@ const FETCH_WEBHOOK_JOBS_SQL: &str = r#"
                 UPDATE webhook_queue wq
                 SET status = 'processing',
                     locked_until = NOW() + $2 * INTERVAL '1 second',
-                    -- F10: mint the claim's owner token — every completion
+                    -- F10: mint the claim's owner token, every completion
                     -- write below is fenced on it, so a worker whose lease
                     -- expired cannot reschedule or delete a row the new
                     -- owner holds.
@@ -165,7 +165,7 @@ pub struct WebhookProcessor {
     shutdown_notify: Arc<Notify>,
     /// SM10 F4: data-plane STONITH gate. With `APEXMAIL_HA_FENCING=true`
     /// the claim loop refuses to claim (or deliver) webhook jobs while this
-    /// node's `ha:fenced:{node}` key stands — or while the fence authority
+    /// node's `ha:fenced:{node}` key stands, or while the fence authority
     /// cannot be read (fail closed). Default off: zero behavior change.
     fence_gate: crate::fence::FenceGate,
 }
@@ -327,7 +327,7 @@ impl WebhookProcessor {
             .execute(&self.db)
             .await?;
             if rescheduled.rows_affected() == 0 {
-                warn!(job_id = %job.id, "per-tenant-limit reschedule fenced out — lease lost");
+                warn!(job_id = %job.id, "per-tenant-limit reschedule fenced out, lease lost");
             }
             return Ok(());
         }
@@ -428,7 +428,7 @@ impl WebhookProcessor {
     /// Redis key unpredictable to an outside observer.
     fn dedup_key(&self, job: &WebhookJob) -> String {
         if let Some(ref hmac_key) = self.config.dedup_hmac_key {
-            // HMAC-based key derivation — unpredictable without the key
+            // HMAC-based key derivation, unpredictable without the key
             let mut mac =
                 HmacSha256::new_from_slice(hmac_key.as_bytes()).expect("HMAC key should be valid");
             mac.update(job.id.as_bytes());
@@ -474,7 +474,7 @@ impl WebhookProcessor {
             .execute(&self.db)
             .await?;
             if deleted.rows_affected() == 0 {
-                warn!(job_id = %job.id, "dedup cleanup fenced out — lease lost");
+                warn!(job_id = %job.id, "dedup cleanup fenced out, lease lost");
             }
             return Ok(());
         }
@@ -492,11 +492,11 @@ impl WebhookProcessor {
             // Reschedule without incrementing attempt
             let retry_delay = job.next_retry_delay_ms().min(30000);
             // F10: the column is error_message (webhook_queue has no
-            // last_error — the old write failed every time); fenced on the
+            // last_error, the old write failed every time); fenced on the
             // claim's owner token; attempt is intentionally NOT incremented
             // (a breaker-open deferral is not a delivery attempt).
             let rescheduled = sqlx::query(
-                "UPDATE webhook_queue SET status = 'pending', scheduled_at = NOW() + $1 * INTERVAL '1 millisecond', locked_until = NULL, error_message = 'Circuit breaker open — waiting for recovery', updated_at = NOW()
+                "UPDATE webhook_queue SET status = 'pending', scheduled_at = NOW() + $1 * INTERVAL '1 millisecond', locked_until = NULL, error_message = 'Circuit breaker open, waiting for recovery', updated_at = NOW()
                  WHERE id = $2 AND (claim_token IS NOT DISTINCT FROM $3)"
             )
             .bind(retry_delay)
@@ -505,7 +505,7 @@ impl WebhookProcessor {
             .execute(&self.db)
             .await?;
             if rescheduled.rows_affected() == 0 {
-                warn!(job_id = %job.id, "circuit-breaker reschedule fenced out — lease lost");
+                warn!(job_id = %job.id, "circuit-breaker reschedule fenced out, lease lost");
             }
             return Ok(());
         }
@@ -528,7 +528,7 @@ impl WebhookProcessor {
 
         // (No empty-resolution check here: `validate_and_resolve_url`
         // refuses to return a target whose hostname resolved to zero IPs —
-        // "URL hostname could not be resolved" — so a success from it always
+        // "URL hostname could not be resolved", so a success from it always
         // carries at least one address. The delivery-time guard in
         // `deliver_webhook` re-checks the same invariant.)
 
@@ -673,7 +673,7 @@ impl WebhookProcessor {
         let delivery_id = format!("dlv_{}", uuid::Uuid::new_v4());
 
         // SM3/SM10 addendum: the ROW's stored secret may be an `enc:v1:`
-        // envelope (api-server writes them) — resolve it to the signing
+        // envelope (api-server writes them), resolve it to the signing
         // material FIRST, and fail closed on a tampered/unreadable envelope:
         // the delivery is refused (never signed with envelope bytes), the
         // refusal is recorded like any other failure so the retry budget
@@ -690,7 +690,7 @@ impl WebhookProcessor {
                     0,
                     format!(
                         "webhook signing secret could not be decrypted (tampered envelope or \
-                         wrong key) — delivery refused; rotate the secret ({error})"
+                         wrong key), delivery refused; rotate the secret ({error})"
                     ),
                     None,
                     None,
@@ -698,7 +698,7 @@ impl WebhookProcessor {
             }
         };
 
-        // Sign payload — secret is zeroized inside sign_payload (O-16.3)
+        // Sign payload, secret is zeroized inside sign_payload (O-16.3)
         let signature = self.sign_payload(&signing_secret, timestamp, serialized_payload);
 
         // Build headers
@@ -741,7 +741,7 @@ impl WebhookProcessor {
             // The pinned client uses the SAME builder recipe as the
             // process-lifetime shared client (which already built at
             // `WebhookProcessor::new`, failing startup if the TLS backend is
-            // unusable), so construction cannot fail here — a failure would
+            // unusable), so construction cannot fail here, a failure would
             // mean a broken environment every other delivery already shares.
             let pinned_client = Client::builder()
                 .timeout(self.config.request_timeout)
@@ -808,13 +808,13 @@ impl WebhookProcessor {
                 if (200..300).contains(&status) {
                     WebhookDeliveryResult::success(status, response_time, response_body)
                 } else if (300..400).contains(&status) {
-                    // Redirects are refused (Policy::none) — the destination
+                    // Redirects are refused (Policy::none), the destination
                     // has not passed SSRF validation, so a 3xx is a failure.
                     WebhookDeliveryResult::failure(
                         Some(status),
                         response_time,
                         format!(
-                            "HTTP {} — redirect refused (webhook endpoint must not redirect)",
+                            "HTTP {}, redirect refused (webhook endpoint must not redirect)",
                             status
                         ),
                         response_body,
@@ -894,7 +894,7 @@ impl WebhookProcessor {
         );
 
         if job.attempt >= job.max_retries && result.is_retryable() {
-            // Exhausted retries — move to dead letter (fenced on the claim).
+            // Exhausted retries, move to dead letter (fenced on the claim).
             self.dead_letter(job, &result, error_msg).await?;
             error!(
                 job_id = %job.id,
@@ -905,14 +905,14 @@ impl WebhookProcessor {
             // Check retry budget before scheduling (RS-H-07)
             match self.check_retry_budget(&job.webhook_id).await {
                 Ok(true) => {
-                    // Budget available — schedule retry with backoff
+                    // Budget available, schedule retry with backoff
                     let retry_delay = result
                         .retry_after_ms
                         .map(|ms| ms as i64)
                         .unwrap_or_else(|| job.next_retry_delay_ms());
 
                     // F10: the column is error_message (webhook_queue has
-                    // no last_error); fenced on the claim's owner token — a
+                    // no last_error); fenced on the claim's owner token, a
                     // stale worker must not reschedule the new owner's row.
                     // Attempt counting and backoff scheduling are unchanged.
                     let rescheduled = sqlx::query(
@@ -926,7 +926,7 @@ impl WebhookProcessor {
                     .execute(&self.db)
                     .await?;
                     if rescheduled.rows_affected() == 0 {
-                        warn!(job_id = %job.id, "retry reschedule fenced out — lease lost");
+                        warn!(job_id = %job.id, "retry reschedule fenced out, lease lost");
                         return Ok(());
                     }
 
@@ -937,7 +937,7 @@ impl WebhookProcessor {
                     );
                 }
                 Ok(false) => {
-                    // Budget exhausted — move to dead letter queue immediately
+                    // Budget exhausted, move to dead letter queue immediately
                     // (fenced on the claim like every other completion write).
                     self.dead_letter(job, &result, error_msg).await?;
 
@@ -948,7 +948,7 @@ impl WebhookProcessor {
                     );
                 }
                 Err(e) => {
-                    // Redis unavailable — fall through to schedule retry
+                    // Redis unavailable, fall through to schedule retry
                     warn!(
                         job_id = %job.id,
                         webhook_id = %job.webhook_id,
@@ -974,7 +974,7 @@ impl WebhookProcessor {
                     .execute(&self.db)
                     .await?;
                     if rescheduled.rows_affected() == 0 {
-                        warn!(job_id = %job.id, "retry reschedule (budget-check failure) fenced out — lease lost");
+                        warn!(job_id = %job.id, "retry reschedule (budget-check failure) fenced out, lease lost");
                         return Ok(());
                     }
 
@@ -1022,7 +1022,7 @@ impl WebhookProcessor {
         .execute(&mut *tx)
         .await?;
         if deleted.rows_affected() == 0 {
-            warn!(job_id = %job.id, "dead-letter fenced out — lease lost; nothing recorded");
+            warn!(job_id = %job.id, "dead-letter fenced out, lease lost; nothing recorded");
             return Ok(());
         }
 
@@ -1051,7 +1051,7 @@ impl WebhookProcessor {
 
     /// Flush pending successes in a batch transaction.
     ///
-    /// P2: each chunk is ONE statement — a data-modifying CTE deletes the
+    /// P2: each chunk is ONE statement, a data-modifying CTE deletes the
     /// claimed queue rows by `(id, claim_token)` and inserts the matching
     /// delivery rows. The fence is unchanged (a row is consumed and recorded
     /// only when this worker owns the claim); chunking only bounds the bind
@@ -1168,7 +1168,7 @@ impl WebhookProcessor {
                         warn!(
                             expected = chunk.len(),
                             recorded = result.rows_affected(),
-                            "success flush fenced out some rows — lease lost; not recorded"
+                            "success flush fenced out some rows, lease lost; not recorded"
                         );
                     }
                     if let Err(e) = sqlx::query("RELEASE SAVEPOINT webhook_success_flush")
@@ -1231,7 +1231,7 @@ mod adversarial_tests {
             .expect("redis pool")
     }
 
-    /// Unroutable Redis with short timeouts — exercises the fail-open branch
+    /// Unroutable Redis with short timeouts, exercises the fail-open branch
     /// of the retry-budget check without stalling the suite.
     fn dead_redis_pool() -> RedisPool {
         let mut cfg = deadpool_redis::Config::from_url("redis://127.0.0.1:1");
@@ -1725,8 +1725,8 @@ mod adversarial_tests {
 
     /// Install a deterministic at-rest key for this test process. MUST run
     /// before the first `secret_at_rest` call in the process (the key state
-    /// is cached at first resolution); under nextest — the canonical runner
-    /// — every test is its own process, so this is deterministic.
+    /// is cached at first resolution); under nextest, the canonical runner
+    ///, every test is its own process, so this is deterministic.
     fn install_at_rest_key() {
         std::env::set_var(
             "MFA_SECRET_ENCRYPTION_KEY",
@@ -1736,7 +1736,7 @@ mod adversarial_tests {
 
     /// A row whose secret is an `enc:v1:` envelope (what the api-server now
     /// writes) must be signed with the DECRYPTED value: the stub's signature
-    /// verifies against the PLAINTEXT under the row-bound AAD — never against
+    /// verifies against the PLAINTEXT under the row-bound AAD, never against
     /// the envelope string the raw read used to sign with.
     #[tokio::test]
     async fn envelope_stored_secret_is_signed_with_the_decrypted_value(
@@ -1943,7 +1943,7 @@ mod adversarial_tests {
         let tenant = unique_tenant();
         let webhook_id = insert_webhook(&pool, &tenant, "https://240.0.0.22/hook", true).await;
         let stub = spawn_stub(vec![StubResponse::new(200, "{}")]);
-        // An envelope bound to a DIFFERENT row id — exactly what a relocated
+        // An envelope bound to a DIFFERENT row id, exactly what a relocated
         // or tampered ciphertext looks like to this row.
         let tampered = apexmail_lib::secret_at_rest::encrypt_at_rest(
             "victim-secret",
@@ -1989,7 +1989,7 @@ mod adversarial_tests {
             "a tampered envelope must never reach the wire"
         );
         assert_eq!(delivery_rows(&pool, &webhook_id).await, 0);
-        // The refused row keeps its (other-row-bound) envelope — the refused
+        // The refused row keeps its (other-row-bound) envelope, the refused
         // read never rewrote it.
         let stored: String = sqlx::query_scalar("SELECT secret FROM webhooks WHERE id = $1")
             .bind(&webhook_id)
@@ -2045,8 +2045,8 @@ mod adversarial_tests {
     async fn deliver_webhook_refuses_redirects_and_classifies_status_matrix() {
         // A DELIBERATELY dead pool with a TINY acquire timeout: the delivery
         // path best-effort-migrates a legacy secret on read (one UPDATE),
-        // and sqlx's default 30s acquire timeout made that write — and with
-        // it every delivery — take 30s per call, four deliveries summing to
+        // and sqlx's default 30s acquire timeout made that write, and with
+        // it every delivery, take 30s per call, four deliveries summing to
         // the observed 120s and expiring the stub's precomputed Retry-After
         // date (deploy-host failure, 2026-10-11). 100ms bounds the failed
         // write on every platform; the delivery still signs and proceeds.
@@ -3271,7 +3271,7 @@ mod adversarial_tests {
     }
 
     /// A 429 with a numeric Retry-After defers the row by exactly that many
-    /// seconds — not by the endpoint's own backoff multiplier.
+    /// seconds, not by the endpoint's own backoff multiplier.
     #[tokio::test]
     async fn retry_after_seconds_header_sets_the_retry_delay(
     ) -> Result<(), Box<dyn std::error::Error>> {
@@ -3485,7 +3485,7 @@ mod adversarial_tests {
     }
 
     /// A flush that cannot open its transaction puts the pending successes
-    /// BACK into the buffer — nothing is dropped.
+    /// BACK into the buffer, nothing is dropped.
     #[tokio::test]
     async fn failed_flush_transaction_requeues_pending_successes(
     ) -> Result<(), Box<dyn std::error::Error>> {
@@ -3946,7 +3946,7 @@ mod adversarial_tests {
             }
         }
         // A closed breaker among them: with a zero threshold it is stale,
-        // but eviction only targets CLOSED breakers — the map keeps the
+        // but eviction only targets CLOSED breakers, the map keeps the
         // open ones and the closed one's key is absent until created.
         let created = processor.get_circuit_breaker_with("fresh", Duration::ZERO);
         assert!(created.as_ref().is_allowed());
@@ -3987,7 +3987,7 @@ mod adversarial_tests {
     /// already built the shared client: the same recipe (TLS backend,
     /// redirect policy) only fails when the shared one fails at startup.
     /// The former `Err` arm was unreachable dead code and is gone; this test
-    /// pins the proof — the identical recipe builds cleanly here.
+    /// pins the proof, the identical recipe builds cleanly here.
     #[tokio::test]
     async fn pinned_client_recipe_always_builds_where_the_shared_client_built(
     ) -> Result<(), Box<dyn std::error::Error>> {

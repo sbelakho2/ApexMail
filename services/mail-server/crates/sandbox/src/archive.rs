@@ -1,5 +1,5 @@
 //! Bounded archive extraction (audit finding: archive inspection previously
-//! only ever scored the OUTER container's raw bytes — a payload nested one
+//! only ever scored the OUTER container's raw bytes, a payload nested one
 //! archive deep was invisible, and `SandboxConfig`'s zip-bomb knobs were
 //! dead configuration).
 //!
@@ -9,14 +9,14 @@
 //! [`SandboxConfig::max_total_extracted_size`]. Every extracted entry is
 //! re-inspected with [`crate::file_inspector::inspect_file`], so macros,
 //! executables, polyglots and scripts inside archives are scored on their
-//! DECOMPRESSED content. Extraction is pure in-memory — nothing is written
+//! DECOMPRESSED content. Extraction is pure in-memory, nothing is written
 //! to disk, so archive entry paths cannot escape anywhere (no zip-slip).
 //!
 //! Everything here is bounded and fail-closed: entry count, total
 //! decompressed bytes, and nesting depth are hard caps; when a cap fires,
 //! the sweep stops and an explicit finding records WHY the contents were
 //! only partially inspected. RAR/7z containers are not extracted (no
-//! in-crate decompressor) — they keep the existing byte-heuristic checks
+//! in-crate decompressor), they keep the existing byte-heuristic checks
 //! plus their encryption risk.
 
 use crate::config::SandboxConfig;
@@ -87,7 +87,7 @@ pub fn extract_and_inspect(data: &[u8], config: &SandboxConfig) -> ExtractionOut
     // `ARCHIVE_ENCRYPTED` (identical predicate: `check_archive_encryption`
     // calls the same `is_zip_encrypted` the `inspect_file` Zip branch uses).
     // An encrypted container's contents are uninspected BECAUSE it is
-    // encrypted — that consequence is already scored at 7.0, so the sweep
+    // encrypted, that consequence is already scored at 7.0, so the sweep
     // must not stack a 3.0 `ARCHIVE_ENTRY_UNREADABLE` on the same container
     // (7 + 3 = 10 crossed `reject_threshold` and flipped QUARANTINE →
     // REJECT, breaking the strip-but-never-reject MTA posture).
@@ -139,7 +139,7 @@ fn push_entry_findings(
 /// `budget` is shared by reference across the WHOLE sweep: every entry
 /// decompressed at any nesting level charges the same pool (adversarial
 /// verification caught the previous by-value pass, which handed each
-/// nested archive a fresh copy of the remaining budget — N sibling zips
+/// nested archive a fresh copy of the remaining budget, N sibling zips
 /// each got (almost) the full entry/byte budget, so a hostile 25 MB
 /// container could amplify `max_total_extracted_size` per sibling).
 ///
@@ -148,7 +148,7 @@ fn push_entry_findings(
 /// the static inspector (for depth 1: the attachment itself; for deeper
 /// levels: the entry's own `inspect_file` run). Its unreadability to the
 /// parser is a CONSEQUENCE of that encryption and must not be scored
-/// again — only genuinely opaque/corrupt containers whose encryption did
+/// again, only genuinely opaque/corrupt containers whose encryption did
 /// NOT fire earn `ARCHIVE_ENTRY_UNREADABLE`.
 fn sweep_zip(
     data: &[u8],
@@ -164,7 +164,7 @@ fn sweep_zip(
         outcome.findings.push(InspectionFinding {
             id: "ARCHIVE_NESTING_EXCEEDED",
             description: format!(
-                "archive nesting exceeds the configured maximum depth {} — deeper contents are uninspected",
+                "archive nesting exceeds the configured maximum depth {}, deeper contents are uninspected",
                 config.max_nesting_depth
             ),
             risk: 5.0,
@@ -176,17 +176,17 @@ fn sweep_zip(
         Ok(archive) => archive,
         Err(_) => {
             // The magic bytes looked like a ZIP but the structure does not
-            // parse — treat as opaque (fail-closed direction: the outer
+            // parse, treat as opaque (fail-closed direction: the outer
             // container's own findings still apply). When the container is
             // ALREADY scored `ARCHIVE_ENCRYPTED` (7.0), its unreadability
-            // is a consequence of that encryption — do not stack a 3.0
+            // is a consequence of that encryption, do not stack a 3.0
             // unreadable finding on the same container (10.0 flipped
             // QUARANTINE → REJECT).
             if !encrypted_already_scored {
                 outcome.findings.push(InspectionFinding {
                     id: "ARCHIVE_ENTRY_UNREADABLE",
                     description:
-                        "archive container could not be parsed — inner contents uninspected".into(),
+                        "archive container could not be parsed, inner contents uninspected".into(),
                     risk: 3.0,
                 });
             }
@@ -200,7 +200,7 @@ fn sweep_zip(
             outcome.findings.push(InspectionFinding {
                 id: "ARCHIVE_ENTRY_CAP",
                 description: format!(
-                    "archive holds more than the configured maximum of {} entries — remaining entries are uninspected",
+                    "archive holds more than the configured maximum of {} entries, remaining entries are uninspected",
                     config.max_archive_entries
                 ),
                 risk: 4.0,
@@ -214,7 +214,7 @@ fn sweep_zip(
             Err(_) => {
                 // zip 2.4 fails `by_index` with "Password required to
                 // decrypt file" for an encrypted entry BEFORE the
-                // `file.encrypted()` check below can ever run — so when
+                // `file.encrypted()` check below can ever run, so when
                 // this container is already scored `ARCHIVE_ENCRYPTED`,
                 // this error IS the encryption, already scored at 7.0 on
                 // the same container. Do not stack the 3.0 unreadable
@@ -224,7 +224,7 @@ fn sweep_zip(
                 if !encrypted_already_scored {
                     outcome.findings.push(InspectionFinding {
                         id: "ARCHIVE_ENTRY_UNREADABLE",
-                        description: "archive entry could not be read — contents uninspected"
+                        description: "archive entry could not be read, contents uninspected"
                             .into(),
                         risk: 3.0,
                     });
@@ -237,7 +237,7 @@ fn sweep_zip(
         }
         // zip 9's `name()` errors on names that are not valid UTF-8 (common
         // for legacy CP437 archives). The raw bytes always exist, and the
-        // entry's CONTENT must still be inspected — use the raw name and a
+        // entry's CONTENT must still be inspected, use the raw name and a
         // lossy display copy, exactly like zip 2's former `name()`.
         let name = String::from_utf8_lossy(file.name_raw()).to_string();
         let path = format!("{path_prefix}{name}");
@@ -249,7 +249,7 @@ fn sweep_zip(
             outcome.findings.push(InspectionFinding {
                 id: "ARCHIVE_NESTED_ENCRYPTED",
                 description: format!(
-                    "archive entry '{path}' is password-protected — contents cannot be inspected"
+                    "archive entry '{path}' is password-protected, contents cannot be inspected"
                 ),
                 risk: 3.0,
             });
@@ -264,7 +264,7 @@ fn sweep_zip(
             outcome.findings.push(InspectionFinding {
                 id: "ARCHIVE_BOMB",
                 description: format!(
-                    "archive entry '{path}' declares {} decompressed bytes, exceeding the remaining extraction budget of {} bytes — contents uninspected",
+                    "archive entry '{path}' declares {} decompressed bytes, exceeding the remaining extraction budget of {} bytes, contents uninspected",
                     file.size(),
                     budget.remaining_bytes
                 ),
@@ -278,7 +278,7 @@ fn sweep_zip(
             outcome.findings.push(InspectionFinding {
                 id: "ARCHIVE_ENTRY_UNREADABLE",
                 description: format!(
-                    "archive entry '{path}' failed to decompress — contents uninspected"
+                    "archive entry '{path}' failed to decompress, contents uninspected"
                 ),
                 risk: 3.0,
             });
@@ -289,7 +289,7 @@ fn sweep_zip(
             outcome.findings.push(InspectionFinding {
                 id: "ARCHIVE_BOMB",
                 description: format!(
-                    "archive entry '{path}' decompressed past the extraction budget of {} bytes — a decompression-bomb shape; remaining entries are uninspected",
+                    "archive entry '{path}' decompressed past the extraction budget of {} bytes, a decompression-bomb shape; remaining entries are uninspected",
                     budget.remaining_bytes
                 ),
                 risk: 6.0,
@@ -302,12 +302,12 @@ fn sweep_zip(
 
         if bytes.len() as u64 > config.max_file_size {
             // An inner entry larger than the attachment limit itself would
-            // have been rejected as a top-level attachment — treat it as a
+            // have been rejected as a top-level attachment, treat it as a
             // high-risk signal instead of re-inspecting it.
             outcome.findings.push(InspectionFinding {
                 id: "ARCHIVE_ENTRY_OVERSIZE",
                 description: format!(
-                    "archive entry '{path}' is {} bytes (limit {}) — suspiciously oversized inner payload",
+                    "archive entry '{path}' is {} bytes (limit {}), suspiciously oversized inner payload",
                     bytes.len(),
                     config.max_file_size
                 ),
@@ -376,7 +376,7 @@ mod tests {
 
     #[test]
     fn nested_zip_marker_at_depth_two_is_detected() {
-        // Fail-first (audit): extraction did not exist — a payload inside a
+        // Fail-first (audit): extraction did not exist, a payload inside a
         // zip inside a zip was scored on the outer container's bytes only.
         // The marker here is a PE executable at nesting level 2; its bytes
         // are invisible in both containers (stored, but one level deep).
@@ -483,7 +483,7 @@ mod tests {
     fn extraction_budget_is_shared_across_sibling_nested_archives() {
         // Fail-first (adversarial verification): `sweep_zip` passed its
         // budget BY VALUE into the recursion, so every nested archive
-        // received a fresh COPY of the remaining budget — N sibling zips
+        // received a fresh COPY of the remaining budget, N sibling zips
         // each got (almost) the full entry budget, defeating the
         // whole-sweep caps the config documents ("across the whole
         // sweep"). The budget must be charged GLOBALLY: entries inspected
@@ -518,7 +518,7 @@ mod tests {
         // Fail-first (MTA cross-crate escalation): a container whose bytes
         // are ALREADY scored ARCHIVE_ENCRYPTED (7.0) must not additionally
         // earn ARCHIVE_ENTRY_UNREADABLE (3.0) when its structure resists
-        // parsing — the unreadability IS the encryption, already scored.
+        // parsing, the unreadability IS the encryption, already scored.
         // 7 + 3 = 10 crossed reject_threshold and flipped QUARANTINE →
         // REJECT. Fixture: ZIP local header with the encryption flag set
         // (bit 0 of the general-purpose flags at offset 6) and no central
@@ -547,7 +547,7 @@ mod tests {
     #[test]
     fn corrupt_non_encrypted_container_still_reports_unreadable() {
         // The other direction: a genuinely opaque/corrupt container whose
-        // encryption did NOT fire keeps the explicit 3.0 finding — the
+        // encryption did NOT fire keeps the explicit 3.0 finding, the
         // suppression is keyed on scored encryption, not on parse failure.
         let mut zip = vec![0x50u8, 0x4B, 0x03, 0x04, 0x14, 0x00, 0x00, 0x00];
         zip.extend_from_slice(&[0u8; 64]);
@@ -631,7 +631,7 @@ mod tests {
     #[test]
     fn encrypted_entries_in_parseable_container_do_not_stack_unreadable() {
         // Fail-first (second stacking site): zip 2.4 rejects by_index for an
-        // encrypted entry with PASSWORD_REQUIRED — previously that emitted a
+        // encrypted entry with PASSWORD_REQUIRED, previously that emitted a
         // 3.0 ARCHIVE_ENTRY_UNREADABLE per entry on TOP of the container's
         // 7.0 ARCHIVE_ENCRYPTED (again 10.0 → REJECT). The by_index failure
         // is the encryption, already scored.

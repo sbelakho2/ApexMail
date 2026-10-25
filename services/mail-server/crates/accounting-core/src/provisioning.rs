@@ -3,21 +3,21 @@
 //! Before this module, `default_legal_entity` was a bare `SELECT ... WHERE
 //! is_default` (migration 220 seeds no entity) and
 //! `find_open_period_for_date` failed with `NoOpenPeriod` unless an operator
-//! had hand-provisioned an open period — so on every fresh deployment ALL
+//! had hand-provisioned an open period, so on every fresh deployment ALL
 //! statutory postings (invoice revenue, AR settlement, credit-note reversal,
 //! bank lines) were silently skipped forever with only an ERROR log.
 //!
 //! The posting path now ensures its own preconditions, inside the caller's
-//! transaction (DML only — this crate's "no runtime DDL" guarantee stands:
+//! transaction (DML only, this crate's "no runtime DDL" guarantee stands:
 //! the schema itself is deploy-time, migration 220):
 //!
-//! * **default legal entity + chart** — created on first use with a stable
+//! * **default legal entity + chart**, created on first use with a stable
 //!   registry-code anchor ([`AUTO_PROVISIONED_REGISTRY_CODE`]), so concurrent
 //!   provisioners collapse onto one row (`ON CONFLICT (registry_code)`), and
 //!   the standard chart is seeded idempotently. The identity fields are
 //!   deliberately minimal: an operator should correct the legal identity on a
 //!   live deployment, but the books never again wait for a manual bootstrap.
-//! * **an open fiscal period covering the document date** — the covering
+//! * **an open fiscal period covering the document date**, the covering
 //!   month is created when NOTHING covers the date. When a period covers the
 //!   date but is closed/locked, provisioning FAILS CLOSED with
 //!   `NoOpenPeriod`: backdating into closed books is a human decision, never
@@ -72,7 +72,7 @@ pub async fn ensure_default_entity_in(conn: &mut PgConnection) -> Result<Uuid> {
 
 /// Ensure an open fiscal period covers `date`, creating the covering calendar
 /// month when nothing does. A closed/locked period covering the date fails
-/// closed (`NoOpenPeriod`) — see the module docs.
+/// closed (`NoOpenPeriod`), see the module docs.
 pub async fn ensure_open_period_in(
     conn: &mut PgConnection,
     legal_entity_id: Uuid,
@@ -131,7 +131,7 @@ pub async fn ensure_ledger_ready_in(
     Ok((legal_entity_id, fiscal_period_id))
 }
 
-/// Calendar-month bounds containing `date` (pure — the provisioning date math
+/// Calendar-month bounds containing `date` (pure, the provisioning date math
 /// is pinned by unit tests, incl. year boundaries and leap years).
 pub fn month_bounds(date: NaiveDate) -> Result<(NaiveDate, NaiveDate)> {
     let start = NaiveDate::from_ymd_opt(date.year(), date.month(), 1).ok_or_else(|| {
@@ -206,7 +206,7 @@ mod tests {
     }
 
     /// The auto-provisioned entity input is anchored on the stable registry
-    /// code — that anchor is what makes concurrent first postings idempotent.
+    /// code, that anchor is what makes concurrent first postings idempotent.
     #[test]
     fn auto_provisioning_is_anchored_on_a_stable_registry_code() {
         assert_eq!(AUTO_PROVISIONED_REGISTRY_CODE, "APEXMAIL-DEFAULT");

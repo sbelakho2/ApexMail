@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Subprocessor register generator — derived from the deployment configuration.
+"""Subprocessor register generator, derived from the deployment configuration.
 
 The public register (B5: "a zero-US subprocessor chain") used to be three
 hand-maintained copies that could drift silently:
@@ -10,8 +10,8 @@ hand-maintained copies that could drift silently:
     ``trust_portal_subprocessors``, served at ``/trust/subprocessors``)
 
 This tool is their single source. It derives the ACTIVE subprocessor set from
-the deployment configuration — the compose files (which services run) and the
-env files (which providers/regions are configured) — and renders all three
+the deployment configuration, the compose files (which services run) and the
+env files (which providers/regions are configured), and renders all three
 surfaces from one in-memory register:
 
   * the marketing page (processor, purpose, location, transfer basis),
@@ -20,7 +20,7 @@ surfaces from one in-memory register:
     trust_portal_seed.json``) the portal's ``upsert_subprocessor`` consumes.
 
 The processor IDENTITY (legal entity, corporate country, DPA, the regions the
-service can run in) is not derivable from a compose file — it is a legal fact
+service can run in) is not derivable from a compose file, it is a legal fact
 — so it lives in ``PROCESSOR_CATALOG`` below, with the evidence pointer for
 each fact. The configuration only decides WHICH processors are active and
 WHERE they process.
@@ -64,7 +64,7 @@ ENV_FILES = [
 MARKETING_REGISTER = ROOT / "apps/marketing-zola/content/subprocessors/index.md"
 COMPLIANCE_MIRROR = ROOT / "templates/compliance/subprocessors.md"
 TRUST_PORTAL_SEED = ROOT / "tools/fixtures/subprocessors/trust_portal_seed.json"
-GENERATED_BANNER = "GENERATED FILE — do not edit by hand"
+GENERATED_BANNER = "GENERATED FILE, do not edit by hand"
 
 # The register's own last-updated date. Bumped by hand when the derived set or
 # the catalog facts change (the tool prints it; --check compares it too).
@@ -160,7 +160,7 @@ PROCESSOR_CATALOG: list[Processor] = [
         data_categories="Loki logs and Tempo traces may contain operational metadata",
         corporate_country="USA",
         transfer_basis="EU Standard Contractual Clauses (AWS DPA)",
-        required="No — only when the active deployment uses S3 telemetry storage",
+        required="No, only when the active deployment uses S3 telemetry storage",
         certifications=[],
         region_env="TELEMETRY_S3_REGION",
         regions={
@@ -180,7 +180,7 @@ PROCESSOR_CATALOG: list[Processor] = [
         data_categories="Email content and recipient addresses in transit",
         corporate_country="USA",
         transfer_basis="EU Standard Contractual Clauses (AWS DPA)",
-        required="No — only when the active deployment uses the SES transport",
+        required="No, only when the active deployment uses the SES transport",
         certifications=[],
         region_env="AWS_REGION",
         regions={
@@ -203,7 +203,7 @@ PROCESSOR_CATALOG: list[Processor] = [
         data_categories="OAuth tokens, email address, name",
         corporate_country="USA",
         transfer_basis="Standard Contractual Clauses (SCCs)",
-        required="No — only if the deployment enables Google OAuth",
+        required="No, only if the deployment enables Google OAuth",
         certifications=[],
         region_env="GOOGLE_CLIENT_ID",
         regions={"__enabled__": ("Global (EU data)", "EU/EEA-based users: EEA")},
@@ -217,7 +217,7 @@ PROCESSOR_CATALOG: list[Processor] = [
         data_categories="OAuth tokens, username, email address",
         corporate_country="USA",
         transfer_basis="Standard Contractual Clauses (SCCs)",
-        required="No — only if the deployment enables GitHub OAuth",
+        required="No, only if the deployment enables GitHub OAuth",
         certifications=[],
         region_env="GITHUB_CLIENT_ID",
         regions={"__enabled__": ("Global (EU data)", "EU/EEA-based users: EEA")},
@@ -228,13 +228,13 @@ PROCESSOR_CATALOG: list[Processor] = [
         legal_entity="Mollie B.V.",
         brand="Mollie",
         purpose="Payment processing, subscription management, invoicing",
-        data_categories="Payment card details (tokenized — ApexMail never receives full card "
+        data_categories="Payment card details (tokenized, ApexMail never receives full card "
         "numbers), billing address, transaction metadata",
         corporate_country="Netherlands",
         transfer_basis="Contracting entity is EU-established (Mollie B.V., Amsterdam); card "
         "scheme networks process globally under the Mollie Data Processing Agreement; PCI DSS "
         "Level 1 certified",
-        required="Yes — required for paid plans",
+        required="Yes, required for paid plans",
         certifications=["PCI DSS Level 1"],
         region_env="MOLLIE_API_KEY",
         regions={"__enabled__": ("Netherlands", "Netherlands")},
@@ -299,7 +299,7 @@ def deployment_config(
     env_paths: list[Path], compose_paths: list[Path], override: dict[str, str] | None = None
 ) -> dict[str, str]:
     """Merge the deployment's env files (later files do NOT override the
-    production example — the production example is authoritative where both
+    production example, the production example is authoritative where both
     declare a value) plus a fixture override."""
     merged: dict[str, str] = {}
     for path in env_paths:
@@ -430,13 +430,13 @@ def check_sovereign_chain_zero_us(active: list[ActiveEntry]) -> list[str]:
         if entry.processing_country == "United States" or entry.storage_country == "United States":
             violations.append(
                 f"{CHECK_NAME}: {entry.name} ({entry.brand}) is ACTIVE with US processing/"
-                f"storage (region {entry.region or 'unset'}) — the sovereign chain refuses "
+                f"storage (region {entry.region or 'unset'}), the sovereign chain refuses "
                 "US processing"
             )
         if entry.processing_country == "UNKNOWN":
             violations.append(
                 f"{CHECK_NAME}: {entry.name} ({entry.brand}) region {entry.region!r} is not "
-                "classified in the processor catalog — the sovereign property cannot be proven, "
+                "classified in the processor catalog, the sovereign property cannot be proven, "
                 "so the register refuses (add the region and its processing country)"
             )
         if entry.processor.corporate_country == "USA" and not any(
@@ -490,7 +490,7 @@ def render_marketing_register(active: list[ActiveEntry], services: set[str]) -> 
     )
     return f"""+++
 title = "Subprocessors"
-description = "ApexMail subprocessor register — third-party vendors processing customer personal data."
+description = "ApexMail subprocessor register, third-party vendors processing customer personal data."
 template = "prose.html"
 
 [extra]
@@ -503,7 +503,7 @@ last_updated = "{REGISTER_LAST_UPDATED}"
 
 This page lists third-party vendors engaged by Bel Consulting OÜ (trading as ApexMail) that may process customer personal data in the course of providing the ApexMail service. This register is maintained in accordance with Article 28 of the GDPR and Section 5 of the ApexMail Data Processing Agreement. It is generated from the deployment's own configuration, so the listed set and locations cannot drift from what the deployment actually runs.
 
-Under EU-only routing the AWS SES entry carries no tenant's mail: messages leave exclusively through ApexMail's own MTAs on Hetzner infrastructure. EU-only routing and its evidence — including the distinction from the Global default, which uses AWS SES in its EU region — are set out on the [EU sovereignty page](/eu-sovereign/).
+Under EU-only routing the AWS SES entry carries no tenant's mail: messages leave exclusively through ApexMail's own MTAs on Hetzner infrastructure. EU-only routing and its evidence, including the distinction from the Global default, which uses AWS SES in its EU region, are set out on the [EU sovereignty page](/eu-sovereign/).
 
 ### Infrastructure Subprocessors
 
@@ -637,7 +637,7 @@ def render_trust_portal_seed(active: list[ActiveEntry], services: set[str]) -> s
         rows.append(
             {
                 "name": f"{name} (self-hosted)",
-                "purpose": f"{purpose} — self-hosted by ApexMail; the publisher is not a "
+                "purpose": f"{purpose}, self-hosted by ApexMail; the publisher is not a "
                 "subprocessor",
                 "location": "Hetzner deployment region",
                 "data_categories": ["Operational telemetry"],
@@ -742,7 +742,7 @@ def check(override: dict[str, str] | None = None) -> int:
             drifted = True
     if drifted:
         print(
-            "  FAIL: the committed register drifted from the deployment-derived truth — "
+            "  FAIL: the committed register drifted from the deployment-derived truth, "
             "run `python3 tools/generate_subprocessors.py` and review the diff",
             file=sys.stderr,
         )
@@ -777,7 +777,7 @@ def self_test() -> int:
         print(f"    PASS: fixture refused ({len(fixture_violations)} violation(s))")
     else:
         failures.append(
-            "the us-east-1 fixture was NOT refused — the zero-US check has no teeth"
+            "the us-east-1 fixture was NOT refused, the zero-US check has no teeth"
         )
 
     print("  self-test 3/3: --check detects a mutated committed file")

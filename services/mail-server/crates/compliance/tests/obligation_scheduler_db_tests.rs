@@ -1,6 +1,6 @@
 //! Dogfood 2026-10-06 wave B: the statutory-obligation scheduler pass.
 //!
-//! `sync_all_obligations` is the production caller the engine lacked — before
+//! `sync_all_obligations` is the production caller the engine lacked, before
 //! it, `statutory_obligations` was written only by tests and the live table
 //! stayed EMPTY (verified 2026-10-07) while the module documented a
 //! "scheduler's monthly tick". These tests exercise the pass against the
@@ -114,7 +114,7 @@ async fn scheduler_pass_populates_the_calendar_idempotently() {
     assert_eq!(
         bare_types,
         vec!["annual_report".to_string()],
-        "no VAT/employer/OSS registration means NO KMD/TSD/VD/OSS rows — only the \
+        "no VAT/employer/OSS registration means NO KMD/TSD/VD/OSS rows, only the \
          annual report derived from the entity's creation date"
     );
 
@@ -165,7 +165,7 @@ async fn scheduler_pass_populates_the_calendar_idempotently() {
 }
 
 /// A pending obligation whose due date is in the past is moved to `overdue` by
-/// the same pass — the state machine advances instead of leaving stale
+/// the same pass, the state machine advances instead of leaving stale
 /// `pending` rows forever.
 #[tokio::test]
 async fn scheduler_pass_marks_past_due_obligations_overdue() {
@@ -211,7 +211,7 @@ async fn scheduler_pass_marks_past_due_obligations_overdue() {
 
 /// The pass derives the ANNUAL REPORT deadline from the entity's fiscal-year
 /// configuration, so an entity without VAT/employer registrations still gets
-/// its ÄS §179 deadline — and the fiscal year end month moves the date.
+/// its ÄS §179 deadline, and the fiscal year end month moves the date.
 #[tokio::test]
 async fn scheduler_pass_derives_annual_report_from_the_fiscal_year() {
     let Some(pool) = canonical_pool("annual_report").await else {

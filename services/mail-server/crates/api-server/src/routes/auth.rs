@@ -74,7 +74,7 @@ const KIWI_MAX_VERIFY_ATTEMPTS: i64 = 20;
 /// Global concurrency cap for memory-hard (Argon2id) verifications.
 ///
 /// Each verification re-derives the Argon2id hash with the record's m_kib
-/// (up to 64 MiB) — an attacker issuing many fresh challenges and submitting
+/// (up to 64 MiB), an attacker issuing many fresh challenges and submitting
 /// bogus counters could otherwise turn the server into an aggregate
 /// memory/CPU amplifier. Per-nonce attempt caps bound ONE challenge; this
 /// semaphore bounds ALL of them. Initialized from config on first use.
@@ -92,7 +92,7 @@ static ARGON2_VERIFY_SEMAPHORE: OnceLock<Arc<Semaphore>> = OnceLock::new();
 const KIWI_ARGON2_PERMIT_WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Acquire the aggregate Argon2 verification permit with a BOUNDED wait.
-/// On timeout (or semaphore closure — never triggered today) the caller gets
+/// On timeout (or semaphore closure, never triggered today) the caller gets
 /// the same retryable 503-style denial `routes::kiwicaptcha.rs` uses for
 /// capacity exhaustion, never an indefinite queue.
 async fn acquire_argon2_permit_bounded(
@@ -109,7 +109,7 @@ async fn acquire_argon2_permit_bounded(
         Err(_) => {
             tracing::warn!(
                 max_wait_ms = max_wait.as_millis() as u64,
-                "KiwiCaptcha: Argon2 verify permit wait timed out — verifier saturated"
+                "KiwiCaptcha: Argon2 verify permit wait timed out, verifier saturated"
             );
             Err(ApiError::ServiceUnavailable(
                 "captcha verification capacity exceeded; please retry shortly".into(),
@@ -122,7 +122,7 @@ async fn acquire_argon2_permit_bounded(
 ///
 /// The record is deleted only if it still equals the exact JSON the caller
 /// verified against. A concurrent or replayed use finds the key missing (or
-/// changed) and gets `0` — the challenge is strictly single-use.
+/// changed) and gets `0`, the challenge is strictly single-use.
 const KIWI_CONSUME_LUA: &str = r#"
     local stored = redis.call('GET', KEYS[1])
     if stored == ARGV[1] then
@@ -135,16 +135,16 @@ const KIWI_CONSUME_LUA: &str = r#"
 /// Outcome of the per-nonce KiwiCaptcha verify-attempt cap check.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum KiwiAttemptCap {
-    /// Under the cap — verification may proceed.
+    /// Under the cap, verification may proceed.
     Allowed,
-    /// Over the cap — verification must be denied. This is ALSO the outcome
+    /// Over the cap, verification must be denied. This is ALSO the outcome
     /// when the INCR Lua script itself fails: the check fails CLOSED, never
     /// silently passing (a `0` on a script error would remove the
     /// `KIWI_MAX_VERIFY_ATTEMPTS` cap and let one nonce drive unbounded
     /// Argon2id derivations). Mirrors the issuance limiter's script-error
     /// semantics in `routes::kiwicaptcha.rs` (error → treated as exceeded).
     Exceeded,
-    /// Redis is unavailable — verification must be denied with a retryable
+    /// Redis is unavailable, verification must be denied with a retryable
     /// 503, mirroring `ChallengeRateLimit::RedisUnavailable` in
     /// `routes::kiwicaptcha.rs`.
     RedisUnavailable,
@@ -165,7 +165,7 @@ async fn check_kiwi_verify_attempt_cap(
         Err(error) => {
             tracing::error!(
                 error = %error,
-                "KiwiCaptcha verify-attempt store unavailable — failing verification closed"
+                "KiwiCaptcha verify-attempt store unavailable, failing verification closed"
             );
             return KiwiAttemptCap::RedisUnavailable;
         }
@@ -194,7 +194,7 @@ async fn check_kiwi_verify_attempt_cap(
     .unwrap_or_else(|error| {
         tracing::error!(
             error = %error,
-            "KiwiCaptcha verify-attempt script failed — failing verification closed"
+            "KiwiCaptcha verify-attempt script failed, failing verification closed"
         );
         1
     });
@@ -227,7 +227,7 @@ pub async fn verify_kiwi_token(
     // RS-063: Dev-mode bypass gated behind compile-time debug_assertions check.
     if cfg!(debug_assertions) && config.kiwi_secret_key == "dev" {
         tracing::warn!(
-            "KiwiCaptcha dev-mode bypass active — this must NOT be enabled in production"
+            "KiwiCaptcha dev-mode bypass active, this must NOT be enabled in production"
         );
         return Ok(());
     }
@@ -244,7 +244,7 @@ pub async fn verify_kiwi_token(
     let solution = kiwicaptcha::SolutionToken::decode(raw).map_err(|e| {
         tracing::warn!(error = %e, "KiwiCaptcha: token decode failed");
         ApiError::Validation(vec![
-            "CAPTCHA verification failed — please refresh and try again".into(),
+            "CAPTCHA verification failed, please refresh and try again".into(),
         ])
     })?;
 
@@ -265,7 +265,7 @@ pub async fn verify_kiwi_token(
         .ok_or_else(|| {
             tracing::warn!("KiwiCaptcha: challenge not found in Redis");
             ApiError::Validation(vec![
-                "CAPTCHA challenge expired or not found — please refresh and try again".into(),
+                "CAPTCHA challenge expired or not found, please refresh and try again".into(),
             ])
         })
         .and_then(|s| {
@@ -309,7 +309,7 @@ pub async fn verify_kiwi_token(
         KiwiAttemptCap::Exceeded => {
             tracing::warn!("KiwiCaptcha: verify attempt cap exceeded");
             return Err(ApiError::Validation(vec![
-                "CAPTCHA verification failed — please refresh and try again".into(),
+                "CAPTCHA verification failed, please refresh and try again".into(),
             ]));
         }
         KiwiAttemptCap::RedisUnavailable => {
@@ -337,14 +337,14 @@ pub async fn verify_kiwi_token(
     // Telemetry scoring: detect headless/automated clients. The telemetry
     // payload itself is deliberately not logged (privacy).
     //
-    // Telemetry is client-controlled and forgeable — supplementary evidence,
+    // Telemetry is client-controlled and forgeable, supplementary evidence,
     // never the security boundary (the kiwicaptcha model: default-off,
     // verify.rs `enforce_telemetry` docs). It is scored EXACTLY ONCE here:
     // when enforcement is OFF, a bot-scored payload is observability-only
     // (warn log below, no rejection); when enforcement is ON, this call is
     // short-circuited and the crate-side check inside verify_solution
     // performs the single scoring and the rejection. The previous shape —
-    // an unconditional hard reject here — ran before the configured
+    // an unconditional hard reject here, ran before the configured
     // `kiwi_enforce_telemetry` flag was consulted (rejecting even with
     // KIWI_ENFORCE_TELEMETRY=false) and double-scored the payload when the
     // flag was on.
@@ -359,7 +359,7 @@ pub async fn verify_kiwi_token(
 
     let now_ns = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_micros() as u64) // epoch MICROseconds — kiwicaptcha's issued_at_ns/now_ns unit
+        .map(|d| d.as_micros() as u64) // epoch MICROseconds, kiwicaptcha's issued_at_ns/now_ns unit
         .unwrap_or(0);
 
     // kiwicaptcha's VerifyContext carries a `&mut dyn FnMut` clock (not
@@ -398,7 +398,7 @@ pub async fn verify_kiwi_token(
         // binding input: the request binding is not enforced here.
         expected_request_binding: kiwicaptcha::RequestBindingExpectation::Unenforced,
         // No region / issuer / policy-version pinning is configured on this
-        // deployment — those enforcement knobs stay off.
+        // deployment, those enforcement knobs stay off.
         expected_region: None,
         expected_issuer: None,
         expected_policy_version: None,
@@ -425,7 +425,7 @@ pub async fn verify_kiwi_token(
         // closed); the api-server only ever issues v2.
         accept_legacy_v1: false,
         telemetry: Some(&solution.telemetry),
-        // Telemetry is client-controlled and forgeable — supplementary only.
+        // Telemetry is client-controlled and forgeable, supplementary only.
         // The per-nonce Lua INCR is the authoritative attempt cap (20); the
         // intrinsic max_attempts is left unlimited here to keep the two
         // mechanisms independent.
@@ -456,7 +456,7 @@ pub async fn verify_kiwi_token(
     };
     match outcome {
         // `Valid` is a struct variant carrying the consumed challenge's nonce
-        // (jti) and any request binding — neither is needed here: consumption
+        // (jti) and any request binding, neither is needed here: consumption
         // is keyed by `solution.nonce` below.
         kiwicaptcha::VerifyOutcome::Valid { .. } => {
             // Atomic single-use consumption (compare-and-delete): the record is
@@ -476,17 +476,17 @@ pub async fn verify_kiwi_token(
                 Ok(())
             } else {
                 tracing::warn!(
-                    "KiwiCaptcha: challenge already consumed or expired — replay rejected"
+                    "KiwiCaptcha: challenge already consumed or expired, replay rejected"
                 );
                 Err(ApiError::Validation(vec![
-                    "CAPTCHA challenge already used — please refresh and try again".into(),
+                    "CAPTCHA challenge already used, please refresh and try again".into(),
                 ]))
             }
         }
         kiwicaptcha::VerifyOutcome::Invalid(reason) => {
             tracing::warn!(reason = ?reason, counter = solution.counter, duration_ms = solution.duration_ms, target_bits = record.target_bits, "KiwiCaptcha: REJECTED");
             Err(ApiError::Validation(vec![
-                "CAPTCHA verification failed — please try again".into(),
+                "CAPTCHA verification failed, please try again".into(),
             ]))
         }
     }
@@ -498,14 +498,14 @@ fn is_unique_violation(error: &sqlx::Error) -> bool {
 
 /// F8 (audit P1-1/P1-2): enterprise SSO enforcement. A tenant whose
 /// `ent_sso_configurations` rows have `enforce_sso = true` must not be able
-/// to authenticate with a local password — every login has to go through the
+/// to authenticate with a local password, every login has to go through the
 /// SSO flow.
 ///
 /// Deterministic by construction (audit P1-2): a tenant may hold a
 /// configuration row PER DOMAIN, and the previous `LIMIT 1` pick was an
 /// arbitrary one of them. The aggregate
 /// `COALESCE(bool_or(enabled AND enforce_sso), FALSE)` answers the policy
-/// question directly — SSO is enforced when ANY enabled configuration row
+/// question directly, SSO is enforced when ANY enabled configuration row
 /// for the tenant demands it. This mirrors
 /// `enterprise::sso::tenant_enforces_sso` (the same query lives there for
 /// the enterprise crate's own routes; the crates cannot share code without
@@ -572,14 +572,14 @@ pub(crate) fn verify_password_or_log(
     // verifiers below answered every login attempt with a 500
     // (`unknown password hash scheme`, live dogfood 2026-10-08: an invited
     // operator's first sign-in returned INTERNAL_ERROR). Refuse with the
-    // honest, actionable 401 instead — the same shape as the SSO arm.
+    // honest, actionable 401 instead, the same shape as the SSO arm.
     if hash.starts_with("!invited-") || hash.starts_with("!pending-") {
         tracing::info!(
             subject = %subject,
             "password login refused for an unaccepted invitation (no password set yet)"
         );
         return Err(ApiError::Unauthorized(
-            "This invitation has not been accepted yet — use the password-setup link in your invitation email to set a password.".into(),
+            "This invitation has not been accepted yet, use the password-setup link in your invitation email to set a password.".into(),
         ));
     }
 
@@ -597,7 +597,7 @@ pub(crate) fn verify_password_or_log(
         tracing::error!(
             hash_prefix = %prefix,
             subject = %subject,
-            "unknown password hash scheme — refusing login (never a 5xx)"
+            "unknown password hash scheme, refusing login (never a 5xx)"
         );
         return Err(ApiError::Unauthorized(
             "This account cannot sign in with a password. Contact support.".into(),
@@ -619,7 +619,7 @@ pub(crate) fn verify_password_or_log(
 //
 // ONE ladder, BOTH login surfaces. The JSON login (`login` below) and the
 // browser SSR login (`routes::web::perform_password_login`) previously
-// maintained two divergent copies of the post-password policy — and the
+// maintained two divergent copies of the post-password policy, and the
 // browser copy never evaluated tenant SSO enforcement at all, so an
 // SSO-enforced tenant's users could walk straight past the gate through the
 // console form. Both surfaces now call [`evaluate_password_login_policy`]
@@ -629,7 +629,7 @@ pub(crate) fn verify_password_or_log(
 /// What the shared ladder demands of the MFA step (audit P1-1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MfaChallengeRequirement {
-    /// The account has an enrolled authenticator — a code must be verified
+    /// The account has an enrolled authenticator, a code must be verified
     /// (TOTP / recovery code / email MFA, per the surface's machinery).
     Verify,
     /// `mfa_enabled` is set but no usable secret is stored: the account can
@@ -678,7 +678,7 @@ pub(crate) struct PasswordLoginSubject<'a> {
     pub role: &'a str,
     pub status: &'a str,
     pub email_verified: bool,
-    /// The `mfa_enabled` flag — set even when the stored secret is missing
+    /// The `mfa_enabled` flag, set even when the stored secret is missing
     /// (that combination is the [`MfaChallengeRequirement::Misconfigured`]
     /// verdict).
     pub mfa_enabled: bool,
@@ -687,7 +687,7 @@ pub(crate) struct PasswordLoginSubject<'a> {
 }
 
 /// The ONE password-login policy ladder (audit P1-1). Run AFTER the password
-/// verified — policy is disclosed only to callers who presented the correct
+/// verified, policy is disclosed only to callers who presented the correct
 /// credentials, never to anonymous probes.
 ///
 /// Order (the audit's): status → SSO enforcement → email verification →
@@ -695,12 +695,12 @@ pub(crate) struct PasswordLoginSubject<'a> {
 ///
 /// `enforce_role_mfa` selects whether the role policy (`role_requires_mfa`)
 /// forces enrollment on this surface. The JSON API enforces it with its
-/// enrollment challenge; the SSR console passes `false` — it has no
+/// enrollment challenge; the SSR console passes `false`, it has no
 /// pre-authentication enrollment flow, so forcing [`MfaChallengeRequirement::Setup`]
 /// there would dead-end administrators behind an uncompletable challenge
 /// (the console enforces the flag post-login via the CP/session gates).
 /// The tenant's lifecycle status for the login verdict, or `None` when the
-/// tenants row is absent (fixture/partial deployments — the middleware's
+/// tenants row is absent (fixture/partial deployments, the middleware's
 /// fallback governs there).
 async fn tenant_status_for_login(
     db: &sqlx::PgPool,
@@ -727,7 +727,7 @@ pub(crate) async fn evaluate_password_login_policy(
     }
 
     // 2. SSO enforcement: SSO-enforced tenants reject password login on
-    //    EVERY surface (audit P1-1 — the browser path never checked this).
+    //    EVERY surface (audit P1-1, the browser path never checked this).
     //    The entitlement gate honours the capability: a tenant whose
     //    configuration enforces SSO without the `sso_enabled` entitlement is
     //    refused instead of silently receiving an unbought feature.
@@ -752,7 +752,7 @@ pub(crate) async fn evaluate_password_login_policy(
 
     // 3b. Tenant state: a restricted workspace (pending/suspended/
     //     pending_deletion) would accept the session and then refuse every
-    //     guarded route at the middleware — "Signed in." followed by a
+    //     guarded route at the middleware, "Signed in." followed by a
     //     silent bounce back to the login form (live run 2026-10-22). Fail
     //     AFTER the account checks so an unverified user still gets the
     //     verification refusal first.
@@ -766,7 +766,7 @@ pub(crate) async fn evaluate_password_login_policy(
 
     // 4. ATO risk verdict on the successful-password authentication. The
     //    high-risk refusal is anti-enumeration: it renders exactly like a
-    //    wrong password. Medium risk steps up to MFA — which requires an
+    //    wrong password. Medium risk steps up to MFA, which requires an
     //    enrollment, so an unenrolled medium-risk login is allowed+flagged
     //    inside the engine.
     let ato_decision = ato_evaluate_password_login(
@@ -855,7 +855,7 @@ pub(crate) fn scopes_for_role(role: &str) -> Vec<String> {
             // `retention:read`/`retention:write` are the scopes REQUIRED by
             // the /v1/retention surface (custom retention editing). Leaving
             // them out of the mintable registry made the documented
-            // retention flow impossible for scoped keys — only wildcard
+            // retention flow impossible for scoped keys, only wildcard
             // holders could ever call it (the exact defect the
             // domains:write/lists:* fixes closed for their surfaces).
             "retention:read".into(),
@@ -906,7 +906,7 @@ pub(crate) fn registered_api_key_scopes() -> &'static [String] {
         // role grants: `billing:write` (plan switches, wallet debits),
         // `scim:read`/`scim:write` (SCIM user provisioning) and `ai:read`
         // (chat/insights). Leaving them out of the registry made those
-        // routes' own scope gates unreachable for scoped keys — no key could
+        // routes' own scope gates unreachable for scoped keys, no key could
         // ever carry the exact scope the route demanded, so only wildcard
         // holders could ever call them (the identical defect the
         // `domains:write`/`automations:write` fix closed for domains).
@@ -938,7 +938,7 @@ pub(crate) fn is_registered_api_key_scope(scope: &str) -> bool {
 
 /// Per-scope issuance authorization for API key creation (F17):
 ///
-/// * a caller holding the wildcard `*` may mint ANY registered scope — the
+/// * a caller holding the wildcard `*` may mint ANY registered scope, the
 ///   previous exact-match check locked administrators out of ordinary
 ///   scoped keys, forcing them to mint full-power `*` keys instead;
 /// * a restricted caller may mint exactly the scopes they already hold;
@@ -1076,7 +1076,7 @@ fn validate_password_strength(password: &str) -> Result<(), ApiError> {
     let char_count = password.chars().count();
     if char_count < 15 || password.len() > 128 {
         return Err(ApiError::Validation(vec![
-            "password must be 15-128 characters; longer is stronger — no uppercase/digit/symbol mix is required".into(),
+            "password must be 15-128 characters; longer is stronger, no uppercase/digit/symbol mix is required".into(),
         ]));
     }
 
@@ -1225,7 +1225,7 @@ fn build_action_link(base_url: &str, path: &str, _email: &str, token: &str) -> S
     format!("{}{}/{}", base_url.trim_end_matches('/'), path, token,)
 }
 
-/// Lowercased/trimmed login identifier (email or username) — shared by the
+/// Lowercased/trimmed login identifier (email or username), shared by the
 /// JSON and SSR login flows so both feed the same Redis failure/lock keys.
 pub(crate) fn normalized_login_identifier(email: &str) -> String {
     email.trim().to_ascii_lowercase()
@@ -1245,13 +1245,13 @@ fn login_lockout_counter_key(identifier: &str) -> String {
 
 /// Redis set of source IPs that recently produced failed logins for an
 /// identifier. Lockout requires corroboration across distinct sources (M-6),
-/// so the set — not just a counter — drives the lock decision.
+/// so the set, not just a counter, drives the lock decision.
 fn login_failure_ip_key(identifier: &str) -> String {
     format!("apexmail:auth:fail_ips:{}", hash_token(identifier))
 }
 
 /// How many distinct source IPs must have produced failures before an
-/// account may be locked (audit M-6). A single source — however persistent —
+/// account may be locked (audit M-6). A single source, however persistent —
 /// can no longer lock a victim's account at will; the per-IP login rate
 /// limit keeps throttling that source while the account stays usable for
 /// the real owner elsewhere.
@@ -1325,7 +1325,7 @@ pub(crate) async fn record_login_failure(
             identifier_hash = %identifier_hash,
             failures = failures,
             distinct_ips = distinct_ips,
-            "login failures reached the threshold from a single source — \
+            "login failures reached the threshold from a single source, \
              account lockout withheld (M-6 distinct-IP rule); per-IP rate \
              limits remain active"
         );
@@ -1380,15 +1380,15 @@ async fn clear_login_failures(
 // platform actually has: client IP, User-Agent, timestamp, and the engine's
 // own per-user login history (prior IPs and device fingerprints).
 //
-// Risk ladder (deterministic, explainable — every non-low verdict names its
+// Risk ladder (deterministic, explainable, every non-low verdict names its
 // factors in the audit row):
 // - low    → allow (score logged, no audit row),
 // - medium → allow, but require the MFA challenge when the user has MFA
-//            enrolled, otherwise allow + flag — audit row always,
+//            enrolled, otherwise allow + flag, audit row always,
 // - high   → refuse with the SAME wrong-password response the handler
 //            already returns (byte-identical status/body/flash, so an
 //            attacker learns nothing); `record_login_failure` rate-limits
-//            the attempt (M-6 distinct-IP corroboration intact — the ATO
+//            the attempt (M-6 distinct-IP corroboration intact, the ATO
 //            path alone never disables an account). Audit row always.
 //
 // Failure semantics: any detector error fails OPEN (allow + loud log) —
@@ -1484,7 +1484,7 @@ async fn write_ato_audit_row(state: &AppState, audit: &AtoAudit<'_>) {
             error = %error,
             user_id = %audit.user_id,
             band = audit.band.as_str(),
-            "failed to write the ATO audit row — the verdict is still enforced"
+            "failed to write the ATO audit row, the verdict is still enforced"
         );
     }
 }
@@ -1531,7 +1531,7 @@ pub(crate) async fn ato_evaluate_password_login(
             tracing::error!(
                 user_id = %user_id,
                 error = %error,
-                "ATO detector unavailable — failing OPEN (login allowed without ATO evaluation)"
+                "ATO detector unavailable, failing OPEN (login allowed without ATO evaluation)"
             );
             return AtoLoginDecision::Allow;
         }
@@ -1543,7 +1543,7 @@ pub(crate) async fn ato_evaluate_password_login(
             user_id = %user_id,
             score = verdict.risk_score,
             action = %verdict.action,
-            "ATO login risk: low — allowed"
+            "ATO login risk: low, allowed"
         );
         return AtoLoginDecision::Allow;
     }
@@ -1632,7 +1632,7 @@ async fn delete_mfa_challenge(
 
 // ─── F3: TOTP hardening (lockout, replay guard, single-use challenges) ──
 
-/// RFC 6238 time step used by `apexmail_lib::mfa` (30 s) — shared by the
+/// RFC 6238 time step used by `apexmail_lib::mfa` (30 s), shared by the
 /// test TOTP generators below; the replay guard itself keys on the step the
 /// verifier MATCHED (no current-step derivation needed).
 #[cfg(test)]
@@ -1651,7 +1651,7 @@ const MFA_TOTP_REPLAY_PREFIX: &str = "apexmail:auth:mfa_totp_replay:";
 
 /// Process-wide TOTP verifier with per-secret failed-attempt lockout
 /// (`apexmail_lib::mfa::TOTPVerifier`, audit O-19.2). Shared so every TOTP
-/// check site contributes to — and is bounded by — the same lockout state.
+/// check site contributes to, and is bounded by, the same lockout state.
 static TOTP_VERIFIER: std::sync::LazyLock<apexmail_lib::mfa::TOTPVerifier> =
     std::sync::LazyLock::new(apexmail_lib::mfa::TOTPVerifier::new);
 
@@ -1666,15 +1666,15 @@ static TOTP_REPLAY_FALLBACK: std::sync::LazyLock<
 /// ARGV[1] = TTL seconds.
 /// Returns 1 when this caller is the first to use that window, 0 on replay.
 ///
-/// Only the matched window is claimed — NOT the whole ±1 acceptance span.
+/// Only the matched window is claimed, NOT the whole ±1 acceptance span.
 /// Claiming all three windows (the previous scheme) made any two
 /// verifications within three steps of each other collide: the second login
 /// presented a genuinely fresh code for step N, but the ±1 claim written by
 /// the login at step N-2 covered step N-1, so the valid code was rejected
 /// as a "replay" (false rejection for every back-to-back login inside ~90s,
 /// and each false rejection fed the per-secret lockout). Claiming exactly
-/// the matched step keeps the RFC 6238 §5.2 guarantee — a second submission
-/// of the SAME code finds its own step already claimed — without inventing
+/// the matched step keeps the RFC 6238 §5.2 guarantee, a second submission
+/// of the SAME code finds its own step already claimed, without inventing
 /// collisions between different codes.
 const TOTP_REPLAY_CLAIM_LUA: &str = r#"
     if redis.call('EXISTS', KEYS[1]) == 1 then
@@ -1765,9 +1765,9 @@ fn claim_totp_window_inprocess(secret_fingerprint: &str, matched_step: u64) -> b
 }
 
 /// Verify a TOTP code with the full F3 hardening applied:
-/// 1. **Lockout** — the shared `TOTPVerifier` locks a secret after repeated
+/// 1. **Lockout**, the shared `TOTPVerifier` locks a secret after repeated
 ///    failures (per process).
-/// 2. **Replay guard** — a valid code is single-use across its whole ±1
+/// 2. **Replay guard**, a valid code is single-use across its whole ±1
 ///    acceptance window (atomic Redis claim, in-process fallback), so an
 ///    intercepted code cannot be replayed inside the drift window.
 ///
@@ -1782,7 +1782,7 @@ pub(crate) async fn verify_totp_code_guarded(
     // In-process verdict first: lockout, format check, drift match, and the
     // per-process RFC 6238 §5.2 replay guard (matched counter <= last used).
     // `verify_matched` surfaces WHICH step the code matched so the shared
-    // (Redis) guard can claim exactly that window — see the Lua fn's doc
+    // (Redis) guard can claim exactly that window, see the Lua fn's doc
     // comment for why claiming the whole ±1 span was wrong.
     let Some(matched_step) = TOTP_VERIFIER.verify_matched(secret, code) else {
         return false;
@@ -1841,7 +1841,7 @@ async fn revoke_user_sessions(
     let revoked_after = Utc::now().timestamp();
 
     // F-DF1 monotonic cutoff: a host clock that steps BACKWARDS (NTP
-    // correction, VM resync — observed live) must never lower the stored
+    // correction, VM resync, observed live) must never lower the stored
     // cutoff below one written earlier, or sessions revoked at the higher
     // cutoff authenticate again. The cutoff only ever advances; the returned
     // value is the EFFECTIVE cutoff so issuers bump `iat` past it (the login
@@ -1896,7 +1896,7 @@ pub(crate) async fn enqueue_verification_email_with_branding(
     let company = branding
         .map(TenantBranding::company_name)
         .unwrap_or("ApexMail");
-    let document_title = format!("Verify your email — {company}");
+    let document_title = format!("Verify your email, {company}");
     let heading = format!("Verify Your {company} Account");
     let body_html = format!(
         "<p>Finish setting up <strong>{safe_email}</strong> by confirming this email address.</p>\n\
@@ -1918,7 +1918,7 @@ pub(crate) async fn enqueue_verification_email_with_branding(
     );
     let text_footer = branding
         .map(branded_text_footer)
-        .unwrap_or_else(|| "© 2026 ApexMail — https://apexmail.ee".to_string());
+        .unwrap_or_else(|| "© 2026 ApexMail, https://apexmail.ee".to_string());
     let default_text = format!(
         "Verify Your {company} Account\n\nConfirm {email} by visiting: {verification_link}\n\nThis link expires in 24 hours. If you didn't create this account, you can safely ignore this email.\n\n{text_footer}"
     );
@@ -1953,7 +1953,7 @@ pub(crate) async fn enqueue_verification_email_with_branding(
 }
 
 /// Operator invitation email: BOTH credentials a created operator needs in
-/// one message — the email-verification link (proves mailbox ownership)
+/// one message, the email-verification link (proves mailbox ownership)
 /// and the password-setup link (the operator was created without a usable
 /// password). Dogfood 2026-10-08 E-OPS: operator creation wrote no mail at
 /// all, so a created operator could never complete login; this reuses the
@@ -1980,7 +1980,7 @@ pub(crate) async fn enqueue_operator_invite_email(
         .map(TenantBranding::company_name)
         .unwrap_or("ApexMail");
     let company_html = html_escape(company);
-    let document_title = format!("You have been invited — {company}");
+    let document_title = format!("You have been invited, {company}");
     let heading = format!("Your {company} Operator Invitation");
     let body_html = if branding.is_some() {
         format!(
@@ -2023,7 +2023,7 @@ pub(crate) async fn enqueue_operator_invite_email(
     );
     let text_footer = branding
         .map(branded_text_footer)
-        .unwrap_or_else(|| "ApexMail — https://apexmail.ee".to_string());
+        .unwrap_or_else(|| "ApexMail, https://apexmail.ee".to_string());
     let default_text = if branding.is_some() {
         format!(
             "Your {company} Operator Invitation\n\nA {company} operator invited {email} to the control plane.\n\n1. Set your password (expires in 1 hour): {setup_link}\n2. Confirm this email address (expires in 24 hours): {verification_link}\n\nControl-plane access also requires MFA enrollment at first sign-in.\n\n{text_footer}"
@@ -2078,7 +2078,7 @@ pub fn router() -> Router<AppState> {
         // below is deprecated but kept for in-flight links and old clients.
         .route("/verify-email/:token", get(verify_email_by_path))
         // Documented JSON form (docs/api/endpoints/auth.md): the token rides
-        // the request BODY — the safest transport (never a URL, header, or
+        // the request BODY, the safest transport (never a URL, header, or
         // log). Same single-use exchange as the GET forms.
         .route("/verify-email", post(verify_email_post).get(verify_email))
         .route("/reset-password", post(reset_password))
@@ -2401,7 +2401,7 @@ async fn issue_session_response_with_codes_at(
     // and the GDPR subject export read. This is deliberately best-effort: the
     // authoritative revocation state is the Redis marker written by
     // `revoke_user_sessions`, so a bookkeeping failure must not deny a valid
-    // login — but it is never silent either.
+    // login, but it is never silent either.
     record_issued_session(state, &session_id, user, exp, client_ip, user_agent).await;
 
     Ok((
@@ -2468,7 +2468,7 @@ async fn insert_auth_audit_log(
     // columns, with NOT NULL outcome/hash/signature populated.
     //
     // This used to be a FOURTH inline hash formula (tenant|user|action|
-    // metadata|timestamp — resource omitted, nanosecond timestamps), which
+    // metadata|timestamp, resource omitted, nanosecond timestamps), which
     // made every auth audit row unreproducible from storage and unverifiable
     // with the canonical writer's formula. Delegate to the one canonical
     // writer instead: same head advance, same microsecond-truncated hash
@@ -2506,7 +2506,7 @@ fn extract_bearer_token(headers: &HeaderMap) -> Option<String> {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-// `kiwi__token` is KiwiCaptcha's literal wire field name — kept verbatim
+// `kiwi__token` is KiwiCaptcha's literal wire field name, kept verbatim
 // (same convention as LoginRequest) so the hidden form field deserializes.
 #[allow(non_snake_case)]
 pub struct ResetPasswordRequest {
@@ -2527,7 +2527,7 @@ pub struct ResetPasswordResponse {
 
 // ─── Handlers ──────────────────────────────────────────────────
 
-/// GET /v1/auth/me — returns the currently authenticated user's profile.
+/// GET /v1/auth/me, returns the currently authenticated user's profile.
 /// Used by the Console/CP after login to hydrate the UI.
 async fn get_current_user(
     State(state): State<AppState>,
@@ -2585,7 +2585,7 @@ async fn login(
         ]));
     }
 
-    // RS-H-03: Per-IP rate limiting — prevents credential-stuffing and brute-force
+    // RS-H-03: Per-IP rate limiting, prevents credential-stuffing and brute-force
     // attacks from a single source, complementing per-account lockout below.
     let client_ip = connect_info
         .map(|ConnectInfo(addr)| {
@@ -2651,18 +2651,18 @@ async fn login(
         }
         Err(error) => {
             if state.config.environment.is_production() {
-                tracing::error!(error = %error, ip = %client_ip, "login IP rate limiter unavailable — failing closed in production");
+                tracing::error!(error = %error, ip = %client_ip, "login IP rate limiter unavailable, failing closed in production");
                 return Err(ApiError::ServiceUnavailable(
                     "login is temporarily unavailable; please retry shortly".into(),
                 ));
             }
-            tracing::warn!(error = %error, ip = %client_ip, "login IP rate limiter unavailable — failing open outside production");
+            tracing::warn!(error = %error, ip = %client_ip, "login IP rate limiter unavailable, failing open outside production");
         }
     }
 
     let login_identifier = normalized_login_identifier(&body.email);
     if let Some(lock_ttl) = login_lock_ttl(&state.redis, &login_identifier).await? {
-        // The lockout TTL is known exactly — advertise it (Retry-After).
+        // The lockout TTL is known exactly, advertise it (Retry-After).
         return Err(ApiError::RateLimitedIn(lock_ttl.max(1) as u64));
     }
 
@@ -2742,7 +2742,7 @@ async fn login(
         }
         PasswordLoginVerdict::TenantRestricted { status } => {
             return Err(ApiError::Forbidden(format!(
-                "workspace is {status} — access is restricted"
+                "workspace is {status}, access is restricted"
             )));
         }
         PasswordLoginVerdict::SsoRequired => {
@@ -2753,7 +2753,7 @@ async fn login(
         }
         // The password half survived the policy. EmailUnverified and full
         // Allowed clear the lockout counter; MfaRequired deliberately does
-        // NOT — clearing there reset the accumulator on every attempt, so an
+        // NOT, clearing there reset the accumulator on every attempt, so an
         // attacker holding a valid password could guess second factors
         // forever (each login → challenge → wrong-code cycle wiped the
         // count). The counter now survives the password step and is cleared
@@ -2768,7 +2768,7 @@ async fn login(
 
     if let PasswordLoginVerdict::EmailUnverified = verdict {
         return Err(ApiError::Forbidden(
-            "email not verified — check your inbox for the verification link".into(),
+            "email not verified, check your inbox for the verification link".into(),
         ));
     }
 
@@ -2802,7 +2802,7 @@ async fn login(
                     match stored {
                         // SM3 (audit F7): authentication comparisons use the
                         // crate's timing-safe standard (the same helper the
-                        // CSRF checks run on) — plain String equality leaked
+                        // CSRF checks run on), plain String equality leaked
                         // the match prefix of the emailed 6-digit code. The
                         // comparison runs through the named seam
                         // [`emailed_mfa_code_matches`] so the acceptance
@@ -3117,7 +3117,7 @@ async fn complete_mfa_challenge(
         ]));
     }
 
-    // KiwiCaptcha gate (scope `mfa-verify`): mirror the SSR step — the
+    // KiwiCaptcha gate (scope `mfa-verify`): mirror the SSR step, the
     // second factor pays its own proof-of-work before the single-use
     // challenge token is consumed, so a distributed 6-digit guessing run
     // costs the attacker a solve per attempt (the lockout alone only bounds
@@ -3133,7 +3133,7 @@ async fn complete_mfa_challenge(
     .await?;
 
     // Single-use (F3): consume the challenge on this attempt regardless of
-    // the outcome — a challenge token can never be retried after a failed
+    // the outcome, a challenge token can never be retried after a failed
     // (or successful) verification.
     let challenge = consume_mfa_challenge(&state.redis, &body.challenge_token).await?;
     let login_identifier = normalized_login_identifier(&challenge.email);
@@ -3177,7 +3177,7 @@ async fn complete_mfa_challenge(
     // NOTE: the login-failure counter is deliberately NOT cleared here.
     // Clearing it mid-challenge reset the lockout accumulator on every
     // attempt, so an attacker holding a valid password could guess MFA codes
-    // forever — each cycle (login → challenge → wrong code) wiped the count
+    // forever, each cycle (login → challenge → wrong code) wiped the count
     // the previous cycles had accumulated. The counter now survives the
     // password step and is cleared only where the challenge is fully
     // VERIFIED (both issuance arms below), so 5 failed second-factors from
@@ -3202,7 +3202,7 @@ async fn complete_mfa_challenge(
     // prerequisite applies exactly as at the password step.
     if !user.email_verified {
         return Err(ApiError::Forbidden(
-            "email not verified — check your inbox for the verification link".into(),
+            "email not verified, check your inbox for the verification link".into(),
         ));
     }
 
@@ -3290,7 +3290,7 @@ async fn complete_mfa_challenge(
             }
 
             // If TOTP failed earlier, try recovery code. `totp_verified`
-            // carries the one-shot verification result from above — the code
+            // carries the one-shot verification result from above, the code
             // must NOT be verified again (replay guard makes it single-use).
             let totp_valid = totp_verified;
             if !totp_valid {
@@ -3551,14 +3551,14 @@ async fn mfa_status(
 
 // ─── MFA disable (FX-2 FIX 1) ───────────────────────────────────────────────
 
-/// Per-user rate limit for `POST /v1/auth/mfa/disable` — a credential-gated
+/// Per-user rate limit for `POST /v1/auth/mfa/disable`, a credential-gated
 /// destructive operation, throttled like `reset-password` (5 per 15 min).
 const MFA_DISABLE_RATE_LIMIT_MAX: i64 = 5;
 const MFA_DISABLE_RATE_LIMIT_WINDOW_SECS: u64 = 15 * 60;
 
 /// Request body for disabling MFA. Turning off the second factor requires
 /// the CURRENT password AND a currently-valid second factor (TOTP code or
-/// recovery code) — a stolen session alone is never sufficient (the same
+/// recovery code), a stolen session alone is never sufficient (the same
 /// two-factor bar the login itself enforces).
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -3580,7 +3580,7 @@ pub struct DisableMfaRequest {
 /// `mfa_recovery_hashes` are cleared, `mfa_enabled` flips false, the used
 /// recovery code is consumed, an `auth.mfa_disabled` audit row is written
 /// (actor + method), and every OTHER session of the user is revoked
-/// (per-session markers — the exact `change-password` precedent — so the
+/// (per-session markers, the exact `change-password` precedent, so the
 /// caller's own session survives).
 async fn disable_mfa(
     State(state): State<AppState>,
@@ -3626,12 +3626,12 @@ async fn disable_mfa(
     .fetch_optional(&state.db)
     .await?
     .ok_or_else(|| ApiError::NotFound("user not found".into()))?;
-    // The stored secret is an at-rest envelope — decrypt in place so the
+    // The stored secret is an at-rest envelope, decrypt in place so the
     // second-factor check sees the plaintext base32 secret.
     decrypt_mfa_secret_in_place(&mut user)?;
 
     // There must be something to disable (also covers the mfa_enabled flag
-    // set with no usable secret — a Misconfigured enrollment can be
+    // set with no usable secret, a Misconfigured enrollment can be
     // re-enrolled, not "disabled").
     let stored_secret = user
         .mfa_secret
@@ -3765,7 +3765,7 @@ async fn disable_mfa(
 
 // ─── Session inventory (FX-2 FIX 4) ────────────────────────────────────────
 
-/// Upper bound on the inventory returned by `GET /v1/auth/sessions` — the
+/// Upper bound on the inventory returned by `GET /v1/auth/sessions`, the
 /// retention window of the table is the session TTL, so a bound well past
 /// any real concurrency keeps the response shape stable.
 const LIST_SESSIONS_LIMIT: i64 = 100;
@@ -3784,7 +3784,7 @@ pub struct SessionInfo {
 
 /// List the CALLER's active (unexpired) sessions.
 ///
-/// Reads strictly `WHERE user_id = <caller>` — other users' sessions are
+/// Reads strictly `WHERE user_id = <caller>`, other users' sessions are
 /// unreachable by construction (tenant isolation rides on the same
 /// authenticated user id). `current` marks the session the request itself
 /// authenticated with. Pair with `POST /v1/auth/sessions/revoke` for
@@ -3987,7 +3987,7 @@ async fn register(
     // never be the answer to an address that could not be delivered anyway.
     // The bare empty/length check below used to admit `user@@host`, bare
     // local-parts, embedded CR/LF (SMTP header-injection material) and
-    // leading whitespace — each minted a live tenant row and a verification
+    // leading whitespace, each minted a live tenant row and a verification
     // email destined to dead-letter. `is_valid_email` is the SAME validator
     // the contacts/import surface already enforces (RFC 5321 length, single
     // unquoted `@`, local-part and domain grammar, control chars excluded).
@@ -4056,8 +4056,8 @@ async fn register(
     // Generate IDs and slug.
     //
     // Schema note (canonical services/mail-server/migrations lineage):
-    // tenants.id is VARCHAR(26) (ULID, migration 064) — a 26-char text id is
-    // correct — but users.id is UUID (migration 052). A text nanoid bound
+    // tenants.id is VARCHAR(26) (ULID, migration 064), a 26-char text id is
+    // correct, but users.id is UUID (migration 052). A text nanoid bound
     // into users.id fails the INSERT with `invalid input syntax for type
     // uuid`, breaking every public registration; generate a UUID for the
     // user id (same convention as create_api_key / the reset-password fix).
@@ -4197,7 +4197,7 @@ async fn verify_email(
     // Deprecated query-string form (CWE-598): a token in the query string
     // leaks into server/access logs, proxies, Referer headers, and browser
     // history. Retained only so in-flight links and API clients built
-    // against the old shape keep working — new links use
+    // against the old shape keep working, new links use
     // GET /v1/auth/verify-email/{token} (F5).
     tracing::warn!(
         "deprecated query-string email verification used; use /v1/auth/verify-email/{{token}}"
@@ -4207,7 +4207,7 @@ async fn verify_email(
 
 /// The documented JSON form (docs/api/endpoints/auth.md §Verify Email):
 /// `POST /v1/auth/verify-email {"token": ...}`. The token rides the request
-/// body — the transport that leaks nowhere (no URL, no header, no Referer).
+/// body, the transport that leaks nowhere (no URL, no header, no Referer).
 /// Same single-use, transactional exchange as the GET forms.
 async fn verify_email_post(
     State(state): State<AppState>,
@@ -4256,7 +4256,7 @@ async fn verify_email_by_path(
     Ok(result.map(Json).into_response())
 }
 
-/// Whether the client's `Accept` header prefers an HTML response — i.e.
+/// Whether the client's `Accept` header prefers an HTML response, i.e.
 /// this is a browser navigation rather than an API call.
 fn client_prefers_html(headers: &HeaderMap) -> bool {
     headers
@@ -4299,7 +4299,7 @@ pub(crate) async fn verify_email_token(
 
     // Find user with matching verification token. `users.id` is UUID
     // (migrations 052/056), so the id is returned and re-bound as
-    // `uuid::Uuid` — the previous text round-trip bound a TEXT value
+    // `uuid::Uuid`, the previous text round-trip bound a TEXT value
     // against the UUID column and failed with 42883
     // `operator does not exist: uuid = text` (F15). `tenant_id` is
     // VARCHAR(26) (migration 064) and stays a String.
@@ -4327,7 +4327,7 @@ pub(crate) async fn verify_email_token(
 
     // Expiry is mandatory and typed (F16): the RFC 3339 metadata string is
     // parsed into a `DateTime<Utc>` and must lie in the future. A missing
-    // or malformed value fails CLOSED — the old code silently skipped the
+    // or malformed value fails CLOSED, the old code silently skipped the
     // expiry check whenever parsing failed, and a missing value was never
     // checked at all.
     let expires: chrono::DateTime<chrono::Utc> = match expires_raw
@@ -4341,7 +4341,7 @@ pub(crate) async fn verify_email_token(
             tracing::warn!(
                 user_id = %user_id,
                 tenant_id = %tenant_id,
-                "verification token has missing or malformed expiry — refusing"
+                "verification token has missing or malformed expiry, refusing"
             );
             return Err(ApiError::BadRequest(
                 "invalid or expired verification token".into(),
@@ -4357,7 +4357,7 @@ pub(crate) async fn verify_email_token(
 
     // Consume the token atomically (F16): the UPDATE matches only while the
     // exact token hash is still present on the still-unverified row, so a
-    // replay — including one that raced the SELECT — affects zero rows.
+    // replay, including one that raced the SELECT, affects zero rows.
     let consumed = sqlx::query(
         "UPDATE users SET email_verified = true,
             metadata = metadata - 'verification_token_hash' - 'verification_token' - 'verification_expires',
@@ -4421,7 +4421,7 @@ pub(crate) fn display_key_prefix(raw_key: &str) -> String {
     const HEAD: usize = 8;
     const TAIL: usize = 4;
     let head: String = raw_key.chars().take(HEAD).collect();
-    // Key too short to split without the tail overlapping the head — expose
+    // Key too short to split without the tail overlapping the head, expose
     // nothing beyond the head.
     if raw_key.chars().count() <= HEAD + TAIL {
         return head;
@@ -4480,7 +4480,7 @@ pub(crate) async fn mint_api_key(
     }
 
     // Privilege-escalation guard (F17): every requested scope must be
-    // registered AND held by the caller — the wildcard authorizes any
+    // registered AND held by the caller, the wildcard authorizes any
     // registered scope, restricted callers authorize their own scopes
     // only, and "*" is mintable solely by a wildcard holder.
     for scope in scopes {
@@ -4495,21 +4495,21 @@ pub(crate) async fn mint_api_key(
     let raw_key = apexmail_lib::id::generate_api_key(false);
     let key_hash =
         apexmail_lib::hash_api_key_with_secret(&raw_key, &state.config.api_key_hash_secret);
-    // B1 (FIX 3): the persisted prefix must DISTINGUISH keys — the raw key
+    // B1 (FIX 3): the persisted prefix must DISTINGUISH keys, the raw key
     // always starts with the shared `am_live_`, so the old first-8-chars
     // prefix stored the literal 'am_live_' for every key and the API-keys
     // list was unusable. The display form keeps the recognizable head and
     // appends the LAST 4 characters: `am_live_…abcd` (13 chars, within the
     // widened VARCHAR(32) from migration 237). The last-4 fragment is
-    // identification metadata, not a secret — the keyed-HMAC `key_hash`
+    // identification metadata, not a secret, the keyed-HMAC `key_hash`
     // is what authenticates.
     let key_prefix = display_key_prefix(&raw_key);
 
     let id = Uuid::new_v4();
 
     // One transaction with the tenant row LOCKED (F46/F18): the per-tenant
-    // key count is enforced atomically — concurrent mints serialize on the
-    // row lock instead of racing a COUNT-then-INSERT past the ceiling — and
+    // key count is enforced atomically, concurrent mints serialize on the
+    // row lock instead of racing a COUNT-then-INSERT past the ceiling, and
     // the tenant policy is decided at mint time through the SAME helper
     // the auth middleware uses, so a suspended tenant mints nothing.
     let mut tx = state.db.begin().await?;
@@ -4528,7 +4528,7 @@ pub(crate) async fn mint_api_key(
                 "API key mint refused for restricted tenant"
             );
             return Err(ApiError::Forbidden(format!(
-                "workspace is {status} — API keys cannot be created until it is active"
+                "workspace is {status}, API keys cannot be created until it is active"
             )));
         }
         None => {
@@ -4581,7 +4581,7 @@ async fn create_api_key(
     auth: AuthUser,
     Json(body): Json<CreateApiKeyRequest>,
 ) -> Result<(StatusCode, Json<CreateApiKeyResponse>), ApiError> {
-    // F46: shared creation path with the console form — scope
+    // F46: shared creation path with the console form, scope
     // authorization, expiry policy, hashing, ceiling, and persistence all
     // live in `mint_api_key`.
     let minted = mint_api_key(
@@ -4617,10 +4617,10 @@ async fn list_api_keys(
     require_scopes(&auth, &["api-keys:read"])?;
 
     // SM3 (audit F8): `cursor` used to be accepted here as a raw integer
-    // OFFSET — contradicting the crate's documented opaque-keyset contract.
+    // OFFSET, contradicting the crate's documented opaque-keyset contract.
     // The mislabeled param is gone; pagination is the honestly-named
     // `offset`. (This list returns a plain array, so a true keyset migration
-    // needs the CursorPage envelope — a breaking client contract — and is
+    // needs the CursorPage envelope, a breaking client contract, and is
     // deliberately out of this pass.)
     let offset = params.offset.clamp(0, 100_000);
     let rows = sqlx::query_as::<_, ApiKeyInfoRow>(
@@ -4873,7 +4873,7 @@ async fn reset_password(
     Ok(Json(ResetPasswordResponse {
         success: true,
         message: if accepting_invitation {
-            "Invitation accepted — password set.".into()
+            "Invitation accepted, password set.".into()
         } else {
             "Password updated successfully.".into()
         },
@@ -4905,7 +4905,7 @@ async fn logout(
     // "Invalidate current session (cookie revocation + JWT blacklist)").
     // This previously called `revoke_user_sessions`, which writes the
     // tenant+user-wide cutoff marker and therefore signed the user out of
-    // EVERY device — a live dogfood probe (2026-10-08) caught the sibling
+    // EVERY device, a live dogfood probe (2026-10-08) caught the sibling
     // session dying on a single logout, contradicting the documented and
     // console ("Sign Out") contract. Siblings stay valid; `revoke_all` is
     // the endpoint that intentionally kills every session.
@@ -4966,7 +4966,7 @@ async fn refresh_token(
 
     // Token-type confusion (audit B): the middleware already rejects
     // non-session `typ` claims for API authentication, but refresh used to
-    // decode the cookie JWT blindly — letting a stream token (or any other
+    // decode the cookie JWT blindly, letting a stream token (or any other
     // non-session typ) be refreshed into a brand-new full `"*"`-scope
     // session. Enforce the same discrimination here.
     if !crate::middleware::auth::claims_typ_is_session(old_claims.typ.as_deref()) {
@@ -5003,9 +5003,9 @@ async fn refresh_token(
     // F-DF1 rotation race: the claim is a single atomic `SET NX EX`. The
     // previous EXISTS-then-(later)-SET pair let N concurrent refreshes of
     // the SAME cookie all observe "not blacklisted" and each mint its own
-    // live session — N credentials from one rotation. Now exactly one
+    // live session, N credentials from one rotation. Now exactly one
     // request wins the claim; every other presentation of the token —
-    // replay or race — is refused as revoked. Claiming before the user load
+    // replay or race, is refused as revoked. Claiming before the user load
     // is fail-closed: any subsequent refusal (suspended tenant, unverified
     // email) leaves the old token dead, which is the safe direction.
     let blacklist_key = token_blacklist_key(&token);
@@ -5058,12 +5058,12 @@ async fn refresh_token(
     // receives a fresh session through it either.
     if !user.email_verified {
         return Err(ApiError::Forbidden(
-            "email not verified — check your inbox for the verification link".into(),
+            "email not verified, check your inbox for the verification link".into(),
         ));
     }
 
     // The rotation claim was already placed above (atomic SET NX), so the
-    // old token is blacklisted from the moment it won — no second write.
+    // old token is blacklisted from the moment it won, no second write.
 
     let expiry_secs = state.config.jwt_expiry.as_secs() as i64;
     let now = Utc::now();
@@ -5073,7 +5073,7 @@ async fn refresh_token(
     // that wrote the cutoff and this refresh (observed live: marker and mint
     // shared one second, so every rotated cookie failed its first `/me` with
     // "session has been revoked"). The login path already issues past the
-    // cutoff via `session_issue_time_after_revocation` — refresh is the same
+    // cutoff via `session_issue_time_after_revocation`, refresh is the same
     // issuance, so it gets the same guard.
     let issued_at = session_issue_time_after_revocation(now, revoked_after);
     let exp = issued_at + ChronoDuration::seconds(expiry_secs);
@@ -5100,7 +5100,7 @@ async fn refresh_token(
     .map_err(|e| ApiError::Internal(format!("token generation failed: {e}")))?;
 
     // SM3 (audit F6): capture the REQUEST's user-agent BEFORE the response
-    // HeaderMap below shadows the `headers` parameter — the accountability
+    // HeaderMap below shadows the `headers` parameter, the accountability
     // row used to read the user-agent off the response-only map (always
     // None), losing device attribution on every refreshed session.
     let request_user_agent = headers
@@ -5335,7 +5335,7 @@ mod tests {
     /// sign-in answered 500 `unknown password hash scheme` because the
     /// `!invited-pending-activation` placeholder fell into the catch-all
     /// `Internal` arm. The shared verifier must refuse placeholders and any
-    /// unrecognized scheme with a named 401 — never a 5xx (both login
+    /// unrecognized scheme with a named 401, never a 5xx (both login
     /// surfaces route through this function).
     #[test]
     fn test_verify_password_or_log_refuses_placeholders_and_unknown_schemes_as_401() {
@@ -5354,7 +5354,7 @@ mod tests {
             other => panic!("invite placeholder must refuse with 401, got {other:?}"),
         }
 
-        // A corrupted/unknown stored scheme: loud log, safe 401 — the login
+        // A corrupted/unknown stored scheme: loud log, safe 401, the login
         // endpoint must never surface a server error for it.
         let error =
             verify_password_or_log("anything", "definitely-not-a-hash", "corrupt@example.com")
@@ -5563,7 +5563,7 @@ mod tests {
         // SM3 (audit F2): `billing:read` gates every billing read surface
         // (invoices, subscription, usage, quota). It MUST be mintable
         // (registered) so a wildcard administrator can deliberately issue
-        // finance-scoped keys — and MUST NOT appear in any role grant, so
+        // finance-scoped keys, and MUST NOT appear in any role grant, so
         // ordinary viewer/developer sessions keep failing the billing read
         // gates (the fail-closed default).
         let registry = registered_api_key_scopes();
@@ -5586,7 +5586,7 @@ mod tests {
     fn emailed_mfa_code_comparison_is_timing_safe_equality() {
         // SM3 (audit F7): the emailed 6-digit MFA code is an authentication
         // comparison, so its acceptance seam must behave exactly like the
-        // crate's timing-safe comparison — full equality only, with no
+        // crate's timing-safe comparison, full equality only, with no
         // prefix/substring or length-loose acceptance.
         assert!(emailed_mfa_code_matches("123456", "123456"), "exact match");
         assert!(
@@ -6135,7 +6135,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_record_login_failure_sets_lock_when_redis_is_available() {
-        // F6: never probe the ambient 6379 — the variable must name the
+        // F6: never probe the ambient 6379, the variable must name the
         // Redis under test explicitly; unset means skip.
         let Ok(redis_url) = std::env::var("TEST_REDIS_URL") else {
             crate::test_db::assert_soft_skip_allowed("TEST_REDIS_URL");
@@ -6207,8 +6207,8 @@ mod tests {
         );
 
         // A lock is lifted by its TTL (a locked account never reaches the
-        // success path), but `clear_login_failures` — the successful-login
-        // path — must clear the failure evidence keys.
+        // success path), but `clear_login_failures`, the successful-login
+        // path, must clear the failure evidence keys.
         clear_login_failures(&pool, &identifier).await.unwrap();
         if let Ok(mut conn) = pool.get().await {
             let failures: Result<i64, _> = deadpool_redis::redis::cmd("GET")
@@ -6231,7 +6231,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_record_login_failure_locks_after_failures_from_two_sources() {
-        // F6: never probe the ambient 6379 — the variable must name the
+        // F6: never probe the ambient 6379, the variable must name the
         // Redis under test explicitly; unset means skip.
         let Ok(redis_url) = std::env::var("TEST_REDIS_URL") else {
             crate::test_db::assert_soft_skip_allowed("TEST_REDIS_URL");
@@ -6305,11 +6305,11 @@ mod tests {
 
     /// End-to-end KiwiCaptcha single-use test (skipped when no Redis is
     /// available). Issues a challenge, stores it like the route does, verifies
-    /// a valid solution once, then replays the same token — the replay must
+    /// a valid solution once, then replays the same token, the replay must
     /// be rejected even though the TTL window is still open.
     #[tokio::test]
     async fn test_kiwi_token_is_single_use_when_redis_available() {
-        // F6: never probe the ambient 6379 — the variable must name the
+        // F6: never probe the ambient 6379, the variable must name the
         // Redis under test explicitly; unset means skip.
         let Ok(redis_url) = std::env::var("TEST_REDIS_URL") else {
             crate::test_db::assert_soft_skip_allowed("TEST_REDIS_URL");
@@ -6403,7 +6403,7 @@ mod tests {
             duration_ms: 5000,
             // valid_production_config() enables kiwi_enforce_telemetry, and
             // strict mode rejects clients that submit NO or EMPTY telemetry
-            // (a custom solver does not send it — VerifyError::BotDetected,
+            // (a custom solver does not send it, VerifyError::BotDetected,
             // which made the first verification fail whenever Redis was
             // actually present; ci/README.md §9 F3). Send a realistic
             // human-looking payload: non-empty, no webdriver flag, few
@@ -6450,7 +6450,7 @@ mod tests {
     /// Issue a fresh KiwiCaptcha challenge, store it in Redis exactly like
     /// the challenge route does, solve it, and encode a solution token with
     /// the given telemetry payload. Shared by the kiwi verify regression
-    /// tests (needs a live Redis — callers gate on TEST_REDIS_URL).
+    /// tests (needs a live Redis, callers gate on TEST_REDIS_URL).
     async fn mint_kiwi_solution_token(
         pool: &deadpool_redis::Pool,
         config: &crate::config::Config,
@@ -6547,7 +6547,7 @@ mod tests {
     }
 
     /// F1 regression: when Redis is unreachable the per-nonce verify-attempt
-    /// cap must report store-unavailability — never silently allow (the old
+    /// cap must report store-unavailability, never silently allow (the old
     /// `.unwrap_or(0)` treated script/pool failures as "under the cap",
     /// removing the 20-attempt bound on Argon2id re-derivations).
     #[tokio::test]
@@ -6602,7 +6602,7 @@ mod tests {
         }
     }
 
-    /// F2 regression: the Argon2 permit wait is BOUNDED — a saturated
+    /// F2 regression: the Argon2 permit wait is BOUNDED, a saturated
     /// semaphore must produce a prompt retryable denial (503-style), not an
     /// unbounded queue that an attacker pinning both permits could induce.
     #[tokio::test]
@@ -6641,7 +6641,7 @@ mod tests {
 
     /// F3 regression: telemetry findings reject ONLY when
     /// `kiwi_enforce_telemetry` is on. With the flag off a bot-scored
-    /// payload (webdriver=true) must not reject — the crate's documented
+    /// payload (webdriver=true) must not reject, the crate's documented
     /// telemetry-default-off model (skipped when no Redis is available).
     #[tokio::test]
     async fn kiwi_telemetry_rejects_only_when_enforced() {
@@ -6656,7 +6656,7 @@ mod tests {
         config.kiwi_challenge_ttl_secs = 120;
 
         // Flag OFF: bot-scored telemetry (wd=true is an instant bot signal
-        // in score_telemetry) must NOT reject — log-only.
+        // in score_telemetry) must NOT reject, log-only.
         config.kiwi_enforce_telemetry = false;
         let token =
             mint_kiwi_solution_token(&pool, &config, serde_json::json!({ "wd": true })).await;
@@ -6879,7 +6879,7 @@ mod tests {
 
     // ── Redis Failover Tests for Auth Routes ──────────────────────
 
-    /// Tests the login lockout key format — verifying the key structure
+    /// Tests the login lockout key format, verifying the key structure
     /// is correct for Redis operations even when Redis is down.
     #[test]
     fn test_login_failure_key_format_does_not_leak_email() {
@@ -6937,7 +6937,7 @@ mod tests {
         //
         // The `?` operator on `redis_pool.get().await?` converts deadpool_redis::PoolError
         // into ApiError via the From/Into trait implementations.
-        // This means Redis failures are NOT silently swallowed — they
+        // This means Redis failures are NOT silently swallowed, they
         // result in a 503 Service Unavailable response.
         fn assert_propagates_error<T>() {}
         assert_propagates_error::<Result<Option<i64>, ApiError>>();
@@ -6981,7 +6981,7 @@ mod tests {
     #[test]
     fn test_mfa_totp_replay_key_is_secret_safe_and_window_scoped() {
         let fingerprint = mfa_totp_secret_fingerprint("JBSWY3DPEHPK3PXP");
-        // Only the SHA-256 fingerprint may appear in the key — raw TOTP key
+        // Only the SHA-256 fingerprint may appear in the key, raw TOTP key
         // material must never land in Redis keyspace.
         assert_eq!(fingerprint.len(), 64);
         assert!(!fingerprint.to_uppercase().contains("JBSWY3DPEHPK3PXP"));
@@ -7056,7 +7056,7 @@ mod tests {
     }
 
     /// Tests that the login lockout key for a normalized vs raw identifier
-    /// produces different keys — the system uses the normalized form for
+    /// produces different keys, the system uses the normalized form for
     /// lockout checks but the raw form is not used for key generation
     /// (the helper functions take pre-normalized identifiers).
     #[test]
@@ -7086,8 +7086,8 @@ mod tests {
 
     /// L-24 + migration 106 (DB-gated): the login lookup
     /// `WHERE LOWER(email) = LOWER($1) OR LOWER(username) = LOWER($2)` must
-    /// (a) run against an existing `username` column — no migration had ever
-    /// created it before 106, so the query failed with 42703 — and (b) be
+    /// (a) run against an existing `username` column, no migration had ever
+    /// created it before 106, so the query failed with 42703, and (b) be
     /// driven by the functional indexes instead of a sequential scan.
     #[tokio::test]
     async fn login_lookup_becomes_index_driven_after_migration_106() {
@@ -7172,7 +7172,7 @@ mod tests {
             .await;
         assert!(
             pre_migration.is_err(),
-            "pre-106 schema has no username column — the login query must fail, not scan"
+            "pre-106 schema has no username column, the login query must fail, not scan"
         );
 
         // Apply the actual migration file (not a copy).
@@ -7222,7 +7222,7 @@ mod tests {
     // services/mail-server/migrations chain applied by the migrator crate,
     // and the apexmail-db SCHEMA used by CI). The register handler used to
     // generate a 26-char text nanoid for the user id, which fails the
-    // INSERT with `invalid input syntax for type uuid` — every public
+    // INSERT with `invalid input syntax for type uuid`, every public
     // signup returned "database error" and no row was created. These tests
     // drive the REAL handler through a router against a canonical-shape
     // fixture database (crate::test_db::canonical_pool) and prove the
@@ -7288,7 +7288,7 @@ mod tests {
     /// Seed the system sender domain (apexmail.ee) with valid DKIM material
     /// so `ensure_system_sender_ready` passes and the verification email can
     /// be queued. Requires `DKIM_PRIVATE_KEY_ENCRYPTION_KEY` (set here) and
-    /// generates a real RSA keypair — the readiness check decrypts and
+    /// generates a real RSA keypair, the readiness check decrypts and
     /// re-derives the public key, so fake material is rejected.
     ///
     /// The caller must hold `crate::test_db::DKIM_ENV_MUTEX` across the
@@ -7368,7 +7368,7 @@ mod tests {
             std::env::var(apexmail_lib::dkim::DKIM_PRIVATE_KEY_ENCRYPTION_KEY_ENV).ok();
         seed_system_sender(&pool).await;
         // Redis is deliberately NOT required for signup (the rate limiter
-        // soft-skips when Redis is unreachable) — the dead port keeps the
+        // soft-skips when Redis is unreachable), the dead port keeps the
         // test hermetic on that axis.
         let state = signup_test_state(pool.clone(), "redis://127.0.0.1:1").await;
 
@@ -7458,7 +7458,7 @@ mod tests {
 
     /// DB+Redis-gated full flow: after a successful signup, a login with the
     /// same credentials reaches the authentication decision (for a fresh
-    /// owner account that is the MFA-enrollment challenge, 202 — NOT
+    /// owner account that is the MFA-enrollment challenge, 202, NOT
     /// 401 invalid credentials), proving the persisted row is usable.
     /// The DKIM env guard is held across awaits on purpose: the awaited
     /// signup path reads the process-global key.
@@ -7557,7 +7557,7 @@ mod tests {
         .expect("login request must dispatch");
 
         // A fresh owner account is UNVERIFIED: login must refuse it (403
-        // verify-your-email) — proving the password verified against the
+        // verify-your-email), proving the password verified against the
         // row the signup created (it is not a 401 invalid-credentials).
         assert_eq!(
             response.status(),
@@ -7573,7 +7573,7 @@ mod tests {
             "the refusal must name the verification requirement, got: {json}"
         );
 
-        // After verification the same credentials authenticate — for a
+        // After verification the same credentials authenticate, for a
         // fresh owner that means the 202 MFA-enrollment challenge.
         sqlx::query("UPDATE users SET email_verified = true WHERE email = $1")
             .bind(&email)
@@ -7582,7 +7582,7 @@ mod tests {
             .expect("mark verified");
         // Mirror the verification-click side effect: activating the tenant
         // from 'pending' (F16). The SQL shortcut used to skip that, leaving
-        // the tenant pending — the TenantRestricted login verdict now
+        // the tenant pending, the TenantRestricted login verdict now
         // honestly refuses it.
         sqlx::query(
             "UPDATE tenants SET status = 'active' WHERE id = (SELECT tenant_id FROM users WHERE email = $1) AND status = 'pending'",
@@ -7677,7 +7677,7 @@ async fn change_password(
     // Revocation is a PER-SESSION Redis marker on each revoked session's jti
     // (checked in the auth middleware and on /refresh). The previous
     // implementation wrote the USER-WIDE revocation marker here "so all
-    // existing JWTs are rejected immediately" — which also killed the
+    // existing JWTs are rejected immediately", which also killed the
     // CALLER's own session, contradicting the very DELETE that spares it:
     // the user changed their password and was logged out mid-request.
     let ttl = state.config.jwt_expiry.as_secs();
@@ -7747,7 +7747,7 @@ async fn revoke_session(
         // Revoke a single, NAMED session: the marker is scoped to that
         // session's own jti, so its siblings stay untouched. The previous
         // implementation wrote the user-wide marker here, which silently
-        // killed EVERY session of the user — the targeted contract in
+        // killed EVERY session of the user, the targeted contract in
         // `RevokeSessionRequest` was a lie.
         //
         // Ownership is checked BEFORE the marker write: a marker keyed by a
@@ -7771,7 +7771,7 @@ async fn revoke_session(
             .await?
             .rows_affected()
     } else if auth.session_id.is_some() {
-        // Default: revoke all sessions EXCEPT the current one — per-session
+        // Default: revoke all sessions EXCEPT the current one, per-session
         // markers on each revoked id, user-wide marker untouched, so the
         // caller's own session survives exactly as this branch's SQL always
         // promised.
@@ -7787,7 +7787,7 @@ async fn revoke_session(
         }
         revoked_ids.len() as u64
     } else {
-        // No session context (e.g. API key auth) — revoke all sessions.
+        // No session context (e.g. API key auth), revoke all sessions.
         let revoked_ids: Vec<String> =
             sqlx::query_scalar("DELETE FROM sessions WHERE user_id = $1::uuid RETURNING id::text")
                 .bind(user_id)
@@ -7991,7 +7991,7 @@ mod adversarial_auth_tests {
 
     /// `call` with an explicit peer socket. axum's `ConnectInfo` extractor
     /// reads the request extensions, so the oneshot harness can pin the
-    /// client IP the way a real connection would — required to exercise the
+    /// client IP the way a real connection would, required to exercise the
     /// ATO IP-pivot risk factors on the JSON login.
     async fn call_peer(
         app: &axum::Router,
@@ -8422,7 +8422,7 @@ mod adversarial_auth_tests {
         );
 
         // Enabled but low-risk (fresh user) must produce the exact same
-        // response shape as the disabled run — the wiring changes nothing
+        // response shape as the disabled run, the wiring changes nothing
         // observable when the verdict is low.
         ato_protection::runtime::install_for_tests(true, ato_development_config());
         let enabled = seed_and_login(&fx, &tenant, "enabled-low", peer, &ua).await;
@@ -8650,7 +8650,7 @@ mod adversarial_auth_tests {
         );
 
         // The refusal rate-limits the attempt: the identifier's failure
-        // counter moved (two failures now — the wrong password and the
+        // counter moved (two failures now, the wrong password and the
         // refusal).
         let failure_keys: Vec<String> = deadpool_redis::redis::cmd("KEYS")
             .arg("apexmail:auth:failures:*")
@@ -9642,7 +9642,7 @@ mod adversarial_auth_tests_2 {
     }
 
     /// K2 wave: the JSON `/mfa/verify` twin carries the same `mfa-verify`
-    /// CAPTCHA gate as the SSR step — a missing or wrong-scope token is a
+    /// CAPTCHA gate as the SSR step, a missing or wrong-scope token is a
     /// CAPTCHA refusal BEFORE the single-use challenge is consumed, and a
     /// correct-scope token passes the gate to the challenge check.
     #[tokio::test]
@@ -10695,7 +10695,7 @@ mod adversarial_auth_tests_3 {
         assert_eq!(created.scopes, vec!["messages:send".to_string()]);
         assert!(created.expires_at.is_some());
         // FIX 3 (B1): the persisted prefix is the DISTINGUISHING display
-        // form — shared head, ellipsis, last 4 of THIS key — never the
+        // form, shared head, ellipsis, last 4 of THIS key, never the
         // literal 'am_live_' every key used to store.
         assert_eq!(
             created.key_prefix,
@@ -10814,7 +10814,7 @@ mod adversarial_auth_tests_3 {
         assert_eq!(offset_page.len(), 1);
         assert!(listed.iter().any(|k| k.prefix_matches(&created)));
 
-        // FIX 3 (B1): stored prefixes DISTINGUISH keys — pre-fix every row
+        // FIX 3 (B1): stored prefixes DISTINGUISH keys, pre-fix every row
         // held the literal 'am_live_' and this set collapsed to size 1.
         let prefixes: std::collections::HashSet<&str> =
             listed.iter().map(|key| key.key_prefix.as_str()).collect();
@@ -10856,7 +10856,7 @@ mod adversarial_auth_tests_3 {
         // A path segment that is NOT a UUID is the same opaque 404: the
         // handler binds the primary key natively (`WHERE id = $1::uuid`), and
         // a value the column could never hold resolves to no-match rather than
-        // a database cast error — exactly what `id::text = 'garbage'` did.
+        // a database cast error, exactly what `id::text = 'garbage'` did.
         for garbage in ["not-a-uuid", "12345", "", "am_live_x"] {
             assert!(
                 matches!(
@@ -11113,7 +11113,7 @@ mod adversarial_auth_tests_3 {
         assert!(matches!(result, Err(ApiError::Forbidden(_))));
 
         // R7 parity with the browser twin: an INVITED user accepts the
-        // invitation through the JSON twin — the guarded UPDATE promotes
+        // invitation through the JSON twin, the guarded UPDATE promotes
         // invited → active and consumes the setup token (the JSON path
         // previously refused with "account is invited").
         let (email, token, invited_user) = seed_reset_user(
@@ -11643,7 +11643,7 @@ mod adversarial_auth_tests_3 {
         // User-Agent. Before the F6 fix the handler read the user-agent off
         // the response-only HeaderMap it had just built (always None), so
         // every refreshed session lost device attribution. (Only the refresh
-        // path writes a user-agent here — the issue call above passes None —
+        // path writes a user-agent here, the issue call above passes None —
         // so the existence check is deterministic.)
         let attributed: bool = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM sessions
@@ -11795,7 +11795,7 @@ mod adversarial_auth_tests_3 {
         ));
 
         // revoke_session: the wildcard branches return the affected count
-        // (0 here — the canonical sessions table is empty for these
+        // (0 here, the canonical sessions table is empty for these
         // fixtures), while a TARGETED unknown session is an honest 404
         // (ownership is checked before the revocation marker lands).
         for (auth, body) in [
@@ -11845,7 +11845,7 @@ mod adversarial_auth_tests_3 {
         // Targeted revoke of a REAL session: the row goes (revoked: 1) and
         // the per-session marker is written, so the JWT is dead even though
         // the user-wide marker stays unset (the caller's other sessions —
-        // here: none — must survive).
+        // here: none, must survive).
         sqlx::query(
             "INSERT INTO sessions (id, user_id, tenant_id, expires_at) \
              VALUES ('target-session', $1::uuid, $2, NOW() + INTERVAL '1 day')",
@@ -12594,7 +12594,7 @@ mod adversarial_auth_units {
         assert_eq!(prefix, "am_live_…klmn");
         assert!(prefix.len() <= 32, "must fit VARCHAR(32)");
         // Two real-shaped keys never collide on the display form (the whole
-        // point of FIX 3 — pre-fix both stored 'am_live_').
+        // point of FIX 3, pre-fix both stored 'am_live_').
         let other = "am_live_QWXYZabcdefghij1234567890abcdefghMNOPQR";
         assert_ne!(display_key_prefix(other), prefix);
         // Key too short to split degrades to the head-only form.
@@ -12803,7 +12803,7 @@ mod adversarial_auth_units {
 /// Transactional-email contract tests. They drive the REAL email builders
 /// (the `enqueue_verification_email` seam and the login handler's email-MFA
 /// branch) and assert on the exact HTML/text that reaches `email_queue`, so
-/// the queued bytes — not a mirrored copy — are what is pinned.
+/// the queued bytes, not a mirrored copy, are what is pinned.
 ///
 /// Both paths queue inside the system-sender gate, so the tests seed the
 /// platform sender domain with real DKIM material (same convention as
@@ -12823,7 +12823,7 @@ mod transactional_email_contracts {
     /// local-development default, not the production action base).
     const ACTION_BASE: &str = "https://apexmail.ee";
 
-    /// Test DKIM encryption key — the same fixture value every api-server
+    /// Test DKIM encryption key, the same fixture value every api-server
     /// test module seeds the system sender with.
     const TEST_DKIM_KEY: &str = "3f7a1c9e2b5d48f01a6c3e792d4b8f15a0c6e3917d2f4b8a5c1e7309d4f2b6a8";
 
@@ -12842,7 +12842,7 @@ mod transactional_email_contracts {
 
     /// Set the DKIM env under the mutex, returning the previous value. The
     /// guard is dropped BEFORE any await point (std MutexGuard must not live
-    /// across awaits) — the same scoped-lock convention
+    /// across awaits), the same scoped-lock convention
     /// forgot_password's `make_system_sender_ready` uses.
     fn install_dkim_key() -> Option<String> {
         let _guard = crate::test_db::DKIM_ENV_MUTEX
@@ -13074,7 +13074,7 @@ mod transactional_email_contracts {
 
     /// Shell contract shared by every transactional email: doctype, lang,
     /// single-line non-empty subject, no scripts, legal footer, and either
-    /// EXACTLY ONE primary CTA (Some) or zero action links (None — the MFA
+    /// EXACTLY ONE primary CTA (Some) or zero action links (None, the MFA
     /// code email must not carry links at all).
     fn assert_email_shell(name: &str, subject: &str, html: &str, cta: Option<&str>) {
         assert!(!subject.trim().is_empty(), "{name}: subject must be set");
@@ -13187,7 +13187,7 @@ mod transactional_email_contracts {
 
     /// GATE L [GREEN]: the MFA one-time-code email carries the shell
     /// metadata, a SINGLE-LINE six-digit code in its own paragraph, expiry
-    /// copy — and deliberately zero action links (a code email must not
+    /// copy, and deliberately zero action links (a code email must not
     /// funnel the reader to a link).
     #[tokio::test]
     async fn mfa_code_email_carries_shell_metadata_and_single_line_code() {
@@ -13257,7 +13257,7 @@ mod transactional_email_contracts {
     /// the text bodies are non-empty, carry the action path where one
     /// exists, and contain no HTML tags. (The password-reset counterpart is
     /// pinned by `reset_email_carries_shell_metadata_expiry_and_action_link`
-    /// in forgot_password.rs — the third `queue_system_email` call site.)
+    /// in forgot_password.rs, the third `queue_system_email` call site.)
     #[tokio::test]
     async fn every_transactional_email_has_a_plain_text_alternative() {
         let Some((_subject, _html, text, _token)) =
@@ -13285,7 +13285,7 @@ mod transactional_email_contracts {
     }
 
     /// GATE L [GREEN]: action links are built from the configured action
-    /// base VERBATIM — an https base yields https-only, absolute,
+    /// base VERBATIM, an https base yields https-only, absolute,
     /// path-based links; the scheme is never downgraded, the link is never
     /// rendered relative-only, and the token never moves into the query
     /// string (CWE-598). Production must configure an https `BASE_URL`; the

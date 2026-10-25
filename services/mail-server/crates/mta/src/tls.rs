@@ -1,7 +1,7 @@
 //! TLS certificate inspection, production fail-fast, and expiry alarms.
 //!
 //! Policy:
-//! * **Port 25 stays opportunistic STARTTLS** — a missing certificate must
+//! * **Port 25 stays opportunistic STARTTLS**, a missing certificate must
 //!   not stop inbound mail (and the binary logs the no-TLS state loudly at
 //!   WARN plus exposes `apexmail_mta_tls_enabled` = 0).
 //! * **Submission (AUTH) in production must not start without a usable
@@ -62,7 +62,7 @@ impl CertExpiryAlarm {
 }
 
 /// Tightest alarm threshold crossed by `days_remaining` (an expiry in the
-/// past reports the 1-day alarm — the loudest).
+/// past reports the 1-day alarm, the loudest).
 pub fn cert_expiry_alarm(days_remaining: i64) -> Option<CertExpiryAlarm> {
     if days_remaining <= 1 {
         Some(CertExpiryAlarm::Day1)

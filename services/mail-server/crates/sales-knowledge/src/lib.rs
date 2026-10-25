@@ -1,4 +1,4 @@
-//! Verified sales knowledge base — the SHARED claim validator (plan §5.5).
+//! Verified sales knowledge base, the SHARED claim validator (plan §5.5).
 //!
 //! Extracted from `sales-autopilot/src/knowledge.rs` so the sales engine AND
 //! the ai-service mailbot/classifier validate claims against ONE
@@ -6,9 +6,9 @@
 //! public surface (`sales_autopilot::knowledge::*`) is unchanged.
 //!
 //! The sales agent may only state what this module can back with a canonical,
-//! in-date, external-copy-allowed fact. Everything else — roadmap features,
+//! in-date, external-copy-allowed fact. Everything else, roadmap features,
 //! expired pages, competitor comparisons, customer stories without approval,
-//! certification claims — is excluded from external copy and
+//! certification claims, is excluded from external copy and
 //! [`SalesKnowledgeBase::validate_claim`] returns
 //! [`ClaimVerdict::Unsupported`] for it.
 //!
@@ -37,7 +37,7 @@
 //!
 //! This module uses the **static feature registry**. The runtime table only
 //! holds `(id, name, description, enabled)` admin toggles for a specific
-//! deployment — it carries no public capability status or plan entitlement,
+//! deployment, it carries no public capability status or plan entitlement,
 //! so a flag being enabled is not evidence that a feature is sold or
 //! shipping. A deployment-specific toggle must never authorize a sales
 //! promise.
@@ -48,7 +48,7 @@
 //! (`migrations/200_sales_autopilot_v2_unification.sql` is the canonical v2
 //! schema and defines no knowledge table). Per the audit instruction this
 //! module therefore keeps the versioned fact set **in code**, constructed
-//! from constants that cite their sources — it builds and runs without a
+//! from constants that cite their sources, it builds and runs without a
 //! database. No table is invented and no DB overlay is attempted.
 //!
 //! # Freshness
@@ -167,7 +167,7 @@ impl ClaimVerdict {
 ///   the only mention is a customer story in `customer_evidence.rs`, which is
 ///   not an approved external-copy fact.
 /// * `certification`: `docs/security/framework-status.md` states SOC 2 and
-///   HIPAA are Planned and ISO 27001/PCI DSS are not planned — there is no
+///   HIPAA are Planned and ISO 27001/PCI DSS are not planned, there is no
 ///   certification to claim.
 ///
 /// The mechanism exists so a future, properly approved fact can be listed
@@ -545,13 +545,13 @@ impl SalesKnowledgeBase {
     /// Validate a proposed claim.
     ///
     /// * A claim naming no restricted capability is [`ClaimVerdict::Supported`]
-    ///   (the writer still grounds statements in evidence — see
+    ///   (the writer still grounds statements in evidence, see
     ///   [`crate::personalization`]).
     /// * A claim naming SSO, SLA terms, migration functionality or
     ///   certifications is [`ClaimVerdict::Unsupported`] unless a fact listed
     ///   in the corresponding backing list is Verified, in date and
     ///   `allowed_in_external_copy`. Today every backing list is empty, so
-    ///   these claims are always refused — the exact control that stops the
+    ///   these claims are always refused, the exact control that stops the
     ///   agent promising something an obsolete page once mentioned.
     pub fn validate_claim(&self, claim: &str) -> ClaimVerdict {
         self.validate_claim_at(claim, Utc::now())

@@ -15,7 +15,7 @@ Für Enterprise-Beschaffung, Sicherheitsprüfung oder Private-Cloud-Planung fül
 
 <div id="enquiry-submitted" class="apex-notice apex-notice--ok" role="status" hidden>
   <b>Übermittelt</b>
-  <p>Vielen Dank — Ihre Eingabe wurde übermittelt. Unser Team prüft die Anfrage und antwortet innerhalb von 2 Werktagen.</p>
+  <p>Vielen Dank, Ihre Eingabe wurde übermittelt. Unser Team prüft die Anfrage und antwortet innerhalb von 2 Werktagen.</p>
 </div>
 <div id="enquiry-error" class="apex-notice apex-notice--fail" role="alert" hidden>
   <b>Nicht angenommen</b>
@@ -86,19 +86,19 @@ Für Enterprise-Beschaffung, Sicherheitsprüfung oder Private-Cloud-Planung fül
     <div class="space-y-3 mt-3">
       <label class="apex-check">
         <input type="radio" class="apex-checkbox apex-input" name="deployment_preference" value="shared" checked />
-        <span><strong>Shared Cloud</strong> — Multi-Tenant-EU-Infrastruktur</span>
+        <span><strong>Shared Cloud</strong>, Multi-Tenant-EU-Infrastruktur</span>
       </label>
       <label class="apex-check">
         <input type="radio" class="apex-checkbox apex-input" name="deployment_preference" value="dedicated" />
-        <span><strong>Dedicated Tenant</strong> — isolierte Single-Tenant-Infrastruktur</span>
+        <span><strong>Dedicated Tenant</strong>, isolierte Single-Tenant-Infrastruktur</span>
       </label>
       <label class="apex-check">
         <input type="radio" class="apex-checkbox apex-input" name="deployment_preference" value="byoc" />
-        <span><strong>BYOC / Private Bereitstellung</strong> — verwaltete Bereitstellung in Ihrem Cloud-Konto</span>
+        <span><strong>BYOC / Private Bereitstellung</strong>, verwaltete Bereitstellung in Ihrem Cloud-Konto</span>
       </label>
       <label class="apex-check">
         <input type="radio" class="apex-checkbox apex-input" name="deployment_preference" value="not_sure" />
-        <span><strong>Noch unsicher</strong> — Beratung zum passenden Modell gewünscht</span>
+        <span><strong>Noch unsicher</strong>, Beratung zum passenden Modell gewünscht</span>
       </label>
     </div>
   </fieldset>
@@ -142,7 +142,7 @@ Für Enterprise-Beschaffung, Sicherheitsprüfung oder Private-Cloud-Planung fül
       <option value="30_days">Innerhalb von 30 Tagen</option>
       <option value="90_days">Innerhalb von 90 Tagen</option>
       <option value="6_months">Innerhalb von 6 Monaten</option>
-      <option value="exploring">Optionen sichten — kein fester Zeitplan</option>
+      <option value="exploring">Optionen sichten, kein fester Zeitplan</option>
     </select>
     </div>
   </div>
@@ -152,8 +152,8 @@ Für Enterprise-Beschaffung, Sicherheitsprüfung oder Private-Cloud-Planung fül
     <div class="apex-select-wrap">
       <select id="security-review" name="security_review_needs">
       <option value="" selected>Prüfungstiefe auswählen</option>
-      <option value="standard">Standard — Sicherheitsfragebogen wird anhand aktueller Prüfunterlagen fallweise beantwortet (kein standardisiertes SIG/CAIQ/HECVAT-Paket ist Teil des Produktumfangs)</option>
-      <option value="detailed">Detailliert — individueller Sicherheitsfragebogen erforderlich</option>
+      <option value="standard">Standard, Sicherheitsfragebogen wird anhand aktueller Prüfunterlagen fallweise beantwortet (kein standardisiertes SIG/CAIQ/HECVAT-Paket ist Teil des Produktumfangs)</option>
+      <option value="detailed">Detailliert, individueller Sicherheitsfragebogen erforderlich</option>
       <option value="pen_test">Penetrationstest-Bericht erforderlich</option>
       <option value="on_site">Vor-Ort-Audit oder Architektur-Review erforderlich</option>
       <option value="none">In dieser Phase keine Sicherheitsprüfung erforderlich</option>

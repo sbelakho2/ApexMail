@@ -65,7 +65,7 @@ async fn harness() -> Option<&'static Harness> {
 async fn build_harness() -> Option<Harness> {
     // `shared_canonical_db`: under nextest EVERY test runs in its own
     // PROCESS, so the process-wide `SHARED` OnceCell does not make these tests
-    // share one harness — each one provisions. The destructive
+    // share one harness, each one provisions. The destructive
     // `fresh_canonical_pool` DROPs and re-creates the same database name in
     // every process, so the tests were dropping each other's database
     // mid-run. The shared variant creates-if-absent under a cluster advisory
@@ -74,7 +74,7 @@ async fn build_harness() -> Option<Harness> {
     // properties of the WHOLE table (the audit hash chain's integrity and
     // truncation detection), which only hold when nothing else is writing.
     // The suffix carries the pid, so each nextest process drops and
-    // re-creates only its own database — race-free, and exclusive.
+    // re-creates only its own database, race-free, and exclusive.
     let db = match migrator::test_support::fresh_canonical_pool(
         "isolation_adversarial",
         &format!("iso_routes_p{}", std::process::id()),
@@ -84,7 +84,7 @@ async fn build_harness() -> Option<Harness> {
         Ok(db) => db,
         Err(error) => panic!("{}", error.panic_message()),
     };
-    // Ok(None) only when TEST_DATABASE_URL is unset — soft-skip.
+    // Ok(None) only when TEST_DATABASE_URL is unset, soft-skip.
     let db = db?;
     let redis_url = std::env::var("TEST_REDIS_URL").ok()?;
     let redis = deadpool_redis::Config::from_url(redis_url)
@@ -1468,7 +1468,7 @@ fn audit_chain_detects_tamper_fork_and_truncation() {
         assert!(result.broken_at.is_none());
 
         // Reordering rows in time (tampered created_at) does not break the
-        // hash-linked traversal — the chain is order independent by design.
+        // hash-linked traversal, the chain is order independent by design.
         sqlx::query("UPDATE iso_audit_logs SET created_at = created_at + interval '1 hour' WHERE organization_id = $1 AND action = 'read-0'")
         .bind(&org)
         .execute(&h.db)
@@ -1821,7 +1821,7 @@ fn access_policy_engine_fails_closed_and_enforces_ownership() {
         .unwrap();
 
         let isolation = h.isolation().await;
-        // Own row is still denied by the policy — and the denial is audited.
+        // Own row is still denied by the policy, and the denial is audited.
         assert!(!isolation
             .check_resource_access(&ctx, "email", "row-a", "read")
             .await
@@ -2205,7 +2205,7 @@ fn isolation_migration_route_reports_unsupported_paths_as_4xx() {
         // Migration against the canonical schema's non-tenanted public tables
         // fails honestly, and the workspace row is left untouched. The
         // refusal status is 409 CONFLICT (audit SM5 F8 fix): the request is
-        // well-formed — the SHARED SCHEMA cannot support the copy — which is
+        // well-formed, the SHARED SCHEMA cannot support the copy, which is
         // a conflict with server state, not a malformed request. Either way
         // it is an honest 4xx: nothing is copied, nothing half-applies.
         let ws = create_workspace(&app, &org, &unique("ws")).await;

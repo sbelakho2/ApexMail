@@ -1,4 +1,4 @@
-//! Mega adversarial bypass payload collection — 500+ payloads
+//! Mega adversarial bypass payload collection, 500+ payloads
 //!
 //! This file is an exhaustive collection of real-world WAF bypass payloads
 //! covering SQLi, XSS, command injection, path traversal, SSRF, and
@@ -50,7 +50,7 @@ fn check_payloads_in_query(label: &str, payloads: &[&str]) {
     // We want at least 80% detection rate.
     assert!(
         rate >= 80.0,
-        "[{}] Detection rate {:.1}% ({}/{}) — missed: {:?}",
+        "[{}] Detection rate {:.1}% ({}/{}), missed: {:?}",
         label,
         rate,
         blocked,
@@ -88,7 +88,7 @@ fn check_payloads_in_body(label: &str, payloads: &[&str]) {
     };
     assert!(
         rate >= 80.0,
-        "[{}] Detection rate {:.1}% ({}/{}) — missed: {:?}",
+        "[{}] Detection rate {:.1}% ({}/{}), missed: {:?}",
         label,
         rate,
         blocked,
@@ -98,7 +98,7 @@ fn check_payloads_in_body(label: &str, payloads: &[&str]) {
 }
 
 // ============================================================================
-// SQL Injection — 100+ payloads
+// SQL Injection, 100+ payloads
 // ============================================================================
 
 #[test]
@@ -220,7 +220,7 @@ fn test_sqli_second_order() {
 }
 
 // ============================================================================
-// XSS — 100+ payloads
+// XSS, 100+ payloads
 // ============================================================================
 
 #[test]
@@ -308,7 +308,7 @@ fn test_xss_dom_based() {
 }
 
 // ============================================================================
-// Command Injection — 80+ payloads
+// Command Injection, 80+ payloads
 // ============================================================================
 
 #[test]
@@ -386,7 +386,7 @@ fn test_cmdi_windows() {
 }
 
 // ============================================================================
-// Path Traversal — 60+ payloads
+// Path Traversal, 60+ payloads
 // ============================================================================
 
 #[test]
@@ -446,7 +446,7 @@ fn test_path_traversal_sensitive_files() {
 }
 
 // ============================================================================
-// SSRF — 30+ payloads
+// SSRF, 30+ payloads
 // ============================================================================
 
 #[test]
@@ -473,7 +473,7 @@ fn test_ssrf_payloads() {
 }
 
 // ============================================================================
-// Protocol-level / Header injection — 30+ payloads
+// Protocol-level / Header injection, 30+ payloads
 // ============================================================================
 
 #[test]
@@ -520,7 +520,7 @@ fn test_header_injection() {
 }
 
 // ============================================================================
-// Mixed / Polyglot attacks — 30+ payloads
+// Mixed / Polyglot attacks, 30+ payloads
 // ============================================================================
 
 #[test]
@@ -540,7 +540,7 @@ fn test_polyglot_attacks() {
 }
 
 // ============================================================================
-// SSTI (Server-Side Template Injection) — 20+ payloads
+// SSTI (Server-Side Template Injection), 20+ payloads
 // ============================================================================
 
 #[test]
@@ -562,7 +562,7 @@ fn test_ssti_payloads() {
 }
 
 // ============================================================================
-// XXE (XML External Entity) — 15+ payloads
+// XXE (XML External Entity), 15+ payloads
 // ============================================================================
 
 #[test]
@@ -578,7 +578,7 @@ fn test_xxe_payloads() {
 }
 
 // ============================================================================
-// LDAP Injection — 10+ payloads
+// LDAP Injection, 10+ payloads
 // ============================================================================
 
 #[test]
@@ -594,7 +594,7 @@ fn test_ldap_injection() {
 }
 
 // ============================================================================
-// False positive tests — legitimate traffic MUST NOT be blocked
+// False positive tests, legitimate traffic MUST NOT be blocked
 // ============================================================================
 
 #[test]
@@ -671,14 +671,14 @@ fn test_false_positive_clean_requests() {
 }
 
 // ============================================================================
-// Real browser traffic must be CLEAN — zero score, not merely "not blocked".
+// Real browser traffic must be CLEAN, zero score, not merely "not blocked".
 // ============================================================================
 
 /// Live run 2026-10-22 (P0): `test_false_positive_clean_requests` sent no
 /// headers at all, so the corpus never contained a User-Agent. Every real
 /// browser UA carries `"; "` inside its platform comment
 /// (`Mozilla/5.0 (Macintosh; Intel Mac OS X …)`), and the bare-metacharacter
-/// tier scored 3 for it. Nothing was blocked in isolation — but the api-server
+/// tier scored 3 for it. Nothing was blocked in isolation, but the api-server
 /// accumulates score per client IP, so two page views reached the anomaly
 /// threshold and the product blocked its own users and its own stylesheet
 /// (`/assets/globals.css`) under `WAF_ENFORCE=true`.
@@ -747,7 +747,7 @@ fn real_browser_traffic_scores_zero() {
 
     assert!(
         dirty.is_empty(),
-        "legitimate browser traffic must score zero — {} dirty request(s):\n{}",
+        "legitimate browser traffic must score zero, {} dirty request(s):\n{}",
         dirty.len(),
         dirty.join("\n")
     );

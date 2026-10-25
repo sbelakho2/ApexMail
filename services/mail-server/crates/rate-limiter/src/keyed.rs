@@ -27,7 +27,7 @@ pub const DEFAULT_EVICTION_TOMBSTONE_TTL: Duration = Duration::from_secs(60);
 /// remaining quota (F14).
 ///
 /// A bare governor exposes no token count, so `KeyedRateLimiter` used to
-/// report the full burst for every allowed decision — callers could not
+/// report the full burst for every allowed decision, callers could not
 /// see a key approaching exhaustion. `consumed` approximates the tokens
 /// outstanding in the current window; it is decayed at the steady refill
 /// rate and clamped at 0, so `remaining = burst - consumed` tracks the
@@ -52,7 +52,7 @@ impl KeyState {
         if pre_drained {
             // Tombstone penalty (fix J): the governor bucket is emptied by
             // draining `burst` checks, and the consumption tracker must
-            // AGREE — otherwise F14's `remaining` would report a budget the
+            // AGREE, otherwise F14's `remaining` would report a budget the
             // limiter does not have.
             for _ in 0..burst {
                 let _ = state.limiter.check();
@@ -105,7 +105,7 @@ impl KeyState {
 pub struct KeyedRateLimiter {
     limiters: Cache<String, Arc<KeyState>>,
     /// Recently-created keys, TTL-bounded. A cache miss for a key that is
-    /// still present here means the key was LRU-evicted (not new) — the
+    /// still present here means the key was LRU-evicted (not new), the
     /// re-created limiter starts empty (tombstone penalty).
     seen_keys: Cache<String, ()>,
     tombstone_ttl: Duration,
@@ -307,7 +307,7 @@ impl KeyedRateLimiter {
             );
         }
 
-        // Key not found — create a new limiter and try to insert.
+        // Key not found, create a new limiter and try to insert.
         let burst = self.config.effective_burst();
         let quota = Quota::per_second(self.config.requests_per_second).allow_burst(burst);
         let new_state = Arc::new(KeyState::new(quota, was_evicted_recently, burst.get()));
@@ -392,7 +392,7 @@ mod tests {
         }
         // moka evicts entries asynchronously via an internal maintenance
         // thread (TinyLFU policy), so the manual key_count is an upper
-        // bound — it tracks inserts and explicit removes, not async evictions.
+        // bound, it tracks inserts and explicit removes, not async evictions.
         // The real eviction behavior is verified in test_lru_eviction_evicts_oldest
         // which checks that the LRU entry is re-created fresh on next access.
         assert!(
@@ -406,7 +406,7 @@ mod tests {
         );
     }
 
-    // NOTE: `test_lru_eviction_evicts_oldest` was replaced — it asserted
+    // NOTE: `test_lru_eviction_evicts_oldest` was replaced, it asserted
     // the vulnerable behavior that an evicted key is "re-created fresh
     // (full burst available)", which let clients rotate keys to reset
     // their budgets. Evicted keys now re-enter with an empty budget for
@@ -419,12 +419,12 @@ mod tests {
     #[test]
     fn test_lru_eviction_reentry_gets_empty_budget() {
         // 1 rps, burst 5. Simulate an LRU eviction of key_a by dropping it
-        // from the limiter cache (as moka would) — the tombstone in
+        // from the limiter cache (as moka would), the tombstone in
         // seen_keys must force an empty restart budget.
         let limiter = KeyedRateLimiter::from_params(1, 5, 1000);
 
         assert!(limiter.check("key_a").is_allowed()); // 4 tokens left
-                                                      // Simulate eviction (NOT an administrative remove — tombstone stays)
+                                                      // Simulate eviction (NOT an administrative remove, tombstone stays)
         limiter.limiters.invalidate("key_a");
         limiter.run_maintenance();
 
@@ -441,7 +441,7 @@ mod tests {
     fn test_key_rotation_cannot_reset_budgets() {
         // Adversarial: rotate 4× max_keys distinct keys. Every rotated-out
         // key that re-enters while its tombstone is alive must start with
-        // an EMPTY budget — key rotation cannot buy fresh bursts.
+        // an EMPTY budget, key rotation cannot buy fresh bursts.
         let max_keys = 64;
         let limiter = KeyedRateLimiter::from_params(1, 3, max_keys);
 
@@ -526,7 +526,7 @@ mod tests {
     }
 
     // ── F14:remaining must reflect real per-key consumption ──────────
-    // (rps=1 so the refill decay needs a full second — counts are
+    // (rps=1 so the refill decay needs a full second, counts are
     // deterministic across adjacent statements.)
 
     #[test]

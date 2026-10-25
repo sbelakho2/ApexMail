@@ -270,7 +270,7 @@ impl PlacementScheduler {
         let remaining = (config.max_tests_per_hour as i64).saturating_sub(active_count.0);
 
         // Claim only due tests: scheduled_for must be NULL (immediate) or in
-        // the past — future-scheduled tests must not start early.
+        // the past, future-scheduled tests must not start early.
         let rows: Vec<(Uuid,)> = sqlx::query_as(
             "SELECT id FROM placement_tests \
              WHERE status = 'pending' \

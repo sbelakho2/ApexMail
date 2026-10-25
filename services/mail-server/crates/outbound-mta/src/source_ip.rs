@@ -7,7 +7,7 @@
 //! enforces both:
 //!
 //! 1. [`connect_bound`] binds the socket before `connect()`. A bind failure
-//!    is a refusal — the relay never falls back to the default source
+//!    is a refusal, the relay never falls back to the default source
 //!    address, because that would spend the dedicated IP's warmup capacity on
 //!    a send from a different IP.
 //! 2. After connect, the kernel-reported local address is compared with the
@@ -16,7 +16,7 @@
 //! 3. Warmup capacity is only consumed when the request was honored:
 //!    [`counts_toward_warmup`] is TRUE only when a requested IP exists and
 //!    equals the verified bound IP. The daily ceiling itself comes from the
-//!    canonical schedule in `mail_common::warmup` — never re-derived here.
+//!    canonical schedule in `mail_common::warmup`, never re-derived here.
 
 use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
@@ -34,7 +34,7 @@ pub enum SourceIpError {
     )]
     Bind { requested: IpAddr, message: String },
     #[error(
-        "requested source IP {requested} but the kernel bound {actual} — refusing before DATA"
+        "requested source IP {requested} but the kernel bound {actual}, refusing before DATA"
     )]
     Unverified { requested: IpAddr, actual: IpAddr },
     #[error("cannot read the socket's bound local address for requested source IP {requested}: {message}")]

@@ -1,12 +1,12 @@
-//! Deep module tests — wider coverage + test the 6 bug fixes
+//! Deep module tests, wider coverage + test the 6 bug fixes
 //!
 //! This file tests://! 1. Bug fixes discovered in deep scan (6 bugs)
 //! 2. Session tracking module (session.rs)
 //! 3. Config module validation (config.rs)
 //! 4. Decision module (decision.rs)
-//! 5. Challenges module (challenges.rs) — JS generation fix
-//! 6. ML module (ml.rs) — online learning fixes
-//! 7. Cost-based limiter (cost_based.rs) — refill race fix
+//! 5. Challenges module (challenges.rs), JS generation fix
+//! 6. ML module (ml.rs), online learning fixes
+//! 7. Cost-based limiter (cost_based.rs), refill race fix
 
 use std::net::{IpAddr, Ipv4Addr};
 use std::time::{Duration, Instant};
@@ -112,7 +112,7 @@ mod bug_fix_verification {
     }
 
     /// Bug Cost-based limiter refill should use CAS to prevent overshoot.
-    /// This is a logical test — actual race would require multi-threading.
+    /// This is a logical test, actual race would require multi-threading.
     #[test]
     fn cost_limiter_refill_logic_correct() {
         let config = CostLimiterConfig {
@@ -513,7 +513,7 @@ mod decision_tests {
         assert!(!challenge.verify(""));
     }
 
-    // NOTE: updated for the cookie-challenge HMAC hardening — the previous
+    // NOTE: updated for the cookie-challenge HMAC hardening, the previous
     // version asserted the vulnerable plain string-compare behavior
     // (any client that observed `secret_value_123` could forge a pass).
     #[test]

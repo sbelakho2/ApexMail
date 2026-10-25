@@ -26,12 +26,12 @@ A alto volumen, los pequeños cambios de entregabilidad tienen un gran impacto e
 
 ## Solución de ApexMail
 
-- **IP dedicadas** — Complemento aprobado en Pro; 1 incluida en Growth y Business, y 3 en Enterprise Cloud. Las opciones de despliegue de ámbito contractual se revisan por separado.
-- **Calentamiento automatizado** — Ramp gradual de volumen según calendarios específicos de cada proveedor. Supervisado por señales de reputación. Anulación manual disponible.
-- **Priorización de colas** — El tráfico transaccional se prioriza por delante del masivo en momentos de carga. Objetivos de tiempo hasta bandeja supervisados.
-- **API por lotes** (`POST /v1/messages/batch`) — Envíe hasta 100 mensajes por solicitud. Menor sobrecoste por mensaje que las llamadas individuales a la API.
-- **Límites de velocidad** — Los límites se aplican por clave de API y plan; consulte la documentación pública actual de la API para conocer los límites públicos.
-- **SLA contractual** — Business y Enterprise incluyen condiciones de SLA a nivel de plan; los despliegues no estándar requieren una revisión contractual separada.
+- **IP dedicadas**, Complemento aprobado en Pro; 1 incluida en Growth y Business, y 3 en Enterprise Cloud. Las opciones de despliegue de ámbito contractual se revisan por separado.
+- **Calentamiento automatizado**, Ramp gradual de volumen según calendarios específicos de cada proveedor. Supervisado por señales de reputación. Anulación manual disponible.
+- **Priorización de colas**, El tráfico transaccional se prioriza por delante del masivo en momentos de carga. Objetivos de tiempo hasta bandeja supervisados.
+- **API por lotes** (`POST /v1/messages/batch`), Envíe hasta 100 mensajes por solicitud. Menor sobrecoste por mensaje que las llamadas individuales a la API.
+- **Límites de velocidad**, Los límites se aplican por clave de API y plan; consulte la documentación pública actual de la API para conocer los límites públicos.
+- **SLA contractual**, Business y Enterprise incluyen condiciones de SLA a nivel de plan; los despliegues no estándar requieren una revisión contractual separada.
 
 ## Implementación técnica
 

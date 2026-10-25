@@ -1,4 +1,4 @@
-//! Spam filter engine — orchestrates all analyzers
+//! Spam filter engine, orchestrates all analyzers
 //!
 //! Combines Bayesian classification, content scoring, header analysis,
 //! and URL analysis into a single composite spam verdict.
@@ -127,7 +127,7 @@ pub enum DriftDirection {
     TowardsSpam,
     /// Model is drifting towards classifying more as ham.
     TowardsHam,
-    /// Stable — no significant directional drift.
+    /// Stable, no significant directional drift.
     Stable,
 }
 
@@ -209,10 +209,10 @@ impl SpamEngine {
         let bayesian_prob = if self.config.enable_bayesian {
             let raw_prob = self.bayesian.classify(body);
             // Cold-start:if model has insufficient training data, treat as neutral.
-            // Uses the cheap O(1) accessor — a full export_model() here would
+            // Uses the cheap O(1) accessor, a full export_model() here would
             // deep-clone the entire vocabulary on every email.
             if self.bayesian.total_samples() < self.config.min_training_samples {
-                0.5 // Neutral — don't let an under-trained model influence scoring
+                0.5 // Neutral, don't let an under-trained model influence scoring
             } else {
                 raw_prob
             }
@@ -234,7 +234,7 @@ impl SpamEngine {
             }
         };
 
-        // 3. Content scoring (including custom phrase blocklists — shared
+        // 3. Content scoring (including custom phrase blocklists, shared
         // with analyze_for_tenant so both entry points score identically)
         let content_result = self.score_content_with_blocklists(body);
 
@@ -418,7 +418,7 @@ impl SpamEngine {
             return false;
         };
         // Route through the validated (entropy/token-count checked,
-        // rate-limited) learning path. A rejected sample is discarded — it
+        // rate-limited) learning path. A rejected sample is discarded, it
         // must never bypass validation by using the legacy unvalidated API.
         let trained = match sample.label {
             TrainingLabel::Spam => self.bayesian.learn_spam_validated(&sample.text),
@@ -429,7 +429,7 @@ impl SpamEngine {
                 sample_id = %sample_id,
                 reviewer = %reviewer,
                 error = ?e,
-                "Approved training sample failed validation — discarded"
+                "Approved training sample failed validation, discarded"
             );
         }
         true
@@ -447,7 +447,7 @@ impl SpamEngine {
     }
 
     /// Persist an in-memory model snapshot for rollback.
-    /// Snapshots are LRU-bounded (MAX_MODEL_SNAPSHOTS) — the oldest snapshot
+    /// Snapshots are LRU-bounded (MAX_MODEL_SNAPSHOTS), the oldest snapshot
     /// is evicted once the cap is reached so long-running processes cannot
     /// accumulate unbounded model copies.
     pub fn create_model_snapshot(&self, label: &str) -> String {
@@ -559,12 +559,12 @@ impl SpamEngine {
         // Global-model probability with the SAME cold-start guard `analyze`
         // enforces: below `min_training_samples` the model is neutral 0.5.
         // Without this guard a 2-sample model's raw probability flowed
-        // straight into the 60/40 blend and moved tenant verdicts — exactly
+        // straight into the 60/40 blend and moved tenant verdicts, exactly
         // the failure the cold-start guard exists to prevent.
         let global_prob = if self.config.enable_bayesian {
             let raw_prob = self.bayesian.classify(body);
             if self.bayesian.total_samples() < self.config.min_training_samples {
-                0.5 // Neutral — don't let an under-trained model influence scoring
+                0.5 // Neutral, don't let an under-trained model influence scoring
             } else {
                 raw_prob
             }
@@ -579,12 +579,12 @@ impl SpamEngine {
             let classifiers = self.tenant_classifiers.read();
             if let Some(tc) = classifiers.get(tenant_id) {
                 if tc.total_samples() < self.config.min_training_samples {
-                    0.5 // Neutral — under-trained tenant model
+                    0.5 // Neutral, under-trained tenant model
                 } else {
                     tc.classify(body)
                 }
             } else {
-                // No tenant-specific model yet — fall back to global
+                // No tenant-specific model yet, fall back to global
                 global_prob
             }
         };
@@ -606,7 +606,7 @@ impl SpamEngine {
             }
         };
 
-        // 3. Content scoring (including custom phrase blocklists — shared
+        // 3. Content scoring (including custom phrase blocklists, shared
         // scoring path with `analyze`)
         let content_result = self.score_content_with_blocklists(body);
 
@@ -653,7 +653,7 @@ impl SpamEngine {
     /// F9:tenant training routes through the VALIDATED learning path —
     /// entropy check, per-sample token cap, rate limiting (each tenant has
     /// its own classifier, hence its own per-minute budget), and vocabulary
-    /// pruning on the tenant model — exactly like the global
+    /// pruning on the tenant model, exactly like the global
     /// [`Self::train_spam`]. The legacy unvalidated path let a tenant
     /// poison its own model with adversarial input unchecked.
     pub fn train_tenant_spam(&self, tenant_id: &str, text: &str) -> Result<(), TrainingError> {
@@ -661,7 +661,7 @@ impl SpamEngine {
     }
 
     /// Train the per-tenant Bayesian classifier with a ham sample
-    /// (LRU-bounded, validated — see [`Self::train_tenant_spam`]).
+    /// (LRU-bounded, validated, see [`Self::train_tenant_spam`]).
     pub fn train_tenant_ham(&self, tenant_id: &str, text: &str) -> Result<(), TrainingError> {
         self.train_tenant(tenant_id, text, TrainingLabel::Ham)
     }
@@ -706,13 +706,13 @@ impl SpamEngine {
         };
         let lower = results.to_lowercase();
         // dmarc=none is informational only:many legitimate senders publish no
-        // DMARC record. It is NOT a failure — treat it as a weak signal
+        // DMARC record. It is NOT a failure, treat it as a weak signal
         // (0.5), consistent with header_analyzer's scoring.
         if lower.contains("dmarc=none") {
             return 0.5;
         }
         if lower.contains("dmarc=fail") {
-            // DMARC explicitly failed — apply the full penalty (the actual
+            // DMARC explicitly failed, apply the full penalty (the actual
             // DNS p= policy would need an async lookup, so we apply a
             // conservative penalty that acknowledges the failure without
             // blocking outright).
@@ -1017,7 +1017,7 @@ mod tests {
         // Fail-first: `analyze_for_tenant` classified with the raw model
         // probability and skipped the `min_training_samples` neutral guard
         // that `analyze` enforces. Through the 60/40 blend a 2-sample model
-        // directly moved tenant verdicts — exactly the cold-start failure
+        // directly moved tenant verdicts, exactly the cold-start failure
         // the guard exists to prevent.
         let config = crate::config::SpamConfig {
             min_training_samples: 200,
@@ -1028,7 +1028,7 @@ mod tests {
 
         let baseline = engine.analyze_for_tenant(spam_body, &[], None, "tenant-x");
 
-        // Train exactly 2 spam samples — far below min_training_samples.
+        // Train exactly 2 spam samples, far below min_training_samples.
         engine.bayesian().learn_spam(spam_body);
         engine.bayesian().learn_spam(spam_body);
         assert_eq!(engine.bayesian().total_samples(), 2);
@@ -1125,7 +1125,7 @@ mod tests {
     #[test]
     fn test_tenant_training_is_rate_limited_per_tenant() {
         // Each tenant classifier carries its own per-minute budget (the
-        // validated path's rate limiter) — a single tenant cannot train
+        // validated path's rate limiter), a single tenant cannot train
         // unbounded, and exhausting one tenant's budget does not affect
         // another tenant.
         let engine = SpamEngine::new();

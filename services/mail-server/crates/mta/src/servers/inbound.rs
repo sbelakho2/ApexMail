@@ -53,16 +53,16 @@ const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 /// (the `421 Too many connections` line). Small writes normally fit the
 /// socket buffer instantly, but a peer that connects, trips the per-IP cap,
 /// and never reads must not pin the refusal task on an unbounded
-/// `writable().await` loop — the connection is refused either way, so a
+/// `writable().await` loop, the connection is refused either way, so a
 /// slow/stalled receiver just gets the socket closed.
 const REFUSAL_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// RCPT-time mailbox resolution failure replies. The decision rule is pure
 /// ([`rcpt_resolution_reply`]) so the 550/451/accept matrix is unit-testable:
 ///
-/// * a definitive "no such mailbox" is a PERMANENT refusal (550 5.1.1) — the
+/// * a definitive "no such mailbox" is a PERMANENT refusal (550 5.1.1), the
 ///   sender must not retry into a black hole;
-/// * a directory/mailstore error is TRANSIENT (451 4.3.0) — the sender must
+/// * a directory/mailstore error is TRANSIENT (451 4.3.0), the sender must
 ///   retry rather than have the message silently accepted and dropped.
 const RCPT_NO_SUCH_USER_REPLY: &str = "550 5.1.1 No such user here\r\n";
 const RCPT_TEMPFAIL_REPLY: &str = "451 4.3.0 Temporary local problem\r\n";
@@ -86,12 +86,12 @@ pub(crate) enum SourceCheck {
     /// No PTR, or the PTR is not forward-confirmed; carries the unconfirmed
     /// PTR hostname when one exists.
     NoReverseDns(Option<String>),
-    /// The resolver itself failed transiently — callers tempfail (451 4.4.3)
+    /// The resolver itself failed transiently, callers tempfail (451 4.4.3)
     /// and the result is never cached.
     Transient,
 }
 
-/// F-02: reply for a transient resolver failure at MAIL FROM — a DNS outage
+/// F-02: reply for a transient resolver failure at MAIL FROM, a DNS outage
 /// must tempfail (never hard-reject), regardless of the FCrDNS policy flag.
 const FCRDNS_TEMPFAIL_REPLY: &str = "451 4.4.3 Temporary DNS failure verifying sender\r\n";
 
@@ -102,7 +102,7 @@ const FCRDNS_REQUIRED_REPLY: &str = "550 5.7.25 Reverse DNS lookup required (FCr
 /// F-02: the MAIL FROM reply implied by a source check (`None` = accept).
 /// Pure so the fail-open/fail-closed matrix is unit-testable:
 ///
-/// * `Transient` → tempfail 451 (either policy) — a resolver outage must
+/// * `Transient` → tempfail 451 (either policy), a resolver outage must
 ///   not permanently bounce mail.
 /// * `NoReverseDns` → hard 550 only under `require_fcrdns=true`; the
 ///   default accepts with a logged warning (RFC 5321 §7.9).
@@ -115,7 +115,7 @@ fn fcrdns_reply(check: &SourceCheck, require_fcrdns: bool) -> Option<&'static st
     }
 }
 
-/// F-02: only DETERMINATE outcomes belong in the negative cache — a
+/// F-02: only DETERMINATE outcomes belong in the negative cache, a
 /// transient resolver failure must never poison the 600 s cache into
 /// hard-rejecting every subsequent sender from that IP.
 fn rdns_outcome_cacheable(check: &SourceCheck) -> bool {
@@ -153,7 +153,7 @@ pub struct SessionContext {
     /// Whether this session's LISTENER permits AUTH at all. The implicit-TLS
     /// listener (port 465) is a submission port and always permits AUTH;
     /// the internet-facing port-25 listener permits it only when
-    /// `SMTP_ADVERTISE_AUTH_PORT25=true` (default false — mail clients
+    /// `SMTP_ADVERTISE_AUTH_PORT25=true` (default false, mail clients
     /// submitting real mail should use port 587/465, and port 25 must not
     /// present an always-on AUTH brute-force surface).
     #[serde(default)]
@@ -163,7 +163,7 @@ pub struct SessionContext {
     #[serde(default)]
     pub helo_seen: bool,
     /// Forward-confirmed reverse DNS hostname for the client IP ("unknown"
-    /// when absent) — recorded in the Received trace header (F-01).
+    /// when absent), recorded in the Received trace header (F-01).
     #[serde(default)]
     pub client_rdns: Option<String>,
     /// Whether the current transaction's MAIL FROM carried SMTPUTF8
@@ -176,7 +176,7 @@ pub struct SessionContext {
 
 /// A recipient address resolved to an actual mailstore mailbox.
 ///
-/// "A mailbox" in this system is a row in `mail_accounts` — the mailstore's
+/// "A mailbox" in this system is a row in `mail_accounts`, the mailstore's
 /// account registry. The mailstore service resolves delivery targets with
 /// `SELECT ... FROM mail_accounts WHERE email = $1 AND is_active = true`
 /// (`crates/mailstore-core/src/storage.rs:298`, table created by
@@ -185,7 +185,7 @@ pub struct SessionContext {
 /// the same registry is what makes "accepted" mean "deliverable".
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedMailbox {
-    /// `mail_accounts.id` (UUID as text) — the account id every mailstore
+    /// `mail_accounts.id` (UUID as text), the account id every mailstore
     /// RPC takes.
     pub mailbox_id: String,
     /// The canonical address stored in the directory.
@@ -260,7 +260,7 @@ fn rcpt_resolution_reply(
 // until now only the HA service's own HTTP routes consulted them, so a
 // fenced node kept ACCEPTING mail. This gate closes that window on the
 // inbound path: the MAIL command refuses with 421 while the node's fence
-// key stands — or while the fence authority cannot be read (fail closed:
+// key stands, or while the fence authority cannot be read (fail closed:
 // a node that cannot prove it is not fenced must not accept writes).
 //
 // Environment contract (identical to the worker's `fence` module):
@@ -271,7 +271,7 @@ fn rcpt_resolution_reply(
 
 /// A fence authority that is permanently unreadable: the construction path
 /// for "fencing explicitly enabled but the authority URL is missing or
-/// invalid" — the operator opted in, so every check fails closed.
+/// invalid", the operator opted in, so every check fails closed.
 #[derive(Debug, Default, Clone, Copy)]
 struct UnreadableFenceStore;
 
@@ -390,14 +390,14 @@ pub struct InboundServer {
     connections: Arc<DashMap<IpAddr, u32>>,
     /// Bounded PTR/FCrDNS cache to avoid repeated DNS lookups per source IP.
     /// Only Confirmed/NoReverseDns outcomes are cached (transient resolver
-    /// failures must not poison the negative cache — F-02).
+    /// failures must not poison the negative cache, F-02).
     rdns_cache: Cache<IpAddr, SourceCheck>,
     /// Failed-AUTH lockout tracking (per-IP + per-account), shared with
     /// the submission server.
     auth_fail_tracker: AuthFailTracker,
     /// Shared resolver for PTR/FCrDNS verification (interior mutability so
     /// tests can point it at a loopback mock before any session runs;
-    /// production clones the process-wide static once at construction — the
+    /// production clones the process-wide static once at construction, the
     /// same pattern the FBL server uses).
     rdns_resolver: std::sync::RwLock<TokioResolver>,
     shutdown: Arc<Notify>,
@@ -501,7 +501,7 @@ impl InboundServer {
         // IDS session-tracker cleanup: without periodic cleanup the
         // connection/half-open/port-scan maps only grow over the process
         // lifetime (ids-engine's own cleanup loop targets the engine's
-        // internal tracker, which stays dormant — session lifecycle is
+        // internal tracker, which stays dormant, session lifecycle is
         // tracked here). Tied to the shutdown signal.
         if let Some(ids) = &self.ids {
             let sessions = ids.sessions().clone();
@@ -631,7 +631,7 @@ impl InboundServer {
     /// loop and the bounded STARTTLS upgrade. Generic over the transport so
     /// the exact slot/timeout contract can be driven over an in-memory duplex
     /// stream (a real TCP socket under a paused test clock races tokio's
-    /// time-driver auto-advance — see
+    /// time-driver auto-advance, see
     /// `test_starttls_handshake_timeout_releases_connection_slot`).
     /// [`handle_session_plain`] supplies the TcpStream and owns the
     /// pre-admission refusal.
@@ -644,7 +644,7 @@ impl InboundServer {
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
     {
         let ip = peer.ip();
-        // F-19: RAII slot guard (same pattern as the bounce server) — the
+        // F-19: RAII slot guard (same pattern as the bounce server), the
         // per-IP slot is released on EVERY exit path, early returns included.
         let _conn_guard = super::bounce::ConnGuard {
             conns: self.connections.clone(),
@@ -689,7 +689,7 @@ impl InboundServer {
             spf_status: None,
             auth_login_user: None,
             auth_plain_pending: false,
-            // Port 25: AUTH only when explicitly enabled via config — the
+            // Port 25: AUTH only when explicitly enabled via config, the
             // internet-facing listener must not advertise an AUTH
             // brute-force surface by default.
             auth_enabled: self.config.advertise_auth_port25,
@@ -701,7 +701,7 @@ impl InboundServer {
         let allow_starttls = tls.is_some();
         let mut stream = BufStream::new(socket);
         // F-11: the greeting is written exactly ONCE per connection, here.
-        // run_session_loop no longer greets — re-entering it after STARTTLS
+        // run_session_loop no longer greets, re-entering it after STARTTLS
         // must continue at the client's EHLO (RFC 3207 §4.2), not emit a
         // second 220 banner.
         let greeting = format!("220 {} ESMTP ApexMail MTA\r\n", self.hostname);
@@ -719,7 +719,7 @@ impl InboundServer {
             );
             return;
         }
-        // IDS: the client received the greeting — the connection is
+        // IDS: the client received the greeting, the connection is
         // established and leaves the half-open bucket.
         if let Some(ids) = &self.ids {
             ids.establish_session(ip, self.config.port);
@@ -822,7 +822,7 @@ impl InboundServer {
                 }
                 Ok(Ok(LineRead::TooLong)) => {
                     // The line's remainder (through its newline) was fully
-                    // drained — the session is still synchronised.
+                    // drained, the session is still synchronised.
                     log_smtp_reject("inbound", ctx.client_ip, &ctx.id, "500 5.5.2 Line too long");
                     let _ = write_line_buf(stream, "500 5.5.2 Line too long\r\n").await;
                     error_count += 1;
@@ -852,7 +852,7 @@ impl InboundServer {
                 Ok(Ok(LineRead::Line(_, LineTerminator::BareLf))) => {
                     // F-08: a bare-LF COMMAND line is refused (RFC 5321
                     // commands are CRLF-terminated). DATA body tolerance is
-                    // unchanged — only command lines are gated here.
+                    // unchanged, only command lines are gated here.
                     log_smtp_reject(
                         "inbound",
                         ctx.client_ip,
@@ -1023,7 +1023,7 @@ impl InboundServer {
                         }
                         Ok(Ok(LineRead::Overflow)) => {
                             // No newline within the absolute drain limit: the
-                            // stream can no longer be resynchronised — close.
+                            // stream can no longer be resynchronised, close.
                             overflowed = true;
                             break;
                         }
@@ -1161,8 +1161,8 @@ impl InboundServer {
     }
 
     /// The ADMITTED implicit-TLS (port 465) session. Generic over the
-    /// transport so its distinct contract — AUTH is part of the port-465
-    /// service and TLS is already active — can be driven over an in-memory
+    /// transport so its distinct contract, AUTH is part of the port-465
+    /// service and TLS is already active, can be driven over an in-memory
     /// duplex stream in tests.
     async fn handle_session_tls<S>(self: Arc<Self>, tls_stream: S, peer: SocketAddr)
     where
@@ -1177,7 +1177,7 @@ impl InboundServer {
             )
         {
             // F-13: the implicit-TLS listener must not drop over-limit
-            // connections silently — the client already paid for the TLS
+            // connections silently, the client already paid for the TLS
             // handshake, so tell it why the connection is going away.
             let mut stream = BufStream::new(tls_stream);
             let _ = write_line_buf(
@@ -1187,7 +1187,7 @@ impl InboundServer {
             .await;
             return;
         }
-        // F-19: RAII slot guard — released on every exit path.
+        // F-19: RAII slot guard, released on every exit path.
         let _conn_guard = super::bounce::ConnGuard {
             conns: self.connections.clone(),
             ip,
@@ -1229,7 +1229,7 @@ impl InboundServer {
             auth_login_user: None,
             auth_plain_pending: false,
             // Port 465 (implicit TLS) is a submission port: AUTH is part of
-            // its contract — email clients that auto-detect port 465 hang
+            // its contract, email clients that auto-detect port 465 hang
             // indefinitely when AUTH is missing from EHLO.
             auth_enabled: true,
             helo_seen: false,
@@ -1304,7 +1304,7 @@ impl InboundServer {
             // charset-agnostic by design).
             caps.push_str("250-8BITMIME\r\n");
             caps.push_str("250-PIPELINING\r\n");
-            // F-05: ENHANCEDSTATUSCODES (RFC 2034) — every reply this
+            // F-05: ENHANCEDSTATUSCODES (RFC 2034), every reply this
             // server emits already carries an enhanced status code.
             caps.push_str("250-ENHANCEDSTATUSCODES\r\n");
             caps.push_str("250 SMTPUTF8\r\n");
@@ -1378,7 +1378,7 @@ impl InboundServer {
         } else if verb == "AUTH" && !ctx.helo_seen {
             "503 5.5.1 Error: send HELO/EHLO first\r\n".into()
         } else if verb == "AUTH" && !ctx.tls_active {
-            // AUTH before TLS — reject for security
+            // AUTH before TLS, reject for security
             "538 5.7.11 Encryption required for requested authentication\r\n".into()
         } else if verb == "AUTH" && ctx.authenticated {
             // RFC 4954 §4: a session must not re-AUTH once authenticated
@@ -1424,8 +1424,8 @@ impl InboundServer {
                 "504 5.5.4 Unrecognized authentication type\r\n".into()
             }
         } else if verb == "MAIL" {
-            // SM10 F4: data-plane STONITH. A fenced node — or one that
-            // cannot prove it is not fenced (the check fails closed) — must
+            // SM10 F4: data-plane STONITH. A fenced node, or one that
+            // cannot prove it is not fenced (the check fails closed), must
             // not accept new mail transactions: 421 sends the peer to
             // another exchanger. Gate disabled (default): no Redis traffic.
             if let Err(refusal) = self.fence_gate.ensure_can_accept().await {
@@ -1449,7 +1449,7 @@ impl InboundServer {
                 return "530 5.7.0 Authentication required\r\n".into();
             }
             if ctx.mail_from.is_some() {
-                // F-04: nested MAIL — RFC 5321 §4.1.4 sequencing error.
+                // F-04: nested MAIL, RFC 5321 §4.1.4 sequencing error.
                 return "503 5.5.1 Nested MAIL command\r\n".into();
             }
             // F-02: forward-confirmed reverse DNS. Transient resolver
@@ -1508,7 +1508,7 @@ impl InboundServer {
                 return "501 5.1.7 Malformed reverse-path\r\n".into();
             }
             // RFC 5321 §4.1.4: a MAIL FROM implicitly resets any prior
-            // transaction's recipients — a new reverse-path starts a new
+            // transaction's recipients, a new reverse-path starts a new
             // transaction.
             ctx.rcpt_to.clear();
             ctx.resolved_recipients.clear();
@@ -1542,7 +1542,7 @@ impl InboundServer {
             let addr = extract_address(raw_line);
             // F-03: the forward-path gets the SAME syntax validation the
             // submission server applies (no whitespace, no control
-            // characters, exactly one '@', well-formed dotted domain) — the
+            // characters, exactly one '@', well-formed dotted domain), the
             // old length+domain-only check let "a b@example.com" and
             // "a@@b.com" straight into the envelope.
             if !super::submission::is_valid_envelope_address(&addr) {
@@ -1604,7 +1604,7 @@ impl InboundServer {
             "214 2.0.0 Commands: EHLO HELO MAIL RCPT DATA RSET NOOP QUIT STARTTLS HELP VRFY EXPN; see RFC 5321\r\n"
                 .into()
         } else if verb == "VRFY" {
-            // RFC 5321 §7.3: never confirm address existence — 252 keeps
+            // RFC 5321 §7.3: never confirm address existence, 252 keeps
             // the anti-enumeration posture while staying protocol-correct.
             "252 2.5.2 Cannot VRFY user, but will accept message and attempt delivery\r\n".into()
         } else if verb == "EXPN" {
@@ -1682,7 +1682,7 @@ impl InboundServer {
             crate::auth::MessageDisposition::Accept => {}
             crate::auth::MessageDisposition::TempFail => {
                 // C:the DMARC policy lookup transiently failed with no
-                // passing SPF/DKIM — answer 451 (via the generic temporary
+                // passing SPF/DKIM, answer 451 (via the generic temporary
                 // failure reply) so the sender retries instead of
                 // fail-open accepting a potentially spoofed message.
                 metric_message("inbound", "tempfail");
@@ -1690,7 +1690,7 @@ impl InboundServer {
             }
         }
 
-        // 2. Inbound content security — IDS payload scan (connection-level
+        // 2. Inbound content security, IDS payload scan (connection-level
         //    admission already happened when the session started). The
         //    verdict is recorded as a stored header; a Drop/Reject verdict
         //    refuses the message ONLY under MTA_IDS_REFUSE=true.
@@ -1712,7 +1712,7 @@ impl InboundServer {
         //    "bounces+" anywhere (e.g. "user+bounces+tag@dom").
         let is_verp = ctx.rcpt_to.iter().any(|r| r.starts_with("bounces+"));
 
-        // 4. Resolve recipients PER OWNING TENANT (invariant I27) — one
+        // 4. Resolve recipients PER OWNING TENANT (invariant I27), one
         //    query per unique domain. The row binds to the first resolved
         //    tenant and stores ONLY that tenant's own addresses; the union of
         //    a cross-tenant envelope is never written under one tenant.
@@ -1832,7 +1832,7 @@ impl InboundServer {
         //    subject, body_text, body_html, headers) are populated from ONE
         //    parse of the client bytes: they are the reply pipeline's input
         //    (its claim predicate is `from_email IS NOT NULL`), and leaving
-        //    them NULL — as this writer did after the 088 column incident —
+        //    them NULL, as this writer did after the 088 column incident —
         //    makes every accepted reply invisible to that pipeline. The
         //    parse is best-effort: a message the parser cannot read is still
         //    accepted with NULL mirrors, never 451'd. The full raw MIME
@@ -1878,7 +1878,7 @@ impl InboundServer {
         tx.commit().await?;
 
         // 11. Queue webhook notification (best-effort, after the durable
-        //    commit — a webhook failure must never reject accepted mail).
+        //    commit, a webhook failure must never reject accepted mail).
         queue_inbound_events_for_tenants(
             &self.pool,
             &message_id,
@@ -1910,7 +1910,7 @@ impl InboundServer {
     /// (no pre-existing ARC chain → `cv=none`, which needs no key
     /// resolution for prior sets). Sealing a message that already carries a
     /// chain requires async DKIM key resolution for the verifier closure
-    /// (generate_arc_headers takes a sync lookup) — that lands with the
+    /// (generate_arc_headers takes a sync lookup), that lands with the
     /// direct-MX sender work tracked under F-16. Any failure is logged and
     /// downgraded to "no seal": ARC must never reject or delay mail.
     async fn build_arc_seal(
@@ -1954,7 +1954,7 @@ impl InboundServer {
         let (headers_bytes, body_bytes) = super::submission::split_headers_body(raw);
         // Parse-only decode for chain detection: ARC field names and tags
         // are ASCII, so a lossy decode cannot hide an existing chain. The
-        // SIGNING input below stays raw octets — hashing a lossy block
+        // SIGNING input below stays raw octets, hashing a lossy block
         // rewrites 8-bit header bytes as U+FFFD, and no external verifier
         // could reconstruct the seal (same discipline as the body hash).
         let headers = String::from_utf8_lossy(headers_bytes);
@@ -1977,8 +1977,8 @@ impl InboundServer {
             dmarc: format!("{:?}", auth_results.dmarc.result).to_lowercase(),
         };
 
-        // The seal build is pure CPU — RSA envelope decrypt + key parse +
-        // two RSA signatures over up to 10 MB of message — and must not run
+        // The seal build is pure CPU, RSA envelope decrypt + key parse +
+        // two RSA signatures over up to 10 MB of message, and must not run
         // on the async worker the session loop shares with every other
         // connection; dispatch it to the blocking pool. Data is moved in
         // owned ('static) form for the dispatch. Any failure (including a
@@ -2026,7 +2026,7 @@ impl InboundServer {
     /// Group this envelope's recipients by OWNING TENANT (invariant I27).
     ///
     /// A single message can arrive for several tenants' domains at once. Each
-    /// tenant's view of it — the stored row and the queued webhook — must
+    /// tenant's view of it, the stored row and the queued webhook, must
     /// carry only that tenant's own addresses; the union would disclose
     /// another tenant's recipients. Domains are resolved once each.
     async fn group_recipients(
@@ -2044,16 +2044,16 @@ impl InboundServer {
     /// (FCrDNS). Returns a [`SourceCheck`] the MAIL FROM handler turns into
     /// a reply:
     ///
-    /// * `Confirmed` — FCrDNS passed; informational only, mail proceeds.
-    /// * `NoReverseDns` — no PTR (or PTR not forward-confirmed). A hard
+    /// * `Confirmed`, FCrDNS passed; informational only, mail proceeds.
+    /// * `NoReverseDns`, no PTR (or PTR not forward-confirmed). A hard
     ///   `550 5.7.25` ONLY under `SMTP_REQUIRE_FCRDNS=true`; the default
     ///   logs a warning and continues (RFC 5321 §7.9 makes the refusal a
     ///   policy choice, and plenty of legitimate senders lack matching PTR).
-    /// * `Transient` — the resolver itself failed. Callers tempfail with
+    /// * `Transient`, the resolver itself failed. Callers tempfail with
     ///   `451 4.4.3`, and the result is NEVER cached: a DNS outage must not
     ///   poison the 600 s cache into hard-rejecting every sender.
     async fn verify_inbound_source(&self, ip: IpAddr) -> SourceCheck {
-        // Clone out of the lock — the guard must not be held across the
+        // Clone out of the lock, the guard must not be held across the
         // DNS awaits (the future is spawned per session and must stay Send).
         let resolver = self
             .rdns_resolver
@@ -2063,7 +2063,7 @@ impl InboundServer {
         self.verify_inbound_source_with(&resolver, ip).await
     }
 
-    /// Point the FCrDNS resolver at a mock (tests only) — the same seam the
+    /// Point the FCrDNS resolver at a mock (tests only), the same seam the
     /// FBL server exposes; sessions started afterwards resolve PTR/A records
     /// against the loopback mock instead of the system resolver.
     #[cfg(test)]
@@ -2074,7 +2074,7 @@ impl InboundServer {
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = resolver;
     }
 
-    /// [`Self::verify_inbound_source`] against an explicit resolver — the
+    /// [`Self::verify_inbound_source`] against an explicit resolver, the
     /// production path always passes the shared static; tests pass a
     /// loopback mock so the whole FCrDNS matrix runs on the real resolver
     /// wire path without touching the network.
@@ -2122,7 +2122,7 @@ impl InboundServer {
                                 debug!(ip = %ip, hostname = %hostname, "Inbound FCrDNS failed: forward lookup doesn't match IP");
                             }
                             // A failing FORWARD lookup is as transient as a
-                            // failing PTR lookup — fail open with a tempfail,
+                            // failing PTR lookup, fail open with a tempfail,
                             // never a permanent rejection.
                             Err(error) => {
                                 debug!(ip = %ip, hostname = %hostname, %error, "Inbound FCrDNS forward lookup failed");
@@ -2260,12 +2260,12 @@ impl InboundServer {
 /// Compose the stored/delivered message: the `Received:` trace header for
 /// this hop (F-01), the Authentication-Results header, an optional ARC seal
 /// set (F-16), the content-security verdict headers (spam / attachment
-/// sandbox / IDS — empty when the controls are disabled), and then the raw
-/// client bytes verbatim — each separated by exactly one CRLF.
+/// sandbox / IDS, empty when the controls are disabled), and then the raw
+/// client bytes verbatim, each separated by exactly one CRLF.
 ///
 /// The A-R header generated by `build_auth_results_header` folds its
 /// continuation lines with `<CRLF>\t` (never a bare LF), and it carries no
-/// trailing CRLF of its own — exactly one is appended here so the header
+/// trailing CRLF of its own, exactly one is appended here so the header
 /// cannot fuse with the message's first header line ("…dmarc=passFrom:
 /// a@b.com"). The same applies to the Received/ARC blocks (no trailing CRLF
 /// of their own) and to every verdict header, which are pre-built as
@@ -2310,7 +2310,7 @@ fn build_stored_message(
 /// The reply-pipeline mirror columns parsed once from the client bytes at
 /// accept time. The reply handler claims on `from_email IS NOT NULL`
 /// (worker-processors/src/reply_handler/processor.rs), so without this the
-/// MTA's own rows were invisible to the reply pipeline — the gap the
+/// MTA's own rows were invisible to the reply pipeline, the gap the
 /// SalesCloser plan closes at the writer.
 struct InboundMirrors {
     from_email: Option<String>,
@@ -2326,7 +2326,7 @@ struct InboundMirrors {
 const MIRROR_ADDRESS_MAX_CHARS: usize = 255;
 
 /// Headers carried in dedicated columns, plus hop/crypto material that is
-/// already in `auth_results`/`raw_message` — everything else is mirrored
+/// already in `auth_results`/`raw_message`, everything else is mirrored
 /// into the `headers` JSONB object the classifier reads (auto-submitted,
 /// precedence, in-reply-to, references, list-unsubscribe[-post],
 /// x-failed-recipients, content-type, ...).
@@ -2428,7 +2428,7 @@ fn parse_inbound_mirrors(raw: &[u8], envelope_recipient: Option<&str>) -> Inboun
             // Address-typed values must survive the mirror: a `<mailto:…>`
             // List-Unsubscribe parses as an Address list, and the reply
             // pipeline's deterministic mailto-unsubscribe arm reads the
-            // JSONB mirror — falling through to `as_text()` (None for
+            // JSONB mirror, falling through to `as_text()` (None for
             // address-typed values) silently dropped the header, so the arm
             // could never fire on live mail (dogfood 2026-10-06 F-4). Render
             // each address the way the header reads: `Name <addr>` when a
@@ -2506,7 +2506,7 @@ fn parse_inbound_mirrors(raw: &[u8], envelope_recipient: Option<&str>) -> Inboun
     }
 }
 
-/// Parse a PEM-encoded RSA private key (PKCS#8 first, then PKCS#1 — the
+/// Parse a PEM-encoded RSA private key (PKCS#8 first, then PKCS#1, the
 /// two encodings apexmail-lib's DKIM provisioning may have produced).
 fn parse_rsa_private_key(pem: &str) -> anyhow::Result<rsa::RsaPrivateKey> {
     use rsa::pkcs1::DecodeRsaPrivateKey;
@@ -2518,12 +2518,12 @@ fn parse_rsa_private_key(pem: &str) -> anyhow::Result<rsa::RsaPrivateKey> {
 
 fn extract_address(line: &str) -> String {
     // Shared panic-safe helper: the closing '>' is always searched after
-    // the opening '<' — a '>' earlier in the line used to slice out of
+    // the opening '<', a '>' earlier in the line used to slice out of
     // bounds and kill the session task (remote panic).
     if let Some(addr) = super::util::extract_addr_safe(line) {
         return addr.to_string();
     }
-    // Fallback:first token — the address is the first argument of
+    // Fallback:first token, the address is the first argument of
     // `MAIL FROM:`, so the LAST token is the SIZE= parameter, not the
     // address (submission.rs takes the first; both must agree).
     line.split_whitespace()
@@ -2624,7 +2624,7 @@ fn should_advertise_starttls(
 /// #138:Write all bytes to a raw TcpStream, handling partial writes.
 ///
 /// Audit finding 11: the whole write is bounded by
-/// [`REFUSAL_WRITE_TIMEOUT`] — the loop below used to await
+/// [`REFUSAL_WRITE_TIMEOUT`], the loop below used to await
 /// `writable()` indefinitely, so a peer that tripped the per-IP connection
 /// cap and then never read could pin the refusal task forever. The refusal
 /// is best-effort: timing out simply closes the socket.
@@ -2667,7 +2667,7 @@ pub async fn group_recipients_by_tenant(
 
 /// Queue one `message.inbound` webhook event PER owning tenant, each payload
 /// carrying only that tenant's recipients (invariant I27). `fallback_tenant`
-/// is queued with its OWN subset only — it never widens the group.
+/// is queued with its OWN subset only, it never widens the group.
 pub async fn queue_inbound_events_for_tenants(
     pool: &sqlx::PgPool,
     message_id: &str,
@@ -2767,7 +2767,7 @@ pub(crate) struct PermanentReject;
 
 /// The spam filter classified the message REJECT and the operator enabled
 /// DATA-time refusal (`MTA_SPAM_REJECT_ENABLED=true`). Refused with
-/// `550 5.7.1` — a permanent policy refusal must not invite retries.
+/// `550 5.7.1`, a permanent policy refusal must not invite retries.
 #[derive(Debug, thiserror::Error)]
 #[error("Message rejected by spam filter")]
 pub(crate) struct SpamPolicyReject;
@@ -2787,7 +2787,7 @@ pub(crate) struct IdsPolicyReject;
 
 /// A recipient could not be resolved at DATA time (the RCPT-time resolution
 /// was absent from the session cache, e.g. a restored session). The message
-/// must be refused with `550 5.1.1` — never committed with a recipient that
+/// must be refused with `550 5.1.1`, never committed with a recipient that
 /// would be dropped.
 #[derive(Debug, thiserror::Error)]
 #[error("No such recipient mailbox")]
@@ -2797,8 +2797,8 @@ pub(crate) struct NoSuchRecipient;
 ///
 /// The previous implementation issued one `INSERT` per recipient (up to
 /// `max_recipients`, 100, per accepted message). `INSERT ... SELECT FROM
-/// unnest(...)` preserves the exact dedupe semantics — `ON CONFLICT
-/// (message_id, recipient) DO NOTHING`, order-insensitive — while collapsing
+/// unnest(...)` preserves the exact dedupe semantics, `ON CONFLICT
+/// (message_id, recipient) DO NOTHING`, order-insensitive, while collapsing
 /// the batch to a single round trip. `mailbox_id` is `text` in
 /// `inbound_recipients`, hence the `text[]` bind rather than `uuid[]`.
 async fn insert_inbound_recipients(
@@ -2877,7 +2877,7 @@ fn format_data_response(result: &anyhow::Result<String>) -> String {
 ///
 /// Generic over the transport so the STARTTLS guard path can be driven over
 /// an in-memory duplex stream in tests (a real TCP socket under a paused test
-/// clock races tokio's auto-advance — see `test_starttls_handshake_timeout_
+/// clock races tokio's auto-advance, see `test_starttls_handshake_timeout_
 /// releases_connection_slot`).
 pub(crate) async fn tls_handshake_with_timeout<IO, F>(
     handshake: F,
@@ -2913,7 +2913,7 @@ mod tests {
 
     /// F-4 (live mailbot dogfood 2026-10-06): `List-Unsubscribe:
     /// <mailto:…>` parses as an Address list, and the mirror's fallback
-    /// (`HeaderValue::as_text()`) is `None` for address-typed values — the
+    /// (`HeaderValue::as_text()`) is `None` for address-typed values, the
     /// header silently vanished from `inbound_messages.headers`, so the reply
     /// pipeline's deterministic mailto-unsubscribe arm (which reads the
     /// mirror, never the raw MIME) could never fire on live mail. Address
@@ -3436,7 +3436,7 @@ as requested\r\n";
     }
 
     /// RFC 4954 §4: QUIT while a continuation is pending closes the session
-    /// — it must NOT be consumed as a base64 payload (the old path answered
+    ///, it must NOT be consumed as a base64 payload (the old path answered
     /// a 535 for the "QUIT" credentials instead of 221).
     #[tokio::test]
     async fn test_inbound_quit_during_auth_continuation_closes_session() {
@@ -3657,7 +3657,7 @@ as requested\r\n";
         assert_eq!(ctx.mail_from.as_deref(), Some(""));
 
         // F-04: a second MAIL while the transaction is open is a nested
-        // MAIL (RFC 5321 §4.1.4) — 503, and the open transaction survives.
+        // MAIL (RFC 5321 §4.1.4), 503, and the open transaction survives.
         let nested = handle_cmd(&server, "MAIL FROM:<user@example.com>\r\n", &mut ctx).await;
         assert_eq!(nested, "503 5.5.1 Nested MAIL command\r\n");
         assert_eq!(ctx.mail_from.as_deref(), Some(""));
@@ -3676,7 +3676,7 @@ as requested\r\n";
 
     #[tokio::test]
     async fn ehlo_resets_an_open_transaction() {
-        // F-04: EHLO/HELO clears mail_from/rcpt_to (RFC 5321 §4.1.4) — the
+        // F-04: EHLO/HELO clears mail_from/rcpt_to (RFC 5321 §4.1.4), the
         // client may start a fresh transaction without RSET.
         let (server, mut ctx) = test_inbound(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))).await;
         assert!(
@@ -3731,7 +3731,7 @@ as requested\r\n";
     #[tokio::test]
     async fn test_tls_handshake_timeout_fires_on_never_completing_handshake() {
         // A client that connects but never sends a ClientHello must be cut off
-        // by the handshake timeout — never held forever.
+        // by the handshake timeout, never held forever.
         let never: std::future::Pending<
             std::io::Result<tokio_rustls::server::TlsStream<TcpStream>>,
         > = std::future::pending();
@@ -3753,7 +3753,7 @@ as requested\r\n";
         // Driven over an in-memory duplex stream under a paused clock. On a
         // real TCP socket the runtime parks on I/O and tokio's time driver
         // auto-advances the paused clock to the next timer, so the session
-        // loop's idle timeout can fire before the client's next write — the
+        // loop's idle timeout can fire before the client's next write, the
         // verdict becomes a function of thread scheduling (the session-
         // deadline test above documents the same race and uses the same
         // duplex idiom). Over the duplex stream every step is under the
@@ -3787,7 +3787,7 @@ as requested\r\n";
         // EHLO
         client.write_all(b"EHLO test.local\r\n").await.unwrap();
         assert!(read_smtp_reply(&mut client).await.starts_with("250"));
-        // STARTTLS — server replies 220 and then waits for the handshake.
+        // STARTTLS, server replies 220 and then waits for the handshake.
         client.write_all(b"STARTTLS\r\n").await.unwrap();
         assert!(read_reply_line(&mut client).await.starts_with("220"));
 
@@ -3798,7 +3798,7 @@ as requested\r\n";
         // The clock stays PAUSED and the wait is BOUNDED BY YIELDS, not by
         // wall-clock: a real-time deadline (previously
         // `timeout(5s, task)` after `time::resume()`) made the test a function
-        // of thread scheduling — under a full-suite run on a saturated machine
+        // of thread scheduling, under a full-suite run on a saturated machine
         // the session task could miss a 5-second deadline and fail a guard
         // that works. Each iteration hands the scheduler a turn and nudges the
         // paused clock, so the timer that already fired is observed
@@ -3888,7 +3888,7 @@ as requested\r\n";
 
     #[tokio::test]
     async fn ehlo_advertises_auth_on_submission_listener() {
-        // The implicit-TLS listener (465) keeps AUTH — it is a submission
+        // The implicit-TLS listener (465) keeps AUTH, it is a submission
         // port; clients that auto-detect 465 wait for the AUTH capability.
         let (server, mut ctx) = test_inbound(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))).await;
         ctx.auth_enabled = true;
@@ -3948,7 +3948,7 @@ as requested\r\n";
     }
 
     /// Read one CRLF-terminated SMTP reply line from a raw TCP stream
-    /// (deterministic — a single `read()` can return a partial or merged
+    /// (deterministic, a single `read()` can return a partial or merged
     /// mix of replies).
     async fn read_reply_line<R: tokio::io::AsyncRead + Unpin>(stream: &mut R) -> String {
         use tokio::io::AsyncReadExt;
@@ -3982,7 +3982,7 @@ as requested\r\n";
     #[tokio::test]
     async fn port25_session_does_not_advertise_auth_after_starttls() {
         // Full end-to-end pin of the default: connect to the port-25 plain
-        // listener, upgrade with STARTTLS, EHLO again — no AUTH capability
+        // listener, upgrade with STARTTLS, EHLO again, no AUTH capability
         // and AUTH commands refused with 502.
         let _ = tokio_rustls::rustls::crypto::ring::default_provider().install_default();
         let (server, _ctx) = test_inbound(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))).await;
@@ -4034,7 +4034,7 @@ as requested\r\n";
         let mut tls = connector.connect(name, client).await.unwrap();
 
         // F-11 (INVERTED pin): RFC 3207 §4.2 forbids a second 220 greeting
-        // on the TLS leg — the session continues directly at the client's
+        // on the TLS leg, the session continues directly at the client's
         // EHLO. Send EHLO IMMEDIATELY after the handshake; the first reply
         // must be the EHLO response (250-...), never a 220 banner.
         tls.write_all(b"EHLO client.example\r\n").await.unwrap();
@@ -4199,7 +4199,7 @@ as requested\r\n";
     async fn rate_limit_recipients_per_message_bounds_the_rcpt_budget() {
         // rate_limit.max_recipients_per_message (config-governed) must be
         // enforced as an upper bound intersected with the per-server
-        // max_recipients — the stricter budget wins. The cap fires BEFORE
+        // max_recipients, the stricter budget wins. The cap fires BEFORE
         // any recipient validation/DB work.
         let (mut server, mut ctx) = test_inbound(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))).await;
         server.rate_limit_config.max_recipients_per_message = 2;
@@ -4425,7 +4425,7 @@ as requested\r\n";
         client.write_all(b"NOOP\r\n").await.unwrap();
 
         // First reply: 500 line too long (the whole oversized line, QUIT
-        // included, was drained — it did NOT terminate the session).
+        // included, was drained, it did NOT terminate the session).
         let too_long = read_reply_line(&mut client).await;
         assert!(
             too_long.starts_with("500"),
@@ -4556,7 +4556,7 @@ as requested\r\n";
             assert!(ctx.rcpt_to.is_empty(), "nothing stored for {bad:?}");
         }
         // A WELL-FORMED recipient passes the syntax gate: the next failure
-        // is the (DB-unreachable) mailbox-directory lookup's 451 — not 501.
+        // is the (DB-unreachable) mailbox-directory lookup's 451, not 501.
         let resp = handle_cmd(&server, "RCPT TO:<user@example.com>\r\n", &mut ctx).await;
         assert_eq!(resp, "451 4.3.0 Temporary local problem\r\n");
     }
@@ -4922,7 +4922,7 @@ as requested\r\n";
         let name = tokio_rustls::rustls::pki_types::ServerName::try_from("localhost").unwrap();
         let mut tls = connector.connect(name, tcp).await.unwrap();
 
-        // F-13: the over-limit connection is not dropped silently — the 421
+        // F-13: the over-limit connection is not dropped silently, the 421
         // arrives on the TLS stream itself.
         let resp = read_reply_line(&mut tls).await;
         assert_eq!(resp, "421 4.7.0 Too many connections, try again later\r\n");
@@ -4959,7 +4959,7 @@ as requested\r\n";
     #[test]
     fn webhook_events_go_to_the_canonical_consumer_queue() {
         // Events used to be LPUSHed onto the `mta:webhook_queue` Redis list,
-        // which NO component ever consumed — every inbound/bounce/complaint
+        // which NO component ever consumed, every inbound/bounce/complaint
         // webhook was silently dropped. They now enter the canonical
         // `webhook_queue` table the worker's webhook processor drains
         // (retries, circuit breaker, SSRF guard). Pinned against the
@@ -5071,7 +5071,7 @@ mod adversarial_db_tests {
     // ── statement counters (batched-hotspot tests) ─────────────────────────
 
     /// A `FOR EACH STATEMENT` trigger bumps the counter once per INSERT /
-    /// UPDATE / DELETE statement, not once per row — the only way to tell a
+    /// UPDATE / DELETE statement, not once per row, the only way to tell a
     /// batched path (1 statement for N rows) from the old per-row loop (N
     /// statements). Mirrors the api-server `test_db` helper.
     async fn install_statement_counters(pool: &PgPool, table: &str) {
@@ -6047,7 +6047,7 @@ mod content_security_session_tests {
     }
 
     /// Deliver one message over the loopback duplex and return the final
-    /// DATA reply (no assertion on it — reject tests rely on that).
+    /// DATA reply (no assertion on it, reject tests rely on that).
     async fn deliver(
         server: Arc<InboundServer>,
         helo: &str,
@@ -6667,7 +6667,7 @@ mod adversarial_data_tests {
         assert!(reply.starts_with("250"), "transcript: {transcript}");
 
         /// (mail_from, helo, raw, raw_size, spf, disposition, from_email,
-        /// to_email, subject, body_text) — an alias keeps the tuple legal
+        /// to_email, subject, body_text), an alias keeps the tuple legal
         /// under the workspace's clippy -D warnings gate.
         type PersistedRow = (
             String,
@@ -6799,7 +6799,7 @@ Content-Type: text/html\r\n\
         let headers = row.5.expect("headers JSONB populated");
         assert_eq!(headers["auto-submitted"], "auto-replied");
         // Message-id-shaped headers are stored in the parser's canonical
-        // bracketless form — the same form `message_id_header` uses, so the
+        // bracketless form, the same form `message_id_header` uses, so the
         // analytics thread-depth join (`message_id = in_reply_to`) compares
         // like with like.
         assert_eq!(headers["in-reply-to"], "campaign-7@apexmail.ee");
@@ -6860,7 +6860,7 @@ Content-Type: text/html\r\n\
 
         // The canonical queue (drained by the worker's webhook processor)
         // must hold exactly one pending `message.inbound` event for this
-        // tenant — the former Redis LPUSH had no consumer at all.
+        // tenant, the former Redis LPUSH had no consumer at all.
         let rows: Vec<(String, String, serde_json::Value)> = sqlx::query_as(
             "SELECT event_type, status, payload FROM webhook_queue WHERE tenant_id = $1",
         )
@@ -6890,7 +6890,7 @@ Content-Type: text/html\r\n\
         };
         let server = session_server(pool.clone(), 1024 * 1024).await;
         // No header block at all: mail_parser yields no message, so the
-        // mirrors stay NULL — the row is stored and NOT claimable, rather
+        // mirrors stay NULL, the row is stored and NOT claimable, rather
         // than 451-ing the connection.
         let body = b"this is not a message\r\n";
         let (reply, transcript) = run_transaction(
@@ -8151,7 +8151,7 @@ mod dispatch_fcrdns_auth_tests {
         .expect("inbound server construction");
         server.mailbox_directory = Arc::new(super::adversarial_session_tests::AcceptAllDirectory);
         // Sessions resolve the (public, non-exempt) peer's PTR against the
-        // mock — never against the system resolver.
+        // mock, never against the system resolver.
         server.set_rdns_resolver_for_tests(resolver_at(mock.port));
         (Arc::new(server), mock)
     }
@@ -8340,7 +8340,7 @@ mod dispatch_fcrdns_auth_tests {
     #[tokio::test]
     async fn fcrdns_empty_ptr_hostname_reads_as_no_reverse_dns() {
         // A PTR record whose target renders empty (the root name) yields an
-        // answer set with no usable hostnames — NODATA semantics, not a
+        // answer set with no usable hostnames, NODATA semantics, not a
         // resolver failure.
         let rules = HashMap::from([("10.113.0.203.in-addr.arpa", DnsAnswer::Ptr(vec!["".into()]))]);
         let mock = MockDns::start(rules).await;
@@ -8641,7 +8641,7 @@ mod dispatch_fcrdns_auth_tests {
         std::mem::ManuallyDrop<DkimKeyEnv>,
     ) {
         // The key must be present at seal time (spawn_blocking decrypt), not
-        // just at seed time — hold it for the whole test.
+        // just at seed time, hold it for the whole test.
         let env = std::mem::ManuallyDrop::new(DkimKeyEnv::set());
         let (server, mock) =
             dispatch_server(test, false, true, HashMap::from([spf_rule()]), false).await;

@@ -87,14 +87,14 @@ impl Backpressure {
         match self.semaphore.try_acquire() {
             Ok(permit) => Some(permit),
             Err(_) => {
-                // All permits are taken — fall through to blocking acquire
+                // All permits are taken, fall through to blocking acquire
                 // with a short timeout to avoid unbounded waiting.
                 match tokio::time::timeout(Duration::from_millis(500), self.semaphore.acquire())
                     .await
                 {
                     Ok(Ok(permit)) => Some(permit),
                     _ => {
-                        // Timeout or closed semaphore — treat as overloaded
+                        // Timeout or closed semaphore, treat as overloaded
                         self.total_rejected.fetch_add(1, Ordering::SeqCst);
                         None
                     }
@@ -199,7 +199,7 @@ mod tests {
         assert_eq!(bp.available(), 19);
 
         drop(permit);
-        // Semaphore permit release happens on drop — in_flight is derived
+        // Semaphore permit release happens on drop, in_flight is derived
         // from semaphore capacity, so it reflects the release automatically.
         assert_eq!(bp.in_flight(), 0);
         assert_eq!(bp.available(), 20);
@@ -285,7 +285,7 @@ mod overload_tests {
             max_concurrency: 4,
             max_backlog: 10,
             // The cooldown is wall-clock (SystemTime), so this test uses real
-            // time — kept well under the suite's sleep budget.
+            // time, kept well under the suite's sleep budget.
             cooldown: Duration::from_millis(20),
         });
         assert_eq!(bp.backlog(), 0);
@@ -317,7 +317,7 @@ mod overload_tests {
     }
 
     /// A waiter that arrives while every permit is taken BLOCKS briefly and
-    /// is admitted the moment capacity frees — it is neither shed (no
+    /// is admitted the moment capacity frees, it is neither shed (no
     /// rejection counted) nor stranded. The current-thread runtime + yield
     /// loop guarantees the waiter is parked on the semaphore before the
     /// permit drops, so no sleeping and no 500 ms timeout race.
@@ -346,7 +346,7 @@ mod overload_tests {
         for _ in 0..100 {
             tokio::task::yield_now().await;
         }
-        assert!(!waiter.is_finished(), "no capacity yet — must wait");
+        assert!(!waiter.is_finished(), "no capacity yet, must wait");
 
         drop(permit);
         let admitted = waiter.await.expect("waiter task");

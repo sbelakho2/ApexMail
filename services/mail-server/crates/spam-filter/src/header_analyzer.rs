@@ -135,7 +135,7 @@ pub fn analyze_headers(email: &EmailHeaders<'_>) -> HeaderScore {
             });
         } else if auth_lower.contains("dkim=none") {
             // `none` is a legitimate result for senders that simply do not
-            // publish/sign with DKIM — informational, not a hard failure.
+            // publish/sign with DKIM, informational, not a hard failure.
             findings.push(HeaderFinding {
                 id: "DKIM_NONE",
                 description: "No DKIM signature present".into(),
@@ -263,7 +263,7 @@ mod tests {
     }
 
     /// `dkim=none`/`dmarc=none` are legitimate results for senders without
-    /// records — they must be informational (0.5 each), not full failures.
+    /// records, they must be informational (0.5 each), not full failures.
     #[test]
     fn test_dkim_dmarc_none_informational() {
         let headers = vec![

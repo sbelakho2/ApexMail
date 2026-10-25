@@ -12,12 +12,12 @@ This SLA applies to Customers on the following plans:
 
 | Plan | SLA Included |
 |---|---|
-| Free | Best-effort — no SLA commitment |
-| Developer | Best-effort — no SLA commitment |
-| Business | Yes — 99.9% uptime |
-| Enterprise Cloud | Yes — 99.9% uptime (enhanced SLA) |
-| Dedicated Tenant | Yes — 99.95% uptime (custom) |
-| BYOC | Application SLA only — infrastructure availability is Customer's responsibility |
+| Free | Best-effort, no SLA commitment |
+| Developer | Best-effort, no SLA commitment |
+| Business | Yes, 99.9% uptime |
+| Enterprise Cloud | Yes, 99.9% uptime (enhanced SLA) |
+| Dedicated Tenant | Yes, 99.95% uptime (custom) |
+| BYOC | Application SLA only, infrastructure availability is Customer's responsibility |
 
 ## 2. Uptime Commitment
 

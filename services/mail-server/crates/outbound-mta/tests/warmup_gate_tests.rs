@@ -14,7 +14,7 @@ use outbound_mta::warmup::{RedisWarmupGate, WarmupAdmission, WarmupGate};
 use outbound_mta::{Relay, RelayConfig, SubmitRequest};
 
 /// One SHARED canonical database for the suite (rows are scoped per test
-/// via UNIQUE source IPs and send units — the real `dedicated_ips` table,
+/// via UNIQUE source IPs and send units, the real `dedicated_ips` table,
 /// the real `outbound_relay_ledger`, the real Redis counters).
 async fn test_db() -> Option<sqlx::PgPool> {
     migrator::test_support::assert_soft_skip_allowed("TEST_DATABASE_URL");
@@ -119,7 +119,7 @@ fn relay_with_gate(
     Relay::with_warmup_gate(ledger, resolver, RelayConfig::default(), gate)
 }
 /// Below the cap: the attempt is admitted, delivered, and the counter the
-/// quota tooling reads is exactly 1 — the WORKER no longer increments.
+/// quota tooling reads is exactly 1, the WORKER no longer increments.
 #[tokio::test]
 async fn warming_attempt_is_admitted_and_counted_at_the_boundary() {
     let (Some(db), Some(redis)) = (test_db().await, redis_pool()) else {
@@ -127,7 +127,7 @@ async fn warming_attempt_is_admitted_and_counted_at_the_boundary() {
         return;
     };
     // Serialize with the active-IP test (both drive the one locally
-    // bindable address through OPPOSITE lifecycle states) — the lock is
+    // bindable address through OPPOSITE lifecycle states), the lock is
     // taken BEFORE seeding so the row's lifecycle state cannot flip
     // mid-test.
     let guard = sqlx::query("SELECT pg_advisory_lock(hashtext('obm-warmup-gate:127.0.0.1'))")
@@ -171,7 +171,7 @@ async fn warming_attempt_is_admitted_and_counted_at_the_boundary() {
 }
 
 /// THE P0 regression: a transient failure persists the send for retry and
-/// the slot STAYS consumed — the daemon's later retry cannot ride a slot the
+/// the slot STAYS consumed, the daemon's later retry cannot ride a slot the
 /// outer worker "released". The retry re-admits via the same-day marker
 /// without a second increment.
 #[tokio::test]
@@ -358,7 +358,7 @@ async fn active_ip_admits_without_quota() {
         .execute(&db)
         .await
         .expect("advisory lock");
-    // Seed the row THIS test needs — an UPDATE of a warming row left by a
+    // Seed the row THIS test needs, an UPDATE of a warming row left by a
     // sibling process would silently match zero rows if that process had
     // not seeded yet (or had cleaned up), and the submit would then defer
     // with "dedicated IP no longer exists". The unique partial index
@@ -505,7 +505,7 @@ mod fingerprint_tests {
             std::sync::Arc::new(outbound_mta::test_support::StaticMxResolver::new()),
             outbound_mta::RelayConfig::default(),
         );
-        let _ = relay; // fingerprint is an associated fn — call via the crate path
+        let _ = relay; // fingerprint is an associated fn, call via the crate path
         let f1 = outbound_mta::relay_fingerprint(&base);
         let f2 = outbound_mta::relay_fingerprint(&base);
         assert_eq!(f1, f2, "deterministic");

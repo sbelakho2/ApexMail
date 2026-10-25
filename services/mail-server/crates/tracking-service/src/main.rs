@@ -1,4 +1,4 @@
-//! ApexMail Tracking Service — entry point.
+//! ApexMail Tracking Service, entry point.
 //!
 //! Startup sequence://! 1. Load configuration from environment variables.
 //! 2. Derive crypto codec from `TRACKING_SECRET_KEY`.
@@ -109,7 +109,7 @@ async fn main() -> Result<()> {
         .with_compression(clickhouse::Compression::Lz4);
     if !cfg.clickhouse.password.is_empty() || cfg.clickhouse.user != "default" {
         // Verify connectivity eagerly so a misconfigured ClickHouse is
-        // visible at startup (log-only — tracking must not fail to boot).
+        // visible at startup (log-only, tracking must not fail to boot).
         match clickhouse.query("SELECT 1").execute().await {
             Ok(()) => info!(
                 url = %cfg.clickhouse.url,
@@ -120,7 +120,7 @@ async fn main() -> Result<()> {
             Err(error) => tracing::warn!(
                 url = %cfg.clickhouse.url,
                 error = %error,
-                "ClickHouse unreachable — events will be written to Postgres only"
+                "ClickHouse unreachable, events will be written to Postgres only"
             ),
         }
     }
@@ -140,7 +140,7 @@ async fn main() -> Result<()> {
 
     // ── Optional metrics server ───────────────────────────────────────
     if cfg.metrics.enabled {
-        // G.2: metrics are unauthenticated — bind to loopback by default.
+        // G.2: metrics are unauthenticated, bind to loopback by default.
         // Set METRICS_BIND_ADDR (e.g. 0.0.0.0) to expose them on other
         // interfaces, restricted by network policy.
         let bind_addr = std::env::var("METRICS_BIND_ADDR").unwrap_or_else(|_| "127.0.0.1".into());
@@ -202,7 +202,7 @@ async fn main() -> Result<()> {
 
         // Signal health check to return 503 immediately (-500-354)
         SHUTTING_DOWN.store(true, Ordering::SeqCst);
-        info!("Shutdown signal received — draining connections");
+        info!("Shutdown signal received, draining connections");
     };
 
     axum::serve(listener, router)
@@ -211,7 +211,7 @@ async fn main() -> Result<()> {
         .context("axum server error")?;
 
     // ── Drain WAL on shutdown ─────────────────────────────────────────
-    info!("HTTP server stopped — draining Redis WAL");
+    info!("HTTP server stopped, draining Redis WAL");
     processor_arc.stop().await;
     info!("ApexMail Tracking Service stopped cleanly");
 

@@ -1,15 +1,15 @@
-//! Mollie API client — the ONE place this repository speaks to the payment
+//! Mollie API client, the ONE place this repository speaks to the payment
 //! provider.
 //!
 //! Mollie's API (https://docs.mollie.com/reference) differs from a
 //! notification-signature processor in three ways that shape this module:
 //!
-//! 1. **Authentication is the secret key itself** — `Authorization: Bearer
+//! 1. **Authentication is the secret key itself**, `Authorization: Bearer
 //!    <key>` on every call. A webhook carries no signature; the only way to
 //!    know what happened is to FETCH the object with this key.
 //! 2. **Amounts are decimal strings** (`{"currency":"EUR","value":"12.34"}`),
 //!    never minor units. Conversion is exact and lives in
-//!    [`Money`] — no floats, ever.
+//!    [`Money`], no floats, ever.
 //! 3. **Creates are idempotent by header** (`Idempotency-Key`), and a payment
 //!    is a *redirect* (`_links.checkout.href`), not a client session.
 //!
@@ -549,7 +549,7 @@ impl MollieClient {
     }
 
     /// Revoke a mandate at Mollie. After this call the mandate can never be
-    /// charged again — the only provider-side guarantee that a canceled
+    /// charged again, the only provider-side guarantee that a canceled
     /// account stops generating recurring charges.
     pub async fn revoke_mandate(
         &self,

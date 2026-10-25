@@ -10,11 +10,11 @@
 //! `409 Conflict`, never the first request's response. Safe reads (GET /
 //! HEAD / OPTIONS) bypass the cache entirely. Every replay dimension must be
 //! PRESENT and equal: the ENTIRE request body is buffered and hashed within
-//! the route body limit (no unhashed passthrough) — a body that exceeds the
+//! the route body limit (no unhashed passthrough), a body that exceeds the
 //! limit gets `413 Payload Too Large` BEFORE any mutation, and a body-read
 //! failure is an explicit error, never a silently emptied request. Legacy
 //! cache records written without the identity bindings (no payload hash,
-//! method or route) are treated as MISSES — they are evicted and the request
+//! method or route) are treated as MISSES, they are evicted and the request
 //! proceeds, so the durable ledger (or a fresh execution) remains the only
 //! authority for those keys.
 //!
@@ -23,25 +23,25 @@
 //! request body by the SHA-256 of the RAW request bytes, hex-encoded
 //! (`canonical_payload_hash`). The middleware hashes the bytes exactly as
 //! they arrived on the wire; the send endpoints hash their typed DTO
-//! (`canonical_send_hash`, messages.rs) — the two hashes are never compared
+//! (`canonical_send_hash`, messages.rs), the two hashes are never compared
 //! against each other, each store compares only hashes it produced itself,
 //! so one normalization rule per store is sufficient and stable.
 //!
 //! F21: the in-flight claim carries a random owner token. Completion and
 //! release compare-and-set on that token (Lua), so a request whose claim
-//! expired — and whose key was re-claimed by a retry — can no longer
+//! expired, and whose key was re-claimed by a retry, can no longer
 //! overwrite the new owner's state. The claim is renewed in the background
 //! while the handler runs, but the renewal task is tied to the middleware
 //! future through an ABORT-ON-DROP GUARD sharing a cancellation token: when
 //! the outer 30 s `TimeoutLayer` (or a dropped client connection) tears this
 //! future down before the handler returns, the guard stops the renewer and
-//! releases the claim owner-conditionally — an abandoned request can never
+//! releases the claim owner-conditionally, an abandoned request can never
 //! keep refreshing its lease (and 409-ing retries) until process restart.
 //! Renewal also carries an independent lifetime bound so the lease cannot
 //! outlive the request by more than a bounded margin. The Redis layer is an
 //! ACCELERATOR only; the send endpoints additionally persist their results
 //! in the durable `idempotency_records` ledger (migration 153), which stays
-//! authoritative when Redis is unavailable or loses data — in particular it
+//! authoritative when Redis is unavailable or loses data, in particular it
 //! is authoritative for a request that may have committed before a
 //! cancellation.
 
@@ -64,7 +64,7 @@ const MAX_BODY_SIZE: usize = 1024 * 1024; // 1 MiB cached response limit
 /// (`DefaultBodyLimit::max(10 MiB)` + `RequestBodyLimitLayer::new(10 MiB)`):
 /// every body the API accepts is buffered IN FULL and hashed, preserving the
 /// exact bytes for the downstream extractor. A body beyond the limit is
-/// rejected here with `413` before any handler mutation — the body-limit
+/// rejected here with `413` before any handler mutation, the body-limit
 /// layers outside this middleware reject the same request anyway, so no
 /// accepted request is ever refused by this bound.
 const MAX_HASH_BODY_SIZE: usize = 10 * 1024 * 1024; // 10 MiB, the route body limit
@@ -111,7 +111,7 @@ struct CachedResponse {
 /// Axum middleware that implements idempotency semantics.
 /// If the request contains an `Idempotency-Key` header the middleware will:
 /// 1. (F19) Skip the cache entirely for safe reads (GET/HEAD/OPTIONS).
-/// 2. Look up the key in Redis — now scoped by tenant + method + route. On
+/// 2. Look up the key in Redis, now scoped by tenant + method + route. On
 ///    hit, replay only when the principal AND the canonical payload hash
 ///    match; any mismatch is a conflicting reuse → `409 Conflict`.
 /// 3. On miss, atomically claim the key (`SET ... NX EX`) with a random
@@ -158,7 +158,7 @@ pub async fn idempotency_middleware(
     // F19: buffer the ENTIRE request body (bounded by the route body limit)
     // to compute the canonical payload hash, then rebuild the request with
     // the exact same bytes for the downstream extractor. Both overflow and
-    // read failure are explicit errors — the handler must never receive an
+    // read failure are explicit errors, the handler must never receive an
     // emptied body, and an oversized request must never run.
     let (parts, body) = req.into_parts();
     let (body_bytes, payload_hash) = match buffer_request_body(body).await {
@@ -171,7 +171,7 @@ pub async fn idempotency_middleware(
                 tracing::warn!(
                     route,
                     body_limit = MAX_HASH_BODY_SIZE,
-                    "idempotent request body exceeds the route body limit — rejecting with 413"
+                    "idempotent request body exceeds the route body limit, rejecting with 413"
                 );
                 return payload_too_large();
             }
@@ -179,7 +179,7 @@ pub async fn idempotency_middleware(
                 tracing::error!(
                     error = %source,
                     route,
-                    "failed to read idempotent request body — rejecting"
+                    "failed to read idempotent request body, rejecting"
                 );
                 return body_read_failed();
             }
@@ -190,7 +190,7 @@ pub async fn idempotency_middleware(
     let cache_key = cache_key_for(&tenant_id, &method, &route, &idempotency_key);
     let ttl = state.config.idempotency_ttl_seconds;
 
-    // 1. Check cache — with identity re-validation (L-06 + F19)
+    // 1. Check cache, with identity re-validation (L-06 + F19)
     if let Some(cached) = lookup_cached(&state, &cache_key).await {
         match replay_verdict(
             current_user.as_ref(),
@@ -207,7 +207,7 @@ pub async fn idempotency_middleware(
                 tracing::warn!(
                     cache_key,
                     reason,
-                    "conflicting idempotency-key reuse — rejecting"
+                    "conflicting idempotency-key reuse, rejecting"
                 );
                 return idempotency_conflict(reason);
             }
@@ -219,7 +219,7 @@ pub async fn idempotency_middleware(
                 // whether the original operation already committed.
                 tracing::warn!(
                     cache_key,
-                    "unbound legacy idempotency cache record — evicting and treating as a miss"
+                    "unbound legacy idempotency cache record, evicting and treating as a miss"
                 );
                 evict_cached(&state, &cache_key).await;
             }
@@ -262,14 +262,14 @@ pub async fn idempotency_middleware(
                 ) {
                     tracing::debug!(
                         cache_key,
-                        "idempotent response stored during claim race — returning it"
+                        "idempotent response stored during claim race, returning it"
                     );
                     return cached_to_response(cached);
                 }
             }
             tracing::warn!(
                 cache_key,
-                "idempotency key already in flight — rejecting concurrent duplicate"
+                "idempotency key already in flight, rejecting concurrent duplicate"
             );
             return (
                 StatusCode::CONFLICT,
@@ -293,18 +293,18 @@ pub async fn idempotency_middleware(
     // in an ABORT-ON-DROP GUARD sharing a cancellation token: if this
     // middleware future is dropped before the handler returns (outer
     // TimeoutLayer, cancelled client connection, panic), Drop cancels the
-    // renewer and performs an owner-conditional release — the lease can
+    // renewer and performs an owner-conditional release, the lease can
     // never be refreshed by a dead request until process restart.
     let mut claim = ClaimGuard::acquire(state.clone(), cache_key.clone(), owner_token.clone());
 
     // 3. Execute the real handler
     let response = next.run(req).await;
 
-    // Normal exit: stop the renewer but KEEP the claim — the store step
+    // Normal exit: stop the renewer but KEEP the claim, the store step
     // below completes (or releases) it compare-and-set on the owner token.
     claim.defuse();
 
-    // 4. Store the response (compare-and-set on the owner token — this
+    // 4. Store the response (compare-and-set on the owner token, this
     //    releases the claim only if we still own it)
     store_response(
         &state,
@@ -326,7 +326,7 @@ fn is_safe_method(method: &Method) -> bool {
     matches!(method, &Method::GET | &Method::HEAD | &Method::OPTIONS)
 }
 /// F19: canonical SHA-256 (hex) of the request body. The raw bytes are
-/// hashed — the JSON extractor has not parsed yet, and byte-level hashing
+/// hashed, the JSON extractor has not parsed yet, and byte-level hashing
 /// already distinguishes any semantic difference the handler would see.
 /// (See the normalization-contract note in the module docs.)
 fn canonical_payload_hash(bytes: &[u8]) -> String {
@@ -345,7 +345,7 @@ enum BodyBufferError {
 /// F19: buffer the request body IN FULL (up to the route body limit) and
 /// hash it. The buffered bytes are handed back so the caller can rebuild the
 /// request with the exact same body for the downstream extractor. Oversized
-/// and unreadable bodies are ERRORS — never an empty-body passthrough.
+/// and unreadable bodies are ERRORS, never an empty-body passthrough.
 async fn buffer_request_body(body: Body) -> Result<(bytes::Bytes, String), BodyBufferError> {
     match axum::body::to_bytes(body, MAX_HASH_BODY_SIZE).await {
         Ok(bytes) => {
@@ -366,7 +366,7 @@ async fn buffer_request_body(body: Body) -> Result<(bytes::Bytes, String), BodyB
     }
 }
 
-/// F19: explicit `413` — an oversized idempotent request must fail before
+/// F19: explicit `413`, an oversized idempotent request must fail before
 /// any mutation, in the same error envelope shape the API uses.
 fn payload_too_large() -> Response {
     (
@@ -415,7 +415,7 @@ enum ReplayVerdict {
     Replay,
     Conflict(&'static str),
     /// F19: the cached record is missing one of the required identity
-    /// bindings (payload hash, method or route) — a legacy/unbound record
+    /// bindings (payload hash, method or route), a legacy/unbound record
     /// that cannot validate a replay. Callers treat it as a MISS.
     Unbound,
 }
@@ -460,7 +460,7 @@ fn replay_verdict(
     ReplayVerdict::Replay
 }
 
-/// F19: 409 response for conflicting key reuse — same JSON error shape the
+/// F19: 409 response for conflicting key reuse, same JSON error shape the
 /// rest of the API uses.
 fn idempotency_conflict(reason: &'static str) -> Response {
     (
@@ -489,7 +489,7 @@ enum ClaimOutcome {
     Claimed,
     /// Another request holds the claim right now.
     AlreadyInFlight,
-    /// Redis is unavailable or errored — idempotency is best-effort, so the
+    /// Redis is unavailable or errored, idempotency is best-effort, so the
     /// request proceeds unclaimed rather than failing hard.
     RedisUnavailable,
 }
@@ -525,7 +525,7 @@ async fn claim_in_flight(state: &AppState, key: &str, owner_token: &str) -> Clai
     }
 }
 
-/// F21: compare-and-set completion — only the request that still owns the
+/// F21: compare-and-set completion, only the request that still owns the
 /// claim may overwrite it with the cached response. A stale owner (lease
 /// expired, key re-claimed) loses the race and its write is a no-op.
 const COMPLETE_IF_OWNER_LUA: &str = r#"
@@ -536,7 +536,7 @@ end
 return 0
 "#;
 
-/// F21: compare-and-set release — only the current owner deletes the claim.
+/// F21: compare-and-set release, only the current owner deletes the claim.
 const RELEASE_IF_OWNER_LUA: &str = r#"
 if redis.call('GET', KEYS[1]) == ARGV[1] then
     redis.call('DEL', KEYS[1])
@@ -545,7 +545,7 @@ end
 return 0
 "#;
 
-/// F21: token-guarded TTL extension — only the current owner may renew.
+/// F21: token-guarded TTL extension, only the current owner may renew.
 const RENEW_IF_OWNER_LUA: &str = r#"
 if redis.call('GET', KEYS[1]) == ARGV[1] then
     redis.call('EXPIRE', KEYS[1], tonumber(ARGV[2]))
@@ -575,7 +575,7 @@ async fn complete_if_owner(
         == 1
 }
 
-/// Release an in-flight claim — but only if we still own it (F21).
+/// Release an in-flight claim, but only if we still own it (F21).
 async fn release_claim_if_owner(state: &AppState, cache_key: &str, owner_token: &str) {
     if let Ok(mut conn) = state.redis.get().await {
         let _: Result<i64, _> = deadpool_redis::redis::Script::new(RELEASE_IF_OWNER_LUA)
@@ -589,11 +589,11 @@ async fn release_claim_if_owner(state: &AppState, cache_key: &str, owner_token: 
 /// F21: renew the claim every CLAIM_TTL/3 while the handler runs.
 ///
 /// The renewer exits when ANY of these happens first:
-/// * the shared cancellation token fires (the `ClaimGuard` dropped — normal
+/// * the shared cancellation token fires (the `ClaimGuard` dropped, normal
 ///   return, timeout, cancelled connection or panic);
 /// * it is aborted through its `JoinHandle` (the guard's hard stop);
 /// * it loses ownership (expired + re-claimed by a retry);
-/// * `MAX_LEASE_LIFETIME_SECONDS` elapse — an independent lifetime bound so
+/// * `MAX_LEASE_LIFETIME_SECONDS` elapse, an independent lifetime bound so
 ///   an abandoned request can never renew indefinitely.
 ///
 /// The lease age is recorded when renewal stops so operators can see how
@@ -626,7 +626,7 @@ fn spawn_claim_renewal(
                             tracing::warn!(
                                 cache_key,
                                 lease_age_secs = acquired_at.elapsed().as_secs(),
-                                "idempotency claim cancellation channel closed — renewal stopping"
+                                "idempotency claim cancellation channel closed, renewal stopping"
                             );
                             break;
                         }
@@ -639,7 +639,7 @@ fn spawn_claim_renewal(
                     cache_key,
                     lease_age_secs = acquired_at.elapsed().as_secs(),
                     max_lifetime_secs = MAX_LEASE_LIFETIME_SECONDS,
-                    "idempotency claim renewal lifetime bound reached — stopping"
+                    "idempotency claim renewal lifetime bound reached, stopping"
                 );
                 break;
             }
@@ -658,7 +658,7 @@ fn spawn_claim_renewal(
                         tracing::warn!(
                             cache_key,
                             lease_age_secs = acquired_at.elapsed().as_secs(),
-                            "idempotency claim ownership lost — renewal stopped"
+                            "idempotency claim ownership lost, renewal stopped"
                         );
                         break;
                     }
@@ -676,7 +676,7 @@ fn spawn_claim_renewal(
 /// The guard ties the renewal task's lifetime to THIS request, not merely to
 /// the normal return path: the outer `TimeoutLayer` (30 s) or a dropped
 /// client connection can tear the middleware future down while
-/// `next.run(req).await` is still pending — dropping this guard then
+/// `next.run(req).await` is still pending, dropping this guard then
 ///
 /// 1. aborts the renewal `JoinHandle` (hard stop), and
 /// 2. signals the shared cancellation token (graceful stop), and
@@ -685,7 +685,7 @@ fn spawn_claim_renewal(
 ///    409-ing retries for the remaining claim TTL.
 ///
 /// If the release itself cannot run (Redis unavailable, dropped outside the
-/// runtime), the claim simply expires after `CLAIM_TTL_SECONDS` — renewal
+/// runtime), the claim simply expires after `CLAIM_TTL_SECONDS`, renewal
 /// has stopped, so the lease is bounded either way. The durable ledger
 /// remains the authority for whether the cancelled request's transaction
 /// committed.
@@ -721,7 +721,7 @@ impl ClaimGuard {
         }
     }
 
-    /// Normal exit: stop the renewal loop but KEEP the claim — the response
+    /// Normal exit: stop the renewal loop but KEEP the claim, the response
     /// store step completes it (or releases it) compare-and-set on the owner
     /// token.
     fn defuse(&mut self) {
@@ -748,7 +748,7 @@ impl Drop for ClaimGuard {
             return;
         }
         // Abnormal exit (timeout / cancellation / panic): release the claim,
-        // but only if we still own it. Best-effort and bounded — if this
+        // but only if we still own it. Best-effort and bounded, if this
         // fails the lease expires after CLAIM_TTL_SECONDS because renewal
         // has stopped.
         let state = self.state.clone();
@@ -761,7 +761,7 @@ impl Drop for ClaimGuard {
                 tracing::warn!(
                     cache_key,
                     lease_age_secs = lease_age.as_secs(),
-                    "idempotent request exited abnormally — claim released if still owned"
+                    "idempotent request exited abnormally, claim released if still owned"
                 );
             });
         }
@@ -775,7 +775,7 @@ async fn lookup_cached(state: &AppState, key: &str) -> Option<CachedResponse> {
 }
 
 /// F19: evict an unbound legacy record so a fresh claim can take the key.
-/// Best-effort — if this fails the subsequent claim attempt simply reports
+/// Best-effort, if this fails the subsequent claim attempt simply reports
 /// the key as in flight and the client retries after the claim TTL.
 async fn evict_cached(state: &AppState, key: &str) {
     if let Ok(mut conn) = state.redis.get().await {
@@ -854,7 +854,7 @@ async fn store_response(
         let mut cacheable = true;
         // Set once the client stops consuming the response. The record must
         // STILL land: retry-safety cannot depend on the client reading the
-        // body — a 201 whose body a caller discards would otherwise leave the
+        // body, a 201 whose body a caller discards would otherwise leave the
         // key unprotected and let a divergent replay create a second row
         // (adversarial suite: `same_idempotency_key_with_a_different_body_is_409`).
         // Only a genuinely INCOMPLETE body (stream error or the size limit)
@@ -869,7 +869,7 @@ async fn store_response(
                         tracing::warn!(
                             cache_key = %store_key,
                             body_limit = MAX_BODY_SIZE,
-                            "response exceeds idempotency cache limit — passing through uncached"
+                            "response exceeds idempotency cache limit, passing through uncached"
                         );
                     }
                     if cacheable {
@@ -910,12 +910,12 @@ async fn store_response(
             };
 
             if let Ok(json) = serde_json::to_string(&cached) {
-                // F21: compare-and-set — only complete the claim if this
+                // F21: compare-and-set, only complete the claim if this
                 // request still owns it.
                 if !complete_if_owner(&store_state, &store_key, &store_owner, &json, ttl).await {
                     tracing::warn!(
                         cache_key = %store_key,
-                        "idempotency completion fenced out — claim ownership lost"
+                        "idempotency completion fenced out, claim ownership lost"
                     );
                 }
             }
@@ -931,7 +931,7 @@ async fn store_response(
 }
 
 /// Stable string identity of an authenticated principal (shared with the
-/// send endpoints' durable idempotency ledger — F19/F20).
+/// send endpoints' durable idempotency ledger, F19/F20).
 pub(crate) fn principal_binding(user: &AuthUser) -> String {
     if let Some(api_key_id) = user.api_key_id.as_deref() {
         return format!("api_key:{api_key_id}");
@@ -1184,7 +1184,7 @@ mod tests {
     }
 
     /// F19: an unbound cached record (no payload hash / method / route) is a
-    /// MISS, not a replay and not a fabricated conflict — the caller evicts
+    /// MISS, not a replay and not a fabricated conflict, the caller evicts
     /// it and proceeds under durable-ledger authority.
     #[test]
     fn missing_identity_dimensions_are_unbound_misses() {
@@ -1262,12 +1262,12 @@ mod tests {
 
     // ── F19: full-body buffering (no unhashed/empty passthrough) ──
 
-    /// A body within the route limit is buffered IN FULL and hashed — the
+    /// A body within the route limit is buffered IN FULL and hashed, the
     /// exact bytes survive for the downstream extractor (even when larger
     /// than the old 1 MiB hashing budget).
     #[tokio::test]
     async fn oversized_under_limit_body_is_fully_buffered_and_hashed() {
-        // 4 MiB body — larger than the previous 1 MiB budget, well within
+        // 4 MiB body, larger than the previous 1 MiB budget, well within
         // the 10 MiB route body limit.
         let body = Body::from(vec![b'x'; 4 * 1024 * 1024]);
         let (bytes, hash) = buffer_request_body(body)
@@ -1289,7 +1289,7 @@ mod tests {
         ));
     }
 
-    /// A transport/read failure is an explicit error — the handler must
+    /// A transport/read failure is an explicit error, the handler must
     /// never see a fabricated empty body.
     #[tokio::test]
     async fn body_read_failure_is_an_explicit_error() {

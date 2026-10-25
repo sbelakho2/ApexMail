@@ -3,7 +3,7 @@
 //! The email agent (ai-service) writes drafts with `pending_approval = true`
 //! and NEVER sends anything. This surface is the missing reader: operators
 //! list pending drafts, approve (which sends the reply through the
-//! platform's verified system sender — `queue_system_email`, attributed to
+//! platform's verified system sender, `queue_system_email`, attributed to
 //! the system tenant that owns the sending domain) or reject them.
 //!
 //! Consent guarantee (F4, live-mailbot dogfood): an AI-composed reply is a
@@ -15,7 +15,7 @@
 //!
 //! Audit guarantee (external-audit P1): every decision's evidence is written
 //! INSIDE the transaction that applies the decision, and its failure aborts
-//! the decision — approve (claim + queued reply + audit row) and reject
+//! the decision, approve (claim + queued reply + audit row) and reject
 //! (claim + audit row) commit atomically or not at all. A decision can
 //! never take effect without its durable actor-attributed record, and
 //! evidence is never written after the effect has committed. The one
@@ -54,7 +54,7 @@ struct DraftDto {
 ///
 /// `$1` (`is_system_tenant`) is the operator flag: a system-tenant caller
 /// (the control-plane gate's ONLY admitted caller) reviews every tenant's
-/// queue. Any other caller — reachable only if the gate were ever bypassed —
+/// queue. Any other caller, reachable only if the gate were ever bypassed —
 /// is restricted by `tenant_id = $2` inside the SQL itself, so another
 /// tenant's rows can never be selected, whatever the middleware did.
 const LIST_DRAFTS_SQL: &str = r#"
@@ -68,7 +68,7 @@ const LIST_DRAFTS_SQL: &str = r#"
 "#;
 
 /// `inbound_messages.id` is the canonical VARCHAR(26) MTA identifier
-/// (`inb_<22 hex>` — migration 088), never a UUID. Every statement below
+/// (`inb_<22 hex>`, migration 088), never a UUID. Every statement below
 /// binds it as text: a `$1::uuid` cast makes the comparison invalid
 /// (`operator does not exist: character varying = uuid`) and the route
 /// fails on every call (audit F11).
@@ -140,7 +140,7 @@ struct ApproveBody {
 /// conditional `pending_approval = true` predicate makes exactly one
 /// approve/reject the winner across concurrent callers (the row lock
 /// serialises them; the loser's UPDATE matches nothing). The id is bound
-/// as the canonical VARCHAR identifier — never cast to UUID (audit F11).
+/// as the canonical VARCHAR identifier, never cast to UUID (audit F11).
 /// `$2`/`$3` carry the same defense-in-depth tenant scope as the list: a
 /// caller outside the system tenant can only ever consume its own rows.
 const CLAIM_DRAFT_FOR_APPROVAL_SQL: &str = r#"
@@ -157,13 +157,13 @@ const CLAIM_DRAFT_FOR_APPROVAL_SQL: &str = r#"
 "#;
 
 /// Actor-attributed audit for AI-draft decisions (P1-4/P2-2 + external-audit
-/// P1): an approved AI reply is a platform-sent message to a customer — the
+/// P1): an approved AI reply is a platform-sent message to a customer, the
 /// operator who approved it (tenant + user) and the routed tenant must be on
 /// record. The entry is written INSIDE the caller's open transaction and its
 /// failure is PROPAGATED, not swallowed: the decision evidence commits
 /// atomically with the decision's effect, or the effect rolls back with the
 /// failed evidence write. This is the transaction-scoped
-/// [`crate::audit_log::insert_audit_log_in_tx_with_env`] variant — never the
+/// [`crate::audit_log::insert_audit_log_in_tx_with_env`] variant, never the
 /// best-effort pool writer, which could leave an effect (a queued
 /// platform-sent reply, a consumed claim) with no durable decision record.
 async fn log_draft_audit_in_tx(
@@ -203,7 +203,7 @@ async fn approve_draft(
 
 /// The approval flow, shared by the JSON API and the control-plane review
 /// page's PRG handler: claim, enqueue on the (first-response aware) priority
-/// lane, close the request, write the actor-attributed audit — one
+/// lane, close the request, write the actor-attributed audit, one
 /// transaction, exactly as the JSON contract documents.
 pub(crate) async fn approve_draft_core(
     state: &AppState,
@@ -252,7 +252,7 @@ pub(crate) async fn approve_draft_core(
         first_response_request_id,
     )) = row
     else {
-        // Dropping the transaction rolls the claim back — nothing consumed.
+        // Dropping the transaction rolls the claim back, nothing consumed.
         return Err(ApiError::NotFound(
             "draft not found or already handled".into(),
         ));
@@ -265,7 +265,7 @@ pub(crate) async fn approve_draft_core(
     // WP F9: the approval records the draft's risk class alongside the
     // decision. The class comes from the SAME deterministic classifier the
     // auto-send sweep runs (`sales_autopilot::reply_autosend`), so a class's
-    // promotion evidence counts exactly the approvals of that class — and a
+    // promotion evidence counts exactly the approvals of that class, and a
     // HIGH verdict is recorded as `high:<reason>`, which can never be
     // mistaken for a promotable class by the evidence query.
     let approval_class: Option<sales_autopilot::reply_autosend::ReplyRiskVerdict> = {
@@ -280,7 +280,7 @@ pub(crate) async fn approve_draft_core(
         // The owner-flagged recipient list rides the tenant's autonomy rules;
         // an approval of a flagged recipient is recorded as HIGH, exactly as
         // the sweep would classify it (so it never counts as class evidence).
-        // An unreadable rules column yields no flags — never a panic.
+        // An unreadable rules column yields no flags, never a panic.
         let flagged = sales_autopilot::reply_autosend::flagged_recipients(&mut tx, &tenant_id)
             .await
             .unwrap_or_default();
@@ -303,7 +303,7 @@ pub(crate) async fn approve_draft_core(
     };
 
     if tenant_id.is_empty() || from_email.is_empty() {
-        // Cannot route the reply — the uncommitted claim rolls back with
+        // Cannot route the reply, the uncommitted claim rolls back with
         // the transaction, so the draft stays pending and visible. The
         // refused attempt is still decision evidence: it is recorded in its
         // own committed write BEFORE the error response. This is the one
@@ -335,14 +335,14 @@ pub(crate) async fn approve_draft_core(
     }
 
     // F4 (live-mailbot dogfood): an approved AI reply is a MARKETING-class
-    // send — `email_queue.message_category` is NOT NULL DEFAULT 'marketing',
+    // send, `email_queue.message_category` is NOT NULL DEFAULT 'marketing',
     // and this path never asked for a narrower category. The REST send path
     // runs the shared send-admission consent gate ([`SendAdmissionService::
     // enforce_consent`]) before it queues; this approval is the same kind of
     // recipient-carrying admission, so it must run the same gate, or an
     // approved reply could mail a recipient with NO marketing consent on
     // file. The check runs INSIDE the claim's transaction and a refusal (or
-    // an unavailable consent store — fail closed) rolls the claim back:
+    // an unavailable consent store, fail closed) rolls the claim back:
     // nothing is consumed, nothing is queued, and the draft stays pending for
     // review. The refusal is still durable decision evidence via the
     // committed best-effort write below, exactly like the unroutable-draft
@@ -404,7 +404,7 @@ pub(crate) async fn approve_draft_core(
     // P1-4: route through the platform's verified system sender. The
     // previous hand-rolled email_queue INSERT hardcoded
     // `support@apexmail.ee` as the from-address while attributing the row to
-    // the CUSTOMER's tenant — the customer neither owns apexmail.ee (SPF/
+    // the CUSTOMER's tenant, the customer neither owns apexmail.ee (SPF/
     // DKIM alignment broken) nor sent the mail. `queue_system_email`
     // enforces system-sender readiness under lock and attributes the queue
     // row to the system tenant that actually owns the sending domain.
@@ -440,7 +440,7 @@ pub(crate) async fn approve_draft_core(
             heading: &heading,
             body_html: &reply_html,
             // A direct reply to someone who wrote in carries no action
-            // buttons — only the message.
+            // buttons, only the message.
             actions: &[],
             footer_link: true,
         },
@@ -459,7 +459,7 @@ pub(crate) async fn approve_draft_core(
     {
         Ok(message_uuid) => message_uuid,
         Err(e) => {
-            // Enqueue failed — rolling back undoes the claim, so the draft
+            // Enqueue failed, rolling back undoes the claim, so the draft
             // remains pending and recoverable instead of consumed.
             let _ = tx.rollback().await;
             tracing::error!(error = %e, draft_id = %id, "approve: queue insert failed");
@@ -472,7 +472,7 @@ pub(crate) async fn approve_draft_core(
     if is_first_response.unwrap_or(false) {
         // The SLO's measured interval: from the platform ACCEPTING the lead
         // (the synthesized row's received_at) to the reply being durably
-        // enqueued. Human review time is deliberately excluded — this is the
+        // enqueued. Human review time is deliberately excluded, this is the
         // automated portion the platform controls (docs/operations/
         // first-response-slo.md).
         let latency = (chrono::Utc::now() - accepted_at).num_seconds().max(0) as f64;
@@ -483,9 +483,9 @@ pub(crate) async fn approve_draft_core(
             // `queued_at` IS the approval marker (migration 241: "a human
             // approval is the next step, not a state here"; migration 244
             // indexes it for the queue-side SLO percentiles). The old
-            // `state = 'pending'` guard never matched a drafted lead — the
+            // `state = 'pending'` guard never matched a drafted lead, the
             // mailbot always moves the request to 'drafted' while it waits
-            // for the human — so queued_at stayed NULL and the measured
+            // for the human, so queued_at stayed NULL and the measured
             // accept→enqueue interval had no end for every approved reply
             // (dogfood 2026-10-06). Idempotent on queued_at so a repeated
             // approval cannot re-stamp it.
@@ -501,7 +501,7 @@ pub(crate) async fn approve_draft_core(
     }
 
     // External-audit P1: the decision evidence is written INSIDE the same
-    // transaction, BEFORE the commit — approval claim, queued reply, and
+    // transaction, BEFORE the commit, approval claim, queued reply, and
     // audit row commit atomically or not at all. A failed audit write rolls
     // back the claim AND the queued reply, so platform-originated mail can
     // never be durably queued without its durable operator-attributed
@@ -519,7 +519,7 @@ pub(crate) async fn approve_draft_core(
             "routedTenantId": tenant_id.clone(),
             "recipient": from_email.clone(),
             "queuedMessageId": message_uuid.to_string(),
-            // WP F9 — the promotion evidence reads this field: an approval of
+            // WP F9, the promotion evidence reads this field: an approval of
             // a LOW class counts toward that class's evidence bar.
             "replyClass": approval_class
                 .as_ref()
@@ -586,7 +586,7 @@ pub(crate) async fn reject_draft_core(
     let id = id.to_string();
 
     // Same guarantee as approve (external-audit P1): the rejection claim and
-    // its actor-attributed evidence commit atomically — a failed audit
+    // its actor-attributed evidence commit atomically, a failed audit
     // write rolls the claim back, so a rejection either happens fully on
     // record or not at all, leaving the draft pending and rejectable.
     let mut tx = state.db.begin().await?;
@@ -602,7 +602,7 @@ pub(crate) async fn reject_draft_core(
         .await?;
 
     let Some((routed_tenant_id,)) = routed_tenant_id else {
-        // Dropping the transaction rolls the claim back — nothing consumed.
+        // Dropping the transaction rolls the claim back, nothing consumed.
         // No decision happened here (the draft is unknown or was already
         // handled, and the decision that consumed it is already on the
         // audit record), so there is nothing to evidence.
@@ -641,7 +641,7 @@ fn _status_guard(_s: StatusCode) {}
 
 // ─── WP F9: gated auto-send for LOW-risk reply classes ─────────────
 //
-// A draft of a LOW-risk class may be released WITHOUT a human approval — but
+// A draft of a LOW-risk class may be released WITHOUT a human approval, but
 // only when the promotion gate (`sales_autopilot::reply_autosend`) allows it,
 // and the gate is re-evaluated INSIDE the same transaction that claims the
 // draft, checks consent, and enqueues the reply. Every refusal rolls back, so
@@ -650,7 +650,7 @@ fn _status_guard(_s: StatusCode) {}
 // The sweep is the automation actor. It attributes its audit row to the
 // system tenant with no human user id (`automation: "reply_autosend"`), and it
 // rides the SAME priority lane and the SAME consent gate as the human
-// approval — the only differences are the actor and the audit action.
+// approval, the only differences are the actor and the audit action.
 
 /// The intents a LOW class can map from (the classifier's LOW-eligible
 /// dispositions). The candidate query pre-filters on them so a HIGH draft is
@@ -685,7 +685,7 @@ const AUTO_SEND_CANDIDATES_SQL: &str = r#"
 /// The auto-send claim: the SAME atomic, conditional claim the approval path
 /// uses (`pending_approval = true` makes exactly one consumer the winner),
 /// returning the risk-classification inputs as well. The id is bound as the
-/// canonical VARCHAR identifier — never cast to UUID (audit F11).
+/// canonical VARCHAR identifier, never cast to UUID (audit F11).
 const CLAIM_DRAFT_FOR_AUTO_SEND_SQL: &str = r#"
     UPDATE inbound_messages
     SET pending_approval = false, processed_at = NOW()
@@ -748,7 +748,7 @@ pub struct AutoSendSweep {
 }
 
 /// One sweep pass: release every pending LOW-class draft the gate admits.
-/// Never fails the whole pass for one draft — a per-draft error is logged and
+/// Never fails the whole pass for one draft, a per-draft error is logged and
 /// the draft stays pending.
 pub async fn auto_send_pending(state: &AppState, limit: usize) -> Result<AutoSendSweep, ApiError> {
     let candidates: Vec<(String,)> = sqlx::query_as(AUTO_SEND_CANDIDATES_SQL)
@@ -781,7 +781,7 @@ pub async fn auto_send_pending(state: &AppState, limit: usize) -> Result<AutoSen
 }
 
 /// Release ONE draft through the gate, or leave it untouched. The whole
-/// decision — classification, gate, consent, enqueue, audit — is one
+/// decision, classification, gate, consent, enqueue, audit, is one
 /// transaction: any refusal or failure rolls everything back.
 pub async fn auto_send_one(state: &AppState, id: &str) -> Result<AutoSendOutcome, ApiError> {
     use sales_autopilot::reply_autosend as autosend;
@@ -857,7 +857,7 @@ pub async fn auto_send_one(state: &AppState, id: &str) -> Result<AutoSendOutcome
         return Ok(held(id, format!("classifier: {}", verdict.class_string())));
     };
 
-    // 2. The promotion gate — re-checked HERE, inside the send transaction
+    // 2. The promotion gate, re-checked HERE, inside the send transaction
     //    (grant row, live evidence, tenant autonomy mode, kill switch).
     let gate = match autosend::evaluate_for_send(&mut tx, &tenant_id, class).await {
         Ok(gate) => gate,
@@ -1111,7 +1111,7 @@ mod approval_db_tests {
         Some(pool)
     }
 
-    /// A canonical MTA id — deliberately NOT parseable as a UUID, which the
+    /// A canonical MTA id, deliberately NOT parseable as a UUID, which the
     /// old `$1::uuid` binding could never match.
     fn canonical_draft_id() -> String {
         format!("inb_{}", "0123456789abcdef012345")
@@ -1212,7 +1212,7 @@ mod approval_db_tests {
     /// The approval path binds the canonical VARCHAR id without a UUID
     /// cast: a non-UUID `inb_…` id claims its draft (this exact statement
     /// errored with `operator does not exist: character varying = uuid`
-    /// before F11), and the claim is conditional — a second claim of the
+    /// before F11), and the claim is conditional, a second claim of the
     /// same draft matches nothing.
     #[tokio::test]
     async fn approval_binds_canonical_varchar_id() {
@@ -1353,7 +1353,7 @@ mod approval_db_tests {
     /// can be enqueued. Each racing attempt is a full approval flow
     /// (claim -> enqueue -> commit): the loser's UPDATE blocks on the
     /// winner's row lock and then, once the winner commits, matches
-    /// nothing — so only the winner's transaction ever persists a reply.
+    /// nothing, so only the winner's transaction ever persists a reply.
     #[tokio::test]
     async fn concurrent_approvals_exactly_one_reply() {
         let Some(pool) = isolated_pool("concurrent").await else {
@@ -1533,7 +1533,7 @@ mod approval_http_tests {
 
     /// SalesCloser plan §5.4: approving a first-response draft queues the
     /// reply on the PRIORITY lane (100 over the default 5) and closes its
-    /// request — the two halves of the instant-response chain that meet in
+    /// request, the two halves of the instant-response chain that meet in
     /// this handler.
     #[test]
     fn first_response_approval_uses_the_priority_lane_and_closes_the_request() {
@@ -1563,7 +1563,7 @@ mod approval_http_tests {
             grant_marketing_consent(&pool, tenant, &from_email).await;
 
             // The request this draft answers. It is seeded in the state the
-            // MAILBOT leaves it in ('drafted' — the AI wrote the reply and
+            // MAILBOT leaves it in ('drafted', the AI wrote the reply and
             // is waiting for the human), NOT the initial 'pending'. Seeding
             // 'pending' made this test pass while every real approval left
             // queued_at NULL (dogfood 2026-10-06).
@@ -1632,7 +1632,7 @@ mod approval_http_tests {
                 .expect("request state");
             assert!(
                 queued_at.is_some(),
-                "approval stamps the request's queued_at — the only marker of the human step"
+                "approval stamps the request's queued_at, the only marker of the human step"
             );
 
             // A repeated approval must not re-stamp the interval (the guard
@@ -1777,7 +1777,7 @@ mod approval_http_tests {
             assert_eq!(status, axum::http::StatusCode::NOT_FOUND);
 
             // External-audit P1: every decision left durable evidence in the
-            // SAME commit as its effect — exactly one approved row, one
+            // SAME commit as its effect, exactly one approved row, one
             // rejected row, and one refused-attempt row (the unroutable
             // approval above); the 404 re-attempts wrote nothing.
             for (action, expected) in [
@@ -1807,7 +1807,7 @@ mod approval_http_tests {
     /// The shared send-admission consent gate (F4) applies to AI-draft
     /// approvals: an AI-composed reply is a MARKETING-class send, so a
     /// recipient with no active marketing consent record must be REFUSED with
-    /// the enforcer's named reason — the draft stays pending (nothing
+    /// the enforcer's named reason, the draft stays pending (nothing
     /// consumed), nothing is queued and nothing can reach Mailpit. The same
     /// draft then approves cleanly once an active consent record exists.
     #[test]
@@ -1889,7 +1889,7 @@ mod approval_http_tests {
         let Some(pool) = crate::test_db::canonical_pool("ai_draft_no_sender").await else {
             return;
         };
-        // NOTE: no seed_system_sender — the readiness lookup fails.
+        // NOTE: no seed_system_sender, the readiness lookup fails.
         let env = AdvEnv::admin(pool.clone()).await;
         let id = draft_id();
         seed_pending_draft(
@@ -1912,7 +1912,7 @@ mod approval_http_tests {
             "{body}"
         );
 
-        // The claim rolled back — the draft is still pending.
+        // The claim rolled back, the draft is still pending.
         let pending: bool =
             sqlx::query_scalar("SELECT pending_approval FROM inbound_messages WHERE id = $1")
                 .bind(&id)
@@ -1924,7 +1924,7 @@ mod approval_http_tests {
     }
 
     /// External-audit P1, fault-injected: when the audit INSERT fails, the
-    /// ENTIRE approval rolls back — the draft stays pending (claim not
+    /// ENTIRE approval rolls back, the draft stays pending (claim not
     /// consumed), no reply is queued, no evidence row exists, and the very
     /// same draft is approvable again once the fault is disarmed. Decision
     /// evidence and decision effect commit atomically or not at all.
@@ -1965,8 +1965,8 @@ mod approval_http_tests {
             grant_marketing_consent(&pool, "ten_probe_0000000000000000", "buyer@corp.example")
                 .await;
 
-            // The first write to `audit_logs` — the decision-evidence INSERT
-            // inside the approval transaction — fails.
+            // The first write to `audit_logs`, the decision-evidence INSERT
+            // inside the approval transaction, fails.
             crate::routes::fault::arm_write_fault(&pool, "audit_logs", "ai_draft_approve_audit", 0)
                 .await
                 .expect("arm audit fault");
@@ -2026,7 +2026,7 @@ mod approval_http_tests {
     }
 
     /// External-audit P1, happy path: the approval's evidence lands in
-    /// `audit_logs` in the same commit as the queued reply — canonical
+    /// `audit_logs` in the same commit as the queued reply, canonical
     /// hash-chained shape, operator attribution (the machine admin's system
     /// tenant; user id when the identity carries one), routed tenant,
     /// recipient, note, and the queued message id.
@@ -2110,7 +2110,7 @@ mod approval_http_tests {
     }
 
     /// Reject gets the same atomic treatment (external-audit P1): a failed
-    /// audit write rolls the rejection claim back — the draft stays pending
+    /// audit write rolls the rejection claim back, the draft stays pending
     /// and the rejection is retryable; the retry then commits WITH its
     /// actor-attributed evidence.
     #[tokio::test]
@@ -2185,7 +2185,7 @@ mod approval_http_tests {
     }
 }
 
-/// WP F9 — gated reply auto-send, exercised against the canonical schema and
+/// WP F9, gated reply auto-send, exercised against the canonical schema and
 /// the real system-sender machinery.
 ///
 /// The fail-closed table the brief pins:
@@ -2308,7 +2308,7 @@ mod auto_send_tests {
         .expect("seed draft");
     }
 
-    /// Grant autonomy to the routed tenant (the F12 outer ring) — autonomy is
+    /// Grant autonomy to the routed tenant (the F12 outer ring), autonomy is
     /// never on by default; tests must grant it deliberately.
     async fn seed_autonomy(pool: &PgPool, tenant: &str, mode: &str, kill_switch: bool) {
         sqlx::query(
@@ -2394,7 +2394,7 @@ mod auto_send_tests {
 
             // The promotion evidence: ten REAL human approvals of this class,
             // driven through the actual endpoint. The gate is satisfied only
-            // by those records — the sweep below re-derives them live.
+            // by those records, the sweep below re-derives them live.
             for _ in 0..10 {
                 let approved = draft_id();
                 seed_draft(
@@ -2405,7 +2405,7 @@ mod auto_send_tests {
                         recipient: &recipient,
                         classification: Some("meeting_request"),
                         confidence: 0.95,
-                        reply: "Thursday 10:00 works for us — shall I send an invite?",
+                        reply: "Thursday 10:00 works for us, shall I send an invite?",
                         first_response_request_id: None,
                     },
                 )
@@ -2438,13 +2438,13 @@ mod auto_send_tests {
                     recipient: &recipient,
                     classification: Some("meeting_request"),
                     confidence: 0.95,
-                    reply: "Thursday 10:00 works for us — shall I send an invite?",
+                    reply: "Thursday 10:00 works for us, shall I send an invite?",
                     first_response_request_id: Some(&request_id),
                 },
             )
             .await;
 
-            // Invariant I22: the promotion gate's fourth ring — the MODE is
+            // Invariant I22: the promotion gate's fourth ring, the MODE is
             // not the AUTHORITY; an owner-approved policy pack covering this
             // tenant and this action is.
             // The pack table has a real FK to tenants (migration 270).
@@ -2554,7 +2554,7 @@ mod auto_send_tests {
             .expect("request");
             assert!(queued_at.is_some(), "the request's queued_at is stamped");
 
-            // The audit row: who/what/why — class, grounding, gate row.
+            // The audit row: who/what/why, class, grounding, gate row.
             let row: (
                 Option<String>,
                 String,
@@ -2630,7 +2630,7 @@ mod auto_send_tests {
                     recipient: &recipient,
                     classification: Some("meeting_request"),
                     confidence: 0.95,
-                    reply: "Thursday 10:00 works for us — shall I send an invite?",
+                    reply: "Thursday 10:00 works for us, shall I send an invite?",
                     first_response_request_id: None,
                 },
             )
@@ -2701,7 +2701,7 @@ mod auto_send_tests {
                     "pricing",
                     Some("meeting_request"),
                     0.95,
-                    "Our pricing is per seat per month — shall we book a call?",
+                    "Our pricing is per seat per month, shall we book a call?",
                 ),
                 (
                     // HIGH by content: an unbacked claim (SSO with no fact).
@@ -2716,21 +2716,21 @@ mod auto_send_tests {
                     "complaint",
                     Some("complaint"),
                     0.99,
-                    "Thanks — noted.",
+                    "Thanks, noted.",
                 ),
                 (
                     // Unclassifiable: no intent class at all.
                     "no_class",
                     None,
                     0.95,
-                    "Thanks — noted.",
+                    "Thanks, noted.",
                 ),
                 (
                     // Unclassifiable: an intent class outside the canonical 11.
                     "unknown_class",
                     Some("maybe_interested"),
                     0.95,
-                    "Thanks — noted.",
+                    "Thanks, noted.",
                 ),
                 (
                     // Unclassifiable: below the worker's 0.7 confidence gate.
@@ -2844,7 +2844,7 @@ mod auto_send_tests {
                     recipient: &flagged,
                     classification: Some("meeting_request"),
                     confidence: 0.95,
-                    reply: "Thursday 10:00 works for us — shall I send an invite?",
+                    reply: "Thursday 10:00 works for us, shall I send an invite?",
                     first_response_request_id: None,
                 },
             )
@@ -2907,7 +2907,7 @@ mod auto_send_tests {
                     recipient: &recipient,
                     classification: Some("meeting_request"),
                     confidence: 0.95,
-                    reply: "Thursday 10:00 works for us — shall I send an invite?",
+                    reply: "Thursday 10:00 works for us, shall I send an invite?",
                     first_response_request_id: None,
                 },
             )

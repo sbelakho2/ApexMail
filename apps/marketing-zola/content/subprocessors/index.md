@@ -1,19 +1,19 @@
 +++
 title = "Subprocessors"
-description = "ApexMail subprocessor register — third-party vendors processing customer personal data."
+description = "ApexMail subprocessor register, third-party vendors processing customer personal data."
 template = "prose.html"
 
 [extra]
 last_updated = "2026-10-24"
 +++
-<!-- GENERATED FILE — do not edit by hand: `python3 tools/generate_subprocessors.py` renders this page from the
+<!-- GENERATED FILE, do not edit by hand: `python3 tools/generate_subprocessors.py` renders this page from the
      deployment configuration (compose + env). `--check` fails the validate stage on drift. -->
 
 ## Subprocessor Register
 
 This page lists third-party vendors engaged by Bel Consulting OÜ (trading as ApexMail) that may process customer personal data in the course of providing the ApexMail service. This register is maintained in accordance with Article 28 of the GDPR and Section 5 of the ApexMail Data Processing Agreement. It is generated from the deployment's own configuration, so the listed set and locations cannot drift from what the deployment actually runs.
 
-Under EU-only routing the AWS SES entry carries no tenant's mail: messages leave exclusively through ApexMail's own MTAs on Hetzner infrastructure. EU-only routing and its evidence — including the distinction from the Global default, which uses AWS SES in its EU region — are set out on the [EU sovereignty page](/eu-sovereign/).
+Under EU-only routing the AWS SES entry carries no tenant's mail: messages leave exclusively through ApexMail's own MTAs on Hetzner infrastructure. EU-only routing and its evidence, including the distinction from the Global default, which uses AWS SES in its EU region, are set out on the [EU sovereignty page](/eu-sovereign/).
 
 ### Infrastructure Subprocessors
 
@@ -22,8 +22,8 @@ The following third-party entities process customer personal data on behalf of A
 | Legal Entity | Brand | Service | Purpose | Data Categories | Processing Country | Storage Country | Corporate Country | Transfer Mechanism | Required |
 |---|---|---|---|---|---|---|---|---|---|
 | Hetzner Online GmbH | Hetzner | Cloud hosting (compute, storage, networking) | Core service data in the default shared deployment | Finland | Finland | Germany | Intra-EEA processing; GDPR Chapter V transfer rules do not apply | Yes. Hetzner EU location: Helsinki (hel1, FI); the active default is hel1 |
-| Amazon Web Services, Inc. | AWS SES | Email-delivery transport when enabled (EMAIL_TRANSPORT_TYPE=ses) | Email content and recipient addresses in transit | Ireland | Ireland | USA | EU Standard Contractual Clauses (AWS DPA) | No — only when the active deployment uses the SES transport. Active only while EMAIL_TRANSPORT_TYPE=ses; dedicated IP transfers ride ApexMail's own Hetzner MTAs. AWS EU regions may include Germany; ApexMail's own hosting is in Finland. |
-| Mollie B.V. | Mollie | Payment processing, subscription management, invoicing | Payment card details (tokenized — ApexMail never receives full card numbers), billing address, transaction metadata | Netherlands | Netherlands | Netherlands | Contracting entity is EU-established (Mollie B.V., Amsterdam); card scheme networks process globally under the Mollie Data Processing Agreement; PCI DSS Level 1 certified | Yes — required for paid plans |
+| Amazon Web Services, Inc. | AWS SES | Email-delivery transport when enabled (EMAIL_TRANSPORT_TYPE=ses) | Email content and recipient addresses in transit | Ireland | Ireland | USA | EU Standard Contractual Clauses (AWS DPA) | No, only when the active deployment uses the SES transport. Active only while EMAIL_TRANSPORT_TYPE=ses; dedicated IP transfers ride ApexMail's own Hetzner MTAs. AWS EU regions may include Germany; ApexMail's own hosting is in Finland. |
+| Mollie B.V. | Mollie | Payment processing, subscription management, invoicing | Payment card details (tokenized, ApexMail never receives full card numbers), billing address, transaction metadata | Netherlands | Netherlands | Netherlands | Contracting entity is EU-established (Mollie B.V., Amsterdam); card scheme networks process globally under the Mollie Data Processing Agreement; PCI DSS Level 1 certified | Yes, required for paid plans |
 
 ### Payment processor
 

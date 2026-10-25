@@ -16,10 +16,10 @@
 //!
 //! # Alert Conditions
 //!
-//! * **Consecutive drain errors** — When [`DRAIN_ERROR_ALERT_THRESHOLD`] (10)
+//! * **Consecutive drain errors**, When [`DRAIN_ERROR_ALERT_THRESHOLD`] (10)
 //!   consecutive drain operations fail, a high-severity `tracing::error!` is
 //!   emitted with the `"METERING DRAIN ALERT"` prefix.
-//! * **Stale pending events** — When pending metering events remain in Redis
+//! * **Stale pending events**, When pending metering events remain in Redis
 //!   beyond [`STALE_EVENT_AGE_LIMIT_MINUTES`] (30 min), a warning is issued
 //!   with the stale count and oldest event age.
 
@@ -65,13 +65,13 @@ static CONSECUTIVE_DRAIN_ERRORS: AtomicU64 = AtomicU64::new(0);
 /// [`drain_pending_metering_events`] and wraps the result with the following
 /// instrumentation:
 ///
-/// * **`apexmail_metering_events_drained_total`** — counter incremented by the
+/// * **`apexmail_metering_events_drained_total`**, counter incremented by the
 ///   number of events successfully processed.
-/// * **`apexmail_metering_events_drain_errors_total`** — counter incremented
+/// * **`apexmail_metering_events_drain_errors_total`**, counter incremented
 ///   on each error.
-/// * **`apexmail_metering_events_drain_duration_seconds`** — histogram
+/// * **`apexmail_metering_events_drain_duration_seconds`**, histogram
 ///   recording the wall-clock duration of the drain operation.
-/// * **Consecutive error tracking** — when
+/// * **Consecutive error tracking**, when
 ///   [`CONSECUTIVE_DRAIN_ERRORS`][CONSECUTIVE_DRAIN_ERRORS] reaches
 ///   [`DRAIN_ERROR_ALERT_THRESHOLD`], a high-severity log entry is emitted.
 pub(crate) async fn monitored_drain_pending_events(
@@ -148,7 +148,7 @@ pub(crate) async fn check_stale_pending_events(state: &AppState) {
     };
 
     // Collect pending event keys for the stale check.
-    // Use SCAN instead of KEYS for production safety — KEYS blocks Redis.
+    // Use SCAN instead of KEYS for production safety, KEYS blocks Redis.
     let mut cursor: u64 = 0;
     let mut pending_keys: Vec<String> = Vec::new();
     loop {
@@ -254,7 +254,7 @@ mod tests {
     /// `monitored_drain_pending_events` cannot span a test's whole
     /// drive-then-assert sequence, so the scenarios that observe the counter
     /// additionally serialize THEMSELVES with this async mutex (never a
-    /// std guard held across await — see `reset_error_streak`).
+    /// std guard held across await, see `reset_error_streak`).
     static MONITORED_DRAIN_TEST_SERIAL: std::sync::LazyLock<tokio::sync::Mutex<()>> =
         std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
 
@@ -385,7 +385,7 @@ mod tests {
     #[test]
     fn stale_count_event_at_exact_boundary() {
         let now = Utc::now();
-        // Exactly at the limit — events at the boundary ARE considered stale
+        // Exactly at the limit, events at the boundary ARE considered stale
         // (age_minutes >= STALE_EVENT_AGE_LIMIT_MINUTES).
         let boundary_ts = now - chrono::Duration::minutes(STALE_EVENT_AGE_LIMIT_MINUTES);
         let payloads = vec![Some(format!(

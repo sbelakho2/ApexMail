@@ -93,8 +93,8 @@ async fn fetch_count_or_zero(db: &sqlx::PgPool, sql: &str) -> i64 {
         .unwrap_or(0)
 }
 
-/// MRR computed from `mollie_subscriptions` — the table the billing-service
-/// webhook writers actually populate — mirroring the proven pattern in
+/// MRR computed from `mollie_subscriptions`, the table the billing-service
+/// webhook writers actually populate, mirroring the proven pattern in
 /// billing-service `routes.rs` (`get_mrr_report`): joined via
 /// `tenants.plan` to `plans` pricing, with yearly prices normalized to
 /// monthly via `ROUND(price_yearly / 12.0)` (round-half-up, not truncation).
@@ -121,7 +121,7 @@ fn build_subscription_mrr_sql(has_billing_interval: bool) -> String {
 }
 
 /// Fix (P1 swallowed outages): the probes and the MRR aggregate propagate
-/// storage failures — `get_dashboard_stats` surfaces them as a 5xx instead
+/// storage failures, `get_dashboard_stats` surfaces them as a 5xx instead
 /// of a fabricated zero on a degraded database.
 async fn fetch_dashboard_mrr(db: &sqlx::PgPool) -> Result<f64, sqlx::Error> {
     if !(table_exists(db, "mollie_subscriptions").await? && table_exists(db, "plans").await?) {
@@ -312,7 +312,7 @@ async fn get_dashboard_stats(
         }
     }
 
-    // Recent activity (simple — latest leads)
+    // Recent activity (simple, latest leads)
     let mut recent_activity: Vec<ActivityEntry> = Vec::new();
 
     if has_sales_leads {

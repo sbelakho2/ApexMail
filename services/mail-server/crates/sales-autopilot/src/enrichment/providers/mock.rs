@@ -2,7 +2,7 @@
 //!
 //! Returns hardcoded data for known domains (`acme.com`, `beta.io`,
 //! `gamma.dev`) and a labelled fallback for unknown domains. Suitable for
-//! testing and development — never use in production.
+//! testing and development, never use in production.
 
 use serde_json::Value;
 

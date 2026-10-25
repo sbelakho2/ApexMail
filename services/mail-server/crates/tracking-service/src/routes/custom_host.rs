@@ -4,12 +4,12 @@
 //! `email.example.com`) at the platform tracking host. DNS delivers the
 //! request to this service with the CUSTOM host in the `Host` header, so the
 //! server must resolve the host back to the owning tenant before it serves
-//! click/open/unsubscribe links — and must REFUSE, by name, when the host is
+//! click/open/unsubscribe links, and must REFUSE, by name, when the host is
 //! not a verified custom tracking domain or when the link inside it belongs
 //! to a different workspace. Never a silent bounce to the vendor fallback.
 //!
 //! Resolution is the explicit `tracking_domains` row (status must be
-//! `verified`) joined to the tenant's still-owned parent domain — the same
+//! `verified`) joined to the tenant's still-owned parent domain, the same
 //! owned-domain authority item 11 uses for redirect destinations. There is
 //! deliberately NO cache: deleting a tracking domain stops serving on the
 //! very next request, and a deleted row can never be replayed from a stale
@@ -25,14 +25,14 @@ use crate::state::AppState;
 /// Which authority governs the request's `Host`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HostScope {
-    /// The platform tracking host (or a loopback/test host) — every
+    /// The platform tracking host (or a loopback/test host), every
     /// authenticated-by-token link is served as before.
     Platform,
     /// A verified custom tracking domain belonging to `tenant_id`.
     Custom { host: String, tenant_id: String },
     /// The host is not a verified custom tracking domain. `unavailable` is
     /// true when the authorization store could not answer (fail closed,
-    /// 503) — an outage must never read as "unknown host".
+    /// 503), an outage must never read as "unknown host".
     Unknown {
         host: String,
         reason: &'static str,
@@ -110,7 +110,7 @@ pub async fn resolve_host_scope(state: &AppState, headers: &HeaderMap) -> HostSc
             unavailable: false,
         },
         Err(error) => {
-            warn!(host = %host, error = %error, "custom tracking host lookup failed — refusing for this request");
+            warn!(host = %host, error = %error, "custom tracking host lookup failed, refusing for this request");
             HostScope::Unknown {
                 host,
                 reason: "The tracking-domain store could not be reached, so this request was \
@@ -171,7 +171,7 @@ pub fn unknown_host_refusal(host: &str, reason: &str, unavailable: bool) -> Resp
 }
 
 /// Refuse a valid token served on a custom host that belongs to ANOTHER
-/// workspace — the host's tenant and the link's tenant must be the same.
+/// workspace, the host's tenant and the link's tenant must be the same.
 pub fn tenant_mismatch_refusal(host: &str) -> Response {
     let reason = "The link inside the request belongs to a different workspace than this \
                   tracking domain, so it was refused.";
@@ -203,7 +203,7 @@ pub fn ensure_token_matches_host(scope: &HostScope, token_tenant_id: &str) -> Re
                     host = %host,
                     host_tenant = %tenant_id,
                     token_tenant = %token_tenant_id,
-                    "tracking link served on a custom host of a different workspace — refused"
+                    "tracking link served on a custom host of a different workspace, refused"
                 );
                 Err(tenant_mismatch_refusal(host))
             }
@@ -230,7 +230,7 @@ pub async fn host_scope_or_refuse(
             reason,
             unavailable,
         } => {
-            warn!(host = %host, "tracking request on an unconfigured host — refused");
+            warn!(host = %host, "tracking request on an unconfigured host, refused");
             Err(unknown_host_refusal(host, reason, *unavailable))
         }
         _ => Ok(scope),
@@ -257,7 +257,7 @@ mod tests {
 
         let mut headers = HeaderMap::new();
         headers.insert("host", "::1".parse().unwrap());
-        // A bare (unbracketed) IPv6 literal does not split on ':' — the
+        // A bare (unbracketed) IPv6 literal does not split on ':', the
         // whole value is the host.
         assert_eq!(request_host(&headers).as_deref(), Some("::1"));
 

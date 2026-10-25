@@ -63,7 +63,7 @@ async fn main() -> anyhow::Result<()> {
         let token = std::env::var("INTERNAL_SERVICE_TOKEN").unwrap_or_default();
         if token.is_empty() {
             // An empty token would make require_service_token reject every
-            // authenticated route — fail fast instead of starting a service
+            // authenticated route, fail fast instead of starting a service
             // that can only serve /health.
             anyhow::bail!("INTERNAL_SERVICE_TOKEN must be set");
         }
@@ -88,7 +88,7 @@ async fn run_(
     }
     if cfg.enrichment_api_key.is_empty() {
         tracing::warn!(
-            "ENRICHMENT_API_KEY is not set — enrichment requests will be unauthenticated and likely rejected by the provider"
+            "ENRICHMENT_API_KEY is not set, enrichment requests will be unauthenticated and likely rejected by the provider"
         );
     }
     tracing::info!(
@@ -142,14 +142,14 @@ async fn run_(
             Ok(d) => {
                 tracing::info!(
                     from_email = %d.config().from_email,
-                    "production campaign dispatcher configured — campaigns will send through the platform pipeline"
+                    "production campaign dispatcher configured, campaigns will send through the platform pipeline"
                 );
                 Some(Arc::new(d))
             }
             Err(e) => {
                 tracing::error!(
                     error = %e,
-                    "invalid campaign dispatcher configuration — campaign start will return 503"
+                    "invalid campaign dispatcher configuration, campaign start will return 503"
                 );
                 None
             }
@@ -157,7 +157,7 @@ async fn run_(
     } else {
         tracing::warn!(
             "campaign dispatcher NOT configured (set SALES_CAMPAIGN_FROM_EMAIL and \
-                 SALES_UNSUBSCRIBE_SECRET to enable campaign sending) — campaign start returns 503"
+                 SALES_UNSUBSCRIBE_SECRET to enable campaign sending), campaign start returns 503"
         );
         None
     };
@@ -193,7 +193,7 @@ async fn run_(
             Err(reason) => {
                 tracing::error!(
                     %reason,
-                    "enrichment gateway HTTP client could not be constructed — enrichment \
+                    "enrichment gateway HTTP client could not be constructed, enrichment \
                      integration is UNAVAILABLE (PERF #24)"
                 );
                 EnrichmentService::new(Arc::new(UnavailableEnrichmentProvider::new(reason)))
@@ -316,7 +316,7 @@ async fn run_(
     // ── Sales feedback projector ──────────────────────────────────────
     // Folds the two delivery ledgers into the learning loops: sender-health
     // events into `sales_sender_health`, and production outcomes into the
-    // experiment posteriors. Runs unconditionally — unlike the send worker it
+    // experiment posteriors. Runs unconditionally, unlike the send worker it
     // has no dispatcher dependency, because it consumes events that were
     // already produced by whatever sent (or refused to send) the mail.
     {
@@ -344,7 +344,7 @@ async fn run_(
     // Customer automation execution is CUSTOMER-facing work; it lives in the
     // worker fleet (`worker-processors::automations`, ticked by the worker
     // binary). This process is the owner's sales brain ONLY: keeping the
-    // executor here would couple the two trust domains — the Sales service
+    // executor here would couple the two trust domains, the Sales service
     // could not be isolated to the system tenant, and disabling the private
     // sales subsystem would take customer automations down with it. Do not
     // re-add an automation tick here.
@@ -393,8 +393,8 @@ fn spawn_signal_shutdown_watcher() -> tokio::sync::watch::Receiver<()> {
         #[cfg(not(unix))]
         let terminate = std::future::pending::<()>();
         tokio::select! {
-            _ = ctrl_c => tracing::info!("received Ctrl+C — shutting down"),
-            _ = terminate => tracing::info!("received SIGTERM — shutting down"),
+            _ = ctrl_c => tracing::info!("received Ctrl+C, shutting down"),
+            _ = terminate => tracing::info!("received SIGTERM, shutting down"),
         }
         let _ = shutdown_tx.send(());
     });
@@ -403,8 +403,8 @@ fn spawn_signal_shutdown_watcher() -> tokio::sync::watch::Receiver<()> {
 
 /// A worker identity that is unique per process across replicas.
 ///
-/// The PID alone is not a valid replica identity — separate containers
-/// routinely share the same PID number — so the hostname and a random suffix
+/// The PID alone is not a valid replica identity, separate containers
+/// routinely share the same PID number, so the hostname and a random suffix
 /// are included. The lease token is what actually fences writes; this string
 /// only makes the owner column diagnosable.
 fn unique_worker_id() -> String {
@@ -561,7 +561,7 @@ mod run_tests {
     }
 
     /// System-tenant hard restriction: an allowlist naming ANY other tenant
-    /// is a boot failure even outside production — the sales brain has no
+    /// is a boot failure even outside production, the sales brain has no
     /// customer surface left to serve, so a broader list could never be
     /// honoured.
     #[tokio::test]
@@ -649,11 +649,11 @@ mod run_tests {
         let id = unique_worker_id();
         assert!(id.starts_with("worker-host-9:"), "{id}");
         let parts: Vec<&str> = id.split(':').collect();
-        assert_eq!(parts.len(), 3, "host:pid:uuid — {id}");
-        assert!(parts[1].parse::<u32>().is_ok(), "pid component — {id}");
+        assert_eq!(parts.len(), 3, "host:pid:uuid, {id}");
+        assert!(parts[1].parse::<u32>().is_ok(), "pid component, {id}");
         assert!(
             uuid::Uuid::parse_str(parts[2]).is_ok(),
-            "random uuid component — {id}"
+            "random uuid component, {id}"
         );
         assert_ne!(id, unique_worker_id(), "ids are unique per call");
         std::env::remove_var("HOSTNAME");

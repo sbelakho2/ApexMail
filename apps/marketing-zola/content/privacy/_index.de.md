@@ -1,6 +1,6 @@
 +++
 title = "Datenschutzerklärung"
-description = "ApexMail-Datenschutzerklärung — wie wir Ihre Daten erfassen, verwenden und schützen."
+description = "ApexMail-Datenschutzerklärung, wie wir Ihre Daten erfassen, verwenden und schützen."
 template = "prose-section.html"
 page_template = "prose.html"
 
@@ -18,7 +18,7 @@ Bel Consulting OÜ (Handelsname ApexMail) („wir", „uns") verpflichtet sich, 
 
 ## 2. Von uns erfasste Daten
 
-- **Webseitenbesucher (Marketing-Website):** IP-Adresse, Browsertyp und User-Agent, Geräteinformationen, besuchte Seiten, Referrer-URL und Zeitstempel — automatisch über Server-Zugriffsprotokolle erhoben. Die Marketing-Website setzt keine Analyse-Skripte ein und bettet keine Tracking-Pixel oder Werbe-Cookies ein.
+- **Webseitenbesucher (Marketing-Website):** IP-Adresse, Browsertyp und User-Agent, Geräteinformationen, besuchte Seiten, Referrer-URL und Zeitstempel, automatisch über Server-Zugriffsprotokolle erhoben. Die Marketing-Website setzt keine Analyse-Skripte ein und bettet keine Tracking-Pixel oder Werbe-Cookies ein.
 - **Interessenten:** Name, E-Mail-Adresse, Unternehmensname, Telefonnummer (falls angegeben) und Kommunikationsverlauf, bereitgestellt über Kontaktformulare oder E-Mail.
 - **Kontodaten:** Name, E-Mail, Unternehmen, Rechnungsadresse, USt-IdNr., Zahlungsdaten-Tokens (Kartendaten werden von Mollie verarbeitet und erreichen niemals unsere Server), API-Schlüssel-Metadaten, Anmeldezeitstempel, IP-Adressen und Audit-Log-Einträge.
 - **Nutzungsdaten:** API-Aufrufe, E-Mail-Versandvolumen, Zustellereignisse sowie Engagement-Ereignisse (Öffnungen und Klicks) für Ihre gesendeten Nachrichten.
@@ -38,10 +38,10 @@ Die bereitgestellte Konfiguration zielt für Kern-E-Mail-Daten und Telemetriespe
 
 | Datenkategorie | Primärer Standort | Backup / Replikat | Verarbeitung |
 |---|---|---|---|
-| Kern-E-Mail-Infrastruktur (Nachrichten, Zustellmetadaten, Kontodaten) | EU-Rechenzentrum — Finnland | EU-Rechenzentrum — Finnland (Sekundärstandort) | EWR — keine Drittlandübermittlung |
+| Kern-E-Mail-Infrastruktur (Nachrichten, Zustellmetadaten, Kontodaten) | EU-Rechenzentrum, Finnland | EU-Rechenzentrum, Finnland (Sekundärstandort) | EWR, keine Drittlandübermittlung |
 | OAuth-Authentifizierungstoken | Google LLC / GitHub, Inc. (US-Unternehmen, SCCs) | Anbieter-verwaltet | US (SCCs) |
-| Zahlungs- und Abrechnungsdaten | Mollie B.V. (Niederlande, EU) | Anbieter-verwaltet innerhalb der EU | EWR — keine Drittlandübermittlung (Kartennetzwerke gemäß Mollie-DPA) |
-| Support-Tickets | EU-Rechenzentrum — Finnland | EU-Rechenzentrum — Finnland (Sekundärstandort) | EWR — keine Drittlandübermittlung |
+| Zahlungs- und Abrechnungsdaten | Mollie B.V. (Niederlande, EU) | Anbieter-verwaltet innerhalb der EU | EWR, keine Drittlandübermittlung (Kartennetzwerke gemäß Mollie-DPA) |
+| Support-Tickets | EU-Rechenzentrum, Finnland | EU-Rechenzentrum, Finnland (Sekundärstandort) | EWR, keine Drittlandübermittlung |
 
 Wir übermitteln keine personenbezogenen Daten außerhalb des EWR ohne angemessene Garantien (Standardvertragsklauseln oder einen Angemessenheitsbeschluss gemäß Artikel 45).
 
@@ -69,16 +69,16 @@ Vollständige Details finden Sie in unserer [Datenaufbewahrungsrichtlinie](/de/c
 
 Gemäß der DSGVO haben Sie folgende Rechte:
 
-- **Auskunftsrecht** (Art. 15) — Bestätigung, ob wir Ihre Daten verarbeiten, und Zugang zu diesen Daten.
-- **Recht auf Berichtigung** (Art. 16) — Korrektur unrichtiger Daten.
-- **Recht auf Löschung** (Art. 17) — Löschung Ihrer Daten („Recht auf Vergessenwerden").
-- **Recht auf Einschränkung der Verarbeitung** (Art. 18) — Einschränkung der Verarbeitung unter bestimmten Bedingungen.
-- **Recht auf Datenübertragbarkeit** (Art. 20) — Erhalt Ihrer Daten in einem strukturierten, maschinenlesbaren Format.
-- **Widerspruchsrecht** (Art. 21) — Widerspruch gegen die Verarbeitung aufgrund berechtigter Interessen.
+- **Auskunftsrecht** (Art. 15), Bestätigung, ob wir Ihre Daten verarbeiten, und Zugang zu diesen Daten.
+- **Recht auf Berichtigung** (Art. 16), Korrektur unrichtiger Daten.
+- **Recht auf Löschung** (Art. 17), Löschung Ihrer Daten („Recht auf Vergessenwerden").
+- **Recht auf Einschränkung der Verarbeitung** (Art. 18), Einschränkung der Verarbeitung unter bestimmten Bedingungen.
+- **Recht auf Datenübertragbarkeit** (Art. 20), Erhalt Ihrer Daten in einem strukturierten, maschinenlesbaren Format.
+- **Widerspruchsrecht** (Art. 21), Widerspruch gegen die Verarbeitung aufgrund berechtigter Interessen.
 
 Zur Ausübung dieser Rechte kontaktieren Sie uns unter **privacy@apexmail.ee**. Wir antworten innerhalb von 30 Tagen.
 
-Für Kalifornien: siehe unseren [Hinweis „Do Not Sell My Personal Information"](/privacy/do-not-sell/) (auf Englisch) — ApexMail verkauft keine persönlichen Daten.
+Für Kalifornien: siehe unseren [Hinweis „Do Not Sell My Personal Information"](/privacy/do-not-sell/) (auf Englisch), ApexMail verkauft keine persönlichen Daten.
 
 ## 7. Beschwerden
 

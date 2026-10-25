@@ -189,7 +189,7 @@ impl GoogleClient {
             .into_iter()
             .filter(|d| d.permission.as_deref().map(|p| p != "NONE").unwrap_or(true))
             .map(|d| {
-                // d.name is "domains/example.com" — strip the prefix.
+                // d.name is "domains/example.com", strip the prefix.
                 d.name
                     .strip_prefix("domains/")
                     .unwrap_or(&d.name)
@@ -264,7 +264,7 @@ pub async fn upsert_reputation(db: &PgPool, rows: &[GoogleReputation]) -> Result
 
     // A single ON CONFLICT DO UPDATE statement cannot touch the same key
     // twice, so duplicate (domain, observed_at) pairs within the slice are
-    // collapsed first. The LAST occurrence wins — the same result the old
+    // collapsed first. The LAST occurrence wins, the same result the old
     // sequential loop produced.
     let mut deduped: Vec<&GoogleReputation> = Vec::with_capacity(rows.len());
     let mut positions: std::collections::HashMap<(String, NaiveDate), usize> =

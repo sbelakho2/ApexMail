@@ -1,4 +1,4 @@
-//! HTTP routes for the HA service — 40+ endpoints under /api/v1.
+//! HTTP routes for the HA service, 40+ endpoints under /api/v1.
 
 use axum::{
     extract::{DefaultBodyLimit, Path, Query, State},
@@ -30,7 +30,7 @@ use apexmail_lib::crypto::timing_safe_compare;
 
 /// Log the error and return a 500 status code.
 /// This ensures HA failures are visible in logs during split-brain, failover,
-/// or replication issues — previously all error context was silently discarded.
+/// or replication issues, previously all error context was silently discarded.
 fn internal_err(e: impl std::fmt::Display) -> StatusCode {
     tracing::error!(error = %e, "HA endpoint failed");
     StatusCode::INTERNAL_SERVER_ERROR
@@ -118,7 +118,7 @@ async fn admin_auth_guard(
 /// can still be operated on (otherwise recovery would deadlock).
 ///
 /// Layer position (SM10 F12): this guard is applied INSIDE the auth layers
-/// (see `build_router`) — it only ever observes AUTHENTICATED requests, so
+/// (see `build_router`), it only ever observes AUTHENTICATED requests, so
 /// the fenced-node 503 body never leaks to unauthenticated callers, who get
 /// 401 from auth first.
 async fn fence_guard(
@@ -142,7 +142,7 @@ async fn fence_guard(
         Err(reason) => (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(serde_json::json!({
-                "error": "node is fenced — writes refused",
+                "error": "node is fenced, writes refused",
                 "reason": reason,
             })),
         )
@@ -156,30 +156,30 @@ async fn fence_guard(
 ///
 /// Auth is enforced PER ROUTE GROUP by middleware (not inside handlers), so
 /// the fence guard can sit INSIDE the auth layer (SM10 F12): the last-added
-/// layer is the outermost, meaning auth runs first — an unauthenticated
+/// layer is the outermost, meaning auth runs first, an unauthenticated
 /// caller gets a 401, never the fenced-node 503 body, which would leak the
 /// node's fence state to anyone who can reach the port.
 ///
 /// Groups (SM10 F11):
-/// - **admin** — destructive cluster-topology operations
+/// - **admin**, destructive cluster-topology operations
 ///   (failover initiation, failback, split-brain resolution, manual
 ///   promotion, backup restore, chaos-experiment start, region fence/
 ///   unfence, replication sync-mode flips). Accept ONLY the admin key; the
 ///   internal service key is held by every internal workload and must not
 ///   authorize topology changes. (External audit 2026-10-02 #2: sync-mode
-///   is topology-class too — `set_sync_mode` rewrites
+///   is topology-class too, `set_sync_mode` rewrites
 ///   `synchronous_standby_names`, which changes the cluster's commit-
 ///   durability and can stall writes cluster-wide.)
-/// - **internal** — everything else; the internal service key OR the
+/// - **internal**, everything else; the internal service key OR the
 ///   admin key. Mutating requests in this group still pass the fence guard.
-/// - `/health` — unauthenticated liveness probe.
+/// - `/health`, unauthenticated liveness probe.
 pub fn build_router(state: Arc<AppState>) -> Router<()> {
     let admin_routes = Router::new()
         // Failover
         .route("/api/v1/failover/initiate", post(failover_initiate))
         // SM10 F11 (adversarial pass): failback and split-brain resolution
         // rewrite primary claims and fence nodes, and the region fence/
-        // unfence routes place and lift the STONITH keys themselves — the
+        // unfence routes place and lift the STONITH keys themselves, the
         // same class of cluster-topology change as initiate/promote, so
         // they take the admin group too (the universal internal key must
         // not authorize topology changes).
@@ -193,7 +193,7 @@ pub fn build_router(state: Arc<AppState>) -> Router<()> {
         // Replication
         .route("/api/v1/replication/promote", post(replication_promote))
         // External audit #2: sync-mode flips are cluster-topology changes
-        // (they rewrite synchronous_standby_names) — admin-only, like
+        // (they rewrite synchronous_standby_names), admin-only, like
         // promote.
         .route("/api/v1/replication/sync-mode", put(replication_sync_mode))
         // Chaos Engineering
@@ -641,7 +641,7 @@ async fn replication_promote(
 struct SyncModeRequest {
     synchronous: bool,
     /// External audit #2: when `synchronous` is true, the request must NAME
-    /// the exact standby(s) to place in `synchronous_standby_names` — the
+    /// the exact standby(s) to place in `synchronous_standby_names`, the
     /// '*' wildcard form is refused by the service guard. Ignored for
     /// `synchronous=false`.
     #[serde(default)]
@@ -649,7 +649,7 @@ struct SyncModeRequest {
 }
 
 /// External audit #2: the sync-mode handler surfaces the service guard's
-/// DETERMINISTIC refusals as 409/422 with the reason — never as a 500.
+/// DETERMINISTIC refusals as 409/422 with the reason, never as a 500.
 async fn replication_sync_mode(
     State(state): State<Arc<AppState>>,
     Json(body): Json<SyncModeRequest>,
@@ -1246,7 +1246,7 @@ mod tests {
         // A private throwaway Redis for this test: the `redis-server`
         // binary when available, else a throwaway container (the deploy
         // host ships Redis as an image only, so the old binary-only spawn
-        // silently skipped this test there — deploy 2026-10-11). The guard
+        // silently skipped this test there, deploy 2026-10-11). The guard
         // kills the server at scope end, including on panic.
         let mut redis_server = migrator::test_support::spawn_isolated_redis();
         let port = redis_server.port();
@@ -1258,7 +1258,7 @@ mod tests {
             config.redis.host = "127.0.0.1".into();
             config.redis.port = port;
             config.multi_region.node_id = "fenced-node".into();
-            // SM10 F11: failover/initiate is ADMIN-only — the fence matrix
+            // SM10 F11: failover/initiate is ADMIN-only, the fence matrix
             // below must present the admin key to reach the guard/handler.
             // (No replicas configured so an accepted initiate fails FAST in
             // the handler instead of probing/promoting anything real.)
@@ -1356,7 +1356,7 @@ mod tests {
         assert!(check_api_key(&garbage, &cfg).is_err());
         assert!(check_api_key(&empty, &cfg).is_err());
 
-        // Destructive gate: ADMIN ONLY — the universal internal key must be
+        // Destructive gate: ADMIN ONLY, the universal internal key must be
         // rejected (SM10 F11).
         assert!(
             check_admin_api_key(&internal_only, &cfg).is_err(),
@@ -1369,7 +1369,7 @@ mod tests {
 
     /// Router-level gate matrix (SM10 F11): every destructive route family
     /// rejects the internal key with 401, while the admin key passes the
-    /// gate (the request proceeds past auth — with an UNREADABLE fence
+    /// gate (the request proceeds past auth, with an UNREADABLE fence
     /// authority it deterministically stops at the fail-closed fence check
     /// with 503, which proves auth opened the gate).
     #[test]
@@ -1379,7 +1379,7 @@ mod tests {
             config.internal_api_key = TEST_INTERNAL_API_KEY.into();
             config.admin_api_key = TEST_ADMIN_API_KEY.into();
             // Unreadable fence authority (nothing listens): fence checks
-            // fail CLOSED with 503 — a deterministic marker that a request
+            // fail CLOSED with 503, a deterministic marker that a request
             // got PAST auth.
             config.redis.host = "127.0.0.1".into();
             config.redis.port = 1;
@@ -1392,12 +1392,12 @@ mod tests {
                 ("POST", "/api/v1/backup/restore"),
                 ("POST", "/api/v1/chaos/experiments"),
                 // SM10 F11 (adversarial pass): the topology routes below
-                // rewrite claims or place STONITH fence keys — admin-only
+                // rewrite claims or place STONITH fence keys, admin-only
                 // like initiate/promote.
                 ("POST", "/api/v1/failover/failback"),
                 ("POST", "/api/v1/regions/some-node/fence"),
                 // External audit #2: sync-mode flips rewrite
-                // synchronous_standby_names — the same topology class.
+                // synchronous_standby_names, the same topology class.
                 ("PUT", "/api/v1/replication/sync-mode"),
             ];
 
@@ -1419,7 +1419,7 @@ mod tests {
                 );
 
                 // The admin key passes the gate; the request then stops at
-                // the fail-closed fence check (503) — never a 401.
+                // the fail-closed fence check (503), never a 401.
                 let req = Request::builder()
                     .method(method)
                     .uri(uri)
@@ -1436,7 +1436,7 @@ mod tests {
             }
 
             // Unfence and split-brain resolution are admin-only too, but
-            // they are RECOVERY endpoints exempt from the fence guard — the
+            // they are RECOVERY endpoints exempt from the fence guard, the
             // admin request proceeds to the handler (500 on this test's
             // unwritable fence authority/DB), which still proves auth
             // opened the gate; the internal key gets 401 for both.
@@ -1477,7 +1477,7 @@ mod tests {
     // ── SM10 F12: the fence guard runs INSIDE auth ─────────────────────
 
     /// An UNAUTHENTICATED mutating request must get 401 (auth is the
-    /// outermost layer) — never the fenced-node 503 body, which would leak
+    /// outermost layer), never the fenced-node 503 body, which would leak
     /// fence state to unauthenticated callers. With an unreadable fence
     /// authority this is deterministic: if the guard ran first, the request
     /// would fail closed with 503 instead.
@@ -1508,7 +1508,7 @@ mod tests {
             );
 
             // Same request authenticated: the guard now runs (inside auth)
-            // and fails closed with 503 — proving the order is auth → fence.
+            // and fails closed with 503, proving the order is auth → fence.
             let req = Request::builder()
                 .method("POST")
                 .uri("/api/v1/backup/retention")

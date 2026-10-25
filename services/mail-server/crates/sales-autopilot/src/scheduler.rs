@@ -1,4 +1,4 @@
-//! Legacy campaign dispatch scheduler — REMOVED.
+//! Legacy campaign dispatch scheduler, REMOVED.
 //!
 //! This module used to run the second send engine: a background loop that
 //! listed active `sales_campaigns` rows and pushed their `due_recipients`

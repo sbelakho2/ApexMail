@@ -1,11 +1,11 @@
-//! Dynamic analyzers — concrete implementations of [`DynamicAnalyzer`]
+//! Dynamic analyzers, concrete implementations of [`DynamicAnalyzer`]
 //!
 //! Ships two ready-to-use analyzers://!
-//! 1. [`YaraSignatureAnalyzer`] — Pattern-based malware detection using
+//! 1. [`YaraSignatureAnalyzer`], Pattern-based malware detection using
 //! Aho-Corasick multi-pattern matching against YARA-like rules compiled
 //! at initialization time. No external dependency required.
 //!
-//! 2. [`ClamAvSocketAnalyzer`] — Integration point for ClamAV via its Unix
+//! 2. [`ClamAvSocketAnalyzer`], Integration point for ClamAV via its Unix
 //! socket protocol (`INSTREAM`). Requires a running ClamAV daemon.
 //!
 //! Both implement [`DynamicAnalyzer`] and can be provided to
@@ -27,7 +27,7 @@ pub struct MalwareRule {
     pub id: String,
     /// Human-readable description
     pub description: String,
-    /// Binary patterns — ALL must be present for a match (AND logic).
+    /// Binary patterns, ALL must be present for a match (AND logic).
     /// In JSON / TOML config files patterns are specified as hex-encoded
     /// strings (e.g. `"586B6C"`).
     #[serde(with = "hex_patterns")]
@@ -205,7 +205,7 @@ fn builtin_malware_rules() -> Vec<MalwareRule> {
         },
         // ── C2 / Beacon ──
         // Tuning note: the 6-byte CS config header alone appears by chance
-        // in ~1/2^48 per position — rare enough to quarantine for review,
+        // in ~1/2^48 per position, rare enough to quarantine for review,
         // but it is also present in benign CS-trainer/research samples, so
         // outright rejection requires a second co-occurring CS artifact
         // (the ReflectiveLoader export every beacon DLL carries), handled
@@ -482,7 +482,7 @@ fn validate_clamav_socket_path(path: &str) -> Result<(), String> {
             if meta.file_type().is_symlink() {
                 tracing::warn!(
                     socket_path = path,
-                    "ClamAV socket path is a symlink — verify target is trusted"
+                    "ClamAV socket path is a symlink, verify target is trusted"
                 );
                 // Follow the symlink to validate the target
                 let target_meta = std::fs::metadata(p)
@@ -503,12 +503,12 @@ fn validate_clamav_socket_path(path: &str) -> Result<(), String> {
             }
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            // Path does not exist yet — the daemon may not have created the
+            // Path does not exist yet, the daemon may not have created the
             // socket yet. Allow the connection attempt to proceed; the error
             // will be caught by `UnixStream::connect`.
             tracing::warn!(
                 socket_path = path,
-                "ClamAV socket does not exist yet — will attempt connect anyway"
+                "ClamAV socket does not exist yet, will attempt connect anyway"
             );
         }
         Err(e) => {
@@ -543,7 +543,7 @@ impl DynamicAnalyzer for ClamAvSocketAnalyzer {
         }
 
         // Attempt connection to ClamAV socket. On non-Unix targets the
-        // `#[cfg(not(unix))]` tail arm below fails closed instead — the
+        // `#[cfg(not(unix))]` tail arm below fails closed instead, the
         // function previously ended without any arm there (compile failure,
         // not silent fail-open, but the port was blocked).
         #[cfg(unix)]
@@ -567,7 +567,7 @@ impl DynamicAnalyzer for ClamAvSocketAnalyzer {
                 tracing::error!(
                     socket = %self.socket_path,
                     reason = %msg,
-                    "ClamAV socket validation failed — rejecting scan"
+                    "ClamAV socket validation failed, rejecting scan"
                 );
                 return Some(DynamicAnalysisFinding {
                     id: "CLAMAV_SOCKET_INVALID".into(),
@@ -584,7 +584,7 @@ impl DynamicAnalyzer for ClamAvSocketAnalyzer {
                     tracing::error!(
                         socket = %self.socket_path,
                         error = %e,
-                        "ClamAV socket connection failed — failing closed"
+                        "ClamAV socket connection failed, failing closed"
                     );
                     return Some(scanner_unavailable(format!("connect failed: {e}")));
                 }
@@ -649,10 +649,10 @@ impl DynamicAnalyzer for ClamAvSocketAnalyzer {
                     decision: DynamicDecision::Reject,
                 }),
                 ClamdVerdict::Invalid => {
-                    // Unexpected/garbage response — fail closed, not clean.
+                    // Unexpected/garbage response, fail closed, not clean.
                     tracing::error!(
                         response = %response,
-                        "Unexpected ClamAV response — failing closed"
+                        "Unexpected ClamAV response, failing closed"
                     );
                     Some(scanner_unavailable("unexpected response".into()))
                 }
@@ -665,7 +665,7 @@ impl DynamicAnalyzer for ClamAvSocketAnalyzer {
             // a non-Unix build had no tail expression and did not compile.
             // ClamAV INSTREAM requires a Unix domain socket; on other
             // platforms the verdict cannot be verified, so fail CLOSED with
-            // an explicit unsupported finding — never a silent clean. The
+            // an explicit unsupported finding, never a silent clean. The
             // byte count is reported so it is explicit that NONE of the
             // content was scanned.
             Some(DynamicAnalysisFinding {
@@ -689,7 +689,7 @@ pub enum ClamdVerdict {
     Clean,
     /// `stream: <name> FOUND`
     Detected(String),
-    /// Anything else — the scanner output cannot be trusted.
+    /// Anything else, the scanner output cannot be trusted.
     Invalid,
 }
 
@@ -879,7 +879,7 @@ mod tests {
     #[test]
     fn test_cobalt_strike_header_alone_flags_but_not_rejects() {
         // Fail-first: the bare 6-byte CS config header rejected (9.0) any
-        // file containing it — including CS research samples and random
+        // file containing it, including CS research samples and random
         // binaries where the sequence appears by chance. Alone it must
         // Flag (quarantine for review), not Reject.
         let analyzer = YaraSignatureAnalyzer::default();
@@ -1150,7 +1150,7 @@ mod tests {
             );
         }
         // A FOUND line without a well-formed stream prefix still counts as a
-        // detection (the safe direction) — it is never reported clean.
+        // detection (the safe direction), it is never reported clean.
         assert!(matches!(
             parse_clamd_response("stream: FOUND"),
             ClamdVerdict::Detected(_)
@@ -1161,7 +1161,7 @@ mod tests {
     fn clamav_socket_path_validation_refuses_non_sockets() {
         // A regular file is not a Unix socket.
         let path =
-            std::env::temp_dir().join(format!("apex-sandbox-not-a-socket-{}", std::process::id())); // nosemgrep: rust.lang.security.temp-dir.temp-dir — test fixture under a unique pid/uuid path — no predictable-name temp collision
+            std::env::temp_dir().join(format!("apex-sandbox-not-a-socket-{}", std::process::id())); // nosemgrep: rust.lang.security.temp-dir.temp-dir, test fixture under a unique pid/uuid path, no predictable-name temp collision
         std::fs::write(&path, b"not a socket").expect("temp file");
         let analyzer = ClamAvSocketAnalyzer::new(path.to_string_lossy().to_string());
         let finding = analyzer
@@ -1205,7 +1205,7 @@ mod tests {
         assert!(analyzer.analyze(b"hello", None).is_none());
 
         // Malformed JSON is None, valid JSON creates rules.
-        let path = std::env::temp_dir().join(format!("apex-rules-{}.json", std::process::id())); // nosemgrep: rust.lang.security.temp-dir.temp-dir — test fixture under a unique pid/uuid path — no predictable-name temp collision
+        let path = std::env::temp_dir().join(format!("apex-rules-{}.json", std::process::id())); // nosemgrep: rust.lang.security.temp-dir.temp-dir, test fixture under a unique pid/uuid path, no predictable-name temp collision
         std::fs::write(&path, b"{ not json").expect("write");
         assert!(load_external_rules(&path.to_string_lossy()).is_none());
         // Patterns are hex-encoded strings ("68656c6c6f" = "hello").

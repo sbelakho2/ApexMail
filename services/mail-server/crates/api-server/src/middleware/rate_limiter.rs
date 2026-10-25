@@ -111,7 +111,7 @@ pub async fn rate_limit_middleware(
                         StatusCode::SERVICE_UNAVAILABLE,
                         "Service Unavailable",
                         "Temporarily unavailable",
-                        "The console is temporarily unavailable — please try again shortly.",
+                        "The console is temporarily unavailable, please try again shortly.",
                         "/login",
                         "Back to sign in",
                     )
@@ -129,7 +129,7 @@ pub async fn rate_limit_middleware(
                 }
             } else {
                 // Fail open in development
-                tracing::warn!("rate limiter Redis unavailable — failing open (dev mode)");
+                tracing::warn!("rate limiter Redis unavailable, failing open (dev mode)");
                 next.run(req).await
             }
         }
@@ -386,7 +386,7 @@ async fn check_rate_limit(
 /// Stricter rate limiter for public auth endpoints (login, register, SSO).
 /// Keys by source IP and route path, falling back to the request path when
 /// no forwarded client IP is available. Limits:20 requests per 60-second
-/// window per IP/path bucket — enough for legitimate users, tight enough to
+/// window per IP/path bucket, enough for legitimate users, tight enough to
 /// mitigate credential-stuffing and registration spam without coupling every
 /// public auth route to the same local-development bucket.
 pub async fn public_rate_limit_middleware(
@@ -468,7 +468,7 @@ pub async fn public_rate_limit_middleware(
                     axum::Json(serde_json::json!({
                         "error": {
                             "code": "RATE_LIMIT_EXCEEDED",
-                            "message": "too many requests — try again later"
+                            "message": "too many requests, try again later"
                         }
                     })),
                 )
@@ -482,14 +482,14 @@ pub async fn public_rate_limit_middleware(
             if state.config.environment == Environment::Production {
                 // F1b: a Redis outage must not bounce a browser to a raw
                 // JSON dump (or, via session resolution, silently to
-                // /login as unauthenticated) — serve the branded HTML
+                // /login as unauthenticated), serve the branded HTML
                 // outage page on browser paths; API paths keep JSON.
                 if crate::middleware::is_browser_request(req.uri().path(), req.headers()) {
                     crate::middleware::browser_error_page_response(
                         StatusCode::SERVICE_UNAVAILABLE,
                         "Service Unavailable",
                         "Temporarily unavailable",
-                        "Sign-in is temporarily unavailable — please try again shortly.",
+                        "Sign-in is temporarily unavailable, please try again shortly.",
                         "/login",
                         "Back to sign in",
                     )
@@ -506,7 +506,7 @@ pub async fn public_rate_limit_middleware(
                         .into_response()
                 }
             } else {
-                tracing::warn!("public rate limiter Redis unavailable — failing open (dev mode)");
+                tracing::warn!("public rate limiter Redis unavailable, failing open (dev mode)");
                 next.run(req).await
             }
         }
@@ -827,7 +827,7 @@ mod tests {
     // ── Redis Failover Tests ─────────────────────────────────────
 
     /// Verifies the `check_rate_limit` function returns `RedisDown` when
-    /// the Redis pool is unreachable — simulating a connection failure.
+    /// the Redis pool is unreachable, simulating a connection failure.
     /// This is a compile-time verification that the error mapping is correct:
     /// Redis pool errors → RateLimitOutcome::RedisDown.
     #[test]
@@ -1507,7 +1507,7 @@ mod w6a_adversarial_tests {
         assert_eq!(body["error"]["code"], "SERVICE_UNAVAILABLE");
         assert_eq!(body["error"]["message"], "rate limiter unavailable");
 
-        // Development: fail-open — the handler runs and no rate-limit headers
+        // Development: fail-open, the handler runs and no rate-limit headers
         // are attached (the limiter never saw a counter).
         let dev = state_with(rl_config(Environment::Development, 10, 60_000, true), dead).await;
         let app = tenant_app(dev);
@@ -1531,7 +1531,7 @@ mod w6a_adversarial_tests {
         .await;
         let app = public_app(state);
 
-        // The suite-wide opt-out must bypass the limiter entirely — even far
+        // The suite-wide opt-out must bypass the limiter entirely, even far
         // beyond 20 requests, and without touching Redis at all.
         for i in 0..30 {
             let resp = app
@@ -1578,7 +1578,7 @@ mod w6a_adversarial_tests {
         assert_eq!(body["error"]["code"], "RATE_LIMIT_EXCEEDED");
         assert_eq!(
             body["error"]["message"],
-            "too many requests — try again later"
+            "too many requests, try again later"
         );
     }
 
@@ -1627,7 +1627,7 @@ mod w6a_adversarial_tests {
                 .status(),
             StatusCode::OK
         );
-        // A session credential on the same path is yet another bucket — and
+        // A session credential on the same path is yet another bucket, and
         // exhausting it must not leak into the API-key buckets.
         let cookie = format!("other=1; am_session={session}; trailing=2");
         for _ in 0..20 {
@@ -1782,8 +1782,8 @@ mod w6a_adversarial_tests {
     // ── F1b: browser surfaces get HTML, API surfaces keep JSON ───────────
 
     /// F1b: a rate-limited BROWSER form post (here /web/auth/login) gets a
-    /// small branded HTML page — status 429, text/html, honest human copy
-    /// and a way onward — never the raw JSON error dump a browser cannot
+    /// small branded HTML page, status 429, text/html, honest human copy
+    /// and a way onward, never the raw JSON error dump a browser cannot
     /// render.
     #[tokio::test]
     async fn rate_limited_browser_post_gets_html_not_json() {
@@ -1839,13 +1839,13 @@ mod w6a_adversarial_tests {
         let body = body_string(resp).await;
         assert!(body.contains("Too many attempts"), "got: {body}");
         assert!(body.contains("href=\"/login\""), "got: {body}");
-        // The branded page contains no braces at all — a JSON error body
+        // The branded page contains no braces at all, a JSON error body
         // cannot hide in it.
         assert!(!body.contains('{'), "got: {body}");
     }
 
     /// F1b: the same limiter on an API path keeps the machine-readable
-    /// envelope EXACTLY — API clients and their tests must not notice the
+    /// envelope EXACTLY, API clients and their tests must not notice the
     /// browser-facing change.
     #[tokio::test]
     async fn rate_limited_api_post_still_gets_json() {
@@ -1889,7 +1889,7 @@ mod w6a_adversarial_tests {
         assert_eq!(body["error"]["code"], "RATE_LIMIT_EXCEEDED");
         assert_eq!(
             body["error"]["message"],
-            "too many requests — try again later"
+            "too many requests, try again later"
         );
     }
 
@@ -2249,7 +2249,7 @@ mod w6a_adversarial_tests {
             );
         }
         // A base whose jitter band is < 1s must not be jittered (and never
-        // become 0 — Redis rejects a 0 TTL).
+        // become 0, Redis rejects a 0 TTL).
         assert_eq!(ttl_with_jitter(1, 0.10), 1);
         assert_eq!(ttl_with_jitter(4, 0.10), 4);
         assert_eq!(ttl_with_jitter(0, 0.10), 0);

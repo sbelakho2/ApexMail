@@ -1,4 +1,4 @@
-//! DSR verification-outbox flush job — turns pending
+//! DSR verification-outbox flush job, turns pending
 //! `dsr_verification_outbox` rows into real mail.
 //!
 //! [`GdprAutomation::submit_request`](crate::gdpr_automation::GdprAutomation)
@@ -11,20 +11,20 @@
 //!
 //! Correctness properties:
 //!
-//! * **Transactional handoff** — the `email_queue` insert and the
+//! * **Transactional handoff**, the `email_queue` insert and the
 //!   `status='sent'` outbox update commit in ONE transaction per row, so a
 //!   row is either queued-and-sent or neither (no lost token, no phantom
 //!   "sent" marker).
-//! * **At-most-once queuing** — the sent-guard `UPDATE … WHERE status =
+//! * **At-most-once queuing**, the sent-guard `UPDATE … WHERE status =
 //!   'pending'` makes a concurrent flusher's transaction roll back its
 //!   already-inserted queue row instead of double-queueing.
-//! * **Bounded + retried** — each tick queues at most
+//! * **Bounded + retried**, each tick queues at most
 //!   `COMPLIANCE_DSR_FLUSH_BATCH` oldest rows; a per-row failure increments
 //!   `attempts` and is retried on the next tick until
 //!   `COMPLIANCE_DSR_FLUSH_MAX_ATTEMPTS`, after which the row is marked
 //!   `failed` (and eventually purged by the retention sweep with the
 //!   request window).
-//! * **No sender, no burn** — when the system sender domain is not
+//! * **No sender, no burn**, when the system sender domain is not
 //!   DKIM/SES-ready the tick is skipped WITHOUT incrementing attempts: that
 //!   is an infrastructure condition, not a per-row delivery failure.
 
@@ -36,13 +36,13 @@ use uuid::Uuid;
 use crate::config::GdprConfig;
 use crate::gdpr_automation::DsrOutboxEntry;
 
-/// Platform system tenant — MUST stay in sync with
+/// Platform system tenant, MUST stay in sync with
 /// `api-server/src/routes/system_sender.rs` (`SYSTEM_TENANT_ID`). The
 /// verified `domains` row for this tenant + [`SYSTEM_DOMAIN`] is what the
 /// worker's `get_domain` authorization check resolves.
 pub const SYSTEM_TENANT_ID: &str = "system_internal_tenant01";
 
-/// Platform system sending domain — MUST stay in sync with
+/// Platform system sending domain, MUST stay in sync with
 /// `api-server/src/routes/system_sender.rs` (`SYSTEM_DOMAIN`).
 pub const SYSTEM_DOMAIN: &str = "apexmail.ee";
 
@@ -92,7 +92,7 @@ impl DsrOutboxFlusher {
         )
     }
 
-    /// Resolve the ready system sender domain — the same readiness predicate
+    /// Resolve the ready system sender domain, the same readiness predicate
     /// `api-server`'s system sender uses (SQL-level share; the worker
     /// re-validates DKIM/SES before sending). `None` means the platform
     /// cannot send system mail right now.
@@ -169,7 +169,7 @@ impl DsrOutboxFlusher {
         for entry in &pending {
             match self.queue_entry(entry, &sender).await {
                 Ok(true) => summary.queued += 1,
-                Ok(false) => {} // claimed concurrently — nothing to do
+                Ok(false) => {} // claimed concurrently, nothing to do
                 Err(e) => {
                     warn!(
                         outbox_id = %entry.id,
@@ -215,7 +215,7 @@ impl DsrOutboxFlusher {
             .await
             .map_err(|e| format!("DB error (tx begin): {e}"))?;
 
-        // Message audit row — same shape as api-server's system emails.
+        // Message audit row, same shape as api-server's system emails.
         sqlx::query(
             "INSERT INTO messages \
                  (id, tenant_id, from_email, to_emails, subject, html_body, text_body, status, tags, created_at) \
@@ -233,7 +233,7 @@ impl DsrOutboxFlusher {
         .await
         .map_err(|e| format!("DB error (messages): {e}"))?;
 
-        // Queue row — BOTH column families, mirroring the platform's
+        // Queue row, BOTH column families, mirroring the platform's
         // system-email insert (the worker reads "from"/"to"/html/text).
         sqlx::query(
             "INSERT INTO email_queue (\
@@ -262,7 +262,7 @@ impl DsrOutboxFlusher {
         .map_err(|e| format!("DB error (email_queue): {e}"))?;
 
         // Sent-guard LAST: under READ COMMITTED a concurrent flusher blocks
-        // here until the first commits, then matches zero rows — and this
+        // here until the first commits, then matches zero rows, and this
         // transaction (including its queue insert) rolls back.
         let claimed = sqlx::query(
             "UPDATE dsr_verification_outbox \
@@ -275,7 +275,7 @@ impl DsrOutboxFlusher {
         .map_err(|e| format!("DB error (mark sent): {e}"))?;
 
         if claimed.rows_affected() != 1 {
-            // Another flusher won the race — roll the inserts back.
+            // Another flusher won the race, roll the inserts back.
             tx.rollback()
                 .await
                 .map_err(|e| format!("DB error (rollback): {e}"))?;
@@ -312,7 +312,7 @@ impl DsrOutboxFlusher {
 }
 
 /// The verification email for one outbox entry: (subject, plain text, HTML).
-/// Pure function — unit-tested below. The stored `verify_url` identifies the
+/// Pure function, unit-tested below. The stored `verify_url` identifies the
 /// request; the raw token is what completes verification, so both are in the
 /// body and the token never appears in API responses or logs.
 pub fn dsr_verification_email(
@@ -335,9 +335,9 @@ pub fn dsr_verification_email(
          Code: {token}\n\
          \n\
          The request expires on {expires}. If you did not submit this request,\n\
-         ignore this email — nothing will happen without the code.\n\
+         ignore this email, nothing will happen without the code.\n\
          \n\
-         — ApexMail",
+         | ApexMail",
         url = entry.verify_url,
         token = entry.verification_token,
         expires = expires,
@@ -351,7 +351,7 @@ pub fn dsr_verification_email(
          <p><a href=\"{url}\">{url}</a></p> \
          <p>Code: <code>{token}</code></p> \
          <p>The request expires on {expires}. If you did not submit this request, \
-         ignore this email — nothing will happen without the code.</p> \
+         ignore this email, nothing will happen without the code.</p> \
          <p>— ApexMail</p> \
          </body></html>",
         url = html_escape(&entry.verify_url),
@@ -395,7 +395,7 @@ mod tests {
     #[test]
     fn system_sender_constants_match_the_api_server() {
         // The flush job queues under the SAME system identity api-server's
-        // system_sender uses — drift here means the worker's domain check
+        // system_sender uses, drift here means the worker's domain check
         // rejects every queued row.
         assert_eq!(SYSTEM_TENANT_ID, "system_internal_tenant01");
         assert_eq!(SYSTEM_DOMAIN, "apexmail.ee");

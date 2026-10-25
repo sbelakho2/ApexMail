@@ -6,7 +6,7 @@
 //! rotation can be added later by bumping the version tag.
 //!
 //! When `encrypt_stored_content` is `true` and no key is configured, the
-//! engine refuses to start — there are no silent fallbacks.
+//! engine refuses to start, there are no silent fallbacks.
 
 use aes_gcm::aead::{Aead, KeyInit};
 use aes_gcm::{Aes256Gcm, Key, Nonce};

@@ -2,7 +2,7 @@
 //!
 //! This is the ONE way any ApexMail discovery source may fetch a public page.
 //! It exists because the previous path had no fetch discipline at all: one
-//! attempt, no politeness, and — the invariant the owner's plan closes with —
+//! attempt, no politeness, and, the invariant the owner's plan closes with —
 //! **no way to tell a CAPTCHA/challenge page from data**. A 403 was reported
 //! as a credentials problem, a 429 as "rate limited", and a 200 challenge
 //! shell was handed to the JSON parser or read as an empty result.
@@ -26,7 +26,7 @@
 //!   module's ordinary policy gates.
 //! * **Politeness and robots.** Per-host minimum interval, optional
 //!   `Crawl-delay`, and `robots.txt` evaluation (RFC 9309 shape: 4xx means
-//!   allow, 5xx or an unreachable robots.txt means DISALLOW — fail closed).
+//!   allow, 5xx or an unreachable robots.txt means DISALLOW, fail closed).
 //!   Robots is not configurable off.
 //! * **Bounded everything.** Total and connect timeouts, bounded retries
 //!   with exponential backoff plus jitter on transient outcomes only, a
@@ -46,11 +46,11 @@
 //! | vendor challenge infrastructure (`__cf_chl_opt`, `/cdn-cgi/challenge-platform/`, `incap_ses`, `px-captcha`, `captcha-delivery.com`, …) | any | `blocked_captcha` |
 //! | CAPTCHA widget embed (reCAPTCHA/hCaptcha/Turnstile) | 403 / 429 / 503 | `blocked_captcha` |
 //! | ≥2 challenge-shell phrases | any | `blocked_captcha` |
-//! | — | 401 / 451 | `blocked_policy` |
-//! | — | 403 | `blocked_policy` |
-//! | — | 408 / 425 / 429 / 500 / 502 / 503 / 504 | `blocked_transient` |
-//! | — | network error / timeout | `blocked_transient` |
-//! | — | other | `ok` (the caller decides: non-2xx is
+//! |, | 401 / 451 | `blocked_policy` |
+//! |, | 403 | `blocked_policy` |
+//! |, | 408 / 425 / 429 / 500 / 502 / 503 / 504 | `blocked_transient` |
+//! |, | network error / timeout | `blocked_transient` |
+//! |, | other | `ok` (the caller decides: non-2xx is
 //!   [`FetchError::HttpStatus`], never a data row) |
 //!
 //! Deliberate asymmetry, documented so it cannot be mistaken for an
@@ -96,7 +96,7 @@ impl FetchClassification {
         }
     }
 
-    /// Parse a persisted value; an unknown string is `None` — callers must
+    /// Parse a persisted value; an unknown string is `None`, callers must
     /// not invent a classification.
     pub fn parse(value: &str) -> Option<Self> {
         match value.trim().to_ascii_lowercase().as_str() {
@@ -412,7 +412,7 @@ const CHALLENGE_MARKERS: &[ChallengeMarker] = &[
     ),
 ];
 
-/// A response reduced to what classification needs — no reqwest types, so
+/// A response reduced to what classification needs, no reqwest types, so
 /// every challenge family can be pinned with a plain-text fixture.
 #[derive(Debug, Clone, Default)]
 pub struct ResponseSnapshot {
@@ -467,7 +467,7 @@ pub struct ClassifiedResponse {
     pub retry_after_seconds: Option<u64>,
 }
 
-/// Detects a challenge page. `None` means no marker matched — the caller
+/// Detects a challenge page. `None` means no marker matched, the caller
 /// still has to verify the status and content type before treating the body
 /// as data ([`classify_response`] documents the full table).
 pub fn detect_challenge(snapshot: &ResponseSnapshot) -> Option<ChallengeEvidence> {
@@ -535,7 +535,7 @@ pub fn detect_challenge(snapshot: &ResponseSnapshot) -> Option<ChallengeEvidence
 }
 
 /// Parses a bounded integer `Retry-After` (seconds only; an HTTP-date form is
-/// deliberately not guessed at — the backoff window still applies).
+/// deliberately not guessed at, the backoff window still applies).
 fn parse_retry_after(snapshot: &ResponseSnapshot) -> Option<u64> {
     let raw = snapshot.header("retry-after")?.trim();
     let seconds: u64 = raw.parse().ok()?;
@@ -937,7 +937,7 @@ impl HostHealthRegistry {
         Duration::from_millis(capped.saturating_add(jitter))
     }
 
-    /// Backoff window for retry attempt `attempt` (1-based) — the same
+    /// Backoff window for retry attempt `attempt` (1-based), the same
     /// growing schedule the per-host block backoff uses, so a retry storm
     /// cannot outpace the polite pace.
     pub fn backoff_window_for(&self, attempt: u32) -> Duration {
@@ -965,7 +965,7 @@ pub struct RobotsRule {
     pub path: String,
 }
 
-/// Why robots allows or disallows — persisted/visible, never guessed.
+/// Why robots allows or disallows, persisted/visible, never guessed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RobotsState {
     /// No matching group and no `*` group: nothing is disallowed.
@@ -973,7 +973,7 @@ pub enum RobotsState {
     /// robots.txt was fetched and parsed.
     Parsed,
     /// robots.txt could not be fetched (5xx, network failure, or a block):
-    /// fail closed — an unknown policy is not permission.
+    /// fail closed, an unknown policy is not permission.
     Unavailable,
     /// A 4xx response: RFC 9309 says the crawler may access anything.
     Absent,
@@ -1131,7 +1131,7 @@ pub struct ScrapedPage {
     pub content_type: String,
     pub body: String,
     pub body_bytes: usize,
-    /// SHA-256 of the body — the provenance snapshot hash.
+    /// SHA-256 of the body, the provenance snapshot hash.
     pub sha256: String,
     pub fetched_at: DateTime<Utc>,
     pub attempts: u32,
@@ -1143,7 +1143,7 @@ impl ScrapedPage {
     }
 }
 
-/// The structured, persistable form of one blocked fetch — the evidence the
+/// The structured, persistable form of one blocked fetch, the evidence the
 /// review queue stores and the solver hook receives.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1419,8 +1419,8 @@ impl ScrapeClient {
 
     /// Exactly ONE attempt with operator-provided solve material (a cookie or
     /// extra same-host headers). Used only by the audited solver retry: it
-    /// still obeys robots, politeness and the per-host backoff — nothing
-    /// bypasses the policy — but it never retries internally.
+    /// still obeys robots, politeness and the per-host backoff, nothing
+    /// bypasses the policy, but it never retries internally.
     pub async fn fetch_once_with_solve_material(
         &self,
         url: &str,
@@ -1691,7 +1691,7 @@ struct TargetUrl {
     host: String,
     scheme: String,
     port: Option<u16>,
-    /// Path plus query, exactly as sent — used for robots matching.
+    /// Path plus query, exactly as sent, used for robots matching.
     request_path: String,
 }
 
@@ -1743,7 +1743,7 @@ impl TargetUrl {
         self.origin()
     }
 
-    /// Path plus query, for robots matching (borrowed — no allocation on the
+    /// Path plus query, for robots matching (borrowed, no allocation on the
     /// hot path).
     fn request_path(&self) -> &str {
         &self.request_path
@@ -1758,7 +1758,7 @@ enum ReadError {
 /// Read a response body, refusing anything above `limit` bytes.
 ///
 /// Two layers: `Content-Length` is checked first (cheap rejection), then the
-/// stream is counted — a lying or chunked response cannot exceed the cap.
+/// stream is counted, a lying or chunked response cannot exceed the cap.
 async fn read_bounded(response: reqwest::Response, limit: usize) -> Result<String, ReadError> {
     if let Some(length) = response.content_length() {
         if length > limit as u64 {
@@ -1849,7 +1849,7 @@ fn validate_header_name(name: &str) -> Result<(), FetchError> {
 }
 
 // ---------------------------------------------------------------------------
-// Tests — fixture-driven, no network
+// Tests, fixture-driven, no network
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
@@ -1910,7 +1910,7 @@ Request unsuccessful. Incapsula incident ID: 123-000000-000000
 <p>JavaScript is required to view this page.</p>
 </body></html>"#;
 
-    const FIXTURE_ORDINARY_PAGE: &str = r#"<!DOCTYPE html><html><head><title>Acme OÜ — company register extract</title>
+    const FIXTURE_ORDINARY_PAGE: &str = r#"<!DOCTYPE html><html><head><title>Acme OÜ, company register extract</title>
 <script type="application/ld+json">
 {"@context":"https://schema.org","@type":"Organization","name":"Acme OÜ",
  "email":"info@acme.ee","url":"https://acme.ee","address":{"addressCountry":"EE"}}
@@ -2038,7 +2038,7 @@ Request unsuccessful. Incapsula incident ID: 123-000000-000000
     }
 
     /// …but infrastructure strings that cannot occur in prose are a block
-    /// even on a 200 page — parsing a challenge script as a document is the
+    /// even on a 200 page, parsing a challenge script as a document is the
     /// failure mode the invariant forbids.
     #[test]
     fn vendor_infrastructure_on_a_200_page_is_still_a_block() {

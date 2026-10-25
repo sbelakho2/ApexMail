@@ -14,7 +14,7 @@
 //! `ddos-protection` at all; the MTA already enforces the same protections
 //! through its own admission path (`ids_engine` session admission, the
 //! per-IP connection counters in `mta::servers::util`, the per-command idle
-//! timeout, the DATA timeout and the session error cap — see
+//! timeout, the DATA timeout and the session error cap, see
 //! `mta/src/servers/inbound.rs`). Wiring this second, parallel state machine
 //! in front of the MTA's would double-enforce the same limits and give two
 //! sources of truth for SMTP state.
@@ -315,7 +315,7 @@ impl SmtpConnectionProtection {
         // Parse SMTP command
         let cmd = parse_smtp_command(raw_cmd);
 
-        // QUIT always bypasses tarpit — releasing connections saves server resources
+        // QUIT always bypasses tarpit, releasing connections saves server resources
         if matches!(cmd, SmtpCommand::Quit) {
             self.transition(SmtpState::Quit);
             return Ok(SmtpAction::Disconnect);
@@ -545,7 +545,7 @@ impl SmtpConnectionTracker {
                 count.fetch_sub(1, Ordering::SeqCst);
                 return Err(SmtpProtectionError::TooManyConcurrent);
             }
-        } // `count` (RefMut) dropped here — shard lock released
+        } // `count` (RefMut) dropped here, shard lock released
 
         // Check connection rate limit
         let now = Instant::now();
@@ -579,7 +579,7 @@ impl SmtpConnectionTracker {
             loop {
                 let current = count.load(Ordering::SeqCst);
                 if current == 0 {
-                    // Already zero — don't decrement (would wrap to u64::MAX)
+                    // Already zero, don't decrement (would wrap to u64::MAX)
                     break;
                 }
                 match count.compare_exchange(

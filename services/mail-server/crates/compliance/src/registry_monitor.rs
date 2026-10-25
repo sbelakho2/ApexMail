@@ -273,7 +273,7 @@ impl ScheduledRegistryMonitor {
 
         self.inner.add_notice(RegistryNotice {
             notice_id: "REG-EE-ANNUAL-REPORT".into(),
-            title: format!("Annual Report Filing — {}", company_name),
+            title: format!("Annual Report Filing, {}", company_name),
             description: format!(
                 "Submit annual report (majandusaasta aruanne) to Estonian Business Register for {} (registry {})",
                 company_name, registry_code
@@ -292,7 +292,7 @@ impl ScheduledRegistryMonitor {
 
         self.inner.add_notice(RegistryNotice {
             notice_id: "REG-EE-CONTACT-PERSON".into(),
-            title: format!("Contact Person Verification — {}", company_name),
+            title: format!("Contact Person Verification, {}", company_name),
             description: format!(
                 "Verify contact person details for {} (registry {}) are current in the Estonian Business Register",
                 company_name, registry_code
@@ -311,7 +311,7 @@ impl ScheduledRegistryMonitor {
 
         self.inner.add_notice(RegistryNotice {
             notice_id: "REG-EE-VAT-KMD".into(),
-            title: format!("Monthly VAT Declaration (KMD) — {}", company_name),
+            title: format!("Monthly VAT Declaration (KMD), {}", company_name),
             description: "Submit KMD (käibedeklaratsioon) to Estonian Tax and Customs Board".into(),
             jurisdiction: "Estonia".into(),
             authority: Some("Estonian Tax and Customs Board (EMTA)".into()),
@@ -327,7 +327,7 @@ impl ScheduledRegistryMonitor {
 
         self.inner.add_notice(RegistryNotice {
             notice_id: "REG-EE-SOCIAL-TAX".into(),
-            title: format!("Monthly Social Tax Declaration (TSD) — {}", company_name),
+            title: format!("Monthly Social Tax Declaration (TSD), {}", company_name),
             description: "Submit TSD (deklaratsioon sotsiaalmaksu kohta) to EMTA".into(),
             jurisdiction: "Estonia".into(),
             authority: Some("Estonian Tax and Customs Board (EMTA)".into()),
@@ -343,7 +343,7 @@ impl ScheduledRegistryMonitor {
 
         self.inner.add_notice(RegistryNotice {
             notice_id: "REG-EE-STATISTICAL".into(),
-            title: format!("Annual Statistical Report — {}", company_name),
+            title: format!("Annual Statistical Report, {}", company_name),
             description: "Submit annual statistical report to Statistics Estonia".into(),
             jurisdiction: "Estonia".into(),
             authority: Some("Statistics Estonia (Statistikaamet)".into()),
@@ -579,7 +579,7 @@ mod tests {
         assert_eq!(q, NaiveDate::from_ymd_opt(2027, 1, 31).unwrap());
         // Quarterly where the target month is shorter than the source day:
         // Jan 31 + 3 months clamps to Apr 28, and Nov 30 + 3 months clamps
-        // to the (non-leap) Feb 28 — both take the or_else arm.
+        // to the (non-leap) Feb 28, both take the or_else arm.
         let q_clamped =
             Recurrence::Quarterly.next_due(NaiveDate::from_ymd_opt(2026, 1, 31).unwrap());
         assert_eq!(q_clamped, NaiveDate::from_ymd_opt(2026, 4, 28).unwrap());
@@ -687,7 +687,7 @@ mod tests {
         ));
 
         // Drive the loop: the first tick fires immediately, the second after
-        // one 10 ms period — both arms (overdue warn + due-this-month info)
+        // one 10 ms period, both arms (overdue warn + due-this-month info)
         // execute against real notices. Aborted after 50 ms.
         let task = tokio::spawn(async move { monitor.run_monthly().await });
         tokio::time::sleep(Duration::from_millis(50)).await;

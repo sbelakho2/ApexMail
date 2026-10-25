@@ -7,7 +7,7 @@
 //! tenant/account/mailbox scope so a record cannot be relocated and
 //! successfully decrypted under a different scope.
 //!
-//! Key derivation is version-selected (audit finding 7 — the old doc claimed
+//! Key derivation is version-selected (audit finding 7, the old doc claimed
 //! "HKDF-SHA256" while v1 actually used a bare domain-separated SHA-256):
 //! * `version = 2` (current): real HKDF-SHA256 (RFC 5869) over the master
 //!   key with the explicit application-specific salt
@@ -16,7 +16,7 @@
 //! * `version = 1` (and the legacy unversioned layout, internally version 0):
 //!   the historical single-SHA256 construction
 //!   `SHA256("apexmail-mailstore-encryption" || version || master_key)`.
-//!   This derivation MUST stay byte-for-byte identical — every
+//!   This derivation MUST stay byte-for-byte identical, every
 //!   already-persisted v1/legacy blob decrypts only under it, which is the
 //!   compatibility story for the v2 switch. New writes always emit v2.
 
@@ -108,7 +108,7 @@ pub fn encrypt_with_aad(plaintext: &[u8], master_key: &[u8], aad: &[u8]) -> Resu
 /// authentication fails. Accepts the legacy unversioned layout
 /// (`nonce || ciphertext || tag`) for forward compatibility with already
 /// persisted data, and every versioned envelope (v1 SHA-256 derivation, v2
-/// HKDF-SHA256 derivation) — the version byte selects the derivation.
+/// HKDF-SHA256 derivation), the version byte selects the derivation.
 ///
 /// Version ambiguity: a legacy blob whose nonce happens to begin with a
 /// version byte (`0x01` or `0x02`) is indistinguishable from a versioned
@@ -129,7 +129,7 @@ pub fn decrypt_with_aad(data: &[u8], master_key: &[u8], aad: &[u8]) -> Result<Ve
     // v2 (current): a blob written by THIS version always decrypts here.
     // When the strict v2 read fails GCM authentication AND the caller bound
     // no AAD, the blob could still be a PRE-v2 legacy one whose random
-    // nonce happens to begin with the byte 0x02 — indistinguishable from a
+    // nonce happens to begin with the byte 0x02, indistinguishable from a
     // v2 envelope by prefix alone (same ambiguity the v1 branch handles for
     // 0x01). The legacy retry is gated on an empty AAD (legacy blobs never
     // bound one) and still requires the legacy key to authenticate the
@@ -245,7 +245,7 @@ fn decrypt_parts(
 /// Derive a 256-bit encryption key from the master key, selected by the
 /// envelope version (audit finding 7).
 ///
-/// * `ENVELOPE_VERSION_V2` — real HKDF-SHA256 (RFC 5869): extract with the
+/// * `ENVELOPE_VERSION_V2`, real HKDF-SHA256 (RFC 5869): extract with the
 ///   explicit application-specific [`HKDF_SALT_V2`], expand with an `info`
 ///   string carrying the application domain tag and the version byte.
 /// * Any other version (1, and the legacy unversioned layout's internal 0) —
@@ -401,7 +401,7 @@ mod tests {
     /// The v2-lookalike sibling of the v1 case above: a LEGACY (unversioned)
     /// blob whose nonce's first byte collides with ENVELOPE_VERSION_V2
     /// (0x02) must still decrypt. The strict v2 read fails GCM auth and the
-    /// legacy layout is retried — without the fallback, ~1/256 of pre-v2
+    /// legacy layout is retried, without the fallback, ~1/256 of pre-v2
     /// legacy blobs became undecryptable when the v2 envelope was introduced.
     #[test]
     fn test_legacy_blob_with_v2_lookalike_first_byte_still_decrypts() {
@@ -486,7 +486,7 @@ mod tests {
     }
 
     /// The v2 envelope: HKDF-SHA256 derivation, AAD binding, and unique
-    /// ciphertexts — plus the derived key differing from both the master key
+    /// ciphertexts, plus the derived key differing from both the master key
     /// and the frozen v1 derivation.
     #[test]
     fn v2_envelope_roundtrips_binds_aad_and_uses_hkdf() {

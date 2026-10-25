@@ -99,7 +99,7 @@ impl TemplateError {
 // ─── Template Types ────────────────────────────────────────────
 
 /// A stored template from the canonical repository (F62): the same
-/// `templates` table the api-server templates routes read — VARCHAR(26)
+/// `templates` table the api-server templates routes read, VARCHAR(26)
 /// text ids, TEXT tenant scope, `subject`/`html_body`/`text_body` columns
 /// and an integer `version` that the api-server writer bumps on every save.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -146,7 +146,7 @@ pub struct RenderResult {
     pub plaintext: Option<String>,
     pub subject: Option<String>,
     pub metadata: RenderMetadata,
-    /// Non-fatal render warnings — one entry per missing merge field.
+    /// Non-fatal render warnings, one entry per missing merge field.
     /// Additive (`#[serde(default)]`) so older serialized results still
     /// deserialize.
     #[serde(default)]

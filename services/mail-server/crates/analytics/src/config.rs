@@ -108,7 +108,7 @@ impl Default for AnalyticsConfig {
 impl AnalyticsConfig {
     pub fn from_env() -> Self {
         if let Err(error) = dotenvy::dotenv() {
-            // coverage: justified — llvm-cov region-counter artifact: this
+            // coverage: justified, llvm-cov region-counter artifact: this
             // arm EXECUTES (malformed_dotenv_file_is_reported_not_swallowed
             // feeds dotenvy an unparseable .env and the warn! below carries a
             // hit in the measured run) but the nested check's and the
@@ -174,11 +174,11 @@ impl AnalyticsConfig {
             if config.database_url.trim().is_empty() {
                 // G.7: no credential-bearing fallback URL. Only a local
                 // trust-style development default is applied, and only
-                // outside production — production keeps the empty value so
+                // outside production, production keeps the empty value so
                 // the invalid config surfaces (see `validate`).
                 if is_production {
                     tracing::error!(
-                        "DATABASE_URL is not set in production — refusing to invent a \
+                        "DATABASE_URL is not set in production, refusing to invent a \
                          credential-bearing default; analytics will fail to start"
                     );
                 } else {
@@ -207,7 +207,7 @@ impl AnalyticsConfig {
         }
         if is_production && config.sto_hmac_key.trim().is_empty() {
             // D.2: unsalted SHA-256 fallback must not silently activate in
-            // production — analytics PII hashing REQUIRES the HMAC key there.
+            // production, analytics PII hashing REQUIRES the HMAC key there.
             tracing::error!(
                 "ANALYTICS_STO_HMAC_KEY must be set in production (PII hashing would \
                  otherwise fall back to unsalted SHA-256)"
@@ -260,7 +260,7 @@ impl AnalyticsConfig {
 /// The contract (see the crate README and `compaction` module docs): the
 /// `analytics_compaction_batches` ledger row is the source of truth for what
 /// cold storage must contain; the objects under the storage root are a
-/// materialization. That makes the root a CACHE in durability terms — losing
+/// materialization. That makes the root a CACHE in durability terms, losing
 /// it is recoverable ONLY if the operator has object storage/backup or
 /// accepts the data loss of the materialized tier. A non-durable root must
 /// therefore be an explicit, visible choice.
@@ -274,7 +274,7 @@ pub fn cold_storage_marked_durable() -> bool {
 /// marked durable. Called at worker startup and at the start of every
 /// compaction run. A warning, never an error:the ledger is the commit
 /// record, so local development against a scratch directory still behaves
-/// correctly — but an operator running on, say, an ephemeral container
+/// correctly, but an operator running on, say, an ephemeral container
 /// volume gets told, on every run, exactly what they would lose.
 pub fn warn_if_cold_storage_not_durable(storage_path: &str) {
     if !cold_storage_marked_durable() {
@@ -283,7 +283,7 @@ pub fn warn_if_cold_storage_not_durable(storage_path: &str) {
             "ANALYTICS_COLD_STORAGE_DURABLE is not set to 1: the cold-storage root is NOT \
              explicitly marked durable. The compaction ledger (analytics_compaction_batches) \
              is the source of truth and the objects under this path are only its \
-             materialization — if this mount is ephemeral or non-redundant, configure durable \
+             materialization, if this mount is ephemeral or non-redundant, configure durable \
              object storage/backup for it or set ANALYTICS_COLD_STORAGE_DURABLE=1 to silence \
              this warning after wiring durability up."
         );
@@ -475,8 +475,8 @@ mod tests {
     ];
 
     /// A .env file that CANNOT parse makes `dotenvy::dotenv` fail with a
-    /// non-NotFound error — the branch that must be LOUD (the silent
-    /// NotFound case — no .env anywhere — stays silent on purpose).
+    /// non-NotFound error, the branch that must be LOUD (the silent
+    /// NotFound case, no .env anywhere, stays silent on purpose).
     #[test]
     fn malformed_dotenv_file_is_reported_not_swallowed() {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -485,7 +485,7 @@ mod tests {
         // ladder tests, whose ambient vars are unset).
         std::env::set_var("DATABASE_URL", "postgres://ci-pin@localhost/ci");
         let _snapshot = EnvSnapshot::take(&["DATABASE_URL"]);
-        let dir = std::env::temp_dir().join(format!("apexmail_cfg_env_{}", std::process::id())); // nosemgrep: rust.lang.security.temp-dir.temp-dir — test fixture under a unique pid/uuid path — no predictable-name temp collision
+        let dir = std::env::temp_dir().join(format!("apexmail_cfg_env_{}", std::process::id())); // nosemgrep: rust.lang.security.temp-dir.temp-dir, test fixture under a unique pid/uuid path, no predictable-name temp collision
         std::fs::create_dir_all(&dir).expect("temp dir");
         std::fs::write(dir.join(".env"), "THIS LINE HAS NO EQUALS SIGN\n").expect("bad .env");
         let cwd = std::env::current_dir().expect("cwd");
@@ -509,7 +509,7 @@ mod tests {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _snapshot = EnvSnapshot::take(FROM_ENV_VARS);
         std::env::set_var("NODE_ENV", "production");
-        // SET (not remove) — dotenvy never overrides an existing var, and a
+        // SET (not remove), dotenvy never overrides an existing var, and a
         // workspace .env would otherwise refill DATABASE_URL.
         std::env::set_var("DATABASE_URL", "");
         std::env::set_var("REDIS_URL", "");
@@ -522,7 +522,7 @@ mod tests {
         // G.7: production keeps the empty database URL (no invented default).
         assert_eq!(cfg.database_url, "");
         // Every other hostile value was reset to its safe default. The
-        // empty-redis reset RE-READS REDIS_URL — an explicitly-empty var is
+        // empty-redis reset RE-READS REDIS_URL, an explicitly-empty var is
         // re-applied as-is (a workspace .env would refill a REMOVED var, so
         // the unwrap_or_else literal is shadowed in dotenv environments).
         assert_eq!(cfg.redis_url, "");
@@ -533,18 +533,18 @@ mod tests {
     }
 
     /// OUTSIDE production the empty database URL gets the local
-    /// trust-style development default — no credentials embedded.
+    /// trust-style development default, no credentials embedded.
     #[test]
     fn from_env_development_falls_back_to_the_local_trust_database_url() {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _snapshot = EnvSnapshot::take(FROM_ENV_VARS);
         // PIN development (not remove): from_env loads a workspace `.env`,
-        // and dotenvy never overrides an EXISTING var — on the deploy host
+        // and dotenvy never overrides an EXISTING var, on the deploy host
         // /opt/apexmail/.env carries NODE_ENV=production, refilling a
         // REMOVED var and flipping this test to the production branch
         // (deploy 2026-10-11). An explicitly pinned var cannot be refilled.
         std::env::set_var("NODE_ENV", "development");
-        // SET empty (not remove) — a workspace .env would refill DATABASE_URL
+        // SET empty (not remove), a workspace .env would refill DATABASE_URL
         // because dotenvy never overrides an existing var.
         std::env::set_var("DATABASE_URL", "");
         let cfg = AnalyticsConfig::from_env();
@@ -564,7 +564,7 @@ mod tests {
         );
     }
 
-    /// `validate` rejects each hostile field with a SPECIFIC error — every
+    /// `validate` rejects each hostile field with a SPECIFIC error, every
     /// guard enumerated (empty urls, zero batch/retention, inverted
     /// retention, out-of-range schedule hours, zero clickhouse connections).
     #[test]

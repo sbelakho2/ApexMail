@@ -2,7 +2,7 @@
 //!
 //! # Security
 //!
-//! ## O-16.7 — DOM-based HTML manipulation
+//! ## O-16.7, DOM-based HTML manipulation
 //!
 //! **Root cause**: `add_tracking_pixel()` used byte-level `windows(7).rposition(b"</body>")`
 //! which could match `</body>` inside `<script>`, `<style>`, or text content (false positive).
@@ -59,7 +59,7 @@ pub struct TrackingPayload {
 // that ENCODE path exactly (same key derivation inputs, same binary payload
 // layout v2/v3, same IV||tag||ciphertext wire format) so every token the
 // worker embeds decodes on the service side. Previously the worker emitted
-// base64url(JSON) which the service could never decode — every rewritten
+// base64url(JSON) which the service could never decode, every rewritten
 // link fell back to the marketing homepage and opens were never recorded.
 
 /// Env var holding the shared master secret (same name as tracking-service).
@@ -69,7 +69,7 @@ const IV_LEN: usize = 12;
 const AUTH_TAG_LEN: usize = 16;
 
 /// Read the shared tracking master secret. Returns an error string when the
-/// key is unset or too short — callers must NOT emit tokens in that case
+/// key is unset or too short, callers must NOT emit tokens in that case
 /// (they would be undecodable and leak the payload shape).
 fn tracking_secret() -> Result<zeroize::Zeroizing<String>, &'static str> {
     let key = zeroize::Zeroizing::new(std::env::var(TRACKING_SECRET_KEY_ENV).unwrap_or_default());
@@ -84,7 +84,7 @@ fn tracking_secret() -> Result<zeroize::Zeroizing<String>, &'static str> {
     Ok(key)
 }
 
-/// HMAC-SHA256(secret, info) truncated to `len` bytes — identical to
+/// HMAC-SHA256(secret, info) truncated to `len` bytes, identical to
 /// tracking-service `derive_key_hmac`.
 fn derive_key_hmac(secret: &[u8], info: &[u8], len: usize) -> zeroize::Zeroizing<Vec<u8>> {
     use hmac::{Hmac, Mac};
@@ -102,7 +102,7 @@ fn write_u16be(buf: &mut Vec<u8>, v: u16) {
 
 /// Serialize into the service's binary payload format:
 /// version u8 + u16-BE length-prefixed tenantId, messageId, recipient,
-/// linkId and (v3 only) originalUrl — identical to tracking-service
+/// linkId and (v3 only) originalUrl, identical to tracking-service
 /// `serialize_tracking_data`.
 fn serialize_payload(
     tenant_id: &str,
@@ -192,18 +192,18 @@ pub fn encode_tracking_id(payload: &TrackingPayload) -> Result<String, &'static 
 
 /// F13: build the unsubscribe identity/link for ONE outgoing copy, using the
 /// tracking-service's v2 token codec (`generate_unsubscribe_token_with_message`)
-/// with SERVER-OWNED identity — the persisted tenant id, the originating
+/// with SERVER-OWNED identity, the persisted tenant id, the originating
 /// message id, and this copy's envelope recipient. The token's
 /// authenticated envelope IS the persisted attribution: activating the link
 /// later names exactly this message even after a newer send to the same
 /// recipient (the legacy latest-message lookup could misattribute).
 ///
 /// * Returns `None` (and the send proceeds unchanged) when the shared
-///   `TRACKING_SECRET_KEY` is not configured — suppression NEVER depends on
+///   `TRACKING_SECRET_KEY` is not configured, suppression NEVER depends on
 ///   attribution success; the recipient's unsubscribe still works through
 ///   the legacy token paths.
 /// * The URL feeds the `List-Unsubscribe` header (plus
-///   `List-Unsubscribe-Post: List-Unsubscribe=One-Click` — the RFC 8058 §3
+///   `List-Unsubscribe-Post: List-Unsubscribe=One-Click`, the RFC 8058 §3
 ///   literal, fixed in batch 2; the tracking-service serves the one-click
 ///   POST on the same route) and `{{unsubscribe_url}}`
 ///   placeholders in the caller's HTML/text bodies.
@@ -302,7 +302,7 @@ fn build_payload(
 }
 
 /// A stable per-anchor link identity: FNV-1a 64 of the original href, hex.
-/// Deterministic on purpose — a retried/resent message maps the same anchor
+/// Deterministic on purpose, a retried/resent message maps the same anchor
 /// to the same id, so click attribution cannot drift between attempts.
 fn link_id_for(href: &str) -> String {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
@@ -379,8 +379,8 @@ pub fn add_tracking_pixel(html: &str, job: &EmailJob, config: &TrackingConfig) -
 /// mailto/tel/anchor/template/unsubscribe hrefs). The rewrite is then
 /// applied to the ORIGINAL HTML in a SINGLE left-to-right scan (see
 /// [`rewrite_href_spans`]) keyed by the href VALUE, so every attribute
-/// spelling resolves — double-quoted, single-quoted, unquoted, and
-/// entity-encoded (`&amp;`) — preserving the document's structure. The
+/// spelling resolves, double-quoted, single-quoted, unquoted, and
+/// entity-encoded (`&amp;`), preserving the document's structure. The
 /// previous implementation substring-searched the whole document once per
 /// replacement key and only ever matched the double-quoted DOM-decoded
 /// spelling, silently losing analytics for the rest.
@@ -471,7 +471,7 @@ struct HrefSpan {
 /// (entity-decoded) value is in `tracked_by_value`.
 ///
 /// Invariants:
-/// * ONE pass, O(hrefs) map lookups — no per-key full-document scans.
+/// * ONE pass, O(hrefs) map lookups, no per-key full-document scans.
 /// * Spans are emitted in document order and never overlap (each starts at
 ///   a distinct `href=` occurrence and ends before the next scan position).
 /// * ASCII lowercasing is byte-length preserving, so indices found in the
@@ -497,7 +497,7 @@ fn rewrite_href_spans(html: &str, tracked_by_value: &HashMap<String, String>) ->
         let value_end = match quote {
             Some(q) => match html[value_start..].find(q) {
                 Some(rel_end) => value_start + rel_end,
-                None => continue, // unterminated quote — leave untouched
+                None => continue, // unterminated quote, leave untouched
             },
             // Unquoted values end at the first whitespace or `>`.
             None => {
@@ -620,7 +620,7 @@ mod tests {
     /// is AES-128-GCM encrypted (confidentiality is the cipher's job), and
     /// the tracking-service consumes tenant_id directly for redirect-domain
     /// authorization (domains.tenant_id) and the recipient for suppression
-    /// — a hashed value made every click fall back and every unsubscribe
+    ///, a hashed value made every click fall back and every unsubscribe
     /// suppress a hash no sender ever matches. Analytics privacy is applied
     /// at ingest (recipient_for_analytics), not in the token.
     #[test]
@@ -635,7 +635,7 @@ mod tests {
     }
 
     /// C: a worker-encoded token must decode with the tracking-service codec
-    /// under the SAME key — this is the exact production contract.
+    /// under the SAME key, this is the exact production contract.
     #[test]
     fn worker_token_decodes_in_tracking_service_codec() {
         let _guard = with_test_secret();
@@ -656,7 +656,7 @@ mod tests {
     }
 
     /// Open-pixel tokens (no original URL, no link) use payload v2 and also
-    /// decode — with `link_id: None`, never a fabricated id.
+    /// decode, with `link_id: None`, never a fabricated id.
     #[test]
     fn worker_open_token_decodes_in_tracking_service_codec() {
         let _guard = with_test_secret();
@@ -1085,7 +1085,7 @@ mod adversarial_rewrite_tests {
         });
     }
 
-    /// Without the shared secret nothing is rewritten — no unsigned token is
+    /// Without the shared secret nothing is rewritten, no unsigned token is
     /// ever emitted into customer HTML.
     #[test]
     fn missing_secret_leaves_every_href_direct() {
@@ -1210,7 +1210,7 @@ mod coverage_arms {
         assert!(out.contains("#anchor"), "{out}");
         // A value whose quote only terminates at the NEXT attribute's quote
         // is one anchor per the HTML5 parse (browsers see the same merged
-        // attribute value) — the rewrite is consistent with that parse.
+        // attribute value), the rewrite is consistent with that parse.
         assert!(
             out.matches("https://track.example.com/c/").count() >= 4,
             "all four DOM anchors are rewritten: {out}"
@@ -1330,7 +1330,7 @@ mod adversarial_batch {
     }
 
     /// Multiple in-raw-text decoys: the scan walks backwards through ALL of
-    /// them and only ever injects before a genuine `</body>` — or appends.
+    /// them and only ever injects before a genuine `</body>`, or appends.
     #[test]
     fn pixel_walks_back_through_every_raw_text_decoy() {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -1441,7 +1441,7 @@ mod residual_arms {
     }
 
     /// The LAST `</body>` candidate lives INSIDE a script: the backwards
-    /// scan must skip it (logging the skip) and keep walking — the pixel
+    /// scan must skip it (logging the skip) and keep walking, the pixel
     /// never lands inside the script.
     #[test]
     fn pixel_skips_a_trailing_body_decoy_inside_script() {

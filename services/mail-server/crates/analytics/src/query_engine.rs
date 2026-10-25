@@ -1,4 +1,4 @@
-//! Query engine — thin facade that delegates all analytic queries to ClickHouseEngine.
+//! Query engine, thin facade that delegates all analytic queries to ClickHouseEngine.
 //!
 //! Previously used PostgreSQL (sqlx::PgPool). All queries now route through
 //! ClickHouse's columnar engine for better OLAP performance.
@@ -30,7 +30,7 @@ pub enum QueryError {
 /// Thin facade over [`ClickHouseEngine`] for analytic queries.
 ///
 /// All query methods delegate to ClickHouse. No caching or transformation
-/// layer is applied — this is a pure delegation pattern.
+/// layer is applied, this is a pure delegation pattern.
 pub struct QueryEngine {
     clickhouse: ClickHouseEngine,
 }
@@ -131,7 +131,7 @@ mod tests {
     use super::*;
 
     /// Verify that QueryEngine delegates to ClickHouseEngine correctly.
-    /// This test does NOT require a running ClickHouse instance — it validates
+    /// This test does NOT require a running ClickHouse instance, it validates
     /// the delegation layer, not the underlying engine.
     #[test]
     fn test_query_engine_construction() {

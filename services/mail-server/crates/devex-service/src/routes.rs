@@ -36,7 +36,7 @@ pub struct AppState {
     pub openapi: Arc<OpenApiGenerator>,
     pub onboarding: Arc<OnboardingService>,
     pub webhook_tester: Arc<WebhookTester>,
-    /// P1 #6: per-workload credentials — the dedicated `DEVEX_AUTH_TOKEN`
+    /// P1 #6: per-workload credentials, the dedicated `DEVEX_AUTH_TOKEN`
     /// is the only accepted secret when configured; the universal token is
     /// legacy fallback (non-production).
     pub service_auth: ServiceAuth,
@@ -48,8 +48,8 @@ impl AppState {
     /// P1 #6: the per-workload credential is resolved from the environment
     /// LENIENTLY here (no production refusal) so config-driven construction
     /// never fails on auth grounds; the binary enforces the production boot
-    /// refusal via `ServiceAuth::from_env()` — which yields the identical
-    /// resolution — before serving traffic.
+    /// refusal via `ServiceAuth::from_env()`, which yields the identical
+    /// resolution, before serving traffic.
     pub fn from_config(cfg: DevExConfig) -> Result<Self, crate::types::DevExError> {
         let openapi = OpenApiGenerator::new(&cfg.current_api_version, &cfg.api_base_url);
         // O-20.2: Pass all signing secrets for rotation support
@@ -113,12 +113,12 @@ async fn require_service_token(
         return Ok(next.run(req).await);
     }
     // P1 #6: a configured dedicated token means the universal
-    // INTERNAL_SERVICE_TOKEN no longer authorizes anything here — call out
+    // INTERNAL_SERVICE_TOKEN no longer authorizes anything here, call out
     // unmigrated callers loudly (they get 401 either way).
     if state.service_auth.is_refused_universal_attempt(&provided) {
         tracing::warn!(
             "request refused: the universal INTERNAL_SERVICE_TOKEN was presented but \
-             DEVEX_AUTH_TOKEN is configured — the caller must migrate to the dedicated \
+             DEVEX_AUTH_TOKEN is configured, the caller must migrate to the dedicated \
              per-workload token"
         );
     }
@@ -127,7 +127,7 @@ async fn require_service_token(
 
 // ── Handlers ─────────────────────────────────────────────────────────────────
 
-/// GET /versions — list all API versions.
+/// GET /versions, list all API versions.
 async fn handle_versions(State(state): State<AppState>) -> impl IntoResponse {
     let versions = state.versions.list_versions();
     let current = &state.config.current_api_version;
@@ -137,7 +137,7 @@ async fn handle_versions(State(state): State<AppState>) -> impl IntoResponse {
     }))
 }
 
-/// GET /sdks — list available SDKs.
+/// GET /sdks, list available SDKs.
 async fn handle_sdks(State(state): State<AppState>) -> impl IntoResponse {
     let sdks = state.sdk_manager.list_sdks();
     let items: Vec<serde_json::Value> = sdks
@@ -169,7 +169,7 @@ fn default_event_type() -> String {
     "message.delivered".into()
 }
 
-/// POST /webhooks/test — fire a test webhook.
+/// POST /webhooks/test, fire a test webhook.
 async fn handle_webhook_test(
     State(state): State<AppState>,
     Json(body): Json<WebhookTestRequest>,
@@ -180,13 +180,13 @@ async fn handle_webhook_test(
         .await
     {
         Ok(result) => match serde_json::to_value(result) {
-            // coverage: justified — the Ok arm needs a completed webhook
+            // coverage: justified, the Ok arm needs a completed webhook
             // round-trip to a PUBLIC host (send_test_webhook resolves DNS and
             // performs a live HTTP POST); offline CI can only reach the
             // validated-refusal arm below.
             Ok(value) => (StatusCode::OK, Json(value)).into_response(),
             Err(e) => {
-                // coverage: justified — WebhookTestResult derives Serialize
+                // coverage: justified, WebhookTestResult derives Serialize
                 // over plain fields, so to_value is infallible; the arm
                 // guards future field types only.
                 tracing::error!(error = %e, "Failed to serialize webhook test result");
@@ -205,13 +205,13 @@ async fn handle_webhook_test(
     }
 }
 
-/// GET /openapi.json — return the OpenAPI spec.
+/// GET /openapi.json, return the OpenAPI spec.
 async fn handle_openapi(State(state): State<AppState>) -> impl IntoResponse {
     let spec = state.openapi.generate_spec();
     Json(spec)
 }
 
-/// GET /onboarding/checklist — return the onboarding checklist.
+/// GET /onboarding/checklist, return the onboarding checklist.
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct OnboardingQuery {
@@ -244,7 +244,7 @@ struct HealthResponse {
     service: &'static str,
 }
 
-/// GET /health — basic health check.
+/// GET /health, basic health check.
 async fn handle_health() -> impl IntoResponse {
     Json(HealthResponse {
         status: "healthy",
@@ -285,7 +285,7 @@ mod tests {
         let app = if let Ok(state) = state {
             build_router(state)
         } else {
-            // coverage: justified — defensive early-return; from_config
+            // coverage: justified, defensive early-return; from_config
             // cannot fail in this environment (default signing secrets,
             // lenient auth), so the else arm is unreachable.
             return;
@@ -313,7 +313,7 @@ mod tests {
         let app = if let Ok(state) = state {
             build_router(state)
         } else {
-            // coverage: justified — defensive early-return (see
+            // coverage: justified, defensive early-return (see
             // test_health_endpoint).
             return;
         };
@@ -341,7 +341,7 @@ mod tests {
         let app = if let Ok(state) = state {
             build_router(state)
         } else {
-            // coverage: justified — defensive early-return (see
+            // coverage: justified, defensive early-return (see
             // test_health_endpoint).
             return;
         };
@@ -482,7 +482,7 @@ mod tests {
     }
 
     /// Legacy fallback (dedicated env unset): the universal token still
-    /// authenticates outside production — migration-safe behavior.
+    /// authenticates outside production, migration-safe behavior.
     #[tokio::test]
     async fn unset_dedicated_token_keeps_universal_token_working() {
         let mut state = AppState::from_config(DevExConfig::default()).expect("state");

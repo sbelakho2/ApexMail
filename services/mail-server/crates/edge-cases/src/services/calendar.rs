@@ -34,7 +34,7 @@ impl CalendarMethod {
     }
     /// Parse a calendar METHOD string (RFC 5546 §3.2).
     ///
-    /// # O-21.4 — Allowlist enforcement
+    /// # O-21.4, Allowlist enforcement
     /// Only the eight IANA-registered iCalendar methods are accepted:
     /// `PUBLISH`, `REQUEST`, `REPLY`, `ADD`, `CANCEL`, `REFRESH`,
     /// `COUNTER`, `DECLINECOUNTER`.
@@ -285,7 +285,7 @@ pub fn generate_ics(event: &CalendarEvent) -> String {
         format_datetime(&event.last_modified)
     ));
 
-    // Organizer — every interpolated value is ICS-escaped (F5): CN values
+    // Organizer, every interpolated value is ICS-escaped (F5): CN values
     // and mailto addresses previously went in raw, so a name containing
     // CR/LF/`:`/`;`/`,` could inject arbitrary properties into the ICS.
     if let Some(ref name) = event.organizer.name {
@@ -301,7 +301,7 @@ pub fn generate_ics(event: &CalendarEvent) -> String {
         ));
     }
 
-    // Attendees — same escaping for CN, ROLE, PARTSTAT and the address.
+    // Attendees, same escaping for CN, ROLE, PARTSTAT and the address.
     for att in &event.attendees {
         let mut params = Vec::new();
         if let Some(ref name) = att.name {
@@ -317,7 +317,7 @@ pub fn generate_ics(event: &CalendarEvent) -> String {
         ));
     }
 
-    // URL (validate scheme) — the URL body is still escaped so a newline in
+    // URL (validate scheme), the URL body is still escaped so a newline in
     // the path cannot terminate the property line.
     if let Some(ref url) = event.url {
         if url.starts_with("http://") || url.starts_with("https://") {
@@ -325,7 +325,7 @@ pub fn generate_ics(event: &CalendarEvent) -> String {
         }
     }
 
-    // Categories — escape each category; the list separator ',' stays real.
+    // Categories, escape each category; the list separator ',' stays real.
     if let Some(ref cats) = event.categories {
         if !cats.is_empty() {
             let escaped: Vec<String> = cats.iter().map(|c| escape_ics(c)).collect();
@@ -432,7 +432,7 @@ fn split_at_char_boundary(s: &str, max_chars: usize) -> (&str, &str) {
 
 /// Escape a TEXT value per RFC 5545 §3.3.11 (`\` `;` `,` and newlines).
 ///
-/// F5: `\r` (bare or as part of CRLF) is ALSO neutralized — a raw CR or LF
+/// F5: `\r` (bare or as part of CRLF) is ALSO neutralized, a raw CR or LF
 /// in an interpolated value would terminate the property line and allow
 /// CRLF injection of arbitrary ICS properties (e.g. `URL:evil`).
 fn escape_ics(text: &str) -> String {
@@ -883,7 +883,7 @@ mod tests {
     fn test_escape_ics() {
         assert_eq!(escape_ics("hello; world,test"), "hello\\; world\\,test");
         assert_eq!(escape_ics("line\nbreak"), "line\\nbreak");
-        // F5: CR and CRLF must not survive into the output — a raw CR/LF
+        // F5: CR and CRLF must not survive into the output, a raw CR/LF
         // terminates an ICS property line and enables property injection.
         assert_eq!(escape_ics("cr\ronly"), "cr\\nonly");
         assert_eq!(escape_ics("crlf\r\ninject"), "crlf\\n\\ninject");
@@ -927,7 +927,7 @@ mod tests {
 
         let ics = generate_ics(&event);
 
-        // No raw CR/LF may appear anywhere in the output — every line must be
+        // No raw CR/LF may appear anywhere in the output, every line must be
         // a single property ending in CRLF, so injected content cannot start
         // a new property. The escaped text stays on the ORGANIZER/ATTENDEE
         // line; the check is that no LINE begins with an injected property.
@@ -1215,7 +1215,7 @@ mod tests {
         assert!(ics.contains("URL:https://example.com/e"));
         assert!(ics.contains("CATEGORIES:work,urgent"));
         assert!(ics.contains("PRIORITY:1"));
-        // Long properties are folded at 75 chars — unfold before comparing.
+        // Long properties are folded at 75 chars, unfold before comparing.
         let unfolded = ics.replace("\r\n ", "");
         // FREQ is upper-cased; BYDAY values are passed through verbatim.
         assert!(unfolded.contains(

@@ -414,7 +414,7 @@ impl IdsEngine {
         self.conn_tracker.cleanup_all(timeout, tracker_timeout);
 
         // Evict stale alert rate-limit entries (older than 60 seconds).
-        // Audit SM5 F4: monotonic-safe subtraction — this runs in the
+        // Audit SM5 F4: monotonic-safe subtraction, this runs in the
         // background maintenance loop, whose panic would silently stop all
         // cleanup on a host younger than the window.
         let stale_cutoff = monotonic_cutoff(Instant::now(), Duration::from_secs(60));
@@ -500,7 +500,7 @@ impl IdsEngine {
     /// Without this (or equivalent external scheduling), the connection tracker
     /// and alert rate-limit map grow unboundedly for long-lived processes
     /// (the table is now hard-capped at `max_connections` between cleanups —
-    /// see `ConnectionTracker` — but stale entries still accumulate up to
+    /// see `ConnectionTracker`, but stale entries still accumulate up to
     /// that cap without this loop).
     /// The returned [`tokio::task::JoinHandle`] can be aborted by the caller
     /// to stop the background loop on shutdown.
@@ -535,7 +535,7 @@ impl IdsEngine {
 /// Monotonic-safe `now - window` (audit SM5 F4).
 ///
 /// Plain `Instant::now() - window` PANICS when the result precedes the
-/// monotonic epoch — i.e. on any host whose current uptime is shorter
+/// monotonic epoch, i.e. on any host whose current uptime is shorter
 /// than `window`. All window subtractions in this crate go through this
 /// helper: until the clock has been up for a full window, the cutoff
 /// degenerates to `now` (nothing expires yet).
@@ -1174,7 +1174,7 @@ mod tests {
         );
 
         // Empty payload on a plain "tcp" stream is not proof of a SYN packet
-        // either — the engine normally only sees application payloads.
+        // either, the engine normally only sees application payloads.
         let (_, alerts) = engine.inspect(source, 80, "tcp", b"");
         assert!(
             !alerts.iter().any(|a| a.id == 4000002),
@@ -1196,7 +1196,7 @@ mod tests {
 
     #[test]
     fn normalize_payload_utf8_percent_encoded_round_trips() {
-        // %C3%A9 is the UTF-8 encoding of 'é' — decoding must yield the two
+        // %C3%A9 is the UTF-8 encoding of 'é', decoding must yield the two
         // raw UTF-8 bytes, not the mangled byte-as-char form.
         let normalized = normalize_payload(b"%C3%A9");
         assert_eq!(normalized, "é".as_bytes());
@@ -1280,7 +1280,7 @@ mod tests {
     #[test]
     fn test_smtp_data_phase_nul_payload_is_not_dropped() {
         // A DATA-time binary body (PDF header + NUL bytes) must not trip
-        // anomaly 3000004 — previously ANY inbound message with a binary
+        // anomaly 3000004, previously ANY inbound message with a binary
         // attachment was classified as evasion and refused.
         let engine = make_inline_engine();
         let mut payload = b"Content-Type: application/pdf\r\n\r\n%PDF-1.7".to_vec();

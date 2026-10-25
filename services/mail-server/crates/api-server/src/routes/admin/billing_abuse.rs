@@ -1,4 +1,4 @@
-//! Admin billing abuse review — the operator surface for the
+//! Admin billing abuse review, the operator surface for the
 //! `billing-service` abuse machinery (audit F09 / wave G).
 //!
 //! `billing_service::maintenance` owns the canonical writers
@@ -17,12 +17,12 @@
 //! attributed as `system`).
 //!
 //! Routes:
-//! * `GET    /v1/admin/billing/abuse/reports`                 — review queue
-//! * `POST   /v1/admin/billing/abuse/reports`                 — record a report
-//! * `POST   /v1/admin/billing/abuse/reports/:id/review`      — transition
-//! * `POST   /v1/admin/billing/abuse/reports/:id/resolve`     — resolve
-//! * `POST   /v1/admin/billing/abuse/restrictions`            — impose
-//! * `DELETE /v1/admin/billing/abuse/restrictions/:tenant_id/:kind` — clear
+//! * `GET    /v1/admin/billing/abuse/reports`                , review queue
+//! * `POST   /v1/admin/billing/abuse/reports`                , record a report
+//! * `POST   /v1/admin/billing/abuse/reports/:id/review`     , transition
+//! * `POST   /v1/admin/billing/abuse/reports/:id/resolve`    , resolve
+//! * `POST   /v1/admin/billing/abuse/restrictions`           , impose
+//! * `DELETE /v1/admin/billing/abuse/restrictions/:tenant_id/:kind`, clear
 
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
@@ -189,7 +189,7 @@ pub struct ClearRestrictionQuery {
 
 // ── Handlers ───────────────────────────────────────────────────
 
-/// `GET /v1/admin/billing/abuse/reports` — the review queue (tenant/status
+/// `GET /v1/admin/billing/abuse/reports`, the review queue (tenant/status
 /// filters, bounded).
 async fn list_reports(
     State(state): State<AppState>,
@@ -268,7 +268,7 @@ async fn list_reports(
     Ok(Json(json!({ "reports": reports })))
 }
 
-/// `POST /v1/admin/billing/abuse/reports` — record an `open` report.
+/// `POST /v1/admin/billing/abuse/reports`, record an `open` report.
 async fn record_report(
     State(state): State<AppState>,
     auth: AuthUser,
@@ -313,7 +313,7 @@ async fn record_report(
     ))
 }
 
-/// `POST /v1/admin/billing/abuse/reports/:id/review` — audited lifecycle
+/// `POST /v1/admin/billing/abuse/reports/:id/review`, audited lifecycle
 /// transition (open → investigating → confirmed/dismissed/resolved).
 async fn review_report(
     State(state): State<AppState>,
@@ -356,7 +356,7 @@ async fn review_report(
     Ok(Json(json!({ "id": id, "status": body.status })))
 }
 
-/// `POST /v1/admin/billing/abuse/reports/:id/resolve` — terminal resolution
+/// `POST /v1/admin/billing/abuse/reports/:id/resolve`, terminal resolution
 /// (also clears the tenant's abuse restriction).
 async fn resolve_report(
     State(state): State<AppState>,
@@ -385,7 +385,7 @@ async fn resolve_report(
     Ok(Json(json!({ "id": id, "status": "resolved" })))
 }
 
-/// `POST /v1/admin/billing/abuse/restrictions` — impose an administrative
+/// `POST /v1/admin/billing/abuse/restrictions`, impose an administrative
 /// restriction (abuse/administrative/billing/verification).
 async fn impose_restriction(
     State(state): State<AppState>,
@@ -430,7 +430,7 @@ async fn impose_restriction(
     ))
 }
 
-/// `DELETE /v1/admin/billing/abuse/restrictions/:tenant_id/:kind` — clear one
+/// `DELETE /v1/admin/billing/abuse/restrictions/:tenant_id/:kind`, clear one
 /// restriction with the operator's reason.
 async fn clear_restriction(
     State(state): State<AppState>,
@@ -708,7 +708,7 @@ mod adversarial_tests {
     }
 
     /// A customer (non-system tenant) credential must never reach the abuse
-    /// surface — the system-tenant gate rejects it before the handler.
+    /// surface, the system-tenant gate rejects it before the handler.
     #[tokio::test]
     async fn abuse_surface_is_control_plane_only() {
         let Some(pool) = crate::test_db::canonical_pool("admin_billing_abuse_gate").await else {
@@ -722,7 +722,7 @@ mod adversarial_tests {
             "a tenant wildcard scope must not reach the control plane"
         );
 
-        // The same wildcard key works on its own tenant surface — the gate is
+        // The same wildcard key works on its own tenant surface, the gate is
         // about the /v1/admin prefix, not the credential itself.
         let (status, _body) = env.get("/v1/contacts/counts").await;
         assert!(

@@ -5,7 +5,7 @@ use crate::types::{ContentSuggestion, ImprovementType};
 type TemplateFn = fn(&str) -> String;
 
 fn urgent_0(t: &str) -> String {
-    format!("🔥 {t} — Act Now!")
+    format!("🔥 {t}, Act Now!")
 }
 fn urgent_1(t: &str) -> String {
     format!("Last chance: {t}")
@@ -17,7 +17,7 @@ fn urgent_3(t: &str) -> String {
     format!("Limited time: {t} expires soon")
 }
 fn urgent_4(t: &str) -> String {
-    format!("Hurry — {t} won't last")
+    format!("Hurry, {t} won't last")
 }
 
 fn friendly_0(t: &str) -> String {
@@ -69,7 +69,7 @@ fn curious_4(t: &str) -> String {
 }
 
 fn neutral_0(t: &str) -> String {
-    format!("{t} — a quick update")
+    format!("{t}, a quick update")
 }
 fn neutral_1(t: &str) -> String {
     format!("All about {t}")

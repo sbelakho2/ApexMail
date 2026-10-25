@@ -60,7 +60,7 @@ const SUPPRESSION_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
 /// Sentinel reason used by [`EmailProcessor::batch_suppression_check`] when
 /// the suppression DB query itself failed (as opposed to a genuine
 /// suppression). Recipients carrying this marker are REQUEUED, not
-/// suppressed — a DB blip must not permanently suppress the batch.
+/// suppressed, a DB blip must not permanently suppress the batch.
 const SUPPRESSION_CHECK_FAILED: &str = "suppression_check_failed";
 
 /// F59: the complete bounded set of `email_queue` statuses (mirrors the
@@ -79,12 +79,12 @@ const EMAIL_QUEUE_STATUSES: [&str; 8] = [
 ];
 
 /// F18: the dispatch-time tenant policy gate's query. NEVER wrapped in an
-/// allow-cache — see [`EmailProcessor::tenant_policy`].
+/// allow-cache, see [`EmailProcessor::tenant_policy`].
 const TENANT_STATUS_SQL: &str = "SELECT status FROM tenants WHERE id = $1";
 
 /// F18: the explicit dispatch-time tenant policy result. Nothing but
 /// [`TenantPolicy::Allowed`] may reach the external transport; every other
-/// variant DEFERS the job (requeue) and exits dispatch — the gate never
+/// variant DEFERS the job (requeue) and exits dispatch, the gate never
 /// fails open and never treats pending/unknown as permitted.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum TenantPolicy {
@@ -111,7 +111,7 @@ impl TenantPolicy {
 }
 
 /// F55: the explicit dispatch-time consent result. `Deferred` is distinct
-/// from both "no suppression" and "suppressed" — a FAILED verification is
+/// from both "no suppression" and "suppressed", a FAILED verification is
 /// never interpreted as permission to send.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ConsentDecision {
@@ -119,15 +119,15 @@ enum ConsentDecision {
     Allowed,
     /// Current authoritative state forbids it (durable reason recorded).
     Suppressed(String),
-    /// The verification itself failed — defer, do not send.
+    /// The verification itself failed, defer, do not send.
     Deferred(&'static str),
 }
 
-/// F55: the single authoritative dispatch-time consent query — global
+/// F55: the single authoritative dispatch-time consent query, global
 /// suppression AND the per-category preference, read together so the two
 /// dimensions cannot disagree.
 ///
-/// P1: each arm joins the ONE canonical candidate through `UNNEST` — the same
+/// P1: each arm joins the ONE canonical candidate through `UNNEST`, the same
 /// probe shape the claim-time batch probes use (see
 /// [`SUPPRESSION_BATCH_PROBE_SQL`]). With the sibling migration's
 /// `(tenant_id, lower(email))` functional index both arms are index-nested
@@ -153,7 +153,7 @@ const DISPATCH_CONSENT_SQL: &str = r#"
 /// UNNEST-equality-join form proven in
 /// `api-server/src/routes/provider_import/suppressions.rs`: each canonical
 /// candidate resolves through the `(tenant_id, lower(email))` functional index
-/// the sibling migration adds — and still runs (a scan, never an error)
+/// the sibling migration adds, and still runs (a scan, never an error)
 /// without it. `e.email` is returned (the canonical candidate the caller keyed
 /// the check with), not a second `LOWER()` of the stored column.
 const SUPPRESSION_BATCH_PROBE_SQL: &str = r#"
@@ -163,7 +163,7 @@ const SUPPRESSION_BATCH_PROBE_SQL: &str = r#"
     WHERE s.tenant_id = $1
 "#;
 
-/// P1: the claim-time category opt-out probe — same UNNEST-equality-join
+/// P1: the claim-time category opt-out probe, same UNNEST-equality-join
 /// conversion as [`SUPPRESSION_BATCH_PROBE_SQL`] (see that constant for the
 /// index rationale).
 const CATEGORY_OPTOUT_BATCH_PROBE_SQL: &str = r#"
@@ -182,7 +182,7 @@ const ERROR_THRESHOLD: usize = 10;
 /// Cooldown duration when error rate is too high.
 const ERROR_COOLDOWN: Duration = Duration::from_secs(60);
 
-/// G.3b: per-recipient suppression — remove the recipient from the pending
+/// G.3b: per-recipient suppression, remove the recipient from the pending
 /// set and only mark the row 'suppressed' when nothing remains owed.
 const SUPPRESSED_UPDATE_SQL: &str = r#"
     UPDATE email_queue
@@ -213,7 +213,7 @@ const SUPPRESSED_UPDATE_SQL: &str = r#"
       AND (metadata->>'lease_token') IS NOT DISTINCT FROM $4::text
 "#;
 
-/// Audit-3: per-recipient hard bounce — the same contract as
+/// Audit-3: per-recipient hard bounce, the same contract as
 /// [`SUPPRESSED_UPDATE_SQL`] / handle_success: the bounced recipient is
 /// removed from `metadata.pending_recipients` and the row only becomes
 /// terminal 'bounced' when the pending set empties. Previously the whole
@@ -248,7 +248,7 @@ const HARD_BOUNCE_UPDATE_SQL: &str = r#"
       AND (metadata->>'lease_token') IS NOT DISTINCT FROM $4::text
 "#;
 
-/// Audit-3: per-recipient DLQ failure — the attempt budget of ONE recipient
+/// Audit-3: per-recipient DLQ failure, the attempt budget of ONE recipient
 /// exhausting must not abandon the row's other recipients. The failed
 /// recipient leaves the pending set (its own delivery is dead-lettered by
 /// the caller's email_dlq insert); the row terminalizes to 'failed' only
@@ -285,16 +285,16 @@ const DLQ_FAIL_UPDATE_SQL: &str = r#"
 "#;
 
 /// F25: derive the audit `messages` row's progress from the COMPLETE set of
-/// its recipient rows (`email_queue`) — the shared canonical contract lives
+/// its recipient rows (`email_queue`), the shared canonical contract lives
 /// in `apexmail_lib::email_headers::RECONCILE_MESSAGE_PROGRESS_SQL` (also
 /// executed by the SES callback handler, F75) so the worker and the API
 /// cannot drift apart. Semantics are documented there:
 ///
 /// * recipients still owed a delivery exist → `partial` (a multi-recipient
-///   message with one delivered copy is NOT sent — the first-recipient
+///   message with one delivered copy is NOT sent, the first-recipient
 ///   success used to flip the whole message to 'sent');
 /// * every recipient row terminal with ≥1 suppressed/bounced/failed/
-///   cancelled → `partial` (final partial success — includes all-failed,
+///   cancelled → `partial` (final partial success, includes all-failed,
 ///   which used to stay 'processing' forever because only successes
 ///   reconciled);
 /// * every recipient row `sent`, ≥1 not yet confirmed delivered → `sent`
@@ -305,19 +305,19 @@ const DLQ_FAIL_UPDATE_SQL: &str = r#"
 ///
 /// Scheduled parents are accepted: the transition fires from
 /// `queued`/`scheduled`/`processing`/`partial`/`sent` alike. Terminal states
-/// set by other paths ('cancelled') are never crouched — the WHERE clause
+/// set by other paths ('cancelled') are never crouched, the WHERE clause
 /// does not match them.
 const MESSAGES_PROGRESS_UPDATE_SQL: &str =
     apexmail_lib::email_headers::RECONCILE_MESSAGE_PROGRESS_SQL;
 
-/// F25: claim-time parent transition — the moment a worker claims recipient
+/// F25: claim-time parent transition, the moment a worker claims recipient
 /// rows of a `queued`/`scheduled` message, the parent moves to
 /// 'processing'. This is the scheduled → processing edge (scheduled
 /// messages previously had no worker-side transition at all) and gives the
 /// API's cancellation check a parent-visible dispatch signal (F24).
 ///
 /// Perf audit 2026-10-18 (finding 18): ONE statement covers ALL tenants in
-/// the claim batch — the previous form ran one UPDATE per tenant per poll
+/// the claim batch, the previous form ran one UPDATE per tenant per poll
 /// (a 100-tenant poll paid 100 extra statements on a continuous loop). The
 /// per-row semantics are unchanged: a parent moves only when its
 /// `(tenant_id, id)` pair was claimed in this batch AND its status is still
@@ -391,7 +391,7 @@ const GET_DOMAIN_SQL: &str = r#"
       AND d.dkim_private_key LIKE 'dkim:v1:%'
 "#;
 
-/// Audit-1: [`GET_DOMAIN_SQL`] row — the [`Domain`] columns plus the routing
+/// Audit-1: [`GET_DOMAIN_SQL`] row, the [`Domain`] columns plus the routing
 /// source data (one JSON object per warming/active dedicated IP).
 #[derive(Debug, sqlx::FromRow)]
 struct DomainWithRoutingRow {
@@ -451,7 +451,7 @@ fn warmup_day_since(now: DateTime<Utc>, started_at: DateTime<Utc>) -> u32 {
 /// One dedicated-IP routing candidate with its DERIVED warmup standing.
 ///
 /// The warmup day and daily cap come from `warmup_started_at` + the canonical
-/// `mail_common::warmup` schedule — no materialized `warmup_day` /
+/// `mail_common::warmup` schedule, no materialized `warmup_day` /
 /// `warmup_daily_limit` column participates, so a job never has to advance
 /// persisted state for routing to be correct.
 #[derive(Debug, Clone)]
@@ -465,7 +465,7 @@ struct RoutingCandidate {
     /// Elapsed warmup days (0 for an active IP without a recorded start).
     warmup_day: u32,
     /// `Some(canonical daily cap)` while the IP is still warming; `None` for
-    /// an active (graduated) IP — routed dedicated, never throttled.
+    /// an active (graduated) IP, routed dedicated, never throttled.
     daily_limit: Option<u64>,
 }
 
@@ -478,7 +478,7 @@ impl RoutingCandidate {
 /// SELECT (pure, no I/O): build the ordered dedicated-IP candidate pool for
 /// one send from the tenant's dedicated identities.
 ///
-/// * warming rows come first, least-warmed first — they are the tightest
+/// * warming rows come first, least-warmed first, they are the tightest
 ///   reputation boundary and must keep receiving traffic to graduate;
 /// * active (graduated) rows follow, unthrottled. They keep the tenant on the
 ///   dedicated route instead of silently falling back to the shared pool.
@@ -497,14 +497,14 @@ fn select_delivery_ip(
     for ip in dedicated_ips {
         let source_ip: std::net::IpAddr = ip.ip_address.trim().parse().map_err(|_| {
             ProcessorError::Config(format!(
-                "dedicated IP identity {} has an unparseable source address {:?} — refusing to route",
+                "dedicated IP identity {} has an unparseable source address {:?}, refusing to route",
                 ip.id, ip.ip_address
             ))
         })?;
         let (warmup_day, daily_limit) = if ip.warming {
             let started_at = ip.warmup_started_at.ok_or_else(|| {
                 ProcessorError::Config(format!(
-                    "dedicated IP identity {} is 'warming' without warmup_started_at — \
+                    "dedicated IP identity {} is 'warming' without warmup_started_at, \
                      its canonical daily cap cannot be derived; refusing to route it unthrottled",
                     ip.id
                 ))
@@ -546,7 +546,7 @@ fn select_delivery_ip(
 // Audit-5: lease-token fencing for `email_queue`
 //
 // `email_queue` has NO lease_token column (migration 103 added one to
-// `queue_jobs`, the queue-provider's table, only) — but it does have a
+// `queue_jobs`, the queue-provider's table, only), but it does have a
 // `metadata` JSONB column, so the claim mints a fresh
 // `metadata.lease_token` (gen_random_uuid) on EVERY claim and every
 // post-claim row write predicates
@@ -617,8 +617,8 @@ const FETCH_JOBS_SQL: &str = r#"
                     -- jsonb_array_elements_text compared against the envelope
                     -- array). For the canonical all-string state, containment
                     -- is exactly "every pending element is an envelope
-                    -- element" (element-wise, duplicates ignored) — the same
-                    -- contract the old form expressed — and it is a single
+                    -- element" (element-wise, duplicates ignored), the same
+                    -- contract the old form expressed, and it is a single
                     -- containment op the planner evaluates without expanding
                     -- P pending elements against R envelope elements on EVERY
                     -- claim (the old O(P·R) fan-out). Corrupt-input nuance:
@@ -658,7 +658,7 @@ fn lease_token_of(job: &EmailJob) -> Option<&str> {
         .and_then(|v| v.as_str())
 }
 
-/// Audit-5: true when a fenced UPDATE affected nothing — the row no longer
+/// Audit-5: true when a fenced UPDATE affected nothing, the row no longer
 /// carries this claim's token (recovered + re-claimed by another worker).
 /// The write is intentionally a no-op; callers warn and skip follow-up
 /// effects (events, suppression, DLQ rows) so a fenced-out worker cannot
@@ -678,7 +678,7 @@ fn jittered_secs(base_secs: i64) -> i64 {
     ((base_secs as f64) * (1.0 + spread)).round().max(1.0) as i64
 }
 
-/// Audit-5: handle_success's row write — identical semantics to the
+/// Audit-5: handle_success's row write, identical semantics to the
 /// pre-fence inline SQL, plus the lease-token fence.
 const HANDLE_SUCCESS_UPDATE_SQL: &str = r#"
             UPDATE email_queue
@@ -723,7 +723,7 @@ const HANDLE_SUCCESS_UPDATE_SQL: &str = r#"
 ///
 /// This mirrors the transport's own MIME construction (same structured
 /// mailbox lists, same header set, same text/html/attachment parts) without
-/// the route-specific `X-ApexMail-Route` header — internal routing metadata
+/// the route-specific `X-ApexMail-Route` header, internal routing metadata
 /// is not part of the customer's message and must not enter the journal.
 /// Serialization is in-memory and cannot fail; the expect is the same one
 /// the SMTP transport uses for its explicit-envelope path.
@@ -818,7 +818,7 @@ const SOFT_BOUNCE_UPDATE_SQL: &str = r#"
               AND (metadata->>'lease_token') IS NOT DISTINCT FROM $5::text
 "#;
 
-/// Audit-5: requeue (deferral) write, fenced on the lease token — a stale
+/// Audit-5: requeue (deferral) write, fenced on the lease token, a stale
 /// worker must not be able to defer a row the new owner is processing.
 const REQUEUE_JOB_UPDATE_SQL: &str = r#"
             UPDATE email_queue
@@ -843,7 +843,7 @@ const REQUEUE_JOB_UPDATE_SQL: &str = r#"
 /// one UPDATE per claimed row per poll. The predicate is per row EXACTLY as
 /// before: each row matches only on ITS OWN id and THIS claim's lease token
 /// (`IS NOT DISTINCT FROM` keeps the legacy NULL-token rows releasable), so
-/// a row whose lease changed is not released — and not counted.
+/// a row whose lease changed is not released, and not counted.
 const RELEASE_REMAINDER_SQL: &str = r#"
             UPDATE email_queue q
             SET status = 'pending', locked_until = NULL, updated_at = NOW()
@@ -854,7 +854,7 @@ const RELEASE_REMAINDER_SQL: &str = r#"
               AND COALESCE(q.metadata->'pending_recipients', '[]'::jsonb) <> '[]'::jsonb
 "#;
 
-/// Audit-5: handle_permanent_job_failure's dead-letter write — previously
+/// Audit-5: handle_permanent_job_failure's dead-letter write, previously
 /// fenced on `status = 'processing'` only; now exactly fenced on the claim
 /// token as well.
 const PERMANENT_FAILURE_UPDATE_SQL: &str = r#"
@@ -864,7 +864,7 @@ const PERMANENT_FAILURE_UPDATE_SQL: &str = r#"
                AND (metadata->>'lease_token') IS NOT DISTINCT FROM $3::text
 "#;
 
-/// G.3c: duplicate-window reclaim bookkeeping — drop the recipient from the
+/// G.3c: duplicate-window reclaim bookkeeping, drop the recipient from the
 /// pending set and append it to an auditable `possibly_sent` metadata list.
 /// When the pending set empties the row terminalizes 'sent' AND `sent_at` is
 /// stamped (COALESCE keeps the first stamp on re-runs): the crash-recovery
@@ -911,11 +911,11 @@ const POSSIBLY_SENT_UPDATE_SQL: &str = r#"
       AND (metadata->>'lease_token') IS NOT DISTINCT FROM $3::text
 "#;
 
-/// WORKER PRE-SEND DLP gate — HIGH severity (engine `Block`) refusal write,
+/// WORKER PRE-SEND DLP gate, HIGH severity (engine `Block`) refusal write,
 /// fenced on the lease token like every durable write. Mirrors the
-/// [`HARD_BOUNCE_UPDATE_SQL`] shape exactly — per-recipient removal from
+/// [`HARD_BOUNCE_UPDATE_SQL`] shape exactly, per-recipient removal from
 /// `metadata.pending_recipients`, terminal `bounced` only when the pending
-/// set empties — because the refusal IS the typed DSN this pipeline issues
+/// set empties, because the refusal IS the typed DSN this pipeline issues
 /// to the sender for content policy. Deliberately NO suppression insert and
 /// NO sales sender-health feedback here: a policy refusal proves nothing
 /// about the recipient's mailbox and is not a reputation bounce. `$4` is the
@@ -952,7 +952,7 @@ const DLP_REFUSAL_UPDATE_SQL: &str = r#"
       AND (metadata->>'lease_token') IS NOT DISTINCT FROM $5::text
 "#;
 
-/// WORKER PRE-SEND DLP gate — MEDIUM severity (engine `Quarantine`) hold
+/// WORKER PRE-SEND DLP gate, MEDIUM severity (engine `Quarantine`) hold
 /// write, fenced on the lease token. `deferred` is the queue's honest
 /// hold-in-queue state: the poller claims only `pending`/expired-
 /// `processing` rows, so a deferred row stays visible, unsent, and
@@ -974,7 +974,7 @@ const DLP_HOLD_UPDATE_SQL: &str = r#"
 "#;
 
 // ─────────────────────────────────────────────────────────────────────────────
-// W4A: EU-only routing — the fail-closed hold
+// W4A: EU-only routing, the fail-closed hold
 //
 // The tenant routing mode (`tenants.settings.routingMode`, read through the
 // shared typed reader `mail_common::RoutingMode`) is a routing FACT the send
@@ -982,15 +982,15 @@ const DLP_HOLD_UPDATE_SQL: &str = r#"
 // OWN relay MTA and nothing else. When that own-MTA route is unavailable —
 // no approved dedicated-IP identity, an unconfigured/unverifiable dedicated
 // transport, DKIM signing unavailable, the warmup quota exhausted or its
-// store unreachable — the message is HELD, never handed to the shared
+// store unreachable, the message is HELD, never handed to the shared
 // third-party transport (SES). This is the plan's headline invariant:
 // "A message on EU-only routing is held, never sent through SES or any
 // non-EU transport."
 //
 // Hold mechanism (chosen to mirror the pre-send DLP quarantine, the existing
-// precedent): the row moves to `deferred` — the queue's honest hold-in-queue
+// precedent): the row moves to `deferred`, the queue's honest hold-in-queue
 // state, never re-claimed by the poller because it claims only `pending` and
-// expired-`processing` rows — with the NAMED reason in `error_message` and a
+// expired-`processing` rows, with the NAMED reason in `error_message` and a
 // `metadata.eu_only_routing` annotation (disposition/mode/reason/detail).
 // The row write and the hash-chained `audit_logs` evidence row commit in ONE
 // transaction: a hold without evidence must not exist. The message stays
@@ -1017,22 +1017,22 @@ const EU_ONLY_HOLD_UPDATE_SQL: &str = r#"
       AND (metadata->>'lease_token') IS NOT DISTINCT FROM $4::text
 "#;
 
-/// W4A: named reason — no approved dedicated-IP identity exists for this
+/// W4A: named reason, no approved dedicated-IP identity exists for this
 /// tenant, so there is no own-MTA route to send from.
 const EU_ONLY_HOLD_NO_OWN_MTA_ROUTE: &str = "eu_only_own_mta_route_unavailable";
-/// W4A: named reason — the own-MTA route cannot be dispatched on this worker
+/// W4A: named reason, the own-MTA route cannot be dispatched on this worker
 /// (dedicated transport missing or unable to bind the source IP).
 const EU_ONLY_HOLD_OWN_MTA_NOT_DISPATCHABLE: &str = "eu_only_own_mta_transport_unavailable";
-/// W4A: named reason — DKIM signing is disabled, so the own-MTA route's
+/// W4A: named reason, DKIM signing is disabled, so the own-MTA route's
 /// mandatory local signature cannot be produced.
 const EU_ONLY_HOLD_DKIM_DISABLED: &str = "eu_only_dkim_unavailable";
-/// W4A: named reason — every own-MTA identity is at its canonical daily
+/// W4A: named reason, every own-MTA identity is at its canonical daily
 /// warmup cap.
 const EU_ONLY_HOLD_WARMUP_LIMIT: &str = "eu_only_warmup_limit";
-/// W4A: named reason — the warmup quota store is unreachable, so admission
+/// W4A: named reason, the warmup quota store is unreachable, so admission
 /// cannot be proven (fail closed).
 const EU_ONLY_HOLD_WARMUP_STORE: &str = "eu_only_warmup_admission_unavailable";
-/// W4A: named reason — the resolved route was NOT the own-MTA dedicated
+/// W4A: named reason, the resolved route was NOT the own-MTA dedicated
 /// route. Structurally unreachable (planning already holds without a
 /// candidate); if it ever fires, the guard holds the message instead of
 /// crossing the transport boundary the mode exists to forbid.
@@ -1040,12 +1040,12 @@ const EU_ONLY_HOLD_ROUTE_GUARD: &str = "eu_only_route_guard_violation";
 
 /// W4A: the routing-mode lookup itself failed. The row is DEFERRED
 /// (retryable, 5-minute requeue) rather than held: the mode is UNKNOWN, not
-/// unavailable — and the job never proceeds past this deferral, so the
+/// unavailable, and the job never proceeds past this deferral, so the
 /// EU-only invariant cannot be violated by an unreadable setting.
 const ROUTING_MODE_LOOKUP_FAILED: &str = "routing_mode_unavailable";
 
 // ─────────────────────────────────────────────────────────────────────────────
-// SALES ISOLATION — the fail-closed hold (`email::sales` owns the decision)
+// SALES ISOLATION, the fail-closed hold (`email::sales` owns the decision)
 //
 // The invariant: "Sales sending is isolated. It never shares a transport
 // account, IP, sending domain or suppression list with customer mail."
@@ -1055,7 +1055,7 @@ const ROUTING_MODE_LOOKUP_FAILED: &str = "routing_mode_unavailable";
 // provenance (`metadata.source = "sales-autopilot"` / the typed
 // `sales_step_execution_id` column) may travel on the SALES transport slot
 // (`SALES_TRANSPORT=relay|ses_account`) and nowhere else. The customer
-// hybrid transport — SES account, relay, dedicated IPs, warmup pools — is
+// hybrid transport, SES account, relay, dedicated IPs, warmup pools, is
 // structurally unreachable for it.
 //
 // Hold mechanism: EXACTLY the DLP-quarantine/EU-only shape (the same
@@ -1091,7 +1091,7 @@ const SALES_HOLD_UPDATE_SQL: &str = r#"
 enum SalesSendOutcome {
     /// Not a sales send: the customer path runs unchanged.
     NotSales,
-    /// A sales send planned onto this route — the only route it may travel.
+    /// A sales send planned onto this route, the only route it may travel.
     Route(DeliveryRoute),
     /// The message was HELD (named reason, annotation, audit evidence) and
     /// dispatch must exit without consulting any other path.
@@ -1128,14 +1128,14 @@ const TENANT_ROUTING_MODE_SQL: &str = "SELECT settings->'routingMode' FROM tenan
 //   resubmission right and the primary key remains the guard.
 //
 // Why in-place reclaim cannot double-submit: the claim is a single
-// INSERT ... ON CONFLICT DO UPDATE statement — Postgres locks the conflicting
+// INSERT ... ON CONFLICT DO UPDATE statement, Postgres locks the conflicting
 // row and re-evaluates the WHERE predicate under that lock, so a second
 // concurrent claim observes the first claim's fresh `reserved_at` and is
 // refused. The residual window is a process that was merely paused (not
 // crashed) longer than the lease and then returns to submit: the lease is
 // sized far above any per-send budget (15 minutes vs seconds), reclaim is
 // logged and counted, and this residual ambiguity is inherent to any
-// at-least-once transport — unlike the old TTL marker, the window is now
+// at-least-once transport, unlike the old TTL marker, the window is now
 // named, bounded, observable, and never silently re-sends within a lease.
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -1150,11 +1150,11 @@ const ACCEPTANCE_RESERVE_LEASE: Duration = Duration::from_secs(15 * 60);
 /// The stable logical send identity, identical to the queue's idempotency
 /// unit:
 ///
-/// * sales mail — `sa-send:{sales_step_execution_id}`, the same value the
+/// * sales mail, `sa-send:{sales_step_execution_id}`, the same value the
 ///   dispatcher uses as `messages.idempotency_key` (migration 205's comment,
 ///   `sequence_worker.rs`'s `sa-send:{step_execution_id}`). The typed
 ///   provenance column is read straight off the queue row.
-/// * other mail — `email_queue:{queue row id}:{canonical recipient}`. The
+/// * other mail, `email_queue:{queue row id}:{canonical recipient}`. The
 ///   queue row id is stable across claim/retry (attempt is deliberately NOT
 ///   part of the unit), and the recipient disambiguates multi-recipient rows
 ///   that expand into several independent sends.
@@ -1171,7 +1171,7 @@ enum AcceptanceClaim {
     /// This attempt owns the submission (fresh insert, a retry after a
     /// recorded refusal, or a reclaimed expired lease).
     Claimed,
-    /// A prior submission of this logical unit is recorded `accepted` — the
+    /// A prior submission of this logical unit is recorded `accepted`, the
     /// documented already-accepted outcome. NEVER submit again.
     AlreadyAccepted,
     /// Another attempt's reservation is still inside its lease. Do not
@@ -1212,13 +1212,13 @@ const CLAIM_ACCEPTANCE_SQL: &str = r#"
 
 /// Durable exactly-once gate: reserve the logical send unit before submit.
 ///
-/// * `Ok(Claimed)` — no acceptance record exists (or the previous one failed /
+/// * `Ok(Claimed)`, no acceptance record exists (or the previous one failed /
 ///   its lease expired): this attempt may submit.
-/// * `Ok(AlreadyAccepted)` — a prior submission is recorded: do NOT submit;
+/// * `Ok(AlreadyAccepted)`, a prior submission is recorded: do NOT submit;
 ///   the caller records the recipient as possibly-sent (the send exists
 ///   externally).
-/// * `Ok(InFlight)` — a live reservation exists: defer.
-/// * `Err` — the ledger is unavailable. The caller DEFERS, never submits: an
+/// * `Ok(InFlight)`, a live reservation exists: defer.
+/// * `Err`, the ledger is unavailable. The caller DEFERS, never submits: an
 ///   unguarded send would forfeit exactly-once.
 async fn claim_acceptance(
     db: &PgPool,
@@ -1245,7 +1245,7 @@ async fn claim_acceptance(
     // Zero rows: the row exists and is either accepted or a live reservation.
     // Read the state to surface the documented already-accepted outcome
     // distinctly (a concurrent state change between the two statements falls
-    // through to InFlight — the safe choice: defer, do not submit).
+    // through to InFlight, the safe choice: defer, do not submit).
     let state: Option<String> =
         sqlx::query_scalar("SELECT state FROM sales_delivery_acceptances WHERE send_unit = $1")
             .bind(&send_unit)
@@ -1265,7 +1265,7 @@ async fn claim_acceptance(
 ///   behaviour.
 /// * unset in a production process → `Ok(None)`: no signer. The worker
 ///   binary refuses to boot in this state (`receipt_signing_gate`), and the
-///   acceptance path refuses to record — an unsigned receipt must not
+///   acceptance path refuses to record, an unsigned receipt must not
 ///   silently exist.
 /// * unset in a development process → an EPHEMERAL per-process key, warned
 ///   loudly. Receipts are still signed (never unsigned); they verify against
@@ -1286,7 +1286,7 @@ fn resolve_receipt_signer() -> ProcessorResult<Option<Arc<RoutingReceiptSigner>>
                 // acceptance write will refuse (loudly) rather than write an
                 // unsigned row.
                 warn!(
-                    "RECEIPT_SIGNING_KEY is unset in a production process — the acceptance \
+                    "RECEIPT_SIGNING_KEY is unset in a production process, the acceptance \
                      path will REFUSE to record accepted sends (no unsigned receipts)"
                 );
                 Ok(None)
@@ -1294,7 +1294,7 @@ fn resolve_receipt_signer() -> ProcessorResult<Option<Arc<RoutingReceiptSigner>>
                 let signer = Arc::new(RoutingReceiptSigner::generate());
                 warn!(
                     key_id = signer.key_id(),
-                    "RECEIPT_SIGNING_KEY is unset — signing routing receipts with an \
+                    "RECEIPT_SIGNING_KEY is unset, signing routing receipts with an \
                      EPHEMERAL development key; these receipts verify only against this \
                      process's public key and must never be treated as production evidence"
                 );
@@ -1310,13 +1310,13 @@ fn resolve_receipt_signer() -> ProcessorResult<Option<Arc<RoutingReceiptSigner>>
 /// Record the transport acceptance on the claimed ledger row.
 ///
 /// The Ed25519 receipt (`signed`, migration 255) is REQUIRED: this function
-/// cannot write an `accepted` row without a signature — the caller signs
+/// cannot write an `accepted` row without a signature, the caller signs
 /// first ([`EmailProcessor::sign_routing_receipt`]) and fails loudly when no
 /// signer exists. `accepted_at` is the exact value the signature covers, so
 /// the stored row and the signed payload agree by construction.
 ///
 /// `last_error` carries a route-contract note when the receipt did not
-/// confirm the requested source IP — an AUDIT anomaly, never a retry signal.
+/// confirm the requested source IP, an AUDIT anomaly, never a retry signal.
 async fn record_acceptance_accepted(
     db: &PgPool,
     send_unit: &str,
@@ -1355,11 +1355,11 @@ async fn record_acceptance_accepted(
     if updated.rows_affected() == 0 {
         // The lease was reclaimed while we were submitting. The external
         // acceptance still happened; a later retry would submit a second
-        // time — surface it loudly rather than failing silently.
+        // time, surface it loudly rather than failing silently.
         metrics::counter!("apexmail_acceptance_record_missed").increment(1);
         warn!(
             send_unit,
-            "acceptance ledger row was not 'reserved' when recording acceptance — \
+            "acceptance ledger row was not 'reserved' when recording acceptance, \
              a concurrent reclaim may resubmit this unit"
         );
     }
@@ -1398,7 +1398,7 @@ async fn record_acceptance_failed(
 /// * the sweep is ONE atomic `UPDATE ... WHERE state = 'reserved' AND
 ///   reserved_at < NOW() - lease`; a live reservation (renewed within the
 ///   lease) cannot match, so an in-flight submission is never stolen;
-/// * it does not itself submit — a resubmission still has to pass
+/// * it does not itself submit, a resubmission still has to pass
 ///   [`claim_acceptance`]'s `ON CONFLICT` predicate, whose row lock admits
 ///   exactly one claimant, and the primary key admits exactly one
 ///   acceptance record;
@@ -1446,12 +1446,12 @@ pub async fn reclaim_stale_acceptance_reservations(db: &PgPool) -> ProcessorResu
 // Lua script performs the reserve across both buckets (all-or-nothing); on
 // exhaustion the caller defers the row via the existing requeue path
 // instead of sending. Redis unavailability fails OPEN (best-effort, same
-// posture as the G.3c send marker) — SES/SMTP still enforce their own
+// posture as the G.3c send marker), SES/SMTP still enforce their own
 // server-side throttling.
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Audit-2 / P0 rate limiting: the two admission buckets a send must reserve
-/// from — the tenant-wide ceiling and the sending domain's own bucket —
+/// from, the tenant-wide ceiling and the sending domain's own bucket —
 /// SCOPED BY ROUTE. Shared-pool mail and dedicated-IP mail have separate
 /// account ceilings (SES `max_send_rate` vs the relay's
 /// `rate_limit_per_second`) and separate reputation boundaries, so one
@@ -1465,7 +1465,7 @@ fn send_admission_keys(job: &EmailJob, kind: TransportKind) -> Vec<String> {
 }
 
 /// The SALES send's admission buckets: the same tenant/domain shape under a
-/// `sales` prefix, so the sales transport's capacity is its own — a sales
+/// `sales` prefix, so the sales transport's capacity is its own, a sales
 /// burst cannot drain the customer buckets (and customer traffic cannot
 /// starve the sales relay).
 fn sales_send_admission_keys(job: &EmailJob, kind: TransportKind) -> Vec<String> {
@@ -1492,7 +1492,7 @@ fn route_send_rate_per_second(config: &EmailConfig, kind: TransportKind) -> u32 
 /// capacity, now_ms]. Each bucket starts full (capacity = one second of
 /// rate), refills continuously at `rate`, and persists `{tokens, ts}`.
 /// Returns 1 when EVERY bucket can afford one token (consuming one from
-/// each atomically), 0 otherwise — no partial consumption is possible.
+/// each atomically), 0 otherwise, no partial consumption is possible.
 const SEND_ADMISSION_LUA: &str = r#"
 local rate = tonumber(ARGV[1])
 local capacity = tonumber(ARGV[2])
@@ -1523,8 +1523,8 @@ return 1
 /// Audit-2: reserve one send from every admission bucket, atomically.
 /// `now_ms` is supplied by the caller (wall clock in production, injected
 /// in tests) so refill is deterministic and testable without sleeping.
-/// `Ok(true)` — admitted; `Ok(false)` — exhausted, defer the row;
-/// `Err` — Redis unavailable.
+/// `Ok(true)`, admitted; `Ok(false)`, exhausted, defer the row;
+/// `Err`, Redis unavailable.
 async fn reserve_send_admission(
     redis: &RedisPool,
     keys: &[String],
@@ -1547,8 +1547,8 @@ async fn reserve_send_admission(
     Ok(admitted == 1)
 }
 
-/// Fix 3: daily warmup counter key for one dedicated source IP. The IP — not
-/// the sending domain — is the reputation boundary that warmup protects.
+/// Fix 3: daily warmup counter key for one dedicated source IP. The IP, not
+/// the sending domain, is the reputation boundary that warmup protects.
 /// Format preserved verbatim (`apexmail:warmup:ip:{ip_address}:{utc_day}`).
 fn warmup_ip_counter_key(ip_address: &str, utc_day: &str) -> String {
     format!("apexmail:warmup:ip:{}:{}", ip_address, utc_day)
@@ -1556,9 +1556,9 @@ fn warmup_ip_counter_key(ip_address: &str, utc_day: &str) -> String {
 
 /// P0 aggregate-pool warmup reservation (one Lua script, one round trip).
 ///
-/// KEYS[1..n]   — per-IP/day counters (format preserved:
+/// KEYS[1..n]  , per-IP/day counters (format preserved:
 ///                `apexmail:warmup:ip:{ip_address}:{utc_day}`);
-/// KEYS[n+1..2n] — per-send-unit markers, one per candidate.
+/// KEYS[n+1..2n], per-send-unit markers, one per candidate.
 ///
 /// ARGV[1] = n (candidate count); ARGV[2] = marker TTL seconds; then per
 /// candidate i: `limit_i` (canonical daily cap, `-1` = unthrottled/active),
@@ -1568,7 +1568,7 @@ fn warmup_ip_counter_key(ip_address: &str, utc_day: &str) -> String {
 /// The script:
 ///
 /// 1. if this send unit already holds a marker on any candidate, return that
-///    candidate — a retry is admitted WITHOUT a second increment;
+///    candidate, a retry is admitted WITHOUT a second increment;
 /// 2. otherwise pick the ELIGIBLE candidate with the lowest utilisation,
 ///    breaking ties by rank (all warming candidates are preferred over any
 ///    active one, so active IPs do not starve warmup), which spreads a
@@ -1582,7 +1582,7 @@ const WARMUP_SELECT_LUA: &str = r#"
 local n = tonumber(ARGV[1])
 -- Selection only (P0 ownership fix): pick the eligible candidate with the
 -- lowest utilisation, breaking ties by rank (warming before active). NO
--- writes — the counter increment + send-unit marker happen at the
+-- writes, the counter increment + send-unit marker happen at the
 -- SMTP-effect boundary in the outbound relay's warmup gate, so inline
 -- sends and durable daemon retries are accounted by the component that
 -- can actually transmit DATA.
@@ -1609,7 +1609,7 @@ end
 return best or 0
 "#;
 
-/// The chosen dedicated IP for one send. Selection only — the warmup
+/// The chosen dedicated IP for one send. Selection only, the warmup
 /// COUNTER is consumed at the SMTP-effect boundary by the outbound relay's
 /// admission gate (P0 ownership fix): the relay admits every attempt
 /// (inline submission and durable daemon retry alike), so a transient
@@ -1621,12 +1621,12 @@ struct ReservedDeliveryIp {
 
 /// SELECT the dedicated IP for one send: the eligible candidate with the
 /// lowest utilisation, warming preferred over active, read atomically from
-/// the per-IP/day counters. NO capacity is consumed here — the relay's
+/// the per-IP/day counters. NO capacity is consumed here, the relay's
 /// warmup gate increments when the attempt actually reaches the wire.
 /// The ROUTE is built from the returned candidate.
 ///
 /// Returns `Ok(None)` when every warming candidate is at its canonical daily
-/// cap (and none is active) — the caller defers, as before.
+/// cap (and none is active), the caller defers, as before.
 async fn select_warmup_ip(
     redis: &RedisPool,
     pool: &[RoutingCandidate],
@@ -1694,7 +1694,7 @@ impl ReservedDeliveryIp {
 /// W4A: the route planning OUTCOME for one send under a routing mode.
 ///
 /// [`plan_delivery_route`] is the single decision point: it is PURE, so the
-/// fail-closed property is provable without a database or a transport — under
+/// fail-closed property is provable without a database or a transport, under
 /// `eu_only` there is no input that yields [`DeliveryRoute::SesShared`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum PlannedDeliveryRoute {
@@ -1710,9 +1710,9 @@ enum PlannedDeliveryRoute {
 
 /// W4A: plan the delivery route for one send (pure).
 ///
-/// * a selected dedicated-IP candidate → [`DeliveryRoute::Dedicated`] — our
+/// * a selected dedicated-IP candidate → [`DeliveryRoute::Dedicated`], our
 ///   own relay MTA binds the tenant's source IP (the historical behavior);
-/// * no candidate, `global` mode → [`DeliveryRoute::SesShared`] — unchanged;
+/// * no candidate, `global` mode → [`DeliveryRoute::SesShared`], unchanged;
 /// * no candidate, `eu_only` mode → [`PlannedDeliveryRoute::EuOnlyHold`] —
 ///   the shared transport is FORBIDDEN, so the message is held.
 ///
@@ -1731,7 +1731,7 @@ fn plan_delivery_route(
         None if mode.is_eu_only() => PlannedDeliveryRoute::EuOnlyHold {
             reason: EU_ONLY_HOLD_NO_OWN_MTA_ROUTE,
             detail: "the tenant has no approved dedicated-IP identity on a warmup/active pool, \
-                     so no own-MTA route exists for an EU-only send — the shared third-party \
+                     so no own-MTA route exists for an EU-only send, the shared third-party \
                      transport is forbidden by the routing mode"
                 .to_string(),
         },
@@ -1757,7 +1757,7 @@ fn eu_only_route_guard_violation(mode: RoutingMode, route: &DeliveryRoute) -> Op
 /// `shared_route_is_ses` reflects WHICH backend the deployment bound the
 /// shared route to (`EMAIL_TRANSPORT_TYPE`): in SMTP mode the shared route
 /// rides the configured relay (Mailpit in dev, an operator relay in prod),
-/// which never touches SES — demanding `ses_verified` there deferred every
+/// which never touches SES, demanding `ses_verified` there deferred every
 /// send forever with `domain_ses_not_verified`.
 fn domain_route_readiness(
     route: &DeliveryRoute,
@@ -1780,7 +1780,7 @@ fn domain_route_readiness(
 ///   present AND equal to the requested IP;
 /// * [`DeliveryRoute::SesShared`]: no dedicated binding exists to confirm.
 ///
-/// A note is an AUDIT anomaly — it is stored on the acceptance ledger and
+/// A note is an AUDIT anomaly, it is stored on the acceptance ledger and
 /// alarmed, and it NEVER triggers a retry: by the time a receipt exists the
 /// transport has already accepted the message, and a retry would duplicate an
 /// externally accepted send. The invariant lives in the pre-DATA gate
@@ -1857,7 +1857,7 @@ fn queued_row_recipient_count(row: &QueuedEmailRow) -> usize {
 //
 // Audit P3: the increment is TEST instrumentation. `cfg!(test)` is a
 // compile-time false in every non-test build, so the update is dead code the
-// compiler removes — no test hook in the production hot path. A test-only
+// compiler removes, no test hook in the production hot path. A test-only
 // attribute cannot be used here: the source-scan tests below split this file
 // at the FIRST test-only attribute and treat everything before it as
 // production, so one here would shrink the scanned region. The item stays
@@ -1912,7 +1912,7 @@ struct CappedExpansion {
 /// measured first, the slice admitted by the remaining slots is taken, and
 /// ONLY the admitted recipients pay the per-job clone of the row's content
 /// fields. The old shape called [`queued_row_to_jobs`] for every row and threw
-/// all but the admitted slice away — a 10k-recipient row under a 64-slot cap
+/// all but the admitted slice away, a 10k-recipient row under a 64-slot cap
 /// cloned html/text/headers/attachments/metadata 10k times per claim.
 ///
 /// The admitted output is IDENTICAL to the old shape: same warning, same
@@ -1931,14 +1931,14 @@ fn expand_rows_within_cap_detailed(rows: Vec<QueuedEmailRow>, cap: usize) -> Cap
             warn!(
                 claimed_recipients,
                 admitted_recipients = remaining,
-                "multi-recipient row exceeds available concurrency slots — excess \
+                "multi-recipient row exceeds available concurrency slots, excess \
                  recipients deferred until the next lease cycle"
             );
         }
         deferred_recipients += claimed_recipients.saturating_sub(remaining);
         // Admit first, then materialize: only `remaining` recipients are ever
         // cloned. `to_addresses == None` is the legacy single-recipient row
-        // (its one recipient fits by construction — the loop breaks above when
+        // (its one recipient fits by construction, the loop breaks above when
         // no slot is left).
         let admitted: Vec<String> = match &row.to_addresses {
             Some(addrs) => addrs.iter().take(remaining).cloned().collect(),
@@ -2012,13 +2012,13 @@ pub(crate) fn classify_send_failure(err: &ProcessorError) -> SendFailureClass {
     }
 }
 
-/// Does this failure actually prove the RECIPIENT ADDRESS is invalid — the
+/// Does this failure actually prove the RECIPIENT ADDRESS is invalid, the
 /// only justification for suppressing it tenant-wide?
 ///
 /// A 5xx reply is permanent for *this message*, but most 5xx are policy
 /// verdicts about the sender or content ("550 5.7.1 spam", IP blocklists,
 /// DMARC failures of OUR alignment) and say nothing about the mailbox.
-/// Suppressing on those poisons valid recipients — one receiving domain's
+/// Suppressing on those poisons valid recipients, one receiving domain's
 /// spam policy would silence the address for the whole tenant. Only a
 /// 5.1.x address-status enhanced code (or an explicit mailbox rejection
 /// phrase) proves address invalidity. SES dispositions carry the
@@ -2067,14 +2067,14 @@ pub struct EmailProcessor {
     config: EmailConfig,
     /// Route-aware dispatcher: `SesShared` → SES, `Dedicated` → relay SMTP.
     /// A missing backend for a requested route fails closed (never crosses the
-    /// shared/dedicated boundary). SALES sends never reach this value — they
+    /// shared/dedicated boundary). SALES sends never reach this value, they
     /// travel on [`Self::sales_transport`] only (see `email::sales`).
     transport: HybridTransport,
     /// The dedicated SALES transport slot. Holds at most the backend the
     /// deployment configured for sales (`SALES_TRANSPORT=relay|ses_account`)
     /// and is UNCONFIGURED by default: a sales send then HOLDS with a named
     /// reason instead of riding the customer transport (the isolation
-    /// invariant — see `email::sales`).
+    /// invariant, see `email::sales`).
     sales_transport: SalesTransport,
     /// WORKER PRE-SEND DLP scanner (the `email::dlp` seam, mirroring the
     /// transport seam). Engaged only when `config.dlp.enabled`; production
@@ -2091,19 +2091,19 @@ pub struct EmailProcessor {
     /// already-running loops.
     background_tasks_started: AtomicBool,
     /// SM10 F9 test seam: how many background loops this processor has
-    /// spawned (2 per arm — metrics + reconcile). Production code never
+    /// spawned (2 per arm, metrics + reconcile). Production code never
     /// reads it; the hermetic restart test asserts it never exceeds 2.
     background_loops_spawned: AtomicUsize,
     /// SM10 F4: data-plane STONITH gate. With `APEXMAIL_HA_FENCING=true`
     /// the claim loop refuses to claim (or complete) jobs while this node's
-    /// `ha:fenced:{node}` key stands — or while the fence authority cannot
+    /// `ha:fenced:{node}` key stands, or while the fence authority cannot
     /// be read (fail closed). Default off: the disabled gate returns
     /// `Ok(())` without touching Redis.
     fence_gate: crate::fence::FenceGate,
     /// Level-triggered shutdown signal. `Notify::notify_waiters` is edge-
     /// triggered: a background task that was mid-DB-call (not parked on
     /// `notified()`) when `stop()` fired never received the wake and stayed
-    /// parked for a full 60 s reconcile interval after shutdown — observed
+    /// parked for a full 60 s reconcile interval after shutdown, observed
     /// as tasks outliving `stop()` (leaky tests) and the poll loop missing
     /// the wake when `notify_waiters` raced a batch. A `watch` channel
     /// stores the shutdown state, so every task observes it at its NEXT
@@ -2115,7 +2115,7 @@ pub struct EmailProcessor {
     // Caches
     suppression_cache: Cache<String, CachedSuppression>,
     /// F18: cache of CONFIRMED tenant restrictions only (reason string).
-    /// Allowed/TemporarilyUnavailable decisions are never cached — see
+    /// Allowed/TemporarilyUnavailable decisions are never cached, see
     /// [`EmailProcessor::tenant_policy`].
     tenant_restriction_cache: Cache<String, String>,
 
@@ -2123,7 +2123,7 @@ pub struct EmailProcessor {
     /// every `accepted` ledger row (migration 255,
     /// `mail_common::routing_receipt`). `None` = this process cannot produce
     /// a signed receipt, and the acceptance write then REFUSES to record
-    /// (fail closed: "no claim without evidence" — an unsigned receipt must
+    /// (fail closed: "no claim without evidence", an unsigned receipt must
     /// not silently exist). In production the signer is resolved from
     /// `RECEIPT_SIGNING_KEY` and the worker refuses to boot without it; in
     /// dev an ephemeral per-process key signs receipts with a loud warning.
@@ -2147,7 +2147,7 @@ impl EmailProcessor {
         // The database pool builds the in-process outbound-MTA transport for
         // dedicated routes: its durable ledger and the worker's exactly-once
         // acceptance ledger share the send_unit identity (migration 212).
-        // P0: the relay owns warmup admission — hand it the Redis pool so
+        // P0: the relay owns warmup admission, hand it the Redis pool so
         // the gate is installed for inline sends and their durable retries.
         let redis = redis.clone();
         let transport =
@@ -2198,7 +2198,7 @@ impl EmailProcessor {
         .await
     }
 
-    /// [`Self::with_transport`] with an explicit receipt signer — the test
+    /// [`Self::with_transport`] with an explicit receipt signer, the test
     /// seam that pins the fail-closed behaviour (`None` refuses to record an
     /// accepted row) without mutating process env.
     pub(crate) async fn with_transport_and_signer(
@@ -2333,7 +2333,7 @@ impl EmailProcessor {
 
     /// Swap the pre-send DLP scanner (chainable, additive to
     /// [`EmailProcessor::with_transport`]). Production keeps the default
-    /// [`EngineDlpScanner`]; tests inject doubles — including an
+    /// [`EngineDlpScanner`]; tests inject doubles, including an
     /// always-failing one that proves the gate FAILS OPEN on engine errors.
     pub fn with_dlp_scanner(mut self, scanner: Arc<dyn PreSendDlpScanner>) -> Self {
         self.dlp_scanner = scanner;
@@ -2347,14 +2347,14 @@ impl EmailProcessor {
 
         // The two background loops below are spawned EXACTLY ONCE per
         // processor (SM10 F9): `supervise` re-enters `start()` on every
-        // failure — including a flapping transport that fails `verify()`
-        // below — and the loops exit only on the shutdown signal, so an
+        // failure, including a flapping transport that fails `verify()`
+        // below, and the loops exit only on the shutdown signal, so an
         // unguarded spawn leaked one metrics loop + one reconcile sweep per
         // restart.
         //
         // Queue-depth metrics must NOT depend on transport health: while the
         // transport is down (e.g. missing credentials), the poll loop below
-        // never starts — and that is exactly when the EmailQueueBacklog
+        // never starts, and that is exactly when the EmailQueueBacklog
         // alerts need their metric. The task runs for the processor's
         // lifetime and stops with the shutdown notification.
         if !self.background_tasks_started.swap(true, Ordering::SeqCst) {
@@ -2373,13 +2373,13 @@ impl EmailProcessor {
                 });
             }
 
-            // F25: restart reconciliation — sweep parents whose recipient
+            // F25: restart reconciliation, sweep parents whose recipient
             // rows are ALL terminal but whose aggregate status is not (the
             // residue of a crash between a recipient transition and its
             // parent reconciliation), once immediately and then every 60 s.
             //
             // P0: the same loop sweeps the delivery-acceptance ledger for
-            // `reserved` rows older than ACCEPTANCE_RESERVE_LEASE — crashed
+            // `reserved` rows older than ACCEPTANCE_RESERVE_LEASE, crashed
             // submissions that never reached `accepted`/`failed`. The sweep
             // is governance/observability; the claim reclaims them on demand
             // too.
@@ -2394,7 +2394,7 @@ impl EmailProcessor {
                         {
                             warn!(
                                 error = %error,
-                                "stale delivery-acceptance reservation sweep failed — retried on the next interval"
+                                "stale delivery-acceptance reservation sweep failed, retried on the next interval"
                             );
                         }
                         tokio::select! {
@@ -2427,7 +2427,7 @@ impl EmailProcessor {
                 warn!(
                     backend = self.sales_transport.backend_name(),
                     error = %error,
-                    "the configured sales transport failed verification — sales sends \
+                    "the configured sales transport failed verification, sales sends \
                      will fail on their own send path until it recovers (customer mail \
                      is unaffected; sales NEVER falls back to the customer transport)"
                 );
@@ -2519,7 +2519,7 @@ impl EmailProcessor {
                 let available = self.backpressure.available();
                 warn!(
                     backlog,
-                    in_flight, available, "Load shedding active — pausing poll loop"
+                    in_flight, available, "Load shedding active, pausing poll loop"
                 );
                 sleep(Duration::from_secs(1)).await;
                 continue;
@@ -2551,7 +2551,7 @@ impl EmailProcessor {
                     // load-shedding decision. The batch is capped at
                     // `available_slots` (≤ concurrency, e.g. 10), so feeding
                     // `jobs.len()` kept the observed backlog permanently far
-                    // below `max_backlog` (10_000) — shedding was
+                    // below `max_backlog` (10_000), shedding was
                     // unreachable. Threshold semantics are unchanged; only
                     // the observed value is now the true pending depth.
                     match self.pending_queue_depth().await {
@@ -2593,7 +2593,7 @@ impl EmailProcessor {
                                 warn!(
                                     job_id = %job.id,
                                     recipient = %job.to,
-                                    "Suppression check failed — requeueing job instead of suppressing"
+                                    "Suppression check failed, requeueing job instead of suppressing"
                                 );
                                 if let Err(e) =
                                     self.requeue_job(&job, SUPPRESSION_CHECK_FAILED).await
@@ -2661,7 +2661,7 @@ impl EmailProcessor {
         };
         // A misconfigured (absurd) visibility timeout clamps to the last
         // representable lease instead of panicking the poll loop on the
-        // DateTime overflow — the i64 clamp above only bounds the argument.
+        // DateTime overflow, the i64 clamp above only bounds the argument.
         let lock_until = Utc::now()
             .checked_add_signed(chrono::Duration::milliseconds(visibility_ms_i64))
             .unwrap_or(DateTime::<Utc>::MAX_UTC);
@@ -2673,7 +2673,7 @@ impl EmailProcessor {
             .await?;
 
         // F25: flip the parents of every claimed row from 'queued'/
-        // 'scheduled' to 'processing' — the worker-side scheduled →
+        // 'scheduled' to 'processing', the worker-side scheduled →
         // processing transition (previously scheduled audit rows never
         // moved at all) and the parent-visible dispatch signal the
         // cancellation check relies on (F24). ONE statement covers ALL
@@ -2722,7 +2722,7 @@ impl EmailProcessor {
         // `limit` is the available slot count, and the expansion is capped to
         // it so one 10k-recipient row cannot fan out into 10k concurrent
         // sends. Recipients beyond the cap remain in the row's pending set
-        // and are delivered after the visibility lease expires (or — F5 —
+        // and are delivered after the visibility lease expires (or, F5 —
         // immediately, via `release_rows_with_remaining_recipients`).
         // P1: admission happens before materialization, so a capped row does
         // not clone its bodies once per claimed recipient.
@@ -2737,7 +2737,7 @@ impl EmailProcessor {
         Ok(expansion.jobs)
     }
 
-    /// F9:actual depth of the deliverable queue — the value the SCALE-H-04
+    /// F9:actual depth of the deliverable queue, the value the SCALE-H-04
     /// load-shedding decision must be fed (the fetched batch is capped at
     /// the concurrency budget and is NOT the backlog).
     async fn pending_queue_depth(&self) -> ProcessorResult<u64> {
@@ -2753,7 +2753,7 @@ impl EmailProcessor {
         Ok(depth.max(0) as u64)
     }
 
-    /// Export `apexmail_email_queue_depth{status=...}` — the metric the
+    /// Export `apexmail_email_queue_depth{status=...}`, the metric the
     /// EmailQueueBacklog / CriticalEmailQueueBacklog alerts key on. The
     /// original exporter lived in a since-removed outbound delivery
     /// package, so the alerts were dead rules; the deployed worker is the
@@ -2774,7 +2774,7 @@ impl EmailProcessor {
 
         match rows {
             Ok(counts) => {
-                // F59: the complete bounded set is emitted — see
+                // F59: the complete bounded set is emitted, see
                 // [`overlay_status_counts`].
                 for (status, count) in overlay_status_counts(counts) {
                     metrics::gauge!("apexmail_email_queue_depth", "status" => status)
@@ -2783,7 +2783,7 @@ impl EmailProcessor {
                 metrics::gauge!("apexmail_email_queue_metrics_fresh").set(1.0);
             }
             Err(e) => {
-                // F59: freshness/error is exposed SEPARATELY — the last
+                // F59: freshness/error is exposed SEPARATELY, the last
                 // complete snapshot stays published (stale but labelled)
                 // instead of being quietly overwritten.
                 metrics::counter!("apexmail_email_queue_metrics_errors").increment(1);
@@ -2797,7 +2797,7 @@ impl EmailProcessor {
     /// back to 'pending' (lease cleared) so the next poll continues without
     /// waiting for the visibility lease to expire. ONE statement covers the
     /// whole claimed batch (perf audit 2026-10-18, finding 18), and it is
-    /// fenced per row on this claim's lease token (Audit-5) — a stale worker
+    /// fenced per row on this claim's lease token (Audit-5), a stale worker
     /// cannot release a row the next owner has re-claimed, and such a row is
     /// not counted as released. Rows that finished (empty pending set →
     /// already 'sent') or were requeued/deferred by the failure handlers
@@ -2852,13 +2852,13 @@ impl EmailProcessor {
 
     /// Batch suppression check for efficiency (claim-time).
     ///
-    /// F55: POSITIVE suppression decisions are NEVER cached anymore — a
+    /// F55: POSITIVE suppression decisions are NEVER cached anymore, a
     /// cached positive could terminalize a job for a recipient who
     /// resubscribed after the cache was primed (a `suppression:added` /
     /// preference-change event missed by this replica would not
     /// invalidate it). Only NEGATIVE results (no suppression row) are
     /// cached; any positive verdict comes from a database row read in
-    /// THIS batch, which is the authoritative state at claim time — and
+    /// THIS batch, which is the authoritative state at claim time, and
     /// every job that proceeds to dispatch gets the authoritative
     /// `dispatch_consent` recheck anyway.
     ///
@@ -2921,7 +2921,7 @@ impl EmailProcessor {
                         // suppressed"): mark these recipients with the
                         // sentinel so poll_loop requeues them instead of
                         // permanently suppressing the batch. Nothing is
-                        // cached — the next poll retries the query.
+                        // cached, the next poll retries the query.
                         for email in &uncached {
                             let cache_key = format!("{}:{}", tenant_id, email);
                             result.insert(cache_key, SUPPRESSION_CHECK_FAILED.to_string());
@@ -2957,7 +2957,7 @@ impl EmailProcessor {
             }
         }
 
-        // F55: category preference opt-outs (always read fresh — never
+        // F55: category preference opt-outs (always read fresh, never
         // cached, matching the authoritative dispatch-time recheck).
         for ((tenant_id, category), emails) in by_tenant_category {
             let canonical: Vec<String> = emails
@@ -3071,8 +3071,8 @@ impl EmailProcessor {
         }
 
         // F18: dispatch-time tenant policy gate. Only a CONFIRMED active
-        // tenant may reach the external transport: any other status — and
-        // any lookup failure, missing tenant row, or empty id — DEFERS the
+        // tenant may reach the external transport: any other status, and
+        // any lookup failure, missing tenant row, or empty id, DEFERS the
         // job and exits dispatch. The gate never fails open.
         match self.tenant_policy(&job.tenant_id).await {
             TenantPolicy::Allowed => {}
@@ -3082,11 +3082,11 @@ impl EmailProcessor {
                     job_id = %job.id,
                     tenant_id = %job.tenant_id,
                     reason = %reason,
-                    "tenant policy is not Allowed at dispatch time — deferring delivery"
+                    "tenant policy is not Allowed at dispatch time, deferring delivery"
                 );
                 self.requeue_job(job, reason).await?;
                 // Exit dispatch immediately: the row is retryable, nothing
-                // below may run (not even the consent gate — a deferred
+                // below may run (not even the consent gate, a deferred
                 // job must not terminalize on the way out).
                 return Ok(());
             }
@@ -3107,7 +3107,7 @@ impl EmailProcessor {
                     job_id = %job.id,
                     tenant_id = %job.tenant_id,
                     error = %error,
-                    "tenant routing-mode lookup failed — deferring the row (fail closed; \
+                    "tenant routing-mode lookup failed, deferring the row (fail closed; \
                      the mode is unknown, so neither the global nor the EU-only path may run)"
                 );
                 self.requeue_job(job, ROUTING_MODE_LOOKUP_FAILED).await?;
@@ -3119,7 +3119,7 @@ impl EmailProcessor {
         // global suppression AND the per-category preference, both read
         // from CURRENT database state (no cache participates in the
         // decision). `Deferred` means the lookup itself failed: the row is
-        // requeued and dispatch EXITS here — a consent-verification
+        // requeued and dispatch EXITS here, a consent-verification
         // failure must never continue into the transport.
         match self.dispatch_consent(job).await? {
             ConsentDecision::Suppressed(reason) => {
@@ -3139,11 +3139,11 @@ impl EmailProcessor {
                     tenant_id = %job.tenant_id,
                     recipient = %job.to,
                     reason = %reason,
-                    "consent verification unavailable at dispatch time — deferring"
+                    "consent verification unavailable at dispatch time, deferring"
                 );
                 self.requeue_job(job, reason).await?;
                 // F55: exit dispatch IMMEDIATELY after the successful
-                // requeue — never fall through into transport.
+                // requeue, never fall through into transport.
                 return Ok(());
             }
             ConsentDecision::Allowed => {}
@@ -3156,11 +3156,11 @@ impl EmailProcessor {
         let domain = self.get_domain(job).await?;
 
         // ── SALES SENDING ISOLATION: classify + pre-flight (pre-route) ────
-        // A sales queue row (the dispatcher's own provenance — see
+        // A sales queue row (the dispatcher's own provenance, see
         // `email::sales`) is decided BEFORE any customer route planning, and
         // every failure HOLDS the message: nothing below can produce a
         // customer route for it. The suppression/consent gate above already
-        // ran for this row too — sales sends CONSULT the platform
+        // ran for this row too, sales sends CONSULT the platform
         // suppressions like any other send (the invariant's read direction).
         let sales_outcome = match SalesSend::classify(job) {
             Some(sales) => {
@@ -3169,7 +3169,7 @@ impl EmailProcessor {
                     tenant_id = %job.tenant_id,
                     sender_pool = ?sales.sender_pool,
                     source_ip = ?sales.source_ip,
-                    "sales send recognised — the dedicated sales transport is the only \
+                    "sales send recognised, the dedicated sales transport is the only \
                      permitted route"
                 );
                 self.prepare_sales_send(job, &domain, &sales).await?
@@ -3201,13 +3201,13 @@ impl EmailProcessor {
         // only fail after the message had already left, producing a
         // refund-then-retry of a possibly-accepted send.
         //
-        // W4A: under `eu_only` this is also the mode's decision point — with
+        // W4A: under `eu_only` this is also the mode's decision point, with
         // no dedicated-IP candidate there is NO own-MTA route, and the shared
         // transport is forbidden, so the message is HELD (named reason,
         // inspectable, releasable) instead of being planned onto SES.
         let planned_route = match &sales_route {
             // A sales send's route is decided by the sales plan and by
-            // NOTHING else — the customer candidate pool above is empty for
+            // NOTHING else, the customer candidate pool above is empty for
             // it, and `plan_delivery_route` is never consulted.
             Some(route) => route.clone(),
             None => match plan_delivery_route(routing_mode, pool.first()) {
@@ -3218,7 +3218,7 @@ impl EmailProcessor {
                         tenant_id = %job.tenant_id,
                         domain_id = %job.domain_id,
                         reason,
-                        "EU-only routing: no own-MTA route for this send — HOLDING the message \
+                        "EU-only routing: no own-MTA route for this send, HOLDING the message \
                          (the shared third-party transport is forbidden)"
                     );
                     self.handle_eu_only_hold(job, reason, &detail).await?;
@@ -3244,14 +3244,14 @@ impl EmailProcessor {
                     domain_id = %job.domain_id,
                     route = %planned_route,
                     reason,
-                    "domain is not ready for the planned delivery route — deferring"
+                    "domain is not ready for the planned delivery route, deferring"
                 );
                 self.requeue_job(job, reason).await?;
                 return Ok(());
             }
         }
         // A dedicated relay send must be DKIM-signed (verified domains must
-        // not leave unsigned). Defer — retryable — instead of letting
+        // not leave unsigned). Defer, retryable, instead of letting
         // prepare_email's Config error strand the row in 'processing' across
         // leases. W4A: under `eu_only` the own-MTA route is the ONLY route,
         // so an unavailable signature is a route outage: HOLD, never defer
@@ -3266,7 +3266,7 @@ impl EmailProcessor {
                     tenant_id = %job.tenant_id,
                     route = %planned_route,
                     reason = EU_ONLY_HOLD_DKIM_DISABLED,
-                    "EU-only routing: DKIM signing is disabled on this worker — HOLDING the message"
+                    "EU-only routing: DKIM signing is disabled on this worker, HOLDING the message"
                 );
                 self.handle_eu_only_hold(
                     job,
@@ -3281,7 +3281,7 @@ impl EmailProcessor {
             warn!(
                 job_id = %job.id,
                 route = %planned_route,
-                "dedicated route requested while DKIM is disabled — deferring"
+                "dedicated route requested while DKIM is disabled, deferring"
             );
             self.requeue_job(job, "dedicated_dkim_disabled").await?;
             return Ok(());
@@ -3301,7 +3301,7 @@ impl EmailProcessor {
                     "ses_transport_unconfigured"
                 };
                 // W4A: under `eu_only` the dedicated transport IS the route, so
-                // its absence/unverifiability is a route outage — HOLD (never
+                // its absence/unverifiability is a route outage, HOLD (never
                 // defer onto a retry that could later cross the boundary).
                 if routing_mode.is_eu_only() {
                     warn!(
@@ -3311,7 +3311,7 @@ impl EmailProcessor {
                         reason = EU_ONLY_HOLD_OWN_MTA_NOT_DISPATCHABLE,
                         dispatch_reason = reason,
                         error = %error,
-                        "EU-only routing: the own-MTA route is not dispatchable on this worker — \
+                        "EU-only routing: the own-MTA route is not dispatchable on this worker, \
                          HOLDING the message BEFORE DATA"
                     );
                     self.handle_eu_only_hold(
@@ -3332,7 +3332,7 @@ impl EmailProcessor {
                     route = %planned_route,
                     reason,
                     error = %error,
-                    "delivery route is not dispatchable on this worker — deferring BEFORE DATA"
+                    "delivery route is not dispatchable on this worker, deferring BEFORE DATA"
                 );
                 self.requeue_job(job, reason).await?;
                 return Ok(());
@@ -3361,7 +3361,7 @@ impl EmailProcessor {
                 Ok(None) => {
                     let candidates = pool.len();
                     // W4A: every own-MTA identity at its canonical daily cap
-                    // is a route outage under EU-only — HOLD, never defer to a
+                    // is a route outage under EU-only, HOLD, never defer to a
                     // later global retry.
                     if routing_mode.is_eu_only() {
                         debug!(
@@ -3369,7 +3369,7 @@ impl EmailProcessor {
                             candidates,
                             reason = EU_ONLY_HOLD_WARMUP_LIMIT,
                             "EU-only routing: every own-MTA identity is at its canonical daily \
-                             cap — HOLDING the message"
+                             cap, HOLDING the message"
                         );
                         self.handle_eu_only_hold(
                             job,
@@ -3386,20 +3386,20 @@ impl EmailProcessor {
                     debug!(
                         job_id = %job.id,
                         candidates,
-                        "every warming dedicated IP is at its canonical daily cap — deferring row"
+                        "every warming dedicated IP is at its canonical daily cap, deferring row"
                     );
                     self.requeue_job(job, "warmup_limit").await?;
                     return Ok(());
                 }
                 Err(error) => {
                     // W4A: an unprovable warmup admission is a route outage
-                    // under EU-only — HOLD rather than send unthrottled later.
+                    // under EU-only, HOLD rather than send unthrottled later.
                     if routing_mode.is_eu_only() {
                         warn!(
                             job_id = %job.id,
                             reason = EU_ONLY_HOLD_WARMUP_STORE,
                             error = %error,
-                            "EU-only routing: warmup quota store unavailable — HOLDING the \
+                            "EU-only routing: warmup quota store unavailable, HOLDING the \
                              message (fail closed)"
                         );
                         self.handle_eu_only_hold(
@@ -3417,7 +3417,7 @@ impl EmailProcessor {
                     warn!(
                         job_id = %job.id,
                         error = %error,
-                        "warmup quota store unavailable — deferring row (fail closed)"
+                        "warmup quota store unavailable, deferring row (fail closed)"
                     );
                     self.requeue_job(job, "warmup_admission_unavailable")
                         .await?;
@@ -3450,7 +3450,7 @@ impl EmailProcessor {
                 tenant_id = %job.tenant_id,
                 route = %route,
                 reason,
-                "sales route guard: the resolved route is not the sales plan's route — \
+                "sales route guard: the resolved route is not the sales plan's route, \
                  HOLDING the message instead of submitting it"
             );
             self.handle_sales_hold(
@@ -3471,7 +3471,7 @@ impl EmailProcessor {
         }
         // W4A route guard: under `eu_only` the submitted route MUST be the
         // own-MTA dedicated route. `plan_delivery_route` already holds when
-        // no candidate exists, so this is structurally unreachable — but it
+        // no candidate exists, so this is structurally unreachable, but it
         // is the last line of defence, and a violation HOLDS the message
         // rather than letting it cross the transport boundary the mode
         // exists to forbid (and rather than silently sending it). A sales
@@ -3483,7 +3483,7 @@ impl EmailProcessor {
                 tenant_id = %job.tenant_id,
                 route = %route,
                 reason,
-                "EU-only route guard: the resolved route is not the own-MTA route — \
+                "EU-only route guard: the resolved route is not the own-MTA route, \
                  HOLDING the message instead of submitting it"
             );
             self.handle_eu_only_hold(
@@ -3507,14 +3507,14 @@ impl EmailProcessor {
             "dispatch route resolved"
         );
 
-        // Audit-2 / P0: route-aware send-time admission control — reserve one
+        // Audit-2 / P0: route-aware send-time admission control, reserve one
         // send from the ROUTE'S tenant and domain token buckets (SES
         // `max_send_rate` for shared, the relay's `rate_limit_per_second` for
         // dedicated) BEFORE the transport. On exhaustion the row is deferred;
         // the attempt is untouched, so the next claim re-evaluates admission.
         // A sales send reserves from the SALES buckets at the
         // `SALES_SEND_RATE_PER_SECOND` ceiling: separate capacity, separate
-        // keys — the same isolation principle.
+        // keys, the same isolation principle.
         let admitted = if sales_route.is_some() {
             self.check_sales_send_admission(job, &route).await?
         } else {
@@ -3526,13 +3526,13 @@ impl EmailProcessor {
                 tenant_id = %job.tenant_id,
                 domain_id = %job.domain_id,
                 route_kind = %route_kind,
-                "send admission exhausted — deferring row"
+                "send admission exhausted, deferring row"
             );
             self.requeue_job(job, "send_rate_limited").await?;
             return Ok(());
         }
 
-        // Prepare email — DKIM is decided by the ROUTE (a dedicated send
+        // Prepare email, DKIM is decided by the ROUTE (a dedicated send
         // needs the local signature; a shared SES send is signed by SES
         // BYODKIM).
         let email = self.prepare_email(job, &domain, &route)?;
@@ -3553,7 +3553,7 @@ impl EmailProcessor {
         //   * Audit (low)   → allow + loud log of the (redacted) findings;
         //   * Quarantine (medium) → HOLD: deferred + annotation + audit row;
         //   * Block (high)  → REFUSE: typed bounce + sender copy + audit row.
-        // Global switch (`WORKER_DLP_ENABLED`, default OFF) — no per-tenant
+        // Global switch (`WORKER_DLP_ENABLED`, default OFF), no per-tenant
         // override surface exists.
         if self.config.dlp.enabled {
             metrics::counter!("apexmail_dlp_presend_scans").increment(1);
@@ -3568,7 +3568,7 @@ impl EmailProcessor {
                         tenant_id = %job.tenant_id,
                         recipient = %job.to,
                         error = %engine_error,
-                        "DLP ENGINE UNAVAILABLE — FAILING OPEN: delivering without a pre-send verdict"
+                        "DLP ENGINE UNAVAILABLE, FAILING OPEN: delivering without a pre-send verdict"
                     );
                 }
                 Ok(verdict) => match verdict.action {
@@ -3581,7 +3581,7 @@ impl EmailProcessor {
                             risk_score = verdict.risk_score,
                             rule_classes = verdict.rule_classes.join(","),
                             findings = %verdict.summary,
-                            "DLP low-severity findings — allowing with audit log (severity below hold threshold)"
+                            "DLP low-severity findings, allowing with audit log (severity below hold threshold)"
                         );
                     }
                     DlpAction::Quarantine => {
@@ -3592,7 +3592,7 @@ impl EmailProcessor {
                             recipient = %job.to,
                             risk_score = verdict.risk_score,
                             rule_classes = verdict.rule_classes.join(","),
-                            "DLP medium-severity detection — HOLDING message in queue (deferred, pending review)"
+                            "DLP medium-severity detection, HOLDING message in queue (deferred, pending review)"
                         );
                         self.handle_dlp_hold(job, &verdict).await?;
                         return Ok(());
@@ -3605,7 +3605,7 @@ impl EmailProcessor {
                             recipient = %job.to,
                             risk_score = verdict.risk_score,
                             rule_classes = verdict.rule_classes.join(","),
-                            "DLP high-severity detection — REFUSING to send (typed bounce to the sender)"
+                            "DLP high-severity detection, REFUSING to send (typed bounce to the sender)"
                         );
                         self.handle_dlp_refusal(job, &verdict).await?;
                         return Ok(());
@@ -3626,7 +3626,7 @@ impl EmailProcessor {
                     job_id = %job.id,
                     send_unit = %send_unit,
                     error = %error,
-                    "acceptance ledger unavailable — deferring (an unguarded send would forfeit exactly-once)"
+                    "acceptance ledger unavailable, deferring (an unguarded send would forfeit exactly-once)"
                 );
                 self.requeue_job(job, "acceptance_ledger_unavailable")
                     .await?;
@@ -3637,7 +3637,7 @@ impl EmailProcessor {
                     job_id = %job.id,
                     send_unit = %send_unit,
                     recipient = %job.to,
-                    "acceptance ledger already records this logical send as accepted — not submitting again"
+                    "acceptance ledger already records this logical send as accepted, not submitting again"
                 );
                 self.handle_possibly_sent(job, Some(&journal_raw)).await?;
                 return Ok(());
@@ -3646,7 +3646,7 @@ impl EmailProcessor {
                 info!(
                     job_id = %job.id,
                     send_unit = %send_unit,
-                    "an acceptance reservation for this logical send is still within its lease — deferring"
+                    "an acceptance reservation for this logical send is still within its lease, deferring"
                 );
                 self.requeue_job(job, "acceptance_in_flight").await?;
                 return Ok(());
@@ -3669,7 +3669,7 @@ impl EmailProcessor {
             Ok(receipt) => {
                 // The transport ACCEPTED the message. Any receipt/route
                 // disagreement is recorded as a contract violation on the
-                // ledger and alarmed — never converted into a retry.
+                // ledger and alarmed, never converted into a retry.
                 let contract_note = route_receipt_contract_note(&route, receipt);
                 if let Some(note) = &contract_note {
                     metrics::counter!("apexmail_delivery_route_contract_violation").increment(1);
@@ -3677,7 +3677,7 @@ impl EmailProcessor {
                         job_id = %job.id,
                         route = %route,
                         note,
-                        "dedicated route contract violation on an ACCEPTED send — recording it; \
+                        "dedicated route contract violation on an ACCEPTED send, recording it; \
                          the message is not retried"
                     );
                 }
@@ -3693,7 +3693,7 @@ impl EmailProcessor {
                 {
                     // The message is ALREADY accepted externally: this is a
                     // loud operational failure, not a reason to retry. The
-                    // row is NOT marked accepted (fail closed — no unsigned
+                    // row is NOT marked accepted (fail closed, no unsigned
                     // receipt exists); the reserved row will be reclaimed
                     // after the lease, which the alarm below makes visible.
                     metrics::counter!("apexmail_acceptance_record_failed").increment(1);
@@ -3701,7 +3701,7 @@ impl EmailProcessor {
                         job_id = %job.id,
                         send_unit = %send_unit,
                         error = %record_error,
-                        "failed to record transport acceptance on the ledger — the message IS accepted; \
+                        "failed to record transport acceptance on the ledger, the message IS accepted; \
                          the reserved row will be reclaimed after the lease"
                     );
                 }
@@ -3721,7 +3721,7 @@ impl EmailProcessor {
             }
         }
 
-        // Per-attempt delivery log (email_delivery_log) — the table
+        // Per-attempt delivery log (email_delivery_log), the table
         // delivery_analytics' latency percentiles and billing's usage ingest
         // read; previously no runtime writer existed, so those surfaces were
         // structurally zero. Best-effort: a logging failure must not fail
@@ -3755,7 +3755,7 @@ impl EmailProcessor {
                         recipient = %job.to,
                         route = %route,
                         reason = %e,
-                        "outbound MTA holds the send — deferring until the relay terminalizes"
+                        "outbound MTA holds the send, deferring until the relay terminalizes"
                     );
                     self.requeue_job(job, "relay_delivery_pending").await?;
                     return Ok(());
@@ -3763,15 +3763,15 @@ impl EmailProcessor {
 
                 // The provider reputation/override throttle deferred this
                 // send BEFORE any external effect (deterministic per send
-                // unit). Requeue it — no attempt consumed, never
-                // dead-lettered — and re-evaluate on a later claim.
+                // unit). Requeue it, no attempt consumed, never
+                // dead-lettered, and re-evaluate on a later claim.
                 if matches!(e, ProcessorError::Throttled(_)) {
                     info!(
                         job_id = %job.id,
                         recipient = %job.to,
                         route = %route,
                         reason = %e,
-                        "provider throttle deferred the send — requeueing without consuming an attempt"
+                        "provider throttle deferred the send, requeueing without consuming an attempt"
                     );
                     self.requeue_job(job, "provider_throttled").await?;
                     return Ok(());
@@ -3803,19 +3803,19 @@ impl EmailProcessor {
     /// F18: the dispatch-time tenant policy decision. Only a CONFIRMED
     /// `active` tenant is [`TenantPolicy::Allowed`]:
     ///
-    /// * DB lookup failure → [`TenantPolicy::TemporarilyUnavailable`] — the
+    /// * DB lookup failure → [`TenantPolicy::TemporarilyUnavailable`], the
     ///   job is DEFERRED and dispatch exits (never fail open; the previous
     ///   fail-open-on-error behavior sent restricted mail during DB blips);
     /// * missing tenant row / empty id → [`TenantPolicy::Restricted`] (the
-    ///   job defers and stays visible — no mail leaves for an
+    ///   job defers and stays visible, no mail leaves for an
     ///   unidentifiable owner);
     /// * any non-active status (`pending`, `suspended`, ...) →
-    ///   [`TenantPolicy::Restricted`] — pending/unknown is NOT permitted.
+    ///   [`TenantPolicy::Restricted`], pending/unknown is NOT permitted.
     ///
     /// Caching: ALLOW decisions are NEVER cached (a primed 30 s allow cache
     /// used to keep sending through a suspension applied on another
     /// instance with no invalidation path). Only positive RESTRICTED
-    /// results are cached (30 s, moka) — a restriction arriving during the
+    /// results are cached (30 s, moka), a restriction arriving during the
     /// TTL window takes effect on the next claim at the latest, and an
     /// allow→restricted transition can never be served from cache.
     async fn tenant_policy(&self, tenant_id: &str) -> TenantPolicy {
@@ -3835,7 +3835,7 @@ impl EmailProcessor {
                 warn!(
                     tenant_id = tenant_id,
                     error = %error,
-                    "tenant status lookup failed — deferring the job (fail closed)"
+                    "tenant status lookup failed, deferring the job (fail closed)"
                 );
                 // Never cached: the next claim re-attempts the lookup.
                 return TenantPolicy::TemporarilyUnavailable;
@@ -3867,7 +3867,7 @@ impl EmailProcessor {
     /// * key absent/null → `global` (documented default; existing tenants are
     ///   unaffected);
     /// * a recognized value → that mode;
-    /// * an unrecognized/corrupt value → `eu_only` with a loud warning — the
+    /// * an unrecognized/corrupt value → `eu_only` with a loud warning, the
     ///   strict mode is the only safe reading of a value that might mean
     ///   EU-only, and a held message is inspectable/releasable while a
     ///   message sent through a forbidden transport is neither;
@@ -3878,7 +3878,7 @@ impl EmailProcessor {
     /// Deliberately NOT cached: the mode is one indexed primary-key read on a
     /// path that already performs several mandatory lookups (policy, consent,
     /// domain), and a stale cached `global` would send EU-only mail through
-    /// the shared transport after a mode change — exactly the failure this
+    /// the shared transport after a mode change, exactly the failure this
     /// feature exists to make impossible.
     async fn tenant_routing_mode(&self, tenant_id: &str) -> ProcessorResult<RoutingMode> {
         let stored: Option<Option<JsonValue>> = sqlx::query_scalar(TENANT_ROUTING_MODE_SQL)
@@ -3892,7 +3892,7 @@ impl EmailProcessor {
                     warn!(
                         tenant_id = tenant_id,
                         stored_value = %raw,
-                        "unrecognized tenants.settings.routingMode — failing CLOSED to eu_only \
+                        "unrecognized tenants.settings.routingMode, failing CLOSED to eu_only \
                          (an unreadable mode must never downgrade a tenant onto the shared transport)"
                     );
                 }
@@ -3907,13 +3907,13 @@ impl EmailProcessor {
     /// F55: the authoritative, cache-free consent decision for one
     /// recipient immediately before dispatch:
     ///
-    /// * [`ConsentDecision::Allowed`] — no global suppression AND no
+    /// * [`ConsentDecision::Allowed`], no global suppression AND no
     ///   applicable category opt-out (or the category is a
     ///   transactional/service exemption);
-    /// * [`ConsentDecision::Suppressed`] — a durable reason to not send
+    /// * [`ConsentDecision::Suppressed`], a durable reason to not send
     ///   (global suppression row, or `subscription_preferences` opted-out
     ///   for this non-exempt category);
-    /// * [`ConsentDecision::Deferred`] — the lookup itself failed. The
+    /// * [`ConsentDecision::Deferred`], the lookup itself failed. The
     ///   CALLER requeues and exits dispatch; a failed verification is
     ///   never interpreted as permission.
     ///
@@ -3923,7 +3923,7 @@ impl EmailProcessor {
     async fn dispatch_consent(&self, job: &EmailJob) -> ProcessorResult<ConsentDecision> {
         let canonical = canonical_recipient(&job.to);
         if canonical.is_empty() {
-            // An empty envelope recipient cannot be consent-checked — defer
+            // An empty envelope recipient cannot be consent-checked, defer
             // rather than send (the address was validated at enqueue; an
             // empty value here means corrupted row state).
             return Ok(ConsentDecision::Deferred(
@@ -3933,7 +3933,7 @@ impl EmailProcessor {
         // ONE query reads both consent dimensions, so they cannot disagree:
         // the global suppression reason, and the category opt-out flag for
         // this send's validated server-owned category (exempt categories
-        // ignore the preference — enforced by the `category_enforced` flag
+        // ignore the preference, enforced by the `category_enforced` flag
         // in Rust; global suppression ALWAYS applies).
         let category = &job.message_category;
         let category_enforced =
@@ -3952,7 +3952,7 @@ impl EmailProcessor {
                         job_id = %job.id,
                         tenant_id = %job.tenant_id,
                         error = %error,
-                        "dispatch-time consent recheck failed — deferring"
+                        "dispatch-time consent recheck failed, deferring"
                     );
                     return Ok(ConsentDecision::Deferred("consent_check_deferred"));
                 }
@@ -3971,20 +3971,20 @@ impl EmailProcessor {
         Ok(ConsentDecision::Allowed)
     }
 
-    /// Audit-2 / P0: route-aware send-time admission gate — reserve one send
+    /// Audit-2 / P0: route-aware send-time admission gate, reserve one send
     /// from the route's tenant and domain token buckets (SES
     /// `max_send_rate` for the shared pool, the relay's
     /// `rate_limit_per_second` for the dedicated route) before any
     /// `transport.send`. The bucket keys are route-scoped, so shared and
     /// dedicated traffic cannot drain each other's allowances.
     ///
-    /// * `Ok(false)` — exhausted: the caller defers the row via the existing
+    /// * `Ok(false)`, exhausted: the caller defers the row via the existing
     ///   requeue path instead of sending.
-    /// * `Err`/Redis unavailable — fails OPEN with a warning (best-effort,
+    /// * `Err`/Redis unavailable, fails OPEN with a warning (best-effort,
     ///   matching the historical posture; the transports still enforce their
     ///   own server-side throttling). The durable exactly-once gate is the
     ///   acceptance ledger, which does NOT fail open.
-    /// * rate 0 — the gate is disabled entirely.
+    /// * rate 0, the gate is disabled entirely.
     async fn check_send_admission(
         &self,
         job: &EmailJob,
@@ -3997,7 +3997,7 @@ impl EmailProcessor {
     /// is a separate account with its own ceiling
     /// (`SALES_SEND_RATE_PER_SECOND`) and separate buckets (the `sales`
     /// prefix), so a sales burst neither drains nor is throttled by the
-    /// customer ceilings — the same isolation principle, applied to the
+    /// customer ceilings, the same isolation principle, applied to the
     /// admission state.
     async fn check_sales_send_admission(
         &self,
@@ -4039,7 +4039,7 @@ impl EmailProcessor {
                     tenant_id = %job.tenant_id,
                     route_kind = %kind,
                     error = %e,
-                    "send admission bucket unavailable — proceeding (best-effort)"
+                    "send admission bucket unavailable, proceeding (best-effort)"
                 );
                 Ok(true)
             }
@@ -4052,7 +4052,7 @@ impl EmailProcessor {
     /// unsigned fallback would turn a revoked or spoofed sender into delivery.
     ///
     /// Audit-1 / P0 routing: dedicated-IP state is derived from the REAL
-    /// per-tenant `dedicated_ips` rows (see [`GET_DOMAIN_SQL`]) — both warming
+    /// per-tenant `dedicated_ips` rows (see [`GET_DOMAIN_SQL`]), both warming
     /// and active. `warmup_enabled`/`warmup_day` describe the BINDING
     /// (least-warmed) warming identity; the actual route is chosen per send by
     /// [`select_delivery_ip`] + [`reserve_warmup_capacity`], so this method
@@ -4083,7 +4083,7 @@ impl EmailProcessor {
 
         let dedicated_ips = parse_dedicated_ips(row.dedicated_ips.as_ref());
         // The binding warmup identity is the least-warmed WARMING row (the
-        // tightest reputation boundary); descriptors only — admission is a
+        // tightest reputation boundary); descriptors only, admission is a
         // separate step.
         let now = Utc::now();
         let binding = dedicated_ips
@@ -4144,7 +4144,7 @@ impl EmailProcessor {
         let mut html = job.html.clone();
         let mut text = job.text.clone();
 
-        // Add tracking if enabled — honoring the per-message toggles the
+        // Add tracking if enabled, honoring the per-message toggles the
         // campaign ladder writes (`track_opens` / `track_clicks` in the job
         // metadata; absent = both on). The unsubscribe affordance is
         // applied separately below and is NEVER toggled off.
@@ -4173,14 +4173,14 @@ impl EmailProcessor {
         // recipient identity (see `unsubscribe_link`). It feeds the
         // List-Unsubscribe header and the {{unsubscribe_url}} placeholders
         // in the caller's HTML/text. Best-effort by design: suppression
-        // NEVER depends on attribution success — a missing token leaves
+        // NEVER depends on attribution success, a missing token leaves
         // the body untouched and the send proceeds.
         let unsubscribe = unsubscribe_link(job, &self.config.tracking);
         let mut headers: Vec<(String, String)> = Vec::new();
         if let Some((_token, url)) = &unsubscribe {
             // RFC 2369 angle-bracketed https URL + RFC 8058 one-click POST.
             // FIXED (batch 2): List-Unsubscribe-Post must carry the LITERAL
-            // value `List-Unsubscribe=One-Click` (RFC 8058 §3) — the obsolete
+            // value `List-Unsubscribe=One-Click` (RFC 8058 §3), the obsolete
             // `Yes` value was not recognized by one-click-capable clients.
             // The tracking-service serves the POST variant on the same
             // route (`handle_unsub_post`).
@@ -4201,7 +4201,7 @@ impl EmailProcessor {
 
         // F74: internal identity headers, generated EXCLUSIVELY from the
         // authenticated persisted job context (never merged from caller
-        // input — the whole X-ApexMail-* namespace is filtered below and
+        // input, the whole X-ApexMail-* namespace is filtered below and
         // at the API boundary). Shared canonical constants keep the SES
         // callback parser and this emitter in lockstep.
         headers.push((
@@ -4249,7 +4249,7 @@ impl EmailProcessor {
         // F26/F48: the queue row's `headers` JSONB carries the SERVER-WRITTEN
         // MIME header map (original To/Cc visibility, reply-to, custom caller
         // headers). Legacy rows (and other writers) stored a flat custom
-        // header object — recognized by the absence of the reserved `to` key.
+        // header object, recognized by the absence of the reserved `to` key.
         let SplitMimeHeaders {
             mime_to,
             mime_cc,
@@ -4260,7 +4260,7 @@ impl EmailProcessor {
         // F26: preserve the ORIGINAL visible To/Cc mailbox LISTS on every
         // per-recipient copy (structured `Mailbox` arrays used by BOTH
         // transports via Address::new_list); the envelope destination stays
-        // `job.to`. Bcc never appears here — it exists only in the delivery
+        // `job.to`. Bcc never appears here, it exists only in the delivery
         // data. Reply-To rides as a structured mailbox too.
 
         // F26: a logical Message-ID shared by every copy of the message —
@@ -4271,7 +4271,7 @@ impl EmailProcessor {
         }
 
         // Add custom headers from job (filtering protected headers and the
-        // reserved X-ApexMail-* namespace — case-insensitive, F74: legacy
+        // reserved X-ApexMail-* namespace, case-insensitive, F74: legacy
         // alias spellings like X-ApexMail-TenantId must be blocked here
         // exactly like the canonical ones).
         let mut seen_custom: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -4294,7 +4294,7 @@ impl EmailProcessor {
         // not merely the route: a dedicated relay send must carry the local
         // signature, AND so must a shared-route send when the shared backend
         // is the SMTP relay (`EMAIL_TRANSPORT_TYPE=smtp` / Mailpit / an
-        // operator relay) — nothing downstream signs there. Only the SES
+        // operator relay), nothing downstream signs there. Only the SES
         // client path is skipped: SES signs with BYODKIM using the same key.
         // Dogfood finding 2026-10-06 P1: keyed off the route alone, an
         // SMTP-mode deployment shipped 100% unsigned mail while the
@@ -4313,7 +4313,7 @@ impl EmailProcessor {
                 // behavior rather than dead-lettering unverified domains.
                 tracing::warn!(
                     job_id = %job.id,
-                    "SMTP-mode shared route with DKIM disabled — sending unsigned (DKIM_ENABLED=false)"
+                    "SMTP-mode shared route with DKIM disabled, sending unsigned (DKIM_ENABLED=false)"
                 );
                 None
             } else {
@@ -4329,7 +4329,7 @@ impl EmailProcessor {
                             job_id = %job.id,
                             domain_id = %domain.id,
                             error = %error,
-                            "SMTP-mode shared route has no usable DKIM key for this domain — sending unsigned"
+                            "SMTP-mode shared route has no usable DKIM key for this domain, sending unsigned"
                         );
                         None
                     }
@@ -4382,7 +4382,7 @@ impl EmailProcessor {
 
         // Gmail Annotations (Promotions tab, `docs/security/advanced-analytics.md`):
         // when the queue row's SERVER-WRITTEN metadata carries a
-        // `gmail_annotations` object (the documented campaign payload — see
+        // `gmail_annotations` object (the documented campaign payload, see
         // `mta::gmail_annotations::GmailAnnotationConfig`), generate the
         // schema.org JSON-LD and inject it into the message HTML `<head>`.
         // This is the live injection point the MTA-side generator exists
@@ -4428,7 +4428,7 @@ impl EmailProcessor {
     /// callback transition (F75 uses the same shared statement). Derives
     /// the parent state from the COMPLETE set of recipient rows; see
     /// `apexmail_lib::email_headers::RECONCILE_MESSAGE_PROGRESS_SQL` for
-    /// the documented state model. Best-effort by design — the recipient
+    /// the documented state model. Best-effort by design, the recipient
     /// transition already committed, so a reconciliation failure is logged,
     /// counted, and picked up by the restart sweep
     /// ([`EmailProcessor::reconcile_stuck_parents`]) instead of failing
@@ -4448,13 +4448,13 @@ impl EmailProcessor {
                 message_id = %job.message_id,
                 tenant_id = %job.tenant_id,
                 error = %e,
-                "parent progress reconciliation failed — restart sweep will recover the aggregate"
+                "parent progress reconciliation failed, restart sweep will recover the aggregate"
             );
         }
     }
 
     /// F25: reconcile every parent whose recipient rows are ALL terminal but
-    /// whose aggregate status is not — the missed-event recovery for a crash
+    /// whose aggregate status is not, the missed-event recovery for a crash
     /// between a recipient transition and its reconciliation. Runs once at
     /// processor start and periodically thereafter; idempotent.
     async fn reconcile_stuck_parents(&self) {
@@ -4475,7 +4475,7 @@ impl EmailProcessor {
                 metrics::counter!("email.parent_reconciliation_failed").increment(1);
                 warn!(
                     error = %e,
-                    "stuck-parent reconciliation sweep failed — retried on the next interval"
+                    "stuck-parent reconciliation sweep failed, retried on the next interval"
                 );
             }
         }
@@ -4486,7 +4486,7 @@ impl EmailProcessor {
     /// latency percentiles (JOIN email_queue ON eq.id = dl.email_id,
     /// dl.attempted_at, dl.success, dl.smtp_response) and billing's
     /// usage ingest (success rows by attempted_at day, tenant via the
-    /// queue). Best-effort by design — never fails the send.
+    /// queue). Best-effort by design, never fails the send.
     ///
     /// `created_at` is NOT NULL and `(email_id, created_at)` is a composite
     /// FK onto `email_queue(id, created_at)`, so the value must be COPIED
@@ -4546,7 +4546,7 @@ impl EmailProcessor {
     /// has one (the real dispatch path always does). The send-effect row
     /// update and the `mail_journal` INSERT are committed in ONE
     /// transaction: a journal failure rolls the status update back and
-    /// surfaces the error — a paid "Archive + Journaling" tenant never gets
+    /// surfaces the error, a paid "Archive + Journaling" tenant never gets
     /// a successful-looking send without its legal copy.
     ///
     /// `None` keeps the pre-journaling behaviour for callers that have no
@@ -4568,14 +4568,14 @@ impl EmailProcessor {
             .await?;
 
         // Audit-5: a fenced-out write means the lease was lost (the row was
-        // recovered and re-claimed). The new owner owns the row now — do not
+        // recovered and re-claimed). The new owner owns the row now, do not
         // record events or stamp messages on its behalf.
         if fenced_out(updated.rows_affected()) {
             tx.rollback().await?;
             warn!(
                 job_id = %job.id,
                 recipient = %job.to,
-                "handle_success fenced out — lease lost, row write skipped"
+                "handle_success fenced out, lease lost, row write skipped"
             );
             return Ok(());
         }
@@ -4612,7 +4612,7 @@ impl EmailProcessor {
                         job_id = %job.id,
                         tenant_id = %job.tenant_id,
                         error = %error,
-                        "mail journal INSERT failed — failing the send effect (paid journaling guarantee)"
+                        "mail journal INSERT failed, failing the send effect (paid journaling guarantee)"
                     );
                     return Err(error.into());
                 }
@@ -4621,13 +4621,13 @@ impl EmailProcessor {
 
         tx.commit().await?;
 
-        // Audit item 12 — THE DELIBERATE GAP: provider/SMTP acceptance
+        // Audit item 12, THE DELIBERATE GAP: provider/SMTP acceptance
         // (exactly what this function handles) is NOT recorded as a
         // `sales_outcomes.delivered` outcome, and not as a `delivered`
         // sender-health event either. Acceptance is an operational signal
         // this worker can observe; DELIVERY requires a delivery-confirmation
         // event (DSN / SES delivery notification), whose consumer does not
-        // exist yet — see `SALES_OUTCOME_MAPPING`, whose
+        // exist yet, see `SALES_OUTCOME_MAPPING`, whose
         // `smtp_or_provider_acceptance` row is `Prohibited` and whose
         // `delivery_confirmation_callback` row is `NoProducerYet`. Until that
         // producer lands, this step records NO outcome: the audit explicitly
@@ -4635,14 +4635,14 @@ impl EmailProcessor {
         // fact must stay missing rather than become a wrong one.
         //
         // Record sent event. Best-effort BY CONTRACT: the send already
-        // happened and the row is already 'sent' — an analytics INSERT
+        // happened and the row is already 'sent', an analytics INSERT
         // failure must NOT classify the delivered mail as failed (the
         // caller would route it to the bounce handlers and the retry path).
         // Log + metric; the delivery stands.
         //
         // Audit item 21: the recipient mailbox provider is persisted HERE,
         // at delivery time, when the transport's delivery path actually
-        // resolved it (MX lookup). Unknown stays NULL — it is never inferred
+        // resolved it (MX lookup). Unknown stays NULL, it is never inferred
         // from the visible recipient domain (a custom domain hosted by
         // Google Workspace would be misreported).
         let (recipient_provider, provider_source) = normalized_provider_columns(
@@ -4669,7 +4669,7 @@ impl EmailProcessor {
                 job_id = %job.id,
                 recipient = %job.to,
                 error = %e,
-                "Post-send 'sent' event INSERT failed — mail IS delivered (row already 'sent'); analytics event lost, not the delivery"
+                "Post-send 'sent' event INSERT failed, mail IS delivered (row already 'sent'); analytics event lost, not the delivery"
             );
         }
 
@@ -4708,7 +4708,7 @@ impl EmailProcessor {
         // terminal-sent. Scheduled and processing parents are accepted.
         // Best-effort for the same reason as the events INSERT above: a
         // legacy job without a UUID message id skips the transition rather
-        // than failing the (already successful) send handling — and so does
+        // than failing the (already successful) send handling, and so does
         // a failed write, with a metric. The same shared reconciliation
         // runs on EVERY durable recipient transition (suppression, bounce,
         // DLQ, deferral) and from the restart sweep.
@@ -4768,7 +4768,7 @@ impl EmailProcessor {
 
     /// Handle suppressed recipient.
     ///
-    /// G.3b: the row carries MULTIPLE recipients (FIX-8) — suppressing one
+    /// G.3b: the row carries MULTIPLE recipients (FIX-8), suppressing one
     /// must not terminate the whole row while siblings are still in flight.
     /// The recipient is removed from `metadata.pending_recipients` (mirroring
     /// `handle_success`) and the row only becomes 'suppressed' when the
@@ -4786,12 +4786,12 @@ impl EmailProcessor {
             warn!(
                 job_id = %job.id,
                 recipient = %job.to,
-                "handle_suppressed fenced out — lease lost, row write skipped"
+                "handle_suppressed fenced out, lease lost, row write skipped"
             );
             return Ok(());
         }
 
-        // F25: suppression is a durable recipient transition — the parent
+        // F25: suppression is a durable recipient transition, the parent
         // must reconcile even when every recipient is suppressed (the
         // all-suppressed parent previously stayed 'processing' forever).
         self.reconcile_parent_progress(job).await;
@@ -4799,7 +4799,7 @@ impl EmailProcessor {
         Ok(())
     }
 
-    /// G.3c: a duplicate-window reclaim — the (row, attempt, recipient) send
+    /// G.3c: a duplicate-window reclaim, the (row, attempt, recipient) send
     /// marker was still held, so a previous worker may already have sent this
     /// message. Record the recipient as possibly-sent in the row metadata
     /// (auditable) and remove it from the pending set so the row completes
@@ -4822,7 +4822,7 @@ impl EmailProcessor {
             warn!(
                 job_id = %job.id,
                 recipient = %job.to,
-                "handle_possibly_sent fenced out — lease lost, row write skipped"
+                "handle_possibly_sent fenced out, lease lost, row write skipped"
             );
             return Ok(());
         }
@@ -4858,7 +4858,7 @@ impl EmailProcessor {
                         job_id = %job.id,
                         tenant_id = %job.tenant_id,
                         error = %error,
-                        "mail journal INSERT failed on the already-accepted path — rolling the transition back so it is retried WITH the legal copy"
+                        "mail journal INSERT failed on the already-accepted path, rolling the transition back so it is retried WITH the legal copy"
                     );
                     return Err(error.into());
                 }
@@ -4873,13 +4873,13 @@ impl EmailProcessor {
         Ok(())
     }
 
-    /// WORKER PRE-SEND DLP gate — MEDIUM severity (engine `Quarantine`) hold.
+    /// WORKER PRE-SEND DLP gate, MEDIUM severity (engine `Quarantine`) hold.
     ///
     /// The row moves to `deferred` (the queue's honest hold-in-queue state:
     /// the poller never claims it, so the message stays visible, unsent and
     /// un-retried pending operator review) with a `metadata.dlp` annotation
     /// naming the rule classes. The row write and the `audit_logs` evidence
-    /// row commit in ONE transaction — a hold without evidence must not
+    /// row commit in ONE transaction, a hold without evidence must not
     /// exist (the same discipline as warmup graduation). No recipient event
     /// is written: nothing happened to this recipient copy, and the queue
     /// row + audit row are the operator-facing record.
@@ -4907,7 +4907,7 @@ impl EmailProcessor {
             warn!(
                 job_id = %job.id,
                 recipient = %job.to,
-                "handle_dlp_hold fenced out — lease lost, hold write skipped"
+                "handle_dlp_hold fenced out, lease lost, hold write skipped"
             );
             return Ok(());
         }
@@ -4918,7 +4918,7 @@ impl EmailProcessor {
             error!(
                 job_id = %job.id,
                 error = %error,
-                "DLP hold audit write failed — rolling the hold back so it can be re-recorded WITH its evidence (never a silent hold)"
+                "DLP hold audit write failed, rolling the hold back so it can be re-recorded WITH its evidence (never a silent hold)"
             );
             return Err(ProcessorError::Database(error));
         }
@@ -4931,19 +4931,19 @@ impl EmailProcessor {
         Ok(())
     }
 
-    /// W4A: EU-ONLY ROUTING HOLD — the fail-closed half of the routing mode.
+    /// W4A: EU-ONLY ROUTING HOLD, the fail-closed half of the routing mode.
     ///
     /// Called from every dispatch point where the own-MTA route is
     /// unavailable or not permitted under `eu_only`. The message MUST NOT be
     /// sent through any other transport and MUST NOT be dead-lettered: it is
-    /// moved to `deferred` (the queue's honest hold-in-queue state — the
+    /// moved to `deferred` (the queue's honest hold-in-queue state, the
     /// poller claims only `pending`/expired-`processing` rows, so the message
     /// stays visible, unsent and un-retried pending operator review) with the
     /// NAMED reason in `error_message` and a `metadata.eu_only_routing`
     /// annotation (disposition, mode, reason, detail, recipient, send unit).
     ///
     /// The row write and the hash-chained `audit_logs` evidence row commit in
-    /// ONE transaction — a hold without evidence must not exist, the same
+    /// ONE transaction, a hold without evidence must not exist, the same
     /// discipline [`EmailProcessor::handle_dlp_hold`] applies. No recipient
     /// event is written: nothing happened to this recipient copy; the queue
     /// row + audit row are the operator-facing record, and the message is
@@ -4984,7 +4984,7 @@ impl EmailProcessor {
             warn!(
                 job_id = %job.id,
                 recipient = %job.to,
-                "handle_eu_only_hold fenced out — lease lost, hold write skipped"
+                "handle_eu_only_hold fenced out, lease lost, hold write skipped"
             );
             return Ok(());
         }
@@ -4993,7 +4993,7 @@ impl EmailProcessor {
             error!(
                 job_id = %job.id,
                 error = %error,
-                "EU-only hold audit write failed — rolling the hold back so it can be re-recorded \
+                "EU-only hold audit write failed, rolling the hold back so it can be re-recorded \
                  WITH its evidence (never a silent hold)"
             );
             return Err(ProcessorError::Database(error));
@@ -5005,7 +5005,7 @@ impl EmailProcessor {
             tenant_id = %job.tenant_id,
             recipient = %job.to,
             reason,
-            "EU-only routing: message HELD in queue (deferred, named reason, audit evidence) — \
+            "EU-only routing: message HELD in queue (deferred, named reason, audit evidence), \
              never sent through a non-EU/third-party transport"
         );
 
@@ -5016,7 +5016,7 @@ impl EmailProcessor {
         Ok(())
     }
 
-    /// SALES ISOLATION HOLD — the fail-closed half of the sales transport
+    /// SALES ISOLATION HOLD, the fail-closed half of the sales transport
     /// slot (see the SALES block above [`SALES_HOLD_UPDATE_SQL`] and
     /// `email::sales`).
     ///
@@ -5072,7 +5072,7 @@ impl EmailProcessor {
             warn!(
                 job_id = %job.id,
                 recipient = %job.to,
-                "handle_sales_hold fenced out — lease lost, hold write skipped"
+                "handle_sales_hold fenced out, lease lost, hold write skipped"
             );
             return Ok(());
         }
@@ -5081,7 +5081,7 @@ impl EmailProcessor {
             error!(
                 job_id = %job.id,
                 error = %error,
-                "sales hold audit write failed — rolling the hold back so it can be \
+                "sales hold audit write failed, rolling the hold back so it can be \
                  re-recorded WITH its evidence (never a silent hold)"
             );
             return Err(ProcessorError::Database(error));
@@ -5094,7 +5094,7 @@ impl EmailProcessor {
             recipient = %job.to,
             reason,
             "SALES ISOLATION: message HELD in queue (deferred, named reason, audit evidence) \
-             — the customer transport is never a fallback for sales mail"
+            , the customer transport is never a fallback for sales mail"
         );
 
         // F25: the hold is a durable recipient transition (non-terminal) —
@@ -5107,16 +5107,16 @@ impl EmailProcessor {
     /// The sales pre-flight: every gate between "this queue row is a sales
     /// send" and "submit it on the sales transport". Each failure records the
     /// SALES hold and returns [`SalesSendOutcome::Held`], so the caller exits
-    /// dispatch — none of these arms can fall through into the customer path.
+    /// dispatch, none of these arms can fall through into the customer path.
     ///
     /// Order (each step also has a fail-closed arm further down the send
     /// path as defense in depth):
-    /// 1. sender-domain allowlist (`SALES_SENDING_DOMAINS`) — refuse BY NAME;
-    /// 2. the PURE [`plan_sales_route`] — mode → route, else a named hold;
+    /// 1. sender-domain allowlist (`SALES_SENDING_DOMAINS`), refuse BY NAME;
+    /// 2. the PURE [`plan_sales_route`], mode → route, else a named hold;
     /// 3. DKIM for own-MTA routes (the relay route must carry the local
     ///    signature; an unavailable signature is a route outage, not a
     ///    reason to fall back);
-    /// 4. the transport gate — the sales slot must be configured and able to
+    /// 4. the transport gate, the sales slot must be configured and able to
     ///    carry the planned route (a non-binding backend is refused here,
     ///    BEFORE any reservation or submission).
     async fn prepare_sales_send(
@@ -5125,7 +5125,7 @@ impl EmailProcessor {
         domain: &Domain,
         sales: &SalesSend,
     ) -> ProcessorResult<SalesSendOutcome> {
-        // (1) The exact allowlist gate on the ENVELOPE sender domain — the
+        // (1) The exact allowlist gate on the ENVELOPE sender domain, the
         // value that will actually be sent from (`get_domain` already proved
         // it matches the authorized `domains` row). An unparsable envelope
         // is unreachable through `get_domain`; it fails closed here anyway.
@@ -5136,13 +5136,13 @@ impl EmailProcessor {
                     job_id = %job.id,
                     tenant_id = %job.tenant_id,
                     reason = SALES_HOLD_DOMAIN_NOT_ALLOWED,
-                    "sales isolation: the queued sender address carries no domain — HOLDING"
+                    "sales isolation: the queued sender address carries no domain, HOLDING"
                 );
                 self.handle_sales_hold(
                     job,
                     SALES_HOLD_DOMAIN_NOT_ALLOWED,
                     "the queued sender address carries no domain, so it cannot be matched \
-                     against SALES_SENDING_DOMAINS — refusing to send from an unvetted domain",
+                     against SALES_SENDING_DOMAINS, refusing to send from an unvetted domain",
                 )
                 .await?;
                 return Ok(SalesSendOutcome::Held);
@@ -5151,7 +5151,7 @@ impl EmailProcessor {
         if !self.config.sales.domain_allowed(&sender_domain) {
             let detail = format!(
                 "sender domain '{}' is not on SALES_SENDING_DOMAINS ({}); a sender outside \
-                 the sales allowlist is refused by name — sales mail never sends from a \
+                 the sales allowlist is refused by name, sales mail never sends from a \
                  customer sending domain",
                 sender_domain,
                 if self.config.sales.sending_domains.is_empty() {
@@ -5166,7 +5166,7 @@ impl EmailProcessor {
                 domain = %sender_domain,
                 authorized_domain = %domain.domain,
                 reason = SALES_HOLD_DOMAIN_NOT_ALLOWED,
-                "sales isolation: sender domain outside the sales allowlist — HOLDING"
+                "sales isolation: sender domain outside the sales allowlist, HOLDING"
             );
             self.handle_sales_hold(job, SALES_HOLD_DOMAIN_NOT_ALLOWED, &detail)
                 .await?;
@@ -5181,7 +5181,7 @@ impl EmailProcessor {
                     job_id = %job.id,
                     tenant_id = %job.tenant_id,
                     reason,
-                    "sales isolation: no permitted sales route — HOLDING the message \
+                    "sales isolation: no permitted sales route, HOLDING the message \
                      (the customer transport is forbidden for sales mail)"
                 );
                 self.handle_sales_hold(job, reason, &detail).await?;
@@ -5192,14 +5192,14 @@ impl EmailProcessor {
         // (3) Own-MTA sales sends are DKIM-signed LOCALLY from the sender
         // domain's key (the relay delivers the bytes verbatim). A disabled
         // signature cannot be produced, and the fallback (the customer
-        // transport) is forbidden — HOLD.
+        // transport) is forbidden, HOLD.
         if route.is_dedicated() && !self.config.dkim.enabled {
             warn!(
                 job_id = %job.id,
                 tenant_id = %job.tenant_id,
                 route = %route,
                 reason = SALES_HOLD_DKIM_DISABLED,
-                "sales isolation: DKIM signing is disabled on this worker — HOLDING the \
+                "sales isolation: DKIM signing is disabled on this worker, HOLDING the \
                  own-MTA sales send"
             );
             self.handle_sales_hold(
@@ -5214,7 +5214,7 @@ impl EmailProcessor {
 
         // (4) Pre-DATA transport gate for the SALES slot (never the customer
         // hybrid): a missing backend or a backend that cannot bind the
-        // requested IP is a route outage — HOLD before any reservation.
+        // requested IP is a route outage, HOLD before any reservation.
         if let Err(error) = self.sales_transport.ensure_dispatchable(&route) {
             warn!(
                 job_id = %job.id,
@@ -5223,7 +5223,7 @@ impl EmailProcessor {
                 reason = SALES_HOLD_TRANSPORT_UNAVAILABLE,
                 backend = self.sales_transport.backend_name(),
                 error = %error,
-                "sales isolation: the sales transport cannot carry the planned route — \
+                "sales isolation: the sales transport cannot carry the planned route, \
                  HOLDING the message BEFORE DATA"
             );
             self.handle_sales_hold(
@@ -5242,14 +5242,14 @@ impl EmailProcessor {
         Ok(SalesSendOutcome::Route(route))
     }
 
-    /// WORKER PRE-SEND DLP gate — HIGH severity (engine `Block`) refusal.
+    /// WORKER PRE-SEND DLP gate, HIGH severity (engine `Block`) refusal.
     ///
     /// The typed DSN to the sender, in this pipeline's terms: a terminal
     /// per-recipient `bounced` queue row (the exact shape
     /// [`EmailProcessor::handle_hard_bounce`] gives a transport 5xx) whose
     /// `error_message` carries honest sender-visible copy naming the rule
     /// classes, plus a `bounced` recipient event with NULL provider
-    /// provenance (nothing left the platform — the provider is unknown, not
+    /// provenance (nothing left the platform, the provider is unknown, not
     /// guessed). The refusal row write and the `audit_logs` evidence row
     /// commit in ONE transaction. Deliberately NOT done here: recipient
     /// suppression (a content-policy refusal proves nothing about the
@@ -5280,7 +5280,7 @@ impl EmailProcessor {
             warn!(
                 job_id = %job.id,
                 recipient = %job.to,
-                "handle_dlp_refusal fenced out — lease lost, refusal write skipped"
+                "handle_dlp_refusal fenced out, lease lost, refusal write skipped"
             );
             return Ok(());
         }
@@ -5291,7 +5291,7 @@ impl EmailProcessor {
             error!(
                 job_id = %job.id,
                 error = %error,
-                "DLP refusal audit write failed — rolling the refusal back so it can be re-recorded WITH its evidence (never a silent drop)"
+                "DLP refusal audit write failed, rolling the refusal back so it can be re-recorded WITH its evidence (never a silent drop)"
             );
             return Err(ProcessorError::Database(error));
         }
@@ -5302,7 +5302,7 @@ impl EmailProcessor {
         self.reconcile_parent_progress(job).await;
 
         // Sender-visible DSN surface: the `bounced` recipient event.
-        // Best-effort AFTER the refusal stands — a lost analytics event must
+        // Best-effort AFTER the refusal stands, a lost analytics event must
         // not un-refuse the message, and the audit row already names the
         // rule class.
         if let Err(error) = insert_recipient_event(
@@ -5325,7 +5325,7 @@ impl EmailProcessor {
                 job_id = %job.id,
                 recipient = %job.to,
                 error = %error,
-                "DLP refusal 'bounced' event INSERT failed — the refusal stands (row is terminal); the DSN event is lost"
+                "DLP refusal 'bounced' event INSERT failed, the refusal stands (row is terminal); the DSN event is lost"
             );
         }
 
@@ -5345,7 +5345,7 @@ impl EmailProcessor {
 
         let next_attempt = job.attempt + 1;
         let backoff_multiplier = 2_i64.saturating_pow(job.attempt.min(30) as u32);
-        // F6:±20% jitter on the exponential backoff — a cohort of messages
+        // F6:±20% jitter on the exponential backoff, a cohort of messages
         // failing the same transient error at the same attempt otherwise
         // retries in one synchronized wave (thundering herd against the
         // same recovering endpoint).
@@ -5363,7 +5363,7 @@ impl EmailProcessor {
 
         // Requeue only the recipients still owed a delivery (partial-failure
         // duplicate fix). `metadata.pending_recipients` is seeded here if it
-        // does not exist yet (from the row's full recipient list) — successes
+        // does not exist yet (from the row's full recipient list), successes
         // recorded by the OTHER recipients of this row subtract from it, and
         // the retry fetch expands only this set. If nothing remains, the row
         // is simply marked sent.
@@ -5380,12 +5380,12 @@ impl EmailProcessor {
             warn!(
                 job_id = %job.id,
                 recipient = %job.to,
-                "handle_soft_bounce fenced out — lease lost, requeue skipped"
+                "handle_soft_bounce fenced out, lease lost, requeue skipped"
             );
             return Ok(());
         }
 
-        // F25: the deferral is a durable recipient transition — the parent
+        // F25: the deferral is a durable recipient transition, the parent
         // re-derives (stays 'processing' while nothing is terminal, so the
         // scheduled retry remains cancellable; 'partial' once siblings
         // completed).
@@ -5403,7 +5403,7 @@ impl EmailProcessor {
 
     /// Handle hard bounce (permanent failure).
     ///
-    /// Audit-3: the row can carry MULTIPLE recipients (FIX-8) — one 550 must
+    /// Audit-3: the row can carry MULTIPLE recipients (FIX-8), one 550 must
     /// not terminalize the whole row. Mirrors `handle_success` /
     /// `handle_suppressed`: the bounced recipient leaves
     /// `metadata.pending_recipients`, the row becomes terminal 'bounced'
@@ -5423,18 +5423,18 @@ impl EmailProcessor {
             .execute(&self.db)
             .await?;
 
-        // Audit-5: fenced out — the lease was lost; the new owner owns the
+        // Audit-5: fenced out, the lease was lost; the new owner owns the
         // row and must not inherit this worker's suppression/event records.
         if fenced_out(updated.rows_affected()) {
             warn!(
                 job_id = %job.id,
                 recipient = %job.to,
-                "handle_hard_bounce fenced out — lease lost, bounce handling skipped"
+                "handle_hard_bounce fenced out, lease lost, bounce handling skipped"
             );
             return Ok(());
         }
 
-        // Add to suppressions — ONLY the bounced address, and ONLY when the
+        // Add to suppressions, ONLY the bounced address, and ONLY when the
         // failure proves the address itself is invalid. Policy 5xx (spam
         // refusals, IP blocklists, DMARC verdicts) mark this message
         // permanently failed but must not suppress a valid mailbox.
@@ -5465,7 +5465,7 @@ impl EmailProcessor {
         }
 
         // F25: the hard bounce is a durable (terminal) recipient transition
-        // — reconcile the parent. The all-bounced parent previously stayed
+        //, reconcile the parent. The all-bounced parent previously stayed
         // 'processing' forever.
         self.reconcile_parent_progress(job).await;
 
@@ -5474,7 +5474,7 @@ impl EmailProcessor {
         // Audit item 21: carry the recipient-provider identity persisted at
         // delivery time for this recipient-send onto the bounce, so outcome
         // events never lose provenance. When nothing was persisted (the
-        // MX was never resolved) both fields stay NULL — never inferred.
+        // MX was never resolved) both fields stay NULL, never inferred.
         //
         // Best-effort BY CONTRACT, exactly like `handle_success`'s sent
         // event: the durable terminal transition (row → bounced, suppression
@@ -5506,7 +5506,7 @@ impl EmailProcessor {
                 job_id = %job.id,
                 recipient = %job.to,
                 error = %e,
-                "bounce event INSERT failed — the recipient IS bounced (row already terminal); \
+                "bounce event INSERT failed, the recipient IS bounced (row already terminal); \
                  analytics event lost, not the bounce"
             );
         }
@@ -5515,7 +5515,7 @@ impl EmailProcessor {
         // `sales_sender_events` row (`hard_bounce`) plus the `bounce` outcome
         // when the queue row carries the typed sales provenance. Both inserts
         // are idempotent on their stable keys. Best-effort: the recipient is
-        // already suppressed and the delivery record written — a ledger
+        // already suppressed and the delivery record written, a ledger
         // failure is logged, never turned into a retry of an already-bounced
         // message.
         let provider = transport_provider_label(&route_transport_type(route));
@@ -5530,7 +5530,7 @@ impl EmailProcessor {
     ///
     /// Both writes are the single-sourced functions at the bottom of this
     /// module; both are idempotent (a replayed provider callback or a
-    /// re-claimed queue row cannot double-count). Best-effort by design — the
+    /// re-claimed queue row cannot double-count). Best-effort by design, the
     /// delivery state transition has already happened and must not be
     /// unwound by a feedback-ledger failure; failures are logged and
     /// counted.
@@ -5556,7 +5556,7 @@ impl EmailProcessor {
                 warn!(
                     job_id = %job.id,
                     error = %error,
-                    "sales outcome write failed — delivery state is unaffected, feedback event lost"
+                    "sales outcome write failed, delivery state is unaffected, feedback event lost"
                 );
             }
         }
@@ -5577,7 +5577,7 @@ impl EmailProcessor {
                 warn!(
                     job_id = %job.id,
                     error = %error,
-                    "sender-health ledger write failed — delivery state is unaffected, feedback event lost"
+                    "sender-health ledger write failed, delivery state is unaffected, feedback event lost"
                 );
             }
         }
@@ -5591,12 +5591,12 @@ impl EmailProcessor {
         route: &DeliveryRoute,
     ) -> ProcessorResult<()> {
         if job.attempt >= self.config.base.max_retries as i32 {
-            // Audit-3: dead-letter only THIS recipient — the row may still
+            // Audit-3: dead-letter only THIS recipient, the row may still
             // owe deliveries to its other recipients (FIX-8). The failed
             // recipient's delivery is recorded in email_dlq; the row itself
             // only terminalizes to 'failed' when the pending set empties,
             // otherwise it returns to 'pending' for the siblings.
-            // Audit-5: the fenced write runs FIRST — a fenced-out (lease
+            // Audit-5: the fenced write runs FIRST, a fenced-out (lease
             // lost) worker must not dead-letter on the new owner's behalf.
             let updated = sqlx::query(DLQ_FAIL_UPDATE_SQL)
                 .bind(error.to_string())
@@ -5610,13 +5610,13 @@ impl EmailProcessor {
                 warn!(
                     job_id = %job.id,
                     recipient = %job.to,
-                    "handle_error dead-letter fenced out — lease lost, DLQ write skipped"
+                    "handle_error dead-letter fenced out, lease lost, DLQ write skipped"
                 );
                 return Ok(());
             }
 
             // F25: exhausted-retry dead-lettering is a durable recipient
-            // transition — reconcile the parent (the all-exhausted parent
+            // transition, reconcile the parent (the all-exhausted parent
             // previously stayed 'processing' forever).
             self.reconcile_parent_progress(job).await;
 
@@ -5674,7 +5674,7 @@ impl EmailProcessor {
         transaction.commit().await?;
 
         // F25: permanent rejection is a durable terminal recipient
-        // transition — reconcile the parent (an all-rejected message
+        // transition, reconcile the parent (an all-rejected message
         // previously stayed 'processing' forever).
         self.reconcile_parent_progress(job).await;
 
@@ -5700,7 +5700,7 @@ impl EmailProcessor {
             warn!(
                 job_id = %job.id,
                 reason = reason,
-                "requeue fenced out — lease lost, deferral skipped"
+                "requeue fenced out, lease lost, deferral skipped"
             );
         }
 
@@ -5768,7 +5768,7 @@ impl EmailProcessor {
 ///
 /// Fail-open per message: malformed JSON, an invalid annotation config, or a
 /// non-string HTML payload is logged and returns the input unchanged.
-/// Annotations are a presentation surface — they must never block or alter
+/// Annotations are a presentation surface, they must never block or alter
 /// delivery, and they are never applied to the plain-text part.
 fn maybe_annotate_html(html: Option<String>, job: &EmailJob) -> Option<String> {
     let Some(annotations) = job
@@ -5791,7 +5791,7 @@ fn maybe_annotate_html(html: Option<String>, job: &EmailJob) -> Option<String> {
             warn!(
                 job_id = %job.id,
                 error = %error,
-                "gmail_annotations metadata is not a valid annotation config — sending without annotations"
+                "gmail_annotations metadata is not a valid annotation config, sending without annotations"
             );
             return html;
         }
@@ -5803,7 +5803,7 @@ fn maybe_annotate_html(html: Option<String>, job: &EmailJob) -> Option<String> {
         warn!(
             job_id = %job.id,
             errors = ?result.validation.errors,
-            "gmail_annotations config failed validation — sending without annotations"
+            "gmail_annotations config failed validation, sending without annotations"
         );
         return html;
     }
@@ -5818,7 +5818,7 @@ fn maybe_annotate_html(html: Option<String>, job: &EmailJob) -> Option<String> {
     let Some(body) = html else {
         warn!(
             job_id = %job.id,
-            "gmail_annotations configured but the message has no HTML part — annotations skipped"
+            "gmail_annotations configured but the message has no HTML part, annotations skipped"
         );
         return html;
     };
@@ -5861,11 +5861,11 @@ fn inject_json_ld_into_head(html: &str, script_block: &str) -> String {
 /// F26: split the queue row's `headers` JSONB into its parts.
 ///
 /// New server-written shape (see the API's `mime_headers_for`):
-/// `{"to": [...], "cc": [...], "reply_to": "...", "custom": {...}}` — the
+/// `{"to": [...], "cc": [...], "reply_to": "...", "custom": {...}}`, the
 /// original MIME To/Cc header values as ARRAYS of mailbox strings (kept
 /// SEPARATE from the envelope destination), the Reply-To address, and the
 /// caller's custom headers. LEGACY rows persisted the comma-joined string
-/// form (`"a@x, b@y"`) — parsed here explicitly into the structured list
+/// form (`"a@x, b@y"`), parsed here explicitly into the structured list
 /// (the documented backfill path; no re-serialization needed). Older
 /// legacy/foreign rows without the reserved `to` key are treated as a flat
 /// custom-header map (previous behaviour).
@@ -5876,7 +5876,7 @@ fn split_mime_headers(headers: Option<&serde_json::Value>) -> SplitMimeHeaders {
 
     // F26: the structured Reply-To may ride the canonical `reply_to` key or
     // the RFC 5322 hyphenated spelling (`reply-to`) the MTA submission
-    // parser used before it was unified — both are the SAME queue contract
+    // parser used before it was unified, both are the SAME queue contract
     // key and neither is ever a custom header (a raw `reply-to` would be
     // dropped by PROTECTED_HEADERS, silently losing the sender's Reply-To).
     let reply_to_key = |key: &str| -> bool {
@@ -5912,7 +5912,7 @@ fn split_mime_headers(headers: Option<&serde_json::Value>) -> SplitMimeHeaders {
             Some(serde_json::Value::Array(items)) => items
                 .iter()
                 .filter_map(|item| {
-                    // F48 structured form: {"email": ..., "name": ...} — the
+                    // F48 structured form: {"email": ..., "name": ...}, the
                     // exact caller-authored mailbox, no re-parsing loss.
                     if let Some(obj) = item.as_object() {
                         let email = obj.get("email").and_then(|e| e.as_str())?;
@@ -6119,7 +6119,7 @@ const PROVIDER_SOURCES: [&str; 3] = ["mx_resolved", "provider_callback", "inferr
 /// Normalize a delivery-time recipient-provider report to a canonical slug:
 /// lowercase ASCII alphanumerics plus `_`, `.`, `-`, whitespace folded to
 /// `_`, trimmed of separator edges, non-empty, at most 64 chars. `None` for
-/// anything unusable (blank, all separators, oversize) — garbage must never
+/// anything unusable (blank, all separators, oversize), garbage must never
 /// reach the shared provider dimension.
 fn normalize_recipient_provider(raw: &str) -> Option<String> {
     let mut out = String::with_capacity(raw.len());
@@ -6214,7 +6214,7 @@ async fn insert_recipient_event(db: &PgPool, event: RecipientEvent<'_>) -> Resul
     // mail system). Delivery CONFIRMATION (`message.delivered`) rides the
     // provider feedback webhooks (SES notifications), never this acceptance.
     // Bounced/complained likewise come from provider feedback (SES), so this
-    // chokepoint only emits acceptance — no double-fire.
+    // chokepoint only emits acceptance, no double-fire.
     if event_type == "sent" {
         enqueue_recipient_outcome_webhook(db, tenant_id, message_id, recipient, "message.accepted")
             .await;
@@ -6245,7 +6245,7 @@ async fn enqueue_recipient_outcome_webhook(
         // `enabled = true AND status = 'active'`. A webhook disabled through
         // `PATCH /v1/webhooks/:id` ({status:"disabled"}) keeps `enabled = true`,
         // so outcome events were still enqueued for it and then never
-        // claimed — rows accumulated forever (and would all fire at once on
+        // claimed, rows accumulated forever (and would all fire at once on
         // re-enable). Enqueue only what the claim path can deliver.
         "SELECT id FROM webhooks \
          WHERE tenant_id = $1 AND enabled = true AND status = 'active' \
@@ -6303,7 +6303,7 @@ async fn enqueue_recipient_outcome_webhook(
 
 /// The `metadata.dlp` annotation stamped on a held/refused queue row:
 /// machine-readable enforcement evidence (what was found, by which engine,
-/// at which gate, when) — an operator's first read, never a silent state.
+/// at which gate, when), an operator's first read, never a silent state.
 fn dlp_annotation(verdict: &PreSendVerdict, disposition: &str) -> JsonValue {
     serde_json::json!({
         "action": disposition,
@@ -6430,7 +6430,7 @@ async fn record_eu_only_hold_audit(
 
 /// The recipient-provider pair already persisted for this recipient-send
 /// (written on the `sent` event at delivery time), so subsequent events —
-/// e.g. a hard bounce — carry the SAME normalized provider. Best-effort:
+/// e.g. a hard bounce, carry the SAME normalized provider. Best-effort:
 /// a lookup failure logs and yields `(None, None)` rather than failing the
 /// bounce path; the provenance is lost, never fabricated.
 async fn carried_recipient_provider(
@@ -6473,7 +6473,7 @@ fn envelope_domain(from: &str) -> Option<&str> {
     from.rsplit_once('@').map(|(_, d)| d)
 }
 
-/// F55: canonical recipient form for suppression lookups — trimmed and
+/// F55: canonical recipient form for suppression lookups, trimmed and
 /// ASCII-lowercased, matching the API's `canonical_email`. Applied on BOTH
 /// sides of the comparison (the query LOWER()s the stored address), so a
 /// queued "User@Example.com" matches a suppressed "user@example.com".
@@ -6502,10 +6502,10 @@ fn overlay_status_counts(counts: Vec<(String, i64)>) -> Vec<(String, i64)> {
 //
 // The sales feedback loops read two canonical tables:
 //
-//   * `sales_sender_events` — ONE row per delivery fact, folded into
+//   * `sales_sender_events`, ONE row per delivery fact, folded into
 //     `sales_sender_health` by `sales_autopilot::outcome_projector`
 //     (migration 202 lines 106-125);
-//   * `sales_outcomes` — the outcome ladder the optimizer learns from,
+//   * `sales_outcomes`, the outcome ladder the optimizer learns from,
 //     unique on `(tenant_id, outcome, step_execution_id)`
 //     (migration 200 lines 758-777).
 //
@@ -6515,7 +6515,7 @@ fn overlay_status_counts(counts: Vec<(String, i64)>) -> Vec<(String, i64)> {
 // worker image would drag its routes/dispatcher/AXUM surface along, and the
 // worker only needs the canonical tables). `sales-autopilot` does not depend
 // on `worker-processors` either, so a new dependency would not be a Cargo
-// cycle — but it would invert the intended layering (the delivery worker is
+// cycle, but it would invert the intended layering (the delivery worker is
 // infrastructure; the sales engine is the consumer of its DB rows), so the
 // insert is implemented here directly against the canonical tables, kept in
 // the ONE function [`record_sales_outcome_if_linked`] so the SQL is still
@@ -6553,7 +6553,7 @@ impl SalesDeliveryEvent {
     ///
     /// SMTP/provider acceptance deliberately returns `None`: "Do not classify
     /// SMTP acceptance as delivered" (audit item 12). `delivered` requires a
-    /// delivery-confirmation event, which has no producer yet — see
+    /// delivery-confirmation event, which has no producer yet, see
     /// [`SALES_OUTCOME_MAPPING`].
     pub fn outcome(self) -> Option<&'static str> {
         match self {
@@ -6731,9 +6731,9 @@ fn parse_queue_row_id(queue_row_id: &str) -> Option<uuid::Uuid> {
 /// outcome for `event` idempotently:
 ///
 /// * `ON CONFLICT (tenant_id, outcome, step_execution_id) DO NOTHING`
-///   (migration 200 line 777) — a replayed provider callback or a retried
+///   (migration 200 line 777), a replayed provider callback or a retried
 ///   delivery attempt can never double-count a bounce or a complaint;
-/// * rows without a step execution are skipped — there is nothing to
+/// * rows without a step execution are skipped, there is nothing to
 ///   attribute to and the unique key does not dedupe `NULL`s.
 ///
 /// Returns `Ok(Some(id))` when this call inserted the row, `Ok(None)` when
@@ -7007,7 +7007,7 @@ mod tests {
         cb.record_failure(); // 3 → Open
         assert_eq!(cb.state(), CircuitState::Open);
 
-        // Verify that failure count is effectively reset — after open_duration,
+        // Verify that failure count is effectively reset, after open_duration,
         // the circuit transitions to Half-Open where success count starts at 0
         // and failures are tracked separately.
         // We can't directly read failure_count, but we can check state.
@@ -7056,7 +7056,7 @@ mod tests {
         cb.record_failure();
         assert_eq!(cb.state(), CircuitState::Open);
 
-        // Immediately check — should still be Open
+        // Immediately check, should still be Open
         assert!(!cb.is_allowed());
         assert_eq!(cb.state(), CircuitState::Open);
     }
@@ -7129,7 +7129,7 @@ mod tests {
         cb.record_success();
         assert_eq!(cb.state(), CircuitState::Closed);
 
-        // Now we're back in Closed — a failure should use Closed logic, not Half-Open
+        // Now we're back in Closed, a failure should use Closed logic, not Half-Open
         // Record one failure (threshold=1) → should go to Open
         cb.record_failure();
         assert_eq!(
@@ -7176,7 +7176,7 @@ mod tests {
             "requests must be rejected after reopening"
         );
 
-        // Verify the opened_at timestamp was reset — wait again to transition back
+        // Verify the opened_at timestamp was reset, wait again to transition back
         thread::sleep(Duration::from_millis(20));
         assert!(cb.is_allowed());
         assert_eq!(cb.state(), CircuitState::HalfOpen);
@@ -7340,7 +7340,7 @@ mod tests {
         }
         assert_eq!(outcomes.len(), 10, "10 old entries added");
 
-        // Now simulate a new event at a much later time — this triggers eviction
+        // Now simulate a new event at a much later time, this triggers eviction
         // of entries whose timestamps are >60s behind `new_now`.
         let new_now = Instant::now();
         simulate_error_tracking(&mut outcomes, SendOutcome::Success, new_now);
@@ -7481,7 +7481,7 @@ mod tests {
     #[test]
     fn test_jittered_backoff_stays_within_20_percent() {
         // F6:handle_soft_bounce applies jittered_secs to the exponential
-        // backoff — every sample must stay within ±20% of the base, a
+        // backoff, every sample must stay within ±20% of the base, a
         // positive base never collapses to zero, and non-positive inputs
         // pass through.
         let base: i64 = 1920; // 60s * 2^5
@@ -7540,7 +7540,7 @@ mod tests {
     }
 
     /// Regression (dogfood 2026-10-06, P1): in SMTP mode the SHARED route is
-    /// the local relay, which signs nothing — the DKIM decision keyed off the
+    /// the local relay, which signs nothing, the DKIM decision keyed off the
     /// route alone, so every self-hosted message left unsigned (DMARC fail /
     /// spam foldering) while dashboards showed the domain verified with DKIM
     /// enabled. The shared route on an SMTP backend must carry the domain's
@@ -7675,7 +7675,7 @@ mod tests {
 
     /// Audit-2 helper: a private throwaway Redis on a random port. The
     /// returned guard keeps it alive for the test body and kills it on
-    /// drop — including on panic. The server comes from
+    /// drop, including on panic. The server comes from
     /// `migrator::test_support::spawn_isolated_redis` (the `redis-server`
     /// binary when present, else a throwaway container): the deploy host
     /// ships Redis as an image only, and the old binary-only spawn silently
@@ -7718,7 +7718,7 @@ mod tests {
         }
         let _ = child.kill();
         let _ = child.wait();
-        eprintln!("redis_ready: no PING within the bounded window — child killed");
+        eprintln!("redis_ready: no PING within the bounded window, child killed");
         None
     }
 
@@ -7808,7 +7808,7 @@ mod tests {
             domain_route_readiness(&DeliveryRoute::SesShared, &domain, true),
             None
         );
-        // In SMTP mode the shared route rides the relay, not SES — an
+        // In SMTP mode the shared route rides the relay, not SES, an
         // unverified domain is ready there.
         domain.ses_verified = false;
         assert_eq!(
@@ -7843,7 +7843,7 @@ mod tests {
     }
 
     /// B: with `enabled: false` the gate in `prepare_email` must leave the
-    /// HTML byte-identical — no pixel, no link rewriting.
+    /// HTML byte-identical, no pixel, no link rewriting.
     /// The env guard is held across awaits on purpose: the awaited processor
     /// setup reads the process-global `TRACKING_SECRET_KEY`.
     #[allow(clippy::await_holding_lock)]
@@ -7916,7 +7916,7 @@ mod tests {
     // ---------------------------------------------------------------------------
 
     /// FIX-8: expand one queued row into one [`EmailJob`] per recipient (the
-    /// uncapped pre-P1 shape these expansion tests pin) — the production claim
+    /// uncapped pre-P1 shape these expansion tests pin), the production claim
     /// path is [`expand_rows_within_cap_detailed`], which admits recipients
     /// before materializing. The two produce identical jobs for one row.
     fn queued_row_to_jobs(row: QueuedEmailRow) -> Vec<EmailJob> {
@@ -7989,7 +7989,7 @@ mod tests {
     #[test]
     fn test_queued_row_empty_to_addresses_yields_no_jobs() {
         // An explicit empty array means every recipient of the row was
-        // already delivered (metadata.pending_recipients = []) — expanding to
+        // already delivered (metadata.pending_recipients = []), expanding to
         // the legacy `to` would DUPLICATE that recipient.
         let row = queued_row("legacy@example.com", Some(vec![]));
         let jobs = queued_row_to_jobs(row);
@@ -8268,7 +8268,7 @@ mod tests {
         assert_eq!(provider.as_deref(), Some("google_workspace"));
         assert_eq!(source.as_deref(), Some("mx_resolved"));
 
-        // An unknown recipient-send has no provenance to carry — NULL, not
+        // An unknown recipient-send has no provenance to carry, NULL, not
         // a suffix guess.
         let (none_provider, none_source) =
             carried_recipient_provider(&pool, &tenant, &message_id, "other@acme-corp.example")
@@ -8324,7 +8324,7 @@ mod tests {
     /// A raw permanent relay rejection ("550 5.1.1") matched NEITHER the
     /// soft- nor the hard-bounce string marker before and was retried up to
     /// max_retries via the generic handler. It now maps to the typed
-    /// `ProcessorError::Smtp` and classifies Hard — i.e. the existing
+    /// `ProcessorError::Smtp` and classifies Hard, i.e. the existing
     /// hard-bounce handling: queue row 'bounced', recipient suppressed,
     /// bounce event recorded, never requeued.
     #[test]
@@ -8338,7 +8338,7 @@ mod tests {
         assert_eq!(classify_send_failure(&err), SendFailureClass::Hard);
     }
 
-    /// A temporary relay deferral ("450 greylisted") classifies Soft — i.e.
+    /// A temporary relay deferral ("450 greylisted") classifies Soft, i.e.
     /// the existing soft-bounce handling: requeued with the unchanged
     /// exponential backoff (attempt + 1, retry_at = now + retry_delay *
     /// 2^attempt) until max_retries.
@@ -8391,7 +8391,7 @@ mod tests {
 
     /// Codeless transport errors (timeout, DNS, connection) stay Unknown:
     /// the generic handler retries them below max_retries and dead-letters
-    /// (DLQ + 'failed') after — unchanged behavior.
+    /// (DLQ + 'failed') after, unchanged behavior.
     #[test]
     fn codeless_transport_errors_stay_generic() {
         for err in [
@@ -8431,7 +8431,7 @@ mod tests {
     }
 
     /// A transient SES failure (4xx / 5xx / network) carries
-    /// permanent:false and must retry via the soft-bounce backoff — never
+    /// permanent:false and must retry via the soft-bounce backoff, never
     /// suppress on it.
     #[test]
     fn ses_transient_failure_classifies_soft_for_retry() {
@@ -8556,8 +8556,8 @@ mod tests {
     }
 
     /// P1 equivalence: the admit-first rewrite yields EXACTLY the old
-    /// observable cap semantics — the first `remaining` recipients in envelope
-    /// order, across rows in claim order — and now also reports the deferred
+    /// observable cap semantics, the first `remaining` recipients in envelope
+    /// order, across rows in claim order, and now also reports the deferred
     /// count the warning described.
     #[test]
     fn expansion_admits_the_old_slice_and_reports_deferred_recipients() {
@@ -8734,7 +8734,7 @@ mod tests {
     fn hard_bounce_suppression_covers_only_the_bounced_address() {
         // The suppression INSERT lives inline in handle_hard_bounce; the
         // hard-bounce contract (HARD_BOUNCE_UPDATE_SQL) keys the recipient
-        // as $3, and the suppression uses the same per-job recipient — the
+        // as $3, and the suppression uses the same per-job recipient, the
         // bounced sibling's address alone. Pin the SQL contract:
         assert!(
             HARD_BOUNCE_UPDATE_SQL.contains("- $3::text"),
@@ -8788,7 +8788,7 @@ mod tests {
         }
     }
 
-    /// The fenced write is a no-op when the lease was lost — the write must
+    /// The fenced write is a no-op when the lease was lost, the write must
     /// not be able to resurrect itself by matching a NULL token row with a
     /// stale token (and vice versa): only exact-token or both-NULL matches
     /// apply.
@@ -8811,8 +8811,8 @@ mod tests {
     // domain, one atomic Lua reserve; exhaustion defers the row)
     // ---------------------------------------------------------------------------
 
-    /// P0: the admission keys scope BOTH dimensions — a tenant-wide bucket
-    /// (account ceiling) and a per-domain bucket — AND the route, so shared
+    /// P0: the admission keys scope BOTH dimensions, a tenant-wide bucket
+    /// (account ceiling) and a per-domain bucket, AND the route, so shared
     /// and dedicated traffic never share an allowance.
     #[test]
     fn send_admission_keys_cover_tenant_domain_and_route() {
@@ -8846,7 +8846,7 @@ mod tests {
         );
     }
 
-    /// P0: the route-aware rate source — SES account ceiling for the shared
+    /// P0: the route-aware rate source, SES account ceiling for the shared
     /// pool, the relay's own cap for the dedicated route.
     #[test]
     fn route_send_rate_selects_the_transports_own_cap() {
@@ -8873,7 +8873,7 @@ mod tests {
 
     /// Audit-2 behavioral gate (ephemeral redis-server): the bucket admits
     /// up to its capacity, refuses when exhausted (the caller defers the
-    /// row instead of sending), and refills over elapsed time — the clock
+    /// row instead of sending), and refills over elapsed time, the clock
     /// is injected as `now_ms`, so refill is tested without sleeping.
     #[tokio::test]
     async fn send_admission_bucket_exhausts_then_refills() -> Result<(), Box<dyn std::error::Error>>
@@ -8890,7 +8890,7 @@ mod tests {
         );
         assert!(
             !reserve_send_admission(&redis, &keys, 1, t0).await.unwrap(),
-            "an exhausted bucket must refuse — the row is deferred, not sent"
+            "an exhausted bucket must refuse, the row is deferred, not sent"
         );
         assert!(
             !reserve_send_admission(&redis, &keys, 1, t0 + 500)
@@ -8929,7 +8929,7 @@ mod tests {
             .await
             .unwrap());
         // domain-b's own bucket is untouched, but the shared TENANT bucket
-        // is empty — admission (an AND over both buckets) must refuse.
+        // is empty, admission (an AND over both buckets) must refuse.
         assert!(
             !reserve_send_admission(&redis, &keys_b, 1, t0)
                 .await
@@ -9058,7 +9058,7 @@ mod tests {
             "above the configured rate the row must be deferred, not sent"
         );
 
-        // A zero rate disables the gate entirely — even with the bucket
+        // A zero rate disables the gate entirely, even with the bucket
         // already drained above.
         let unlimited = EmailProcessor::new(
             sqlx::postgres::PgPoolOptions::new()
@@ -9090,7 +9090,7 @@ mod tests {
 
     /// D/F25/F75: the audit `messages` row must follow the COMPLETE
     /// recipient set: 'partial' while siblings are owed (and finally
-    /// partial on any terminal failure — the all-failed case), 'sent' when
+    /// partial on any terminal failure, the all-failed case), 'sent' when
     /// every recipient row is terminal-sent but not yet confirmed
     /// delivered, 'delivered' + messages.delivered_at when every recipient
     /// copy is confirmed delivered, and never crouching terminal states
@@ -9153,7 +9153,7 @@ mod tests {
         );
     }
 
-    /// G.3c: simulate the reclaim sequence — the first claim wins, the
+    /// G.3c: simulate the reclaim sequence, the first claim wins, the
     /// reclaim of a lease that expired mid-send is refused, and the marker
     /// is releasable once the attempt is handled.
     // ---------------------------------------------------------------------------
@@ -9190,7 +9190,7 @@ mod tests {
     }
 
     /// P0 graduation: an `active` (graduated) dedicated IP stays in the pool
-    /// with NO daily limit — it is still routed as dedicated, just without
+    /// with NO daily limit, it is still routed as dedicated, just without
     /// throttling (the old warming-only query dropped it to the shared pool).
     #[test]
     fn select_delivery_ip_keeps_graduated_ips_as_unthrottled_candidates() {
@@ -9285,7 +9285,7 @@ mod tests {
     }
 
     /// get_domain must consult the real dedicated-IP tables (warming AND
-    /// active — a graduated IP must keep being routed), and its rows must
+    /// active, a graduated IP must keep being routed), and its rows must
     /// carry the identity the admission counter keys on.
     #[test]
     fn get_domain_sql_consults_warming_and_active_dedicated_ips() {
@@ -9318,7 +9318,7 @@ mod tests {
         );
     }
 
-    /// Fix 3: the selection key is IP-scoped — the reputation boundary. The
+    /// Fix 3: the selection key is IP-scoped, the reputation boundary. The
     /// per-send-unit marker moved to the relay's admission gate (keyed by
     /// send_unit there), proven in the outbound-mta crate.
     #[test]
@@ -9331,7 +9331,7 @@ mod tests {
         );
     }
 
-    /// With the real state wired, the gate switch defaults ON — it only ever
+    /// With the real state wired, the gate switch defaults ON, it only ever
     /// throttles domains whose tenant actually has a warming dedicated IP.
     #[test]
     fn warmup_gate_defaults_to_enabled() {
@@ -9358,7 +9358,7 @@ mod tests {
         // P0 ownership fix: warmup CONSUMPTION moved to the outbound relay's
         // admission gate at the SMTP-effect boundary. The worker keeps a
         // single SELECTION entry point (no writes), and no release path may
-        // exist here — a worker-side release is exactly what let a durable
+        // exist here, a worker-side release is exactly what let a durable
         // relay retry bypass the IP's daily cap.
         assert_eq!(
             production.matches("async fn select_warmup_ip(").count(),
@@ -9372,7 +9372,7 @@ mod tests {
         );
         assert!(
             !production.contains("release_warmup_reservation"),
-            "the worker must not release warmup capacity — the relay owns accounting"
+            "the worker must not release warmup capacity, the relay owns accounting"
         );
         assert!(
             !production.contains("WARMUP_RELEASE_LUA"),
@@ -9446,7 +9446,7 @@ mod tests {
     /// never resolves a recipient provider for admission and never reads the
     /// ISP warmup catalog or the inert per-pool schedule rows. With no
     /// reader, a catalog profile that is absent, maps to nothing, or carries
-    /// a zero/negative/huge target cannot produce ANY cap — the canonical
+    /// a zero/negative/huge target cannot produce ANY cap, the canonical
     /// per-IP limit above stays the sole maximum. Provider strings that do
     /// exist in this file are event-persistence evidence only.
     #[test]
@@ -9468,7 +9468,7 @@ mod tests {
     }
 
     /// P0 ownership fix (ephemeral redis): the worker SELECTS the dedicated
-    /// IP by utilisation but consumes NOTHING — the counter stays untouched
+    /// IP by utilisation but consumes NOTHING, the counter stays untouched
     /// (the relay's SMTP-effect admission gate owns consumption), an at-cap
     /// pool selects nothing, the retired domain-keyed counter is ignored,
     /// and an unavailable store fails closed.
@@ -9498,7 +9498,7 @@ mod tests {
         };
 
         // Below the cap the selection names the warming candidate and the
-        // counter is UNCHANGED (no marker, no increment — the relay admits).
+        // counter is UNCHANGED (no marker, no increment, the relay admits).
         let reserved = select_warmup_ip(&redis, &pool, &today)
             .await
             .expect("redis available")
@@ -9525,7 +9525,7 @@ mod tests {
                 .await
                 .expect("redis available")
                 .is_none(),
-            "an at-cap warming pool selects nothing — the caller defers"
+            "an at-cap warming pool selects nothing, the caller defers"
         );
 
         // The RETIRED domain-keyed counter is not authoritative.
@@ -9565,7 +9565,7 @@ mod tests {
 
     /// P0 aggregate selection (ephemeral redis): with two warming IPs the
     /// selection prefers the LOWEST-utilised candidate, so a burst routes to
-    /// the idle IP first and an at-cap IP is skipped — spreading without
+    /// the idle IP first and an at-cap IP is skipped, spreading without
     /// consuming (consumption is the relay's, at the effect boundary).
     #[tokio::test]
     async fn aggregate_selection_prefers_the_least_utilised_ip(
@@ -9633,7 +9633,7 @@ mod tests {
     }
 
     /// P0 graduation: an `active` (graduated) IP is still SELECTED for a
-    /// dedicated route and needs NO quota store — proven by selecting from
+    /// dedicated route and needs NO quota store, proven by selecting from
     /// an active-only pool with a dead Redis.
     #[tokio::test]
     async fn active_ip_routes_dedicated_without_consuming_quota() {
@@ -9751,7 +9751,7 @@ mod tests {
         );
         assert!(
             FETCH_JOBS_SQL.contains("metadata->'pending_recipients' <@ to_jsonb("),
-            "every pending recipient must be proven to be an envelope recipient (F45) — \
+            "every pending recipient must be proven to be an envelope recipient (F45), \
              via the single jsonb containment op, not a per-element probe (P1)"
         );
         assert!(
@@ -9767,7 +9767,7 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------------
-    // F24 (worker side): the claim only ever takes pending rows — cancelled
+    // F24 (worker side): the claim only ever takes pending rows, cancelled
     // rows are never dispatched, and claimed (processing) rows are the
     // irreversible dispatch boundary the API's cancellation check relies on.
     // ---------------------------------------------------------------------------
@@ -9802,7 +9802,7 @@ mod tests {
     /// limit); the leading-`status` lane from migration 241
     /// (`idx_email_queue_claim_lane (status, priority DESC, created_at)`)
     /// cannot order the OR-shaped status predicate and still ends in a Sort of
-    /// every matching row. The query shape NEEDS NO CHANGE — this guard keeps
+    /// every matching row. The query shape NEEDS NO CHANGE, this guard keeps
     /// it aligned with the index (e.g. flipping the order or dropping the
     /// partial predicates must fail here, not silently in production).
     #[test]
@@ -9832,7 +9832,7 @@ mod tests {
             "siblings still owed a delivery must leave the parent partial (F25)"
         );
         // 'processing' while NOTHING is terminal yet (mid-flight, still
-        // cancellable — a soft-bounce deferral must not strand the parent).
+        // cancellable, a soft-bounce deferral must not strand the parent).
         assert!(
             MESSAGES_PROGRESS_UPDATE_SQL.contains("THEN 'processing'"),
             "all-non-terminal parents must stay processing (F25)"
@@ -9887,7 +9887,7 @@ mod tests {
     // ── F18: explicit tenant policy result ───────────────────────────
 
     /// F55: the dispatch-time consent gate must EXIT dispatch on
-    /// `Deferred` — the old `Ok(None)` conflated "verification failed"
+    /// `Deferred`, the old `Ok(None)` conflated "verification failed"
     /// with "not suppressed" and let the job fall through into the
     /// transport while its row was already requeued. Structural guard on
     /// the gate block in `process_job_inner`.
@@ -9969,7 +9969,7 @@ mod tests {
         );
     }
 
-    // ── W4A: EU-only routing — the fail-closed route decision ─────────
+    // ── W4A: EU-only routing, the fail-closed route decision ─────────
 
     fn routing_candidate(id: &str, ip: &str) -> RoutingCandidate {
         RoutingCandidate {
@@ -9983,7 +9983,7 @@ mod tests {
 
     /// THE invariant, at its decision point: under `eu_only` an empty
     /// dedicated-IP pool can never produce a sendable route. This is the
-    /// fail-before test for the whole feature — if anyone "allows the
+    /// fail-before test for the whole feature, if anyone "allows the
     /// fallback" by planning [`DeliveryRoute::SesShared`] here, this fails.
     #[test]
     fn eu_only_never_plans_the_shared_route() {
@@ -10131,7 +10131,7 @@ mod tests {
     }
 
     /// The dispatch source contains exactly one eu_only hold call site per
-    /// fail-closed arm, each exiting immediately — no arm may fall through
+    /// fail-closed arm, each exiting immediately, no arm may fall through
     /// into transport.
     #[test]
     fn every_eu_only_hold_arm_exits_dispatch() {
@@ -10165,7 +10165,7 @@ mod tests {
 
     #[test]
     fn consent_decisions_are_three_valued_not_option() {
-        // Deferred is DISTINCT from Allowed — a failed verification is
+        // Deferred is DISTINCT from Allowed, a failed verification is
         // never permission to send (the Option<String> conflation let the
         // caller fall through into the transport).
         assert_ne!(ConsentDecision::Allowed, ConsentDecision::Deferred("x"));
@@ -10196,7 +10196,7 @@ mod tests {
     #[test]
     fn claim_time_suppression_caching_is_negative_only() {
         // F55: positive suppression verdicts are never written to the
-        // cache — this source property is the regression guard for the
+        // cache, this source property is the regression guard for the
         // stale-positive-terminalize defect (a resubscribed recipient
         // could be suppressed from a primed cache entry).
         let source = include_str!("processor.rs");
@@ -10260,7 +10260,7 @@ mod tests {
 
     #[test]
     fn split_mime_headers_parses_legacy_comma_joined_strings() {
-        // F26: legacy rows persisted comma-joined strings — parsed
+        // F26: legacy rows persisted comma-joined strings, parsed
         // explicitly into the structured list (backfill-by-parse).
         let headers = serde_json::json!({
             "to": "a@example.com, b@example.com",
@@ -10311,7 +10311,7 @@ mod tests {
     /// Regression (dogfood 2026-10-06, P2): the MTA's SMTP-submission parser
     /// writes Reply-To into the FLAT queue-header map under the canonical
     /// `reply_to` key. The flat-map branch used to hand it back as a custom
-    /// header — which the protected list then dropped — so an SMTP-submitted
+    /// header, which the protected list then dropped, so an SMTP-submitted
     /// Reply-To was silently lost. Both spellings must produce the structured
     /// Reply-To, and it must reach the built MIME as a real `Reply-To` header.
     #[tokio::test]
@@ -10429,7 +10429,7 @@ mod tests {
         job.headers = Some(serde_json::json!({
             "custom": {
                 "X-Legit": "one",
-                "x-legit": "duplicate — second spelling must be blocked",
+                "x-legit": "duplicate, second spelling must be blocked",
             }
         }));
         job.attachments = Some(serde_json::json!([
@@ -10485,7 +10485,7 @@ mod tests {
             "reply_to": "",
             "custom": {
                 // Legacy alias spellings (case variants) must be blocked
-                // here — the API blocks them too, but the worker is the
+                // here, the API blocks them too, but the worker is the
                 // last boundary before transport.
                 "X-ApexMail-MessageId": "forged-message",
                 "x-apexmail-tenant-id": "forged-tenant",
@@ -10810,7 +10810,7 @@ mod tests {
     }
 
     /// The dispatch-time gate must read CURRENT state (no cache table,
-    /// LOWER() on the stored address) — category changes and resubscriptions
+    /// LOWER() on the stored address), category changes and resubscriptions
     /// are both covered by an authoritative read.
     #[test]
     fn dispatch_time_suppression_recheck_reads_authoritative_state() {
@@ -10840,7 +10840,7 @@ mod tests {
     #[test]
     fn drained_statuses_are_zeroed_in_every_snapshot() {
         // A queue that only has 'pending' rows left must still publish 0 for
-        // every other supported status — previously those gauges kept their
+        // every other supported status, previously those gauges kept their
         // last nonzero value forever.
         let snapshot = overlay_status_counts(vec![("pending".to_string(), 5)]);
         let map: std::collections::HashMap<&str, i64> = snapshot
@@ -10995,7 +10995,7 @@ mod tests {
     }
 
     /// Adversarial 2: a `SesShared` route never reaches the dedicated
-    /// transport, and a `Dedicated` route never reaches SES — asserted on
+    /// transport, and a `Dedicated` route never reaches SES, asserted on
     /// WHICH recording double saw the call.
     #[tokio::test]
     async fn hybrid_dispatches_each_route_to_exactly_one_backend() {
@@ -11034,7 +11034,7 @@ mod tests {
     }
 
     /// Adversarial 1: a `Dedicated` route with NO dedicated transport
-    /// configured fails closed — the `send` is refused before any
+    /// configured fails closed, the `send` is refused before any
     /// submission, and the error names the missing transport and the route.
     #[tokio::test]
     async fn dedicated_route_without_a_dedicated_transport_fails_closed_before_submit() {
@@ -11065,7 +11065,7 @@ mod tests {
         );
     }
 
-    /// Adversarial 1b: the mirror image — a `SesShared` route with no SES
+    /// Adversarial 1b: the mirror image, a `SesShared` route with no SES
     /// transport configured fails closed and never falls back to the relay.
     #[tokio::test]
     async fn shared_route_without_ses_fails_closed_before_submit() {
@@ -11087,7 +11087,7 @@ mod tests {
     }
 
     /// Adversarial 3 (unit): a dedicated route on a transport that cannot
-    /// verify source binding is refused BEFORE DATA — the recording double
+    /// verify source binding is refused BEFORE DATA, the recording double
     /// saw zero calls.
     #[tokio::test]
     async fn unverifiable_dedicated_route_defers_before_submitting() {
@@ -11162,7 +11162,7 @@ mod tests {
     /// P0 ownership fix: the worker no longer holds warmup reservations, so
     /// a confirmed source-IP contract violation is RECORDED (the
     /// `apexmail_delivery_route_contract_violation` counter on the dispatch
-    /// path) and never corrected by releasing anything — the relay's
+    /// path) and never corrected by releasing anything, the relay's
     /// per-attempt gate already accounted the attempt conservatively. This
     /// pins the new rule by proving the retired release machinery is gone
     /// from the production region entirely.
@@ -11181,7 +11181,7 @@ mod tests {
         ] {
             assert!(
                 !production.contains(retired),
-                "the worker must not own warmup settlement (`{retired}` found) — the relay's \
+                "the worker must not own warmup settlement (`{retired}` found), the relay's \
                  SMTP-effect admission gate owns accounting"
             );
         }
@@ -11304,7 +11304,7 @@ mod tests {
     // ---------------------------------------------------------------------------
 
     /// Adversarial 4: the deduplicated module really has ONE transport
-    /// abstraction — `transport_router.rs` must not define a second
+    /// abstraction, `transport_router.rs` must not define a second
     /// `EmailTransport` trait or its own send path.
     #[test]
     fn transport_router_defines_no_second_transport_trait_or_send_path() {
@@ -11339,7 +11339,7 @@ mod tests {
     }
 
     /// Adversarial 5 (processor side): a caller-supplied header named like
-    /// the internal route metadata is stripped before transport — the
+    /// the internal route metadata is stripped before transport, the
     /// transport writes its own value, so message content cannot spoof the
     /// route.
     #[tokio::test]
@@ -11380,7 +11380,7 @@ mod tests {
 
 #[cfg(test)]
 mod sales_feedback_db_tests {
-    //! Audit items 10/12 — the delivery-side producers for `sales_outcomes`
+    //! Audit items 10/12, the delivery-side producers for `sales_outcomes`
     //! and `sales_sender_events`, against the canonical provisioned schema.
     //!
     //! The pool follows this crate's live-test convention
@@ -11623,7 +11623,7 @@ mod sales_feedback_db_tests {
     }
 
     /// Adversarial 6: SMTP/provider acceptance alone produces NO `delivered`
-    /// outcome — the audit's specific prohibition.
+    /// outcome, the audit's specific prohibition.
     #[tokio::test]
     async fn smtp_acceptance_produces_no_delivered_outcome(
     ) -> Result<(), Box<dyn std::error::Error>> {
@@ -11797,7 +11797,7 @@ mod sales_feedback_db_tests {
     }
 
     /// Non-sales mail (no typed provenance) and legacy non-UUID ids record
-    /// nothing — the typed columns are the gate.
+    /// nothing, the typed columns are the gate.
     #[tokio::test]
     async fn queue_rows_without_sales_provenance_record_nothing(
     ) -> Result<(), Box<dyn std::error::Error>> {
@@ -11995,7 +11995,7 @@ mod acceptance_ledger_db_tests {
 
     /// Adversarial 1 (ledger half): a dedicated route with no dedicated
     /// transport is refused by the pre-DATA gate and inserts NO acceptance
-    /// row — the deferral happens before the ledger is touched.
+    /// row, the deferral happens before the ledger is touched.
     #[tokio::test]
     async fn dedicated_route_without_dedicated_transport_inserts_no_acceptance_row(
     ) -> Result<(), Box<dyn std::error::Error>> {
@@ -12155,7 +12155,7 @@ mod acceptance_ledger_db_tests {
     }
 
     /// Adversarial 6: a crashed `reserved` row is reclaimed after the lease,
-    /// exactly once — the ledger's primary key serializes the claim.
+    /// exactly once, the ledger's primary key serializes the claim.
     #[tokio::test]
     async fn crashed_reserved_row_is_reclaimed_after_the_lease_exactly_once(
     ) -> Result<(), Box<dyn std::error::Error>> {
@@ -12332,7 +12332,7 @@ mod acceptance_ledger_db_tests {
 
     /// B3 "the proof is signed per message": the accepted ledger row carries
     /// the canonical payload + Ed25519 signature, and a THIRD PARTY holding
-    /// only the published public key can verify it — no database access, no
+    /// only the published public key can verify it, no database access, no
     /// secret, no trust in this process. Tampering with the stored payload
     /// must fail.
     #[tokio::test]
@@ -12739,7 +12739,7 @@ mod end_to_end_db_tests {
     // ── success path ───────────────────────────────────────────────────────
 
     /// A job whose authorized domain row has vanished (deleted/unverified
-    /// after enqueue) is a permanent job error — dead-lettered, never sent.
+    /// after enqueue) is a permanent job error, dead-lettered, never sent.
     #[tokio::test]
     async fn vanished_domain_row_is_a_permanent_job_error() -> Result<(), Box<dyn std::error::Error>>
     {
@@ -12863,7 +12863,7 @@ mod end_to_end_db_tests {
     /// double stays untouched.
     /// SalesCloser plan §5.4: the claim is `ORDER BY priority DESC,
     /// created_at ASC`, so a first-response send (priority 100) is
-    /// claimed ahead of an older default-priority (5) row — the lane is
+    /// claimed ahead of an older default-priority (5) row, the lane is
     /// what makes "instant response" instant under backlog.
     #[tokio::test]
     async fn the_priority_lane_claims_first_response_mail_before_the_backlog(
@@ -12888,7 +12888,7 @@ mod end_to_end_db_tests {
     }
 
     /// Perf smoke (plan §9): under a seeded backlog the first-response lane
-    /// must clear the response rows within the FIRST claim batch — a bounded,
+    /// must clear the response rows within the FIRST claim batch, a bounded,
     /// deterministic assertion that "instant response" is not starved by
     /// ordinary mail. (The latency SLO itself is measured at enqueue; this
     /// pins the queueing behaviour that bounds it.)
@@ -13133,7 +13133,7 @@ mod end_to_end_db_tests {
                 .expect("suppressions");
         assert_eq!(
             suppressed, 0,
-            "a policy refusal says nothing about the mailbox — no suppression"
+            "a policy refusal says nothing about the mailbox, no suppression"
         );
         pool.close().await;
         Ok(())
@@ -14031,7 +14031,7 @@ mod end_to_end_db_tests {
     }
 
     /// A worker with NO transport at all defers before DATA with
-    /// ses_transport_unconfigured — the row stays retryable.
+    /// ses_transport_unconfigured, the row stays retryable.
     #[tokio::test]
     async fn unconfigured_transport_defers_before_data() -> Result<(), Box<dyn std::error::Error>> {
         #[rustfmt::skip]
@@ -14283,7 +14283,7 @@ mod end_to_end_db_tests {
             .expect("attempt");
         assert_eq!(attempt, 0, "a deferred send does not consume an attempt");
 
-        // Un-poison and retry: the same row is admitted and completes — the
+        // Un-poison and retry: the same row is admitted and completes, the
         // deferral was a deferral, not a terminal state.
         {
             let mut conn = e2e_redis().get().await.expect("redis conn");
@@ -14389,7 +14389,7 @@ mod end_to_end_db_tests {
     // (modelled exactly: real claimed rows, real ledger rows, real recovery
     // through the production reclaim paths) and asserts the invariant: the
     // message is submitted exactly once, the queue row reaches exactly one
-    // terminal state, and the counters write exactly once — with no operator
+    // terminal state, and the counters write exactly once, with no operator
     // intervention.
 
     /// Count of successful delivery-log rows for one queue row.
@@ -14425,7 +14425,7 @@ mod end_to_end_db_tests {
             .expect("queue metadata")
     }
 
-    /// Window 1 — crash BETWEEN CLAIM AND SEND. The row is claimed
+    /// Window 1, crash BETWEEN CLAIM AND SEND. The row is claimed
     // ('processing' under a lease a dead worker will never renew), then the
     // lease expires and a replacement worker re-claims it with a FRESH lease
     // token: the recovery delivers exactly once, and the crashed claim's
@@ -14527,7 +14527,7 @@ mod end_to_end_db_tests {
         Ok(())
     }
 
-    /// Window 2 — crash AFTER THE TRANSPORT ACCEPTED but before any row
+    /// Window 2, crash AFTER THE TRANSPORT ACCEPTED but before any row
     /// bookkeeping (the ledger acceptance itself DID commit). Recovery must
     /// complete the row through the already-accepted path: the recipient is
     /// marked possibly-sent, the row terminalizes, and the transport is NEVER
@@ -14551,7 +14551,7 @@ mod end_to_end_db_tests {
         let route = DeliveryRoute::SesShared;
 
         // Mid-flight: reserve the unit, the transport ACCEPTS, the acceptance
-        // is recorded — then the process dies before handle_success.
+        // is recorded, then the process dies before handle_success.
         assert_eq!(
             claim_acceptance(&pool, &job, &route).await?,
             AcceptanceClaim::Claimed
@@ -14594,7 +14594,7 @@ mod end_to_end_db_tests {
         .expect("expire lease");
 
         // Recovery: the replacement worker re-claims and the ledger answers
-        // AlreadyAccepted — the row completes as possibly-sent.
+        // AlreadyAccepted, the row completes as possibly-sent.
         let recovered = build_processor(&pool, transport.clone()).await;
         let job = recovered
             .fetch_jobs(1)
@@ -14649,7 +14649,7 @@ mod end_to_end_db_tests {
         Ok(())
     }
 
-    /// Window 3 — crash AFTER THE RESULT WRITE but before/around the counters
+    /// Window 3, crash AFTER THE RESULT WRITE but before/around the counters
     /// (events, reputation). The committed result fences every late write of
     /// the crashed worker: recovery (its own ghost re-run, or any later
     /// claim) can never double a counter, double-log, or re-send.
@@ -14714,9 +14714,9 @@ mod end_to_end_db_tests {
         Ok(())
     }
 
-    // ── W4A: EU-only routing — the fail-closed hold on the send path ─────
+    // ── W4A: EU-only routing, the fail-closed hold on the send path ─────
 
-    /// Set the tenant's routing mode in the settings JSON — the source of
+    /// Set the tenant's routing mode in the settings JSON, the source of
     /// truth the worker reads on every dispatch (`tenants.settings.routingMode`).
     async fn set_routing_mode(pool: &PgPool, tenant_id: &str, mode: &str) {
         sqlx::query(
@@ -14771,7 +14771,7 @@ mod end_to_end_db_tests {
             .await
             .expect("a hold is a clean outcome, not an error");
 
-        // THE invariant: never through SES — or any other transport.
+        // THE invariant: never through SES, or any other transport.
         assert_eq!(
             ses_spy.calls(),
             0,
@@ -14976,7 +14976,7 @@ mod end_to_end_db_tests {
         let fixture = seed(&pool, "eu-only-ses-only").await;
         set_routing_mode(&pool, &fixture.tenant_id, "eu_only").await;
         // An own-MTA identity EXISTS for the tenant (the plan resolves to the
-        // dedicated route) — but this worker has no relay transport.
+        // dedicated route), but this worker has no relay transport.
         sqlx::query(
             "INSERT INTO dedicated_ips (id, tenant_id, ip_address, status) \
              VALUES ($1, $2, '198.51.100.77', 'active')",
@@ -15464,7 +15464,7 @@ mod orchestration_tests {
 
     /// A loop entering its window inside an error-rate cooldown must not
     /// fetch: the first (and only) submission happens only after the
-    /// cooldown elapses — proving the pause instead of a hot poll.
+    /// cooldown elapses, proving the pause instead of a hot poll.
     #[tokio::test]
     async fn error_cooldown_pauses_polling_until_it_elapses(
     ) -> Result<(), Box<dyn std::error::Error>> {
@@ -15502,7 +15502,7 @@ mod orchestration_tests {
         let first_send_elapsed = started.elapsed();
         assert!(
             first_send_elapsed >= Duration::from_millis(45),
-            "the first fetch must wait out the cooldown (elapsed {first_send_elapsed:?}) — \
+            "the first fetch must wait out the cooldown (elapsed {first_send_elapsed:?}), \
              a hot loop would have fetched immediately"
         );
 
@@ -15520,7 +15520,7 @@ mod orchestration_tests {
     // ── 3. Idle shutdown breaks promptly ──────────────────────────────────
 
     /// An idle loop parked on a LONG poll interval must break promptly on
-    /// shutdown — the select! arm on the shutdown notification, not the
+    /// shutdown, the select! arm on the shutdown notification, not the
     /// 60 s interval, decides the exit latency.
     #[tokio::test]
     async fn idle_loop_breaks_promptly_on_shutdown() -> Result<(), Box<dyn std::error::Error>> {
@@ -15696,7 +15696,7 @@ mod orchestration_tests {
 
     /// SM10 F9 regression: the two background loops (queue-depth metrics +
     /// the F25 reconcile sweep) spawn EXACTLY ONCE per processor. `start()`
-    /// used to spawn them on EVERY entry — a supervised restart (a flapping
+    /// used to spawn them on EVERY entry, a supervised restart (a flapping
     /// transport failing `verify()`, exactly the failure below) piled up
     /// another pair of 15 s/60 s loops against the DB per restart. The
     /// loops spawn BEFORE the transport check BY DESIGN (the metrics loop
@@ -15730,7 +15730,7 @@ mod orchestration_tests {
 
         crate::common::ensure_aws_test_env();
         crate::test_support::install_test_tracing();
-        // Hermetic: lazy pools that never carry traffic — the loops' first
+        // Hermetic: lazy pools that never carry traffic, the loops' first
         // DB sweep errors and retries on the next tick; the test ends long
         // before that matters.
         let db = sqlx::postgres::PgPoolOptions::new()
@@ -15765,7 +15765,7 @@ mod orchestration_tests {
             processor.background_loops_spawned.load(Ordering::SeqCst),
             2,
             "two loops total (metrics + reconcile) across TWO start() entries, \
-             not two pairs — the leak is fixed"
+             not two pairs, the leak is fixed"
         );
     }
 
@@ -15809,7 +15809,7 @@ mod orchestration_tests {
         );
 
         // Suppression checks fail into the REQUEUE sentinel (never into a
-        // positive suppression) — for both the global and the category
+        // positive suppression), for both the global and the category
         // dimension.
         let verdicts = processor
             .batch_suppression_check(std::slice::from_ref(&job))
@@ -16046,7 +16046,7 @@ mod orchestration_tests {
 
     /// Regression (dogfood 2026-10-06, P1 split-brain): when the relay holds
     /// the send (its own durable retry ladder owns delivery), the processor
-    /// DEFERS the queue row — no attempt consumed, never dead-lettered — and
+    /// DEFERS the queue row, no attempt consumed, never dead-lettered, and
     /// observes the terminal state on a later claim. The old failure path
     /// dead-lettered the row at the retry ceiling while the relay could still
     /// deliver it.
@@ -16264,7 +16264,7 @@ mod orchestration_tests {
     }
 
     /// A shared-pool send on a domain that lost SES verification defers at
-    /// the route-readiness gate — before any ledger or transport touch.
+    /// the route-readiness gate, before any ledger or transport touch.
     #[tokio::test]
     async fn unverified_shared_domain_defers_at_the_readiness_gate(
     ) -> Result<(), Box<dyn std::error::Error>> {
@@ -16406,13 +16406,13 @@ mod orchestration_tests {
     // The enforcement gate for the advertised DLP capability, on the REAL
     // send path: every test below drives `process_job_inner` (the same
     // dispatch the poll loop runs) against the canonical schema and a
-    // scripted transport, with the REAL `EngineDlpScanner` — determinism
+    // scripted transport, with the REAL `EngineDlpScanner`, determinism
     // comes from fixed bodies whose engine risk scores are known constants
     // (CC 8.0, SSN 9.0, phone 1.5; quarantine ≥ 5.0, block ≥ 10.0).
 
     use crate::email::dlp::DlpGateError;
 
-    /// A scanner double whose engine is always unavailable — the fail-open
+    /// A scanner double whose engine is always unavailable, the fail-open
     /// probe.
     struct FailingDlpScanner;
 
@@ -16425,7 +16425,7 @@ mod orchestration_tests {
         }
     }
 
-    /// A success double that RECORDS the prepared copy it was handed — the
+    /// A success double that RECORDS the prepared copy it was handed, the
     /// byte-identity probe for the allow/clean paths.
     struct CapturingTransport {
         calls: AtomicUsize,
@@ -16522,7 +16522,7 @@ mod orchestration_tests {
 
     /// Regression (dogfood 2026-10-06, P1): DLP audit rows used to chain onto
     /// the newest `audit_logs` row without a lock and never advanced
-    /// `audit_chain_head` — forking the canonical chain (migration 105 exists
+    /// `audit_chain_head`, forking the canonical chain (migration 105 exists
     /// to prevent exactly this). The canonical writer must make the DLP row
     /// the chain head, sequence it, and re-derive under the shared byte
     /// contract.
@@ -16810,7 +16810,7 @@ mod orchestration_tests {
         assert_eq!(
             queue_status(&pool, fixture.queue_id).await,
             "deferred",
-            "the queue's honest hold state — visible, unsent, never auto-retried"
+            "the queue's honest hold state, visible, unsent, never auto-retried"
         );
         let error_message = queue_error_message(&pool, fixture.queue_id)
             .await
@@ -17295,7 +17295,7 @@ mod orchestration_tests {
     }
 
     /// A relay that ACCEPTS but reports the wrong source IP produces a
-    /// recorded contract violation on the ledger — and is NEVER retried.
+    /// recorded contract violation on the ledger, and is NEVER retried.
     #[tokio::test]
     async fn accepted_send_with_a_route_contract_violation_is_recorded_not_retried(
     ) -> Result<(), Box<dyn std::error::Error>> {
@@ -17345,7 +17345,7 @@ mod orchestration_tests {
     }
 
     /// An acceptance-ledger INSERT failure defers the send (exactly-once is
-    /// never bypassed) — the transport must not be touched.
+    /// never bypassed), the transport must not be touched.
     #[tokio::test]
     async fn acceptance_ledger_unavailable_defers_without_submitting(
     ) -> Result<(), Box<dyn std::error::Error>> {
@@ -17362,7 +17362,7 @@ mod orchestration_tests {
 
         // Take the ledger itself out (this suite's DB is per-test): the
         // reservation INSERT fails, so the send must DEFER with the outage
-        // reason — exactly-once is never bypassed, the transport is never
+        // reason, exactly-once is never bypassed, the transport is never
         // touched.
         let mut job = EmailJob {
             id: fixture.queue_id.to_string(),
@@ -17980,7 +17980,7 @@ mod residual_arms_db_tests {
         Ok(())
     }
 
-    /// Expansion beyond the available slots truncates AND warns — the
+    /// Expansion beyond the available slots truncates AND warns, the
     /// deferral of the excess recipients is observable in the log stream.
     #[tokio::test]
     async fn expansion_warns_and_truncates_beyond_the_slot_cap() {
@@ -18088,7 +18088,7 @@ mod residual_arms_db_tests {
     // ── dispatch: acceptance-ledger write failures are loud, not retries ──
 
     /// The transport ACCEPTED, but recording the acceptance on the ledger
-    /// fails (injected UPDATE fault). The message stays delivered — the
+    /// fails (injected UPDATE fault). The message stays delivered, the
     /// failure is a loud operational event, never a retry signal.
     #[tokio::test]
     async fn accepted_send_with_a_failing_ledger_write_is_loud(
@@ -18145,7 +18145,7 @@ mod residual_arms_db_tests {
             .into_iter()
             .next()
             .expect("one job");
-        // The classified bounce IS the outcome of a failed dispatch — the
+        // The classified bounce IS the outcome of a failed dispatch, the
         // ledger-write failure must not change it into a retry signal.
         let error = processor
             .process_job(job)
@@ -18265,7 +18265,7 @@ mod residual_arms_db_tests {
         // records): REVOKE is a no-op when the canonical TEST_DATABASE_URL
         // role owns the table or is the cluster superuser, so the fetch
         // outage is injected with the module's own BEFORE-UPDATE fault
-        // trigger on email_queue — the claim fails for EVERY role.
+        // trigger on email_queue, the claim fails for EVERY role.
         install_fault(&pool, "res_fetch_outage", "email_queue", "UPDATE").await;
         set_fault(&pool, "res_fetch_outage", true).await;
 
@@ -18355,7 +18355,7 @@ mod residual_arms_db_tests {
         );
 
         // Phase 2: the requeue write itself fails (injected UPDATE fault on
-        // email_queue) — the loop logs the failure and keeps polling. The
+        // email_queue), the loop logs the failure and keeps polling. The
         // loop is parked between phases so the reset cannot race a claim.
         processor.stop().await.expect("stop park one");
         tokio::time::timeout(Duration::from_secs(10), loop_handle)
@@ -18446,7 +18446,7 @@ mod residual_arms_db_tests {
         );
         assert_eq!(transport.calls(), 0, "suppressed mail never dispatches");
 
-        // Phase 2: the durable suppression write fails — the loop logs and
+        // Phase 2: the durable suppression write fails, the loop logs and
         // continues (the row stays claimable for the next poll). The loop
         // is parked between phases so the reset cannot race a claim.
         processor.stop().await.expect("stop park one");
@@ -18465,7 +18465,7 @@ mod residual_arms_db_tests {
         install_fault(&pool, "suppress_write", "email_queue", "UPDATE").await;
         // Target ONLY the suppression write: the claim's UPDATE (status
         // 'processing') and the release write (status 'pending') must keep
-        // working — only the handler's terminal 'suppressed' flip fails.
+        // working, only the handler's terminal 'suppressed' flip fails.
         sqlx::query(
             "CREATE OR REPLACE FUNCTION wpf_suppress_write_UPDATE() RETURNS trigger AS $$ \
              BEGIN \
@@ -18560,7 +18560,7 @@ mod residual_arms_db_tests {
             .expect("clean exit");
 
         // Phase 2: a second row whose PERMANENT-FAILURE write itself fails
-        // (injected, targeted at status='failed') — the dispatch reports the
+        // (injected, targeted at status='failed'), the dispatch reports the
         // dead-letter failure instead of stalling.
         install_fault(&pool, "dlq_write", "email_queue", "UPDATE").await;
         sqlx::query(
@@ -18669,7 +18669,7 @@ mod residual_arms_db_tests {
             .expect("restore delivery log");
 
         // Phase 2: the post-send `sent` event INSERT fails (events table
-        // gone) — the delivery stands, the analytics event is lost.
+        // gone), the delivery stands, the analytics event is lost.
         sqlx::query("ALTER TABLE events RENAME TO events_gone")
             .execute(&pool)
             .await
@@ -19020,7 +19020,7 @@ mod residual_arms_db_tests {
     // ── unit-reachable handler guards ─────────────────────────────────────
 
     /// `prepare_email` refuses a queue row whose envelope sender carries no
-    /// domain — the authorized domain can never match.
+    /// domain, the authorized domain can never match.
     #[tokio::test]
     async fn prepare_email_refuses_an_invalid_sender() -> Result<(), Box<dyn std::error::Error>> {
         #[rustfmt::skip]
@@ -19057,7 +19057,7 @@ mod residual_arms_db_tests {
     }
 
     /// A success whose envelope sender has no domain skips the FBL
-    /// reputation counter (nothing to attribute) — and still completes.
+    /// reputation counter (nothing to attribute), and still completes.
     #[tokio::test]
     async fn handle_success_without_envelope_domain_skips_reputation(
     ) -> Result<(), Box<dyn std::error::Error>> {
@@ -19089,7 +19089,7 @@ mod residual_arms_db_tests {
     }
 
     /// A Redis hash-type collision (the FBL key pre-set as a plain string)
-    /// must not fail the send — the reputation counter degrades to a log.
+    /// must not fail the send, the reputation counter degrades to a log.
     #[tokio::test]
     async fn sent_reputation_redis_hash_failure_degrades() -> Result<(), Box<dyn std::error::Error>>
     {
@@ -19323,7 +19323,7 @@ mod residual_arms_db_tests {
         assert_eq!(ledger, 1);
 
         // Err arms: the outcome INSERT and the ledger INSERT both fail
-        // under the injected fault — logged + counted, never propagated.
+        // under the injected fault, logged + counted, never propagated.
         // A HardBounce REPLAY still executes the INSERT (ON CONFLICT DO
         // NOTHING), so the fault fires inside record_sales_outcome_if_linked.
         install_fault(&pool, "sales_outcome", "sales_outcomes", "INSERT").await;
@@ -19522,7 +19522,7 @@ mod residual_arms_db_tests {
         Ok(())
     }
 
-    /// A permanent-failure write matching zero rows (the row is gone — the
+    /// A permanent-failure write matching zero rows (the row is gone, the
     /// lease was lost and the new owner finished it) skips the dead-letter
     /// insert entirely.
     #[tokio::test]
@@ -19634,7 +19634,7 @@ mod residual_arms_db_tests {
 
     /// Audit item 12's prohibition is type-level and total: provider/SMTP
     /// ACCEPTANCE records NEITHER a sales outcome NOR a sender-health
-    /// ledger row — not even for a fully sales-provenanced row with a
+    /// ledger row, not even for a fully sales-provenanced row with a
     /// resolvable queue id and recipient. A producer that slips acceptance
     /// through would fabricate a `delivered`-adjacent fact the audit
     /// explicitly forbids.
@@ -19709,7 +19709,7 @@ mod residual_arms_db_tests {
     }
 
     /// The readiness helper's exhausted path: a child that can never answer
-    /// PING (any long-lived process on a closed port does — the deploy host
+    /// PING (any long-lived process on a closed port does, the deploy host
     /// carries no redis-server binary, deploy 2026-10-11) is killed and
     /// reports `None`.
     #[tokio::test]
@@ -19836,7 +19836,7 @@ mod residual_arms_db_tests {
         };
         let fixture = seed(&pool, "stuck-parent").await;
         // The parent `messages` row: aggregate still 'processing' while its
-        // only recipient row is terminal 'sent' — the crash residue.
+        // only recipient row is terminal 'sent', the crash residue.
         // The recipient row is already terminal; the parent lags behind.
         sqlx::query("UPDATE email_queue SET status = 'sent' WHERE id = $1")
             .bind(fixture.queue_id)
@@ -19940,7 +19940,7 @@ mod residual_arms_db_tests {
     }
 
     /// The documented payload (camelCase, organization object) must produce
-    /// the JSON-LD block inside `<head>` — the effect the doc page promises
+    /// the JSON-LD block inside `<head>`, the effect the doc page promises
     /// ("generates the required JSON-LD markup and injects it into the email
     /// <head>"). Before this wiring the generator was unreachable.
     #[test]
@@ -20043,7 +20043,7 @@ mod sales_isolation_db_tests {
     //! REAL sales-transport spy, against the canonical provisioned schema:
     //!
     //! * configured sales transport → only the sales spy is called (the
-    //!   customer SES spy records zero — the fail-before arm: the fallback is
+    //!   customer SES spy records zero, the fail-before arm: the fallback is
     //!   configured, armed and working, and is still never taken);
     //! * unconfigured sales transport → the row is HELD with the named
     //!   reason, zero transports called, releasable like the eu_only/DLP
@@ -20449,7 +20449,7 @@ mod sales_isolation_db_tests {
     // ─────────────────────────────────────────────────────────────────────
 
     /// A sales send with the sales transport configured goes through the
-    /// SALES spy — never the customer SES spy — and the relay route binds the
+    /// SALES spy, never the customer SES spy, and the relay route binds the
     /// RECORDED source IP end to end (the acceptance ledger proves it).
     #[tokio::test]
     async fn a_sales_send_rides_the_sales_transport_and_never_the_customer_ses(
@@ -20599,7 +20599,7 @@ mod sales_isolation_db_tests {
     // ─────────────────────────────────────────────────────────────────────
 
     /// THE headline invariant, end to end: with NO sales transport
-    /// configured, a sales send is HELD with the named reason — and the
+    /// configured, a sales send is HELD with the named reason, and the
     /// customer SES transport, which IS configured, armed and working, is
     /// never called (the fail-before proof: this is the fallback that the old
     /// code path would have taken).
@@ -20850,7 +20850,7 @@ mod sales_isolation_db_tests {
     // ─────────────────────────────────────────────────────────────────────
 
     /// A customer send runs the customer path unchanged even with the sales
-    /// transport fully configured — the sales slot is additive.
+    /// transport fully configured, the sales slot is additive.
     #[tokio::test]
     async fn a_customer_send_is_unaffected_by_the_sales_configuration(
     ) -> Result<(), Box<dyn std::error::Error>> {
@@ -20976,7 +20976,7 @@ mod sales_isolation_db_tests {
 
     /// A sales hard bounce writes the SALES suppression set only: one row on
     /// the sales tenant, NONE on any customer tenant, plus the sales
-    /// feedback ledger row — the write direction of the invariant.
+    /// feedback ledger row, the write direction of the invariant.
     #[tokio::test]
     async fn a_sales_bounce_feeds_the_sales_suppression_set_only(
     ) -> Result<(), Box<dyn std::error::Error>> {
@@ -21139,7 +21139,7 @@ mod sales_isolation_db_tests {
     }
 
     /// The dispatch source pins: exactly one submission call site per path,
-    /// selected by the sales flag — no third path can reach a transport.
+    /// selected by the sales flag, no third path can reach a transport.
     #[test]
     fn dispatch_submits_through_exactly_one_call_per_path() {
         let source = include_str!("processor.rs");
@@ -21199,7 +21199,7 @@ mod claim_subset_containment_db_tests {
     //! claim; the new guard is one `jsonb` containment (`<@`) op. These
     //! tests run the REAL [`FETCH_JOBS_SQL`] against the canonical
     //! provisioned schema and pin the exact decision table the old probe
-    //! expressed, so the rewrite is an equivalence — including the two
+    //! expressed, so the rewrite is an equivalence, including the two
     //! directions that matter: an exact/strict SUBSET is honored (only the
     //! owed recipients) and every forged/corrupt shape falls back to the
     //! trusted envelope.
@@ -21262,14 +21262,14 @@ mod claim_subset_containment_db_tests {
 
         let envelope = ["a@example.com", "b@example.com"];
 
-        // (a) exact subset — honored as-is.
+        // (a) exact subset, honored as-is.
         let exact = insert_row(
             &pool,
             &envelope,
             serde_json::json!({ "pending_recipients": ["a@example.com", "b@example.com"] }),
         )
         .await;
-        // (b) STRICT subset — only the still-owed recipient is admitted; the
+        // (b) STRICT subset, only the still-owed recipient is admitted; the
         // delivered one is not re-sent.
         let strict = insert_row(
             &pool,
@@ -21277,7 +21277,7 @@ mod claim_subset_containment_db_tests {
             serde_json::json!({ "pending_recipients": ["a@example.com"] }),
         )
         .await;
-        // (c) duplicate of an envelope address — still a subset, duplicates
+        // (c) duplicate of an envelope address, still a subset, duplicates
         // preserved exactly like the old text-array form.
         let duplicate = insert_row(
             &pool,
@@ -21285,7 +21285,7 @@ mod claim_subset_containment_db_tests {
             serde_json::json!({ "pending_recipients": ["a@example.com", "a@example.com"] }),
         )
         .await;
-        // (d) empty array — an explicit "nothing left to send" stays honored
+        // (d) empty array, an explicit "nothing left to send" stays honored
         // (falling back here would DUPLICATE delivered recipients).
         let empty = insert_row(
             &pool,
@@ -21293,7 +21293,7 @@ mod claim_subset_containment_db_tests {
             serde_json::json!({ "pending_recipients": [] }),
         )
         .await;
-        // (e) SUPERSET of the envelope — forged/corrupt: fall back.
+        // (e) SUPERSET of the envelope, forged/corrupt: fall back.
         let superset = insert_row(
             &pool,
             &envelope,
@@ -21301,21 +21301,21 @@ mod claim_subset_containment_db_tests {
         )
         .await;
         // (f) forged address that is NOT an envelope recipient (even at
-        // subset size) — fall back; a delivery can never be redirected.
+        // subset size), fall back; a delivery can never be redirected.
         let forged = insert_row(
             &pool,
             &envelope,
             serde_json::json!({ "pending_recipients": ["attacker@evil.example"] }),
         )
         .await;
-        // (g) scalar metadata value — not an array: fall back.
+        // (g) scalar metadata value, not an array: fall back.
         let scalar = insert_row(
             &pool,
             &envelope,
             serde_json::json!({ "pending_recipients": "a@example.com" }),
         )
         .await;
-        // (h) JSON null — jsonb_typeof = 'null': fall back.
+        // (h) JSON null, jsonb_typeof = 'null': fall back.
         let json_null = insert_row(
             &pool,
             &envelope,
@@ -21389,8 +21389,8 @@ mod suppression_probe_db_tests {
     //! never an error) when that index is absent.
     //!
     //! These tests pin (a) equivalence with the old forms over a 500-candidate
-    //! seeded fixture — including mixed-case stored rows, the tenant scoping
-    //! and the precedence rules — and (b) that the new probes are a single
+    //! seeded fixture, including mixed-case stored rows, the tenant scoping
+    //! and the precedence rules, and (b) that the new probes are a single
     //! statement whose plan uses the functional index when present.
     //!
     //! `TEST_DATABASE_URL` gates the suite exactly like the rest of the crate:
@@ -21400,7 +21400,7 @@ mod suppression_probe_db_tests {
     use sqlx::PgPool;
     use std::collections::{HashMap, HashSet};
 
-    /// The verbatim pre-change probes — kept ONLY as the equivalence oracle
+    /// The verbatim pre-change probes, kept ONLY as the equivalence oracle
     /// (never called by production code).
     const OLD_SUPPRESSION_PROBE_SQL: &str = "SELECT LOWER(email), reason FROM suppressions \
          WHERE tenant_id = $1 AND LOWER(email) = ANY($2)";
@@ -21518,7 +21518,7 @@ mod suppression_probe_db_tests {
     }
 
     /// P1 source contract: every suppression probe is the UNNEST-equality join.
-    /// This is the shape-level regression guard — it fails on the old
+    /// This is the shape-level regression guard, it fails on the old
     /// `LOWER(email) = ANY($n)` snippet.
     #[test]
     fn suppression_probes_are_unnest_equality_joins() {
@@ -21627,8 +21627,8 @@ mod suppression_probe_db_tests {
         Ok(())
     }
 
-    /// P1 equivalence, end to end: `batch_suppression_check` — the real
-    /// claim-time path — derives every verdict for all 500 candidates in one
+    /// P1 equivalence, end to end: `batch_suppression_check`, the real
+    /// claim-time path, derives every verdict for all 500 candidates in one
     /// pass, with global suppression taking precedence over the category
     /// opt-out and clean recipients unverdict-ed.
     #[tokio::test]
@@ -21725,7 +21725,7 @@ mod suppression_probe_db_tests {
             .await?;
 
         // The plan assertion forces the index alternative set (no seq scan,
-        // no bitmap, no materialize — a plan that CANNOT resolve candidates
+        // no bitmap, no materialize, a plan that CANNOT resolve candidates
         // through the functional index has no way out), so it proves the
         // index is usable for the probe's exact shape without depending on
         // cost wiggle for this fixture's size.
@@ -22247,7 +22247,7 @@ mod journaling_db_tests {
 #[cfg(test)]
 mod poll_batching_db_tests {
     //! Perf audit 2026-10-18, finding 18: the poll's per-claim bookkeeping is
-    //! ONE statement per batch — the claimed-parent transition covers ALL
+    //! ONE statement per batch, the claimed-parent transition covers ALL
     //! tenants in the batch with a single `UPDATE … FROM UNNEST(…)`, and the
     //! post-chunk release is a single `UPDATE … FROM UNNEST(…)` that still
     //! fences EVERY row on its own lease token (a row whose lease changed is
@@ -22587,7 +22587,7 @@ mod poll_batching_db_tests {
     }
 
     /// Finding 18b: the post-chunk release is ONE statement for N rows and
-    /// keeps the EXACT per-row predicates — a row whose lease token changed
+    /// keeps the EXACT per-row predicates, a row whose lease token changed
     /// since the claim (stale worker) is NOT released and NOT counted, an
     /// emptied row is not released, and a legacy NULL-token claim still
     /// releases via `IS NOT DISTINCT FROM`.
@@ -22613,7 +22613,7 @@ mod poll_batching_db_tests {
         )
         .await;
         // (b) STALE lease: the row was recovered and re-claimed by another
-        // worker — its token no longer matches this claim's.
+        // worker, its token no longer matches this claim's.
         let stale_lease = insert_queue_row(
             &pool,
             None,
@@ -22677,7 +22677,7 @@ mod poll_batching_db_tests {
         let (status, locked) = queue_state(&pool, releasable).await;
         assert_eq!(status, "pending", "the eligible row must be released");
         assert!(locked.is_none(), "the release must clear the lease");
-        // (b) STALE lease: NOT released, NOT counted — the row keeps the new
+        // (b) STALE lease: NOT released, NOT counted, the row keeps the new
         // owner's token, status and lease.
         let (status, locked, token): (String, Option<chrono::DateTime<Utc>>, Option<String>) =
             sqlx::query_as(

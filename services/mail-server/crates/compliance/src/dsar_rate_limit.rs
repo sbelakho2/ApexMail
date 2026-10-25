@@ -65,7 +65,7 @@ impl DsarRateLimiter {
         }
     }
 
-    /// Check submission rate limits for a DSAR request (read-only — the
+    /// Check submission rate limits for a DSAR request (read-only, the
     /// quota is only consumed on success via
     /// [`DsarRateLimiter::record_submission_success`]).
     ///
@@ -101,7 +101,7 @@ impl DsarRateLimiter {
         DsarRateLimitStatus::Allowed
     }
 
-    /// L1: consume one submission slot — call only AFTER the submission has
+    /// L1: consume one submission slot, call only AFTER the submission has
     /// been durably accepted, so failed/invalid submissions do not burn the
     /// subject's daily quota.
     pub async fn record_submission_success(&self, email: &str, tenant_id: &str) {
@@ -122,7 +122,7 @@ impl DsarRateLimiter {
     /// Check verification rate limit for a DSAR verification attempt.
     ///
     /// Enforces per-token-hash limit (5 attempts per token per hour).
-    /// D: the attempt is CONSUMED here (even failed attempts count — this is
+    /// D: the attempt is CONSUMED here (even failed attempts count, this is
     /// the brute-force guard), and an exceeded limit is reported as
     /// `VerificationRateLimited` so the verify handler cannot swallow it.
     pub async fn check_verification(&self, token_hash: &str) -> DsarRateLimitStatus {
@@ -197,7 +197,7 @@ impl DsarRateLimiter {
                 .await
                 .map_err(|e| e.to_string())?;
             // L1: set the TTL whenever it is missing (not only when INCR
-            // returns 1 — a lost EXPIRE after a crash used to leave a
+            // returns 1, a lost EXPIRE after a crash used to leave a
             // permanent counter).
             let ttl: i64 = redis::cmd("TTL")
                 .arg(key)
@@ -221,7 +221,7 @@ impl DsarRateLimiter {
         Ok(())
     }
 
-    /// Check-and-consume (used for verification attempts — every attempt,
+    /// Check-and-consume (used for verification attempts, every attempt,
     /// successful or not, consumes quota).
     async fn check_and_consume_key(
         &self,
@@ -297,7 +297,7 @@ impl DsarRateLimiter {
     }
 }
 
-/// Which limit a key belongs to — D: exceeded keys must surface as the
+/// Which limit a key belongs to, D: exceeded keys must surface as the
 /// variant the handlers actually enforce (previously every exceeded key was
 /// reported as `UserRateLimited`, which the verification handler swallowed).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -394,7 +394,7 @@ mod tests {
         let email = "user@example.com";
         let tenant = "t1";
 
-        // Several (failed) submission attempts — all still allowed.
+        // Several (failed) submission attempts, all still allowed.
         for _ in 0..5 {
             let status = limiter.check_submission(email, tenant).await;
             assert!(matches!(status, DsarRateLimitStatus::Allowed));
@@ -430,7 +430,7 @@ mod tests {
         ));
     }
 
-    /// D/L1: window reset — once the in-memory entry expires (evicted), the
+    /// D/L1: window reset, once the in-memory entry expires (evicted), the
     /// same subject can submit again.
     #[tokio::test]
     async fn test_rate_limit_resets_after_window() {
@@ -663,7 +663,7 @@ mod tests {
 
         // INCR failure on a LIVE connection: a wrong-type key (string) makes
         // the verification INCR error and the check falls back to the
-        // in-memory window — which still enforces the cap.
+        // in-memory window, which still enforces the cap.
         let wrong_key = format!("dsar:verify:wrongtype-{}:x", std::process::id());
         {
             let mut conn = redis.get().await.expect("redis conn");
@@ -736,7 +736,7 @@ mod tests {
 
     /// A loopback RESP server that answers INCR and TTL, then drops the
     /// connection before EXPIRE: the TTL-repair loss is a WARN, not an
-    /// error — the counter itself stays valid (L1 degradation contract).
+    /// error, the counter itself stays valid (L1 degradation contract).
     #[tokio::test]
     async fn consume_key_treats_a_failed_expire_as_a_logged_loss() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -772,7 +772,7 @@ mod tests {
     }
 
     /// Read one complete RESP request (array of bulk strings) from the
-    /// socket, discarding the bytes. Returns on error/EOF too — the mock
+    /// socket, discarding the bytes. Returns on error/EOF too, the mock
     /// only needs framing, not parsing.
     async fn read_one_resp_request<S>(sock: &mut S)
     where

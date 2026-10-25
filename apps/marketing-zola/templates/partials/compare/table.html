@@ -12,23 +12,23 @@
 {# the constrained scroller so they wrap and print normally.     #}
 {# ARK comparison primitive: the scroll wrapper is .apex-comparison #}
 {# (it owns the border); the ApexMail column carries the pale    #}
-{# crimson wash + 3px top edge via __ours/--head — no winner or  #}
+{# crimson wash + 3px top edge via __ours/--head, no winner or  #}
 {# loser colours anywhere.                                       #}
 
 {% set competitor_name = page.extra.competitor_name | default(value="the alternative") %}
 {# NOTE: the winner badges (macros::winner_badge) are deliberately NOT
-   rendered here — the decision guide carries balanced "choose when" rules
+   rendered here, the decision guide carries balanced "choose when" rules
    instead of superiority labels. The macro remains a supported export and
    now takes localized tie/unavailable labels for any future caller. #}
 
-<section id="comparison" class="apex-mkt-section scroll-mt-20">
+<section id="comparison" class="apex-mkt-section apex-mkt-section--soft scroll-mt-20">
   <div class="apex-mkt-container">
     {% if page.extra.comparison_sections %}
     <div
       class="apex-comparison overflow-x-auto"
       role="region"
       tabindex="0"
-      aria-label="{% if i18n_data and i18n_data[l] and i18n_data[l]['a11y'] and i18n_data[l]['a11y']['comparison_scroll'] %}{{ i18n_data[l]['a11y']['comparison_scroll'] }}{% else %}Comparison table — scroll horizontally to see every column{% endif %}"
+      aria-label="{% if i18n_data and i18n_data[l] and i18n_data[l]['a11y'] and i18n_data[l]['a11y']['comparison_scroll'] %}{{ i18n_data[l]['a11y']['comparison_scroll'] }}{% else %}Comparison table, scroll horizontally to see every column{% endif %}"
     >
       <table class="apex-table">
         <caption class="sr-only">{% if i18n_data and i18n_data[l] and i18n_data[l]['a11y'] and i18n_data[l]['a11y']['comparison_caption'] %}{{ i18n_data[l]['a11y']['comparison_caption'] }}{% else %}Feature comparison between ApexMail and {{ competitor_name }}.{% endif %}</caption>
@@ -60,7 +60,7 @@
       class="apex-comparison overflow-x-auto"
       role="region"
       tabindex="0"
-      aria-label="{% if i18n_data and i18n_data[l] and i18n_data[l]['a11y'] and i18n_data[l]['a11y']['comparison_scroll'] %}{{ i18n_data[l]['a11y']['comparison_scroll'] }}{% else %}Comparison table — scroll horizontally to see every column{% endif %}"
+      aria-label="{% if i18n_data and i18n_data[l] and i18n_data[l]['a11y'] and i18n_data[l]['a11y']['comparison_scroll'] %}{{ i18n_data[l]['a11y']['comparison_scroll'] }}{% else %}Comparison table, scroll horizontally to see every column{% endif %}"
     >
       {{ page.content | safe }}
     </div>

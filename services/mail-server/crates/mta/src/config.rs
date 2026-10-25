@@ -84,7 +84,7 @@ pub struct InboundConfig {
     /// Whether the internet-facing port-25 listener advertises/accepts AUTH.
     ///
     /// DEFAULT FALSE: port 25 faces the whole internet and AUTH there is a
-    /// pure brute-force surface — real mail clients submit on port 587
+    /// pure brute-force surface, real mail clients submit on port 587
     /// (STARTTLS) or 465 (implicit TLS), which keep AUTH enabled
     /// unconditionally. Operators with a legacy authenticated-relay-on-25
     /// deployment can restore the old behaviour with
@@ -100,7 +100,7 @@ pub struct InboundConfig {
     /// With `false`, a missing/unconfirmed PTR is logged as a warning and the
     /// session continues; with `true` the hard `550 5.7.25` gate applies.
     /// Transient resolver failures are ALWAYS answered with a temporary
-    /// `451 4.4.3` (and never cached), regardless of this flag — a DNS
+    /// `451 4.4.3` (and never cached), regardless of this flag, a DNS
     /// outage must not permanently bounce mail on a fail-closed default.
     #[serde(default)]
     pub require_fcrdns: bool,
@@ -152,7 +152,7 @@ pub struct SpamFilterConfig {
     #[serde(default)]
     pub reject_at_data: bool,
     /// Composite score at/above which a message is classified REJECT
-    /// (`MTA_SPAM_REJECT_THRESHOLD`, default 10.0 — the spam-filter crate's
+    /// (`MTA_SPAM_REJECT_THRESHOLD`, default 10.0, the spam-filter crate's
     /// default reject threshold). Fed into the crate's `SpamConfig` so the
     /// classification and the DATA-time action cannot drift apart.
     #[serde(default = "default_spam_reject_threshold")]
@@ -209,9 +209,9 @@ pub struct AttachmentScanConfig {
 /// SMTP-level intrusion detection (crate `ids-engine`) integration.
 ///
 /// The engine's SMTP protocol analyser and mail signatures are wired into:
-/// (a) the connection/session layer — every admitted session feeds the
+/// (a) the connection/session layer, every admitted session feeds the
 /// connection tracker (SYN → established → close) so SYN-flood anomalies
-/// are observable; and (b) the DATA payload — SMTP signatures and protocol
+/// are observable; and (b) the DATA payload, SMTP signatures and protocol
 /// anomalies are evaluated per message. Verdicts are stored as an
 /// `X-Apex-Ids-Verdict` header. Refusal is a separate explicit opt-in and
 /// defaults OFF so an over-eager anomaly can never take down mail flow by
@@ -223,7 +223,7 @@ pub struct IdsIntegrationConfig {
     #[serde(default)]
     pub enabled: bool,
     /// ACT on Drop/Reject verdicts: 421 at connection admission and 550 at
-    /// DATA time (`MTA_IDS_REFUSE`, default false — log + record only).
+    /// DATA time (`MTA_IDS_REFUSE`, default false, log + record only).
     #[serde(default)]
     pub refuse: bool,
 }
@@ -336,7 +336,7 @@ pub struct EmailAuthConfig {
     pub require_dkim: bool,
     /// C:DMARC enforcement defaults ON (p=reject → reject, p=quarantine →
     /// quarantine, p=none → deliver with header). require_spf/require_dkim
-    /// stay off by default — they are inputs to the DMARC evaluation, not
+    /// stay off by default, they are inputs to the DMARC evaluation, not
     /// standalone gates. Operators opt out explicitly with ENFORCE_DMARC=false.
     #[serde(default = "default_true")]
     pub enforce_dmarc: bool,
@@ -380,7 +380,7 @@ pub struct MetricsConfig {
 /// (queue/send id, tenant, recipient, expiry); the same secret must be
 /// configured in the worker that mints the tokens (`VERP_HMAC_SECRET`).
 /// In production a missing/short secret is a STARTUP FAILURE whenever the
-/// bounce listener is enabled — without it, v2 bounces cannot be verified
+/// bounce listener is enabled, without it, v2 bounces cannot be verified
 /// and the platform would silently stop honouring hard bounces. In
 /// development the listener still starts, but v2 verification stays
 /// disabled and every bounce is a non-authoritative observation (never a
@@ -1195,7 +1195,7 @@ mod tests {
     #[test]
     fn inbound_fcrdns_and_arc_seal_default_to_false() {
         // SMTP_REQUIRE_FCRDNS: no-PTR senders are a warning by default
-        // (RFC 5321 §7.9 — rejecting for missing FCrDNS is a policy opt-in,
+        // (RFC 5321 §7.9, rejecting for missing FCrDNS is a policy opt-in,
         // and transient DNS errors tempfail independently of this flag).
         // SMTP_ARC_SEAL: ARC sealing is opt-in for relay deployments.
         let default = InboundConfig::default();
@@ -1298,7 +1298,7 @@ mod tests {
 
     /// Regression (dogfood 2026-10-06, P1): the production gates in
     /// `MtaConfig::validate` and `worker-processors/bin/worker.rs` require
-    /// `VERP_HMAC_SECRET`, but no deploy artifact set it — a deployment built
+    /// `VERP_HMAC_SECRET`, but no deploy artifact set it, a deployment built
     /// from the shipped example crash-looped the MTA or silently stopped
     /// authenticating bounces. This pins the wire-through: the example env
     /// declares it (>= 32 bytes), the production compose mounts it into BOTH
@@ -1372,7 +1372,7 @@ mod tests {
     /// Dogfood-2 (2026-10-08) live finding: the DEV compose never passed
     /// `VERP_HMAC_SECRET` into the mta-server or the worker, so the worker's
     /// startup gate (correctly) emitted NO VERP Return-Path and every
-    /// self-hosted DSN was recorded as a non-authoritative observation — the
+    /// self-hosted DSN was recorded as a non-authoritative observation, the
     /// authoritative bounce → suppression path was unreachable on the local
     /// stack even though the code supports it. `docker-compose.prod.yml` has
     /// always required the secret; the dev file must exercise the same path.
@@ -1580,7 +1580,7 @@ mod adversarial_env_tests {
         set("MTA_IDS_ENABLED", "true");
         set("MTA_IDS_REFUSE", "true");
         // Pin the mode AFTER clear: `from_env()` runs dotenvy::dotenv(), which
-        // REFILLS a removed var from the ambient .env — on the deploy host
+        // REFILLS a removed var from the ambient .env, on the deploy host
         // that is the production env file (NODE_ENV=production), which turned
         // this dev-shaped fixture into a production config whose validation
         // demands TLS material and a VERP secret (deploy 2026-10-11, the same

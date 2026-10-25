@@ -36,11 +36,11 @@ struct SecretRow {
     description: Option<String>,
     rotation_policy: String,
     /// The canonical schema (migration 038) has no lifecycle `status`
-    /// column — revoked secrets leave this table for `secrets_archive`.
+    /// column, revoked secrets leave this table for `secrets_archive`.
     /// `None` is the honest value; the previous `'active'` literal asserted
     /// a fact nothing in the database backs.
     status: Option<String>,
-    /// No access counter exists on the canonical table — `None`, never a
+    /// No access counter exists on the canonical table, `None`, never a
     /// fabricated zero that reads as "never accessed but tracked".
     access_count: Option<i64>,
     last_accessed: Option<chrono::DateTime<chrono::Utc>>,
@@ -103,7 +103,7 @@ fn default_limit() -> i64 {
 /// Canonical list query: `description` comes from the stored
 /// `rotation_schedule` JSONB (where create_secret puts it); the fields the
 /// canonical table does not carry (`status`, `access_count`,
-/// `last_accessed`) surface as honest SQL NULLs — never fabricated
+/// `last_accessed`) surface as honest SQL NULLs, never fabricated
 /// constants that assert facts the database cannot back.
 fn build_list_secrets_sql() -> &'static str {
     // RS-050: Scoped by tenant_id to prevent cross-tenant secret exposure.
@@ -264,7 +264,7 @@ async fn create_secret(
             if state.config.environment.is_production() {
                 tracing::error!(
                     error = %error,
-                    "secret encryption key unset in production — refusing plaintext fallback"
+                    "secret encryption key unset in production, refusing plaintext fallback"
                 );
                 return Err(ApiError::Internal(
                     "secret encryption is not configured; refusing to store plaintext".into(),
@@ -272,7 +272,7 @@ async fn create_secret(
             }
             tracing::warn!(
                 error = %error,
-                "secret encryption key unset (non-production) — storing plaintext-marked secret"
+                "secret encryption key unset (non-production), storing plaintext-marked secret"
             );
             format!("plain:{}", generate_secret_value())
         }

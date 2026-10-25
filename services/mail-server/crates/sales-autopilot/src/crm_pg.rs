@@ -12,7 +12,7 @@ use uuid::Uuid;
 use crate::crm::{is_valid_transition, CrmService as InMemoryCrmService};
 use crate::types::{Lead, LeadStatus, SalesError};
 
-/// Canonical status derivation — byte-for-byte the CP's lead read
+/// Canonical status derivation, byte-for-byte the CP's lead read
 /// (`CANONICAL_LEAD_CTE` in `api-server/src/routes/admin/sales.rs` and
 /// `CP_LEADS_CANONICAL_CTE` in `api-server/src/routes/web/data.rs`).
 ///
@@ -41,7 +41,7 @@ const DERIVED_LEAD_STATUS_SQL: &str = r#"
 /// Canonical joins feeding [`DERIVED_LEAD_STATUS_SQL`] and the lead
 /// projection. Since migration 223 `sales_leads` is a derived view, so every
 /// read in this module goes straight to the canonical tables (this is also
-/// what lets `search_leads` use the canonical GIN index — a view carries no
+/// what lets `search_leads` use the canonical GIN index, a view carries no
 /// indexes).
 const LEAD_LIFECYCLE_JOINS_SQL: &str = r#"
     LEFT JOIN sales_accounts a
@@ -141,7 +141,7 @@ fn canonical_lead_target(status: &LeadStatus) -> Option<CanonicalLeadTarget> {
 ///
 /// No lead-capture path in this service runs an SMTP/mailbox verification
 /// step, so the point is written as `unverified` and with a deliberately low
-/// confidence — claiming `valid` (or `1.0`) would fabricate provenance the
+/// confidence, claiming `valid` (or `1.0`) would fabricate provenance the
 /// source cannot justify.
 const UNVERIFIED_LEAD_CONFIDENCE: f64 = 0.2;
 
@@ -194,7 +194,7 @@ impl SqlxCrmService {
     ///    owns the lead, so this call returns
     ///    [`SalesError::LeadAlreadyExists`] (409). This re-expresses the
     ///    retired `idx_sales_leads_tenant_email` uniqueness against the
-    ///    canonical tables — the guarantee that remains is
+    ///    canonical tables, the guarantee that remains is
     ///    `sales_contact_points`' `UNIQUE (tenant_id, channel,
     ///    normalized_value)`: no second contact point (hence no second lead)
     ///    for the same tenant + address. The check runs under the same
@@ -211,8 +211,8 @@ impl SqlxCrmService {
     ///    view at all. No address is fabricated for it.
     /// 4. `sales_contact_points` upserted on
     ///    `(tenant_id, channel, normalized_value)` (migration 200:297) with
-    ///    `verification = 'unverified'` — this path never verifies an address,
-    ///    so `valid` would be fabricated provenance — and the low
+    ///    `verification = 'unverified'`, this path never verifies an address,
+    ///    so `valid` would be fabricated provenance, and the low
     ///    [`UNVERIFIED_LEAD_CONFIDENCE`]. An existing point is never
     ///    downgraded: `DO UPDATE` only touches `updated_at`, so provenance a
     ///    real verifier wrote earlier survives.
@@ -269,8 +269,8 @@ impl SqlxCrmService {
                 .map_err(|e| SalesError::Database(e.to_string()))?;
 
             // Canonical duplicate check (the replacement for the retired
-            // unique index): a mapped contact that owns this address — via
-            // its primary contact point or the legacy email fallback — is
+            // unique index): a mapped contact that owns this address, via
+            // its primary contact point or the legacy email fallback, is
             // this tenant's existing lead. No write has happened yet, so the
             // early return leaves nothing pending.
             let duplicate: Option<String> = sqlx::query_scalar(
@@ -534,7 +534,7 @@ impl SqlxCrmService {
     /// Transition a lead to a new status, scoped to tenant.
     ///
     /// Audit item 17: this writes the CANONICAL lifecycle field the CP read
-    /// derives status from — `sales_accounts.lifecycle` for `Qualified`,
+    /// derives status from, `sales_accounts.lifecycle` for `Qualified`,
     /// `sales_contacts.lifecycle` for `Converted` (customer) and `Lost`
     /// (do_not_contact). It never writes `sales_leads.status`, which no read
     /// path renders.
@@ -685,10 +685,10 @@ impl SqlxCrmService {
     ///
     /// **Fix**: PostgreSQL full-text search (`to_tsvector` /
     /// `plainto_tsquery`). Since migration 223 the search document is the
-    /// trigger-maintained `sales_contacts.lead_search_vector` column — built
+    /// trigger-maintained `sales_contacts.lead_search_vector` column, built
     /// from EXACTLY the same `to_tsvector('english', name || ' ' || email ||
     /// ' ' || company)` expression the retired `idx_sales_leads_fts_gin`
-    /// covered — and `idx_sales_contacts_lead_search_gin` indexes it, so the
+    /// covered, and `idx_sales_contacts_lead_search_gin` indexes it, so the
     /// planner can use the index (a view carries no indexes; searching the
     /// view would force a full scan). The search is scoped to tenant_id and
     /// only returns mapped leads.
@@ -766,7 +766,7 @@ impl SqlxCrmService {
     /// enrollment/step-execution history that predates the lead object.
     ///
     /// Runs in a transaction: conversions referencing the lead are deleted
-    /// first — required by `fk_sales_conversions_lead_mapping` and the
+    /// first, required by `fk_sales_conversions_lead_mapping` and the
     /// historical contract that no orphaned conversion rows remain.
     /// `sales_conversions.lead_id` is TEXT since migration 223, so the
     /// comparison is a plain equality.
@@ -872,7 +872,7 @@ fn row_to_lead(row: &sqlx::postgres::PgRow) -> Lead {
 }
 
 // ---------------------------------------------------------------------------
-// Tests (unit — no database required)
+// Tests (unit, no database required)
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
@@ -880,7 +880,7 @@ mod tests {
     use super::*;
 
     // -----------------------------------------------------------------------
-    // parse_lead_status — exhaustive coverage
+    // parse_lead_status, exhaustive coverage
     // -----------------------------------------------------------------------
 
     #[test]
@@ -962,7 +962,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // score_lead delegation — boundary values
+    // score_lead delegation, boundary values
     // -----------------------------------------------------------------------
 
     #[test]
@@ -1006,14 +1006,14 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Canonical write path — DB-backed adversarial set
+    // Canonical write path, DB-backed adversarial set
     // -----------------------------------------------------------------------
     //
     // These run against the crate's canonical provisioned pool
     // (`crate::test_db::canonical_test_pool`): the real migration chain applied
     // by the production migrator. Without `SALES_TEST_DATABASE_URL` /
     // `TEST_DATABASE_URL` they soft-skip (print SKIP), exactly like the other
-    // DB-backed suites in this crate — a configured-but-broken database
+    // DB-backed suites in this crate, a configured-but-broken database
     // panics instead.
 
     async fn count_canonical(pool: &PgPool, tenant: &str) -> (i64, i64, i64, i64) {
@@ -1073,9 +1073,9 @@ mod tests {
 
     /// Test 1: capturing the same lead twice reuses ONE account and ONE
     /// contact/contact-point; the duplicate still surfaces the documented
-    /// `LeadAlreadyExists` (409) contract — now enforced by the canonical
+    /// `LeadAlreadyExists` (409) contract, now enforced by the canonical
     /// duplicate check against `sales_contacts`/`sales_contact_points`
-    /// instead of the retired `idx_sales_leads_tenant_email` — and leaves no
+    /// instead of the retired `idx_sales_leads_tenant_email`, and leaves no
     /// second canonical row behind.
     #[tokio::test]
     async fn creating_the_same_lead_twice_reuses_one_account_and_one_contact() {
@@ -1130,7 +1130,7 @@ mod tests {
         );
 
         // The lead is visible through the derived view with the FIRST call's
-        // id — the id an API client holds must keep resolving.
+        // id, the id an API client holds must keep resolving.
         let view_row: (String, String) =
             sqlx::query_as("SELECT id, status FROM sales_leads WHERE tenant_id = $1 AND id = $2")
                 .bind(&tenant)
@@ -1170,7 +1170,7 @@ mod tests {
     }
 
     /// Test 2: an imported lead with an address but no verification step gets
-    /// an `unverified` contact point with low confidence — never `valid`.
+    /// an `unverified` contact point with low confidence, never `valid`.
     #[tokio::test]
     async fn imported_lead_never_claims_a_valid_contact_point() {
         let Some(pool) = crate::test_db::canonical_test_pool("create_lead_unverified").await else {
@@ -1218,7 +1218,7 @@ mod tests {
     /// `unknown.local`) and a CONTACT with no contact point. The behaviour
     /// legitimately changed with migration 223: the derived view is
     /// contact-driven, so a captured person must be represented as a contact
-    /// or the lead could not exist at all. No address is fabricated — the
+    /// or the lead could not exist at all. No address is fabricated, the
     /// contact simply has no reachable point.
     #[tokio::test]
     async fn lead_without_email_is_a_contact_with_no_contact_point() {
@@ -1270,7 +1270,7 @@ mod tests {
     }
 
     /// Test 4: `Example.COM`, `www.example.com` and ` example.com ` converge
-    /// on ONE account — the case that would otherwise create three.
+    /// on ONE account, the case that would otherwise create three.
     #[tokio::test]
     async fn domain_normalization_converges_on_one_account() {
         let Some(pool) = crate::test_db::canonical_test_pool("create_lead_domain").await else {
@@ -1335,7 +1335,7 @@ mod tests {
 
     /// Test 5: canonical writes are atomic. A failure injected at the
     /// canonical contact insert (a BEFORE INSERT trigger raising only for
-    /// this test's tenant) must roll the account write back with it — no
+    /// this test's tenant) must roll the account write back with it, no
     /// orphan account, no orphan lead mapping. The trigger targets
     /// `sales_contacts` (not the view, which cannot carry triggers): the old
     /// fail-point was the compatibility `sales_leads` insert, which no longer
@@ -1412,7 +1412,7 @@ mod tests {
     }
 
     /// Test 6: no lead created by this path with both a domain and an email
-    /// can carry a NULL canonical link — a live assertion over the rows the
+    /// can carry a NULL canonical link, a live assertion over the rows the
     /// test just created.
     #[tokio::test]
     async fn no_new_lead_has_a_null_canonical_link() {
@@ -1668,7 +1668,7 @@ mod tests {
         cleanup_lead_fixture(&pool, &tenant).await;
     }
 
-    /// Test 10 (regression guard): `status` is DERIVED, not stored — changing
+    /// Test 10 (regression guard): `status` is DERIVED, not stored, changing
     /// the canonical lifecycle changes the view immediately, and the view
     /// itself refuses writes. If someone ever reintroduces a stored status,
     /// this fails.

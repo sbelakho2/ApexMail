@@ -13,12 +13,12 @@ use crate::config::PlacementConfig;
 ///
 /// The message is sent **from** the tenant-configured sender (`from_email`)
 /// **to** the seed account address, so the receiving provider evaluates the
-/// platform's real authentication (SPF/DKIM/DMARC) and reputation — the thing
+/// platform's real authentication (SPF/DKIM/DMARC) and reputation, the thing
 /// a placement test is meant to measure. Sending from the seed account itself
 /// (previous behaviour) measured nothing: providers always trust self-mail.
 ///
 /// F4:`from_email` must belong to one of the tenant's VERIFIED sending
-/// domains — enforced at `create_test` (see
+/// domains, enforced at `create_test` (see
 /// `PlacementEngine::ensure_from_domain_verified`); the relay itself accepts
 /// arbitrary From headers, so that check is the spoofing gate.
 ///
@@ -257,7 +257,7 @@ mod tests {
     #[tokio::test]
     async fn authenticated_relay_arm_builds_transport() {
         // The credentialed arm uses STARTTLS; against a plain listener the
-        // handshake fails — the point is that the arm is exercised and the
+        // handshake fails, the point is that the arm is exercised and the
         // failure is surfaced, not swallowed.
         let rcpt_log = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new()));
         let port = spawn_fake_relay(rcpt_log).await;
@@ -279,6 +279,6 @@ mod tests {
         if let Err(err) = result {
             assert!(err.contains("placement send via"), "{err}");
         }
-        // …or (if the client degrades) succeed — either way no panic.
+        // …or (if the client degrades) succeed, either way no panic.
     }
 }

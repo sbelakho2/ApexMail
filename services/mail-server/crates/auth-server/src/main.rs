@@ -7,29 +7,29 @@
 //! (`/status/api`), the status history (`/status/history`) and the health
 //! probe (`/v1/health`). The former auth / register / MFA / API-key /
 //! billing / admin / sandbox routes are intentionally NOT wired into the
-//! router — interactive auth lives in the api-server crate; nginx
+//! router, interactive auth lives in the api-server crate; nginx
 //! additionally refuses every other path. Routing stays out of scope; the
 //! handlers below are retained so that the day a route is deliberately
 //! re-exposed it is SAFE to route.
 //!
 //! # What the retained auth handlers enforce (audit F1–F3, F7)
 //!
-//! * **MFA gate (F1)** — the login fetch reads `mfa_enabled`; an
+//! * **MFA gate (F1)**, the login fetch reads `mfa_enabled`; an
 //!   MFA-enabled user NEVER receives a session cookie from a password-only
 //!   submission. The handler answers `202` with an `mfa_required` challenge
 //!   body. (The interactive TOTP verification itself lives in api-server;
 //!   this handler must not become a second-factor bypass.)
-//! * **Brake + timing uniformity (F2)** — every login attempt is checked
+//! * **Brake + timing uniformity (F2)**, every login attempt is checked
 //!   through the rate-limiter BEFORE any database work, keyed BOTH by the
 //!   submitted identifier and by the client IP (5-attempt burst, 1/s
 //!   refill, Redis-backed when `RATE_LIMIT_REDIS_URL`/`REDIS_URL` is
 //!   configured, in-memory keyed otherwise). Unknown emails run a dummy
 //!   Argon2id verification so nonexistent and wrong-password responses cost
-//!   the same ~19 MiB computation — the timing side channel that let
+//!   the same ~19 MiB computation, the timing side channel that let
 //!   attackers enumerate registered users is closed.
-//! * **Random, revocable sessions (F3)** — the cookie value is a fresh
+//! * **Random, revocable sessions (F3)**, the cookie value is a fresh
 //!   256-bit OS-CSPRNG session id, HMAC-SHA256-bound to the process secret
-//!   (via `apexmail_lib::crypto::create_hmac_signature` — never the old
+//!   (via `apexmail_lib::crypto::create_hmac_signature`, never the old
 //!   homebrew `SHA256(msg||secret)`). Every session has a row in the
 //!   `auth_sessions` table (migration 234) with a hard `expires_at`;
 //!   verification requires an unrevoked, unexpired row, so logout
@@ -37,7 +37,7 @@
 //!   (`revoke_all_for_user`) actually invalidate leaked cookies. Two
 //!   logins can never produce the same token, and the email no longer
 //!   rides in the cookie.
-//! * **Atomic registration (F7)** — the tenant and user INSERTs run inside
+//! * **Atomic registration (F7)**, the tenant and user INSERTs run inside
 //!   ONE transaction (`apexmail_db::transaction::with_transaction`), and
 //!   the tenant-insert error is never swallowed: any failure rolls back
 //!   both writes (no orphaned tenant permanently consuming the free-plan
@@ -47,8 +47,8 @@
 //!
 //! The public `/status` and `/status/api` endpoints NEVER run probes per
 //! request. A background task samples every probe (six database checks plus
-//! the SMTP TCP probe) every [`PROBE_INTERVAL_SECS`] seconds — matching the
-//! page's "probes run every 60 seconds" claim — into a shared snapshot the
+//! the SMTP TCP probe) every [`PROBE_INTERVAL_SECS`] seconds, matching the
+//! page's "probes run every 60 seconds" claim, into a shared snapshot the
 //! handlers serve. At most ONE SMTP probe runs concurrently per process
 //! (semaphore), so a slow SMTP target cannot stack up connections.
 
@@ -71,7 +71,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 /// How often the background task samples the service probes. The status
-/// page tells users "probes run every 60 seconds" — this is what makes that
+/// page tells users "probes run every 60 seconds", this is what makes that
 /// claim true (audit F8).
 const PROBE_INTERVAL_SECS: u64 = 60;
 
@@ -89,7 +89,7 @@ const LOGIN_REFILL_PER_SEC: u32 = 1;
 
 /// Login brute-force brake: a keyed in-memory limiter ALWAYS consulted
 /// (per-key buckets with eviction tombstones), plus a Redis token bucket
-/// (the same one every other pod uses) when Redis is configured — so the
+/// (the same one every other pod uses) when Redis is configured, so the
 /// brake is fleet-wide in production and still effective per-process when
 /// Redis is unavailable.
 struct LoginThrottle {
@@ -182,7 +182,7 @@ struct AppState {
 // writer from forging ids without the process secret; the `auth_sessions`
 // row (migration 234) makes every session individually revocable and
 // expiring. A leaked cookie dies at logout, at a password change, or at
-// `expires_at` — whichever comes first.
+// `expires_at`, whichever comes first.
 
 /// Maximum age of a session (24h): cookie Max-Age AND the `auth_sessions`
 /// hard expiry minted with each session.
@@ -222,7 +222,7 @@ fn build_session_token(id: &str, secret: &str) -> String {
 
 /// Verify the MAC portion of a token and return the session id on success.
 ///
-/// Constant-time comparison via `timing_safe_compare` — a plain `==`
+/// Constant-time comparison via `timing_safe_compare`, a plain `==`
 /// short-circuits and leaks a byte-by-byte timing oracle on the signature.
 fn verify_session_mac(token: &str, secret: &str) -> Option<String> {
     let (id, sig) = token.split_once('.')?;
@@ -295,7 +295,7 @@ async fn revoke_session(pool: &sqlx::PgPool, token: &str) -> Result<bool, sqlx::
     Ok(result.rows_affected() > 0)
 }
 
-/// Revoke EVERY live session of a user — the password-change / MFA-reset
+/// Revoke EVERY live session of a user, the password-change / MFA-reset
 /// hook (audit F3). Returns the number of sessions killed.
 ///
 /// Kept ready (like the other retained handlers) for the day a
@@ -400,7 +400,7 @@ fn burn_dummy_verification(password: &str) {
     let _ = apexmail_lib::crypto::verify_password(password, dummy_password_hash());
 }
 
-// ─── Auth endpoints (NOT routed — see crate docs) ──────────
+// ─── Auth endpoints (NOT routed, see crate docs) ──────────
 
 #[allow(dead_code)]
 async fn login_post(
@@ -416,7 +416,7 @@ async fn login_post(
         .map(|v| v == "control-plane")
         .unwrap_or(false);
 
-    // Brake FIRST — before any database work (audit F2).
+    // Brake FIRST, before any database work (audit F2).
     let retry_after = match state.throttle.check("login:id", &identifier).await {
         Err(wait) => Some(wait),
         Ok(()) => state.throttle.check("login:ip", &ip).await.err(),
@@ -425,7 +425,7 @@ async fn login_post(
         let mut resp = (
             StatusCode::TOO_MANY_REQUESTS,
             Json(serde_json::json!({
-                "error": "Too many login attempts — try again later"
+                "error": "Too many login attempts, try again later"
             })),
         )
             .into_response();
@@ -435,7 +435,7 @@ async fn login_post(
         return resp;
     }
 
-    // Look up by email ONLY — the `users` table has no `username` column, so
+    // Look up by email ONLY, the `users` table has no `username` column, so
     // the old `WHERE username = $1 OR email = $1` made every login fail with
     // a database error (column does not exist). mfa_enabled is fetched so
     // the MFA gate below can actually fire (audit F1).
@@ -449,7 +449,7 @@ async fn login_post(
     let user = match row {
         Ok(Some(user)) => {
             // Verify against the row's OWN argon2 params (weak legacy rows
-            // still authenticate instead of hard-failing — apexmail-lib F11).
+            // still authenticate instead of hard-failing, apexmail-lib F11).
             let valid =
                 apexmail_lib::crypto::verify_password(&form.password, &user.1).unwrap_or(false);
             if valid {
@@ -485,7 +485,7 @@ async fn login_post(
     };
 
     // MFA gate (audit F1): an MFA-enabled user NEVER gets a session from a
-    // password-only submission — issue the challenge instead.
+    // password-only submission, issue the challenge instead.
     if mfa_enabled {
         return (
             StatusCode::ACCEPTED,
@@ -592,7 +592,7 @@ async fn register_post(
 
     // Enforce Free plan quota: reject new free plan registrations if global free tenant
     // count exceeds the 30,000 email/month aggregate safety threshold. This is a blunt
-    // gate — per-tenant usage is enforced by the billing_usage endpoint.
+    // gate, per-tenant usage is enforced by the billing_usage endpoint.
     let free_count: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM tenants WHERE plan = 'free' AND status = 'active'",
     )
@@ -707,7 +707,7 @@ async fn register_post(
 }
 
 /// The (structurally unreachable) error for a `Tx` whose inner transaction
-/// was already consumed — fail-closed instead of panicking.
+/// was already consumed, fail-closed instead of panicking.
 fn tx_consumed_error() -> sqlx::Error {
     sqlx::Error::Io(std::io::Error::other("transaction already consumed"))
 }
@@ -740,7 +740,7 @@ async fn tcp_connect_ok(host: &str, port: u16, timeout: std::time::Duration) -> 
 // ─── Probe snapshot (audit F8) ────────────────────────────────
 
 /// One sampled snapshot of every service probe. Handlers serve this
-/// verbatim — they NEVER probe per request.
+/// verbatim, they NEVER probe per request.
 #[derive(Debug, Clone)]
 struct ProbeSnapshot {
     services: Vec<serde_json::Value>,
@@ -787,7 +787,7 @@ impl ProbeCache {
 }
 
 /// Sample EVERY probe once, PUBLISH the snapshot into the shared cache, and
-/// return it. Called ONLY by the background task (and tests) — never from a
+/// return it. Called ONLY by the background task (and tests), never from a
 /// request handler.
 async fn run_probe_cycle(state: &AppState) -> ProbeSnapshot {
     // The SMTP probe FIRST, under the concurrency cap: at most one 3 s TCP
@@ -818,13 +818,13 @@ async fn run_probe_cycle(state: &AppState) -> ProbeSnapshot {
     };
     // Publish HERE, not in the caller: every sampler (production task and
     // tests) must leave the shared cache holding exactly the snapshot it
-    // sampled — a cycle that returns without publishing would keep handlers
+    // sampled, a cycle that returns without publishing would keep handlers
     // serving the stale "probes are starting" placeholder.
     state.probes.store(snapshot.clone());
     snapshot
 }
 
-/// The configured SMTP probe target (MAIL_HOST env, MAIL_PORT env — port 25
+/// The configured SMTP probe target (MAIL_HOST env, MAIL_PORT env, port 25
 /// by default).
 ///
 /// The port is configurable because the status tests must pin a target that
@@ -846,7 +846,7 @@ fn smtp_probe_target() -> Option<(String, u16)> {
 }
 
 /// The six database probes. Cheap on the snapshot path: these run once per
-/// cycle, not per request (audit F8 — the public endpoints used to run
+/// cycle, not per request (audit F8, the public endpoints used to run
 /// these on EVERY request, including partitioned `messages` COUNT scans).
 async fn collect_db_probe_results(state: &AppState) -> (Vec<serde_json::Value>, bool) {
     let mut services = Vec::new();
@@ -966,10 +966,10 @@ footer{{margin-top:36px;padding-top:14px;border-top:1px solid var(--hair);font-s
 </style></head><body>
 <div class="masthead"><span class="wordmark"><span class="apex">Apex</span><span class="mail">Mail</span></span><span class="legend">Status</span></div>
 <h1>Service status</h1>
-<p class="intro">Live service health — probes run every {PROBE_INTERVAL_SECS} seconds. Last checked {updated}.</p>
+<p class="intro">Live service health, probes run every {PROBE_INTERVAL_SECS} seconds. Last checked {updated}.</p>
 <div class="overall"><div class="big {overall_cls}">{pct}%</div><div class="msg {overall_cls}">{overall_msg}</div></div>
 <div class="grid">{cards}</div>
-<footer>ApexMail — Bel Consulting OÜ, Registry 16588745</footer>
+<footer>ApexMail, Bel Consulting OÜ, Registry 16588745</footer>
 </body></html>"##,
         updated = updated,
         overall_cls = overall_cls,
@@ -981,7 +981,7 @@ footer{{margin-top:36px;padding-top:14px;border-top:1px solid var(--hair);font-s
 
 async fn status_page(State(state): State<AppState>) -> impl IntoResponse {
     // Serve the SHARED SNAPSHOT (audit F8): the SSR output is the real
-    // sampled health with the sample timestamp — never a per-request probe.
+    // sampled health with the sample timestamp, never a per-request probe.
     let snapshot = state.probes.current();
     let updated = snapshot.updated.format("%Y-%m-%d %H:%M UTC").to_string();
 
@@ -1011,7 +1011,7 @@ async fn status_page(State(state): State<AppState>) -> impl IntoResponse {
     let total = snapshot.services.len().max(1);
     let pct = (operational * 100 / total) as i64;
     let (overall_msg, overall_cls) = if !snapshot.probed {
-        ("Probes are starting — first check within a minute", "warn")
+        ("Probes are starting, first check within a minute", "warn")
     } else if pct == 100 {
         ("All systems operational", "ok")
     } else if pct >= 80 {
@@ -1022,7 +1022,7 @@ async fn status_page(State(state): State<AppState>) -> impl IntoResponse {
 
     // ARK status document: paper and ink, Spectral display, Overpass text,
     // Overpass Mono for machine data, 3px rules, square corners, no green.
-    // The page polls with <meta http-equiv=refresh> — the platform ships no
+    // The page polls with <meta http-equiv=refresh>, the platform ships no
     // client script for presentation, and a refresh is the honest zero-JS
     // equivalent of the deleted fetch loop (the JSON snapshot it used to read
     // stays at /status/api for machines).
@@ -1043,7 +1043,7 @@ async fn status_page(State(state): State<AppState>) -> impl IntoResponse {
 // probes live on /status/api, which is the status page's purpose.
 
 async fn health_check(State(state): State<AppState>) -> impl IntoResponse {
-    // Database connectivity check — the only dependency whose failure makes
+    // Database connectivity check, the only dependency whose failure makes
     // the service itself unable to answer authoritatively.
     let db_ok = sqlx::query_scalar::<_, i64>("SELECT 1::bigint")
         .fetch_one(&state.db)
@@ -1081,15 +1081,15 @@ const STATUS_HISTORY_WINDOW_DAYS: i64 = 90;
 /// newest 50 within the window is the whole page).
 const STATUS_HISTORY_LIMIT: i64 = 50;
 
-/// Public incident history — REAL data from `status_page_incidents`
+/// Public incident history, REAL data from `status_page_incidents`
 /// (migration 198's ledger, written by the incident repo), bounded to the
 /// last [`STATUS_HISTORY_WINDOW_DAYS`] days.
 ///
 /// Honesty rules (the old handler returned a hardcoded empty list while the
-/// incident ledger existed — an "unknown" disguised as "none"):
+/// incident ledger existed, an "unknown" disguised as "none"):
 ///
 /// * a successful read that found nothing answers `history: []` with
-///   `"recorded": true` and `count: 0` — a determinate "no incidents were
+///   `"recorded": true` and `count: 0`, a determinate "no incidents were
 ///   recorded in this window";
 /// * a failed read answers `503` with `history: null` and a named error —
 ///   UNKNOWN, never silently rendered as "no incidents happened";
@@ -1116,7 +1116,7 @@ async fn status_history(State(state): State<AppState>) -> impl IntoResponse {
             .into_response(),
         Err(error) => {
             eprintln!(
-                "status history read failed: {error} — answering UNKNOWN (503), never an empty history"
+                "status history read failed: {error}, answering UNKNOWN (503), never an empty history"
             );
             (
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -1138,7 +1138,7 @@ async fn status_history(State(state): State<AppState>) -> impl IntoResponse {
 
 #[tokio::main]
 async fn main() {
-    // G.6: DATABASE_URL must be provided — the previous embedded default
+    // G.6: DATABASE_URL must be provided, the previous embedded default
     // (postgres://apexmail@127.0.0.1:5432/apexmail) silently pointed
     // misconfigured deployments at a host that may not exist.
     let db_url = resolve_database_url();
@@ -1155,7 +1155,7 @@ async fn main() {
     let throttle = LoginThrottle::from_env_with_redis().await;
     if throttle.redis.is_none() {
         eprintln!(
-            "WARNING: RATE_LIMIT_REDIS_URL/REDIS_URL not configured or unreachable — \
+            "WARNING: RATE_LIMIT_REDIS_URL/REDIS_URL not configured or unreachable, \
              the login brake is per-process only"
         );
     }
@@ -1185,7 +1185,7 @@ async fn main() {
     });
 
     // SECURITY: status-only surface. Every route added here is reachable
-    // from the public internet via nginx — see the crate docs. The auth
+    // from the public internet via nginx, see the crate docs. The auth
     // handlers are deliberately NOT routed (routing out of scope).
     let app = Router::new()
         .route("/v1/health", get(health_check))
@@ -1201,7 +1201,7 @@ async fn main() {
         .unwrap();
 }
 
-/// G.6: require DATABASE_URL — no credential-bearing embedded fallback.
+/// G.6: require DATABASE_URL, no credential-bearing embedded fallback.
 fn resolve_database_url() -> String {
     match std::env::var("DATABASE_URL") {
         Ok(url) if !url.trim().is_empty() => url,
@@ -1221,7 +1221,7 @@ fn resolve_session_secret() -> String {
             }
             let fallback = uuid::Uuid::new_v4().to_string();
             eprintln!(
-                "WARNING: SESSION_SECRET is not set — using a random per-process value. \
+                "WARNING: SESSION_SECRET is not set, using a random per-process value. \
                  All sessions are invalidated on restart; set SESSION_SECRET for stability."
             );
             fallback
@@ -1234,7 +1234,7 @@ mod tests {
     use super::*;
 
     /// The status page is an ARK document: paper and ink, Spectral display,
-    /// Overpass text, square corners, no green, and no client script — the
+    /// Overpass text, square corners, no green, and no client script, the
     /// refresh is a `<meta http-equiv>`.
     #[test]
     fn status_page_is_an_ark_document() {
@@ -1276,7 +1276,7 @@ mod tests {
     /// because the sync `#[test]`s below share it (a `tokio::sync::Mutex`
     /// cannot be locked from sync tests). No awaited future ever locks
     /// ENV_LOCK itself, so the deadlock `clippy::await_holding_lock` guards
-    /// against cannot occur — hence the per-test allows.
+    /// against cannot occur, hence the per-test allows.
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn fake_state() -> AppState {
@@ -1297,7 +1297,7 @@ mod tests {
     }
 
     /// G.6: the public /v1/health payload must contain ONLY ok/error status
-    /// and the version — no queue depth, no service internals.
+    /// and the version, no queue depth, no service internals.
     #[tokio::test]
     async fn health_payload_has_no_queue_internals() {
         let response = health_check(State(fake_state())).await.into_response();
@@ -1358,7 +1358,7 @@ mod tests {
 
     // ── Adversarial: session tokens / cookies (audit F3) ──────────────
 
-    /// Two mints must NEVER collide — the old `email:ts:MAC` token was
+    /// Two mints must NEVER collide, the old `email:ts:MAC` token was
     /// byte-identical for two logins in the same second.
     #[test]
     fn session_ids_are_random_and_unfingerprintable() {
@@ -1382,7 +1382,7 @@ mod tests {
         );
         // A different secret must not validate the same token.
         assert_eq!(verify_session_mac(&token, "other-secret"), None);
-        // The MAC is a real HMAC over the id — flip one id hex char, keep
+        // The MAC is a real HMAC over the id, flip one id hex char, keep
         // the MAC: refused.
         let (parsed_id, sig) = token.split_once('.').unwrap();
         let mut flipped = parsed_id.to_string();
@@ -1710,7 +1710,7 @@ mod tests {
     }
 
     /// Audit F1: an MFA-enabled user must NEVER receive a session cookie
-    /// from a password-only submission — the handler issues the MFA
+    /// from a password-only submission, the handler issues the MFA
     /// challenge instead, and no `auth_sessions` row is minted.
     #[tokio::test]
     async fn login_mfa_enabled_users_get_a_challenge_not_a_session() {
@@ -1780,7 +1780,7 @@ mod tests {
         .await;
         assert_eq!(response.status(), StatusCode::OK);
         let token = cookie_token(&response).expect("successful login sets a session cookie");
-        // The token is `{id}.{hmac}` — NOT the old deterministic shape —
+        // The token is `{id}.{hmac}`, NOT the old deterministic shape —
         // and it verifies ONLY against the server-side store.
         assert!(
             !token.contains('@'),
@@ -1806,7 +1806,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
         assert!(response.headers().get(header::SET_COOKIE).is_none());
 
-        // Unknown user — same 401, no cookie.
+        // Unknown user, same 401, no cookie.
         let response = login_post(
             State(state),
             axum::http::HeaderMap::new(),
@@ -1818,7 +1818,7 @@ mod tests {
     }
 
     /// Audit F2: the brake's per-identifier AND per-IP scoping contract,
-    /// verified directly on the throttle — the checks are microsecond-cheap,
+    /// verified directly on the throttle, the checks are microsecond-cheap,
     /// so the 1/s refill can never interfere and the assertions stay
     /// deterministic no matter how slow the machine is.
     #[tokio::test]
@@ -1853,7 +1853,7 @@ mod tests {
             "identifier buckets must be isolated"
         );
         // Rotating IPs cannot escape the drained identifier bucket: the
-        // check() key is `{scope}:{key}` — the identifier part decides.
+        // check() key is `{scope}:{key}`, the identifier part decides.
         assert!(
             throttle
                 .check("login:id", "hammered@example.com")
@@ -1885,7 +1885,7 @@ mod tests {
         );
     }
 
-    /// Audit F2: the handler actually WIRES the brake in — hammering one
+    /// Audit F2: the handler actually WIRES the brake in, hammering one
     /// identifier from one IP must produce a plain 401 while budget remains
     /// and a 429 + Retry-After once the identifier bucket is drained. The
     /// loop allows headroom for the 1/s refill (each attempt burns a full
@@ -1964,7 +1964,7 @@ mod tests {
         );
     }
 
-    /// Audit F3: sessions are server-side records — logout revokes the row,
+    /// Audit F3: sessions are server-side records, logout revokes the row,
     /// a password change kills every session of the user, and expiry is
     /// enforced by the store, not by trusting the cookie.
     #[tokio::test]
@@ -2116,11 +2116,11 @@ mod tests {
         }
     }
 
-    // Deliberate: see ENV_LOCK — the guard must outlive the handler awaits.
+    // Deliberate: see ENV_LOCK, the guard must outlive the handler awaits.
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn register_rejects_duplicate_email_and_creates_a_real_account() {
-        // register_post READS FREE_TENANT_LIMIT — hold the env lock for the
+        // register_post READS FREE_TENANT_LIMIT, hold the env lock for the
         // whole body so the capacity test's `FREE_TENANT_LIMIT=0` mutation
         // can never race this registration into a spurious 503.
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -2154,7 +2154,7 @@ mod tests {
         assert_eq!(response_json(response).await["message"], "Account created");
 
         // The account is real: role owner, argon2 hash, free/active tenant,
-        // and EXACTLY one new tenant (no orphans — audit F7).
+        // and EXACTLY one new tenant (no orphans, audit F7).
         let (email, hash, role, tenant_id): (
             String,
             Option<String>,
@@ -2195,7 +2195,7 @@ mod tests {
             "a successful registration creates exactly one tenant"
         );
 
-        // A second identical registration is a conflict — and issues no cookie.
+        // A second identical registration is a conflict, and issues no cookie.
         let response = register_post(
             State(state),
             axum::Json(RegisterForm {
@@ -2209,7 +2209,7 @@ mod tests {
         assert!(response.headers().get(header::SET_COOKIE).is_none());
     }
 
-    // Deliberate: see ENV_LOCK — the guard must outlive the handler awaits.
+    // Deliberate: see ENV_LOCK, the guard must outlive the handler awaits.
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn register_refuses_when_free_plan_is_at_capacity() {
@@ -2265,7 +2265,7 @@ mod tests {
 
     /// Audit F8: handlers serve the BACKGROUND snapshot. The snapshot is
     /// sampled once (by `run_probe_cycle`); repeated handler calls return
-    /// the identical sample timestamp — proving no per-request probing.
+    /// the identical sample timestamp, proving no per-request probing.
     #[tokio::test]
     async fn status_handlers_serve_the_cached_snapshot() {
         // Loopback + port 1: nothing binds it on any host (the deploy host
@@ -2294,7 +2294,7 @@ mod tests {
         assert!(html.contains("probes run every 60 seconds"), "{html}");
         // `fake_state` cannot reach its database, so every probe is degraded
         // and the honest aggregate is the outage message. (This assertion
-        // previously matched the text inside the client script — a string
+        // previously matched the text inside the client script, a string
         // that existed in the page source while the rendered aggregate said
         // something else. The page serves no script now.)
         assert!(html.contains("Service disruption"), "{html}");
@@ -2366,7 +2366,7 @@ mod tests {
 
     /// The public history used to be a hardcoded `[]` while the
     /// `status_page_incidents` ledger (migration 198, incident repo) was real
-    /// and unused — an "unknown" served as "no incidents". This test is the
+    /// and unused, an "unknown" served as "no incidents". This test is the
     /// successor of the old placeholder pin and holds the NEW truth:
     /// recorded history is served, the window is stated and enforced, and an
     /// empty read stays a DETERMINATE empty (recorded=true, count=0) rather
@@ -2447,12 +2447,12 @@ mod tests {
         assert_eq!(json["count"], 0);
         assert_eq!(
             json["recorded"], true,
-            "an empty window is RECORDED emptiness — never an unknown: {json}"
+            "an empty window is RECORDED emptiness, never an unknown: {json}"
         );
     }
 
     /// The failure direction: an unreadable ledger answers UNKNOWN (503,
-    /// `history: null`, a named error, `recorded: false`) — the page must
+    /// `history: null`, a named error, `recorded: false`), the page must
     /// never render "no incidents" out of a broken query.
     #[tokio::test]
     async fn status_history_answers_unknown_when_the_ledger_is_unreadable() {
@@ -2471,7 +2471,7 @@ mod tests {
     /// The MAIL_PORT knob must move the probe target: a listener on a chosen
     /// loopback port flips the SMTP card to `operational`. Without this pin
     /// the knob could silently rot and the probe would fall back to port 25
-    /// — which refuses everywhere in dev (masking the knob entirely) while
+    ///, which refuses everywhere in dev (masking the knob entirely) while
     /// the deploy host's production MTA answers on 0.0.0.0:25 (the original
     /// status-test false-failure, 2026-10-11). The knobs are asserted
     /// end-to-end: refused port ⇒ degraded (sibling tests), listening port
@@ -2508,7 +2508,7 @@ mod tests {
     /// auth-server status surface has NO tenant dimension to fail closed
     /// on. It is deliberately public and aggregate-only: every probe is a
     /// COUNT(*)/SELECT 1/TCP reachability check, and the responses carry
-    /// ONLY {status, services[{name, status}], updated} — never tenant ids,
+    /// ONLY {status, services[{name, status}], updated}, never tenant ids,
     /// emails, or rows. There is no tenant selector on any routed endpoint
     /// (login/register are unrouted), so the AI-audit bypass class
     /// (missing-tenant → broad default) has no foothold here. This test
@@ -2605,7 +2605,7 @@ mod tests {
     }
 
     /// Before the first background cycle the handlers answer with the
-    /// honest "probes are starting" placeholder — never a fabricated
+    /// honest "probes are starting" placeholder, never a fabricated
     /// operational state.
     #[tokio::test]
     async fn status_page_admits_probes_have_not_run_yet() {
@@ -2621,7 +2621,7 @@ mod tests {
     }
 
     /// Audit F8: the SMTP probe is capped at ONE concurrent probe per
-    /// process — a cycle that finds the permit held WAITS instead of
+    /// process, a cycle that finds the permit held WAITS instead of
     /// stacking a second TCP connect, and the permit is released after.
     #[tokio::test]
     async fn smtp_probe_is_capped_at_one_concurrent() {
@@ -2659,14 +2659,14 @@ mod tests {
 
     /// The unique index is on `lower(email)`: an address whose normalized form
     /// differs from the stored row (mixed case) slips past the exact-match
-    /// SELECT pre-check and must hit the CONFLICT branch on INSERT — not a
+    /// SELECT pre-check and must hit the CONFLICT branch on INSERT, not a
     /// 500 and not a fabricated success. Audit F7: the transaction must
     /// ROLL BACK the tenant insert, leaving NO orphaned tenant row.
-    // Deliberate: see ENV_LOCK — the guard must outlive the handler awaits.
+    // Deliberate: see ENV_LOCK, the guard must outlive the handler awaits.
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn register_maps_case_fold_unique_collision_to_conflict_without_orphan_tenant() {
-        // register_post READS FREE_TENANT_LIMIT — same env-lock discipline
+        // register_post READS FREE_TENANT_LIMIT, same env-lock discipline
         // as the other registration flows.
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let Some(pool) = canonical_pool("auth_register_casefold").await else {

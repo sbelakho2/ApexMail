@@ -1,4 +1,4 @@
-//! §12/§26 — account research that produces grounded evidence, and the AI
+//! §12/§26, account research that produces grounded evidence, and the AI
 //! outage rule.
 //!
 //! Research never writes bare prose. Every accepted finding becomes a
@@ -7,7 +7,7 @@
 //! only after [`intelligence::validate_claims`] has verified that a factual
 //! claim cites an allowed `evidence_id` or is explicitly a hypothesis.
 //!
-//! # §26 — the outage rule
+//! # §26, the outage rule
 //!
 //! When AI is unavailable the engine falls back to **verified static
 //! content**, never to hallucination. Concretely, an outage:
@@ -63,7 +63,7 @@ impl ResearchSourceKind {
         }
     }
 
-    /// Parse a source kind. `None` for absent or unknown values — the caller
+    /// Parse a source kind. `None` for absent or unknown values, the caller
     /// must omit the finding rather than guess a provenance.
     pub fn parse(value: Option<&str>) -> Option<Self> {
         match value.map(|value| value.trim().to_ascii_lowercase()) {
@@ -157,7 +157,7 @@ pub fn outage_run(error: &IntelligenceError) -> ResearchRun {
         omitted: Vec::new(),
         mode: ResearchMode::Outage,
         reason: Some(format!(
-            "AI unavailable ({error}); no evidence written and no claim fabricated — falling back \
+            "AI unavailable ({error}); no evidence written and no claim fabricated, falling back \
              to verified static content only"
         )),
         model_version: None,

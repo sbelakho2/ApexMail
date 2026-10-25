@@ -11,7 +11,7 @@
 //!   transport gate),
 //! * admission via the ONE shared
 //!   [`billing_service::send_admission::SendAdmissionService`] (category,
-//!   canonical suppression, plan entitlement and `EmailsSent` quota) — the
+//!   canonical suppression, plan entitlement and `EmailsSent` quota), the
 //!   same gate the REST and SMTP submission paths use,
 //! * `messages` insert with `ON CONFLICT (tenant_id, idempotency_key) DO
 //!   NOTHING` and a deterministic key `sacmp:{campaign_id}:{recipient}` —
@@ -52,28 +52,28 @@ use crate::config::DispatchConfig;
 use crate::types::SalesError;
 
 // ---------------------------------------------------------------------------
-// Unified send admission — the ONE gate in front of every outbound send
+// Unified send admission, the ONE gate in front of every outbound send
 // ---------------------------------------------------------------------------
 //
 // Audit implementation-order item 3: sales sends used to reserve quota
 // through a local `QuotaGateway` seam. The quota functions were canonical
 // (billing_service::usage::record_with_quota_check), but sales still ran its
 // OWN category policy and its OWN suppression checks, and its reservation
-// identity was a random UUID — a retried logical send could reserve twice.
+// identity was a random UUID, a retried logical send could reserve twice.
 // Every sales send path now calls the SAME
 // [`billing_service::send_admission::SendAdmissionService::admit`] the REST
 // and SMTP submission paths call:
 //
-// * category — validated/normalized by the ONE shared helper and written
+// * category, validated/normalized by the ONE shared helper and written
 //   EXPLICITLY into `messages.message_category` / `email_queue.
 //   message_category` (never left to the schema default);
-// * suppression — the canonical tenant suppression lookup shared with REST
+// * suppression, the canonical tenant suppression lookup shared with REST
 //   and SMTP, applied BEFORE the enqueue transaction;
-// * entitlement + quota — the plan gate and the `EmailsSent` reservation
+// * entitlement + quota, the plan gate and the `EmailsSent` reservation
 //   keyed by the sales send's deterministic logical identity
 //   (`sa-send:{step_execution_id}`, `sacmp:{campaign}:{recipient}`, or
 //   `sareply:{inbox_message_id}`), so a retry cannot double-reserve;
-// * settlement — committed only after the enqueue transaction committed,
+// * settlement, committed only after the enqueue transaction committed,
 //   rolled back on every refusal/error, exactly like the REST path.
 //
 // The decision engine's gates, the action fence, the message idempotency
@@ -85,7 +85,7 @@ use crate::types::SalesError;
 /// Sales outreach is commercial mail: it is `marketing`-class under the
 /// platform's suppression semantics and deliberately NOT preference-exempt
 /// (`message_category::PREFERENCE_EXEMPT` covers only transactional/service).
-/// The value is passed to admission EXPLICITLY — a sales send must not be
+/// The value is passed to admission EXPLICITLY, a sales send must not be
 /// able to acquire an opt-out exemption through a missing field.
 pub const SALES_MARKETING_CATEGORY: &str = message_category::MARKETING;
 
@@ -103,7 +103,7 @@ enum SalesAdmissionRefusal {
     /// Non-retryable, terminal refusal: the recipient is on the canonical
     /// suppression list (or the server-owned category failed validation).
     /// Returned as an `EnqueueOutcome`, never as an error, so the worker
-    /// marks the action finished instead of requeueing it — retrying a
+    /// marks the action finished instead of requeueing it, retrying a
     /// suppression is the forbidden loop.
     Skip(EnqueueOutcome),
     /// Retryable deferral: quota exhausted, or the metering/suppression
@@ -131,7 +131,7 @@ fn classify_admission_refusal(error: SendAdmissionError, tenant_id: &str) -> Sal
             tracing::error!(
                 tenant_id = %tenant_id,
                 category = %raw,
-                "server-owned sales category failed validation — refusing the send (non-retryable)"
+                "server-owned sales category failed validation, refusing the send (non-retryable)"
             );
             SalesAdmissionRefusal::Skip(EnqueueOutcome::Suppressed)
         }
@@ -152,7 +152,7 @@ fn classify_admission_refusal(error: SendAdmissionError, tenant_id: &str) -> Sal
             tracing::error!(
                 error = %error,
                 tenant_id = %tenant_id,
-                "sales suppression lookup failed — failing closed (retryable)"
+                "sales suppression lookup failed, failing closed (retryable)"
             );
             SalesAdmissionRefusal::Retry(SalesError::ServiceUnavailable(
                 "suppression lookup is temporarily unavailable".into(),
@@ -174,7 +174,7 @@ fn classify_admission_refusal(error: SendAdmissionError, tenant_id: &str) -> Sal
             tracing::error!(
                 error = %error,
                 tenant_id = %tenant_id,
-                "sales consent lookup failed — failing closed (retryable)"
+                "sales consent lookup failed, failing closed (retryable)"
             );
             SalesAdmissionRefusal::Retry(SalesError::ServiceUnavailable(
                 "consent lookup is temporarily unavailable".into(),
@@ -202,12 +202,12 @@ struct SalesSendAdmission<'a> {
 //
 // Two generations exist:
 //
-// * **v2 (current)** — an opaque 32-byte random token, URL-safe base64. Only
+// * **v2 (current)**, an opaque 32-byte random token, URL-safe base64. Only
 //   its SHA-256 hash is persisted (`sales_unsubscribe_tokens`, migration
 //   203), so a database/backup leak does not disclose recipient addresses
 //   and the URL itself carries no tenant id, no email, and no reversible
 //   encoding of either.
-// * **v1 (legacy, read-only)** — `v1.{tenant_hex}.{email_hex}.{expiry}.{sig}`.
+// * **v1 (legacy, read-only)**, `v1.{tenant_hex}.{email_hex}.{expiry}.{sig}`.
 //   Hex is reversible, so every v1 URL is a portable copy of the recipient
 //   address. No new token may be minted with it; the verifier is retained
 //   only so links in already-delivered mail keep working for ONE expiry
@@ -349,8 +349,8 @@ pub struct UnsubscribeTokenData {
 const UNSUB_TOKEN_VERSION: &str = "v1";
 
 /// Redact a recipient address for operational logs (audit SM7 F11). The
-/// local part is personal data — warn-level send-refusal logs used to carry
-/// the raw B2B address — so it is replaced by a short SHA-256 prefix while
+/// local part is personal data, warn-level send-refusal logs used to carry
+/// the raw B2B address, so it is replaced by a short SHA-256 prefix while
 /// the DOMAIN stays legible: the same domain-only discipline the enrichment
 /// providers use. A value without an '@' (malformed) is hashed in full, so
 /// the helper is total.
@@ -395,7 +395,7 @@ fn unsub_signed_payload(tenant_hex: &str, email_hex: &str, expires_at: i64) -> S
     format!("{UNSUB_TOKEN_VERSION}.{tenant_hex}.{email_hex}.{expires_at}")
 }
 
-/// **Deprecated (v1)** — the payload hex-encodes the tenant id and recipient
+/// **Deprecated (v1)**, the payload hex-encodes the tenant id and recipient
 /// address, so the token is a reversible copy of the address. Kept ONLY for
 /// the legacy dry-run preview path (`campaigns::legacy_unsubscribe_link`),
 /// which never enqueues, and for v1 verification tests. Never call this from
@@ -415,7 +415,7 @@ pub fn sign_unsubscribe_token(
     format!("{payload}.{sig}")
 }
 
-/// **Deprecated (v1, read-only compatibility)** — verifies tokens that were
+/// **Deprecated (v1, read-only compatibility)**, verifies tokens that were
 /// already delivered in email before the v2 rollout. Returns `None` for
 /// malformed input, a bad signature (constant-time compare), or an expired
 /// token.
@@ -467,7 +467,7 @@ pub fn verify_unsubscribe_token(secret: &str, token: &str) -> Option<Unsubscribe
     })
 }
 
-/// **Deprecated (v1)** — convenience signer expiring
+/// **Deprecated (v1)**, convenience signer expiring
 /// [`UNSUB_TOKEN_TTL_SECS`] from now, used only by the legacy dry-run
 /// preview path. New sends must use [`create_unsubscribe_token`].
 pub fn sign_unsubscribe_token_default_ttl(secret: &str, tenant_id: &str, email: &str) -> String {
@@ -587,7 +587,7 @@ pub struct OutreachFooter<'a> {
 /// Render the truthfulness-aware footer for one outbound sales message.
 ///
 /// Returns `(html, text)`. The caller supplies the reason, and the wording
-/// follows from it — the footer can never claim a signup that did not happen.
+/// follows from it, the footer can never claim a signup that did not happen.
 pub fn render_outreach_footer(footer: &OutreachFooter<'_>) -> (String, String) {
     let mut disclosure = String::new();
     if let Some(address) = footer.postal_address {
@@ -808,7 +808,7 @@ pub async fn fetch_template(
 // Sender-domain resolution (mirrors api-server messages.rs)
 // ---------------------------------------------------------------------------
 
-/// SES/SMTP transport gate — identical semantics to
+/// SES/SMTP transport gate, identical semantics to
 /// `api-server::config::Config::ses_transport_enabled` (read at call time so
 /// deployments behave the same as the REST path).
 fn ses_transport_enabled() -> bool {
@@ -824,7 +824,7 @@ fn sender_domain(from: &str) -> Option<String> {
 }
 
 /// Resolve the ready `domains.id` for the sender domain while holding a row
-/// lock through queue insertion — the exact SQL from api-server's
+/// lock through queue insertion, the exact SQL from api-server's
 /// `resolve_sender_domain_id` (closes the check-then-enqueue race where a
 /// domain could be disabled between validation and enqueue).
 async fn resolve_sender_domain_id(
@@ -969,21 +969,21 @@ fn truncate_bytes(s: String, max: usize) -> String {
 pub enum EnqueueOutcome {
     /// Rows inserted into `messages` + `email_queue`; ledger stamped.
     Enqueued,
-    /// Another dispatcher claimed the ledger row concurrently — skipped.
+    /// Another dispatcher claimed the ledger row concurrently, skipped.
     AlreadyClaimed,
-    /// The (campaign, recipient) idempotency key already existed — a prior
+    /// The (campaign, recipient) idempotency key already existed, a prior
     /// attempt (or an older code path that stamped the ledger first) already
     /// enqueued this recipient; nothing sent again.
     DuplicateIdempotency,
     /// The worker no longer holds the action lease (recovered by another
     /// process, expired, or the action left `executing`). This is the
     /// ANTI-DUPLICATE GUARD: the stale worker produced NO external effect —
-    /// nothing was inserted into `messages` or `email_queue` — and the
+    /// nothing was inserted into `messages` or `email_queue`, and the
     /// recovered worker owns the retry.
     LeaseLost,
     /// Admission refused the recipient permanently: the canonical tenant
     /// suppression list contains them (or the server-owned category failed
-    /// validation). NON-RETRYABLE — the caller must terminate the work
+    /// validation). NON-RETRYABLE, the caller must terminate the work
     /// (skip/cancel), never requeue it: retrying a suppression is the loop
     /// the release gates forbid. Nothing was inserted into `messages` or
     /// `email_queue` and no quota was consumed.
@@ -992,7 +992,7 @@ pub enum EnqueueOutcome {
 
 /// `email_queue` insert for campaign mail. `campaign_id` is set on the COLUMN
 /// (not just metadata) so the delivery worker attributes every event it
-/// records (sent/bounced) back to the campaign — see D.
+/// records (sent/bounced) back to the campaign, see D.
 ///
 /// `message_category` is bound EXPLICITLY from the admission handle
 /// (`$16` = the category admission validated), never left to the schema
@@ -1035,7 +1035,7 @@ const SEQUENCE_MESSAGES_INSERT_SQL: &str = r#"
 
 /// `email_queue` insert for a sequenced send: the same four typed provenance
 /// columns as [`SEQUENCE_MESSAGES_INSERT_SQL`], so delivery events are
-/// attributable at the queue row too. `campaign_id` stays NULL — sequence mail
+/// attributable at the queue row too. `campaign_id` stays NULL, sequence mail
 /// is attributed to a step execution, not a campaign. `message_category`
 /// (`$18`) is bound explicitly from the admission handle.
 const SEQUENCE_EMAIL_QUEUE_INSERT_SQL: &str = r#"
@@ -1052,7 +1052,7 @@ const SEQUENCE_EMAIL_QUEUE_INSERT_SQL: &str = r#"
         "#;
 
 /// Statement order inside the sequenced-send transaction: the lease fence is
-/// deliberately FIRST — before either insert — so a stale worker aborts with
+/// deliberately FIRST, before either insert, so a stale worker aborts with
 /// no external effect. Test-only data so the ordering is asserted in tests;
 /// the implementation below follows it literally.
 #[cfg(test)]
@@ -1140,7 +1140,7 @@ impl std::fmt::Debug for ProductionCampaignDispatcher {
 
 impl ProductionCampaignDispatcher {
     /// Construct the production dispatcher. Fails unless the mandatory
-    /// configuration is present — an unconfigured deployment must NOT get a
+    /// configuration is present, an unconfigured deployment must NOT get a
     /// half-working dispatcher (campaign start stays 503).
     ///
     /// `admission_backend` is the shared [`SendAdmissionBackend`] the REST
@@ -1277,7 +1277,7 @@ impl ProductionCampaignDispatcher {
         unsubscribe_link: &str,
     ) -> Result<EnqueueOutcome, SalesError> {
         // 1. Unified admission (outside the enqueue transaction, exactly like
-        //    the REST path — released on every non-enqueue exit). The
+        //    the REST path, released on every non-enqueue exit). The
         //    logical identity is the campaign idempotency key, so a retry of
         //    the same (campaign, recipient) re-derives the same metering
         //    event and cannot double-reserve.
@@ -1328,7 +1328,7 @@ impl ProductionCampaignDispatcher {
         // LEGACY PATH (the audit intends to retire it): campaign mail still
         // sends from the deployment-wide SALES_CAMPAIGN_FROM_EMAIL. New
         // autonomous/sequence mail must name the resolved sender identity
-        // instead — see `enqueue_sequenced`.
+        // instead, see `enqueue_sequenced`.
         let from = self.cfg.from_email.clone();
         let idempotency_key = campaign_idempotency_key(campaign_id, recipient_email);
         // The category admission validated (never the schema default) is
@@ -1439,7 +1439,7 @@ impl ProductionCampaignDispatcher {
 
         if result.rows_affected() == 0 {
             // Idempotent duplicate: this (campaign, recipient) was already
-            // enqueued by a prior attempt — never double-send. Commit the
+            // enqueued by a prior attempt, never double-send. Commit the
             // ledger claim so the recipient is not retried forever (the
             // `sent` counter was already incremented by the original attempt).
             tracing::warn!(
@@ -1481,7 +1481,7 @@ impl ProductionCampaignDispatcher {
             .await
             .map_err(|e| SalesError::Database(e.to_string()))?;
 
-        // 5. Campaign send counter — same transaction.
+        // 5. Campaign send counter, same transaction.
         sqlx::query("UPDATE sales_campaigns SET sent = sent + 1 WHERE id = $1")
             .bind(campaign_id)
             .execute(&mut *tx)
@@ -1518,7 +1518,7 @@ impl ProductionCampaignDispatcher {
     ///    returns [`EnqueueOutcome::LeaseLost`] and enqueues nothing.
     ///
     /// The caller (the action worker) has already claimed the
-    /// `sales_step_executions` row, so that row — not a campaign ledger — is
+    /// `sales_step_executions` row, so that row, not a campaign ledger, is
     /// the send ledger. Suppression is still re-checked inside the transaction,
     /// because an unsubscribe that landed between the decision and this send
     /// must win.
@@ -1794,7 +1794,7 @@ impl ProductionCampaignDispatcher {
         // the enqueue transaction).
         if !sender_domain_ready(&self.db, tenant_id, &self.cfg.from_email).await? {
             return Err(SalesError::InvalidInput(format!(
-                "sender domain of '{}' is not verified/DKIM-ready for tenant — campaign paused",
+                "sender domain of '{}' is not verified/DKIM-ready for tenant, campaign paused",
                 self.cfg.from_email
             )));
         }
@@ -1838,7 +1838,7 @@ impl ProductionCampaignDispatcher {
                         .increment(1);
                 }
                 // Quota exhaustion and hard configuration errors abort the
-                // batch — the campaign is paused with an error state by the
+                // batch, the campaign is paused with an error state by the
                 // caller; transient DB errors are retried on the next tick.
                 Err(e) => return Err(e),
             }
@@ -1852,7 +1852,7 @@ impl ProductionCampaignDispatcher {
     ///
     /// Persists only the token hash (see [`create_unsubscribe_token`]), so
     /// the emitted URL carries no recipient/tenant material. Fails rather
-    /// than falling back to a v1 link when persistence fails — a token that
+    /// than falling back to a v1 link when persistence fails, a token that
     /// cannot be resolved is worse than no link.
     ///
     /// Inherent (not trait) method since the legacy `CampaignEmailDispatcher`
@@ -1874,7 +1874,7 @@ impl ProductionCampaignDispatcher {
 // Inbox replies (same pipeline, no campaign ledger)
 // ---------------------------------------------------------------------------
 
-/// Idempotency key namespace for inbox replies — one enqueued reply per
+/// Idempotency key namespace for inbox replies, one enqueued reply per
 /// inbox message; a double-click can never double-send.
 pub fn reply_idempotency_key(inbox_message_id: Uuid) -> String {
     format!("sareply:{inbox_message_id}")
@@ -1928,7 +1928,7 @@ pub enum ReplyOutcome {
 
 impl ProductionCampaignDispatcher {
     /// Enqueue a reply to an inbound inbox message through the platform
-    /// pipeline (`messages` + `email_queue`) — the same statements the
+    /// pipeline (`messages` + `email_queue`), the same statements the
     /// campaign enqueue path and api-server's REST send use, minus the
     /// campaign ledger. The `replied` flag on `sales_inbox_messages` is
     /// stamped in the SAME transaction, so the flag can never claim
@@ -1941,7 +1941,7 @@ impl ProductionCampaignDispatcher {
     /// mail. Exactly like api-server's REST send path we check ONLY the
     /// platform-wide `suppressions` table (hard bounces, spam complaints,
     /// platform-level unsubscribes). A campaign opt-out recorded in
-    /// `sales_unsubscribes` does NOT block a personal reply — a lead who
+    /// `sales_unsubscribes` does NOT block a personal reply, a lead who
     /// opted out of marketing may still legitimately receive a direct
     /// answer to their own inbound question.
     #[allow(clippy::too_many_arguments)]
@@ -1959,7 +1959,7 @@ impl ProductionCampaignDispatcher {
         // category is passed EXPLICITLY as `transactional`; the suppression
         // check is the canonical platform list, which preserves the
         // documented 1:1-reply semantics (a `sales_unsubscribes` marketing
-        // opt-out never blocks a personal reply — see the method docs).
+        // opt-out never blocks a personal reply, see the method docs).
         let idempotency_key = reply_idempotency_key(inbox_message_id);
         let admission = match self
             .admit_sales_recipient(SalesSendAdmission {
@@ -2029,7 +2029,7 @@ impl ProductionCampaignDispatcher {
         // LEGACY PATH (retained for 1:1 correspondence): replies to an
         // inbound inbox message still use the deployment-wide
         // SALES_CAMPAIGN_FROM_EMAIL. Autonomous sequence mail must send from
-        // the resolved sender identity — see `enqueue_sequenced`.
+        // the resolved sender identity, see `enqueue_sequenced`.
         let from = self.cfg.from_email.clone();
         let idempotency_key = reply_idempotency_key(inbox_message_id);
         // The category admission validated (never the schema default) is
@@ -2117,7 +2117,7 @@ impl ProductionCampaignDispatcher {
         }
 
         // `messages` insert with the deterministic reply key
-        // (ON CONFLICT DO NOTHING — same statement as the REST path) and the
+        // (ON CONFLICT DO NOTHING, same statement as the REST path) and the
         // admission-validated category written explicitly.
         let result = sqlx::query(
             "INSERT INTO messages (id, tenant_id, from_email, to_emails, cc_emails, bcc_emails,
@@ -2174,7 +2174,7 @@ impl ProductionCampaignDispatcher {
         }
 
         // `email_queue` insert (single-recipient row, mirrors the REST path;
-        // no List-Unsubscribe headers — this is 1:1 correspondence, not
+        // no List-Unsubscribe headers, this is 1:1 correspondence, not
         // bulk mail).
         sqlx::query(
             "INSERT INTO email_queue (
@@ -2225,7 +2225,7 @@ mod tests {
     const SECRET: &str = "test-unsub-secret-0123456789abcdef";
 
     // ------------------------------------------------------------------
-    // Audit SM7 F11 — warn-level send-refusal logs never carry the raw
+    // Audit SM7 F11, warn-level send-refusal logs never carry the raw
     // recipient address: the local part is hashed, the domain stays legible
     // (the enrichment providers' domain-only discipline).
     // ------------------------------------------------------------------
@@ -2258,7 +2258,7 @@ mod tests {
             redact_recipient("jane.doe@corp.example")
         );
 
-        // Malformed input is hashed in full — total, never a panic.
+        // Malformed input is hashed in full, total, never a panic.
         let malformed = redact_recipient("not-an-address");
         assert!(malformed.starts_with("sha256:"), "{malformed}");
         assert!(!malformed.contains("not-an-address"), "{malformed}");
@@ -2515,7 +2515,7 @@ mod tests {
 
     /// Adversarial 5 (documented `used_at` semantics): the FIRST redemption
     /// stamps `used_at`; a replay still resolves and never rewrites the
-    /// original timestamp (idempotent suppression, not single-use — mail
+    /// original timestamp (idempotent suppression, not single-use, mail
     /// scanners prefetch links).
     #[tokio::test]
     async fn used_at_is_stamped_on_first_redemption_and_replay_still_resolves() {
@@ -2572,7 +2572,7 @@ mod tests {
     #[test]
     fn personalization_escapes_html() {
         let template = TemplateContent {
-            subject: "Hi {{first_name}} — {{company}}".into(),
+            subject: "Hi {{first_name}}, {{company}}".into(),
             html_body: Some("<p>Hello {{name}} at {{company}}</p>".into()),
             text_body: Some("Hello {{name}}".into()),
         };
@@ -2590,7 +2590,7 @@ mod tests {
         // (escaped) script tag; the subject interpolates it safely.
         assert_eq!(
             rendered.subject,
-            "Hi &lt;script&gt;alert(1)&lt;/script&gt; — ACME &amp; Sons &lt;b&gt;LLC&lt;/b&gt;"
+            "Hi &lt;script&gt;alert(1)&lt;/script&gt;, ACME &amp; Sons &lt;b&gt;LLC&lt;/b&gt;"
         );
         assert!(rendered
             .html
@@ -2799,7 +2799,7 @@ mod tests {
         assert!(html.contains("apexmail-unsubscribe-footer"));
     }
 
-    /// An opted-in relationship may say so — the wording follows the reason.
+    /// An opted-in relationship may say so, the wording follows the reason.
     #[test]
     fn consented_relationship_footer_states_the_opt_in() {
         let recipient = DispatchRecipient::new("customer@example.com", "https://x/u/2");
@@ -2838,7 +2838,7 @@ mod tests {
 
     /// Release gate (§103¹ / CAN-SPAM): the central footer renderer must
     /// carry the unsubscribe link and a truthful disclosure for EVERY
-    /// [`FooterReason`] — a reason that renders without them is a bypass of
+    /// [`FooterReason`], a reason that renders without them is a bypass of
     /// the compliant footer.
     #[test]
     fn every_footer_reason_carries_the_unsubscribe_link_and_disclosure() {
@@ -3026,7 +3026,7 @@ mod tests {
             "re: already replied"
         );
         assert_eq!(compose_reply_subject("  Trims me  "), "Re: Trims me");
-        // Not a Re: prefix — the colon belongs to the subject text.
+        // Not a Re: prefix, the colon belongs to the subject text.
         assert_eq!(
             compose_reply_subject("Note: something"),
             "Re: Note: something"
@@ -3070,7 +3070,7 @@ mod tests {
         );
     }
 
-    /// D: campaign attribution — the email_queue insert must set the
+    /// D: campaign attribution, the email_queue insert must set the
     /// campaign_id COLUMN (bound as a UUID, position $5), because the
     /// delivery worker reads email_queue.campaign_id into every events row
     /// it records. Metadata-only attribution left worker events unattributed.
@@ -3220,7 +3220,7 @@ mod tests {
     }
 
     /// Typed provenance (migration 202): all four columns on BOTH inserts,
-    /// parameterized as UUIDs — a feedback consumer must not have to parse
+    /// parameterized as UUIDs, a feedback consumer must not have to parse
     /// JSON metadata. Idempotency and the envelope columns are preserved.
     #[test]
     fn sequenced_inserts_write_all_four_typed_provenance_columns() {
@@ -3300,7 +3300,7 @@ mod tests {
     }
 
     /// Audit item 3: the refusal classification enforces the required
-    /// retryable-vs-skip contract — a quota refusal must DEFER (retryable),
+    /// retryable-vs-skip contract, a quota refusal must DEFER (retryable),
     /// a suppression refusal must SKIP (terminal).
     #[test]
     fn admission_refusals_classify_as_retryable_deferrals_or_terminal_skips() {
@@ -3356,9 +3356,9 @@ mod tests {
 
     /// In-memory [`SendAdmissionBackend`] for the dispatcher's live tests:
     /// the same contract as billing's canonical
-    /// `record_with_quota_check` / `rollback_usage_record` — one shared
+    /// `record_with_quota_check` / `rollback_usage_record`, one shared
     /// counter per tenant, all-or-nothing reservation, usage-event-id
-    /// de-duplication, event-id keyed rollback — plus a suppression set, so
+    /// de-duplication, event-id keyed rollback, plus a suppression set, so
     /// the sales path is exercised against the SHARED admission semantics
     /// without touching billing storage.
     #[derive(Debug)]
@@ -3835,7 +3835,7 @@ mod tests {
         assert_eq!(metadata["sales_sender_source_ip"], "203.0.113.7");
 
         // The category recorded on the message is the explicit sales class
-        // admission validated — the schema default is never consulted.
+        // admission validated, the schema default is never consulted.
         assert_eq!(
             category, SALES_MARKETING_CATEGORY,
             "the messages row must carry the admission-validated category"
@@ -3890,8 +3890,8 @@ mod tests {
     }
 
     /// Live proof for defect 3: a worker whose lease was recovered (here:
-    /// expired) gets `LeaseLost` and produces NO external effect — zero new
-    /// rows in `messages` and `email_queue` — and its quota reservation is
+    /// expired) gets `LeaseLost` and produces NO external effect, zero new
+    /// rows in `messages` and `email_queue`, and its quota reservation is
     /// released.
     #[tokio::test]
     async fn stale_fence_returns_lease_lost_and_writes_nothing() {
@@ -3973,7 +3973,7 @@ mod tests {
     /// RESOLVED sender (never the deployment config address), stamps the
     /// marketing category on both the message and its queue row, consumes
     /// exactly one admission unit, and a replay of the same logical send is a
-    /// duplicate — never a second message.
+    /// duplicate, never a second message.
     #[tokio::test]
     async fn sequenced_send_is_fenced_marketing_and_replay_is_a_duplicate() {
         let Some(pool) = crate::test_db::canonical_test_pool("sequenced_default_run").await else {
@@ -4095,7 +4095,7 @@ mod tests {
     /// The admission refusal classification, proved behaviourally: an
     /// exhausted quota is a RETRYABLE error (the worker requeues with
     /// backoff) and a canonical suppression is a TERMINAL `Suppressed`
-    /// outcome — both write nothing and neither sends.
+    /// outcome, both write nothing and neither sends.
     #[tokio::test]
     async fn admission_refusals_are_retryable_errors_or_terminal_skips() {
         let Some(pool) = crate::test_db::canonical_test_pool("admission_refusal_default").await
@@ -4169,7 +4169,7 @@ mod tests {
 
     /// A stale lease token (the worker died and its work was recovered) is
     /// refused with `LeaseLost`, writes nothing, and releases the reservation
-    /// it had already taken — no external effect from a worker that no longer
+    /// it had already taken, no external effect from a worker that no longer
     /// owns the action.
     #[tokio::test]
     async fn stale_fenced_send_is_refused_and_releases_its_reservation() {

@@ -5,8 +5,8 @@
 //! This is CUSTOMER automation: the rules customers configure under
 //! `/v1/automations` are executed here, against customer tenants, using the
 //! shared billing/send-admission machinery. The owner's sales brain
-//! (`crates/sales-autopilot`) is a separate trust domain — externally
-//! owner-only and restricted to the system tenant — so executing customer
+//! (`crates/sales-autopilot`) is a separate trust domain, externally
+//! owner-only and restricted to the system tenant, so executing customer
 //! automations in that process would couple the two: the Sales service could
 //! not be isolated to the system tenant, and turning the private sales
 //! subsystem off would take customer automations down with it. The executor
@@ -28,7 +28,7 @@
 //!    with `FOR UPDATE SKIP LOCKED` and a lease, bounded to
 //!    [`AutomationExecutor::with_batch_size`] events per tick;
 //! 2. **evaluates** every enabled rule of the event's tenant against the
-//!    event — the trigger vocabulary is exactly what the product writes (see
+//!    event, the trigger vocabulary is exactly what the product writes (see
 //!    [`AutomationEventKind`] and [`resolve_trigger`]); a stored kind with no
 //!    meaning is reported in the run log as an unsupported trigger, never
 //!    silently ignored;
@@ -42,19 +42,19 @@
 //!
 //! # Exactly-once (three derived identities, no random retry ids)
 //!
-//! * **Event** — `automation_trigger_events.event_key` is derived from the
+//! * **Event**, `automation_trigger_events.event_key` is derived from the
 //!   source row (migration 224 header), unique per tenant. A replayed
 //!   platform event is a no-op at ingest.
-//! * **Run** — `automation_runs` is unique on
+//! * **Run**, `automation_runs` is unique on
 //!   `(tenant_id, automation_id, trigger_event_key)`: one run per (rule,
 //!   event) forever. A re-claimed event RESUMES its run; only actions without
 //!   a terminal record are re-attempted.
-//! * **Send** — `messages.idempotency_key = "autoact:{run_id}:{action_index}"`
+//! * **Send**, `messages.idempotency_key = "autoact:{run_id}:{action_index}"`
 //!   (unique per tenant). The `messages` + `email_queue` inserts share one
 //!   transaction, and even if the process dies after that commit and before
 //!   the `automation_run_actions` bookkeeping write, the retry's insert hits
 //!   the idempotency key and reuses the existing message instead of sending
-//!   again — the partial-commit window is closed by the derived key, not by
+//!   again, the partial-commit window is closed by the derived key, not by
 //!   hoping the two writes stay together.
 //!
 //! # Admission (audit implementation-order item 3)
@@ -64,7 +64,7 @@
 //! with an EXPLICIT category:
 //!
 //! * [`AUTOMATION_MARKETING_CATEGORY`] (`marketing`) for every rule triggered
-//!   by a contact lifecycle event — automation/nurture mail is commercial
+//!   by a contact lifecycle event, automation/nurture mail is commercial
 //!   mail and gets no opt-out exemption;
 //! * [`AUTOMATION_REPLY_CATEGORY`] (`transactional`) only for a 1:1 reply to
 //!   a message the recipient sent (`message.received`).
@@ -124,7 +124,7 @@ pub enum AutomationError {
 /// Automations are CUSTOMER-configured, trigger-driven lifecycle mail
 /// (welcome series, onboarding, re-engagement): commercial mail,
 /// `marketing`-class under the platform's suppression semantics, and
-/// deliberately NOT preference-exempt. Passed to admission EXPLICITLY — an
+/// deliberately NOT preference-exempt. Passed to admission EXPLICITLY, an
 /// automation send must never acquire an opt-out exemption through a missing
 /// field or a schema default.
 pub const AUTOMATION_MARKETING_CATEGORY: &str = message_category::MARKETING;
@@ -132,7 +132,7 @@ pub const AUTOMATION_MARKETING_CATEGORY: &str = message_category::MARKETING;
 /// Category of a 1:1 reply to a message the recipient sent (`message.received`).
 ///
 /// The rule answers inbound correspondence: transactional-class, exactly like
-/// the sales reply path. Global suppression still applies — admission checks
+/// the sales reply path. Global suppression still applies, admission checks
 /// the canonical suppression list for every category.
 pub const AUTOMATION_REPLY_CATEGORY: &str = message_category::TRANSACTIONAL;
 
@@ -226,7 +226,7 @@ impl AutomationEventKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TriggerSpec {
     pub event: AutomationEventKind,
-    /// `trigger_config.filters.tags` — the whole filter vocabulary the
+    /// `trigger_config.filters.tags`, the whole filter vocabulary the
     /// documented product shape contains.
     pub filter_tags: Vec<String>,
 }
@@ -248,8 +248,8 @@ pub enum TriggerResolution {
 ///   (the documented shape; `docs/api/endpoints/automations.md`);
 /// * `{"type": "contact_created"}` / `{"type": "tag_added"}` (the
 ///   in-repo underscore aliases);
-/// * anything else — `schedule`, `webhook`, an unknown event name, a filter
-///   key the product does not define — resolves to
+/// * anything else, `schedule`, `webhook`, an unknown event name, a filter
+///   key the product does not define, resolves to
 ///   [`TriggerResolution::Unsupported`] with a product-readable reason.
 pub fn resolve_trigger(trigger: &Value) -> TriggerResolution {
     let Some(obj) = trigger.as_object() else {
@@ -365,7 +365,7 @@ enum ConditionVerdict {
 /// Evaluate the documented condition shape
 /// (`{"all": [{"field": "tags", "operator": "contains", "value": "active"}]}`).
 ///
-/// Unknown group keys, fields and operators are `Unsupported` — reported in
+/// Unknown group keys, fields and operators are `Unsupported`, reported in
 /// the run log, never treated as a silent pass.
 fn evaluate_conditions(conditions: Option<&Value>, ctx: &EventContext) -> ConditionVerdict {
     let Some(conditions) = conditions else {
@@ -731,7 +731,7 @@ pub struct TickReport {
     pub events_pruned: u64,
     /// P1: enabled rules materialized into memory this tick. Rules are loaded
     /// ONCE per tenant per tick (the process-event path reuses the load), so
-    /// this counter is O(rules) rather than O(events × rules) — it is the
+    /// this counter is O(rules) rather than O(events × rules), it is the
     /// observable seam the batching test asserts on.
     pub rules_loaded: u64,
 }
@@ -866,7 +866,7 @@ pub struct AutomationExecutor {
     batch_size: i64,
     /// SM10 F4: data-plane STONITH gate. With `APEXMAIL_HA_FENCING=true`
     /// the tick refuses to claim automation events (and to execute the
-    /// action ladder — including real sends — that follows them) while this
+    /// action ladder, including real sends, that follows them) while this
     /// node's `ha:fenced:{node}` key stands, or while the fence authority
     /// cannot be read (fail closed). Default off: zero behavior change.
     fence_gate: Arc<crate::fence::FenceGate>,
@@ -902,7 +902,7 @@ impl AutomationExecutor {
 
     /// Ingest one platform event into the inbox. Idempotent by
     /// `(tenant_id, event_key)`: returns `true` only when this call inserted
-    /// the event, `false` when it was already present (a replay — the
+    /// the event, `false` when it was already present (a replay, the
     /// executor will not process it twice).
     ///
     /// This is the public producer seam (the DB triggers call the same
@@ -1236,7 +1236,7 @@ impl AutomationExecutor {
 
     /// P1: every enabled rule of the tenant, paged through `RULES_PAGE_SIZE`
     /// rows (a bounded statement size) but materialized ONCE per tick by the
-    /// caller's per-tenant cache — no longer re-read per event.
+    /// caller's per-tenant cache, no longer re-read per event.
     async fn enabled_rules(&self, tenant_id: &str) -> Result<Vec<RuleRow>, AutomationError> {
         let mut rules: Vec<RuleRow> = Vec::new();
         let mut cursor: Option<(DateTime<Utc>, Uuid)> = None;
@@ -1284,7 +1284,7 @@ impl AutomationExecutor {
 
     /// Insert the run row (or fetch the existing one). `Some(state)` when this
     /// call owns (or resumes) the run, `None` when the run is already
-    /// terminal — the replay no-op.
+    /// terminal, the replay no-op.
     async fn get_or_create_run(
         &self,
         rule: &RuleRow,
@@ -1513,7 +1513,7 @@ impl AutomationExecutor {
 
     /// P1: persist one event's collected skip records with ONE multi-row
     /// INSERT (the `ON CONFLICT (tenant_id, automation_id,
-    /// trigger_event_key) DO NOTHING` idempotency is preserved exactly — a
+    /// trigger_event_key) DO NOTHING` idempotency is preserved exactly, a
     /// replayed event conflict-skips every row it already wrote). The old
     /// shape issued one INSERT per (event × rule).
     async fn record_skipped_runs(
@@ -1707,7 +1707,7 @@ impl AutomationExecutor {
                     .await
             }
             other => ActionRecord::unsupported(format!(
-                "unsupported action kind '{other}' — the action was not executed"
+                "unsupported action kind '{other}', the action was not executed"
             )),
         }
     }
@@ -1726,7 +1726,7 @@ impl AutomationExecutor {
         index: i32,
         config: &Value,
     ) -> ActionRecord {
-        // 1. Recipient — explicit `config.to` for addressable sends, else the
+        // 1. Recipient, explicit `config.to` for addressable sends, else the
         //    triggering entity's address (contact email; the inbound sender
         //    for a reply).
         let recipient = match config
@@ -1795,7 +1795,7 @@ impl AutomationExecutor {
         };
         let rendered = render_template(&template, ctx);
 
-        // 4. Admission — the ONE shared gate, explicit category.
+        // 4. Admission, the ONE shared gate, explicit category.
         let category = kind.send_category();
         let quota_identity = format!("auto-run:{run_id}:{index}");
         let admission = match self
@@ -2155,7 +2155,7 @@ impl AutomationExecutor {
 
         let webhook_id: Option<String> = match sqlx::query_scalar(
             // Dogfood-2: mirror the webhook processor's claim contract
-            // (`enabled AND status = 'active'`) — a disabled/paused webhook
+            // (`enabled AND status = 'active'`), a disabled/paused webhook
             // must not receive queued automation deliveries it can never
             // claim.
             "SELECT id FROM webhooks WHERE tenant_id = $1 AND enabled = true AND status = 'active' \
@@ -2354,8 +2354,8 @@ fn backoff_secs(attempts: i32) -> f64 {
 }
 
 /// `trigger_config.filters.tags` semantics:
-/// * created/updated — the contact must carry ALL filter tags;
-/// * tag_added — at least one ADDED tag must be in the filter (the filter
+/// * created/updated, the contact must carry ALL filter tags;
+/// * tag_added, at least one ADDED tag must be in the filter (the filter
 ///   names the tag that fires the rule).
 fn trigger_filter_matches(
     spec: &TriggerSpec,
@@ -2453,7 +2453,7 @@ fn escape_html(value: &str) -> String {
         .replace('\'', "&#39;")
 }
 
-/// SES/SMTP transport gate — identical semantics to the REST/sales paths.
+/// SES/SMTP transport gate, identical semantics to the REST/sales paths.
 fn ses_transport_enabled() -> bool {
     apexmail_lib::transport::email_transport_is_ses(
         std::env::var("EMAIL_TRANSPORT_TYPE").ok().as_deref(),
@@ -2467,7 +2467,7 @@ fn sender_domain(from: &str) -> Option<String> {
 }
 
 /// Ready sender-domain resolution with a row lock held through the queue
-/// insert — the exact SQL the REST and sales paths use.
+/// insert, the exact SQL the REST and sales paths use.
 async fn resolve_sender_domain_id(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     tenant_id: &str,
@@ -3465,7 +3465,7 @@ mod tests {
     }
 
     /// A rule triggered by a received message replies to the SENDER with a
-    /// transactional category — never the contact's address or a marketing
+    /// transactional category, never the contact's address or a marketing
     /// category.
     #[tokio::test]
     async fn inbound_reply_trigger_sends_transactional_to_the_sender() {
@@ -3527,7 +3527,7 @@ mod tests {
     }
 
     /// Unsupported trigger and action kinds are recorded in the run log with
-    /// their kind named — never silently ignored, never retried.
+    /// their kind named, never silently ignored, never retried.
     #[tokio::test]
     async fn unsupported_trigger_and_action_kinds_are_recorded() {
         let Some(pool) = fresh_pool("automations_lib_unsupported", "sa_lib_auto_unsup").await
@@ -3703,7 +3703,7 @@ mod tests {
                 .expect("pin rule order");
         }
 
-        // Force rule B's execute_rule to fail with a DB error — the exact
+        // Force rule B's execute_rule to fail with a DB error, the exact
         // `?` path the audit loss came from.
         let failing_uuid = failing_rule.to_string();
         sqlx::query(&format!(
@@ -5219,7 +5219,7 @@ mod tests {
     }
 
     /// A FENCED node's tick must return an EMPTY report without touching the
-    /// database — against the dead pool any DB reach would error, so an
+    /// database, against the dead pool any DB reach would error, so an
     /// `Ok` empty report proves the gate refused before the claim.
     #[tokio::test]
     async fn fenced_node_skips_the_tick_without_claiming() {
@@ -5233,7 +5233,7 @@ mod tests {
         let report = executor
             .tick()
             .await
-            .expect("a fenced tick is not an error — it claims nothing");
+            .expect("a fenced tick is not an error, it claims nothing");
         assert_eq!(
             report.events_claimed, 0,
             "a fenced node must not claim automation events"
@@ -5241,7 +5241,7 @@ mod tests {
     }
 
     /// The control: the SAME dead pool under the default (disabled) gate
-    /// fails at the claim — proving the empty report above came from the
+    /// fails at the claim, proving the empty report above came from the
     /// fence gate, not from the executor suddenly succeeding.
     #[tokio::test]
     async fn unfenced_node_attempts_the_claim_against_the_database() {

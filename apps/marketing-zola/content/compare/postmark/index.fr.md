@@ -17,7 +17,7 @@ og_image = "/images/og-image.png"
 # single loop, so design changes to the row/winner markup happen in ONE place.
 # Cell values are raw HTML (rendered with | safe) to preserve color-emphasis
 # spans and any inline markup. Winner is one of: apexmail | competitor | tie | none.
-# Postmark never declares a winner — every row uses winner = "none".
+# Postmark never declares a winner, every row uses winner = "none".
 comparison_sections = [
   { title = "DÉLIVRABILITÉ", rows = [
     { feature = "Taux de livraison", apex = '<span>Élevé</span>', comp = '<span class="">Élevé</span>', winner = "none" },
@@ -47,14 +47,14 @@ comparison_sections = [
   ]},
   { title = "TARIFS", rows = [
     { feature = "Offre gratuite", apex = '<span>3 000/mois + allocation de lancement unique de 30 000</span>', comp = '<span class="">100/mois</span>', winner = "none" },
-    { feature = "100K emails/mois", apex = '<span>€89 (Pro : 150K)</span>', comp = '<span class="">€122.82 (US$133.50) — Pro : €15.18 (US$16.50)/mois + 90K en dépassement à €1.20 (US$1.30)/1K</span>', winner = "none" },
+    { feature = "100K emails/mois", apex = '<span>€89 (Pro : 150K)</span>', comp = '<span class="">€122.82 (US$133.50), Pro : €15.18 (US$16.50)/mois + 90K en dépassement à €1.20 (US$1.30)/1K</span>', winner = "none" },
     { feature = "Membres d’équipe illimités", apex = '<span>Forfait Enterprise</span>', comp = '<span class="">✗</span>', winner = "none" },
     { feature = "Conditions Enterprise personnalisées", apex = '<span>Contrats annuels</span>', comp = '<span class="">✗</span>', winner = "none" }
   ]}
 ]
 
 # Trailing methodology paragraph (rendered via macros::methodology_note).
-# Raw HTML — the inner <p> content with the methodology link. Uses a TOML
+# Raw HTML, the inner <p> content with the methodology link. Uses a TOML
 # multi-line basic string (""" """) because the text contains both a single
 # quote ("provider's") and double-quoted HTML attributes; the leading \ trims
 # the opening newline and literal newlines collapse to spaces per TOML spec.

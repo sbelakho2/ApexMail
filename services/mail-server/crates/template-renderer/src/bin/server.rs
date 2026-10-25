@@ -142,8 +142,8 @@ async fn main() -> anyhow::Result<()> {
         #[cfg(not(unix))]
         let terminate = std::future::pending::<()>();
         tokio::select! {
-            _ = ctrl_c => tracing::info!("received Ctrl+C — shutting down"),
-            _ = terminate => tracing::info!("received SIGTERM — shutting down"),
+            _ = ctrl_c => tracing::info!("received Ctrl+C, shutting down"),
+            _ = terminate => tracing::info!("received SIGTERM, shutting down"),
         }
     };
     axum::serve(listener, app)

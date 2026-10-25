@@ -192,7 +192,7 @@ pub enum ActionOutcome {
     /// Failed permanently. Goes straight to `dead_letter`.
     DeadLetter(String),
     /// The handler's gates require a human before this work may run. The
-    /// action parks in `awaiting_approval` — not complete, not failed, and
+    /// action parks in `awaiting_approval`, not complete, not failed, and
     /// not claimable until `control::review_decision` releases it.
     AwaitApproval,
 }
@@ -221,7 +221,7 @@ fn outcome_state(outcome: &ActionOutcome) -> &'static str {
 /// keeps the rule in one place instead of duplicating the list as a literal.
 const REPLAYABLE_STATES: [&str; 2] = ["failed", "dead_letter"];
 
-/// Queue operations. Stateless — every call takes the pool.
+/// Queue operations. Stateless, every call takes the pool.
 #[derive(Debug, Clone)]
 pub struct ActionQueue {
     db: PgPool,
@@ -382,7 +382,7 @@ impl ActionQueue {
     /// fenced. The claimed state is `executing`: the claim IS the start of
     /// execution, and a lease is valid only while that state holds.
     ///
-    /// Actions whose lease has expired are also reclaimable — that is the
+    /// Actions whose lease has expired are also reclaimable, that is the
     /// crash-recovery path (see [`requeue_expired_leases`]). `attempt` is
     /// incremented at claim time so a repeatedly crashing worker eventually
     /// dead-letters instead of looping.
@@ -404,7 +404,7 @@ impl ActionQueue {
     ///   * a targeted recovery of one stuck action;
     ///   * a test that must not race and be raced by unrelated rows sharing the
     ///     same database (the reason the queue tests previously had to run
-    ///     serialized — a test using the global claim would steal another
+    ///     serialized, a test using the global claim would steal another
     ///     test's action, and be stolen from).
     ///
     /// It is the SAME statement as `claim` with one extra predicate, so the
@@ -419,7 +419,7 @@ impl ActionQueue {
         let rows: Vec<SalesActionRow> = sqlx::query_as::<_, SalesActionRow>(
             // `due_at <= NOW() + 1s`: an immediately-due action (due_at was
             // minted from the APP clock) must not be withheld because the
-            // DATABASE clock runs a few milliseconds behind — the enqueue
+            // DATABASE clock runs a few milliseconds behind, the enqueue
             // path already clamps to "now - 1s" for the opposite skew.
             "WITH claimable AS ( \
                  SELECT id FROM sales_actions \
@@ -593,7 +593,7 @@ impl ActionQueue {
 
     /// Requeue an action for immediate replay (operator-driven, from the CP).
     ///
-    /// OPERATOR PATH — deliberately NOT fenced: no worker lease is held by the
+    /// OPERATOR PATH, deliberately NOT fenced: no worker lease is held by the
     /// caller, so requiring a token would make replay impossible. The action
     /// must be terminal (`failed`/`dead_letter`, see [`REPLAYABLE_STATES`]);
     /// `awaiting_approval` is refused because releasing approval-gated work is
@@ -625,7 +625,7 @@ impl ActionQueue {
     /// Cancel every queued/leased action for an entity. Used when a human
     /// reply must stop a sequence immediately.
     ///
-    /// OPERATOR/SYSTEM PATH — deliberately NOT fenced: this is a stop signal
+    /// OPERATOR/SYSTEM PATH, deliberately NOT fenced: this is a stop signal
     /// that must win over any lease, so it clears the lease (including the
     /// token) instead of presenting one. A worker whose action is cancelled
     /// underneath it then fails its own fenced `finish` and drops the result,
@@ -722,7 +722,7 @@ pub async fn requeue_expired_leases(db: &PgPool) -> Result<u64, SalesError> {
              lease_token = NULL, \
              lease_expires_at = NULL, \
              completed_at = CASE WHEN attempt >= max_attempts THEN NOW() ELSE NULL END, \
-             last_error = COALESCE(last_error, 'lease expired — worker did not complete the action') \
+             last_error = COALESCE(last_error, 'lease expired, worker did not complete the action') \
          WHERE state IN ('leased', 'executing') \
            AND lease_expires_at IS NOT NULL \
            AND lease_expires_at < NOW()",
@@ -783,7 +783,7 @@ fn heartbeat_interval(lease_secs: i64) -> std::time::Duration {
 /// recovered by another worker; the heartbeat fires a oneshot and the
 /// `tokio::select!` below drops the handler future. That drop is the
 /// cooperative stop signal the existing `ActionHandler` interface supports,
-/// and it is the EARLIER of the two lease-lost signals — the later one is
+/// and it is the EARLIER of the two lease-lost signals, the later one is
 /// `finish` returning false, which guarantees no result is written over the
 /// recovering worker. A handler dropped mid-effect is safe because the queue
 /// contract already requires idempotent handlers (`idempotency_key`).
@@ -881,7 +881,7 @@ async fn execute_claimed(
             action_id = %action.id(),
             action_type = %action.action_type(),
             error = %error,
-            "sales action dead-lettered — operator intervention required"
+            "sales action dead-lettered, operator intervention required"
         );
     }
 }
@@ -893,7 +893,7 @@ async fn execute_claimed(
 ///
 /// The semaphore is sized to the worker's concurrency and held by each
 /// in-flight action, so a later tick claims only the slots that are actually
-/// free — the worker never has more than `concurrency` actions in flight, and
+/// free, the worker never has more than `concurrency` actions in flight, and
 /// the stale-lease window of a batch pre-lease is gone. Any number of
 /// processes can run this concurrently; `FOR UPDATE SKIP LOCKED` makes the
 /// claims safe.
@@ -912,7 +912,7 @@ pub async fn tick(
         metrics::counter!("sales_actions_lease_recovered_total").increment(recovered);
     }
 
-    // Audit SM7 F2: the same recovery for the entity the actions drive — a
+    // Audit SM7 F2: the same recovery for the entity the actions drive, a
     // step execution whose `executing` claim lease expired (a transient
     // failure or crash between the claim and the terminal write) is requeued,
     // so the next claim can deliver it instead of dead-ending the enrollment.
@@ -958,7 +958,7 @@ pub async fn tick(
 ///
 /// `concurrency` is the maximum number of actions in flight simultaneously.
 /// Shutdown stops new claims; actions already in flight are not forcibly
-/// awaited — a hard exit is recovered by lease expiry, and handlers are
+/// awaited, a hard exit is recovered by lease expiry, and handlers are
 /// idempotent by contract.
 pub async fn run(
     queue: ActionQueue,
@@ -1003,7 +1003,7 @@ pub async fn run(
                 tracing::debug!(processed, "sales action tick complete");
             }
             Err(error) => {
-                tracing::error!(error = %error, "sales action tick failed — will retry");
+                tracing::error!(error = %error, "sales action tick failed, will retry");
                 metrics::counter!("sales_action_tick_errors_total").increment(1);
             }
         }
@@ -1202,7 +1202,7 @@ mod tests {
         //
         // Every claim here is scoped to the action under test. The production
         // claim is deliberately global (one worker drains every tenant), so an
-        // unscoped claim in a test would take — and be raced by — unrelated rows
+        // unscoped claim in a test would take, and be raced by, unrelated rows
         // sharing this database.
         let claimed = queue_a
             .claim_filtered(50, DEFAULT_LEASE_SECS, Some(&[action.id]))
@@ -1253,7 +1253,7 @@ mod tests {
 
         // …and worker B recovers it. The claim may be skipped once by a
         // concurrent test's deployment-global sweep still holding the row
-        // lock (`FOR UPDATE SKIP LOCKED`), so retry briefly — the property
+        // lock (`FOR UPDATE SKIP LOCKED`), so retry briefly, the property
         // asserted (the survivor recovers the row, attempt incremented) is
         // unchanged.
         let mut recovered = Vec::new();
@@ -1677,7 +1677,7 @@ mod tests {
     }
 
     /// AwaitApproval is a parked state, not a completion: the action keeps no
-    /// lease, has no `completed_at`, cannot be re-claimed, and — critically —
+    /// lease, has no `completed_at`, cannot be re-claimed, and, critically —
     /// operator replay refuses it.
     #[tokio::test]
     async fn finish_await_approval_parks_the_action_and_replay_refuses_it() {
@@ -2036,7 +2036,7 @@ mod tests {
 
     /// A retryable failure returns the action to the queue with a backoff, and
     /// the attempt budget is enforced in SQL: once spent, the retry becomes a
-    /// dead letter with `completed_at` set — never an infinite retry loop.
+    /// dead letter with `completed_at` set, never an infinite retry loop.
     #[tokio::test]
     async fn retry_backs_off_and_dead_letters_when_the_budget_is_spent() {
         let Some(pool) = live_pool("actions_retry_budget").await else {
@@ -2465,7 +2465,7 @@ mod tests {
     }
 
     /// A deployment without a registered handler must dead-letter loudly with
-    /// the action type in the reason — never drop the work silently.
+    /// the action type in the reason, never drop the work silently.
     #[tokio::test]
     async fn unhandled_handler_dead_letters_with_the_action_type_named() {
         let leased = LeasedAction {
@@ -2649,7 +2649,7 @@ mod tests {
     }
 
     /// `run` claims nothing before its first interval and stops promptly when
-    /// shutdown resolves — the worker loop's contract.
+    /// shutdown resolves, the worker loop's contract.
     #[tokio::test]
     async fn run_worker_stops_on_shutdown_without_claiming() {
         let Some(pool) = live_pool("actions_run_shutdown").await else {
@@ -2778,7 +2778,7 @@ mod worker_tests {
         .expect("condition must become true within the poll budget");
     }
 
-    /// Wait until at least `minimum` has really elapsed, in 50ms steps — the
+    /// Wait until at least `minimum` has really elapsed, in 50ms steps, the
     /// pause a handler gate needs before it may be released.
     async fn wait_at_least(minimum: Duration) {
         let started = std::time::Instant::now();
@@ -2997,8 +2997,8 @@ mod worker_tests {
             .unwrap();
     }
 
-    /// The handler parks until the test releases it, so the test — not timing
-    /// — decides the interleaving between the handler, the heartbeat and the
+    /// The handler parks until the test releases it, so the test, not timing
+    ///, decides the interleaving between the handler, the heartbeat and the
     /// lease theft.
     struct ParkedHandler {
         in_flight: tokio::sync::mpsc::Sender<()>,
@@ -3011,7 +3011,7 @@ mod worker_tests {
         async fn handle(&self, _action: &LeasedAction) -> ActionOutcome {
             let _ = self.in_flight.send(()).await;
             // Wait until released. If the lease was lost first, the worker
-            // drops this future at the await point below — the effect counter
+            // drops this future at the await point below, the effect counter
             // then stays at zero, which is the "no external effect" guarantee.
             self.release.notified().await;
             self.effect_calls.fetch_add(1, Ordering::SeqCst);

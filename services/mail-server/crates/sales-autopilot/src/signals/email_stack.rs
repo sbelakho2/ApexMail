@@ -1,9 +1,9 @@
-//! §11 — email-stack signals: ApexMail's own domain expertise as the moat.
+//! §11, email-stack signals: ApexMail's own domain expertise as the moat.
 //!
 //! ApexMail observes DNS and deliverability configuration that a generic CRM
 //! enrichment provider does not. This module turns those raw observations
 //! (SPF includes, DKIM selectors/CNAMEs, DMARC policies, MX hosts, tracking
-//! domains) into **evidence-backed propositions with a confidence** — never
+//! domains) into **evidence-backed propositions with a confidence**, never
 //! facts, never a claim of use from a single weak hint.
 //!
 //! Design rules (audit §11):
@@ -12,13 +12,13 @@
 //!   observations, so the inference rules are exhaustively unit-testable
 //!   without network access. The `*_at` variants take an explicit
 //!   `observed_at`; the short forms stamp `Utc::now()`.
-//! * A single weak hint yields `company_may_use_<vendor>` — never
+//! * A single weak hint yields `company_may_use_<vendor>`, never
 //!   `company_uses_<vendor>`. Two independent hints for the same vendor
 //!   corroborate to `company_likely_uses_<vendor>` (still not "uses").
 //! * Inference confidence is capped at [`MAX_INFERENCE_CONFIDENCE`] (0.95):
 //!   no inference is ever asserted with certainty.
 //! * Malformed / non-ASCII / absurdly long records produce low-confidence
-//!   evidence or nothing at all — never a confident wrong claim, never a
+//!   evidence or nothing at all, never a confident wrong claim, never a
 //!   panic.
 //! * A record that was queried and is absent is *observed absence*
 //!   ([`CONFIDENCE_OBSERVED_ABSENCE`]) and is a different class of evidence
@@ -350,7 +350,7 @@ const TRACKING_HOST_PREFIXES: &[&str] = &[
 // ---------------------------------------------------------------------------
 
 /// Normalise a host/token: trim, drop a trailing dot, lowercase. Returns
-/// `None` for empty, non-ASCII or absurdly long input — hostile bytes are
+/// `None` for empty, non-ASCII or absurdly long input, hostile bytes are
 /// skipped, never guessed at.
 fn normalize_host(raw: &str) -> Option<String> {
     let trimmed = raw.trim().trim_end_matches('.');
@@ -1107,7 +1107,7 @@ pub fn analyse_deliverability_at(
 }
 
 // ---------------------------------------------------------------------------
-// Raw observation collection (wave G) — the production caller path
+// Raw observation collection (wave G), the production caller path
 // ---------------------------------------------------------------------------
 
 /// The raw observation set [`analyse_email_stack`] consumes, collected for
@@ -1217,7 +1217,7 @@ impl EmailStackObserver for DnsEmailStackObserver {
 }
 
 // ---------------------------------------------------------------------------
-// Authentication quality — the scalar the scorer consumes
+// Authentication quality, the scalar the scorer consumes
 // ---------------------------------------------------------------------------
 
 /// Reconstruct the 0.0..=1.0 authentication quality from the EVIDENCE rows
@@ -1228,7 +1228,7 @@ impl EmailStackObserver for DnsEmailStackObserver {
 /// in the sequence worker: the composite analyser produces the propositions,
 /// they are persisted as `sales_evidence` rows, and the scorer re-derives the
 /// scalar from them (tenant-scoped). `None` means no authentication
-/// observation exists at all — the caller keeps its fail-closed zero rather
+/// observation exists at all, the caller keeps its fail-closed zero rather
 /// than treating "unobserved" as "authenticated".
 ///
 /// Only positive observation propositions count; deficiency propositions are
@@ -1309,7 +1309,7 @@ pub fn analyse_email_stack(
 ///
 /// In addition to the per-analyser rows, a vendor detected by two or more
 /// independent analysers is promoted from `company_may_use_<vendor>` to the
-/// corroborated `company_likely_uses_<vendor>` (0.55) — still never "uses".
+/// corroborated `company_likely_uses_<vendor>` (0.55), still never "uses".
 #[allow(clippy::too_many_arguments)]
 pub fn analyse_email_stack_at(
     spf_records: &[String],

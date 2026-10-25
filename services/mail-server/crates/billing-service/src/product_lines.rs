@@ -9,7 +9,7 @@
 //! `ent_sub_accounts` rows were an enterprise feature nothing billed;
 //! `mail_accounts` were provisioning-only. This module turns both into real
 //! monthly invoices through the SAME machinery the subscription/PAYG sweeps
-//! use — `billing_periods` rows (one per tenant/line/period), an invoice
+//! use, `billing_periods` rows (one per tenant/line/period), an invoice
 //! created with a period-identity marker, per-period state transitions and
 //! the shared collection ladder ([`crate::overage::collect_usage_invoice`]:
 //! wallet first, then the recurring Mollie charge, then dunning).
@@ -25,7 +25,7 @@
 //!
 //! # The model (and its truth source)
 //!
-//! * **Who is billed.** `product_line_contracts` (migration 256) — one row
+//! * **Who is billed.** `product_line_contracts` (migration 256), one row
 //!   per (tenant, product line), written by ops/sales when the line is
 //!   contracted. Only a row with `status = 'active'` (or a terminated row
 //!   whose recorded `ended_at` is still in the future) makes a tenant
@@ -36,12 +36,12 @@
 //!   PAYG half of the overage sweep invoices (contract lines are billed
 //!   monthly on 12-month terms; there is no subscription cycle to read).
 //!   No proration exists: a month bills only when the contract covered it
-//!   IN FULL ([`contract_covers_period`]) — a partially covered first or
+//!   IN FULL ([`contract_covers_period`]), a partially covered first or
 //!   final month is not billed, and that is stated, not prorated.
 //! * **Currency.** The tenant's billing currency (`settings.billingCurrency`),
 //!   normalized exactly like the api-server checkout resolver; the catalog
 //!   prices in EUR and USD, and the USD list applies when (and only when)
-//!   the tenant bills in USD — the same rule the self-serve checkout uses
+//!   the tenant bills in USD, the same rule the self-serve checkout uses
 //!   (`routes/billing.rs` `resolve_tenant_billing_currency`). The resolved
 //!   currency (and the whole price set) is snapshotted onto the period row
 //!   at claim time (audit F32 discipline): a later settings change can never
@@ -49,32 +49,32 @@
 //! * **Freeze.** Per period, per line: the price set, the invoice identity
 //!   and the invoice itself are written under an advisory lock and one
 //!   transaction per phase, so a replay either finds the terminal state or
-//!   adopts the existing invoice — never a second charge.
+//!   adopts the existing invoice, never a second charge.
 //!
 //! # Platform line
 //!
 //! * base 990 EUR / 1 090 USD per month for tenants on the `platform` line
 //!   (`platform-catalog` `PRODUCT_LINES` row, pinned by test);
 //! * usage tier: `emails_sent` in the period minus the 1 000 000 included
-//!   at 0.30 EUR / 0.35 USD per 1 000 — computed with the SAME integer
+//!   at 0.30 EUR / 0.35 USD per 1 000, computed with the SAME integer
 //!   millicents-per-email arithmetic as the plan overage ladder
 //!   ([`crate::plans::calculate_overage_cost_with_rate`], ceiling to the
 //!   cent, i128 intermediate, no floats). The catalog's per-1K cent figure
 //!   and the per-email millicent rate are numerically the same number by
 //!   construction (0.30 EUR/1 000 emails = 0.03 cents = 30 millicents per
-//!   email) — pinned by test so a future edit of either constant fails;
+//!   email), pinned by test so a future edit of either constant fails;
 //! * active subaccounts above the included 100 bill 1 EUR / 1 USD each.
-//!   **"Active" is `ent_sub_accounts.status = 'active'`** — the table's own
+//!   **"Active" is `ent_sub_accounts.status = 'active'`**, the table's own
 //!   status vocabulary (`CHECK (status IN ('active','suspended'))`,
 //!   migration 092) and the exact filter the enterprise list/read paths
 //!   apply. Suspended children do not bill. The count is read as
-//!   `parent_id = tenant` — the same parent column the quota check locks on.
+//!   `parent_id = tenant`, the same parent column the quota check locks on.
 //!
 //! # Mailboxes line
 //!
 //! * Seats bill from the mailboxes actually PROVISIONED for the tenant:
 //!   `mail_accounts` rows with `tenant_id = <tenant>` and `is_active`
-//!   (`mail_mailboxes` are FOLDERS — INBOX, Sent, ... — inside an account,
+//!   (`mail_mailboxes` are FOLDERS, INBOX, Sent, ..., inside an account,
 //!   not mailboxes; the account row is the seat). The entitlement-gated
 //!   provisioning path (`api-server` `routes/admin/mailboxes.rs`) is the
 //!   purchase act, so no separate contracted-seat count exists.
@@ -169,7 +169,7 @@ pub fn flat_line_display_name(product_line: &str) -> Option<&'static str> {
     }
 }
 
-/// Default currency when the tenant has no valid billing currency — the
+/// Default currency when the tenant has no valid billing currency, the
 /// same default the api-server resolver applies.
 pub const DEFAULT_PRODUCT_LINE_CURRENCY: &str = "EUR";
 
@@ -183,7 +183,7 @@ const SWEEP_PAGE: i64 = 100;
 ///
 /// The status filter is EXPLICITLY parenthesized: SQL binds `AND` tighter
 /// than `OR`, so the unparenthesized form applied the cursor predicate to
-/// the terminated branch only — every page re-selected all `active` tenants
+/// the terminated branch only, every page re-selected all `active` tenants
 /// and the paging loop could never terminate once more than one page held
 /// active contracts. Pinned by unit test.
 const SWEEP_TENANTS_SQL: &str = r#"
@@ -241,7 +241,7 @@ pub fn normalize_billing_currency(raw: Option<&str>) -> String {
 }
 
 /// The catalog price list a billing currency maps to: the USD list when the
-/// tenant bills in USD, the EUR list otherwise — the checkout's rule (the
+/// tenant bills in USD, the EUR list otherwise, the checkout's rule (the
 /// catalog carries exactly these two lists; a GBP-billing tenant is quoted
 /// the EUR list, exactly as self-serve checkout charges them).
 pub fn catalog_price_currency(billing_currency: &str) -> &'static str {
@@ -253,7 +253,7 @@ pub fn catalog_price_currency(billing_currency: &str) -> &'static str {
 }
 
 // ---------------------------------------------------------------------------
-// Platform line — pricing and charge computation (pure, integer cents)
+// Platform line, pricing and charge computation (pure, integer cents)
 // ---------------------------------------------------------------------------
 
 /// The Platform line's frozen price set for one currency (`platform-catalog`
@@ -266,7 +266,7 @@ pub struct PlatformPricing {
     /// Emails included per month before the usage tier applies.
     pub included_emails: i64,
     /// Usage rate in `billing_periods.overage_rate_millicents` units
-    /// (millicents per email — the per-1K cent figure, see the module doc).
+    /// (millicents per email, the per-1K cent figure, see the module doc).
     pub overage_rate_millicents: i64,
     /// Active subaccounts included before the per-subaccount fee.
     pub included_subaccounts: i64,
@@ -349,7 +349,7 @@ impl PlatformCharge {
 /// tier reuses the plan overage ladder's exact arithmetic
 /// ([`crate::plans::calculate_overage_cost_with_rate`]: ceiling to the
 /// cent, i128 intermediate). Saturating adds keep a pathological reading
-/// from wrapping — `i64::MAX` cents is ~9.2 × 10^16 EUR.
+/// from wrapping, `i64::MAX` cents is ~9.2 × 10^16 EUR.
 pub fn platform_charge(
     emails_sent: i64,
     active_subaccounts: i64,
@@ -379,7 +379,7 @@ pub fn platform_charge(
 }
 
 // ---------------------------------------------------------------------------
-// Mailboxes line — pricing and charge computation (pure, integer cents)
+// Mailboxes line, pricing and charge computation (pure, integer cents)
 // ---------------------------------------------------------------------------
 
 /// The Mailboxes line's frozen price set for one currency.
@@ -454,7 +454,7 @@ impl MailboxCharge {
 
 /// Compute one Mailboxes period charge. The 10-seat minimum floors the
 /// seat line; archive bills per flagged PROVISIONED seat (a flagged seat
-/// beyond the floor is impossible — the floor is a minimum, not a pool).
+/// beyond the floor is impossible, the floor is a minimum, not a pool).
 pub fn mailbox_charge(
     provisioned_seats: i64,
     archive_seats: i64,
@@ -477,7 +477,7 @@ pub fn mailbox_charge(
 }
 
 // ---------------------------------------------------------------------------
-// Flat lines — pricing (pure, integer cents)
+// Flat lines, pricing (pure, integer cents)
 // ---------------------------------------------------------------------------
 
 /// A flat monthly product line's frozen price set for one currency. The
@@ -540,12 +540,12 @@ pub fn flat_pricing(product_line: &str, price_currency: &str) -> Option<FlatPric
 }
 
 /// One flat line for one period: exactly one invoice line at the monthly
-/// catalog amount (quantity 1 — the price is per month, not per unit).
+/// catalog amount (quantity 1, the price is per month, not per unit).
 pub fn flat_charge_lines(pricing: &FlatPricing, period_label: &str) -> Vec<ChargeLine> {
     let label = flat_line_display_name(pricing.product_line).unwrap_or(pricing.product_line);
     vec![ChargeLine {
         description: format!(
-            "{label} ({period_label}) — {} per month",
+            "{label} ({period_label}), {} per month",
             format_cents(pricing.monthly_cents, pricing.currency)
         ),
         quantity: 1,
@@ -568,7 +568,7 @@ pub struct ChargeLine {
 }
 
 impl ChargeLine {
-    /// Line amount in cents (`quantity × unit_price`), checked — the same
+    /// Line amount in cents (`quantity × unit_price`), checked, the same
     /// multiplication `create_invoice_in_tx` performs.
     pub fn amount_cents(&self) -> i64 {
         self.quantity.saturating_mul(self.unit_price)
@@ -586,7 +586,7 @@ fn to_new_line_items(lines: &[ChargeLine]) -> Vec<NewLineItem> {
         .collect()
 }
 
-/// `99000` EUR → `"990.00 EUR"` — integer math, ISO code (never a symbol:
+/// `99000` EUR → `"990.00 EUR"`, integer math, ISO code (never a symbol:
 /// a legal document quoting "€… USD" misquotes the money, audit SM7 F9).
 fn format_cents(cents: i64, currency: &str) -> String {
     let sign = if cents < 0 { "-" } else { "" };
@@ -607,7 +607,7 @@ pub fn platform_charge_lines(charge: &PlatformCharge, period_label: &str) -> Vec
     let currency = charge.pricing.currency;
     let mut lines = vec![ChargeLine {
         description: format!(
-            "Platform base ({period_label}) — {}/month, {} emails included",
+            "Platform base ({period_label}), {}/month, {} emails included",
             format_cents(charge.pricing.base_cents, currency),
             charge.pricing.included_emails
         ),
@@ -617,7 +617,7 @@ pub fn platform_charge_lines(charge: &PlatformCharge, period_label: &str) -> Vec
     if charge.overage_cents > 0 {
         lines.push(ChargeLine {
             description: format!(
-                "Platform email usage ({period_label}) — {} emails beyond the {} included at {} per 1,000",
+                "Platform email usage ({period_label}), {} emails beyond the {} included at {} per 1,000",
                 charge.overage_emails,
                 charge.pricing.included_emails,
                 format_cents(charge.pricing.overage_rate_millicents, currency),
@@ -629,7 +629,7 @@ pub fn platform_charge_lines(charge: &PlatformCharge, period_label: &str) -> Vec
     if charge.subaccount_cents > 0 {
         lines.push(ChargeLine {
             description: format!(
-                "Platform active subaccounts ({period_label}) — {} above the {} included at {} each",
+                "Platform active subaccounts ({period_label}), {} above the {} included at {} each",
                 charge.billable_subaccounts,
                 charge.pricing.included_subaccounts,
                 format_cents(charge.pricing.subaccount_cents, currency)
@@ -647,7 +647,7 @@ pub fn mailbox_charge_lines(charge: &MailboxCharge, period_label: &str) -> Vec<C
     let currency = charge.pricing.currency;
     let mut lines = vec![ChargeLine {
         description: format!(
-            "Mailboxes ({period_label}) — {} billable seats at {} per seat per month ({} minimum)",
+            "Mailboxes ({period_label}), {} billable seats at {} per seat per month ({} minimum)",
             charge.billable_seats,
             format_cents(charge.pricing.seat_cents, currency),
             charge.pricing.minimum_seats
@@ -658,7 +658,7 @@ pub fn mailbox_charge_lines(charge: &MailboxCharge, period_label: &str) -> Vec<C
     if charge.archive_cents > 0 {
         lines.push(ChargeLine {
             description: format!(
-                "Mailbox archive + journaling ({period_label}) — {} seats at {} per seat per month",
+                "Mailbox archive + journaling ({period_label}), {} seats at {} per seat per month",
                 charge.archive_seats,
                 format_cents(charge.pricing.archive_seat_cents, currency)
             ),
@@ -676,7 +676,7 @@ pub fn mailbox_charge_lines(charge: &MailboxCharge, period_label: &str) -> Vec<C
 /// Whether a contract covered a calendar month IN FULL. No proration:
 /// `active_from` on/after the period start and no recorded end before the
 /// period end. A partial first/last month is deliberately unbilled (the
-/// safe direction — never a charge for days the tenant did not hold the
+/// safe direction, never a charge for days the tenant did not hold the
 /// line).
 pub fn contract_covers_period(
     active_from: DateTime<Utc>,
@@ -705,7 +705,7 @@ pub struct ProductLineSweepResult {
     /// Months whose invoice identity was ALREADY taken by an existing
     /// invoice while this run had an unbilled line left (a backdated
     /// contract): the line is surfaced as `needs_review` for manual
-    /// reconciliation — never silently linked, never re-collected.
+    /// reconciliation, never silently linked, never re-collected.
     pub months_already_invoiced: u64,
     /// Period rows already in a terminal state (nothing to do).
     pub periods_already_terminal: u64,
@@ -714,7 +714,7 @@ pub struct ProductLineSweepResult {
     pub skipped_no_address: u64,
     /// Period rows surfaced as `needs_review` for a broken snapshot.
     pub periods_needs_review: u64,
-    /// Tenant-months whose invoice failed — isolated, retried next sweep.
+    /// Tenant-months whose invoice failed, isolated, retried next sweep.
     pub failed_months: u64,
     /// Invoices settled from wallet balance by this run.
     pub wallet_paid: u64,
@@ -772,7 +772,7 @@ pub async fn sweep_product_line_months(state: &AppState) -> Result<ProductLineSw
             .map_err(|e| format!("product-line sweep: tenant query failed: {e}"))?;
 
         let page_len = tenants.len();
-        // P3 fix 3 — the page's contracts and billing currencies load in ONE
+        // P3 fix 3, the page's contracts and billing currencies load in ONE
         // query each. Before this, `load_contracts` ran once per tenant and
         // `resolve_tenant_billing_currency` once per tenant-MONTH (up to 2),
         // so a 100-tenant page cost up to 300 round trips before any billing
@@ -809,7 +809,7 @@ pub async fn sweep_product_line_months(state: &AppState) -> Result<ProductLineSw
                         tenant_id = %tenant_id,
                         month = %month_start.format("%Y-%m"),
                         error = %error,
-                        "product-line sweep: tenant-month failed — isolated; retried next sweep"
+                        "product-line sweep: tenant-month failed, isolated; retried next sweep"
                     );
                 }
             }
@@ -902,7 +902,7 @@ fn billable_lines_for_month(
                 warn!(
                     tenant_id = %row.tenant_id,
                     product_line = %row.product_line,
-                    "product-line sweep: unknown product line — skipped, never billed by guesswork"
+                    "product-line sweep: unknown product line, skipped, never billed by guesswork"
                 );
                 return false;
             }
@@ -911,7 +911,7 @@ fn billable_lines_for_month(
         .collect()
 }
 
-/// Process one tenant-month: claim the period rows (committed first — the
+/// Process one tenant-month: claim the period rows (committed first, the
 /// periods are the sweep's durable work queue), then invoice + mark in one
 /// transaction and collect after the commit.
 async fn process_tenant_month(
@@ -971,7 +971,7 @@ async fn process_tenant_month(
             crate::overage::mark_period_needs_review(
                 &mut tx,
                 period.id,
-                "no billing address on file — contract-line month retained for reconciliation",
+                "no billing address on file, contract-line month retained for reconciliation",
             )
             .await?;
         }
@@ -981,7 +981,7 @@ async fn process_tenant_month(
         warn!(
             tenant_id = %tenant_id,
             month = %period_start.format("%Y-%m"),
-            "product-line sweep: contract month billable but no billing address — committed as needs_review"
+            "product-line sweep: contract month billable but no billing address, committed as needs_review"
         );
         return Ok(());
     }
@@ -1021,7 +1021,7 @@ async fn process_tenant_month(
                 &mut tx,
                 period.id,
                 &format!(
-                    "currency mismatch across lines ({} vs {}) — refusing a mixed-currency invoice",
+                    "currency mismatch across lines ({} vs {}), refusing a mixed-currency invoice",
                     period_currency, mismatched.currency
                 ),
             )
@@ -1035,7 +1035,7 @@ async fn process_tenant_month(
             month = %period_start.format("%Y-%m"),
             %period_currency,
             other = %mismatched.currency,
-            "product-line sweep: period currencies disagree — month surfaced for review"
+            "product-line sweep: period currencies disagree, month surfaced for review"
         );
         return Ok(());
     }
@@ -1055,7 +1055,7 @@ async fn process_tenant_month(
                 line_items.extend(mailbox_charge_lines(charge, &period_label));
                 metered_watermarks.push((period.id, None));
                 description = format!(
-                    "Mailboxes contract line for {period_label} — {} billable seats",
+                    "Mailboxes contract line for {period_label}, {} billable seats",
                     charge.billable_seats
                 );
             }
@@ -1101,7 +1101,7 @@ async fn process_tenant_month(
 
     // SAVEPOINT around the insert (audit F29): a period-identity unique
     // violation rolls back to the savepoint only, so the adoption SELECT
-    // runs in the still-healthy claim transaction — no 25P02, and never a
+    // runs in the still-healthy claim transaction, no 25P02, and never a
     // second collection.
     sqlx::query("SAVEPOINT invoice_creation")
         .execute(&mut *tx)
@@ -1138,7 +1138,7 @@ async fn process_tenant_month(
 
             let Some((existing_id, existing_total, existing_currency)) = existing else {
                 // The constraint fired but the invoice is not visible inside
-                // this transaction — retry later rather than adopt something
+                // this transaction, retry later rather than adopt something
                 // unverified.
                 return Err(format!(
                     "product-line sweep: period-identity constraint fired but no existing \
@@ -1157,14 +1157,14 @@ async fn process_tenant_month(
                     existing_currency = %existing_currency,
                     snapshot_total = subtotal,
                     snapshot_currency = %period_currency,
-                    "product-line sweep: existing month invoice disagrees with the period snapshot — surfaced for review"
+                    "product-line sweep: existing month invoice disagrees with the period snapshot, surfaced for review"
                 );
             }
 
             // The month already has an invoice. Under the per-(tenant,
             // month) advisory lock and the atomic claim+invoice transaction
             // this can only mean the claimed line was activated (or its
-            // period row written) AFTER that invoice was issued — for
+            // period row written) AFTER that invoice was issued, for
             // example a backdated contract. Linking the line to that
             // invoice would silently swallow its charge and minting a
             // second invoice for the month is impossible (the identity is
@@ -1177,7 +1177,7 @@ async fn process_tenant_month(
                     period.id,
                     &format!(
                         "month already invoiced (invoice {existing_id}); this line was not part \
-                         of it — reconcile manually"
+                         of it, reconcile manually"
                     ),
                 )
                 .await?;
@@ -1198,7 +1198,7 @@ async fn process_tenant_month(
                 tenant_id = %tenant_id,
                 invoice_id = %existing_id,
                 month = %period_start.format("%Y-%m"),
-                "product-line sweep: month already invoiced — the claimed line was surfaced for \
+                "product-line sweep: month already invoiced, the claimed line was surfaced for \
                  reconciliation, no second collection"
             );
             return Ok(());
@@ -1239,7 +1239,7 @@ async fn process_tenant_month(
         "product-line invoice created for completed calendar month"
     );
 
-    // Collection runs AFTER the claim committed — external calls stay out
+    // Collection runs AFTER the claim committed, external calls stay out
     // of the claim transaction (audit F33). Failures leave the outbox
     // retryable; the invoice itself is durably claimed above.
     if let Err(error) = crate::overage::collect_usage_invoice(
@@ -1257,7 +1257,7 @@ async fn process_tenant_month(
             tenant_id = %tenant_id,
             invoice_id = %invoice.id,
             error = %error,
-            "product-line sweep: collection failed — outbox retains retryable state"
+            "product-line sweep: collection failed, outbox retains retryable state"
         );
     }
 
@@ -1347,7 +1347,7 @@ async fn ensure_period_records(
 
 /// Claim one UNBILLED period row inside the caller's transaction. Returns
 /// `None` when the row already exists in a terminal state (invoiced,
-/// skipped, needs_review, collected) — a replay never re-bills.
+/// skipped, needs_review, collected), a replay never re-bills.
 async fn claim_period(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     tenant_id: &str,
@@ -1409,9 +1409,9 @@ enum PeriodCharge {
 
 #[derive(Debug)]
 enum ChargeFailure {
-    /// The period cannot be priced from its snapshot — surface it for review.
+    /// The period cannot be priced from its snapshot, surface it for review.
     Unpriced { period_id: Uuid, reason: String },
-    /// Infrastructure failure — propagate.
+    /// Infrastructure failure, propagate.
     Fatal(String),
 }
 
@@ -1485,7 +1485,7 @@ async fn build_charges(
 }
 
 /// Rebuild [`PlatformPricing`] from a period's snapshot JSON. `None` when
-/// the snapshot is missing/corrupt — the caller surfaces the period for
+/// the snapshot is missing/corrupt, the caller surfaces the period for
 /// review instead of pricing from today's catalog (audit F32).
 fn snapshot_platform_pricing(snapshot: &serde_json::Value) -> Option<PlatformPricing> {
     let currency: &'static str = match snapshot.get("currency").and_then(|v| v.as_str())? {
@@ -1524,7 +1524,7 @@ fn snapshot_mailbox_pricing(snapshot: &serde_json::Value) -> Option<MailboxPrici
 }
 
 /// Rebuild [`FlatPricing`] from a period's snapshot JSON. `None` when the
-/// snapshot is missing/corrupt — the caller surfaces the period for review
+/// snapshot is missing/corrupt, the caller surfaces the period for review
 /// instead of pricing from today's catalog (audit F32).
 fn snapshot_flat_pricing(snapshot: &serde_json::Value) -> Option<FlatPricing> {
     let currency: &'static str = match snapshot.get("currency").and_then(|v| v.as_str())? {
@@ -1593,7 +1593,7 @@ async fn active_subaccounts(
 }
 
 /// (active mailbox accounts, active accounts carrying the archive flag) for
-/// one tenant. The account row is the seat — `mail_mailboxes` are folders.
+/// one tenant. The account row is the seat, `mail_mailboxes` are folders.
 async fn mailbox_seats(
     executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>,
     tenant_id: &str,
@@ -1749,7 +1749,7 @@ pub struct ProductLineContractRecord {
     pub updated_at: DateTime<Utc>,
 }
 
-/// What a purchase request did — 201 Created, 200 Renewed, or 200 Replayed
+/// What a purchase request did, 201 Created, 200 Renewed, or 200 Replayed
 /// (the same idempotency key already produced this contract).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProductLinePurchaseOutcome {
@@ -1872,7 +1872,7 @@ async fn set_eu_only_addon_flag(
 ///   returns the recorded contract unchanged (`Replayed`), so a retried CP
 ///   request can never mint a second contract or shift `active_from`.
 /// * A key already used for a DIFFERENT line is refused
-///   (`IdempotencyConflict`) — the key identifies one purchase.
+///   (`IdempotencyConflict`), the key identifies one purchase.
 /// * A purchase on an ACTIVE line renews the metadata but preserves the
 ///   original `active_from` (no re-proration); a terminated line starts a
 ///   fresh contract period at NOW.
@@ -2078,7 +2078,7 @@ pub async fn list_product_line_contracts(
 }
 
 // ---------------------------------------------------------------------------
-// Unit tests — pure pricing, boundaries, currency, line shapes
+// Unit tests, pure pricing, boundaries, currency, line shapes
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
@@ -2308,7 +2308,7 @@ mod tests {
         );
     }
 
-    /// Contract coverage is full-month only — no proration.
+    /// Contract coverage is full-month only, no proration.
     #[test]
     fn contract_covers_a_period_only_in_full() {
         let start = utc(2026, 5, 1);
@@ -2369,7 +2369,7 @@ mod tests {
         assert_eq!(subtotal, charge.total_cents());
         assert_eq!(subtotal, 99_000 + 15_000 + 500);
 
-        // Zero usage: base only — the brief's "zero-usage month still bills
+        // Zero usage: base only, the brief's "zero-usage month still bills
         // the base".
         let idle = platform_charge_lines(&platform_charge(0, 0, &eur()), "2026-05");
         assert_eq!(idle.len(), 1);
@@ -2397,7 +2397,7 @@ mod tests {
         assert_eq!(no_archive.len(), 1);
     }
 
-    /// The frozen price set round-trips through the snapshot JSON — the
+    /// The frozen price set round-trips through the snapshot JSON, the
     /// period's stored pricing rebuilds exactly.
     #[test]
     fn pricing_snapshots_round_trip() {
@@ -2424,7 +2424,7 @@ mod tests {
         );
     }
 
-    /// Integer display only — no floats anywhere in the money path.
+    /// Integer display only, no floats anywhere in the money path.
     #[test]
     fn cents_render_with_integer_math() {
         assert_eq!(format_cents(99_000, "EUR"), "990.00 EUR");
@@ -2462,7 +2462,7 @@ mod tests {
 }
 
 // ---------------------------------------------------------------------------
-// Adversarial coverage tests (DB backed) — the monthly sweep end to end.
+// Adversarial coverage tests (DB backed), the monthly sweep end to end.
 //
 // Every test provisions its own canonical database clone (private, dropped
 // on finish); `TEST_DATABASE_URL` unset → soft-skip (the workspace
@@ -2497,7 +2497,7 @@ mod coverage_adversarial {
         };
     }
 
-    /// The FIRST completed calendar month the sweep looks at — tests seed
+    /// The FIRST completed calendar month the sweep looks at, tests seed
     /// data for exactly the month the sweep will consider.
     fn target_month() -> (DateTime<Utc>, DateTime<Utc>) {
         crate::overage::recent_completed_calendar_months(Utc::now())[0]
@@ -2920,7 +2920,7 @@ mod coverage_adversarial {
             assert_eq!(state, "invoiced");
             assert_eq!(
                 metered, None,
-                "the seat line carries no email watermark — never a fake zero"
+                "the seat line carries no email watermark, never a fake zero"
             );
         }
     );
@@ -2973,7 +2973,7 @@ mod coverage_adversarial {
                 None,
             )
             .await;
-            // A PAYG month invoice for the SAME (tenant, month) — the identity
+            // A PAYG month invoice for the SAME (tenant, month), the identity
             // the overage sweep uses.
             sqlx::query(
                 "INSERT INTO invoices (id, tenant_id, amount, currency, status, invoice_number,
@@ -3167,7 +3167,7 @@ mod coverage_adversarial {
         );
     });
 
-    // P3 fix 3 — contracts and billing currencies load ONCE for the whole
+    // P3 fix 3, contracts and billing currencies load ONCE for the whole
     // tenant page, not once per tenant (contracts) / per tenant-month
     // (currency). The counters would read 3 (contracts) and 3–6 (currency)
     // on the pre-fix per-tenant loops; they must read exactly 1 and 1 here,
@@ -3336,7 +3336,7 @@ mod coverage_adversarial {
     );
 
     // ------------------------------------------------------------------
-    // F3 — Compliance / Inbox Placement / EU-only Routing lines
+    // F3, Compliance / Inbox Placement / EU-only Routing lines
     // ------------------------------------------------------------------
 
     async fn purchase(

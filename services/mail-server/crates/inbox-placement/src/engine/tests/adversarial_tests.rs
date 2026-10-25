@@ -1,9 +1,9 @@
 //! Adversarial canonical-schema tests for the placement engine
 //! (`src/engine.rs`).
 //!
-//! Drives the REAL lifecycle — create → claim → SMTP send (fake relay) →
+//! Drives the REAL lifecycle, create → claim → SMTP send (fake relay) →
 //! IMAP poll (scripted connector, no network) → classify → persist →
-//! finalize → health → webhook — against a freshly provisioned canonical
+//! finalize → health → webhook, against a freshly provisioned canonical
 //! database, and proves:
 //! - the draft... (n/a here) the CHECK-AND-SET discipline: a test reaped
 //!   mid-flight is never resurrected, and finalize never overwrites a
@@ -410,7 +410,7 @@ async fn execute_test_full_lifecycle_classifies_and_persists() {
     );
     assert_eq!(gmail.spf_pass_rate, 0.5);
     // The recommendation ladder: ≥95 excellent, ≥85 good, ≥70 moderate,
-    // otherwise poor — 50% inbox is "Poor" and names the mechanisms to fix.
+    // otherwise poor, 50% inbox is "Poor" and names the mechanisms to fix.
     assert!(
         gmail.recommendation.contains("Poor inbox placement (50%)"),
         "{}",
@@ -504,7 +504,7 @@ async fn execute_test_send_failure_records_absent_and_error_health() {
     seed_verified_domain(&db, &tenant, "send.example", true).await;
     let acct = seed_account(&db, "gmail", &format!("{tenant}.a@seed.example"), "pw").await;
 
-    // Port 1 on localhost: connection refused — the relay is down.
+    // Port 1 on localhost: connection refused, the relay is down.
     let scripts: std::sync::Arc<Mutex<HashMap<String, std::sync::Arc<Script>>>> =
         Default::default();
     scripts.lock().unwrap().insert(

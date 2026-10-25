@@ -6,9 +6,9 @@
 //! # Security
 //!
 //! Validation is performed at two levels:
-//! 1. **Regex level** — catches forbidden module imports and dangerous patterns
+//! 1. **Regex level**, catches forbidden module imports and dangerous patterns
 //!    (e.g. `eval()`, `Function()`, `process`).
-//! 2. **AST level** — parses HTML into nodes and validates every element tag and
+//! 2. **AST level**, parses HTML into nodes and validates every element tag and
 //!    attribute against the allowlists defined in [`types`] (O-7.1, O-7.2).
 //!    Event-handler attributes (on*) are always rejected.
 
@@ -44,14 +44,14 @@ static URL_ATTR_RE: LazyLock<Regex> = LazyLock::new(|| {
         .expect("URL_ATTR_RE: invalid regex pattern - this is a bug")
 });
 
-/// `<meta http-equiv="refresh" …>` — stripped from rendered output because a
+/// `<meta http-equiv="refresh" …>`, stripped from rendered output because a
 /// prop-injected refresh URL is a redirect/open-redirect vector.
 static META_REFRESH_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#"(?is)<meta\b[^>]*http-equiv\s*=\s*["']?refresh["']?[^>]*>"#)
         .expect("META_REFRESH_RE: invalid regex pattern - this is a bug")
 });
 
-/// `<link rel="stylesheet" href="…">` — remote stylesheet hosts must be in
+/// `<link rel="stylesheet" href="…">`, remote stylesheet hosts must be in
 /// [`ALLOWED_STYLESHEET_HOSTS`]; everything else is stripped.
 static STYLESHEET_LINK_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#"(?is)<link\b[^>]*rel\s*=\s*["']?stylesheet["']?[^>]*>"#)
@@ -131,7 +131,7 @@ pub fn validate_source(source: &str, max_length: usize) -> ValidationResult {
         }
     }
 
-    // Check for dangerous patterns — hard-fail here too (same list as
+    // Check for dangerous patterns, hard-fail here too (same list as
     // `transpile()`), so validation and transpilation never disagree.
     for pat in DANGEROUS_PATTERNS.iter() {
         if let Some(m) = pat.find(source) {
@@ -162,7 +162,7 @@ pub fn validate_source(source: &str, max_length: usize) -> ValidationResult {
         });
     }
 
-    // O-7.1 / O-7.2: AST-level validation — parse HTML into nodes and check
+    // O-7.1 / O-7.2: AST-level validation, parse HTML into nodes and check
     // every element tag and attribute against the allowlists. Parse failures
     // (including the nesting-depth guard) are validation errors, not silence.
     match parse_html_to_nodes(source) {
@@ -217,7 +217,7 @@ pub fn transpile(
     // Parse into nodes
     let nodes = parse_html_to_nodes(&stripped)?;
 
-    // O-7.1 / O-7.2: AST-level validation — check every element and attribute
+    // O-7.1 / O-7.2: AST-level validation, check every element and attribute
     // against the allowlists. This catches disallowed tags, blocked event
     // handlers, and attributes not permitted on specific elements.
     let ast_errors = validate_ast(&nodes, source);
@@ -244,11 +244,11 @@ pub fn transpile(
 ///
 /// Security:
 /// - String values are HTML-escaped (`&`, `<`, `>`, `"`, `'`) before
-///   substitution so props can never inject markup — INCLUDING props whose
+///   substitution so props can never inject markup, INCLUDING props whose
 ///   leaf key ends with `_html`. Raw substitution of `*_html` values now
 ///   requires the renderer's explicit trust:pass the allowlist of trusted
 ///   prop paths via [`resolve_placeholders_with_trust`] (backed by
-///   `SandboxConfig::trusted_html_props`, empty by default — F8).
+///   `SandboxConfig::trusted_html_props`, empty by default, F8).
 /// - After substitution, every `href`/`src` attribute value is checked in
 ///   ALL quoting styles: only `http:`/`https:` schemes (and scheme-less
 ///   relative URLs) are allowed; anything else is neutralized to `#`.
@@ -368,7 +368,7 @@ pub fn resolve_placeholders_plain_reported(
 /// hardening: CR/LF are mapped to spaces and NUL is removed from the final
 /// value (whether it came from a merge field or the subject template itself).
 /// A subject containing `"Hi\r\nBcc: x"` must never smuggle a second header
-/// into the outgoing mail. Bodies are not routed through here — they may
+/// into the outgoing mail. Bodies are not routed through here, they may
 /// legitimately contain newlines.
 pub fn resolve_placeholders_subject_reported(
     text: &str,
@@ -738,7 +738,7 @@ fn is_element_named(node: NodeRef<'_, Node>, expected: &str) -> bool {
 /// [`TemplateNode`].
 ///
 /// `depth` is the element nesting level and is hard-bounded by
-/// [`MAX_HTML_NESTING_DEPTH`] — the recursion must never be driven by
+/// [`MAX_HTML_NESTING_DEPTH`], the recursion must never be driven by
 /// attacker-controlled input depth, which can exceed any fixed stack within
 /// the 512KB source cap.
 fn html_node_to_template_node(
@@ -1134,7 +1134,7 @@ mod tests {
         assert!(!result.contains("<script"));
     }
 
-    /// F8:`*_html` props are escaped by DEFAULT — raw substitution now
+    /// F8:`*_html` props are escaped by DEFAULT, raw substitution now
     /// requires the renderer's explicit allowlist (empty by default), so a
     /// `<script>` smuggled into any `*_html` merge field can no longer
     /// bypass escaping into email bodies/previews.
@@ -1163,7 +1163,7 @@ mod tests {
         assert_eq!(result, "<div><strong>ok</strong></div>");
 
         // Trusted-raw is still scheme-sanitized (the href/src pass runs on
-        // the substituted output regardless of trust — F8):a javascript:
+        // the substituted output regardless of trust, F8):a javascript:
         // URL inside an allowlisted raw fragment is neutralized to "#".
         let html = "<div>{{ link_html }}</div>";
         let props = serde_json::json!({"link_html": r#"<a href="javascript:alert(1)">y</a>"#});
@@ -1177,7 +1177,7 @@ mod tests {
         assert!(result.contains(">y</a>"), "{result}");
     }
 
-    /// F8:the allowlist is exact-path — a listed path does NOT open the
+    /// F8:the allowlist is exact-path, a listed path does NOT open the
     /// `*_html` bypass for other paths, and non-`_html` paths stay escaped
     /// even when (mistakenly) allowlisted.
     #[test]
@@ -1341,7 +1341,7 @@ mod tests {
 
     // ── Nesting-depth guard ─────────────────────────────────────
 
-    /// 20 000 nested `<div>`s (100KB) — well inside the 512KB source cap and
+    /// 20 000 nested `<div>`s (100KB), well inside the 512KB source cap and
     /// deep enough to blow a default 2 MiB thread stack (~5 MB of frames) if
     /// the tree conversion recursed unboundedly. The original defect was
     /// reproduced with the full 512KB/100k-level payload; this enduring
@@ -1354,7 +1354,7 @@ mod tests {
 
         // Run the conversion on a DEFAULT-stack thread: if it recursed too
         // deep the process aborts here and this test (and the whole binary)
-        // dies — that is the defect. Reaching the assert below proves the
+        // dies, that is the defect. Reaching the assert below proves the
         // recursion is bounded.
         let handle = std::thread::Builder::new()
             .spawn(move || transpile(&source, 512 * 1024))

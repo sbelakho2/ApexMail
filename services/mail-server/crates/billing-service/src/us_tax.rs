@@ -15,14 +15,14 @@
 //!    carries the state's own `sourceUrl` and the `retrieved` date the
 //!    figures were read. Every row declares `taxability`
 //!    (`taxable` | `not_taxable`); an absent or unrecognised value resolves
-//!    to `not_taxable` — for a SaaS product, over-collecting where the
+//!    to `not_taxable`, for a SaaS product, over-collecting where the
 //!    product is exempt is the harmful direction. A `taxable` row REQUIRES a
 //!    rate. [`UsTaxTable::parse`] validates every row and
 //!    [`check_data_file`] renders the `--check` report.
 //! 2. **Stale rates fail closed.** The stamp of the rate that will be USED
 //!    (the combined rate when the row carries one, else the state rate)
 //!    older than `US_TAX_MAX_AGE_DAYS` (default 120) makes the computation
-//!    REFUSE with a named error ([`UsTaxError::StaleRateRow`]) — never a
+//!    REFUSE with a named error ([`UsTaxError::StaleRateRow`]), never a
 //!    silent computation from a rate of unknown age. The invoice writer
 //!    propagates the refusal (no invoice, retried, visible); it never issues
 //!    a US invoice in a registered state without its tax.
@@ -32,7 +32,7 @@
 //!    the state's row declares (`sales` | `transactions` | `either`), and
 //!    raises ONE early warning at `US_TAX_WARN_FRACTION` (default 0.8) of
 //!    the threshold so registration/filing has lead time. It NEVER registers
-//!    a state and NEVER charges tax — sales tax is computed only after the
+//!    a state and NEVER charges tax, sales tax is computed only after the
 //!    owner/accounting registers the state through the admin surface
 //!    ([`register_state`], audited), which itself requires a usable row.
 //!    `not_taxable` states are never evaluated, never asked to register, and
@@ -50,7 +50,7 @@
 //!
 //! Every amount is integer cents (`i64`); the rate is integer basis points
 //! (`u32`, 7.25 % = 725) because US state rates are conventionally quoted in
-//! whole or quarter basis points — no float ever touches a money path here
+//! whole or quarter basis points, no float ever touches a money path here
 //! (the crate's `money_invariants` gate covers this file). The warn fraction
 //! is parsed to integer basis points of the threshold (`0.8` → 8000). Tax is
 //! rounded half-up ONCE per invoice line, exactly like the VAT module's
@@ -61,12 +61,12 @@
 //! Invoices whose `billing_country` is `US`, whose status is not `void`, and
 //! whose `issued_at` lies in the state's window:
 //!
-//! * the **sales test** sums the invoice SUBTOTAL (the sales price — collected
+//! * the **sales test** sums the invoice SUBTOTAL (the sales price, collected
 //!   tax is not part of gross receipts), USD invoices only (the thresholds
 //!   are USD figures; no FX source exists here, and inventing one would
 //!   fabricate the number the threshold is compared against);
 //! * the **transaction test** counts invoices in every currency (a
-//!   transaction needs no conversion) — the two counts are both stored, and
+//!   transaction needs no conversion), the two counts are both stored, and
 //!   only the declared criterion(s) alert;
 //! * an **exempt sale counts toward both tests**: the common statutory rule
 //!   measures gross sales / all transactions, and the exemption changes who
@@ -97,7 +97,7 @@
 //!   invoice for a state with `status = 'registered'` is refused there by
 //!   name. The product invoicing path (this crate's invoice writer) always
 //!   applies the stamped line, for every invoice kind (subscription overage,
-//!   PAYG usage, product-line and add-on lines — they all share
+//!   PAYG usage, product-line and add-on lines, they all share
 //!   [`crate::invoices::create_invoice_in_tx`]).
 //! * **Credit notes do not carry a tax component.** A credit note reduces
 //!   reported sales (attributed through the credited invoice's state
@@ -189,7 +189,7 @@ pub fn is_us_state_code(code: &str) -> bool {
 
 /// Normalize a free-text `billing_addresses.state` value to a postal code:
 /// trimmed, upper-cased, and ONLY when that yields a recognised code. Any
-/// other text (`"California"`, `"N/A"`, empty) is `None` — an unrecognised
+/// other text (`"California"`, `"N/A"`, empty) is `None`, an unrecognised
 /// state is never guessed into a code.
 pub fn normalize_state_code(raw: Option<&str>) -> Option<String> {
     let normalized = raw?.trim().to_ascii_uppercase();
@@ -213,7 +213,7 @@ pub enum NexusWindow {
     /// new year returns to `below`.
     CalendarYear,
     /// The trailing twelve months ending at the evaluation instant. A
-    /// rolling window has no "new window" — a crossing stays sticky until
+    /// rolling window has no "new window", a crossing stays sticky until
     /// the operator acts.
     Trailing12Months,
 }
@@ -279,7 +279,7 @@ impl Taxability {
     }
 
     /// Resolve a raw file value: absent or anything that is not exactly
-    /// `"taxable"` (trimmed, case-insensitively) is `NotTaxable` — the safe
+    /// `"taxable"` (trimmed, case-insensitively) is `NotTaxable`, the safe
     /// direction. The caller records the notice for `--check`/the admin read
     /// when the raw value was present but unrecognised, so the fallback is
     /// reported, never silent.
@@ -296,7 +296,7 @@ impl Taxability {
                     (
                         Taxability::NotTaxable,
                         Some(format!(
-                            "taxability {value:?} is not \"taxable\" or \"not_taxable\" — treated \
+                            "taxability {value:?} is not \"taxable\" or \"not_taxable\", treated \
                              as not_taxable (never silently charge)"
                         )),
                     )
@@ -367,7 +367,7 @@ pub struct EffectiveRate<'a> {
 /// The resolved nexus declaration: exactly what the sweep compares and
 /// alerts on. [`UsTaxStateRow::nexus_declaration`] returns the named data
 /// error instead when the row declares a criterion whose threshold (or
-/// window) is missing — the state is then refused, never evaluated against a
+/// window) is missing, the state is then refused, never evaluated against a
 /// guess.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NexusDeclaration {
@@ -418,7 +418,7 @@ pub struct UsTaxStateRow {
 impl UsTaxStateRow {
     /// The rate this row computes with: the combined rate when present (with
     /// its own stamp), else the state rate. `None` when the row computes no
-    /// tax at all — a `not_taxable` row, whose (possibly present) figures are
+    /// tax at all, a `not_taxable` row, whose (possibly present) figures are
     /// dead data reported by the notices.
     pub fn effective_rate(&self) -> Option<EffectiveRate<'_>> {
         if self.taxability == Taxability::NotTaxable {
@@ -448,13 +448,13 @@ impl UsTaxStateRow {
 
     /// Resolve the row's nexus declaration.
     ///
-    /// * `not_taxable` rows declare nothing — `Ok(None)`: the sweep skips
+    /// * `not_taxable` rows declare nothing, `Ok(None)`: the sweep skips
     ///   them (never asked to register) and no threshold exists to compare.
     /// * A usable declaration names exactly the declared criterion's
     ///   thresholds: `sales` needs `nexusThresholdCents`, `transactions`
     ///   needs `transactionThreshold`, `either` needs BOTH; a declared
-    ///   criterion whose threshold is missing — or thresholds without a
-    ///   declared window — is the named data error the sweep reports while
+    ///   criterion whose threshold is missing, or thresholds without a
+    ///   declared window, is the named data error the sweep reports while
     ///   refusing to evaluate the state (never a guess).
     pub fn nexus_declaration(&self) -> Result<Option<NexusDeclaration>, String> {
         if self.taxability == Taxability::NotTaxable {
@@ -464,7 +464,7 @@ impl UsTaxStateRow {
             None => NexusCriteria::Sales,
             Some(raw) => NexusCriteria::parse(raw).ok_or_else(|| {
                 format!(
-                    "criteria {raw:?} is not \"sales\", \"transactions\" or \"either\" — refusing \
+                    "criteria {raw:?} is not \"sales\", \"transactions\" or \"either\", refusing \
                      to evaluate the state against a guessed criterion"
                 )
             })?,
@@ -473,28 +473,28 @@ impl UsTaxStateRow {
         let transactions = self.transaction_threshold;
         match (criteria, sales, transactions) {
             (NexusCriteria::Sales, None, _) => Err(
-                "criteria \"sales\" declares no nexusThresholdCents — a row declaring a \
+                "criteria \"sales\" declares no nexusThresholdCents, a row declaring a \
                  criterion whose threshold is missing is a data error"
                     .to_string(),
             ),
             (NexusCriteria::Sales, Some(_), Some(_)) => Err(
-                "criteria \"sales\" also carries a transactionThreshold — declare criteria \
+                "criteria \"sales\" also carries a transactionThreshold, declare criteria \
                  \"either\" to evaluate both, or drop the unused threshold"
                     .to_string(),
             ),
             (NexusCriteria::Transactions, _, None) => Err(
-                "criteria \"transactions\" declares no transactionThreshold — a row declaring a \
+                "criteria \"transactions\" declares no transactionThreshold, a row declaring a \
                  criterion whose threshold is missing is a data error"
                     .to_string(),
             ),
             (NexusCriteria::Transactions, Some(_), Some(_)) => Err(
-                "criteria \"transactions\" also carries a nexusThresholdCents — declare criteria \
+                "criteria \"transactions\" also carries a nexusThresholdCents, declare criteria \
                  \"either\" to evaluate both, or drop the unused threshold"
                     .to_string(),
             ),
             (NexusCriteria::Either, None, _) | (NexusCriteria::Either, _, None) => Err(
                 "criteria \"either\" requires BOTH nexusThresholdCents and transactionThreshold \
-                 — a row declaring a criterion whose threshold is missing is a data error"
+                , a row declaring a criterion whose threshold is missing is a data error"
                     .to_string(),
             ),
             (_, Some(_), _) | (_, _, Some(_)) => match self.nexus_window {
@@ -505,7 +505,7 @@ impl UsTaxStateRow {
                     window,
                 })),
                 None => Err(
-                    "the row declares nexus thresholds but no nexusWindow — refusing to \
+                    "the row declares nexus thresholds but no nexusWindow, refusing to \
                      evaluate the state against a guessed measurement window"
                         .to_string(),
                 ),
@@ -522,7 +522,7 @@ pub enum UsTaxDataError {
     MalformedJson(String),
     #[error(
         "US sales tax data file declares schemaVersion {found}; this build reads {expected} \
-         (upgrade the file or the build — never guess a version)"
+         (upgrade the file or the build, never guess a version)"
     )]
     UnsupportedSchemaVersion { found: u32, expected: u32 },
     #[error("US sales tax data file row {index}: {problem}")]
@@ -632,7 +632,7 @@ impl UsTaxTable {
                 if rate_bps > MAX_RATE_BPS {
                     return Err(invalid(format!(
                         "rateBps {rate_bps} is out of range (0..={MAX_RATE_BPS} basis points \
-                         = 20 %) — basis points, not percent"
+                         = 20 %), basis points, not percent"
                     )));
                 }
             }
@@ -640,7 +640,7 @@ impl UsTaxTable {
                 if combined_rate_bps > MAX_RATE_BPS {
                     return Err(invalid(format!(
                         "combinedRateBps {combined_rate_bps} is out of range \
-                         (0..={MAX_RATE_BPS} basis points = 20 %) — basis points, not percent"
+                         (0..={MAX_RATE_BPS} basis points = 20 %), basis points, not percent"
                     )));
                 }
             }
@@ -648,7 +648,7 @@ impl UsTaxTable {
                 if !(MIN_NEXUS_THRESHOLD_CENTS..=MAX_NEXUS_THRESHOLD_CENTS).contains(&threshold) {
                     return Err(invalid(format!(
                         "nexusThresholdCents {threshold} is out of range ({}..={} USD cents \
-                         = $1..$100M) — cents, not dollars",
+                         = $1..$100M), cents, not dollars",
                         MIN_NEXUS_THRESHOLD_CENTS, MAX_NEXUS_THRESHOLD_CENTS
                     )));
                 }
@@ -679,7 +679,7 @@ impl UsTaxTable {
                 && raw_row.combined_rate_bps.is_none()
             {
                 return Err(invalid(
-                    "taxability \"taxable\" REQUIRES rateBps (or combinedRateBps) — a taxable row \
+                    "taxability \"taxable\" REQUIRES rateBps (or combinedRateBps), a taxable row \
                      without a rate is not usable"
                         .to_string(),
                 ));
@@ -696,7 +696,7 @@ impl UsTaxTable {
                     || raw_row.transaction_threshold.is_some()))
             .then(|| {
                 "the row resolves to not_taxable: its rate/threshold figures are NOT used (the \
-                 state is never charged, never asked to register) — declare taxability \
+                 state is never charged, never asked to register), declare taxability \
                  \"taxable\" to collect"
                     .to_string()
             });
@@ -718,7 +718,7 @@ impl UsTaxTable {
                         })?;
                     if parsed > today {
                         return Err(invalid(format!(
-                            "combinedRetrieved {parsed} is in the future (today is {today}) — \
+                            "combinedRetrieved {parsed} is in the future (today is {today}), \
                              a rate cannot be fetched on a date that has not happened"
                         )));
                     }
@@ -734,7 +734,7 @@ impl UsTaxTable {
                 (Some(_), Some(source), Some(_)) => {
                     if source.is_empty() {
                         return Err(invalid(
-                            "combinedSourceUrl is empty — a combined rate without its source is \
+                            "combinedSourceUrl is empty, a combined rate without its source is \
                              not usable"
                                 .to_string(),
                         ));
@@ -748,7 +748,7 @@ impl UsTaxTable {
                 _ => {
                     return Err(invalid(
                         "combinedRateBps requires combinedSourceUrl AND combinedRetrieved (all \
-                         three or none) — a combined rate without its own stamp is not usable"
+                         three or none), a combined rate without its own stamp is not usable"
                             .to_string(),
                     ));
                 }
@@ -757,7 +757,7 @@ impl UsTaxTable {
             let source_url = raw_row.source_url.trim().to_string();
             if source_url.is_empty() {
                 return Err(invalid(
-                    "sourceUrl is empty — a rate without its source is not usable".to_string(),
+                    "sourceUrl is empty, a rate without its source is not usable".to_string(),
                 ));
             }
             if !source_url.starts_with("https://") {
@@ -774,7 +774,7 @@ impl UsTaxTable {
                 })?;
             if retrieved > today {
                 return Err(invalid(format!(
-                    "retrieved {retrieved} is in the future (today is {today}) — a rate cannot be \
+                    "retrieved {retrieved} is in the future (today is {today}), a rate cannot be \
                      fetched on a date that has not happened"
                 )));
             }
@@ -825,13 +825,13 @@ impl UsTaxTable {
 
 /// Days between a `retrieved` date and the evaluation date. Negative when the
 /// date is in the future (only reachable when the validation clock moved
-/// backwards since the load — treated as stale, never as fresh).
+/// backwards since the load, treated as stale, never as fresh).
 pub fn stamp_age_days(retrieved: NaiveDate, today: NaiveDate) -> i64 {
     (today - retrieved).num_days()
 }
 
 /// The stamp a row's figures are governed by: the rate actually used (the
-/// combined rate's own stamp when present, else the state rate's) — or the
+/// combined rate's own stamp when present, else the state rate's), or the
 /// row's own `retrieved` date when no rate governs it (a `not_taxable` claim
 /// is still a dated fact; dead figures on such a row are never used).
 pub fn row_stamp_retrieved(row: &UsTaxStateRow) -> NaiveDate {
@@ -848,7 +848,7 @@ pub fn row_age_days(row: &UsTaxStateRow, today: NaiveDate) -> i64 {
     stamp_age_days(row_stamp_retrieved(row), today)
 }
 
-/// Whether a row is fresh at `today` under `max_age_days` — the SAME rule
+/// Whether a row is fresh at `today` under `max_age_days`, the SAME rule
 /// for the state rate and a combined rate: the stamp of the figure that will
 /// be used governs (a stale stamp, whichever it is, refuses to compute).
 pub fn is_row_fresh(row: &UsTaxStateRow, today: NaiveDate, max_age_days: u32) -> bool {
@@ -860,19 +860,19 @@ pub fn is_row_fresh(row: &UsTaxStateRow, today: NaiveDate, max_age_days: u32) ->
 // Errors of the compute path
 // ---------------------------------------------------------------------------
 
-/// Failures of the US tax computation. Every variant is a REFUSAL — there is
+/// Failures of the US tax computation. Every variant is a REFUSAL, there is
 /// deliberately no variant that yields a guessed tax amount.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum UsTaxError {
     #[error("US sales tax data file unusable: {0}")]
     DataFile(#[from] UsTaxDataError),
     #[error(
-        "US sales tax: state {state} is registered but the data file has NO rate row for it — \
+        "US sales tax: state {state} is registered but the data file has NO rate row for it, \
          refusing to compute tax; add the state's rateBps/threshold/source/retrieved row"
     )]
     MissingRateRow { state: String },
     #[error(
-        "US sales tax: state {state} rate row is STALE — read {retrieved}, {age_days} days old \
+        "US sales tax: state {state} rate row is STALE, read {retrieved}, {age_days} days old \
          at evaluation (max {max_age_days}, {env}=...); refusing to compute tax from a stale \
          rate. Refresh the row's figures and `retrieved` date from {rate_source}"
     )]
@@ -885,28 +885,28 @@ pub enum UsTaxError {
         rate_source: String,
     },
     #[error(
-        "US sales tax: {env}={raw:?} is not a whole number of days — refusing to guess the \
+        "US sales tax: {env}={raw:?} is not a whole number of days, refusing to guess the \
          maximum rate age"
     )]
     InvalidMaxAge { raw: String, env: &'static str },
     #[error(
-        "US sales tax: the registration/exemption lookup for state {state} failed ({reason}) — \
+        "US sales tax: the registration/exemption lookup for state {state} failed ({reason}), \
          refusing to guess whether the state is registered or the sale exempt"
     )]
     RegistrationLookup { state: String, reason: String },
     #[error(
-        "US sales tax: state {state} is not taxable for this product per the data file — a \
+        "US sales tax: state {state} is not taxable for this product per the data file, a \
          not_taxable state is never registered and never charged; if the law changed, update the \
          row's taxability (with a fresh source/retrieved) first"
     )]
     NotTaxableState { state: String },
     #[error(
-        "US sales tax: state {state}'s nexus declaration is a data error ({reason}) — refusing to \
+        "US sales tax: state {state}'s nexus declaration is a data error ({reason}), refusing to \
          evaluate it against a guessed criterion or threshold"
     )]
     IncompleteNexusDeclaration { state: String, reason: String },
     #[error(
-        "US sales tax: {env}={raw:?} is not a fraction between 0 and 1 (e.g. \"0.8\") — refusing \
+        "US sales tax: {env}={raw:?} is not a fraction between 0 and 1 (e.g. \"0.8\"), refusing \
          to guess the early-warning threshold"
     )]
     InvalidWarnFraction { raw: String, env: &'static str },
@@ -917,7 +917,7 @@ pub enum UsTaxError {
 // ---------------------------------------------------------------------------
 
 /// Sales tax on one taxable amount: `base × bps / 10_000`, rounded half-up
-/// ONCE (the VAT module's convention — see `billing_common`'s
+/// ONCE (the VAT module's convention, see `billing_common`'s
 /// `vat_amount_half_up`). Exact i128 intermediate; a negative base saturates
 /// to zero tax (no credit is ever minted here).
 pub fn sales_tax_cents(base_cents: i64, rate_bps: u32) -> i64 {
@@ -1010,7 +1010,7 @@ pub fn max_age_days_from_env() -> Result<u32, UsTaxError> {
 /// Parse a warning fraction like `0.8` into basis points of the threshold
 /// (`8000`), in integer arithmetic only (no float ever touches a money path
 /// in this file). Accepts `1`, `0.8`, `0.85`, `0.5`, …; rejects `0`, values
-/// above 1, more than four decimal digits, and anything else — a refusal,
+/// above 1, more than four decimal digits, and anything else, a refusal,
 /// never a silent default.
 pub fn parse_warn_fraction_bps(raw: &str) -> Option<u32> {
     let trimmed = raw.trim();
@@ -1157,7 +1157,7 @@ pub struct UsTaxDataCheckReport {
     /// criterion whose threshold/window is missing): the state is refused at
     /// evaluation time; `--check` exits non-zero while any is present.
     pub declaration_errors: Vec<String>,
-    /// The file's owner instructions — rendered when the file carries no
+    /// The file's owner instructions, rendered when the file carries no
     /// state yet, so the fill-in contract is what `--check` prints.
     pub instructions: Vec<String>,
 }
@@ -1167,7 +1167,7 @@ impl UsTaxDataCheckReport {
     pub fn render(&self) -> String {
         let mut out = String::new();
         out.push_str(&format!(
-            "US sales tax data: {} — {} state row(s), max age {} days, warn fraction {} bps of \
+            "US sales tax data: {}, {} state row(s), max age {} days, warn fraction {} bps of \
              the threshold, today {}\n",
             self.source,
             self.rows.len(),
@@ -1177,7 +1177,7 @@ impl UsTaxDataCheckReport {
         ));
         if self.rows.is_empty() {
             out.push_str(
-                "  (no states configured — no US sales tax is computed anywhere; fill the file \
+                "  (no states configured, no US sales tax is computed anywhere; fill the file \
                  to enable registered states)\n",
             );
             for line in &self.instructions {
@@ -1216,7 +1216,7 @@ pub fn check_data_file(today: NaiveDate) -> Result<UsTaxDataCheckReport, UsTaxEr
         let freshness = if is_row_fresh(row, today, max_age_days) {
             format!("fresh ({age} days old)")
         } else {
-            format!("STALE ({age} days old — will refuse to compute)")
+            format!("STALE ({age} days old, will refuse to compute)")
         };
         let rate = row
             .effective_rate()
@@ -1234,7 +1234,7 @@ pub fn check_data_file(today: NaiveDate) -> Result<UsTaxDataCheckReport, UsTaxEr
             .unwrap_or_else(|| "no rate (not_taxable)".to_string());
         let nexus = match row.nexus_declaration() {
             Ok(Some(declaration)) => format!(
-                "criteria {} — sales threshold {} USD cents, transaction threshold {} ({})",
+                "criteria {}, sales threshold {} USD cents, transaction threshold {} ({})",
                 declaration.criteria.as_str(),
                 declaration
                     .sales_threshold_cents
@@ -1247,7 +1247,7 @@ pub fn check_data_file(today: NaiveDate) -> Result<UsTaxDataCheckReport, UsTaxEr
                 declaration.window.as_str()
             ),
             Ok(None) => {
-                "nexus n/a (not_taxable — never evaluated, never asked to register)".to_string()
+                "nexus n/a (not_taxable, never evaluated, never asked to register)".to_string()
             }
             Err(reason) => {
                 declaration_errors.push(format!("{}: {reason}", row.state));
@@ -1262,7 +1262,7 @@ pub fn check_data_file(today: NaiveDate) -> Result<UsTaxDataCheckReport, UsTaxEr
             taxability.push_str(&format!(" NOTE: {notice}"));
         }
         rows.push(format!(
-            "{}: {taxability} — {rate} — {nexus} — {freshness} — source {} retrieved {}",
+            "{}: {taxability}, {rate}, {nexus}, {freshness}, source {} retrieved {}",
             row.state, row.source_url, row.retrieved
         ));
     }
@@ -1312,7 +1312,7 @@ impl UsSalesTaxLine {
             RateKind::Combined => "combined rate",
         };
         format!(
-            "US sales tax ({}) — {} {} — source {} retrieved {}",
+            "US sales tax ({}), {} {}, source {} retrieved {}",
             self.state, percent, kind, self.source_url, self.retrieved
         )
     }
@@ -1414,7 +1414,7 @@ impl TaxContextRow {
 
 /// Resolve the US sales tax for one invoice.
 ///
-/// The gate, in order — every step is a refusal, never a guess:
+/// The gate, in order, every step is a refusal, never a guess:
 /// 1. customer country must be `US` (any other country: untouched);
 /// 2. the billing address state must be a recognisable US postal code
 ///    (unrecognised/missing → nothing: the sweep reports those invoices as
@@ -1424,7 +1424,7 @@ impl TaxContextRow {
 /// 4. the state's data-file row must exist (a registered state with no row
 ///    is REFUSED by name: the row is the operator's claim that the state is
 ///    taxable at all) and must not be `not_taxable` (never charge where the
-///    product is exempt — even a legacy registration row charges nothing);
+///    product is exempt, even a legacy registration row charges nothing);
 /// 5. a customer exemption certificate covering the state and not expired at
 ///    the invoice date → an EXEMPT decision (zero tax, the certificate
 ///    recorded). An expired or absent certificate is taxable;
@@ -1433,7 +1433,7 @@ impl TaxContextRow {
 /// 7. a tax rounding to 0 cents adds no line (nothing).
 ///
 /// `config` is the caller's table (tests inject one); `None` loads the
-/// configured source LAZILY — only after steps 1–3 established that this
+/// configured source LAZILY, only after steps 1–3 established that this
 /// invoice actually needs a rate, so a broken data file can never refuse a
 /// US invoice that would not carry tax anyway.
 pub async fn tax_decision_for_invoice<'e, E>(
@@ -1456,7 +1456,7 @@ where
     };
     // ONE round trip answers both questions the gate needs: is the state
     // registered, and does a non-expired exemption certificate cover this
-    // customer's sale? An infrastructure failure REFUSES the invoice — an
+    // customer's sale? An infrastructure failure REFUSES the invoice, an
     // unregistered state must not be taxed, a registered one must not escape
     // its tax, and a certificate must never be assumed.
     let context: TaxContextRow = sqlx::query_as(
@@ -1500,18 +1500,18 @@ where
     };
     let Some(row) = config.table.row(&state) else {
         // The row is the operator's factual claim that this state charges
-        // tax at all — a registered state without one is refused, never
+        // tax at all, a registered state without one is refused, never
         // guessed (not even an exemption can be applied to a state whose
         // taxability is unknown).
         return Err(UsTaxError::MissingRateRow { state });
     };
     if row.taxability == Taxability::NotTaxable {
-        // Never charge where the product is exempt — even when a legacy
+        // Never charge where the product is exempt, even when a legacy
         // registration row exists. `--check` and the admin read surface the
         // contradiction for the operator.
         debug!(
             state = %state,
-            "US sales tax: state is not_taxable in the data file — no tax line, even registered"
+            "US sales tax: state is not_taxable in the data file, no tax line, even registered"
         );
         return Ok(UsTaxDecision::None);
     }
@@ -1539,7 +1539,7 @@ where
             state = %state,
             subtotal_cents,
             rate_bps = used.rate_bps,
-            "US sales tax rounds to 0 cents — no line added"
+            "US sales tax rounds to 0 cents, no line added"
         );
         return Ok(UsTaxDecision::None);
     }
@@ -1556,7 +1556,7 @@ where
 }
 
 // ---------------------------------------------------------------------------
-// Customer exemptions (B2B certificates) — storage and operator surface
+// Customer exemptions (B2B certificates), storage and operator surface
 // ---------------------------------------------------------------------------
 
 /// One stored exemption certificate row (`us_tax_customer_exemptions`).
@@ -1587,7 +1587,7 @@ pub enum ExemptionError {
     #[error("US sales tax: {0}")]
     InvalidExpiry(String),
     #[error(
-        "US sales tax: tenant {0:?} does not exist — an exemption on a wrong id would \
+        "US sales tax: tenant {0:?} does not exist, an exemption on a wrong id would \
              exempt nothing; fix the tenant id"
     )]
     UnknownTenant(String),
@@ -1611,7 +1611,7 @@ pub struct ExemptionInput {
 /// latest-expiring non-expired one. An expiry is INCLUSIVE (a certificate
 /// valid through its `expires_at` day); `expires_at IS NULL` means the
 /// certificate states no expiry date and is valid until replaced or removed.
-/// Selection is deterministic (latest expiry first, NULL first — "no
+/// Selection is deterministic (latest expiry first, NULL first, "no
 /// expiry" outranks any dated one; then newest created; then id) so the
 /// certificate recorded on the snapshot is reproducible.
 pub async fn find_applicable_exemption<'e, E>(
@@ -1678,7 +1678,7 @@ pub async fn upsert_exemption(
     let certificate_id = input.certificate_id.trim().to_string();
     if certificate_id.is_empty() {
         return Err(ExemptionError::InvalidCertificate(
-            "certificateId is empty — an exemption without its certificate id is not \
+            "certificateId is empty, an exemption without its certificate id is not \
              substantiated"
                 .to_string(),
         ));
@@ -1740,7 +1740,7 @@ pub async fn upsert_exemption(
         certificate_id = %row.certificate_id,
         expires_at = ?row.expires_at,
         actor,
-        "US tax exemption: certificate stored — sales in this state are exempt from now on \
+        "US tax exemption: certificate stored, sales in this state are exempt from now on \
          (issued invoices are never changed)"
     );
     Ok(row)
@@ -1768,7 +1768,7 @@ pub async fn delete_exemption(
         state = %row.state_code,
         certificate_id = %row.certificate_id,
         actor,
-        "US tax exemption: certificate removed — new invoices in this state are taxable again"
+        "US tax exemption: certificate removed, new invoices in this state are taxable again"
     );
     Ok(row)
 }
@@ -1795,7 +1795,7 @@ struct UsSalesBucket {
 /// portion is carried separately for reporting. The billing-address state is
 /// read from the immutable snapshot (audit F08) as JSON: a snapshot that is
 /// not a JSON object yields the empty string (the UNKNOWN bucket) instead of
-/// an SQL error — one corrupt row must not blind the whole sweep. The report
+/// an SQL error, one corrupt row must not blind the whole sweep. The report
 /// queries below use the same expression.
 const US_SALES_BY_STATE_SQL: &str = r#"
     SELECT
@@ -1880,7 +1880,7 @@ fn fold_state_measures(buckets: &[UsSalesBucket]) -> BTreeMap<String, NexusMeasu
 
 /// US invoices the sweep can REPORT but never assign: those whose billing
 /// address carries no recognisable state code, and those in a currency other
-/// than USD (reported per currency — never converted, there is no FX source
+/// than USD (reported per currency, never converted, there is no FX source
 /// in this repository).
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct UsUnassignedSales {
@@ -1929,7 +1929,7 @@ fn bucket_unassigned_sales(buckets: &[UsSalesBucket]) -> UsUnassignedSales {
     reported
 }
 
-/// The reported-not-assigned buckets over the trailing twelve months — the
+/// The reported-not-assigned buckets over the trailing twelve months, the
 /// same measurement the sweep reports, exposed so the admin read shows the
 /// UNKNOWN bucket to the operator instead of leaving it in logs alone.
 pub async fn unassigned_us_sales(
@@ -1966,7 +1966,7 @@ pub struct UsTaxSweepResult {
     /// surfaced by name, never evaluated against an invented threshold.
     pub states_without_threshold_data: Vec<String>,
     /// States whose declared criterion is missing its threshold (or window):
-    /// a data error — the state is refused and reported, never evaluated.
+    /// a data error, the state is refused and reported, never evaluated.
     pub states_invalid_nexus: Vec<(String, String)>,
     /// US invoices in the window whose billing address carries no
     /// recognisable state code: reported, never assigned to a state.
@@ -2055,7 +2055,7 @@ pub async fn sweep_us_tax_nexus(state: &AppState) -> Result<UsTaxSweepResult, St
     if table.is_empty() {
         info!(
             source = %source,
-            "US tax nexus sweep: the rate/threshold file carries no states — nothing to \
+            "US tax nexus sweep: the rate/threshold file carries no states, nothing to \
              evaluate (never a threshold from thin air)"
         );
     }
@@ -2066,14 +2066,14 @@ pub async fn sweep_us_tax_nexus(state: &AppState) -> Result<UsTaxSweepResult, St
     // trailing twelve months, and each state is read from the window its own
     // row names (the file is the truth for which). The REPORTING buckets
     // (unknown-state and non-USD invoices) are measured over the trailing
-    // twelve months — the widest single window, so nothing recent can hide.
+    // twelve months, the widest single window, so nothing recent can hide.
     let (calendar_start, calendar_end) = NexusWindow::CalendarYear.bounds(now);
     let (trailing_start, trailing_end) = NexusWindow::Trailing12Months.bounds(now);
     let calendar_buckets = us_sales_by_state(&state.db, calendar_start, calendar_end).await?;
     let trailing_buckets = us_sales_by_state(&state.db, trailing_start, trailing_end).await?;
 
     // BOTH nexus measures per state: USD gross sales, transaction counts
-    // (all currencies) and the exempt portion — always tracked, whichever
+    // (all currencies) and the exempt portion, always tracked, whichever
     // criterion the row declares.
     let measures_calendar = fold_state_measures(&calendar_buckets);
     let measures_trailing = fold_state_measures(&trailing_buckets);
@@ -2089,7 +2089,7 @@ pub async fn sweep_us_tax_nexus(state: &AppState) -> Result<UsTaxSweepResult, St
         warn!(
             unknown_state_invoices = result.unknown_state_invoices,
             unknown_state_cents = result.unknown_state_cents,
-            "US tax nexus sweep: US invoices without a recognisable billing-address state — \
+            "US tax nexus sweep: US invoices without a recognisable billing-address state, \
              reported as UNKNOWN, never assigned to a state"
         );
     }
@@ -2099,7 +2099,7 @@ pub async fn sweep_us_tax_nexus(state: &AppState) -> Result<UsTaxSweepResult, St
             invoices,
             taxable_cents = cents,
             "US tax nexus sweep: US invoices in a non-USD currency are excluded from the \
-             USD thresholds — never converted without an FX source"
+             USD thresholds, never converted without an FX source"
         );
     }
 
@@ -2124,7 +2124,7 @@ pub async fn sweep_us_tax_nexus(state: &AppState) -> Result<UsTaxSweepResult, St
             // No threshold data: named, never evaluated against a guess.
             result.states_without_threshold_data.push(code.clone());
             let note = format!(
-                "no row in the US tax data file ({source}) — not evaluated against an \
+                "no row in the US tax data file ({source}), not evaluated against an \
                  invented threshold; add the state's taxability/rate/threshold/source/retrieved \
                  row"
             );
@@ -2136,13 +2136,13 @@ pub async fn sweep_us_tax_nexus(state: &AppState) -> Result<UsTaxSweepResult, St
         };
         if table_row.taxability == Taxability::NotTaxable {
             // The product is exempt in this state: nothing to register, no
-            // threshold to measure — reported distinctly, never evaluated,
+            // threshold to measure, reported distinctly, never evaluated,
             // and a status row (if any) is left untouched (registration is
             // the operator's; the sweep never writes one).
             result.states_not_taxable.push(code.clone());
             debug!(
                 state = %code,
-                "US tax nexus sweep: state is not_taxable in the data file — skipped (never \
+                "US tax nexus sweep: state is not_taxable in the data file, skipped (never \
                  asked to register)"
             );
             continue;
@@ -2159,11 +2159,11 @@ pub async fn sweep_us_tax_nexus(state: &AppState) -> Result<UsTaxSweepResult, St
                 warn!(
                     state = %code,
                     reason = %reason,
-                    "US tax nexus sweep: nexus declaration is a data error — state refused, \
+                    "US tax nexus sweep: nexus declaration is a data error, state refused, \
                      not evaluated"
                 );
                 let note = format!(
-                    "nexus declaration data error ({reason}) — not evaluated; fix the row in {source}"
+                    "nexus declaration data error ({reason}), not evaluated; fix the row in {source}"
                 );
                 let _ = record_evaluation_error(&state.db, &code, &note).await;
                 continue;
@@ -2209,7 +2209,7 @@ pub async fn sweep_us_tax_nexus(state: &AppState) -> Result<UsTaxSweepResult, St
                 // ONE failing state must not abort the sweep; it is retried
                 // next run (its transaction committed nothing).
                 result.failed_states += 1;
-                warn!(state = %code, error = %error, "US tax nexus sweep: state failed — isolated");
+                warn!(state = %code, error = %error, "US tax nexus sweep: state failed, isolated");
                 let _ = record_evaluation_error(&state.db, &code, &error).await;
             }
         }
@@ -2227,7 +2227,7 @@ pub async fn sweep_us_tax_nexus(state: &AppState) -> Result<UsTaxSweepResult, St
         invalid_nexus_declarations = result.states_invalid_nexus.len(),
         unknown_state_invoices = result.unknown_state_invoices,
         failed_states = result.failed_states,
-        "US tax nexus sweep complete (tracking only — registration and charging are operator \
+        "US tax nexus sweep complete (tracking only, registration and charging are operator \
          actions)"
     );
     if result.alerts_raised > 0 {
@@ -2262,7 +2262,7 @@ struct StateEvaluation {
     warn_armed: bool,
 }
 
-/// Compare observed transactions against a count threshold — the same
+/// Compare observed transactions against a count threshold, the same
 /// "meets or exceeds" boundary as [`evaluate_nexus`].
 pub fn evaluate_nexus_count(observed: i64, threshold: i64) -> NexusVerdict {
     evaluate_nexus(observed, threshold)
@@ -2398,11 +2398,11 @@ async fn upsert_status_row(
 ///   continues, no alert is ever raised for a registered state);
 /// * `below` → `threshold_crossed` when the window reaches the threshold:
 ///   the alert is raised ONCE;
-/// * `threshold_crossed` stays sticky — for a CALENDAR window a new calendar
+/// * `threshold_crossed` stays sticky, for a CALENDAR window a new calendar
 ///   year is a new window instance (a fresh crossing alerts once for the new
 ///   year; a state below again in the new year returns to `below`), while a
 ///   ROLLING twelve-month window has no new window and never re-alerts;
-/// * nothing here ever writes `registered` — that is the operator path.
+/// * nothing here ever writes `registered`, that is the operator path.
 async fn evaluate_state(
     db: &PgPool,
     table_row: &UsTaxStateRow,
@@ -2522,7 +2522,7 @@ async fn evaluate_state(
             }
         }
         // First sighting of the state (its address state is known, so the
-        // row is created here at its evaluated status — never `registered`).
+        // row is created here at its evaluated status, never `registered`).
         None => {
             if crossed {
                 status = "threshold_crossed";
@@ -2582,7 +2582,7 @@ async fn evaluate_state(
             observed_count = measures.transactions,
             criteria = declaration.criteria.as_str(),
             window = declaration.window.as_str(),
-            "US tax nexus: threshold crossed — operator alert raised (registration is an \
+            "US tax nexus: threshold crossed, operator alert raised (registration is an \
              operator action; NO tax is charged until the state is registered)"
         );
     }
@@ -2608,7 +2608,7 @@ async fn evaluate_state(
             triggers = ?triggers,
             warn_bps,
             window = declaration.window.as_str(),
-            "US tax nexus: early warning raised at the configured fraction of the threshold — \
+            "US tax nexus: early warning raised at the configured fraction of the threshold, \
              registration/filing has lead time; NO tax is charged until the state is registered"
         );
     }
@@ -2677,7 +2677,7 @@ struct WarningContext<'a> {
 
 /// Raise the one durable early warning for a window (`US_TAX_WARN_FRACTION` of
 /// the threshold): a MEDIUM-grade `finance_incidents` row with the remaining
-/// headroom and — when the window is a calendar year — the days left in it,
+/// headroom and, when the window is a calendar year, the days left in it,
 /// so registration/filing has lead time. Inserted INSIDE the state
 /// transaction: the warned-marker write and its alert are atomic, so a failed
 /// alert cannot leave a warned state un-alerted, nor can a committed warning
@@ -2770,7 +2770,7 @@ pub enum RegistrationError {
     #[error("US sales tax: {0:?} is not a US state/territory postal code")]
     UnknownState(String),
     #[error(
-        "US sales tax: cannot register {state} — the data file has no usable rate row for it \
+        "US sales tax: cannot register {state}, the data file has no usable rate row for it \
          ({source_reason}); the state's invoices would be refused, so the rate row must land \
          first"
     )]
@@ -2779,17 +2779,17 @@ pub enum RegistrationError {
         source_reason: String,
     },
     #[error(
-        "US sales tax: cannot register {state} — the data file marks the product not_taxable \
+        "US sales tax: cannot register {state}, the data file marks the product not_taxable \
          there, so registration would collect nothing; if the law changed, update the row \
          (taxability \"taxable\", a fresh rate and its retrieved date) first"
     )]
     NotTaxableState { state: String },
     #[error(
-        "US sales tax: cannot register {state} — the row's nexus declaration is a data error \
+        "US sales tax: cannot register {state}, the row's nexus declaration is a data error \
          ({reason}); the sweep could not track it, so fix the row first"
     )]
     InvalidNexusDeclaration { state: String, reason: String },
-    #[error("US sales tax: state {state} is not tracked — nothing to update")]
+    #[error("US sales tax: state {state} is not tracked, nothing to update")]
     NotTracked { state: String },
     #[error("US sales tax: {0}")]
     Database(String),
@@ -2812,7 +2812,7 @@ pub async fn state_window_measures(
 }
 
 /// Register a state (owner/accounting act): from this moment, new invoices
-/// for US customers in that state carry the sales-tax line — which requires a
+/// for US customers in that state carry the sales-tax line, which requires a
 /// usable (present, fresh, `taxable`) row whose nexus declaration is intact,
 /// so registration is refused by name when any of that is missing. The row is
 /// created when the state was never observed.
@@ -2938,7 +2938,7 @@ pub async fn register_state(
     info!(
         state = %code,
         actor,
-        "US tax nexus: state registered — sales tax now computes on new invoices \
+        "US tax nexus: state registered, sales tax now computes on new invoices \
          (never on past ones)"
     );
     Ok(row)
@@ -2997,14 +2997,14 @@ pub async fn unregister_state(
     info!(
         state = %code,
         actor,
-        "US tax nexus: state unregistered — sales tax no longer computes for it; a still-\
+        "US tax nexus: state unregistered, sales tax no longer computes for it; a still-\
          crossed state alerts again on the next sweep"
     );
     Ok(row)
 }
 
 // ---------------------------------------------------------------------------
-// Filing-ready per-state report (JSON + CSV) — the accountant's artifact
+// Filing-ready per-state report (JSON + CSV), the accountant's artifact
 // ---------------------------------------------------------------------------
 
 /// A validated reporting period: one calendar month, UTC, half-open
@@ -3019,7 +3019,7 @@ pub struct UsTaxReportPeriod {
 
 impl UsTaxReportPeriod {
     /// Parse `YYYY-MM` (strict: four digits, month 01..12). Anything else is
-    /// a named refusal — a period is never guessed.
+    /// a named refusal, a period is never guessed.
     pub fn parse(raw: &str) -> Result<Self, String> {
         let trimmed = raw.trim();
         let Some((year_raw, month_raw)) = trimmed.split_once('-') else {
@@ -3063,7 +3063,7 @@ impl UsTaxReportPeriod {
 }
 
 /// One rate stamp used on invoices of a state within the report period (from
-/// the invoice tax snapshots — which rate was actually charged).
+/// the invoice tax snapshots, which rate was actually charged).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UsTaxReportRateUsed {
     pub rate_bps: u32,
@@ -3109,7 +3109,7 @@ pub struct UsTaxReportState {
     pub credited_exempt_cents: i64,
     pub credited_other_cents: i64,
     /// `taxable − credited_taxed`; the filing number (may be negative when
-    /// credits exceed the period's sales — reported as-is, never clamped).
+    /// credits exceed the period's sales, reported as-is, never clamped).
     pub net_taxable_sales_cents: i64,
     /// `exempt − credited_exempt`.
     pub net_exempt_sales_cents: i64,
@@ -3133,7 +3133,7 @@ pub struct UsTaxReportTotals {
     pub net_exempt_sales_cents: i64,
 }
 
-/// Non-USD US invoices of the period, per currency — reported, never
+/// Non-USD US invoices of the period, per currency, reported, never
 /// converted (there is no FX source in this repository).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UsTaxReportNonUsd {
@@ -3168,7 +3168,7 @@ pub struct UsTaxReport {
     pub rate_file_max_age_days: u32,
     /// Set when the rate file could not be loaded: the DB figures are still
     /// reported (they are the filing truth), taxability context degrades to
-    /// `unknown_row` and the reason is stated — never silently.
+    /// `unknown_row` and the reason is stated, never silently.
     pub rate_file_error: Option<String>,
     pub states: Vec<UsTaxReportState>,
     pub totals: UsTaxReportTotals,
@@ -3626,7 +3626,7 @@ fn csv_field(raw: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Unit tests — the data file, the staleness gate, the money and the windows
+// Unit tests, the data file, the staleness gate, the money and the windows
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
@@ -3683,7 +3683,7 @@ mod tests {
         }
     }
 
-    /// The COMMITTED file: it must stay valid, and it must stay EMPTY — a
+    /// The COMMITTED file: it must stay valid, and it must stay EMPTY, a
     /// committed file carrying invented rates would be a fabricated claim
     /// about another jurisdiction's tax law.
     #[test]
@@ -3706,7 +3706,7 @@ mod tests {
         );
     }
 
-    /// Every malformed shape is refused with a named error — `--check` must
+    /// Every malformed shape is refused with a named error, `--check` must
     /// never pass a file that would make the money path guess.
     #[test]
     fn data_file_validation_refuses_every_bad_shape() {
@@ -3979,7 +3979,7 @@ mod tests {
     }
 
     /// A declared criterion whose threshold (or window) is missing refuses
-    /// the state with a named reason — and only when declared in the wrong
+    /// the state with a named reason, and only when declared in the wrong
     /// shape, never for a clean row.
     #[test]
     fn nexus_declarations_require_exactly_the_declared_thresholds() {
@@ -4061,7 +4061,7 @@ mod tests {
         assert_eq!(declaration.criteria, NexusCriteria::Either);
         assert_eq!(declaration.window, NexusWindow::Trailing12Months);
 
-        // An unrecognised criteria spelling is a data error too — never a
+        // An unrecognised criteria spelling is a data error too, never a
         // guessed criterion.
         let bad_criteria = parse_row(taxable(serde_json::json!({
             "criteria": "quarterly", "nexusThresholdCents": 50_000_000,
@@ -4071,7 +4071,7 @@ mod tests {
         assert!(error.contains("quarterly"), "{error}");
     }
 
-    /// The combined rate is preferred when present, with its OWN stamp — the
+    /// The combined rate is preferred when present, with its OWN stamp, the
     /// same staleness rule applies to whichever stamp is used.
     #[test]
     fn combined_rate_is_preferred_with_its_own_stamp_and_staleness() {
@@ -4225,7 +4225,7 @@ mod tests {
         );
 
         // The verdict boundaries: threshold − 1 below, exactly the
-        // threshold crossed — for both measures.
+        // threshold crossed, for both measures.
         assert_eq!(evaluate_nexus_count(199, 200), NexusVerdict::Below);
         assert_eq!(evaluate_nexus_count(200, 200), NexusVerdict::Crossed);
         assert_eq!(evaluate_nexus_count(201, 200), NexusVerdict::Crossed);
@@ -4313,7 +4313,7 @@ mod tests {
     }
 
     /// The staleness gate is exact at its boundary, and a missing row is its
-    /// own named refusal — the two ways a computation must never proceed.
+    /// own named refusal, the two ways a computation must never proceed.
     #[test]
     fn rate_rows_fail_closed_when_missing_or_stale() {
         // 2026-10-15 minus 2026-06-17 = exactly 120 days.
@@ -4611,7 +4611,7 @@ mod tests {
             max_age_days: 120,
             warn_fraction_bps: 8_000,
             today: today(),
-            rows: vec!["CA: taxable — 725 bps state rate …".to_string()],
+            rows: vec!["CA: taxable, 725 bps state rate …".to_string()],
             declaration_errors: Vec::new(),
             instructions: vec!["fill me".to_string()],
         };
@@ -4681,7 +4681,7 @@ mod tests {
 }
 
 // ---------------------------------------------------------------------------
-// Adversarial coverage tests (DB backed) — the sweep, the operator surface
+// Adversarial coverage tests (DB backed), the sweep, the operator surface
 // and the stamped tax line end to end.
 //
 // Every test provisions its own canonical database clone (private, dropped on
@@ -4689,7 +4689,7 @@ mod tests {
 // configured provisioning failure panics. The rate table comes from the test
 // override (see [`set_test_table`]): the committed file ships empty on
 // purpose, and the process environment cannot be mutated safely in a
-// parallel test binary — so the money path is exercised against an explicit
+// parallel test binary, so the money path is exercised against an explicit
 // fixture table, serialized by [`TEST_TABLE_LOCK`].
 // ---------------------------------------------------------------------------
 
@@ -4731,7 +4731,7 @@ mod coverage_adversarial {
     /// this file is shippable rate data.
     const FIXTURE_SOURCE: &str = "https://example.gov/us-tax-test-fixture";
 
-    /// $100,000.00 — the fixture threshold most tests use.
+    /// $100,000.00, the fixture threshold most tests use.
     const THRESHOLD: i64 = 10_000_000;
 
     fn fixture_row(
@@ -4825,7 +4825,7 @@ mod coverage_adversarial {
 
     /// Seed an invoice row directly: the sweep reads the invoices table, so
     /// fixtures are independent of the writer under test. (The long argument
-    /// list is the fixture shape under test — each field is a dimension a case
+    /// list is the fixture shape under test, each field is a dimension a case
     /// varies.)
     #[allow(clippy::too_many_arguments)]
     async fn seed_invoice(
@@ -4927,7 +4927,7 @@ mod coverage_adversarial {
             assert_eq!(first.states_below, 1);
             assert_eq!(first.alerts_raised, 0, "threshold − 1 does not alert");
             // …but it IS past the warning fraction (0.8 × $100,000.00), so
-            // the early warning fired exactly once — a warning-grade incident,
+            // the early warning fired exactly once, a warning-grade incident,
             // not the crossing alert.
             assert_eq!(first.warnings_raised, 1);
             assert_eq!(first.states_warned, 1);
@@ -5010,7 +5010,7 @@ mod coverage_adversarial {
                 "the alert names the operator act"
             );
 
-            // Replay: idempotent — no second alert, no status drift.
+            // Replay: idempotent, no second alert, no status drift.
             let replay = sweep_us_tax_nexus(&env.state).await.expect("replay");
             assert_eq!(replay.alerts_raised, 0, "a replay never re-alerts");
             assert_eq!(replay.states_crossed, 1);
@@ -5063,7 +5063,7 @@ mod coverage_adversarial {
             .await;
             {
                 // A non-JSON billing address must not break the aggregation
-                // (the `IS JSON` guard) — it is simply unknown.
+                // (the `IS JSON` guard), it is simply unknown.
                 seed_tenant(env, "ustax_unknown_corrupt", "US", None).await;
                 sqlx::query(
                     "INSERT INTO invoices (
@@ -5311,7 +5311,7 @@ mod coverage_adversarial {
             assert_eq!(nexus_incidents(env).await.len(), 2);
 
             // Simulate a calendar year boundary: the stored window belongs to
-            // last year, so this evaluation is a NEW window instance — its
+            // last year, so this evaluation is a NEW window instance, its
             // crossing is its own once-per-window alert.
             sqlx::query(
                 "UPDATE us_tax_nexus_states SET window_start = $2, crossed_window_start = $2 \
@@ -5436,7 +5436,7 @@ mod coverage_adversarial {
             assert_eq!(row.status, "registered");
             assert_eq!(nexus_incidents(env).await.len(), 1);
 
-            // Registration refuses a state with no usable rate row — the
+            // Registration refuses a state with no usable rate row, the
             // state's invoices would be refused, so the row must land first.
             let error = register_state(&env.pool, &config, "TX", "owner@apexmail.test", None, now)
                 .await
@@ -5723,7 +5723,7 @@ mod coverage_adversarial {
     env_test!(
         registered_state_with_a_stale_rate_row_refuses_the_invoice,
         |env| {
-            // 200 days old — past the 120-day default.
+            // 200 days old, past the 120-day default.
             let stale = fixture_config(
                 &[fixture_row(
                     "CA",
@@ -5920,7 +5920,7 @@ mod coverage_adversarial {
 
     // A row declaring a criterion whose threshold is missing is a data
     // error: the state is REFUSED (no row, no evaluation, no alert) and
-    // reported by name — never evaluated against an invented threshold.
+    // reported by name, never evaluated against an invented threshold.
     // not_taxable states are reported distinctly and never evaluated.
     env_test!(
         sweep_refuses_incomplete_declarations_and_skips_not_taxable_states,
@@ -5983,8 +5983,8 @@ mod coverage_adversarial {
         }
     );
 
-    // not_taxable states never charge — not even when a (legacy)
-    // registration row exists — and registration is refused for them.
+    // not_taxable states never charge, not even when a (legacy)
+    // registration row exists, and registration is refused for them.
     env_test!(
         not_taxable_states_never_charge_and_registration_is_refused,
         |env| {
@@ -6046,7 +6046,7 @@ mod coverage_adversarial {
             assert!(error.to_string().contains("not_taxable"), "{error}");
 
             // The sweep reports NY distinctly, never evaluates it (the legacy
-            // registration row is left untouched — the sweep never writes
+            // registration row is left untouched, the sweep never writes
             // registration state), and never alerts.
             let result = sweep_us_tax_nexus(&env.state).await.expect("sweep");
             assert_eq!(result.states_not_taxable, vec!["NY".to_string()]);
@@ -6060,7 +6060,7 @@ mod coverage_adversarial {
     );
 
     // The early warning fires ONCE per window at the configured fraction —
-    // below the threshold — with the headroom and days-left, and the
+    // below the threshold, with the headroom and days-left, and the
     // crossing alert then stays its own exactly-once event.
     env_test!(
         early_warning_fires_once_before_the_crossing_which_alerts_once,
@@ -6337,7 +6337,7 @@ mod coverage_adversarial {
     );
 
     // The combined rate is the rate invoices compute with when the row
-    // carries one — stamped with its own source — and its own stamp obeys
+    // carries one, stamped with its own source, and its own stamp obeys
     // the same fail-closed staleness rule.
     env_test!(
         combined_rate_is_used_stamped_and_fails_closed_when_stale,
@@ -6517,7 +6517,7 @@ mod coverage_adversarial {
             );
             assert_eq!(overage_invoice.2, "usd");
 
-            // (2) PAYG usage: the same sweep's other half (a EUR invoice — the
+            // (2) PAYG usage: the same sweep's other half (a EUR invoice, the
             // PAYG snapshot currency; the tax is 7.25 % of the whole subtotal in
             // that currency, reported as a non-USD gap by the report).
             let payg_tenant = "ustax_kind_payg";
@@ -6604,17 +6604,17 @@ mod coverage_adversarial {
                     mollie_payment_id: None,
                     line_items: vec![
                         NewLineItem {
-                            description: "Dedicated IP (2026-10) — 15.00/month".to_string(),
+                            description: "Dedicated IP (2026-10), 15.00/month".to_string(),
                             quantity: 1,
                             unit_price: 1_500,
                         },
                         NewLineItem {
-                            description: "EU-only routing (2026-10) — 29.00/month".to_string(),
+                            description: "EU-only routing (2026-10), 29.00/month".to_string(),
                             quantity: 1,
                             unit_price: 2_900,
                         },
                         NewLineItem {
-                            description: "Mailboxes (2026-10) — 3 seats".to_string(),
+                            description: "Mailboxes (2026-10), 3 seats".to_string(),
                             quantity: 3,
                             unit_price: 900,
                         },
@@ -6643,7 +6643,7 @@ mod coverage_adversarial {
     // The filing report: per-state USD figures from the DB, credit notes
     // netting the period's taxable/exempt sales through the credited
     // invoice's state, and the honest gaps (unknown state, non-USD,
-    // unattributed credits) — deterministic between runs, JSON and CSV.
+    // unattributed credits), deterministic between runs, JSON and CSV.
     env_test!(
         report_nets_credit_notes_and_reports_gaps_deterministically,
         |env| {

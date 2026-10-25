@@ -1,4 +1,4 @@
-//! DLP Engine — orchestrates PII detection, entropy analysis, and content policy scanning
+//! DLP Engine, orchestrates PII detection, entropy analysis, and content policy scanning
 
 use crate::config::DlpConfig;
 use crate::content_policy;
@@ -57,7 +57,7 @@ const MAX_TOTAL_SCAN_CHUNKS: usize = 10;
 /// Bytes carried over from the tail of each scan chunk into the next one
 /// (audit finding: chunks split at exact multiples of `max_scan_size` and
 /// joined with "\n" made a PII token straddling a seam match in NEITHER
-/// chunk — a deterministic DLP bypass). 64 bytes covers the longest
+/// chunk, a deterministic DLP bypass). 64 bytes covers the longest
 /// detectable token with a wide margin (19-digit card plus separators).
 const CHUNK_CARRY_OVER_BYTES: usize = 64;
 
@@ -112,7 +112,7 @@ impl DlpEngine {
         // Oversized bodies are scanned in `max_scan_size` chunks across the
         // FULL body up to `MAX_TOTAL_SCAN_CHUNKS × max_scan_size` bytes.
         // The previous head+tail-only truncation left the entire middle of
-        // multi-MiB bodies unscanned — senders could park sensitive content
+        // multi-MiB bodies unscanned, senders could park sensitive content
         // just past the head window and evade detection entirely. Only
         // bodies beyond the hard cap fall back to head+tail (with an
         // explicit unscanned-middle note in the summary).
@@ -131,15 +131,15 @@ impl DlpEngine {
             let half = total_scan_cap / 2;
             // The head/tail CUT line is a seam too: extend each side by a
             // carry-over band so a token straddling the cut is fully
-            // visible inside one slice. The middle remains — and is
-            // explicitly reported as — unscanned.
+            // visible inside one slice. The middle remains, and is
+            // explicitly reported as, unscanned.
             let head_end =
                 body.floor_char_boundary((half + CHUNK_CARRY_OVER_BYTES).min(body.len()));
             let tail_start =
                 body.ceil_char_boundary(body.len().saturating_sub(half + CHUNK_CARRY_OVER_BYTES));
             chunks_scanned = MAX_TOTAL_SCAN_CHUNKS;
             let note = format!(
-                "\n[DLP:content exceeds {} bytes — scanned first and last {} KiB, middle unscanned]\n",
+                "\n[DLP:content exceeds {} bytes, scanned first and last {} KiB, middle unscanned]\n",
                 total_scan_cap,
                 (half + CHUNK_CARRY_OVER_BYTES) / 1024
             );
@@ -222,7 +222,7 @@ impl DlpEngine {
             dedup_overlap_copies(&mut result.findings, spans, &chunk_table, |f| {
                 (1u8, f.token_preview.clone())
             });
-            // The aggregate risk must track the SURVIVING findings — the
+            // The aggregate risk must track the SURVIVING findings, the
             // deduplicated copies must not keep contributing risk.
             result.risk_score = result.findings.iter().map(|f| f.risk).sum();
             result
@@ -241,7 +241,7 @@ impl DlpEngine {
         }
 
         // 3. Content policy scanning. A build failure is LOUD:it is
-        // counted globally and surfaced in the summary — a disabled content
+        // counted globally and surfaced in the summary, a disabled content
         // channel must never look like "no matches".
         let mut policy_matches = match content_policy::scan_content_policy(
             scan_text,
@@ -272,12 +272,12 @@ impl DlpEngine {
 
         if overflow {
             summary_parts.push(format!(
-                "Content exceeded {} bytes (hard cap) — scanned first and last {} KiB only, middle unscanned",
+                "Content exceeded {} bytes (hard cap), scanned first and last {} KiB only, middle unscanned",
                 total_scan_cap, total_scan_cap / 2 / 1024
             ));
         } else if truncated {
             summary_parts.push(format!(
-                "Content exceeded {} bytes — scanned in {} chunk(s) covering the full body",
+                "Content exceeded {} bytes, scanned in {} chunk(s) covering the full body",
                 self.config.max_scan_size, chunks_scanned
             ));
         }
@@ -390,7 +390,7 @@ fn canonical_domain(domain: &str) -> String {
 /// span. Offsets are mapped from scan-text coordinates to body coordinates
 /// via the chunk table; normalization drift (NFKC / zero-width stripping
 /// in the PII scanner) makes them approximate, which at worst KEEPS both
-/// copies of a duplicate — it can never drop a unique finding.
+/// copies of a duplicate, it can never drop a unique finding.
 fn dedup_overlap_copies<T>(
     findings: &mut Vec<T>,
     spans: Vec<(usize, usize)>,
@@ -575,7 +575,7 @@ mod tests {
     fn test_api_key_detection() {
         let engine = DlpEngine::new();
         let verdict = engine.scan_body(
-            "Here is the production key: sk_live_4eC39HqLyjWDarjtT1zdp7dc please deploy", // nosemgrep: generic.secrets.security.detected-stripe-api-key.detected-stripe-api-key — the payment provider's public documentation example key (Stripe-shaped corpus, kept for multi-vendor DLP coverage) used as DLP detection-test corpus — the code that FINDS such keys
+            "Here is the production key: sk_live_4eC39HqLyjWDarjtT1zdp7dc please deploy", // nosemgrep: generic.secrets.security.detected-stripe-api-key.detected-stripe-api-key, the payment provider's public documentation example key (Stripe-shaped corpus, kept for multi-vendor DLP coverage) used as DLP detection-test corpus, the code that FINDS such keys
         );
         // Should detect high-entropy secret
         assert!(verdict.risk_score > 0.0, "Should detect API key");
@@ -679,7 +679,7 @@ mod tests {
     #[test]
     fn test_oversized_body_middle_is_scanned() {
         // F2:the MIDDLE of an oversized body used to be silently skipped by
-        // head+tail truncation — PII parked there evaded detection.
+        // head+tail truncation, PII parked there evaded detection.
         let config = DlpConfig {
             max_scan_size: 8 * 1024,
             ..Default::default()
@@ -708,7 +708,7 @@ mod tests {
     fn card_straddling_exact_chunk_seam_is_detected() {
         // Fail-first: chunks were split at exact multiples of max_scan_size
         // and joined with "\n", so a token spanning the seam matched in
-        // NEITHER chunk — a deterministic, repeatable DLP bypass. Padding
+        // NEITHER chunk, a deterministic, repeatable DLP bypass. Padding
         // is a NON-word character so the \b anchors inside the card
         // patterns hold (word-char padding would suppress matching by
         // itself and prove nothing).
@@ -767,7 +767,7 @@ mod tests {
     #[test]
     fn seam_carryover_does_not_double_count_tokens_inside_overlap() {
         // A token lying ENTIRELY inside the carry-over window is scanned
-        // twice (original chunk + next chunk's carried copy) — the overlap
+        // twice (original chunk + next chunk's carried copy), the overlap
         // dedup must report it exactly once so risk is not inflated toward
         // block_threshold.
         let config = DlpConfig {
@@ -860,7 +860,7 @@ mod tests {
         );
 
         // And a secret in the dropped middle region is (correctly) not found
-        // — the note documents that gap rather than claiming a full scan.
+        //, the note documents that gap rather than claiming a full scan.
         let head = filler.repeat(100);
         let secret = "SSN dropped middle: 123-45-6789";
         let tail = filler.repeat(cap / filler.len() + 100);

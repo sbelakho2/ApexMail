@@ -37,7 +37,7 @@ pub struct QuotaExceeded;
 const ACCOUNT_COLUMNS: &str = "id, email, domain, password_hash, display_name, quota_bytes, used_bytes, is_active, created_at, updated_at";
 const MAILBOX_COLUMNS: &str = "id, account_id, name, parent_id, mailbox_type, total_messages, unread_messages, uidnext, created_at, updated_at";
 const MESSAGE_COLUMNS: &str = "id, account_id, mailbox_id, uid, message_id, from_address, from_name, to_addresses, cc_addresses, bcc_addresses, subject, date, text_body, html_body, raw_message, raw_size, is_read, is_starred, is_deleted, is_spam, labels, dedup_exempt, headers, attachments, created_at, updated_at";
-/// F2: metadata-only column list — everything the listing/metadata read path
+/// F2: metadata-only column list, everything the listing/metadata read path
 /// needs (ids, flags, sizes, envelope-ish fields, headers JSONB) EXCLUDING
 /// the AES-GCM-encrypted body columns (`text_body`, `html_body`,
 /// `raw_message`). Selecting (and decrypting) bodies for up to 100k rows per
@@ -641,7 +641,7 @@ impl MessageStorage {
     /// The journal row is written in the SAME transaction as the mailbox
     /// insert: a journal failure rolls the mailbox copy back, so a paid
     /// "archive + journaling" tenant can never accept mail without its
-    /// legal copy. Only an `inserted == true` store journals — an SMTP
+    /// legal copy. Only an `inserted == true` store journals, an SMTP
     /// redelivery that dedups onto the existing mailbox row already has the
     /// copy from the first delivery.
     pub async fn store_inbound_message(&self, message: &StoredMessage) -> Result<(Uuid, i64)> {
@@ -681,14 +681,14 @@ impl MessageStorage {
         Ok((id, uid))
     }
 
-    /// L10: store several messages in ONE transaction — a failure at message
+    /// L10: store several messages in ONE transaction, a failure at message
     /// k rolls back messages 1..k-1 (used by COPY, which must be all-or-nothing).
     ///
     /// L14(e): the per-mailbox `total_messages`/`unread_messages` refresh runs
     /// ONCE PER TOUCHED MAILBOX after the batch (and the account `used_bytes`
     /// adjustment once per account with the summed byte delta) instead of once
     /// per message. A 500-message COPY used to issue 500 COUNT(*) refreshes of
-    /// the destination mailbox — the destination's counts are only meaningful
+    /// the destination mailbox, the destination's counts are only meaningful
     /// after the batch anyway, and the same shape is already used by
     /// [`Self::move_messages_batch`] / [`Self::expunge_deleted_messages`].
     ///
@@ -696,7 +696,7 @@ impl MessageStorage {
     /// already inserted are carried in [`PendingBatchUsage`] and added to the
     /// persisted counters in the checks, so hoisting the counter writes does
     /// not weaken the byte or message-count limits (a COPY that would overshoot
-    /// on its second message still fails — see
+    /// on its second message still fails, see
     /// `copy_failure_mid_batch_rolls_back_earlier_copies`).
     pub async fn store_messages_batch(
         &self,
@@ -736,7 +736,7 @@ impl MessageStorage {
     /// The transactional core of a message insert (see [`Self::store_message`]).
     /// Callers own the transaction: single inserts commit immediately; the
     /// COPY batch wraps N calls in one transaction. Returns
-    /// `(row id, uid, inserted)` — `inserted == false` means the DI-006
+    /// `(row id, uid, inserted)`, `inserted == false` means the DI-006
     /// delivery-dedup lookup collapsed onto an existing row, so no row was
     /// written and no counter/usage adjustment is owed.
     ///
@@ -795,7 +795,7 @@ impl MessageStorage {
         // L14(d): the count is derived from the per-mailbox `total_messages`
         // counters (maintained transactionally by update_mailbox_counts_tx,
         // which counts `is_deleted = false` rows) instead of a COUNT(*) over
-        // every mail_messages row of the account — an account has a handful
+        // every mail_messages row of the account, an account has a handful
         // of mailbox rows but potentially 100k message rows. The SUM is
         // updated within each store transaction, so it cannot drift from the
         // row count (see the equivalence test).
@@ -819,7 +819,7 @@ impl MessageStorage {
         // Delivery-scoped (migration 102): user-initiated copies are stored
         // with dedup_exempt = TRUE and are ignored here, so a COPY always
         // materializes a new row (and a new UID for COPYUID) instead of
-        // aliasing the original — the old behavior made the copy vanish
+        // aliasing the original, the old behavior made the copy vanish
         // when the original was expunged.
         if !message.message_id.is_empty() && !message.dedup_exempt {
             let existing: Option<(Uuid, i64)> = sqlx::query_as::<_, (Uuid, i64)>(
@@ -915,7 +915,7 @@ impl MessageStorage {
     }
 
     /// Get a message by ID
-    /// DI-009: Standard read — uses a fresh connection from the pool. Returns committed
+    /// DI-009: Standard read, uses a fresh connection from the pool. Returns committed
     /// data visible at the time of the query (READ COMMITTED isolation).
     pub async fn get_message(&self, message_id: &Uuid) -> Result<Option<StoredMessage>> {
         // SAFETY: MESSAGE_COLUMNS is a compile-time constant string, not user input.
@@ -985,7 +985,7 @@ impl MessageStorage {
     /// List messages.
     ///
     /// F1 (RFC 3501 §6.4.3/§7.4.1): when `query.is_deleted` is `None` the
-    /// listing INCLUDES soft-deleted (`\Deleted`) messages — they are part of
+    /// listing INCLUDES soft-deleted (`\Deleted`) messages, they are part of
     /// the mailbox view until an EXPUNGE actually removes them, so
     /// `STORE +FLAGS (\Deleted)` must not make messages vanish, sequence
     /// numbers must not shift silently, and `SEARCH DELETED` must find them.
@@ -1074,7 +1074,7 @@ impl MessageStorage {
             param_idx += 1;
             binds.is_starred = true;
         }
-        // F1: the default (None) includes soft-deleted rows — they leave the
+        // F1: the default (None) includes soft-deleted rows, they leave the
         // view only via EXPUNGE, which has its own dedicated queries. An
         // explicit Some(_) filters on the flag for callers that want one side.
         if query.is_deleted.is_some() {
@@ -1085,7 +1085,7 @@ impl MessageStorage {
 
         // PERF (audit P3): `uid` is NOT NULL in the canonical schema
         // (002_mailstore_uid.sql sets it; 056 re-asserts it; the partitioned
-        // rebuild in 050 declares it NOT NULL — verified against a fresh
+        // rebuild in 050 declares it NOT NULL, verified against a fresh
         // canonical database), so `NULLS LAST` was dead weight that made the
         // sort un-indexable: `uid DESC NULLS LAST` cannot use the existing
         // ascending `idx_mail_messages_mailbox_uid (mailbox_id, uid, …)`,
@@ -1162,7 +1162,7 @@ impl MessageStorage {
         .await
     }
 
-    /// `SEARCH BODY` scope: `text_body` ONLY (RFC 3501 §6.4.4 — BODY matches
+    /// `SEARCH BODY` scope: `text_body` ONLY (RFC 3501 §6.4.4, BODY matches
     /// the body, not the headers). TEXT and the generic query keep the
     /// combined subject+body+sender expression; this method is backed by its
     /// own GIN index (`idx_mail_messages_body_search`) with the identical
@@ -1186,11 +1186,11 @@ impl MessageStorage {
         .await
     }
 
-    /// The `TEXT`/generic full-text expression — MUST match the GIN index
+    /// The `TEXT`/generic full-text expression, MUST match the GIN index
     /// expression from migration 050 exactly (subject + body + sender).
     const FULLTEXT_EXPR_TEXT: &'static str = "to_tsvector('english', COALESCE(subject, '') || ' ' || COALESCE(text_body, '') || ' ' || COALESCE(from_address, ''))";
 
-    /// The `BODY` expression — MUST match `idx_mail_messages_body_search`.
+    /// The `BODY` expression, MUST match `idx_mail_messages_body_search`.
     const FULLTEXT_EXPR_BODY: &'static str = "to_tsvector('english', COALESCE(text_body, ''))";
 
     async fn fulltext_search(
@@ -1210,7 +1210,7 @@ impl MessageStorage {
 
         // Fail closed: with encryption at rest, text_body is ciphertext and
         // the to_tsvector index below would match ciphertext tokens,
-        // returning wrong results. Refuse the search instead — the IMAP
+        // returning wrong results. Refuse the search instead, the IMAP
         // layer surfaces this as NO rather than silently wrong matches.
         if self.is_encryption_enabled() {
             return Err(anyhow!(
@@ -1234,7 +1234,7 @@ impl MessageStorage {
         .await?;
 
         // SAFETY: MESSAGE_META_COLUMNS is a compile-time constant string, not
-        // user input. F1/F2: no `is_deleted = false` predicate — SEARCH
+        // user input. F1/F2: no `is_deleted = false` predicate, SEARCH
         // operates over the mailbox view, which includes \Deleted messages —
         // and the rows are read metadata-only (no body decrypt).
         let rows = sqlx::query(&format!(
@@ -1276,11 +1276,11 @@ impl MessageStorage {
     /// Matches messages where a header field named `field` (case-insensitive
     /// key comparison, JSONB keys preserve original case) carries a value
     /// containing `value` (case-insensitive substring). Unlike the fulltext
-    /// search this works on encrypted stores too — headers are never
-    /// encrypted — and never matches on subject/body alone, so an IMAP
+    /// search this works on encrypted stores too, headers are never
+    /// encrypted, and never matches on subject/body alone, so an IMAP
     /// `SEARCH HEADER` cannot be satisfied by an unrelated subject hit.
     ///
-    /// PERF (audit P3): page-only — NO COUNT. The old entry point ran the
+    /// PERF (audit P3): page-only, NO COUNT. The old entry point ran the
     /// same unindexable `EXISTS (SELECT 1 FROM jsonb_each(…))` predicate
     /// TWICE per search (once for `COUNT(*)`, once for the page), i.e. two
     /// mailbox scans for one page, and the value was only ever used to fill a
@@ -1353,7 +1353,7 @@ impl MessageStorage {
         "#;
 
     /// Run the header-search page query once. Identical SQL (filter,
-    /// ordering, paging) in both public entry points — the count-free path
+    /// ordering, paging) in both public entry points, the count-free path
     /// simply never issues the COUNT.
     async fn header_search_page(
         &self,
@@ -1368,7 +1368,7 @@ impl MessageStorage {
         // compile-time constant strings, not user input. F1/F2: no
         // `is_deleted = false` predicate (the SEARCH view includes \Deleted
         // messages) and metadata-only columns (headers are never encrypted,
-        // so the predicate still works on encrypted stores — and no body is
+        // so the predicate still works on encrypted stores, and no body is
         // decrypted for the result rows).
         let rows = sqlx::query(&format!(
             r#"
@@ -1654,13 +1654,13 @@ impl MessageStorage {
     /// refreshed once at the end instead of once per message. Returns the new
     /// UID for each moved row id, in the same order.
     ///
-    /// L14(f): set-based — the pre-fix loop did 3 round trips per message
+    /// L14(f): set-based, the pre-fix loop did 3 round trips per message
     /// (SELECT its mailbox, bump the destination `uidnext`, UPDATE the row)
     /// plus a per-message `FOR UPDATE` lock on the destination mailbox, i.e.
     /// O(N) statements and O(N) lock acquisitions for an N-message MOVE. Now:
     /// one `SELECT … WHERE id = ANY($1)`, one `uidnext` bump reserving a
     /// contiguous block of N UIDs, and one `UPDATE … FROM unnest($ids, $uids)`
-    /// — 3 statements for the whole batch regardless of N (plus the count
+    ///, 3 statements for the whole batch regardless of N (plus the count
     /// refreshes). The UID each row receives is UNCHANGED: the destination's
     /// pre-batch `uidnext` + the row's position in `message_ids`, exactly what
     /// the per-message loop allocated (COPYUID ordering preserved, and the
@@ -2308,7 +2308,7 @@ mod tests {
             sql
         );
         assert!(!binds.is_deleted);
-        // mailbox_id consumes $2, so LIMIT/OFFSET land on $3/$4 — what
+        // mailbox_id consumes $2, so LIMIT/OFFSET land on $3/$4, what
         // matters is that NO is_deleted predicate appears anywhere.
         assert!(sql.contains(" AND mailbox_id = $2"));
         // PERF (audit P3): the listing orders by `uid DESC` WITHOUT
@@ -2454,7 +2454,7 @@ mod tests {
         assert_eq!((id1, uid1), (id2, uid2), "delivery dedup must collapse");
 
         // A user-initiated COPY (dedup_exempt) materializes a DISTINCT row
-        // with a fresh UID — the COPYUID the IMAP layer reports maps to a
+        // with a fresh UID, the COPYUID the IMAP layer reports maps to a
         // real message that no longer vanishes when the original is
         // expunged.
         let mut user_copy = delivery.clone();
@@ -4077,7 +4077,7 @@ mod tests {
     }
 
     // ═══════════════════════════════════════════════════════════════════════
-    // P3 perf wave: COPY/MOVE/SEARCH/listing — set-based paths + bound tests
+    // P3 perf wave: COPY/MOVE/SEARCH/listing, set-based paths + bound tests
     // ═══════════════════════════════════════════════════════════════════════
 
     /// Statement-level probe on `mail_mailboxes` UPDATEs (P3 item 1/2 bound
@@ -4208,7 +4208,7 @@ mod tests {
             .unwrap();
     }
 
-    /// P3 item 1 — equivalence: a multi-message COPY leaves the destination's
+    /// P3 item 1, equivalence: a multi-message COPY leaves the destination's
     /// `total_messages`/`unread_messages` identical to a full recount of the
     /// copied rows, and the source untouched.
     #[tokio::test]
@@ -4313,7 +4313,7 @@ mod tests {
         pool.close().await;
     }
 
-    /// P3 item 1 — bound: a 500-message COPY refreshes the destination
+    /// P3 item 1, bound: a 500-message COPY refreshes the destination
     /// mailbox counters ONCE. Method: a statement-level trigger counts every
     /// UPDATE statement on `mail_mailboxes`; `uidnext` allocations are
     /// counted by a second (row-level) trigger, so
@@ -4376,7 +4376,7 @@ mod tests {
         pool.close().await;
     }
 
-    /// P3 item 2 — golden: the batch MOVE hands every row exactly the UID the
+    /// P3 item 2, golden: the batch MOVE hands every row exactly the UID the
     /// pre-fix per-message loop produced (destination `uidnext` + the row's
     /// position in `message_ids`), preserves input order, and keeps UIDs
     /// unique. The pre-fix algorithm is reimplemented here against a second
@@ -4529,7 +4529,7 @@ mod tests {
         pool.close().await;
     }
 
-    /// P3 item 2 — bound: a 25-message MOVE issues ONE `mail_messages`
+    /// P3 item 2, bound: a 25-message MOVE issues ONE `mail_messages`
     /// UPDATE statement and ONE destination `uidnext` allocation regardless
     /// of N (pre-fix: 25 of each). Method: statement-level triggers.
     #[tokio::test]
@@ -4647,7 +4647,7 @@ mod tests {
         mail_messages_family_scans(pool).await - base
     }
 
-    /// P3 item 3 — the header search path issues exactly ONE statement over
+    /// P3 item 3, the header search path issues exactly ONE statement over
     /// `mail_messages` (no COUNT). Method: reset the family's scan counters,
     /// run the search, and read the delta from `pg_stat_all_tables`; the
     /// opt-in counting variant is the control (delta 2 statements). Fail
@@ -4724,10 +4724,10 @@ mod tests {
         pool.close().await;
     }
 
-    /// P3 item 4 — the precondition the nil-`NULLS LAST` listing sort relies
+    /// P3 item 4, the precondition the nil-`NULLS LAST` listing sort relies
     /// on: the canonical schema's `mail_messages.uid` is NOT NULL (002 adds
     /// it, 056 re-asserts it, 050's partitioned rebuild declares it NOT
-    /// NULL), and the application never writes a NULL uid — the insert path
+    /// NULL), and the application never writes a NULL uid, the insert path
     /// always allocates one from `uidnext`.
     #[tokio::test]
     async fn canonical_schema_pins_uid_not_null() {
@@ -4744,7 +4744,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             nullable, "NO",
-            "the canonical chain must keep uid NOT NULL — that is what makes \
+            "the canonical chain must keep uid NOT NULL, that is what makes \
              `ORDER BY uid DESC` equivalent to `uid DESC NULLS LAST`"
         );
 
@@ -4776,7 +4776,7 @@ mod tests {
         pool.close().await;
     }
 
-    /// P3 item 4 — ordering equivalence: on a fixture containing an
+    /// P3 item 4, ordering equivalence: on a fixture containing an
     /// (out-of-schema) NULL-uid row, `uid DESC` and `uid DESC NULLS LAST`
     /// order every reachable row identically; the NULL row is the only
     /// difference, and it cannot exist in the canonical schema (previous
@@ -4812,7 +4812,7 @@ mod tests {
         older.date = chrono::Utc::now() - chrono::Duration::days(1);
         stored_uids.push(storage.store_message(&older).await.unwrap().1);
 
-        // Inject the NULL-uid row — only possible by dropping the canonical
+        // Inject the NULL-uid row, only possible by dropping the canonical
         // constraint, i.e. it is outside the schema's domain (pinned above).
         sqlx::query("ALTER TABLE mail_messages ALTER COLUMN uid DROP NOT NULL")
             .execute(&pool)
@@ -4863,13 +4863,13 @@ mod tests {
             new_order.first(),
             Some(&None),
             "with NULLS LAST dropped the (unreachable) NULL row sorts FIRST (the \
-             default for DESC) — the one and only difference"
+             default for DESC), the one and only difference"
         );
         assert_eq!(old_order.last(), Some(&None));
 
         // The storage path itself returns the same order as both raw sorts.
         // (The NULL-uid row must go first: `StoredMessage.uid` is a plain
-        // i64, so a NULL uid is not even decodable — further proof the
+        // i64, so a NULL uid is not even decodable, further proof the
         // canonical schema's NOT NULL is load-bearing.)
         sqlx::query("DELETE FROM mail_messages WHERE mailbox_id = $1 AND uid IS NULL")
             .bind(inbox.id)

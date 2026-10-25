@@ -14,10 +14,10 @@
 //!
 //! Unlike User-Agent which is a single header, TLS fingerprints are derived from
 //! the ClientHello message during handshake. This module provides://!
-//! 1. **Fingerprint extraction** — Parse TLS ClientHello to extract cipher suites,
+//! 1. **Fingerprint extraction**, Parse TLS ClientHello to extract cipher suites,
 //! extensions, and signature algorithms
-//! 2. **Fingerprint storage** — Track known fingerprints per user
-//! 3. **Anomaly detection** — Detect sudden changes in TLS stack that indicate
+//! 2. **Fingerprint storage**, Track known fingerprints per user
+//! 3. **Anomaly detection**, Detect sudden changes in TLS stack that indicate
 //! credential theft running on a different system
 
 use chrono::{DateTime, Utc};
@@ -99,7 +99,7 @@ impl TlsFingerprint {
 
     /// Create from a pre-computed JA4 string.
     /// The cipher/extension COUNTS and lists are parsed from the string
-    /// components instead of being discarded — previously everything was
+    /// components instead of being discarded, previously everything was
     /// zeroed, which made every parsed fingerprint look like a minimal
     /// bot stack to `looks_like_bot`.
     pub fn from_ja4_string(ja4: &str) -> Self {
@@ -201,7 +201,7 @@ pub struct UserTlsHistory {
     pub last_fingerprint: Option<TlsFingerprint>,
     /// Maximum fingerprints to track
     max_fingerprints: usize,
-    /// Timestamp of the most recent `record` call — used for TTL-based map eviction.
+    /// Timestamp of the most recent `record` call, used for TTL-based map eviction.
     pub last_seen: DateTime<Utc>,
 }
 
@@ -452,7 +452,7 @@ mod tests {
 
     #[test]
     fn test_from_ja4_string_parses_counts_not_bot() {
-        // Real Chrome JA4:15 ciphers, 16 extensions — must NOT look like a
+        // Real Chrome JA4:15 ciphers, 16 extensions, must NOT look like a
         // bot (previously everything parsed to zero counts and every
         // fingerprint looked bot-like).
         let chrome = TlsFingerprint::from_ja4_string(

@@ -321,7 +321,7 @@ impl PrivateDeployService {
     /// Allocate a dedicated IP
     ///
     /// Fix J-7: the requested address must come from the configured pool
-    /// (`ip_pool_available`) and must still be `available` — arbitrary,
+    /// (`ip_pool_available`) and must still be `available`, arbitrary,
     /// non-pool, or already-allocated addresses are rejected instead of being
     /// inserted blindly.
     pub async fn allocate_dedicated_ip(
@@ -340,7 +340,7 @@ impl PrivateDeployService {
         // (migration 064; migration 120 converged ip_pool_available's
         // allocated_to, the last UUID holdout). The pre-120 code required a
         // UUID-shaped tenant here and then failed the ent_dedicated_ips
-        // insert for it — no real tenant could allocate a dedicated IP.
+        // insert for it, no real tenant could allocate a dedicated IP.
         //
         // Atomically claim the pool entry: only succeeds when the address is
         // in the pool AND still available. A collision (already allocated)

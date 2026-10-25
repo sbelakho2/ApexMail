@@ -17,7 +17,7 @@ use crate::types::{ChunkConfig, EmbeddingError, TextChunk};
 ///
 /// # Offset contract (SM9 #8)
 /// For every chunk, `doc[start_offset..end_offset]` is EXACTLY `chunk.text`
-/// — separators dropped by splitting are counted, and the prepended overlap
+///, separators dropped by splitting are counted, and the prepended overlap
 /// extends the span backward into the document (see
 /// [`merge_with_overlap`]). Downstream highlight/quoting features can
 /// therefore trust the offsets to slice back to the chunk text.
@@ -103,7 +103,7 @@ fn recursive_split(
     }
 
     if separators.is_empty() {
-        // SM9 #9: the cap is a BYTE budget — split by accumulated
+        // SM9 #9: the cap is a BYTE budget, split by accumulated
         // `char.len_utf8()` so CJK/emoji chunks never exceed `max_size`
         // bytes. (Chunking by CHAR count produced chunks up to 4x the byte
         // cap, which the old merge then silently byte-truncated, discarding
@@ -146,7 +146,7 @@ fn recursive_split(
         return recursive_split(text, base, remaining_seps, max_size);
     }
 
-    // Merge small parts together (WITH their separators — the merged text
+    // Merge small parts together (WITH their separators, the merged text
     // is exactly the document slice), split large parts recursively.
     let mut result: Vec<ChunkDraft> = Vec::new();
     let mut current: Option<ChunkDraft> = None;
@@ -211,7 +211,7 @@ fn recursive_split(
 /// `doc[start_offset..end_offset]` with `start_offset` EXTENDED BACKWARD to
 /// where that tail begins in the document. When the overlap pushes the text
 /// past `max_size`, the text is truncated to the boundary and `end_offset`
-/// follows the truncation — the slice-back invariant
+/// follows the truncation, the slice-back invariant
 /// (`doc[start_offset..end_offset] == text`) holds either way.
 fn merge_with_overlap(
     doc: &str,
@@ -455,7 +455,7 @@ mod tests {
         assert_eq!(chunks[0].start_offset, 0);
     }
 
-    /// SM9 #8: offsets reference TRUE document positions — separator bytes
+    /// SM9 #8: offsets reference TRUE document positions, separator bytes
     /// between merged parts are counted, so `doc[start..end] == text` holds
     /// (the old bookkeeping dropped separators, drifting every offset after
     /// the first chunk).
@@ -471,7 +471,7 @@ mod tests {
         let chunks = chunk_text(text, &config).unwrap();
         assert!(chunks.len() >= 2, "{chunks:?}");
         assert_offsets_slice_back(text, &chunks);
-        // Concrete pin: the second chunk begins at the "CCC" part — byte 8,
+        // Concrete pin: the second chunk begins at the "CCC" part, byte 8,
         // AFTER the second separator. (The old bookkeeping accumulated only
         // chunk bytes and reported 7: a position INSIDE the "\n".)
         assert_eq!(chunks[1].start_offset, 8);
@@ -482,7 +482,7 @@ mod tests {
     }
 
     /// SM9 #8: with overlap, the span extends backward to where the
-    /// prepended tail begins in the document — the overlap bytes are real
+    /// prepended tail begins in the document, the overlap bytes are real
     /// document content and the chunk still slices back exactly.
     #[test]
     fn overlap_offsets_extend_backward_and_still_slice_back() {
@@ -533,7 +533,7 @@ mod tests {
     }
 
     /// SM9 #9: with no separators left, the fallback splits by accumulated
-    /// `char.len_utf8()` against the BYTE budget — CJK/emoji chunks can no
+    /// `char.len_utf8()` against the BYTE budget, CJK/emoji chunks can no
     /// longer reach 3-4x the cap and lose their tails to silent
     /// byte-truncation. With overlap 0 the chunks partition the document
     /// exactly.
@@ -555,7 +555,7 @@ mod tests {
                 "chunk of {} bytes exceeds the 30-byte budget",
                 chunk.text.len()
             );
-            // Every chunk is whole characters — no truncation damage.
+            // Every chunk is whole characters, no truncation damage.
             assert!(chunk
                 .text
                 .chars()

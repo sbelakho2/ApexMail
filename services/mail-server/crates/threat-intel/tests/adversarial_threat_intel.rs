@@ -273,12 +273,12 @@ async fn test_spawn_refresh_task_no_panic() {
         enabled: true,
     };
 
-    // No-op loader — just verifies the task can be spawned
+    // No-op loader, just verifies the task can be spawned
     let handle = spawn_refresh_task(engine, config, |_engine| {
         // In real usage:fetch feed data and load into engine
     });
 
-    // Abort immediately — we're just checking it spawns without panic
+    // Abort immediately, we're just checking it spawns without panic
     handle.abort();
     // Give Tokio a moment to process the abort
     tokio::time::sleep(std::time::Duration::from_millis(10)).await;

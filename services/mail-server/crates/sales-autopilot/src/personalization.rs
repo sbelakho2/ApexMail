@@ -117,7 +117,7 @@ pub struct AccountContext {
     pub industry: Option<String>,
     pub employees: Option<i32>,
     pub technologies: Vec<String>,
-    /// `sales_accounts.esp_hypotheses` — hypotheses, never facts
+    /// `sales_accounts.esp_hypotheses`, hypotheses, never facts
     /// (`migrations/200_sales_autopilot_v2_unification.sql:226`).
     pub esp_hypotheses: Vec<String>,
 }
@@ -218,7 +218,7 @@ pub struct StrategyInput {
     /// Clock injection for determinism.
     pub now: Option<DateTime<Utc>>,
     /// Verified knowledge base used for value props and proof points.
-    /// Defaults to an empty base (no product claims) — callers should pass
+    /// Defaults to an empty base (no product claims), callers should pass
     /// [`SalesKnowledgeBase::canonical`] or their own approved set.
     pub knowledge: SalesKnowledgeBase,
 }
@@ -359,7 +359,7 @@ pub fn compose_strategy(input: &StrategyInput) -> MessageStrategy {
         });
 
     // 2. One problem hypothesis, derived from the strongest live signal and
-    //    the persona. Explicitly a hypothesis — never a factual claim.
+    //    the persona. Explicitly a hypothesis, never a factual claim.
     let problem_hypothesis = derive_problem_hypothesis(input, now);
 
     // 3. One value proposition grounded in a verified knowledge fact.
@@ -707,7 +707,7 @@ pub trait ProseWriter: Send + Sync + std::fmt::Debug {
     fn write(&self, request: &ProseRequest<'_>) -> Result<String, ProseError>;
 }
 
-/// Deterministic template writer — no model, no network, stable output.
+/// Deterministic template writer, no model, no network, stable output.
 #[derive(Debug, Clone, Default)]
 pub struct TemplateProseWriter;
 

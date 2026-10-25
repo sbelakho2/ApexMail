@@ -1,4 +1,4 @@
-//! Canonical analytics metric definitions — ONE source of truth for the
+//! Canonical analytics metric definitions, ONE source of truth for the
 //! business metrics shared by the admin analytics endpoints and the control
 //! plane SSR loaders.
 //!
@@ -8,7 +8,7 @@
 //!   lower(recipient))`. Outcomes (`delivered` / `opened` / `clicked` /
 //!   `bounced` / `complained`) attach to the send they belong to, not to the
 //!   day they happened. An email sent before the window but opened inside it
-//!   therefore does NOT appear in the window's `opened` numerator — it is
+//!   therefore does NOT appear in the window's `opened` numerator, it is
 //!   simply not in the window's send cohort.
 //! * **Cohort time = the send event occurrence.** A cohort row enters a
 //!   window through the `events.timestamp` of its `sent` event (MIN when a
@@ -22,7 +22,7 @@
 //!   numbers.
 //! * **Cardinality is BOOL_OR per cohort row.** Repeat opens/clicks on one
 //!   recipient-send count once. The numerator is a subset of the sent cohort,
-//!   so ratios are `<= 1` by construction — they are never clamped.
+//!   so ratios are `<= 1` by construction, they are never clamped.
 //! * **Rates are `Option<f64>` fractions in `0.0..=1.0`.** A zero
 //!   denominator yields `None` (absent/null), never `0` and never `inf`.
 //!
@@ -225,7 +225,7 @@ fn pool_cache_scope(db: &PgPool) -> String {
 /// Drop every memoised detection (and the probe counters). Test-only:
 /// schema-provisioning tests create/rename columns at runtime and must prove
 /// detection against the schema they just made, not against the schema the
-/// process saw first. Compiled out of production binaries — no test hook in
+/// process saw first. Compiled out of production binaries, no test hook in
 /// the hot path.
 #[cfg(test)]
 pub(crate) fn reset_column_detection_cache_for_tests() {
@@ -240,7 +240,7 @@ pub(crate) fn reset_column_detection_cache_for_tests() {
 /// production schemas have `event_type`/`timestamp`; runtime-provisioned
 /// legacy schemas may have `type`/`created_at`).
 ///
-/// Positive results are memoised process-wide — see [`DETECTED_COLUMNS`].
+/// Positive results are memoised process-wide, see [`DETECTED_COLUMNS`].
 pub async fn detect_column(db: &PgPool, table: &str, candidates: &[&str]) -> Option<String> {
     let key = detection_cache_key(&pool_cache_scope(db), table, candidates);
     if let Some(cached) = detected_columns().read().get(&key) {
@@ -316,7 +316,7 @@ fn interval_duration(interval: &str) -> Result<ChronoDuration, ApiError> {
 /// falls in `[window_start, window_end)`.
 ///
 /// Columns referenced: `events.tenant_id` / `message_id` / `recipient` /
-/// `event_type` / `timestamp` — migration
+/// `event_type` / `timestamp`, migration
 /// `075_create_missing_tables.sql:30-49` (events DDL) and
 /// `090_widen_events_id_columns.sql:25-32` (`domain_id`/`campaign_id` are
 /// TEXT; `message_id` stays VARCHAR(64), which fits a UUID).
@@ -340,7 +340,7 @@ fn sent_cohort_cte(type_col: &str, time_col: &str) -> String {
 /// strictly before the cutoff (`$4`).
 ///
 /// A cohort row with no matching outcome events keeps every BOOL_OR false
-/// and is still counted by the outer `COUNT(*)` — a send without feedback is
+/// and is still counted by the outer `COUNT(*)`, a send without feedback is
 /// a delivered-with-no-evidence send, not a missing send.
 ///
 /// `lower(e.recipient) = s.recipient` is never true for a NULL recipient, so
@@ -371,7 +371,7 @@ fn outcomes_cte(type_col: &str, time_col: &str) -> String {
 ///
 /// Current window: `$1 = NOW() - interval`, `$2 = NOW()`, `$4 = NOW()`.
 /// Previous window: `$1 = NOW() - 2*interval`, `$2 = NOW() - interval`,
-/// `$4 = NOW() - interval` — the previous period's END. The cutoff is what
+/// `$4 = NOW() - interval`, the previous period's END. The cutoff is what
 /// makes a past period immutable: an open that lands today cannot change
 /// last period's `opened` numerator.
 pub fn send_cohort_counts_sql(columns: EventColumns) -> String {
@@ -393,7 +393,7 @@ pub fn send_cohort_counts_sql(columns: EventColumns) -> String {
 
 /// Cohort time-series SQL: each day is the `sent_at` day of the cohort, with
 /// the same outcome cutoff (`$4`) as [`send_cohort_counts_sql`]. Opens are
-/// NOT bucketed on the day they happened — the chart is a send-cohort
+/// NOT bucketed on the day they happened, the chart is a send-cohort
 /// engagement series, so an open attaches to the day its send went out.
 pub fn send_cohort_time_series_sql(columns: EventColumns) -> String {
     let type_col = columns.type_col.as_sql();
@@ -441,7 +441,7 @@ pub struct SendCohortCounts {
 
 impl SendCohortCounts {
     /// Fraction of the send cohort, in `0.0..=1.0`. A zero denominator
-    /// yields `None` — absent, never a fabricated `0` and never `inf`.
+    /// yields `None`, absent, never a fabricated `0` and never `inf`.
     /// Because every numerator counts cohort rows that also have a send
     /// event, the result cannot exceed 1.0 by construction.
     pub fn rate_of_sent(&self, numerator: i64) -> Option<f64> {
@@ -677,7 +677,7 @@ pub enum ProviderSource {
     /// No persisted dimension exists: only well-known consumer mailbox
     /// domains are classified, from the recipient-domain suffix. Custom
     /// domains hosted by Google Workspace / Microsoft 365 therefore appear
-    /// as 'Other' — every row is labelled `inferred`.
+    /// as 'Other', every row is labelled `inferred`.
     InferredFromConsumerDomain,
 }
 
@@ -737,7 +737,7 @@ const INFERRED_PROVIDER_NOTE: &str = "Provider identity is inferred from well-kn
 ///
 /// Preference order:
 /// 1. a persisted normalized provider on the `sent` event
-///    (`recipient_provider`, migration 202) — read it, never re-derive.
+///    (`recipient_provider`, migration 202), read it, never re-derive.
 ///    `provider_source` is passed through so an `inferred` value persisted
 ///    at write time stays labelled inferred;
 /// 2. for rows with NO persisted provider (historical rows written before
@@ -745,7 +745,7 @@ const INFERRED_PROVIDER_NOTE: &str = "Provider identity is inferred from well-kn
 ///    consumer domains ONLY and label those buckets `inferred: true` with a
 ///    response note. Hosted custom domains are never guessed.
 ///
-/// Counts are distinct `(message_id, lower(recipient))` cohort rows — the
+/// Counts are distinct `(message_id, lower(recipient))` cohort rows, the
 /// same recipient-send unit as every other metric here.
 pub async fn provider_breakdown(
     db: &PgPool,
@@ -880,7 +880,7 @@ mod tests {
     //  1. a per-key PROBE COUNTER (`catalog_probe_count`) shows the second
     //     call issues zero `information_schema` probes;
     //  2. the memo is served even after the probed column is DROPPED —
-    //     something only a cache (not a catalog read) can do — and a cache
+    //     something only a cache (not a catalog read) can do, and a cache
     //     reset makes the same call see the dropped schema again, proving
     //     BOTH the cache hit and that the reset hook works.
     #[tokio::test]
@@ -1041,7 +1041,7 @@ mod tests {
         assert!(counts.complaint_rate().expect("rate") <= 1.0);
     }
 
-    /// Zero denominator yields `None` — absent, not `0`, not `inf`.
+    /// Zero denominator yields `None`, absent, not `0`, not `inf`.
     #[test]
     fn zero_send_population_yields_none_rate_not_zero() {
         let counts = SendCohortCounts::default();
@@ -1347,7 +1347,7 @@ mod tests {
 
     /// Adversarial 2: the previous period's outcome cutoff is the previous
     /// period's END. A send in the prior period opened NOW stays
-    /// sent=1/opened=0 in that prior period — history cannot be rewritten.
+    /// sent=1/opened=0 in that prior period, history cannot be rewritten.
     #[tokio::test]
     async fn previous_period_is_frozen_at_its_own_end() {
         let Some(pool) = crate::test_db::canonical_pool("analytics_cohort_freeze").await else {
@@ -1401,7 +1401,7 @@ mod tests {
 
     /// Adversarial 5 for the growth module is in `growth_analytics`; here we
     /// prove the cohort aggregate itself never returns Ok(0) when the
-    /// relation is broken — the error propagates as an Err.
+    /// relation is broken, the error propagates as an Err.
     #[tokio::test]
     async fn cohort_query_failure_is_an_error_not_zero_counts() {
         let Some(pool) = crate::test_db::canonical_pool("analytics_cohort_failure").await else {

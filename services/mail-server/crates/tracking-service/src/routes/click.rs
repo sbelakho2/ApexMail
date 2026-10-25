@@ -4,17 +4,17 @@
 //!
 //! Security properties:
 //! - Prefers `originalUrl` from inside the encrypted token over `?r=` query
-//!   param (-041) — query params can be tampered with, token content cannot.
+//!   param (-041), query params can be tampered with, token content cannot.
 //! - Only allows redirects to http/https URLs whose hostname is authorised
 //!   for the tenant (blocks open-redirect attacks). A host is authorised
 //!   when it is the tenant's own `domains` row **or a subdomain of one**
-//!   (suffix match — `www.example.com` for owned `example.com`), matches a
+//!   (suffix match, `www.example.com` for owned `example.com`), matches a
 //!   pattern in the tenant's `allowed_redirect_domains`, matches the
 //!   deployment allowlist (`TRACKING_ALLOWED_REDIRECT_DOMAINS`), or is the
 //!   configured fallback host.
 //! - A refused destination is answered HONESTLY: HTTP 400 (503 when the
 //!   authorization store cannot answer) with the named reason and a
-//!   locked-down HTML page, and — for valid, non-bot tokens — recorded as an
+//!   locked-down HTML page, and, for valid, non-bot tokens, recorded as an
 //!   explicit `click_refused` event. It is never silently redirected to the
 //!   vendor homepage (dogfood 2026-10-06 P1).
 //! - Adds a locked-down `Content-Security-Policy` to prevent click-jacking and
@@ -43,7 +43,7 @@ const TRACKING_CSP: &str = "default-src 'none'; base-uri 'none'; frame-ancestors
 pub struct ClickQuery {
     /// Optional override URL (used when originalUrl was not baked into the
     /// token). NOTE:axum's `Query` extractor has ALREADY percent-decoded
-    /// this value exactly once (serde_urlencoded form decoding) — use it
+    /// this value exactly once (serde_urlencoded form decoding), use it
     /// verbatim, never decode it again.
     r: Option<String>,
 }
@@ -60,7 +60,7 @@ pub async fn handle_click(
 
     // Capability wave 2: a request on a custom tracking host must be a
     // VERIFIED custom domain; an unconfigured host is refused by name here,
-    // before any token work — never silently served or bounced.
+    // before any token work, never silently served or bounced.
     let host_scope = match host_scope_or_refuse(&state, &headers).await {
         Ok(scope) => scope,
         Err(refusal) => return refusal,
@@ -85,14 +85,14 @@ pub async fn handle_click(
     let ip = extract_client_ip(&headers, addr.ip(), &state);
 
     // E-190 (parity with pixel.rs): bots and security scanners still get
-    // their click-through served — never break the user's redirect — but
+    // their click-through served, never break the user's redirect, but
     // their hits must not pollute click analytics.
     let is_bot = state.bot_detector.is_bot(user_agent.as_deref(), Some(&ip));
     if is_bot {
         info!("E-190: Bot detected on click redirect, skipping recording");
     }
 
-    // SM2-F4: the prefix is extracted char-boundary-safely — the id is
+    // SM2-F4: the prefix is extracted char-boundary-safely, the id is
     // percent-decoded UTF-8 and a slice at a fixed byte offset used to panic
     // when byte 20 split a multi-byte character.
     debug!(
@@ -104,11 +104,11 @@ pub async fn handle_click(
 
     // Unknown token (well-formed shape, but it does not decrypt: fabricated,
     // truncated, or signed with a different key). Answer a TYPED 404 naming
-    // the reason — never the silent fallback bounce (dogfood 2026-10-06 E2).
+    // the reason, never the silent fallback bounce (dogfood 2026-10-06 E2).
     let Some(decoded) = state.codec.decode(&tracking_id) else {
         warn!(
             id_prefix = token_log_prefix(&tracking_id, 20),
-            "Click: unknown tracking token — refused instead of bounced"
+            "Click: unknown tracking token, refused instead of bounced"
         );
         metrics::counter!("apexmail_tracking_click_unknown_token_total").increment(1);
         return refusal_response(&RedirectRefusal::UnknownToken);
@@ -116,7 +116,7 @@ pub async fn handle_click(
     let data = Some(decoded);
 
     // Capability wave 2: the token must belong to the custom host's
-    // workspace — a link for tenant B served on tenant A's tracking host is
+    // workspace, a link for tenant B served on tenant A's tracking host is
     // refused by name, never attributed to the wrong tenant.
     if let Some(decoded) = &data {
         if let Err(refusal) = ensure_token_matches_host(&host_scope, &decoded.tenant_id) {
@@ -127,7 +127,7 @@ pub async fn handle_click(
     let redirect_url = determine_redirect_url(&data, q.r.as_deref(), &fallback);
 
     // Validate protocol and domain. A refusal is answered honestly (400 with
-    // the reason, or 503 when the authorization store cannot answer) — never
+    // the reason, or 503 when the authorization store cannot answer), never
     // a silent bounce to the vendor fallback.
     let validated = validate_redirect_url(&redirect_url, data.as_ref(), &state).await;
     let redirect_url = match validated {
@@ -165,7 +165,7 @@ pub async fn handle_click(
         }
     };
 
-    // Record click asynchronously (fire-and-forget) — only for valid tokens,
+    // Record click asynchronously (fire-and-forget), only for valid tokens,
     // non-bot clients, and redirects that passed domain validation (any
     // refusal returned above).
     if let Some(d) = &data {
@@ -244,7 +244,7 @@ enum RedirectRefusal {
     /// The destination host is not authorized for this tenant.
     NotAuthorized { domain: String },
     /// The destination URL itself is invalid (non-http scheme, unparseable
-    /// URL, over the length cap) — nothing to authorize.
+    /// URL, over the length cap), nothing to authorize.
     InvalidTarget { reason: &'static str },
     /// The authorization store could not answer. Refusing (rather than
     /// guessing) is outage honesty; it is a 503, not a client error.
@@ -404,7 +404,7 @@ async fn verify_redirect_domain(
         return Ok(true);
     }
 
-    // 2. Redis — an AUTHORITATIVE cached verdict only. A key MISS
+    // 2. Redis, an AUTHORITATIVE cached verdict only. A key MISS
     // (`Ok(None)`) is not a "deny": returning early on it made this cache
     // the whole authorization and the Postgres tier below unreachable
     // whenever Redis was up, denying every tenant-owned redirect domain on
@@ -438,7 +438,7 @@ async fn verify_redirect_domain(
                 tenant_id = %tenant_id,
                 domain = %domain,
                 error = %error,
-                "Click: domain authorization lookup failed — refusing for this request only"
+                "Click: domain authorization lookup failed, refusing for this request only"
             );
             return Err(RedirectRefusal::Unavailable {
                 domain: domain.to_owned(),
@@ -462,16 +462,16 @@ async fn verify_redirect_domain(
 
 /// Authoritative Postgres check for redirect-domain authorization: an
 /// owned `domains` row (or any subdomain of one), or a wildcard match in
-/// `tenant_settings`. `Err` means the database could not answer — callers
+/// `tenant_settings`. `Err` means the database could not answer, callers
 /// must refuse for the current request WITHOUT caching the outcome.
 async fn query_domain_authorization(
     state: &AppState,
     tenant_id: &str,
     domain: &str,
 ) -> Result<bool, sqlx::Error> {
-    // Migration 070 renamed `domains.domain` to `domains.name` — the old
+    // Migration 070 renamed `domains.domain` to `domains.name`, the old
     // column reference made this query fail on every deployment.
-    // The `1` literal is INT4: decode as i32 — sqlx does not coerce INT4
+    // The `1` literal is INT4: decode as i32, sqlx does not coerce INT4
     // into i64, and an i64 tuple made this probe (and therefore EVERY
     // database-backed domain authorization) fail with a type error,
     // denying all owned-domain redirects on cache miss.
@@ -496,7 +496,7 @@ async fn query_domain_authorization(
     }
 
     // `allowed_redirect_domains` is a JSONB array (migration 093): decode
-    // through sqlx's Json wrapper — a bare Vec<String> expects TEXT[] and
+    // through sqlx's Json wrapper, a bare Vec<String> expects TEXT[] and
     // failed to decode, erroring (and therefore denying) every wildcard-
     // pattern redirect.
     let patterns = sqlx::query_as::<_, (sqlx::types::Json<Vec<String>>,)>(
@@ -571,7 +571,7 @@ mod tests {
     }
 
     /// The `?r=` value arrives here ALREADY percent-decoded exactly once by
-    /// axum's `Query` extractor — `determine_redirect_url` must use it
+    /// axum's `Query` extractor, `determine_redirect_url` must use it
     /// verbatim. A second decode would silently rewrite URLs that
     /// legitimately contain `%2F`-style sequences.
     #[test]

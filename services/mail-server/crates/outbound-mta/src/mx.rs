@@ -5,7 +5,7 @@
 //! * Targets are ordered by ascending preference number (lower = more
 //!   preferred, RFC 5321 §5.1). The delivery loop walks them in order; on a
 //!   connection failure or a 4xx reply it falls through to the next target.
-//! * A domain with **no MX records** is REFUSED — the relay deliberately does
+//! * A domain with **no MX records** is REFUSED, the relay deliberately does
 //!   not apply the legacy implicit-MX fallback (RFC 5321 §5.1 A/AAAA lookup).
 //!   Silent A-record fallback hid misconfigured sender domains behind
 //!   unpredictable routing; operators must publish an MX.
@@ -60,7 +60,7 @@ pub enum MxError {
 
 impl MxError {
     /// True when retrying the same domain can never succeed (no MX / Null MX
-    /// / malformed name) — the caller must bounce instead of retry.
+    /// / malformed name), the caller must bounce instead of retry.
     pub fn is_permanent(&self) -> bool {
         matches!(
             self,
@@ -81,7 +81,7 @@ pub struct DnsMxResolver {
     /// SSRF escape hatch for loopback test setups (env
     /// `RELAY_ALLOW_PRIVATE_MX`, default FALSE): when true, MX addresses in
     /// private/loopback/link-local/reserved ranges are delivered to anyway.
-    /// Production must keep this off — recipient domains are tenant
+    /// Production must keep this off, recipient domains are tenant
     /// controlled, so an MX that resolves to an internal IP is a
     /// server-side-request-forgery surface (the relay opens SMTP sessions,
     /// with attacker-influenced content, against whatever the address is).
@@ -492,7 +492,7 @@ mod tests {
     }
 
     /// The audit regression: MX addresses in private/loopback/link-local
-    /// ranges were explicitly usable — a tenant could publish an MX
+    /// ranges were explicitly usable, a tenant could publish an MX
     /// resolving at an internal IP (incl. 169.254.169.254) and drive the
     /// relay into opening SMTP sessions against internal services. Resolved
     /// MX addresses are now filtered through the shared
@@ -580,7 +580,7 @@ mod tests {
         };
         assert!(
             !no_address.is_permanent(),
-            "A/AAAA resolution failure is retryable — the host may come back"
+            "A/AAAA resolution failure is retryable, the host may come back"
         );
     }
 

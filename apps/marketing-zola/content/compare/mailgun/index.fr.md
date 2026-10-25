@@ -15,7 +15,7 @@ methodology = "Documentation publique de Mailgun sur mailgun.com/docs, consulté
 volume_assumption = "100 000 emails/mois"
 billing_period = "mensuelle"
 currency_note = "Les prix sont indiqués en EUR. Lorsqu’un fournisseur publie uniquement en USD, le montant en EUR est converti à 1 USD = €0.92 (taux de référence, 2026-08-19) et le prix USD publié par le fournisseur est affiché entre parenthèses. Hors taxes applicables."
-# Feature comparison counts — update when capabilities change
+# Feature comparison counts, update when capabilities change
 verdict_title = "Ce qui distingue ApexMail de Mailgun"
 verdict_points = ["Configuration de déploiement orientée UE/EEE", "Catalogue public actuel (Mailgun publie en USD ; EUR affiché au taux de référence)", "Contrôles d’accès Business et Enterprise", "Journaux d’audit dès le forfait Growth", "Revue d’architecture et de contrat pour les déploiements non standards"]
 
@@ -26,34 +26,34 @@ verdict_points = ["Configuration de déploiement orientée UE/EEE", "Catalogue p
 # of: apexmail | competitor | tie | none.
 comparison_sections = [
   { title = "TRAITEMENT DES DONNÉES DANS L’EEE", rows = [
-    { feature = "Région d’hébergement principale", apex = 'Centres de données UE en Finlande ; données principales traitées dans l’EEE. Les envois Global passent par AWS SES dans ses régions UE (qui peuvent inclure l’Allemagne) — des régions UE d’une société américaine ; le routage EU-only retire ce transport (<a href="/fr/eu-sovereign/">détails</a>)', comp = 'États-Unis (par défaut) ; région UE sélectionnable pour chaque domaine émetteur (même compte et même forfait)<sup><a href="#src-mg1">1</a></sup>', winner = "none" },
-    { feature = "Routage EU-only", apex = 'Oui — un seul réglage : chaque envoi ne part que par les MTA européens propres d’ApexMail ; le transport tiers est retiré, et une route MTA propre indisponible retient le message (<a href="/fr/eu-sovereign/">comment ça marche</a>)', comp = 'Non proposé — région UE sélectionnable par domaine d’envoi ; la livraison passe toujours par l’infrastructure Mailgun<sup><a href="#src-mg1">1</a></sup>', winner = "none" },
-    { feature = "Traitement des données dans l’EEE par défaut", apex = 'Configuration par défaut orientée UE/EEE ; les lieux actifs sont propres à chaque accord', comp = 'Non — basé aux États-Unis par défaut ; région UE configurée par domaine d’envoi<sup><a href="#src-mg1">1</a></sup>', winner = "none" },
-    { feature = "Disponibilité de la DPA", apex = 'Disponible dans le cadre de l’accord ApexMail applicable', comp = 'Disponible — la DPA de Sinch couvre les services Mailgun<sup><a href="#src-mg2">2</a></sup>', winner = "none" }
+    { feature = "Région d’hébergement principale", apex = 'Centres de données UE en Finlande ; données principales traitées dans l’EEE. Les envois Global passent par AWS SES dans ses régions UE (qui peuvent inclure l’Allemagne), des régions UE d’une société américaine ; le routage EU-only retire ce transport (<a href="/fr/eu-sovereign/">détails</a>)', comp = 'États-Unis (par défaut) ; région UE sélectionnable pour chaque domaine émetteur (même compte et même forfait)<sup><a href="#src-mg1">1</a></sup>', winner = "none" },
+    { feature = "Routage EU-only", apex = 'Oui, un seul réglage : chaque envoi ne part que par les MTA européens propres d’ApexMail ; le transport tiers est retiré, et une route MTA propre indisponible retient le message (<a href="/fr/eu-sovereign/">comment ça marche</a>)', comp = 'Non proposé, région UE sélectionnable par domaine d’envoi ; la livraison passe toujours par l’infrastructure Mailgun<sup><a href="#src-mg1">1</a></sup>', winner = "none" },
+    { feature = "Traitement des données dans l’EEE par défaut", apex = 'Configuration par défaut orientée UE/EEE ; les lieux actifs sont propres à chaque accord', comp = 'Non, basé aux États-Unis par défaut ; région UE configurée par domaine d’envoi<sup><a href="#src-mg1">1</a></sup>', winner = "none" },
+    { feature = "Disponibilité de la DPA", apex = 'Disponible dans le cadre de l’accord ApexMail applicable', comp = 'Disponible, la DPA de Sinch couvre les services Mailgun<sup><a href="#src-mg2">2</a></sup>', winner = "none" }
   ]},
   { title = "CAPACITÉS D’ENVOI", rows = [
-    { feature = "API REST", apex = 'Oui — <code>POST /v1/messages</code>', comp = 'Oui — <code>POST /v3/{domain}/messages</code><sup><a href="#src-mg3">3</a></sup>', winner = "none" },
-    { feature = "Relais SMTP", apex = 'Oui — smtp.apexmail.ee:587 (STARTTLS)', comp = 'Oui — smtp.mailgun.org:587 (STARTTLS)<sup><a href="#src-mg3">3</a></sup>', winner = "none" },
-    { feature = "Envoi par lots", apex = 'Disponible lorsque cette option est activée pour le forfait souscrit', comp = 'Oui — envoi par lots via <code>recipient-variables</code> avec jusqu’à 1 000 destinataires<sup><a href="#src-mg3">3</a></sup>', winner = "none" },
-    { feature = "Clés d’idempotence", apex = 'Oui (tous les forfaits) — en-tête <code>Idempotency-Key</code>', comp = 'Non pris en charge — les applications doivent implémenter leur propre logique de déduplication<sup><a href="#src-mg3">3</a></sup>', winner = "apexmail" },
-    { feature = "Envoi programmé", apex = 'Disponible lorsque cette option est activée pour le forfait souscrit', comp = 'Oui — paramètre <code>o:deliverytime</code> (format RFC 2822, jusqu’à 3 jours)<sup><a href="#src-mg3">3</a></sup>', winner = "none" },
-    { feature = "Email entrant", apex = 'Forfaits Business et Enterprise', comp = 'Oui — routes entrantes avec transfert, stockage et actions webhook<sup><a href="#src-mg4">4</a></sup>', winner = "none" }
+    { feature = "API REST", apex = 'Oui, <code>POST /v1/messages</code>', comp = 'Oui, <code>POST /v3/{domain}/messages</code><sup><a href="#src-mg3">3</a></sup>', winner = "none" },
+    { feature = "Relais SMTP", apex = 'Oui, smtp.apexmail.ee:587 (STARTTLS)', comp = 'Oui, smtp.mailgun.org:587 (STARTTLS)<sup><a href="#src-mg3">3</a></sup>', winner = "none" },
+    { feature = "Envoi par lots", apex = 'Disponible lorsque cette option est activée pour le forfait souscrit', comp = 'Oui, envoi par lots via <code>recipient-variables</code> avec jusqu’à 1 000 destinataires<sup><a href="#src-mg3">3</a></sup>', winner = "none" },
+    { feature = "Clés d’idempotence", apex = 'Oui (tous les forfaits), en-tête <code>Idempotency-Key</code>', comp = 'Non pris en charge, les applications doivent implémenter leur propre logique de déduplication<sup><a href="#src-mg3">3</a></sup>', winner = "apexmail" },
+    { feature = "Envoi programmé", apex = 'Disponible lorsque cette option est activée pour le forfait souscrit', comp = 'Oui, paramètre <code>o:deliverytime</code> (format RFC 2822, jusqu’à 3 jours)<sup><a href="#src-mg3">3</a></sup>', winner = "none" },
+    { feature = "Email entrant", apex = 'Forfaits Business et Enterprise', comp = 'Oui, routes entrantes avec transfert, stockage et actions webhook<sup><a href="#src-mg4">4</a></sup>', winner = "none" }
   ]},
   { title = "MODÈLES DE DÉPLOIEMENT", rows = [
-    { feature = "Cloud mutualisé", apex = 'Oui (tous les forfaits) — multi-tenant, hébergé dans l’UE', comp = 'Oui (tous les forfaits)<sup><a href="#src-mg5">5</a></sup>', winner = "none" },
+    { feature = "Cloud mutualisé", apex = 'Oui (tous les forfaits), multi-tenant, hébergé dans l’UE', comp = 'Oui (tous les forfaits)<sup><a href="#src-mg5">5</a></sup>', winner = "none" },
     { feature = "IP dédiée", apex = 'Option additionnelle approuvée sur Pro ; 1 incluse sur Growth et Business ; 3 sur Enterprise Cloud', comp = 'Disponible en option additionnelle sur le forfait Foundation et au-delà<sup><a href="#src-mg5">5</a></sup>', winner = "none" },
     { feature = "Tenance dédiée", apex = 'Soumis à revue d’architecture et de contrat', comp = 'Voir la documentation du fournisseur<sup><a href="#src-mg5">5</a></sup>', winner = "none" },
     { feature = "BYOC / déploiement privé", apex = 'Soumis à revue d’architecture et de contrat', comp = 'Voir la documentation du fournisseur<sup><a href="#src-mg5">5</a></sup>', winner = "none" }
   ]},
   { title = "CONTRÔLES ENTERPRISE", rows = [
     { feature = "SAML SSO", apex = 'Forfaits Business et Enterprise', comp = 'Forfaits Foundation 100K et supérieurs<sup><a href="#src-mg6">6</a></sup>', winner = "none" },
-    { feature = "SCIM", apex = 'Forfait Enterprise', comp = 'Non documenté à la date de vérification — provisioning des utilisateurs via l’API Mailgun<sup><a href="#src-mg6">6</a></sup>', winner = "apexmail" },
-    { feature = "Journaux d’audit", apex = 'Forfait Growth et supérieurs — activité du compte, usage des clés API, changements de configuration ; consultables, exportables', comp = 'Journaux d’événements accessibles via l’API Events ; rétention variable selon le forfait ; pas de piste d’audit consolidée au niveau du compte<sup><a href="#src-mg7">7</a></sup>', winner = "apexmail" }
+    { feature = "SCIM", apex = 'Forfait Enterprise', comp = 'Non documenté à la date de vérification, provisioning des utilisateurs via l’API Mailgun<sup><a href="#src-mg6">6</a></sup>', winner = "apexmail" },
+    { feature = "Journaux d’audit", apex = 'Forfait Growth et supérieurs, activité du compte, usage des clés API, changements de configuration ; consultables, exportables', comp = 'Journaux d’événements accessibles via l’API Events ; rétention variable selon le forfait ; pas de piste d’audit consolidée au niveau du compte<sup><a href="#src-mg7">7</a></sup>', winner = "apexmail" }
   ]},
   { title = "TARIFS À 100K/MOIS (vérifiés le 2026-07-29)", rows = [
     { feature = "Forfait comparé", apex = 'Pro : €89/mois (150 000 emails inclus)', comp = 'Scale : €82.80 (US$90)/mois (100 000 emails inclus)<sup><a href="#src-mg8">8</a></sup>', winner = "none" },
     { feature = "Conditions d’usage", apex = 'Voir le catalogue public actuel et le paiement pour les conditions d’usage applicables', comp = 'à partir de €1.20 (US$1.30)/1 000 en dépassement sur Foundation ; tarifs progressifs sur Scale<sup><a href="#src-mg8">8</a></sup>', winner = "none" },
-    { feature = "Offre gratuite", apex = '3 000 emails/mois + allocation de lancement unique de 30 000 emails', comp = '100 emails/jour (essai Flex — sans carte bancaire)<sup><a href="#src-mg8">8</a></sup>', winner = "apexmail" }
+    { feature = "Offre gratuite", apex = '3 000 emails/mois + allocation de lancement unique de 30 000 emails', comp = '100 emails/jour (essai Flex, sans carte bancaire)<sup><a href="#src-mg8">8</a></sup>', winner = "apexmail" }
   ]},
   { title = "DOMAINES OÙ MAILGUN EST PLUS FORT", rows = [
     { feature = "Validation d’emails", apex = 'API Email Grader (DNS/SPF/DKIM/DMARC/contenu/réputation)', comp = 'API de validation d’emails dédiée avec validation en temps réel et en masse<sup><a href="#src-mg9">9</a></sup>', winner = "competitor" },

@@ -1,4 +1,4 @@
-//! Provider compatibility surface — SendGrid, Mailgun, Postmark, Resend.
+//! Provider compatibility surface, SendGrid, Mailgun, Postmark, Resend.
 //!
 //! A **pure mapping layer**: every route here translates a provider's send
 //! syntax into the canonical [`SendMessageRequest`](crate::routes::messages)
@@ -10,8 +10,8 @@
 //! logic is duplicated or bypassed here: subjects and mailbox parsing, the
 //! DKIM-verified sender-domain gate, suppression and consent enforcement,
 //! plan entitlements/quotas, the durable idempotency ledger and the
-//! `messages` + `email_queue` inserts all run in exactly one place — the
-//! canonical handler — so a compat send can never take a shortcut past the
+//! `messages` + `email_queue` inserts all run in exactly one place, the
+//! canonical handler, so a compat send can never take a shortcut past the
 //! gates the canonical API enforces.
 //!
 //! # Auth model (the `base URL` swap)
@@ -44,8 +44,8 @@
 //! canonical `require_auth` so an auth refusal comes back in the provider's
 //! shape. Platform-level protections that run before any credential is known
 //! (DDoS load-shedding/challenge, the body-size limits, the 30 s timeout, the
-//! `Content-Type` gate) keep the canonical envelope — exactly like nginx's
-//! own 429 — because they are not provider-contract refusals.
+//! `Content-Type` gate) keep the canonical envelope, exactly like nginx's
+//! own 429, because they are not provider-contract refusals.
 //!
 //! # Mapping policy
 //!
@@ -60,7 +60,7 @@
 //! * Fields that are an explicit no-op (e.g.
 //!   `mail_settings.sandbox_mode.enable = false`) are accepted.
 //! * The canonical `category` (the server-owned consent/preference class)
-//!   defaults to the canonical default — `marketing`, which means the SAME
+//!   defaults to the canonical default, `marketing`, which means the SAME
 //!   consent gate `/v1` applies also refuses a compat marketing send. Two
 //!   explicit, opt-in escapes exist: Postmark's `MessageStream`
 //!   (`outbound` → `transactional`, `broadcast` → `marketing`) and the
@@ -73,7 +73,7 @@
 //! response (SendGrid `202` + `X-Message-Id`, Mailgun
 //! `{"id","message"}`, Postmark `{"ErrorCode":0,"MessageID"}` / the batch
 //! array, Resend `{"id"}`). The message id in every provider response is the
-//! canonical message id — the same id `GET /v1/messages/{id}` serves, so a
+//! canonical message id, the same id `GET /v1/messages/{id}` serves, so a
 //! migrated integration keeps its idempotent retry semantics: a retry that
 //! replays from the durable idempotency ledger is re-rendered here through
 //! the same path and returns the SAME provider-shaped id.
@@ -99,7 +99,7 @@ use crate::middleware::auth::{require_scopes, AuthUser};
 use crate::routes::messages::{send_batch, send_message, BatchSendRequest, SendMessageRequest};
 use crate::state::AppState;
 
-/// The compatibility surface's scope gate — identical to `POST /v1/messages`.
+/// The compatibility surface's scope gate, identical to `POST /v1/messages`.
 pub(crate) const COMPAT_SCOPES: [&str; 1] = ["messages:send"];
 
 /// The provider whose wire contract a route serves. Each value owns its
@@ -194,7 +194,7 @@ pub(crate) async fn require_provider_auth(
 /// Resolve the provider's native credential header into an [`AuthUser`].
 ///
 /// * SendGrid / Resend: `Authorization: Bearer <key>`.
-/// * Mailgun: `Authorization: Basic base64("<user>:<key>")` — Mailgun's own
+/// * Mailgun: `Authorization: Basic base64("<user>:<key>")`, Mailgun's own
 ///   `api:<key>` form; the username is accepted as-is (Mailgun clients send
 ///   `api`, and a wrong username cannot grant anything: only the key is
 ///   authoritative).
@@ -349,7 +349,7 @@ impl CanonicalOutcome {
 }
 
 /// Decode a canonical handler response into [`CanonicalOutcome`]. A body that
-/// is not JSON is an explicit internal error — a compat surface must never
+/// is not JSON is an explicit internal error, a compat surface must never
 /// synthesize a success out of an unreadable canonical answer.
 pub(crate) async fn canonical_outcome(
     provider: Provider,
@@ -487,7 +487,7 @@ pub(crate) fn provider_error(
         }
         // Mailgun: `{"message": "..."}`. Mailgun's shape has no per-field
         // slot for the canonical refusal's details, so they are folded into
-        // the message — a refusal that dropped them would hide WHICH field or
+        // the message, a refusal that dropped them would hide WHICH field or
         // recipient was refused.
         Provider::Mailgun => (
             status,
@@ -625,7 +625,7 @@ impl MappingIssues {
 // ─── JSON mapping helpers ──────────────────────────────────────
 //
 // Every accessor takes the borrowed object it reads and records a
-// field-named refusal for a wrong type — the mapping layer never coerces.
+// field-named refusal for a wrong type, the mapping layer never coerces.
 
 /// A string member (missing/null → `None`).
 pub(crate) fn map_str(
@@ -721,7 +721,7 @@ pub(crate) fn map_object(
 }
 
 /// A recipient list: bare addr-spec strings, `"Name <addr>"` strings, or
-/// provider address objects (`{"email": …, "name": …}`) — all three forms are
+/// provider address objects (`{"email": …, "name": …}`), all three forms are
 /// normalized into the canonical mailbox display form.
 pub(crate) fn map_mailbox_list(
     map: &serde_json::Map<String, serde_json::Value>,
@@ -772,7 +772,7 @@ pub(crate) fn json_type_name(value: &serde_json::Value) -> &'static str {
 }
 
 /// `"Name <addr>"` when a display name is present, the bare addr-spec
-/// otherwise — the canonical `from`/`reply_to` display form.
+/// otherwise, the canonical `from`/`reply_to` display form.
 pub(crate) fn mailbox(email: &str, name: Option<&str>) -> String {
     match name.map(str::trim).filter(|name| !name.is_empty()) {
         Some(name) => format!("{name} <{email}>"),
@@ -921,7 +921,7 @@ pub(crate) fn category_override(headers: &HeaderMap) -> Option<String> {
         .map(str::to_string)
 }
 
-/// Dispatch one mapped send onto the canonical handler — the ONLY place the
+/// Dispatch one mapped send onto the canonical handler, the ONLY place the
 /// compat surface touches the send path. The `ApiError` is returned unmapped
 /// so each provider renders its own error shape.
 pub(crate) async fn dispatch_send(
@@ -987,7 +987,7 @@ pub(crate) async fn dispatch_batch_and_decode(
 }
 
 /// The canonical message id from a successful single-send outcome. A success
-/// without an id would be a broken canonical contract — refuse rather than
+/// without an id would be a broken canonical contract, refuse rather than
 /// invent one.
 pub(crate) fn canonical_message_id(
     provider: Provider,

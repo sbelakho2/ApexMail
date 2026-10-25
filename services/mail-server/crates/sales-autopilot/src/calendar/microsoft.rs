@@ -75,7 +75,7 @@ impl MicrosoftCalendarProvider {
             .unwrap_or_else(|| "me".into());
         // PERF #24: a client-construction failure must make the Microsoft
         // Graph integration UNAVAILABLE, never substitute the process-default
-        // (unbounded) client — the old fallback silently discarded the
+        // (unbounded) client, the old fallback silently discarded the
         // timeout. `None` is the documented unavailable shape here: the
         // caller degrades to the internal provider.
         let client = reqwest::Client::builder()
@@ -84,7 +84,7 @@ impl MicrosoftCalendarProvider {
             .map_err(|error| {
                 tracing::error!(
                     %error,
-                    "failed to build Microsoft Graph HTTP client — Microsoft Calendar integration is UNAVAILABLE (PERF #24)"
+                    "failed to build Microsoft Graph HTTP client, Microsoft Calendar integration is UNAVAILABLE (PERF #24)"
                 )
             })
             .ok()?;

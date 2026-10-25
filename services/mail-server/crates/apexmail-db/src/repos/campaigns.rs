@@ -97,7 +97,7 @@ impl CampaignsRepo {
                 .await
             }
             _ => {
-                // First page — no cursor
+                // First page, no cursor
                 sqlx::query_as::<_, Campaign>(
                     "SELECT id, tenant_id, name, subject, template_id, status, scheduled_at, sent_count::bigint AS sent_count, created_at, updated_at \
                      FROM campaigns WHERE tenant_id = $1 \

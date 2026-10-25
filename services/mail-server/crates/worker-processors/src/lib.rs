@@ -1,4 +1,4 @@
-//! ApexMail Worker Processors — Rust implementation of queue-based background workers.
+//! ApexMail Worker Processors, Rust implementation of queue-based background workers.
 //!
 //! This crate provides high-performance Rust implementations of the worker processors
 //! that handle background tasks:analytics aggregation, email sending, reply classification,
@@ -6,20 +6,20 @@
 //!
 //! ## Modules
 //!
-//! - [`analytics`] — Event aggregation and real-time stats (Redis counters + Postgres rollups)
-//! - [`automations`] — Customer automation executor (migration 224): claims due
+//! - [`analytics`], Event aggregation and real-time stats (Redis counters + Postgres rollups)
+//! - [`automations`], Customer automation executor (migration 224): claims due
 //!   trigger events, evaluates rules, executes the action ladder through the
 //!   shared `SendAdmissionService`. Moved here from `sales-autopilot` so the
 //!   owner's sales brain and customer automation execution are separate trust
 //!   domains; this crate has NO dependency on `sales-autopilot`.
-//! - [`campaigns`] — Campaign send consumer (dogfood DF-3): starts due
+//! - [`campaigns`], Campaign send consumer (dogfood DF-3): starts due
 //!   scheduled campaigns, drains `campaign_jobs` resend jobs, and sends each
 //!   `campaign_recipients` row through the same admission gate + enqueue
 //!   transaction, so `/v1/campaigns` sends actually deliver.
-//! - [`email`] — Email sending pipeline (SMTP/SES, DKIM, tracking, warmup)
-//! - [`reply_handler`] — Pattern-based reply classification with Aho-Corasick
-//! - [`webhook`] — Webhook delivery with SSRF protection and circuit breakers
-//! - [`common`] — Shared types, database pools, circuit breakers, error handling
+//! - [`email`], Email sending pipeline (SMTP/SES, DKIM, tracking, warmup)
+//! - [`reply_handler`], Pattern-based reply classification with Aho-Corasick
+//! - [`webhook`], Webhook delivery with SSRF protection and circuit breakers
+//! - [`common`], Shared types, database pools, circuit breakers, error handling
 
 #![deny(unsafe_code)]
 pub mod analytics;
@@ -46,7 +46,7 @@ pub use webhook::WebhookProcessor;
 /// crate's binary in ONE process on parallel threads. Per-module locks do not
 /// exclude each other: `email::tracking` and `email::processor` both mutate
 /// `TRACKING_SECRET_KEY`, so a module-local lock let one test re-set the
-/// variable while another asserted its absence (ci/README.md §9 F10 — flaky
+/// variable while another asserted its absence (ci/README.md §9 F10, flaky
 /// under `cargo test`, invisible under nextest's process isolation). Every
 /// `#[cfg(test)]` module that calls `std::env::set_var`/`remove_var` must take
 /// this lock for the duration of the mutation AND the assertion.
@@ -113,7 +113,7 @@ pub(crate) mod test_support {
     /// THE one provisioning gate for every DB-backed test in this crate:
     /// per-test canonical databases (`migrator::test_support::
     /// fresh_canonical_pool`). `TEST_DATABASE_URL` unset/blank soft-skips
-    /// (returns `None` — callers early-return through their one-line
+    /// (returns `None`, callers early-return through their one-line
     /// `let ... else { return }` guard); a configured-but-broken server is
     /// `Err` and PANICS (audit F01: infrastructure failure must fail the
     /// suite, never silently skip it).
@@ -202,14 +202,14 @@ pub(crate) mod test_support {
     }
 
     /// Pins the gate's fail-hard contract: a CONFIGURED provisioning failure
-    /// (constructed here — the panic arm is the behaviour under test) must
+    /// (constructed here, the panic arm is the behaviour under test) must
     /// PANIC, never degrade into a silent skip (audit F01).
     #[test]
     #[should_panic(expected = "canonical test-database provisioning failed")]
     fn configured_provisioning_failure_fails_the_suite() {
         let injected = migrator::test_support::ProvisionError::new(
             "admin-connect",
-            "injected probe failure — behaviour under test, not infrastructure",
+            "injected probe failure, behaviour under test, not infrastructure",
         );
         let _ = unwrap_provisioned(Err(injected), "gate_probe");
     }

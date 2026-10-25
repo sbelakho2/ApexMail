@@ -1,6 +1,6 @@
 +++
 title = "Anti-Spam Policy"
-description = "ApexMail Anti-Spam Policy — requirements for permission-based sending and spam prevention."
+description = "ApexMail Anti-Spam Policy, requirements for permission-based sending and spam prevention."
 template = "prose.html"
 
 [extra]

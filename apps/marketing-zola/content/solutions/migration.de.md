@@ -26,20 +26,20 @@ Die Migration eines E-Mail-Anbieters ist ein riskanter Vorgang. Verlorene Zustel
 
 ## Die ApexMail-Lösung
 
-- **Verwaltetes IP-Warm-up** — Automatischer Warm-up-Zeitplan für dedizierte IPs, mit Drosselung und Reputationsüberwachung.
-- **Anleitung zum Domain-Übergang** — Schrittweise DNS-Konfiguration für SPF, DKIM, DMARC und benutzerdefinierten Return-Path.
-- **Vorlagen-Import** — Überführen Sie bestehende Vorlagen in das ApexMail-Format, mit Erhalt von Variablen und Layouts.
-- **Webhook-Kompatibilität** — Standardisierte Ereignistypen mit Dokumentation des Payload-Mappings.
-- **Parallelversand-Validierung** — Leiten Sie einen konfigurierbaren Anteil des Verkehrs über ApexMail, während Sie Ihren bestehenden Anbieter weiterbetreiben.
+- **Verwaltetes IP-Warm-up**, Automatischer Warm-up-Zeitplan für dedizierte IPs, mit Drosselung und Reputationsüberwachung.
+- **Anleitung zum Domain-Übergang**, Schrittweise DNS-Konfiguration für SPF, DKIM, DMARC und benutzerdefinierten Return-Path.
+- **Vorlagen-Import**, Überführen Sie bestehende Vorlagen in das ApexMail-Format, mit Erhalt von Variablen und Layouts.
+- **Webhook-Kompatibilität**, Standardisierte Ereignistypen mit Dokumentation des Payload-Mappings.
+- **Parallelversand-Validierung**, Leiten Sie einen konfigurierbaren Anteil des Verkehrs über ApexMail, während Sie Ihren bestehenden Anbieter weiterbetreiben.
 
 ## Migrationsleitfäden je Anbieter
 
 Für vier Anbieter gibt es einen eigenen Leitfaden: Kompatibilitätsendpunkt, Auth-Umstellung, Feld-für-Feld-Zuordnung mit den benannt abgelehnten Konstrukten, DNS-Checkliste, die neu zu abonnierenden Webhook-Ereignisnamen und ein sechsschrittiger Umschaltplan mit Rollback.
 
-- [Von SendGrid migrieren](/de/migrate/sendgrid/) — `POST /v3/mail/send` mit Ihrem ApexMail-Schlüssel im Authorization-Bearer-Slot.
-- [Von Mailgun migrieren](/de/migrate/mailgun/) — `POST /v3/{domain}/messages` mit dem Basic-Auth-Slot; `messages.mime` antwortet mit einem benannten 501.
-- [Von Postmark migrieren](/de/migrate/postmark/) — `POST /email` und `POST /email/batch` mit dem Header `X-Postmark-Server-Token`.
-- [Von Resend migrieren](/de/migrate/resend/) — `POST /emails` und `POST /emails/batch` mit dem Authorization-Bearer-Slot, den Sie bereits senden.
+- [Von SendGrid migrieren](/de/migrate/sendgrid/), `POST /v3/mail/send` mit Ihrem ApexMail-Schlüssel im Authorization-Bearer-Slot.
+- [Von Mailgun migrieren](/de/migrate/mailgun/), `POST /v3/{domain}/messages` mit dem Basic-Auth-Slot; `messages.mime` antwortet mit einem benannten 501.
+- [Von Postmark migrieren](/de/migrate/postmark/), `POST /email` und `POST /email/batch` mit dem Header `X-Postmark-Server-Token`.
+- [Von Resend migrieren](/de/migrate/resend/), `POST /emails` und `POST /emails/batch` mit dem Authorization-Bearer-Slot, den Sie bereits senden.
 
 ## Technische Umsetzung
 
@@ -58,7 +58,7 @@ Durchlaufen Sie diese Phasen der Reihe nach; jede hat ein klares Eintrittskriter
 
 | Phase | Eintrittskriterium | Abnahmekriterien | Rollback-Auslöser |
 |---|---|---|---|
-| 1. Vorbereitung | Konto erstellt; Absenderdomain hinzugefügt; Templates inventarisiert | DNS-Datensätze ausgestellt und geprüft; Template-Zuordnung dokumentiert | Keiner — noch kein Produktionsverkehr |
+| 1. Vorbereitung | Konto erstellt; Absenderdomain hinzugefügt; Templates inventarisiert | DNS-Datensätze ausgestellt und geprüft; Template-Zuordnung dokumentiert | Keiner, noch kein Produktionsverkehr |
 | 2. Parallel validieren | ApexMail-DKIM und SPF bestehen parallel zum aktuellen Anbieter; DMARC auf `p=none` | Testnachrichten werden mit gültiger Authentifizierung zugestellt; Webhook-Ereignisse empfangen und signaturgeprüft | Authentifizierungsfehler oder Webhook-Signaturabweichungen, die nach der Korrektur fortbestehen |
 | 3. Verkehrsanteil verschieben | Parallele Validierung abgeschlossen; Zustellmetriken je Anbieter messbar | Zustellmetriken entsprechen dem bisherigen Anbieter innerhalb der vereinbarten Toleranz im Beobachtungsfenster | Bounce- oder Beschwerdequote überschreitet die AUP-Schwellenwerte (2 % Bounce / 0,1 % Beschwerden) |
 | 4. Vollständige Umstellung | Anhaltende Annahme im vereinbarten Anteil | 100 % des Verkehrs über ApexMail; Legacy-Datensätze erst nach dem Aufbewahrungsfenster entfernt | Zustellverschlechterung, die sich nach Retry-Budget und Warm-up-Anpassungen nicht erholt |

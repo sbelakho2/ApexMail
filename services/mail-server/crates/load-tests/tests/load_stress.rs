@@ -1,21 +1,21 @@
-//! Stress tests — push REAL production code to large volumes and verify correctness.
+//! Stress tests, push REAL production code to large volumes and verify correctness.
 //!
 //! SM12 F10: the old `test_stress_campaign_manager` built 1,000 `Campaign`
 //! structs in a local `Vec`, filtered them by `tenant_id` and asserted the
-//! count — exercising `Vec::filter`, not any manager, dispatch, or
+//! count, exercising `Vec::filter`, not any manager, dispatch, or
 //! enrollment. It is replaced by:
 //!
-//! * `test_stress_queue_fair_dispatch_claim_loop` — the REAL
+//! * `test_stress_queue_fair_dispatch_claim_loop`, the REAL
 //!   `queue_provider::FairQueueScheduler` (the fair-scheduling pass of the
 //!   queue claim loop) driven at 100k jobs through a claim → schedule →
 //!   dispatch → release-back loop;
-//! * `test_stress_webhook_dispatch_logic` — the REAL webhook dispatch-side
+//! * `test_stress_webhook_dispatch_logic`, the REAL webhook dispatch-side
 //!   logic that is callable in-process (the retry ladder, delivery-result
 //!   retryability policy, and payload truncation from
 //!   `worker_processors::webhook::types`), driven at volume with invariant
 //!   assertions. The full `WebhookProcessor` dispatch loop itself needs a
 //!   live Postgres + Redis (it polls `webhook_jobs` via SKIP LOCKED), which
-//!   is out of scope for a hermetic in-process load crate — the HTTP-level
+//!   is out of scope for a hermetic in-process load crate, the HTTP-level
 //!   dispatcher is covered by the k6 suite.
 
 use std::collections::VecDeque;
@@ -31,7 +31,7 @@ use uuid::Uuid;
 use worker_processors::webhook::{truncate_payload, WebhookDeliveryResult, WebhookJob};
 
 // ---------------------------------------------------------------------------
-// 1. Stress CRM — 10 000 leads
+// 1. Stress CRM, 10 000 leads
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -61,7 +61,7 @@ fn test_stress_crm_many_leads() {
 }
 
 // ---------------------------------------------------------------------------
-// 2. Stress the queue claim loop — 100 000 jobs through the REAL
+// 2. Stress the queue claim loop, 100 000 jobs through the REAL
 //    FairQueueScheduler with release-back (SM12 F10)
 // ---------------------------------------------------------------------------
 
@@ -96,7 +96,7 @@ fn test_stress_queue_fair_dispatch_claim_loop() {
     let scheduler = FairQueueScheduler::default_scheduler(); // 30% max share
     let tenants: Vec<Uuid> = (0..TENANTS).map(|_| Uuid::new_v4()).collect();
 
-    // Round-robin tenant assignment — the fair-share cap (ceil(30% of 500)
+    // Round-robin tenant assignment, the fair-share cap (ceil(30% of 500)
     // = 150 per tenant per pass) must hold for EVERY pass regardless.
     let pending: VecDeque<Job> = (0..TOTAL_JOBS)
         .map(|i| make_job(tenants[i % TENANTS], i))
@@ -109,7 +109,7 @@ fn test_stress_queue_fair_dispatch_claim_loop() {
 
     let start = Instant::now();
     while !pending.is_empty() {
-        // "Dequeue" a batch (the scheduler consumes it — jobs are under
+        // "Dequeue" a batch (the scheduler consumes it, jobs are under
         // lease at this point, mirroring PostgresQueueProvider::dequeue).
         let batch: Vec<Job> = pending.drain(..BATCH_SIZE.min(pending.len())).collect();
         let outcome = scheduler.schedule(batch, BATCH_SIZE);
@@ -127,7 +127,7 @@ fn test_stress_queue_fair_dispatch_claim_loop() {
         dispatched_total += outcome.selected.len();
 
         // Release the deferred jobs back to the FRONT of the pending queue
-        // (they were claimed under lease and must not vanish — the exact
+        // (they were claimed under lease and must not vanish, the exact
         // release-back the production caller must perform).
         for job in outcome.deferred.into_iter().rev() {
             pending.push_front(job);
@@ -146,23 +146,23 @@ fn test_stress_queue_fair_dispatch_claim_loop() {
     }
     let elapsed = start.elapsed();
 
-    // Correctness: every single job was dispatched exactly once — the old
+    // Correctness: every single job was dispatched exactly once, the old
     // Vec-filter test could never catch a scheduler that drops jobs.
     assert_eq!(
         dispatched_total, TOTAL_JOBS,
-        "claim loop dispatched {dispatched_total} of {TOTAL_JOBS} jobs — lost work"
+        "claim loop dispatched {dispatched_total} of {TOTAL_JOBS} jobs, lost work"
     );
     assert!(pending.is_empty(), "pending queue must drain completely");
 
     // Throughput floor for the stress volume (conservative CI floor; the
-    // scheduler is an in-memory partition pass — hundreds of k jobs/sec).
+    // scheduler is an in-memory partition pass, hundreds of k jobs/sec).
     let jobs_per_sec = TOTAL_JOBS as f64 / elapsed.as_secs_f64();
     println!(
         "claim loop: {TOTAL_JOBS} jobs in {passes} passes, {elapsed:?} ({jobs_per_sec:.0} jobs/s)"
     );
     assert!(
         elapsed < Duration::from_secs(30),
-        "100k-job claim loop took {elapsed:?} — scheduler throughput collapsed"
+        "100k-job claim loop took {elapsed:?}, scheduler throughput collapsed"
     );
     assert!(
         jobs_per_sec > 5_000.0,
@@ -171,7 +171,7 @@ fn test_stress_queue_fair_dispatch_claim_loop() {
 }
 
 // ---------------------------------------------------------------------------
-// 3. Stress webhook dispatch-side logic — 50 000 jobs through the REAL
+// 3. Stress webhook dispatch-side logic, 50 000 jobs through the REAL
 //    retry ladder, retryability policy, and payload truncation (SM12 F10)
 // ---------------------------------------------------------------------------
 
@@ -206,7 +206,7 @@ fn test_stress_webhook_dispatch_logic() {
 
     let start = Instant::now();
     for i in 0..50_000u64 {
-        let attempt = (i % 14) as i32 + 1; // 1..=14 — includes exhaustion territory
+        let attempt = (i % 14) as i32 + 1; // 1..=14, includes exhaustion territory
         let job = make_webhook_job(attempt);
 
         // Real retry-ladder computation for every job.
@@ -256,12 +256,12 @@ fn test_stress_webhook_dispatch_logic() {
     println!("webhook dispatch logic: 50,000 jobs (5,000 truncations) in {elapsed:?}");
     assert!(
         elapsed < Duration::from_secs(30),
-        "webhook dispatch logic stress took {elapsed:?} — collapsed"
+        "webhook dispatch logic stress took {elapsed:?}, collapsed"
     );
 }
 
 // ---------------------------------------------------------------------------
-// 4. Stress metrics collector — 100 000 data points
+// 4. Stress metrics collector, 100 000 data points
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -293,7 +293,7 @@ fn test_stress_metrics_collector() {
 }
 
 // ---------------------------------------------------------------------------
-// 5. Stress pattern rules — 1 000 rules, match against text
+// 5. Stress pattern rules, 1 000 rules, match against text
 // ---------------------------------------------------------------------------
 
 #[test]

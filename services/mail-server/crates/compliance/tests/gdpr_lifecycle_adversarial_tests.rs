@@ -2,7 +2,7 @@
 //!
 //! Contract (docs/pricing-authority.md + GDPR Art. 12–17):
 //! * request lifecycle is CREATE → in_progress (processing) → completed /
-//!   rejected ONLY — there is no silent skip to `completed` without the
+//!   rejected ONLY, there is no silent skip to `completed` without the
 //!   deliberate processing record;
 //! * every terminal transition writes an `audit_logs` row on the tenant
 //!   chain (F5 `record_terminal_transition`);
@@ -154,7 +154,7 @@ async fn dsar_lifecycle_is_create_in_progress_completed_with_audit_record() {
     seed_tenant(&pool, &tenant).await;
     let subject = format!("lifecycle-{}@example.com", Uuid::new_v4().simple());
 
-    // 1. CREATE — never completed on intake.
+    // 1. CREATE, never completed on intake.
     let (request, token) = gdpr
         .submit_request(&tenant, DataSubjectRequestType::Access, &subject)
         .await
@@ -209,7 +209,7 @@ async fn dsar_lifecycle_is_create_in_progress_completed_with_audit_record() {
     // source suite documents `contact_list_members`: "does not exist on the
     // canonical chain: the store is reported skipped and the export is
     // PARTIAL, not complete"). The honest terminal outcome is therefore
-    // `completed` OR `partial` — both terminal, both completed_at-stamped,
+    // `completed` OR `partial`, both terminal, both completed_at-stamped,
     // and a partial MUST disclose itself in the result.
     assert!(
         final_status == "completed" || final_status == "partial",
@@ -235,7 +235,7 @@ async fn dsar_lifecycle_is_create_in_progress_completed_with_audit_record() {
     );
     assert!(
         stored_result.is_some(),
-        "completion stores the result record — never a bare status flip"
+        "completion stores the result record, never a bare status flip"
     );
 
     // 4. Audit trail: exactly one dsr.lifecycle.completed row for this DSR.
@@ -333,7 +333,7 @@ async fn dsar_cannot_skip_to_completed_without_the_processing_record() {
         "no terminal audit row exists for an unprocessed request"
     );
 
-    // Rejection is also a recorded terminal — but only through the
+    // Rejection is also a recorded terminal, but only through the
     // deliberate processing path. A request parked in manual review
     // (rectification) must NEVER skip to `completed`.
     let (rect_request, _) = gdpr
@@ -427,7 +427,7 @@ async fn tenant_cannot_complete_another_tenants_dsar() {
         "A's own request reaches a terminal outcome, got {status_a:?}"
     );
 
-    // Tenant B's request is untouched — not completed by A's processing.
+    // Tenant B's request is untouched, not completed by A's processing.
     let status_b = status_of(&pool, &req_b.id).await;
     assert_ne!(
         status_b, "completed",

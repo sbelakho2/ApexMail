@@ -1,8 +1,8 @@
 //! DB-backed tests for the automation executor (migration 224 +
 //! `worker_processors::automations`).
 //!
-//! These tests live in `worker-processors` — which has NO dependency on the
-//! sales-autopilot crate — so a green run here proves customer automation
+//! These tests live in `worker-processors`, which has NO dependency on the
+//! sales-autopilot crate, so a green run here proves customer automation
 //! execution works standalone, without the owner's sales-brain process.
 //!
 //! Every test provisions its own canonical database through the production
@@ -37,7 +37,7 @@ async fn fresh_pool(test_name: &str) -> Option<PgPool> {
     match migrator::test_support::fresh_canonical_pool(test_name, test_name).await {
         Ok(pool) => pool,
         // F01: TEST_DATABASE_URL is configured, so a provisioning failure is
-        // an infrastructure failure — fail the test, never soft-skip.
+        // an infrastructure failure, fail the test, never soft-skip.
         Err(error) => panic!("{}", error.panic_message()),
     }
 }
@@ -1066,7 +1066,7 @@ async fn inbound_reply_trigger_sends_transactional() {
 //    recovered by the lease + the derived identities, without operator help
 // ---------------------------------------------------------------------------
 
-/// Window 1 — crash between CLAIM and any effect. The fault kills the tick at
+/// Window 1, crash between CLAIM and any effect. The fault kills the tick at
 /// the statement that would open the run (before admission, before any send).
 /// The abandoned lease must be reclaimed, the event executed exactly once,
 /// and the settled event never re-claimed.
@@ -1103,7 +1103,7 @@ async fn crash_between_claim_and_any_effect_is_recovered_by_the_lease() {
     );
 
     // Crash state: the event was claimed (lease held by a dead process) but
-    // nothing durable happened — no run, no admission, no send.
+    // nothing durable happened, no run, no admission, no send.
     let (status, locked_until): (String, Option<chrono::DateTime<chrono::Utc>>) = sqlx::query_as(
         "SELECT status, locked_until FROM automation_trigger_events \
          WHERE tenant_id = $1 AND event_key = $2",
@@ -1153,7 +1153,7 @@ async fn crash_between_claim_and_any_effect_is_recovered_by_the_lease() {
     assert_eq!(drained.events_claimed, 0);
 }
 
-/// Window 2 — a HALF-EXECUTED action ladder (crash after 2 of 3 actions
+/// Window 2, a HALF-EXECUTED action ladder (crash after 2 of 3 actions
 /// physically executed, only the first recorded). Recovery must resume the
 /// SAME run and re-execute the unrecorded prefix WITHOUT repeating its
 /// effects: the tag stays a set of one, the list keeps one membership row,
@@ -1300,7 +1300,7 @@ async fn half_executed_action_ladder_resumes_without_repeating_effects() {
     assert_eq!(backend.used(), 1, "quota reserved exactly once");
 }
 
-/// Window 3 — crash AFTER the send transaction committed but BEFORE the
+/// Window 3, crash AFTER the send transaction committed but BEFORE the
 /// action bookkeeping was written. The derived message idempotency key
 /// (`autoact:{run_id}:{index}`) must make the recovery a no-op re-enqueue:
 /// one message, one queue row, one quota reservation across the crash.
@@ -1455,7 +1455,7 @@ async fn run_insert_statements(pool: &PgPool) -> i64 {
 
 /// P1: two events against K rules load the tenant's rules ONCE (not once per
 /// event) and persist all K skipped runs of an event with ONE INSERT
-/// statement — while producing exactly the same skipped rows as before.
+/// statement, while producing exactly the same skipped rows as before.
 #[tokio::test]
 async fn two_events_against_k_rules_batch_the_rule_load_and_skip_inserts() {
     let Some(pool) = fresh_pool("autoexec_p1_batch").await else {

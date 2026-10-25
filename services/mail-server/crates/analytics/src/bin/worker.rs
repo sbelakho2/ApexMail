@@ -52,7 +52,7 @@ async fn main() -> anyhow::Result<()> {
 
     let config = analytics::config::AnalyticsConfig::from_env();
     // FINDING C (migration 231): state the cold-storage durability contract
-    // at startup — the compaction ledger is the source of truth, the storage
+    // at startup, the compaction ledger is the source of truth, the storage
     // root is a materialization and must be a durable mount (or backed by
     // object storage). Warning only; local dev is unaffected.
     analytics::config::warn_if_cold_storage_not_durable(&config.storage_path);
@@ -284,7 +284,7 @@ fn backoff_after_failure(current_backoff_secs: u64) -> u64 {
 const INITIAL_TASK_BACKOFF_SECS: u64 = 30;
 /// In-place retries allowed after the initial failure before a scheduled
 /// slot gives up and hands back to the daily scheduler (SM10 F10). Five
-/// retries under the doubling backoff span ~15.5 minutes — long enough to
+/// retries under the doubling backoff span ~15.5 minutes, long enough to
 /// ride out a DB/Redis blip, short enough that a failed nightly compaction
 /// never waits a full day to run while the hot `events` table keeps growing.
 const MAX_TASK_RETRIES: u32 = 5;
@@ -292,7 +292,7 @@ const MAX_TASK_RETRIES: u32 = 5;
 /// Run one scheduled task with IN-PLACE retries (SM10 F10).
 ///
 /// The nightly loops used to `continue` back into the scheduler on failure,
-/// whose first act was recomputing `next_scheduled_time` → tomorrow — so the
+/// whose first act was recomputing `next_scheduled_time` → tomorrow, so the
 /// exponential backoff was dead in effect and a failed run was retried at
 /// most once per day. This helper retries the task DIRECTLY (attempt, then
 /// up to [`MAX_TASK_RETRIES`] retries under [`backoff_after_failure`]) and
@@ -436,7 +436,7 @@ mod tests {
     }
 
     /// THE F10 regression: a failure must re-attempt the task DIRECTLY (not
-    /// hand back to the daily scheduler) until it succeeds — the old loop's
+    /// hand back to the daily scheduler) until it succeeds, the old loop's
     /// `continue` re-entered the scheduler, which slept ~24 h before the
     /// "retry", rendering the backoff dead.
     #[tokio::test(start_paused = true)]
@@ -457,7 +457,7 @@ mod tests {
         assert_eq!(
             attempts.load(std::sync::atomic::Ordering::SeqCst),
             4,
-            "one initial attempt plus in-place retries — never a scheduler round-trip"
+            "one initial attempt plus in-place retries, never a scheduler round-trip"
         );
     }
 

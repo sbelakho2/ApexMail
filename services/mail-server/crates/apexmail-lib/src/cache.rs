@@ -94,7 +94,7 @@ mod tests {
         }
         if std::env::var("APEXMAIL_RELEASE_TEST_MODE").as_deref() == Ok("1") {
             panic!(
-                "APEXMAIL_RELEASE_TEST_MODE: required variable {env_var} is missing — \
+                "APEXMAIL_RELEASE_TEST_MODE: required variable {env_var} is missing, \
              release CI must not skip infrastructure tests"
             );
         }

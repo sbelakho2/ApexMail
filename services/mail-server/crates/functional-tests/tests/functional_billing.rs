@@ -87,7 +87,7 @@ fn vat_estonian_customer_24_percent() {
 
 /// A structurally valid EU VAT number is NOT sufficient for a reverse charge:
 /// only authoritative (VIES) evidence is. This test previously asserted the
-/// opposite, which was the vulnerability — any caller could zero-rate by
+/// opposite, which was the vulnerability, any caller could zero-rate by
 /// supplying a well-formed number.
 #[test]
 fn vat_eu_b2b_without_evidence_charges_the_destination_rate() {

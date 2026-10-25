@@ -1,6 +1,6 @@
 +++
 title = "Anti-Spam-Richtlinie"
-description = "ApexMail-Anti-Spam-Richtlinie — Anforderungen an einwilligungsbasierten Versand und Spam-Prävention."
+description = "ApexMail-Anti-Spam-Richtlinie, Anforderungen an einwilligungsbasierten Versand und Spam-Prävention."
 template = "prose.html"
 
 [extra]

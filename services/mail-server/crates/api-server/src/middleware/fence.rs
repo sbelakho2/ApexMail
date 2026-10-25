@@ -2,28 +2,28 @@
 //!
 //! The HA failover coordinator places `ha:fenced:{node_id}` keys in Redis,
 //! but until now only the HA service's own HTTP routes ever consulted them
-//! — a fenced node kept accepting API writes. This middleware closes that
+//!, a fenced node kept accepting API writes. This middleware closes that
 //! window on the api-server surface: every MUTATING request (POST, PUT,
 //! PATCH, DELETE) must pass the fence gate before it reaches any route.
 //!
 //! # Environment contract (identical to the worker's `fence` module)
 //!
-//! * `APEXMAIL_HA_FENCING` — `"true"`/`"1"` enables enforcement; the
+//! * `APEXMAIL_HA_FENCING`, `"true"`/`"1"` enables enforcement; the
 //!   default is OFF, in which case the middleware is a pass-through that
 //!   performs no Redis reads and every request proceeds unchanged.
-//! * `NODE_ID` — the fence identity (same variable the HA service's
+//! * `NODE_ID`, the fence identity (same variable the HA service's
 //!   `multi_region.node_id` reads; defaults to `node-{pid}`).
 //! * `REDIS_URL` (or `REDIS_HOST`/`REDIS_PORT`/`REDIS_PASSWORD`/`REDIS_DB`)
-//!   — the fence authority.
+//!  , the fence authority.
 //!
 //! # Semantics
 //!
 //! `ha::fence::FenceChecker` answers with a 5 s negative cache; a `Fenced`
-//! or unreadable verdict refuses the write — an unreadable authority FAILS
+//! or unreadable verdict refuses the write, an unreadable authority FAILS
 //! CLOSED (a node that cannot prove it is not fenced must not write to the
 //! primary). Read-only verbs bypass the gate: during the (bounded) fence
 //! observation window a fenced node may still answer reads, which is the
-//! documented trade of the shared negative cache — never the reverse.
+//! documented trade of the shared negative cache, never the reverse.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -130,7 +130,7 @@ impl FenceGate {
 
 /// A fence authority that is permanently unreadable: the construction path
 /// for "fencing explicitly enabled but the authority URL is missing or
-/// invalid" — the operator opted in, so every check fails closed.
+/// invalid", the operator opted in, so every check fails closed.
 #[derive(Debug, Default, Clone, Copy)]
 struct UnreadableStore;
 
@@ -168,7 +168,7 @@ fn fence_refusal_response(err: &FenceError) -> Response {
     (
         StatusCode::SERVICE_UNAVAILABLE,
         axum::Json(serde_json::json!({
-            "error": "node is fenced — writes refused (HA failover in progress); retry against another node"
+            "error": "node is fenced, writes refused (HA failover in progress); retry against another node"
         })),
     )
         .into_response()

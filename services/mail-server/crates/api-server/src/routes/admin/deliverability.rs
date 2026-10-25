@@ -5,9 +5,9 @@
 //! `outbound_provider_throttle_overrides` on every cache miss; these endpoints
 //! are the only writer. Semantics:
 //!
-//! * `throttle_pct = 0` — send everything to the provider;
-//! * `throttle_pct = 100` — block everything to the provider;
-//! * `1..=99` — defer that percentage of submissions. The roll is a stable
+//! * `throttle_pct = 0`, send everything to the provider;
+//! * `throttle_pct = 100`, block everything to the provider;
+//! * `1..=99`, defer that percentage of submissions. The roll is a stable
 //!   hash of the send unit WITHIN a five-minute retry window (a duplicated
 //!   attempt gets one verdict) and re-rolls at the next window, so a
 //!   persistent throttle cannot starve the same submission forever.
@@ -17,7 +17,7 @@
 //! wins over the global row. Expired rows (`expires_at <= NOW()`) are inert
 //! and are omitted from the default listing.
 //!
-//! Every mutation writes an `audit_logs` row in the same transaction — an
+//! Every mutation writes an `audit_logs` row in the same transaction, an
 //! override changes what mail leaves the platform, so the operator who
 //! ordered it must be on record.
 
@@ -139,7 +139,7 @@ pub(crate) fn validate_provider(raw: &str) -> Result<String, String> {
         Ok(provider)
     } else {
         Err(format!(
-            "unsupported provider \"{raw}\"; the throttle engine classifies {} — \
+            "unsupported provider \"{raw}\"; the throttle engine classifies {}, \
              an override for any other value could never match a send",
             PROVIDERS.join(", ")
         ))
@@ -192,7 +192,7 @@ pub(crate) fn validate_reason(raw: &str) -> Result<String, String> {
 }
 
 /// Parse and validate an optional expiry. An expiry in the past would create
-/// a row that is inert the moment it is written — refuse it.
+/// a row that is inert the moment it is written, refuse it.
 pub(crate) fn validate_expiry(
     raw: Option<&str>,
     now: DateTime<Utc>,
@@ -285,7 +285,7 @@ async fn upsert_override(
 
     let mut tx = state.db.begin().await?;
 
-    // One ACTIVE row per (provider, tenant) — migration 267 guarantees the
+    // One ACTIVE row per (provider, tenant), migration 267 guarantees the
     // uniqueness; this select-update-first shape adopts an existing row
     // (including its id) instead of churning ids on every PUT.
     let existing: Option<String> = sqlx::query_scalar(
@@ -406,7 +406,7 @@ async fn upsert_override(
     Ok(Json(OverrideDto::from_row(row)))
 }
 
-/// `DELETE /:id` — removes one override (active or expired).
+/// `DELETE /:id`, removes one override (active or expired).
 async fn delete_override(
     State(state): State<AppState>,
     auth: AuthUser,

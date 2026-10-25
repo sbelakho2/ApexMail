@@ -1,4 +1,4 @@
-//! Chaos engineering service — experiment lifecycle, safety monitoring, metric snapshots.
+//! Chaos engineering service, experiment lifecycle, safety monitoring, metric snapshots.
 
 use chrono::Utc;
 use observability_service::metrics_collector::MetricsCollector;
@@ -41,7 +41,7 @@ pub const MAX_ABS_EXPERIMENT_NUMERIC: f64 = 1.0e15;
 /// Typed validation failure for experiment-config numbers.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ExperimentValidationError {
-    /// NaN or ±infinity — not representable in JSON at all.
+    /// NaN or ±infinity, not representable in JSON at all.
     NonFinite { field: String },
     /// Finite, but outside the documented ±`MAX_ABS_EXPERIMENT_NUMERIC`.
     OutOfRange { field: String, value: f64, max: f64 },
@@ -55,7 +55,7 @@ impl std::fmt::Display for ExperimentValidationError {
             }
             Self::OutOfRange { field, value, max } => write!(
                 f,
-                "{field} must be within ±{max} — larger values are not JSONB-representable (got {value:e})"
+                "{field} must be within ±{max}, larger values are not JSONB-representable (got {value:e})"
             ),
         }
     }
@@ -279,7 +279,7 @@ impl ChaosEngineeringService {
                                         let violated = match Self::safety_check_violated(value, &check.operator, check.threshold) {
                                             Ok(violated) => violated,
                                             Err(error) => {
-                                                warn!(experiment_id = %experiment_id, operator = check.operator, error = %error, "Unknown safety check operator — aborting experiment");
+                                                warn!(experiment_id = %experiment_id, operator = check.operator, error = %error, "Unknown safety check operator, aborting experiment");
                                                 true
                                             }
                                         };
@@ -289,7 +289,7 @@ impl ChaosEngineeringService {
                                                 check = check.name,
                                                 value,
                                                 threshold = check.threshold,
-                                                "Safety check violated — aborting experiment"
+                                                "Safety check violated, aborting experiment"
                                             );
                                             if let Err(e) = Self::complete_experiment_static(
                                                 &pool, experiment_id, ExperimentStatus::Aborted,
@@ -854,7 +854,7 @@ mod tests {
 
     /// A threshold of `f64::MAX` (or any non-finite / absurd value) is stored
     /// by PostgreSQL as a 309-digit integer inside JSONB, which serde_json
-    /// then refuses to parse back — permanently bricking the experiment row.
+    /// then refuses to parse back, permanently bricking the experiment row.
     /// Such values must be refused on write with a clear, typed error.
     #[test]
     fn test_chaos_rejects_non_finite_and_absurd_safety_thresholds() {

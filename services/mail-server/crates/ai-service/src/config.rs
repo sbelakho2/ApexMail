@@ -41,7 +41,7 @@ pub struct AiConfig {
     /// Whether model output is sanitized with the ammonia allowlist before
     /// it is returned or persisted (O-10.2). Default `true`. `false` is a
     /// FAIL-CLOSED refusal: generative answers are refused with an honest
-    /// error (chat returns 503) — disabling sanitization never creates an
+    /// error (chat returns 503), disabling sanitization never creates an
     /// unsanitized output path.
     pub sanitize_ai_output: bool,
     /// Interval in seconds between periodic training checkpoint writes (O-10.3).
@@ -60,7 +60,7 @@ pub struct AiConfig {
     /// P1-SECURITY: dedicated credential for the AI-control routes (`/train`,
     /// `/training/jobs/:job_id`, `/evaluate`, `/admin/reindex`). The universal
     /// `INTERNAL_SERVICE_TOKEN` must never authorize model lifecycle changes.
-    /// REQUIRED in production (`APP_ENV` unset counts as production) — the
+    /// REQUIRED in production (`APP_ENV` unset counts as production), the
     /// service refuses to boot without it. Omitted from serialized output.
     #[serde(default, skip_serializing)]
     pub ai_admin_token: String,
@@ -187,7 +187,7 @@ impl AiConfig {
         // SM9 #10: a bearer API key must never transit plaintext HTTP to a
         // non-loopback host. `http://` stays legitimate for the default
         // local sidecar (127.0.0.1), but anywhere else on the wire the
-        // credential is network-observable — refuse the boot rather than
+        // credential is network-observable, refuse the boot rather than
         // leak the key (fail closed).
         if self.model_enabled
             && !self.model_api_key.trim().is_empty()
@@ -195,7 +195,7 @@ impl AiConfig {
         {
             return Err(
                 "AI_MODEL_ENDPOINT uses plaintext http:// with a non-empty AI_MODEL_API_KEY: \
-                 the bearer credential would transit the network unencrypted — use https:// \
+                 the bearer credential would transit the network unencrypted, use https:// \
                  or a loopback endpoint"
                     .into(),
             );
@@ -261,7 +261,7 @@ impl AiConfig {
 }
 
 /// Production detection following the workspace convention (see
-/// sales-autopilot): `APP_ENV == "production"` case-insensitively — and an
+/// sales-autopilot): `APP_ENV == "production"` case-insensitively, and an
 /// UNSET `APP_ENV` is treated as production (fail closed).
 pub fn is_production_mode() -> bool {
     std::env::var("APP_ENV")
@@ -382,7 +382,7 @@ mod tests {
 
     /// SM9 #10: the gate recognizes exactly the loopback shapes (the
     /// supported local-sidecar configuration) and treats everything else —
-    /// remote hostnames, remote IPs, malformed authorities — as remote.
+    /// remote hostnames, remote IPs, malformed authorities, as remote.
     #[test]
     fn plaintext_http_gate_flags_only_non_loopback_hosts() {
         // Loopback plaintext stays allowed.
@@ -433,7 +433,7 @@ mod tests {
     }
 
     /// P1-SECURITY: production boot refuses without the dedicated AI-admin
-    /// credential — an unset APP_ENV counts as production (fail closed), and
+    /// credential, an unset APP_ENV counts as production (fail closed), and
     /// a loaded production config carries the credential.
     #[test]
     fn production_boots_require_ai_admin_token() {

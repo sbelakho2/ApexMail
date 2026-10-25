@@ -13,7 +13,7 @@
 //! Mapping notes:
 //! * the send ledger is now `sales_step_executions` (state `sent`/`skipped`)
 //!   plus the `messages` idempotency key
-//!   `sa:{enrollment}:{version}:{step}:{attempt_kind}:{variant}` — NOT the
+//!   `sa:{enrollment}:{version}:{step}:{attempt_kind}:{variant}`, NOT the
 //!   campaign `sacmp:{campaign}:{recipient}` key;
 //! * "the scheduler completes the campaign" no longer exists
 //!   (`scheduler::run`/`tick`/`process_campaign` removed with the engine); the
@@ -62,18 +62,18 @@ use sales_autopilot::types::{SalesError, SenderIdentity, SenderPool};
 // ---------------------------------------------------------------------------
 
 /// Deterministic in-memory [`billing_service::send_admission::
-/// SendAdmissionBackend`] — the SHARED admission contract (one counter per
+/// SendAdmissionBackend`], the SHARED admission contract (one counter per
 /// tenant, usage-event-id de-duplication, all-or-nothing reservation,
 /// event-id keyed rollback) with the knobs these tests need.
 ///
 /// Modes:
-/// * `new()` — allow everything (limit = -1, billing's "unlimited"),
-/// * `with_limit(n)` — allow exactly n reserved units, then quota denial,
-/// * `with_transient_failure_at(call)` — the given record call (1-based)
+/// * `new()`, allow everything (limit = -1, billing's "unlimited"),
+/// * `with_limit(n)`, allow exactly n reserved units, then quota denial,
+/// * `with_transient_failure_at(call)`, the given record call (1-based)
 ///   fails with an infrastructure error, simulating a billing/DB hiccup,
-/// * `suppress(email)` — put an address on the tenant suppression list.
+/// * `suppress(email)`, put an address on the tenant suppression list.
 ///
-/// NOTE: deliberately not `Default` — a derived Default would set limit=0
+/// NOTE: deliberately not `Default`, a derived Default would set limit=0
 /// (deny everything); construct via [`FakeAdmissionBackend::new`].
 #[derive(Debug)]
 struct FakeAdmissionBackend {
@@ -404,7 +404,7 @@ struct QueuedEmailRow {
 
 /// The dispatcher's real job is unchanged: enqueue through the platform
 /// pipeline with List-Unsubscribe headers, escaped personalization, the
-/// compliance footer, typed sales provenance — but the envelope sender is now
+/// compliance footer, typed sales provenance, but the envelope sender is now
 /// the RESOLVED sender identity, never the deployment-wide
 /// `SALES_CAMPAIGN_FROM_EMAIL` (the defect the sequence path exists to fix).
 #[tokio::test]
@@ -759,9 +759,9 @@ async fn suppression_landing_between_decision_and_enqueue_is_refused() {
 ///    the idempotency key and is a no-op that consumes no additional quota
 ///    (the deterministic `sa-send:{step_execution_id}` usage identity is
 ///    recognized as a duplicate, and a duplicate owns no reservation to
-///    release — releasing it would delete the winner's);
+///    release, releasing it would delete the winner's);
 /// 3. a DIFFERENT step for the same recipient is a different logical send and
-///    does produce a second message — the regression the key change exists
+///    does produce a second message, the regression the key change exists
 ///    for.
 #[tokio::test]
 async fn crash_replay_never_double_sends_but_a_second_step_is_a_new_send() {
@@ -921,7 +921,7 @@ async fn crash_replay_never_double_sends_but_a_second_step_is_a_new_send() {
 /// restoring quota lets the SAME live action enqueue. The old "campaign pauses
 /// with an error state" half of this test was scheduler behaviour
 /// (`scheduler::process_campaign` is removed with the engine); the surviving
-/// caller contract is a retryable action — see the module docs.
+/// caller contract is a retryable action, see the module docs.
 #[tokio::test]
 async fn quota_exhaustion_refuses_the_send_and_recovers() {
     let Some(mut fx) = fixture("sequence_quota", fixture_options()).await else {
@@ -1061,7 +1061,7 @@ async fn transient_quota_failure_is_retried_without_duplicates() {
     assert_eq!(message_count_for_step(&fx.db, exec2).await, 0);
     assert_eq!(queue_count_for_step(&fx.db, exec2).await, 0);
 
-    // Health restored: retry the failed step, then replay it — one row each.
+    // Health restored: retry the failed step, then replay it, one row each.
     fx.set_admission(Arc::new(FakeAdmissionBackend::new()));
     assert_eq!(
         enqueue_step(&fx, &key2, exec2, enrollment_id, &leased2, &sender2)
@@ -1212,7 +1212,7 @@ async fn sales_send_without_quota_defers_retryably_and_writes_no_message() {
 
 /// A recipient on the canonical suppression list is refused by admission
 /// BEFORE the enqueue transaction: NON-RETRYABLE (the step is cancelled, the
-/// action succeeds — it must never be requeued), no message, no queue row,
+/// action succeeds, it must never be requeued), no message, no queue row,
 /// no quota consumed.
 #[tokio::test]
 async fn suppressed_recipient_is_refused_non_retryably_on_the_sales_path() {
@@ -1929,11 +1929,11 @@ mod reply_http {
         inbox::InboxManager,
     };
 
-    /// batch: system-tenant restriction — the router gate admits the system
+    /// batch: system-tenant restriction, the router gate admits the system
     /// tenant ONLY, so the reply fixtures seed under the SHARED system tenant
     /// and keep their isolation through per-fixture unique correspondents and
     /// sender domains (never through tenant ids). Cleanup is scoped to this
-    /// fixture's rows ([`cleanup_reply_fixture`]) — never `cleanup_tenant` on
+    /// fixture's rows ([`cleanup_reply_fixture`]), never `cleanup_tenant` on
     /// the shared tenant.
     struct ReplyFixture {
         app: axum::Router,
@@ -2027,7 +2027,7 @@ mod reply_http {
         })
     }
 
-    /// batch: scoped cleanup — removes ONLY this fixture's rows from the
+    /// batch: scoped cleanup, removes ONLY this fixture's rows from the
     /// shared system tenant (by inbox id, reply idempotency key and the
     /// per-fixture unique sender domain).
     async fn cleanup_reply_fixture(db: &PgPool, inbox_id: Uuid, domain: &str) {
@@ -2048,7 +2048,7 @@ mod reply_http {
                 .await
                 .unwrap_or_else(|error| panic!("reply fixture cleanup failed: {error}"));
         }
-        // `sales_inbox_messages.id` is UUID — bind the typed id, not text.
+        // `sales_inbox_messages.id` is UUID, bind the typed id, not text.
         sqlx::query("DELETE FROM sales_inbox_messages WHERE id = $1")
             .bind(inbox_id)
             .execute(db)
@@ -2208,7 +2208,7 @@ mod reply_http {
     }
 
     /// A correspondent who hard-bounced (platform suppressions) never gets
-    /// the reply — and the message stays visibly unanswered.
+    /// the reply, and the message stays visibly unanswered.
     #[tokio::test]
     async fn reply_to_suppressed_correspondent_refused() {
         let Some(fx) = reply_fixture("reply_suppressed").await else {
@@ -2243,7 +2243,7 @@ mod reply_http {
                 .unwrap();
         assert!(!replied.0, "failed reply must not flip the replied flag");
 
-        // batch: scoped cleanup — this fixture's suppression row only.
+        // batch: scoped cleanup, this fixture's suppression row only.
         sqlx::query("DELETE FROM suppressions WHERE id = $1")
             .bind(&suppression_id)
             .execute(&fx.db)
@@ -2259,7 +2259,7 @@ mod reply_http {
         let Some(fx) = reply_fixture("reply_cross_tenant").await else {
             return;
         };
-        // batch: system-tenant restriction — the gate refuses foreign tenants
+        // batch: system-tenant restriction, the gate refuses foreign tenants
         // with 403 BEFORE the handler's tenant-scoped lookup (which answered
         // a data-layer 404 before the system-tenant restriction existed).
         let other_tenant = common::insert_test_tenant(&fx.db, "reply-other").await;
@@ -2289,7 +2289,7 @@ mod reply_http {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-        // batch: scoped count — the shared system tenant carries concurrent
+        // batch: scoped count, the shared system tenant carries concurrent
         // fixtures' replies, so assert on THIS fixture's message only.
         let queue: (i64,) = sqlx::query_as(
             "SELECT COUNT(*) FROM email_queue \
@@ -2311,7 +2311,7 @@ mod reply_http {
         let Some(fx) = reply_fixture("reply_no_domain").await else {
             return;
         };
-        // batch: scoped removal — delete ONLY this fixture's domain; the
+        // batch: scoped removal, delete ONLY this fixture's domain; the
         // shared system tenant carries every concurrent fixture's domain.
         sqlx::query("DELETE FROM domains WHERE name = $1")
             .bind(&fx.domain)
@@ -2353,7 +2353,7 @@ mod reply_http {
     }
 
     /// A campaign opt-out (sales_unsubscribes only) deliberately does NOT
-    /// block a 1:1 reply — documented decision in enqueue_reply.
+    /// block a 1:1 reply, documented decision in enqueue_reply.
     #[tokio::test]
     async fn campaign_optout_does_not_block_personal_reply() {
         let Some(fx) = reply_fixture("reply_campaign_optout").await else {
@@ -2385,7 +2385,7 @@ mod reply_http {
         );
         assert_eq!(reply_queue_rows(&fx.db, fx.inbox_id).await.len(), 1);
 
-        // batch: scoped cleanup — this fixture's opt-out row only.
+        // batch: scoped cleanup, this fixture's opt-out row only.
         sqlx::query("DELETE FROM sales_unsubscribes WHERE tenant_id = $1 AND email = $2")
             .bind(&fx.tenant_id)
             .bind(&fx.correspondent)

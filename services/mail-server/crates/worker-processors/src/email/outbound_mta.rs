@@ -4,7 +4,7 @@
 //! # Why the library and not the SMTP wire contract
 //!
 //! The worker → relay SMTP contract (`X-ApexMail-Route` on the submission,
-//! `X-ApexMail-Source-IP` in the end-of-DATA reply — see
+//! `X-ApexMail-Source-IP` in the end-of-DATA reply, see
 //! [`super::transport`]) is NOT complete on either side: `crates/outbound-mta`
 //! owns the recipient-facing connector but exposes no SMTP submission
 //! listener (its daemon only polls the durable queue and serves health), and
@@ -12,7 +12,7 @@
 //! DATA, so it cannot read the reply header that would carry the bound IP.
 //!
 //! The MTA's idempotent acceptance protocol DOES already exist as a library
-//! API, and it is exactly the contract the audit demanded — a stable send id
+//! API, and it is exactly the contract the audit demanded, a stable send id
 //! plus a requested source IP in, the verified actual source IP in the SAME
 //! idempotent acceptance record:
 //!
@@ -71,7 +71,7 @@ pub trait RelaySubmitter: Send + Sync {
     /// never rebuilds and resubmits MIME that the relay already holds. The
     /// worker re-renders with a fresh `Date`, MIME boundary and tracking-token
     /// IVs on each attempt, so the relay's byte-contract fingerprint of a
-    /// rebuilt submission differs from the stored one — resubmitting it is
+    /// rebuilt submission differs from the stored one, resubmitting it is
     /// what used to terminalize the queue row as a false "idempotency
     /// conflict" while the relay ledger stayed `pending` (dogfood finding
     /// 2026-10-06 P1 split-brain).
@@ -116,8 +116,8 @@ impl OutboundMtaTransport {
     /// Build the production submitter around the worker's database pool: a
     /// durable `outbound_relay_ledger` (migration 212) plus system MX
     /// resolution, with the relay's own WARMUP ADMISSION gate installed
-    /// (P0): every SMTP attempt on a warming requested IP — inline and
-    /// daemon retry alike — is admitted at the effect boundary by the relay,
+    /// (P0): every SMTP attempt on a warming requested IP, inline and
+    /// daemon retry alike, is admitted at the effect boundary by the relay,
     /// so a durable retry can never bypass the IP's daily cap.
     pub fn from_pool(pool: &PgPool, redis: Option<&deadpool_redis::Pool>) -> ProcessorResult<Self> {
         Self::from_pool_with_config(pool, redis, RelayConfig::default())
@@ -176,7 +176,7 @@ impl OutboundMtaTransport {
         let host = endpoint_host.trim().trim_end_matches('.').to_string();
         if host.is_empty() {
             return Err(ProcessorError::Config(
-                "the sales relay endpoint host is empty — refusing to build a sales \
+                "the sales relay endpoint host is empty, refusing to build a sales \
                  transport without a declared relay identity"
                     .into(),
             ));
@@ -193,7 +193,7 @@ impl OutboundMtaTransport {
 
     /// Build the typed submission the MTA ledger keys on.
     ///
-    /// The identity is [`PreparedEmail::send_unit`] — the SAME value the
+    /// The identity is [`PreparedEmail::send_unit`], the SAME value the
     /// processor reserved on `sales_delivery_acceptances` and the PRIMARY KEY
     /// of `outbound_relay_ledger` (migration 212), so a replayed submission
     /// returns the stored acceptance instead of delivering again.
@@ -205,7 +205,7 @@ impl OutboundMtaTransport {
         if !matches!(route, DeliveryRoute::Dedicated { .. }) {
             return Err(ProcessorError::Transport(format!(
                 "the outbound MTA transport only carries the dedicated delivery route; \
-                 route {route} belongs to the shared SES pool — refusing before submission"
+                 route {route} belongs to the shared SES pool, refusing before submission"
             )));
         }
         let send_unit = email.send_unit.trim();
@@ -273,7 +273,7 @@ impl OutboundMtaTransport {
 ///
 /// * a terminal relay failure (`Permanent`) is carried as a 5xx-class SMTP
 ///   refusal so the processor takes the no-retry path (the MTA ledger is
-///   already terminal — a resubmit would return the stored failure). The
+///   already terminal, a resubmit would return the stored failure). The
 ///   remote diagnostics the relay folded into `reason` still decide
 ///   suppression through the existing address-proving rule: a 5.1.x /
 ///   "user unknown" diagnostic suppresses, a policy refusal does not;
@@ -305,7 +305,7 @@ fn receipt_from_record(record: &AcceptanceRecord) -> DeliveryReceipt {
     DeliveryReceipt {
         transport: TransportType::Smtp,
         transport_message_id: None,
-        // The verified bound IP from the acceptance record — the ONLY
+        // The verified bound IP from the acceptance record, the ONLY
         // evidence that lets the processor consume warmup capacity.
         actual_source_ip: record.actual_source_ip,
         // The relay resolved the recipient MX but the mailbox provider
@@ -329,7 +329,7 @@ fn outcome_for_stored_row(
             let record = row.acceptance.ok_or_else(|| {
                 ProcessorError::SourceBindingUnverified(format!(
                     "outbound MTA ledger row for '{send_unit}' is accepted but carries no \
-                     acceptance record — refusing to treat it as delivered"
+                     acceptance record, refusing to treat it as delivered"
                 ))
             })?;
             verify_acceptance_record(route, send_unit, &record)?;
@@ -346,7 +346,7 @@ fn outcome_for_stored_row(
         }),
         state => Err(ProcessorError::RelayDeliveryPending(format!(
             "outbound MTA already holds send unit '{send_unit}' in state '{state}' \
-             (attempt {}, next attempt {}) — the relay owns the delivery ladder; refusing to \
+             (attempt {}, next attempt {}), the relay owns the delivery ladder; refusing to \
              resubmit rebuilt bytes under the same idempotency key",
             row.attempt, row.next_attempt_at
         ))),
@@ -357,7 +357,7 @@ fn outcome_for_stored_row(
 ///
 /// The record must be `accepted`, must carry the send unit that was
 /// submitted, and must prove the reserved IP was the actual bound IP. A
-/// missing report never verifies — there is NO optimistic success.
+/// missing report never verifies, there is NO optimistic success.
 fn verify_acceptance_record(
     route: &DeliveryRoute,
     expected_send_unit: &str,
@@ -365,13 +365,13 @@ fn verify_acceptance_record(
 ) -> ProcessorResult<()> {
     if record.state != "accepted" {
         return Err(ProcessorError::SourceBindingUnverified(format!(
-            "outbound MTA returned record for '{}' in state '{}' — refusing to treat it as accepted",
+            "outbound MTA returned record for '{}' in state '{}', refusing to treat it as accepted",
             record.send_unit, record.state
         )));
     }
     if record.send_unit != expected_send_unit {
         return Err(ProcessorError::SourceBindingUnverified(format!(
-            "outbound MTA acceptance is keyed on '{}' but '{}' was submitted — idempotency \
+            "outbound MTA acceptance is keyed on '{}' but '{}' was submitted, idempotency \
              identity mismatch",
             record.send_unit, expected_send_unit
         )));
@@ -385,7 +385,7 @@ fn verify_acceptance_record(
         }
         (requested, actual) => Err(ProcessorError::SourceBindingUnverified(format!(
             "outbound MTA acceptance for '{expected_send_unit}' does not verify the reserved \
-             source IP {source_ip}: requested {requested:?}, actual {actual:?} — refusing to \
+             source IP {source_ip}: requested {requested:?}, actual {actual:?}, refusing to \
              report a verified dedicated send (and never consuming its warmup capacity)"
         ))),
     }
@@ -397,7 +397,7 @@ impl super::transport::EmailTransport for OutboundMtaTransport {
         "outbound-mta"
     }
 
-    /// TRUE — honestly: the relay binds the recipient-facing socket to the
+    /// TRUE, honestly: the relay binds the recipient-facing socket to the
     /// requested IP before connect and reports the kernel-bound actual IP in
     /// the same acceptance record this transport verifies before returning
     /// success (see the module docs).
@@ -424,7 +424,7 @@ impl super::transport::EmailTransport for OutboundMtaTransport {
         if !matches!(route, DeliveryRoute::Dedicated { .. }) {
             return Err(ProcessorError::Transport(format!(
                 "the outbound MTA transport only carries the dedicated delivery route; \
-                 route {route} belongs to the shared SES pool — refusing before submission"
+                 route {route} belongs to the shared SES pool, refusing before submission"
             )));
         }
         let send_unit = email.send_unit.trim();
@@ -443,7 +443,7 @@ impl super::transport::EmailTransport for OutboundMtaTransport {
         // queue row terminalized `failed` ("idempotency conflict") while the
         // relay ledger stayed `pending` and could still deliver (dogfood
         // finding 2026-10-06 P1 split-brain). Whenever the relay already
-        // holds the unit, report its stored outcome — accepted rows verify
+        // holds the unit, report its stored outcome, accepted rows verify
         // and return their stored acceptance; non-terminal rows DEFER.
         match self.relay.get(send_unit).await {
             Ok(Some(row)) => return outcome_for_stored_row(route, send_unit, row),
@@ -661,7 +661,7 @@ mod tests {
     }
 
     /// The submitter receives EXACTLY the stable send identity the worker's
-    /// acceptance ledger reserved — migration 212's ledger key.
+    /// acceptance ledger reserved, migration 212's ledger key.
     #[tokio::test]
     async fn submission_carries_the_shared_send_unit_identity() {
         let scripted = Arc::new(ScriptedRelay::new(record(
@@ -718,7 +718,7 @@ mod tests {
         );
         assert!(
             !crate::email::processor::is_recipient_invalid(&error),
-            "a binding mismatch says nothing about the mailbox — no suppression"
+            "a binding mismatch says nothing about the mailbox, no suppression"
         );
 
         // The binding was never verified; the relay's gate already
@@ -726,7 +726,7 @@ mod tests {
         let _ = (route, error);
     }
 
-    /// A receipt with NO reported actual IP does not verify — no optimistic
+    /// A receipt with NO reported actual IP does not verify, no optimistic
     /// success.
     #[tokio::test]
     async fn missing_source_ip_report_never_verifies() {
@@ -906,7 +906,7 @@ mod tests {
         assert!(matches!(transient, ProcessorError::Transport(_)));
     }
 
-    /// A record that is not `accepted` — or is keyed on another unit — never
+    /// A record that is not `accepted`, or is keyed on another unit, never
     /// verifies, and a shared route has no binding to verify.
     #[tokio::test]
     async fn acceptance_verification_covers_every_rejection_shape() {
@@ -1006,7 +1006,7 @@ mod tests {
     }
 
     /// A stored terminal relay failure keeps its 5xx refusal shape (and its
-    /// address-proving classification) — observed from the ledger without
+    /// address-proving classification), observed from the ledger without
     /// resubmitting the message.
     #[tokio::test]
     async fn stored_terminal_failure_maps_to_a_5xx_refusal_without_resubmitting() {
@@ -1045,7 +1045,7 @@ mod tests {
     /// DSN it); the transport observes the stored row, reports
     /// `RelayDeliveryPending` (the processor defers instead of failing the
     /// queue row), and once the relay accepts, the stored acceptance is
-    /// returned — exactly one delivery, both sides agreeing on the outcome.
+    /// returned, exactly one delivery, both sides agreeing on the outcome.
     #[tokio::test]
     async fn retry_after_a_transient_failure_defers_and_never_resubmits_rebuilt_bytes() {
         use std::sync::atomic::AtomicBool;
@@ -1096,7 +1096,7 @@ mod tests {
                         outbound_mta::ledger::LedgerError::Corrupt {
                             send_unit: request.send_unit,
                             message: "idempotency conflict: send_unit reused with a different \
-                                  delivery contract — reconcile against the existing row"
+                                  delivery contract, reconcile against the existing row"
                                 .into(),
                         },
                     ))
@@ -1137,7 +1137,7 @@ mod tests {
         let error = transport
             .send(&email(), &route)
             .await
-            .expect_err("the relay still holds the send — the worker defers");
+            .expect_err("the relay still holds the send, the worker defers");
         assert!(
             matches!(error, ProcessorError::RelayDeliveryPending(_)),
             "a retry while the relay holds the row must defer, got {error:?}"

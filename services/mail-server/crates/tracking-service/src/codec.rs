@@ -51,7 +51,7 @@ pub struct UnsubscribeData {
     /// Decoded for token-expiry validation in the unsubscribe flow.
     pub timestamp_ms: u64,
     /// F13:originating message id, present only in v2 unsubscribe tokens.
-    /// `None` for legacy (`tenant:recipient:ts`) tokens — the caller must
+    /// `None` for legacy (`tenant:recipient:ts`) tokens, the caller must
     /// then resolve attribution against the canonical recipient arrays (or
     /// record `"unknown"`) and NEVER invent a message id.
     pub message_id: Option<String>,
@@ -170,7 +170,7 @@ impl TrackingCodec {
     // ── Unsubscribe token ─────────────────────────────────────────────
 
     /// Generate an AES-128-GCM encrypted unsubscribe token.
-    /// Payload:`{tenantId}:{recipient}:{unix_ms}` (UTF-8) — the LEGACY v1
+    /// Payload:`{tenantId}:{recipient}:{unix_ms}` (UTF-8), the LEGACY v1
     /// format (no message attribution). Prefer
     /// [`TrackingCodec::generate_unsubscribe_token_with_message`] for new
     /// mail so the tracking service can attribute the unsubscribe to the
@@ -197,7 +197,7 @@ impl TrackingCodec {
     /// attribution never depends on a `messages` lookup that can silently
     /// fail and get substituted with an invented id.
     ///
-    /// v2 payload layout (binary, length-prefixed — unambiguous even when
+    /// v2 payload layout (binary, length-prefixed, unambiguous even when
     /// tenant/recipient/message ids contain `:`):
     ///
     /// ```text
@@ -236,8 +236,8 @@ impl TrackingCodec {
     }
 
     /// Verify and decode an unsubscribe token.
-    /// Supports two formats:/// 1. **New (GCM-encrypted)** — IV[12] || AuthTag[16] || Ciphertext.
-    /// 2. **Legacy (HMAC-signed)** — payload-bytes || HMAC-SHA-256 suffix,
+    /// Supports two formats:/// 1. **New (GCM-encrypted)**, IV[12] || AuthTag[16] || Ciphertext.
+    /// 2. **Legacy (HMAC-signed)**, payload-bytes || HMAC-SHA-256 suffix,
     ///    either the full 32-byte digest or the legacy 16-byte truncation
     ///    (#194).
     /// `max_age_days` defaults to 90 days.
@@ -388,7 +388,7 @@ impl TrackingCodec {
         match verify(32).or_else(|| verify(16)) {
             Some(payload) => {
                 tracing::debug!(
-                    "Legacy HMAC unsubscribe token verified — consider re-issuing with the GCM format"
+                    "Legacy HMAC unsubscribe token verified, consider re-issuing with the GCM format"
                 );
                 Some(payload)
             }
@@ -401,8 +401,8 @@ impl TrackingCodec {
 
 /// Returns HMAC-SHA-256(secret, info) truncated to `len` bytes.
 ///
-/// `Hmac::new_from_slice` accepts ANY key length — the `Err` arm is
-/// uninhabited for HMAC — so the previous "degrade to an empty key" fallback
+/// `Hmac::new_from_slice` accepts ANY key length, the `Err` arm is
+/// uninhabited for HMAC, so the previous "degrade to an empty key" fallback
 /// was dead code that, if it ever COULD run, would have silently made every
 /// derived key identical. The invariant is asserted instead.
 fn derive_key_hmac(secret: &[u8], info: &[u8], len: usize) -> Zeroizing<Vec<u8>> {
@@ -431,7 +431,7 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 
 // ── Unsubscribe payload parser ────────────────────────────────────────────────
 
-/// F13:v2 unsubscribe payload magic. Uppercase on purpose — platform tenant
+/// F13:v2 unsubscribe payload magic. Uppercase on purpose, platform tenant
 /// ids are 26-char [0-9a-z] nanoids, so a legacy v1 text payload
 /// (`"tenant:recipient:ts"`) can never start with it and the two formats
 /// stay unambiguously distinguishable after decryption.
@@ -439,7 +439,7 @@ const UNSUB_PAYLOAD_V2_MAGIC: &[u8; 4] = b"AXU2";
 
 /// Serialize a v2 (message-attributed) unsubscribe payload.
 ///
-/// SM2-F9: every length-prefixed field must fit `u16::MAX` — the previous
+/// SM2-F9: every length-prefixed field must fit `u16::MAX`, the previous
 /// silent `as u16` truncation produced a structurally corrupt payload that
 /// could never decode, minting a dead unsubscribe token with no error.
 fn serialize_unsub_payload_v2(
@@ -518,7 +518,7 @@ fn parse_unsub_payload_v2(buf: &[u8]) -> Option<(String, String, String, u64)> {
 
 /// Shared age gate for unsubscribe/preference tokens (v1 and v2 payloads):
 /// rejected once older than `max_age_days` (codec default 90 days; the
-/// operator overrides via TRACKING_TOKEN_MAX_AGE_DAYS — audit #14: stale
+/// operator overrides via TRACKING_TOKEN_MAX_AGE_DAYS, audit #14: stale
 /// signed URLs have an explicit lifetime, never indefinite-by-accident).
 fn unsubscribe_token_age_ok(timestamp_ms: u64, max_age_days: Option<u64>) -> bool {
     let now_ms = SystemTime::now()
@@ -576,7 +576,7 @@ fn write_u16be(buf: &mut Vec<u8>, v: u16) {
     buf.push((v & 0xff) as u8);
 }
 
-/// SM2-F9: every length-prefixed field must fit `u16::MAX` — an
+/// SM2-F9: every length-prefixed field must fit `u16::MAX`, an
 /// `original_url` (or recipient/message id) longer than 65 535 bytes used to
 /// have its length prefix silently truncated (`as u16`), minting a token
 /// that could never decode; the click route only enforced URL length at
@@ -606,7 +606,7 @@ fn serialize_tracking_data(data: &TrackingData) -> Result<Vec<u8>> {
     }
     if version == 3 && url.len() > u16::MAX as usize {
         return Err(anyhow!(
-            "tracking payload field `original_url` is {} bytes; the u16 length prefix caps fields at {} — enforce max_redirect_url_len at MINT time",
+            "tracking payload field `original_url` is {} bytes; the u16 length prefix caps fields at {}, enforce max_redirect_url_len at MINT time",
             url.len(),
             u16::MAX
         ));
@@ -652,11 +652,11 @@ fn serialize_tracking_data(data: &TrackingData) -> Result<Vec<u8>> {
 }
 
 // `pos` is advanced inside read_field! macros; the final increment after the
-// last field is technically unused — suppress the macro-generated false positive.
+// last field is technically unused, suppress the macro-generated false positive.
 #[allow(unused_assignments)]
 fn deserialize_tracking_data(buf: &[u8]) -> Option<TrackingData> {
     if buf.is_empty() {
-        // coverage: justified — llvm-cov region-counter artifact: the guard
+        // coverage: justified, llvm-cov region-counter artifact: the guard
         // EXECUTES (deserialize_tracking_data_rejects_empty_buffer calls it
         // with an empty buffer and the `if` check region carries 49 hits
         // across the suite) but the early-return's own region is never
@@ -716,7 +716,7 @@ fn deserialize_tracking_data(buf: &[u8]) -> Option<TrackingData> {
     };
 
     let original_url = if version == 3 && pos < buf.len() {
-        // coverage: justified — llvm-cov region-counter artifact: this line
+        // coverage: justified, llvm-cov region-counter artifact: this line
         // EXECUTES (v3_original_url_round_trips_and_v2_decodes_to_none
         // decodes a v3 token whose URL field is read exactly here and is
         // asserted preserved) but the region between the `if` (line above)
@@ -1019,7 +1019,7 @@ mod tests {
     }
 
     /// SM2-F9: a field longer than the u16 length prefix can hold must make
-    /// `encode` FAIL at mint time — the old `len as u16` truncation minted a
+    /// `encode` FAIL at mint time, the old `len as u16` truncation minted a
     /// structurally corrupt token that could never decode, so a click link
     /// silently dead-ended at the fallback with no error surfaced.
     #[test]
@@ -1066,7 +1066,7 @@ mod tests {
 
         // Sanity: the exact boundary (65 535 bytes) is exactly representable
         // and round-trips at the payload layer. (The full token path caps
-        // tokens at 4096 chars by design — a 65 KB URL exceeds it and the
+        // tokens at 4096 chars by design, a 65 KB URL exceeds it and the
         // routes reject it; the point here is that the SERIALIZER is honest
         // at the boundary instead of truncating.)
         let boundary_url = mk(
@@ -1109,7 +1109,7 @@ mod tests {
     }
 
     /// #194:legacy HMAC tokens must verify with EITHER the full 32-byte
-    /// digest or the 16-byte truncation — the old code compared the last 16
+    /// digest or the 16-byte truncation, the old code compared the last 16
     /// bytes against the first 16 of the full digest, so full-32 signatures
     /// never verified.
     #[test]
@@ -1156,7 +1156,7 @@ mod tests {
         let tiny_cipher = URL_SAFE_NO_PAD.encode([0u8; 8]);
         assert!(codec.verify_unsubscribe_token(&tiny_cipher, None).is_none());
 
-        // A fresh v2 token is fine now — and expired once a moment has
+        // A fresh v2 token is fine now, and expired once a moment has
         // passed under a zero-day window (the age gate compares against the
         // mint time, so advance past it before asserting).
         let token = codec
@@ -1306,7 +1306,7 @@ mod tests {
         assert_eq!(data.message_id.as_deref(), Some("msg_new"));
     }
 
-    /// `deserialize_tracking_data` rejects an EMPTY plaintext outright — the
+    /// `deserialize_tracking_data` rejects an EMPTY plaintext outright, the
     /// version byte cannot even be read.
     #[test]
     fn deserialize_tracking_data_rejects_empty_buffer() {

@@ -4,9 +4,9 @@
 //!
 //! ```text
 //! CalendarProvider (trait)
-//!   ├── internal  — sales_calendar_events + sales_meetings (store of record)
-//!   ├── google    — Google Calendar API (authoritative availability when configured)
-//!   └── microsoft — Microsoft Graph calendar (authoritative availability when configured)
+//!   ├── internal , sales_calendar_events + sales_meetings (store of record)
+//!   ├── google   , Google Calendar API (authoritative availability when configured)
+//!   └── microsoft, Microsoft Graph calendar (authoritative availability when configured)
 //! ```
 //!
 //! **Source of truth.** When an external provider is configured it is
@@ -56,7 +56,7 @@
 //!
 //! The provider env reads follow `crate::config::read_env`: the first
 //! present, non-empty variable wins and empty values are treated as unset.
-//! Invalid values fall back to defaults with a warning — configuration
+//! Invalid values fall back to defaults with a warning, configuration
 //! mistakes never panic the process.
 
 pub mod availability;
@@ -217,7 +217,7 @@ pub struct BookedEvent {
     pub status: String,
 }
 
-/// Calendar policy configuration (env-driven — see the module docs).
+/// Calendar policy configuration (env-driven, see the module docs).
 #[derive(Debug, Clone)]
 pub struct CalendarConfig {
     pub timezone: Tz,
@@ -434,7 +434,7 @@ pub struct CalendarService {
     internal: Arc<internal::InternalCalendarProvider>,
     external: Option<Arc<dyn CalendarProvider>>,
     config: CalendarConfig,
-    /// Legacy informational field — see [`CalendarService::timezone_utc_offset_hours`].
+    /// Legacy informational field, see [`CalendarService::timezone_utc_offset_hours`].
     timezone_utc_offset_hours: i8,
 }
 

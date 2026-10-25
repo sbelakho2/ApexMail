@@ -1,6 +1,6 @@
 +++
 title = "Nutzungsbedingungen"
-description = "ApexMail-Nutzungsbedingungen — die Vereinbarung, die Ihre Nutzung unserer Plattform regelt."
+description = "ApexMail-Nutzungsbedingungen, die Vereinbarung, die Ihre Nutzung unserer Plattform regelt."
 template = "prose.html"
 
 [extra]

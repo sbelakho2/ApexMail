@@ -26,7 +26,7 @@ pub async fn ddos_protection_middleware(
             // The challenge body is a PoW parameter set for a programmatic
             // client to solve. A browser cannot act on it, and rendering it
             // as raw JSON left the user on a blank untitled page (live run
-            // 2026-10-22) — so the browser gets an explanation instead.
+            // 2026-10-22), so the browser gets an explanation instead.
             if is_browser_request(req.uri().path(), req.headers()) {
                 browser_error_page_response(
                     status_code(status, StatusCode::TOO_MANY_REQUESTS),

@@ -15,9 +15,9 @@ This page defines every performance metric published by ApexMail, including how 
 
 The three canonical latency labels used across the site are:
 
-1. **Production API SLA: P95 ≤ 500ms measured at gateway** — contractual SLA metric for Enterprise plans, measured server-side at the API gateway.
-2. **Sandbox validation target: typically under 120ms** — guidance target for sandbox/test-mode validation latency; no email is sent.
-3. **Private Cloud illustrative: architecture-dependent, not an SLA** — deployment-specific; contractual Private Cloud latency targets are defined per-deployment in customer agreements.
+1. **Production API SLA: P95 ≤ 500ms measured at gateway**, contractual SLA metric for Enterprise plans, measured server-side at the API gateway.
+2. **Sandbox validation target: typically under 120ms**, guidance target for sandbox/test-mode validation latency; no email is sent.
+3. **Private Cloud illustrative: architecture-dependent, not an SLA**, deployment-specific; contractual Private Cloud latency targets are defined per-deployment in customer agreements.
 
 ---
 
@@ -99,11 +99,11 @@ Any published API latency number must specify the exact measurement boundaries.
 
 **Permitted public statement example**:
 
-> Production API SLA: P95 ≤ 500ms measured at gateway — measured server-side over a rolling 30-day period for all authenticated requests in the EU region.
+> Production API SLA: P95 ≤ 500ms measured at gateway, measured server-side over a rolling 30-day period for all authenticated requests in the EU region.
 
 **Prohibited statements**:
 
-> Average API latency is under Xms. *(Must specify p50/p95/p99 — "average" is ambiguous.)*
+> Average API latency is under Xms. *(Must specify p50/p95/p99, "average" is ambiguous.)*
 >
 > API responds in under Xms. *(Must specify what start and end events measure and exclude network round-trip.)*
 
@@ -114,7 +114,7 @@ Any published API latency number must specify the exact measurement boundaries.
 | Parameter | Value |
 |---|---|
 | What it measures | Internal request validation, authentication, and queue acceptance in sandbox/test mode |
-| Does NOT include | Outbound SMTP delivery — no email is sent in sandbox mode |
+| Does NOT include | Outbound SMTP delivery, no email is sent in sandbox mode |
 | Environment | Sandbox/test mode only |
 | Metric type | p50, p95 |
 | Sample size | All sandbox-mode requests in the measurement period |
@@ -209,15 +209,15 @@ Uptime is measured per component, not as a single global number. Each component 
 
 | Component | Definition | Measurement |
 |---|---|---|
-| **REST API** | `api.apexmail.ee` — all API endpoints | External probe; HTTP 2xx on `/health` |
-| **SMTP Relay** | `smtp.apexmail.ee:587` — SMTP STARTTLS handshake and banner response | External probe; SMTP connection, banner, and STARTTLS negotiation |
-| **Dashboard** | `app.apexmail.ee` — web dashboard application | External probe; HTTP 2xx on login page and authenticated health endpoint |
-| **Authentication** | API auth endpoints — login, token refresh, SSO | External probe; HTTP 2xx on auth health endpoint |
+| **REST API** | `api.apexmail.ee`, all API endpoints | External probe; HTTP 2xx on `/health` |
+| **SMTP Relay** | `smtp.apexmail.ee:587`, SMTP STARTTLS handshake and banner response | External probe; SMTP connection, banner, and STARTTLS negotiation |
+| **Dashboard** | `app.apexmail.ee`, web dashboard application | External probe; HTTP 2xx on login page and authenticated health endpoint |
+| **Authentication** | API auth endpoints, login, token refresh, SSO | External probe; HTTP 2xx on auth health endpoint |
 | **Queue Processing** | Internal message queue consumer health | Internal probe; queue depth within threshold, consumer process running |
 | **Delivery Engine** | Outbound SMTP delivery workers | Internal probe; delivery worker count above minimum, no stalled workers |
 | **Webhooks** | Outbound webhook delivery service | External probe; HTTP 2xx on webhook health endpoint |
-| **Documentation** | `docs.apexmail.ee` — API and guide documentation | External probe; HTTP 2xx on documentation home page |
-| **Status Page** | `status.apexmail.ee` — public status dashboard | External probe; independently hosted and monitored separately |
+| **Documentation** | `docs.apexmail.ee`, API and guide documentation | External probe; HTTP 2xx on documentation home page |
+| **Status Page** | `status.apexmail.ee`, public status dashboard | External probe; independently hosted and monitored separately |
 | **Billing** | Billing API and invoice generation | Internal probe; billing service reachable, no stalled invoice jobs |
 | **Private Cloud CP** | Management API for Private Cloud deployments | Internal probe (where applicable) |
 
@@ -269,7 +269,7 @@ The following are excluded from performance calculations:
 
 - **Test traffic**: Messages sent to test domains, sandbox environments, or internal test recipients.
 - **Customer misconfiguration**: Failures caused by missing DNS records (SPF, DKIM, DMARC), unverified domains, or incorrect API key usage.
-- **Recipient issues**: Full mailbox, invalid recipient address, recipient server policy rejection — counted in bounce metrics, not performance metrics.
+- **Recipient issues**: Full mailbox, invalid recipient address, recipient server policy rejection, counted in bounce metrics, not performance metrics.
 - **Force majeure events**: Events qualifying as force majeure under the Terms of Service (natural disasters, internet backbone failures, DDoS attacks exceeding mitigation capacity).
 - **Scheduled maintenance**: Published maintenance windows with at least 48 hours' notice.
 

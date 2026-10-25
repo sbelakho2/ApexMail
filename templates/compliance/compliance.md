@@ -66,7 +66,7 @@ Customers should direct DSR requests to their account administrator. ApexMail wi
 - Deletion follows the configured 30-day grace period (`GDPR_DELETION_GRACE_PERIOD`); after that the request is irreversible.
 - Data-subject erasure requests (GDPR Art. 17) run through the verified-request pipeline: subject-scoped rows are deleted from the profile, event, consent and contact stores; billing records with statutory retention are anonymized (the subject's identifiers are replaced with an irreversible redaction marker) rather than deleted; suppression entries are retained to keep opt-outs enforceable. A per-store deletion confirmation certificate records exactly what was deleted, anonymized, or retained.
 - Event logs, message data, templates, domains, and API keys are deleted within 30 days.
-- Backup data expires according to the backup retention rotation (a configured window, default 90 days — no backup tier is kept beyond that).
+- Backup data expires according to the backup retention rotation (a configured window, default 90 days, no backup tier is kept beyond that).
 - A deletion confirmation certificate is provided upon request.
 
 ### Export Process
@@ -114,7 +114,7 @@ The supplied deployment configuration targets European Union / European Economic
 
 The platform provides BAA signing machinery for Enterprise tenants: a Business Associate Agreement can be executed and countersigned through the compliance endpoints (the BAA lifecycle `draft → requested → signed → countersigned → active → terminated` is tracked per tenant, and every state transition is recorded in a tamper-evident event log). A [BAA template](../../docs/compliance/baa-template.md) is also available for customers who require HIPAA-equivalent contractual protections under EU regulatory frameworks.
 
-Executing a BAA is a contractual control only — it does not amount to a HIPAA compliance attestation.
+Executing a BAA is a contractual control only, it does not amount to a HIPAA compliance attestation.
 
 ### Which Plans May Be Eligible
 
@@ -144,8 +144,8 @@ Tenants with an executed BAA would need to:
 
 ### Current Status
 
-**SOC 2 Type I**: Planned — readiness assessment in progress.
-**SOC 2 Type II**: Planned — after Type I completion.
+**SOC 2 Type I**: Planned, readiness assessment in progress.
+**SOC 2 Type II**: Planned, after Type I completion.
 
 ### Scope
 
@@ -190,13 +190,13 @@ The timeline is credible and resourced:
 
 ### Current Status
 
-**Planned** — To be evaluated based on customer demand. ISO 27001 is on the roadmap but is not the current priority (GDPR and SOC 2 are prioritized first). If multiple enterprise customers require ISO 27001 certification, the timeline will be accelerated.
+**Planned**, To be evaluated based on customer demand. ISO 27001 is on the roadmap but is not the current priority (GDPR and SOC 2 are prioritized first). If multiple enterprise customers require ISO 27001 certification, the timeline will be accelerated.
 
 ### Applicable Standards
 
-- **ISO 27001:2022** — Information Security Management System (ISMS) requirements.
-- **ISO 27017** — Cloud-specific information security controls.
-- **ISO 27018** — Protection of personally identifiable information (PII) in public clouds.
+- **ISO 27001:2022**, Information Security Management System (ISMS) requirements.
+- **ISO 27017**, Cloud-specific information security controls.
+- **ISO 27018**, Protection of personally identifiable information (PII) in public clouds.
 
 ### Customer Responsibility
 

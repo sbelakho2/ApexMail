@@ -21,7 +21,7 @@
 //! ```
 //!
 //! Only the original headers are attached (RFC 3464 §6.1 permits headers-only
-//! and it avoids echoing message bodies — and any backscatter payload — to
+//! and it avoids echoing message bodies, and any backscatter payload, to
 //! third parties). The attachment is capped at 32 KiB.
 
 use chrono::{DateTime, Utc};
@@ -89,7 +89,7 @@ impl DsnInputs {
 /// envelope sender as recipient, and the raw MIME bytes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GeneratedDsn {
-    /// Always `None` — DSNs are sent with `MAIL FROM:<>`.
+    /// Always `None`, DSNs are sent with `MAIL FROM:<>`.
     pub envelope_from: Option<String>,
     /// The original envelope sender the DSN reports back to.
     pub envelope_to: String,

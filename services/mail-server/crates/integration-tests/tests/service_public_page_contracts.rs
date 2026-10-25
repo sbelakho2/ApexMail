@@ -1,4 +1,4 @@
-//! Service public page contracts (batch 1, W2) — render-only [GREEN] gates
+//! Service public page contracts (batch 1, W2), render-only [GREEN] gates
 //! pinning the tracking-service unsubscribe / preferences-center pages.
 //!
 //! These render the pub template functions directly (no DB, no Redis); the
@@ -13,7 +13,7 @@ const EMAIL: &str = "unsubscribe.me@example.com";
 const UNSUB_PATH: &str = "/u";
 
 /// GATE [GREEN]: the unsubscribe confirmation page is side-effect-free
-/// plain HTML whose ONLY action is a POST form to the confirm path — no
+/// plain HTML whose ONLY action is a POST form to the confirm path, no
 /// GET anchor may ever perform the unsubscribe (F39).
 #[test]
 fn unsubscribe_confirm_page_is_side_effect_free_html_with_post_form() {
@@ -88,7 +88,7 @@ fn preferences_page_renders_category_checkboxes_and_resubscribe() {
     );
     assert!(html.contains("lang=\"en\""), "must declare lang=\"en\"");
     // One checkbox input per category, named after it, reflecting the
-    // stored subscribed state. (The substring is scoped to the INPUT — the
+    // stored subscribed state. (The substring is scoped to the INPUT, the
     // page's CSS also mentions `type="checkbox"` in a selector.)
     assert_eq!(
         html.matches("type=\"checkbox\" name=\"category_").count(),
@@ -146,7 +146,7 @@ fn repo_root() -> PathBuf {
 
 /// GATE [GREEN]: the shared error type serializes the required wire fields
 /// (`code`, `message`) and the request-logger normalization layer always
-/// attaches `requestId` — clients key retries and support tickets off these.
+/// attaches `requestId`, clients key retries and support tickets off these.
 #[test]
 fn api_error_contract_carries_code_message_and_request_id() {
     use api_server::error::ErrorDetail;
@@ -207,7 +207,7 @@ fn api_error_contract_carries_code_message_and_request_id() {
 /// GATE [GREEN]: the docs contract trio stays aligned —
 /// `docs/api-contract-manifest.json`, `packages/contract/send-contract.json`,
 /// and `docs/api/openapi.yaml` must describe the same send surface the
-/// SDKs serialize (`deny_unknown_fields` — an extra key is a 422).
+/// SDKs serialize (`deny_unknown_fields`, an extra key is a 422).
 #[test]
 fn api_docs_manifest_send_contract_and_openapi_stay_aligned() {
     let root = repo_root();

@@ -31,7 +31,7 @@ impl AnalyticsPredictor {
     pub fn predict_open_rate(&self, subject: &str, hour: u8, day_of_week: u8) -> f64 {
         let len = subject.len() as f64;
 
-        // Length factor — sweet spot 30-60 chars
+        // Length factor, sweet spot 30-60 chars
         let len_factor = if (30.0..=60.0).contains(&len) {
             1.1
         } else if !(15.0..=100.0).contains(&len) {
@@ -40,7 +40,7 @@ impl AnalyticsPredictor {
             1.0
         };
 
-        // Hour factor — peak 9-11 and 14-16
+        // Hour factor, peak 9-11 and 14-16
         let hour_factor = match hour {
             9..=11 => 1.15,
             14..=16 => 1.10,
@@ -48,7 +48,7 @@ impl AnalyticsPredictor {
             _ => 0.85,
         };
 
-        // Day factor — Tue(1), Wed(2), Thu(3) best (0=Mon)
+        // Day factor, Tue(1), Wed(2), Thu(3) best (0=Mon)
         let day_factor = match day_of_week {
             1..=3 => 1.12,
             0 | 4 => 1.0,

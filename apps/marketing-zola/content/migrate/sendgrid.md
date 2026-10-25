@@ -58,7 +58,7 @@ Each of these is a refusal in SendGrid's own error shape `{"errors": [{"message"
 
 | SendGrid construct | Refusal |
 |---|---|
-| More than one `personalizations` entry | `more than one 'personalizations' entry is not supported by the ApexMail compatibility surface: per-personalization subject/headers would be dropped — send one request per personalization` |
+| More than one `personalizations` entry | `more than one 'personalizations' entry is not supported by the ApexMail compatibility surface: per-personalization subject/headers would be dropped, send one request per personalization` |
 | `personalizations[].substitutions`, `.dynamic_template_data` | Field has no canonical equivalent |
 | `template_id`, `dynamic_template_data` | SendGrid template ids are not ApexMail template ids |
 | `attachments[].content_id`, `disposition: "inline"` | The canonical send path has no inline-part concept; attach the file instead of embedding it |
@@ -74,7 +74,7 @@ Each of these is a refusal in SendGrid's own error shape `{"errors": [{"message"
 
 The compatibility surface serves the send route only. The SendGrid APIs below have no compat route; use the ApexMail native API or the dashboard for the capability.
 
-- Template storage and rendering (`/v3/templates`, Handlebars `dynamic_template_data`) — see the template section below.
+- Template storage and rendering (`/v3/templates`, Handlebars `dynamic_template_data`), see the template section below.
 - Suppression management (`/v3/asm/*`, `bypass_list_management`): suppressions live in ApexMail's suppression list, managed in the dashboard or through the native API.
 - Stats, message activity and email validation APIs.
 - Marketing contacts, lists and single-send campaign APIs.

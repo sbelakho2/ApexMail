@@ -9,7 +9,7 @@
 //! guards or verifier reject marks the message processed WITHOUT a draft and
 //! leaves a human-review note in `ai_response`.
 //!
-//! SM9 #7: this module is UNWIRED LIBRARY CODE — no binary routes traffic
+//! SM9 #7: this module is UNWIRED LIBRARY CODE, no binary routes traffic
 //! through `EmailAnswerer` today (the poll loop has no `bin` owner). The
 //! defenses below are maintained so the module is safe to wire, not because
 //! anything currently exercises them; its guarantees protect nothing until
@@ -72,7 +72,7 @@ pub(crate) const MAX_RAW_MESSAGE_BYTES: usize = 10 * 1024 * 1024;
 static RAW_MESSAGE_MISSING_WARNING: Once = Once::new();
 
 /// The ONLY successful write path: stores a generated reply as a DRAFT
-/// (`pending_approval = true`). The agent never sends — an outbound queue
+/// (`pending_approval = true`). The agent never sends, an outbound queue
 /// insert or SMTP call must never appear on this path; only the separately
 /// authorized approval control plane may release a draft.
 /// Prompt-registry identities for the draft surfaces (plan §6): the plain
@@ -136,7 +136,7 @@ pub(crate) const QUARANTINE_MESSAGE_SQL: &str = r#"
 // The AI agent claims rows via its OWN marker (`ai_claimed_at`, migration
 // 123). The reply-handler's `processing` column previously served both
 // consumers with the same eligibility predicate and different claim
-// semantics — a race. The MTA only populates raw_message (the mirror
+// semantics, a race. The MTA only populates raw_message (the mirror
 // columns are NULL), so from/subject/body are parsed from the raw MIME.
 //
 // ELIGIBILITY IS "NO TERMINAL WRITE YET", never "processed_at IS NULL":
@@ -144,13 +144,13 @@ pub(crate) const QUARANTINE_MESSAGE_SQL: &str = r#"
 // `processed_at` on each one when it finishes (MARK_PROCESSED_SQL). Since the
 // worker polls every second and this agent every 30, a predicate keyed on
 // `processed_at IS NULL` loses essentially every race and the mailbot stops
-// drafting entirely — the live 2026-10-06 dogfood caught a canary row
+// drafting entirely, the live 2026-10-06 dogfood caught a canary row
 // classified `meeting_request` that the agent never claimed (and 25 more
 // classified-without-draft rows). The durable discriminators are the agent's
 // OWN terminal writes: STORE_DRAFT / DECLINE / QUARANTINE all set
 // `processed = true` AND an `ai_response`, so a row with `processed = false
 // AND ai_response IS NULL AND pending_approval = false` is exactly "no draft
-// and no review note yet" — whether or not the worker already classified it.
+// and no review note yet", whether or not the worker already classified it.
 // A worker-classified row therefore keeps its classification as the draft
 // prompt hint and still receives its draft.
 //
@@ -328,7 +328,7 @@ struct InboundRow {
     /// Owning tenant (migration 088). Used for per-tenant rate/cost caps;
     /// NULL rows fall back to a shared `_unknown` budget.
     tenant_id: Option<String>,
-    /// Full raw MIME — the only column the MTA reliably populates.
+    /// Full raw MIME, the only column the MTA reliably populates.
     raw_message: Vec<u8>,
     /// The reply pipeline's classification for this same message row (the
     /// workers write it before/alongside the AI draft). `None` when the
@@ -342,7 +342,7 @@ struct InboundRow {
 
 impl InboundRow {
     /// Parse from/to/subject/body from the raw MIME (NULL-safe by
-    /// construction — never reads the legacy mirror columns).
+    /// construction, never reads the legacy mirror columns).
     fn parsed(&self) -> ParsedInbound {
         let parsed = mail_parser::MessageParser::default().parse(&self.raw_message);
         let from = parsed
@@ -443,7 +443,7 @@ pub(crate) fn is_loop_sender(from: &str, reply_from: &str) -> bool {
     }
     let (local, domain) = match from.split_once('@') {
         Some(parts) => parts,
-        None => return true, // not an address — nothing to reply to
+        None => return true, // not an address, nothing to reply to
     };
     if domain.eq_ignore_ascii_case(email_domain(reply_from)) {
         return true; // the agent's own delivery domain
@@ -480,9 +480,9 @@ pub(crate) fn detect_auto_submitted(header_block: &str) -> Option<&'static str> 
 }
 
 /// Instruction-detection: inbound email content is attacker-controlled DATA.
-/// When it explicitly tries to steer the agent's behavior — override,
+/// When it explicitly tries to steer the agent's behavior, override,
 /// ignore, or reveal its instructions, change roles, jailbreak, or redirect
-/// its mail — the run is flagged and declined (no draft) instead of being
+/// its mail, the run is flagged and declined (no draft) instead of being
 /// answered.
 pub(crate) fn contains_behavior_directives(body: &str) -> bool {
     const DIRECTIVE_PATTERNS: &[&str] = &[
@@ -600,7 +600,7 @@ pub struct EmailAnswerer {
     /// Per-message failure counters for the retry/quarantine decision.
     attempts: DashMap<String, u32>,
     /// Enforces the configured inference rate limit for agent LLM calls,
-    /// keyed per tenant — the PROCESS governor, shared with the HTTP
+    /// keyed per tenant, the PROCESS governor, shared with the HTTP
     /// surfaces so one budget bounds every model call in the process.
     governor: Arc<RateGovernor>,
 }
@@ -628,7 +628,7 @@ impl EmailAnswerer {
 
     /// Build the answerer over the PROCESS's singletons: the same database
     /// pool, the same model client, the same inference governor the HTTP
-    /// surfaces use. One LLM, one budget — a second client or governor would
+    /// surfaces use. One LLM, one budget, a second client or governor would
     /// double the provider spend the operator configured.
     pub fn with_runtime(
         config: EmailAnsweringConfig,
@@ -647,7 +647,7 @@ impl EmailAnswerer {
     }
 
     /// Construct from the environment over the process singletons. Returns
-    /// `Ok(None)` when `AI_EMAIL_AGENT_ENABLED` is off — the agent is opt-in,
+    /// `Ok(None)` when `AI_EMAIL_AGENT_ENABLED` is off, the agent is opt-in,
     /// and a disabled agent must not be spawned at all.
     ///
     /// `pool` is the process pool; when absent the config's own
@@ -660,7 +660,7 @@ impl EmailAnswerer {
         let config = EmailAnsweringConfig::from_env();
         if !config.enabled {
             tracing::info!(
-                "Email answering agent is disabled (AI_EMAIL_AGENT_ENABLED=false) — not spawned"
+                "Email answering agent is disabled (AI_EMAIL_AGENT_ENABLED=false), not spawned"
             );
             return Ok(None);
         }
@@ -723,7 +723,7 @@ impl EmailAnswerer {
                     tracing::info!(count, "Processed inbound emails");
                 }
                 Ok(_) => {
-                    // No messages — sleep the full interval
+                    // No messages, sleep the full interval
                 }
                 Err(e) => {
                     tracing::error!(error = %e, "Error in email agent poll loop");
@@ -898,12 +898,12 @@ impl EmailAnswerer {
                     msg_id = %row.id,
                     size_bytes = row.raw_message.len(),
                     cap = MAX_RAW_MESSAGE_BYTES,
-                    "Inbound message exceeds the raw-message size cap — flagged for human review, no draft"
+                    "Inbound message exceeds the raw-message size cap, flagged for human review, no draft"
                 );
                 self.attempts.remove(&row.id);
                 let _ = sqlx::query(DECLINE_MESSAGE_SQL)
                     .bind(&row.id)
-                    .bind("[NO DRAFT — message exceeds the 10 MiB processing cap; manual review required]")
+                    .bind("[NO DRAFT, message exceeds the 10 MiB processing cap; manual review required]")
                     .execute(&self.pool)
                     .await;
                 continue;
@@ -916,7 +916,7 @@ impl EmailAnswerer {
             {
                 tracing::debug!(
                     msg_id = %row.id,
-                    "Inference rate limit reached — deferring inbound message"
+                    "Inference rate limit reached, deferring inbound message"
                 );
                 // Clear the claim marker so a later poll can re-claim the row;
                 // no attempt is consumed for a rate-limit deferral.
@@ -931,7 +931,7 @@ impl EmailAnswerer {
                 // entry guard holds the shard's write lock, and the
                 // Quarantine arm below re-enters the same shard via
                 // `attempts.remove`. dashmap's parking_lot RwLock is not
-                // reentrant — the guard lives to the end of the match, so
+                // reentrant, the guard lives to the end of the match, so
                 // the lock MUST be released here or the poll task deadlocks
                 // forever the first time a message reaches the quarantine
                 // threshold.
@@ -947,7 +947,7 @@ impl EmailAnswerer {
                             error = %e,
                             attempt = attempt_no,
                             max_attempts = MAX_PROCESS_ATTEMPTS,
-                            "Failed to process inbound message — will retry on a later poll"
+                            "Failed to process inbound message, will retry on a later poll"
                         );
                         // Release the claim (both markers) so the retry can
                         // actually happen; the attempts entry stays so the
@@ -962,7 +962,7 @@ impl EmailAnswerer {
                         tracing::error!(
                             msg_id = %row.id,
                             attempt = attempt_no,
-                            "Inbound message exceeded max processing attempts — quarantining"
+                            "Inbound message exceeded max processing attempts, quarantining"
                         );
                         self.attempts.remove(&row.id);
                         let _ = sqlx::query(QUARANTINE_MESSAGE_SQL)
@@ -1036,7 +1036,7 @@ impl EmailAnswerer {
                 RAW_MESSAGE_MISSING_WARNING.call_once(|| {
                     tracing::warn!(
                         error = %error,
-                        "inbound_messages.raw_message unavailable — header-based loop protection is limited to sender checks"
+                        "inbound_messages.raw_message unavailable, header-based loop protection is limited to sender checks"
                     );
                 });
                 None
@@ -1098,12 +1098,12 @@ impl EmailAnswerer {
                 tracing::info!(
                     msg_id = %row.id,
                     prior_msg_id = %prior_id,
-                    "Duplicate delivery (same Message-ID) — no second draft"
+                    "Duplicate delivery (same Message-ID), no second draft"
                 );
                 return self
                     .decline(
                         &row.id,
-                        "[NO DRAFT — duplicate delivery: this message (same Message-ID) was \
+                        "[NO DRAFT, duplicate delivery: this message (same Message-ID) was \
                          already answered or reviewed; the earlier copy is the one to review]",
                     )
                     .await;
@@ -1113,12 +1113,12 @@ impl EmailAnswerer {
                 tracing::error!(
                     msg_id = %row.id,
                     error = %error,
-                    "duplicate-delivery lookup failed — declining to human review (fail closed)"
+                    "duplicate-delivery lookup failed, declining to human review (fail closed)"
                 );
                 return self
                     .decline(
                         &row.id,
-                        "[NO DRAFT — duplicate-delivery check unavailable; message routed to human review]",
+                        "[NO DRAFT, duplicate-delivery check unavailable; message routed to human review]",
                     )
                     .await;
             }
@@ -1129,12 +1129,12 @@ impl EmailAnswerer {
             tracing::info!(
                 msg_id = %row.id,
                 from = %redact_for_log(&row.from_email),
-                "Inbound message from automated/self sender — no reply generated (loop guard)"
+                "Inbound message from automated/self sender, no reply generated (loop guard)"
             );
             return self
                 .decline(
                     &row.id,
-                    "[NO DRAFT — loop guard: sender is the agent itself, its domain, or an automated address]",
+                    "[NO DRAFT, loop guard: sender is the agent itself, its domain, or an automated address]",
                 )
                 .await;
         }
@@ -1146,12 +1146,12 @@ impl EmailAnswerer {
                     msg_id = %row.id,
                     reason,
                     from = %redact_for_log(&row.from_email),
-                    "Inbound auto-submitted message — no reply generated (loop guard)"
+                    "Inbound auto-submitted message, no reply generated (loop guard)"
                 );
                 return self
                     .decline(
                         &row.id,
-                        &format!("[NO DRAFT — loop guard: message carries an auto-submission header ({reason})]"),
+                        &format!("[NO DRAFT, loop guard: message carries an auto-submission header ({reason})]"),
                     )
                     .await;
             }
@@ -1169,12 +1169,12 @@ impl EmailAnswerer {
                     msg_id = %row.id,
                     from = %redact_for_log(&row.from_email),
                     error = %error,
-                    "reply-cap lookup failed — declining to human review (fail closed)"
+                    "reply-cap lookup failed, declining to human review (fail closed)"
                 );
                 return self
                     .decline(
                         &row.id,
-                        "[NO DRAFT — reply-cap lookup unavailable; message routed to human review]",
+                        "[NO DRAFT, reply-cap lookup unavailable; message routed to human review]",
                     )
                     .await;
             }
@@ -1184,12 +1184,12 @@ impl EmailAnswerer {
                 msg_id = %row.id,
                 from = %redact_for_log(&row.from_email),
                 window_days = REPLY_CAP_WINDOW_DAYS,
-                "Per-sender reply cap reached — no reply generated"
+                "Per-sender reply cap reached, no reply generated"
             );
             return self
                 .decline(
                     &row.id,
-                    "[NO DRAFT — reply cap for this sender reached; a human will follow up if needed]",
+                    "[NO DRAFT, reply cap for this sender reached; a human will follow up if needed]",
                 )
                 .await;
         }
@@ -1202,12 +1202,12 @@ impl EmailAnswerer {
                         msg_id = %row.id,
                         tenant = %redact_for_log(tenant),
                         cap = MAX_DRAFTS_PER_TENANT_PER_DAY,
-                        "Per-tenant daily draft cap reached — no reply generated"
+                        "Per-tenant daily draft cap reached, no reply generated"
                     );
                     return self
                         .decline(
                             &row.id,
-                            "[NO DRAFT — tenant daily AI draft cap reached; manual review required]",
+                            "[NO DRAFT, tenant daily AI draft cap reached; manual review required]",
                         )
                         .await;
                 }
@@ -1257,12 +1257,12 @@ impl EmailAnswerer {
                 from = %redact_for_log(&row.from_email),
                 threat_level = ?prompt_check.threat_level,
                 findings = ?prompt_check.findings,
-                "Blocked malicious prompt — refusing to send to LLM"
+                "Blocked malicious prompt, refusing to send to LLM"
             );
             return self
                 .decline(
                     &row.id,
-                    "[NO DRAFT — security policy: message content matched prompt-injection patterns. Contact support@apexmail.ee directly.]",
+                    "[NO DRAFT, security policy: message content matched prompt-injection patterns. Contact support@apexmail.ee directly.]",
                 )
                 .await;
         }
@@ -1274,12 +1274,12 @@ impl EmailAnswerer {
                 msg_id = %row.id,
                 from = %redact_for_log(&row.from_email),
                 subject = %redact_for_log(&row.subject),
-                "Inbound email attempts to steer agent behavior — declined and flagged for review"
+                "Inbound email attempts to steer agent behavior, declined and flagged for review"
             );
             return self
                 .decline(
                     &row.id,
-                    "[NO DRAFT — flagged: message asked the assistant to change behavior or bypass rules. Manual review required.]",
+                    "[NO DRAFT, flagged: message asked the assistant to change behavior or bypass rules. Manual review required.]",
                 )
                 .await;
         }
@@ -1296,13 +1296,13 @@ impl EmailAnswerer {
         if !self.governor.allow(&rate_key) {
             tracing::warn!(
                 msg_id = %row.id,
-                "Inference rate limit reached — deferring inbound message"
+                "Inference rate limit reached, deferring inbound message"
             );
             anyhow::bail!("inference rate limit reached; message deferred");
         }
 
         // A generation failure must NOT be turned into a canned customer
-        // draft — propagate the error so the retry/quarantine machinery
+        // draft, propagate the error so the retry/quarantine machinery
         // handles it and no draft is stored.
         let system_prompt = grounded_system_prompt(&self.config.system_prompt, &grounding_facts);
         let response = self
@@ -1327,13 +1327,13 @@ impl EmailAnswerer {
             tracing::warn!(
                 msg_id = %row.id,
                 violations = ?violations,
-                "LLM response failed verification — no draft, queued for human review"
+                "LLM response failed verification, no draft, queued for human review"
             );
             return self
                 .decline(
                     &row.id,
                     &format!(
-                        "[NO DRAFT — verification failed ({}). Manual review required.]",
+                        "[NO DRAFT, verification failed ({}). Manual review required.]",
                         violations.join("; ")
                     ),
                 )
@@ -1347,7 +1347,7 @@ impl EmailAnswerer {
             tracing::warn!(
                 msg_id = %row.id,
                 violations = ?output_check.violations,
-                "LLM output contained unsafe content — sanitized"
+                "LLM output contained unsafe content, sanitized"
             );
             output_check.sanitized
         } else {
@@ -1362,7 +1362,7 @@ impl EmailAnswerer {
         tracing::info!(
             msg_id = %row.id,
             to = %redact_for_log(&row.to_email),
-            "AI reply stored as pending draft — requires human approval"
+            "AI reply stored as pending draft, requires human approval"
         );
         // The approval control plane must revalidate tenant ownership and the
         // selected sender's current DKIM/transport readiness before queueing.
@@ -1393,7 +1393,7 @@ pub(crate) fn truncate_response(response: &str) -> String {
     } else {
         let truncated: String = response.chars().take(MAX_RESPONSE_CHARS_HARD).collect();
         format!(
-            "{}\n\n[Response truncated — length limit reached]",
+            "{}\n\n[Response truncated, length limit reached]",
             truncated
         )
     }
@@ -1512,7 +1512,7 @@ pub(crate) fn sanitize_reply_for_api(raw: &str) -> String {
 /// All user-controlled fields (from, subject, body) are sanitized through the
 /// defense pipeline to strip prompt injection payloads before reaching the LLM.
 /// Build the user prompt. `classification` is the reply pipeline's verdict
-/// for this same message row (joined by id) — when present it steers the
+/// for this same message row (joined by id), when present it steers the
 /// reply toward the objection the classifier recorded instead of answering
 /// generically. The facts block is NOT repeated here: it travels in the
 /// system prompt (see [`grounded_system_prompt`]).
@@ -1578,7 +1578,7 @@ pub(crate) fn build_prompt(
 
 /// The approved objection-library guidance applicable to `class`, if any:
 /// tenant-specific entries win over platform-wide ones, and only APPROVED,
-/// in-window, non-empty entries are usable — an unapproved or expired entry
+/// in-window, non-empty entries are usable, an unapproved or expired entry
 /// is treated as absent rather than as advice.
 pub(crate) async fn load_objection_guidance(
     pool: &PgPool,
@@ -1653,7 +1653,7 @@ fn sanitize_quoted_header_text(value: &str) -> String {
 
 /// Format the reply email body with quoting of the original message.
 /// The AI response is sanitized against HTML/XSS injection before inclusion,
-/// and the quoted `From`/`Subject` header text — ATTACKER-CONTROLLED — runs
+/// and the quoted `From`/`Subject` header text, ATTACKER-CONTROLLED, runs
 /// through [`sanitize_quoted_header_text`] first (SM9 #7c): only the AI
 /// response used to be sanitized, so raw header text re-entered the stored
 /// draft verbatim.
@@ -1701,7 +1701,7 @@ pub struct ProcessEmailResult {
 /// returned, so the manual endpoint cannot bypass the defense layer.
 ///
 /// SM9 #7d: an LLM failure is an ERROR to the caller. It is never converted
-/// into a 200-shaped canned response string — failure stays structurally
+/// into a 200-shaped canned response string, failure stays structurally
 /// distinguishable from success instead of hiding behind
 /// `tokens_used: None` with a fake answer.
 pub async fn generate_email_reply(
@@ -1725,7 +1725,7 @@ pub async fn generate_email_reply(
     let tokens = response.split_whitespace().count();
     let sanitized = sanitize_reply_for_api(&response);
     if sanitized != response {
-        tracing::warn!("Manual process-email response contained unsafe content — sanitized");
+        tracing::warn!("Manual process-email response contained unsafe content, sanitized");
     }
     Ok(ProcessEmailResult {
         response: sanitized,
@@ -1903,7 +1903,7 @@ mod tests {
         // NULL`: the worker reply handler stamps processed_at on every
         // reply-shaped row it classifies first (1s poll vs this agent's 30s),
         // so that predicate starved the draft queue entirely (live dogfood
-        // 2026-10-06 — 25 classified rows, 0 drafts). Eligibility is "no
+        // 2026-10-06, 25 classified rows, 0 drafts). Eligibility is "no
         // terminal write yet": no ai_response, processed=false,
         // pending_approval=false.
         assert!(
@@ -1914,7 +1914,7 @@ mod tests {
         assert!(CLAIM_UNPROCESSED_SQL.contains("processed = false"));
         assert!(CLAIM_UNPROCESSED_SQL.contains("pending_approval = false"));
         // The AI agent claims via its own marker (migration 123): the worker
-        // reply-handler owns the 'processing' column — sharing it raced both
+        // reply-handler owns the 'processing' column, sharing it raced both
         // consumers on the same eligibility predicate.
         assert!(CLAIM_UNPROCESSED_SQL.contains("ai_claimed_at IS NULL"));
         assert!(!CLAIM_UNPROCESSED_SQL.contains("processing = false"));
@@ -1928,7 +1928,7 @@ mod tests {
     #[test]
     fn claim_query_reclaims_stale_claims_left_by_dead_workers() {
         // Regression: a worker that died between claiming and finishing left
-        // `ai_claimed_at` set forever — the message became unclaimable,
+        // `ai_claimed_at` set forever, the message became unclaimable,
         // unprocessed and unquarantinable (observed: SIGTERMed workers
         // stranded rows in exactly that state). The claim must recover
         // claims older than the 15-minute staleness bound.
@@ -1949,7 +1949,7 @@ mod tests {
     #[test]
     fn release_claim_clears_both_markers_so_rows_can_be_reclaimed() {
         // Regression: deferral/retry used to reset only `processing`, but the
-        // claim query requires `ai_claimed_at IS NULL` — a claimed row whose
+        // claim query requires `ai_claimed_at IS NULL`, a claimed row whose
         // processing failed was stranded forever (never re-claimable, never
         // quarantined). Release must clear BOTH markers.
         assert!(
@@ -2012,7 +2012,7 @@ mod tests {
 
         let oversized = "x".repeat(MAX_RESPONSE_CHARS_HARD + 5_000);
         let truncated = sanitize_reply_for_api(&oversized);
-        assert!(truncated.contains("[Response truncated — length limit reached]"));
+        assert!(truncated.contains("[Response truncated, length limit reached]"));
     }
 
     // ── loop guard: sender-based ─────────────────────────────────────────
@@ -2135,7 +2135,7 @@ mod tests {
         for benign in [
             "Hi! My open rate dropped after I changed my SPF record. What should I check first?",
             "How much does the Growth plan cost per month?",
-            "I forgot my password — how do I reset it?",
+            "I forgot my password, how do I reset it?",
             "Can you act quickly? My campaign goes out in an hour.",
         ] {
             assert!(
@@ -2205,7 +2205,7 @@ mod tests {
     #[test]
     fn no_write_path_touches_the_outbound_queue_or_smtp() {
         // The email agent composes DRAFTS ONLY. None of its write paths may
-        // reference the outbound queue — releasing a draft is the approval
+        // reference the outbound queue, releasing a draft is the approval
         // control plane's job, never the agent's.
         for sql in [
             STORE_DRAFT_SQL,

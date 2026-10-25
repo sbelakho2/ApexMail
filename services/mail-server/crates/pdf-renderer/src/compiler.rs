@@ -1,4 +1,4 @@
-//! Typst compiler — template + JSON data → PDF bytes.
+//! Typst compiler, template + JSON data → PDF bytes.
 //!
 //! This module wraps the Typst compiler pipeline:
 //! 1. Build a [`TypstWorld`] from template name + JSON data
@@ -7,15 +7,15 @@
 //!
 //! The designed layouts live in `src/templates/*.typ`; every template in
 //! [`crate::world::TEMPLATES`] is compiled and exported by this pipeline, so
-//! the downloaded PDF is the designed document — not a data export.
+//! the downloaded PDF is the designed document, not a data export.
 //!
 //! # Security (O-14.1 / O-14.2)
 //!
-//! - **Rendering timeout** — A configurable timeout (default 10 s) prevents
+//! - **Rendering timeout**, A configurable timeout (default 10 s) prevents
 //!   runaway Typst compilation from crafted JSON data.
-//! - **Input size limit** — JSON data payload is capped at 1 MB so deeply
+//! - **Input size limit**, JSON data payload is capped at 1 MB so deeply
 //!   nested / oversized inputs are rejected early.
-//! - **Output size limit** — Generated PDF bytes are checked against a
+//! - **Output size limit**, Generated PDF bytes are checked against a
 //!   configurable maximum (default 50 MB) to prevent OOM from oversized
 //!   output (e.g. a template expanded by huge JSON arrays).
 
@@ -57,17 +57,17 @@ const RENDER_TIMEOUT_SECS: u64 = 10;
 ///
 /// # Security
 ///
-/// 1. **Input validation** — The JSON payload is checked against
+/// 1. **Input validation**, The JSON payload is checked against
 ///    [`MAX_DATA_JSON_BYTES`] before any processing begins.
-/// 2. **Timeout** — The actual generation runs inside
+/// 2. **Timeout**, The actual generation runs inside
 ///    [`tokio::task::spawn_blocking`] wrapped by [`tokio::time::timeout`]
 ///    so a stalled / infinite‑loop template is caught.
-/// 3. **Output limit** — After generation the byte vector is checked against
+/// 3. **Output limit**, After generation the byte vector is checked against
 ///    [`MAX_PDF_OUTPUT_SIZE`]; oversized output is rejected.
 ///
 /// # Arguments
-/// * `template` — template name (e.g. `"invoice"`, `"dpa"`)
-/// * `data` — arbitrary JSON value to inject into the template
+/// * `template`, template name (e.g. `"invoice"`, `"dpa"`)
+/// * `data`, arbitrary JSON value to inject into the template
 ///
 /// # Returns
 /// PDF bytes on success.
@@ -343,7 +343,7 @@ mod tests {
         assert!(!text.contains('€'), "USD invoice must not carry €: {text}");
         assert!(text.contains("USD"), "{text}");
 
-        // An unknown code stays the code — never a guessed symbol.
+        // An unknown code stays the code, never a guessed symbol.
         let xyz = render_pdf("invoice", &invoice_payload("XYZ", 12078))
             .await
             .expect("xyz invoice renders");
@@ -376,7 +376,7 @@ mod tests {
         payload["line_items"] = serde_json::json!([
             { "description": "Platform base", "quantity": 1, "unit_price": 10900,
               "amount": 10900, "vat_rate": 0, "vat_amount": 0 },
-            { "description": "US sales tax (CA) — 7.25 % state rate", "quantity": 1,
+            { "description": "US sales tax (CA), 7.25 % state rate", "quantity": 1,
               "unit_price": 790, "amount": 790, "vat_rate": 0, "vat_amount": 0 }
         ]);
         let pdf = render_pdf("invoice", &payload)
@@ -387,7 +387,7 @@ mod tests {
         assert!(text.contains("US sales tax (CA)"), "{text}");
         assert!(text.contains("7.90"), "the tax amount renders: {text}");
 
-        // An EXEMPT sale (customer certificate) says so — a silent $0.00 US
+        // An EXEMPT sale (customer certificate) says so, a silent $0.00 US
         // tax row would not tell the reader why no tax was charged.
         // subtotal 10900 + VAT 0 + tax 0 = total 10900.
         let mut exempt_payload = invoice_payload("USD", 10900);
@@ -405,7 +405,7 @@ mod tests {
             .expect("exempt US invoice renders");
         assert_pdf(&pdf);
         let text = crate::test_extract::extract_text(&pdf);
-        assert!(text.contains("US sales tax (CA) — exempt"), "{text}");
+        assert!(text.contains("US sales tax (CA), exempt"), "{text}");
         assert!(
             text.contains("MTC-777"),
             "the certificate names itself: {text}"
@@ -416,7 +416,7 @@ mod tests {
     async fn invoice_handles_negative_and_missing_optional_data() {
         let mut payload = invoice_payload("EUR", -500000);
         payload["line_items"] = serde_json::json!([
-            { "description": "Credit note — overbilled December", "quantity": 1,
+            { "description": "Credit note, overbilled December", "quantity": 1,
               "unit_price": -500000, "amount": -500000, "vat_rate": 0, "vat_amount": 0 }
         ]);
         payload["bill_to"] = serde_json::Value::Null;

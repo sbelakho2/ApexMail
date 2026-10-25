@@ -41,7 +41,7 @@ async fn canonical_pool(suffix: &str) -> Option<PgPool> {
     // the database name as `<base>_<suffix>`, so two test binaries sharing a
     // suffix (this file and repos_canonical_db_tests.rs both used "incidents")
     // drop and re-create each other's database while running concurrently
-    // under nextest — observed as `clone-connect: database ... does not
+    // under nextest, observed as `clone-connect: database ... does not
     // exist`.
     let namespaced = format!("adversarial_{suffix}");
     match migrator::test_support::fresh_canonical_pool("apexdb_repos_adversarial", &namespaced)
@@ -145,7 +145,7 @@ async fn tenants_crud_and_slug_conflict_is_typed() {
 
 /// Users: tenant scoping, keyset pagination ordering (ASC) and NULL name
 /// handling; a duplicate email in the same tenant is a typed error only if
-/// the schema enforces it — here we assert the row is readable with a NULL
+/// the schema enforces it, here we assert the row is readable with a NULL
 /// name (the classic Option decode bug).
 #[tokio::test]
 async fn users_null_name_scoping_and_keyset_pagination() {
@@ -1745,7 +1745,7 @@ async fn incidents_transitions_timeline_and_cascade() {
         .is_none());
 
     // Invalid status strings are just inert data on create (no CHECK on
-    // create in the canonical schema) — but the TYPED transition rejects
+    // create in the canonical schema), but the TYPED transition rejects
     // nothing unknown because it is an enum. Resolve clears/creates
     // resolved_at deterministically.
     let resolved = IncidentRepo::transition(&pool, "inc_adv_1", IncidentStatus::Resolved)
@@ -1906,7 +1906,7 @@ async fn pool_pair_and_write_tracker_against_real_db() {
     assert!(pair.get(apexmail_db::pool::PoolType::ReadWrite).size() >= 1);
     assert!(pair.get(apexmail_db::pool::PoolType::ReadOnly).size() >= 1);
 
-    // With `None` replica the pair shares the primary URL — both answer.
+    // With `None` replica the pair shares the primary URL, both answer.
     let ro_value: i64 = sqlx::query_scalar("SELECT 2::bigint")
         .fetch_one(pair.get(apexmail_db::pool::PoolType::ReadOnly))
         .await
@@ -1923,7 +1923,7 @@ async fn pool_pair_and_write_tracker_against_real_db() {
     let after = tracker.choose_pool(&pair) as *const _;
     assert_eq!(after, &pair.rw as *const _);
 
-    // PoolPair::new is the second constructor (G.5) — same contract.
+    // PoolPair::new is the second constructor (G.5), same contract.
     let pair2 = apexmail_db::pool::PoolPair::new(&url, Some(&url), 3)
         .await
         .expect("pair2");
@@ -1952,7 +1952,7 @@ async fn transaction_commit_rollback_and_helpers() {
     };
 
     // Commit persists: the temp table survives on a NEW connection only
-    // because ON COMMIT DROP is the inverse — instead prove the transaction
+    // because ON COMMIT DROP is the inverse, instead prove the transaction
     // is really open by reading from it and then committing cleanly.
     let mut tx = Tx::begin(&pool).await.expect("begin");
     assert!(tx.as_mut().is_some(), "as_mut yields the live transaction");

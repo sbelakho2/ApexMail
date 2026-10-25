@@ -38,7 +38,7 @@ fn lazy_db() -> sqlx::PgPool {
 
 /// Dedicated canonical database for this suite. Provisioning goes through the
 /// REAL production migrator (`migrator::test_support::shared_canonical_db`,
-/// audit F01 — same convention as `crates/sales-autopilot/tests/common/mod.rs`)
+/// audit F01, same convention as `crates/sales-autopilot/tests/common/mod.rs`)
 /// instead of calling `initialize_schema` to create tables: schema ownership
 /// is the canonical migration chain, and `initialize_schema` now VERIFIES.
 const FUNCTIONAL_SALES_DB: &str = "apexmail_functional_sales";
@@ -304,13 +304,13 @@ async fn campaign_lifecycle_draft_active_paused() {
 // ── Calendar availability ──────────────────────────────────────
 
 /// Audit F11 schema check: the canonical migration chain DOES install the
-/// calendar stores `CalendarService` writes — `sales_calendar_events`
+/// calendar stores `CalendarService` writes, `sales_calendar_events`
 /// (availability index, `migrations/200_sales_autopilot_v2_unification.sql:144`,
 /// with the `no_overlapping_events` GiST exclusion constraint) and
 /// `sales_meetings` (store of record, `:716`). The historical fail-closed
 /// branch (asserting a `Database` error naming the absent legacy table) is
 /// therefore DEAD: these tests exercise the REAL booking path end to end on
-/// the canonical schema, and will now FAIL — not silently degrade — if the
+/// the canonical schema, and will now FAIL, not silently degrade, if the
 /// tables ever vanish from the chain again.
 ///
 /// Every test pins the policy with `CalendarService::with_working_hours`

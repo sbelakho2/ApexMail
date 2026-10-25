@@ -1,9 +1,9 @@
 # ApexMail US DPA Addendum
 
-**Status:** DRAFT — not effective and not offered to customers until the owner approves it.
+**Status:** DRAFT, not effective and not offered to customers until the owner approves it.
 **Last Updated:** 2026-10-15
 **Version:** 0.1 (draft for owner/counsel review)
-**Owner approval:** not recorded — `approved_by` and `approved_at` are unset on purpose. An agent never approves a legal document: the owner (or counsel instructed by the owner) approves it, and only then does this file lose its draft status.
+**Owner approval:** not recorded, `approved_by` and `approved_at` are unset on purpose. An agent never approves a legal document: the owner (or counsel instructed by the owner) approves it, and only then does this file lose its draft status.
 
 This draft is an addendum to the ApexMail [Data Processing Agreement](dpa.md) ("DPA") for customers established in the United States of America ("US Customer"). It reflects the processing roles under US state privacy laws (California Consumer Privacy Act as amended by the California Privacy Rights Act, and comparable state statutes) and keeps the GDPR transfer terms for any EU personal data a US Customer sends through the Service.
 
@@ -173,7 +173,7 @@ This addendum takes effect when the owner approves it and both parties sign it. 
 
 | Party | Name and title | Signature | Date |
 |---|---|---|---|
-| ApexMail — Bel Consulting OÜ | ______________________ | ______________________ | __________ |
+| ApexMail, Bel Consulting OÜ | ______________________ | ______________________ | __________ |
 | Customer | ______________________ | ______________________ | __________ |
 
 Approval record: this draft carries NO approval values. The `approved_by` and `approved_at` fields stay empty until the owner approves the document and both parties sign; the executed copy records them, this draft never does.

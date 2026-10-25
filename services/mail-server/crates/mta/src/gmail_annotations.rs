@@ -328,7 +328,7 @@ impl GmailAnnotationsService {
 
         // E-5:script-safe serialization. serde_json does NOT escape `<`, `>`,
         // `&`, U+2028 or U+2029 inside string literals, but this JSON is
-        // embedded in a <script> block — an org name like
+        // embedded in a <script> block, an org name like
         // `</script><img src=x onerror=alert(1)>` used to break out of the
         // script context (XSS). Post-process the serialized JSON so those
         // characters are always emitted as JSON unicode escapes.

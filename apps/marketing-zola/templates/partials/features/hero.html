@@ -1,4 +1,4 @@
-{# ── Features Hero — ARK marketing revision (law 11/12) ───────── #}
+{# ── Features Hero, ARK marketing revision (law 11/12) ───────── #}
 {# Hero system + poster factrow. The stat figures and their evidence
    links, the SLA-target honesty notes and every i18n key are preserved
    from the previous version. #}
@@ -39,11 +39,11 @@
       <div>
         {# This figure is an SLA TARGET from data/canonical.json
            (claims.api_latency_target: "P95 ≤ 500ms measured at gateway"),
-           not a measured result — the label says so beside the number. #}
+           not a measured result, the label says so beside the number. #}
         <div class="apex-factrow__n">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["stat_latency_value"] %}{{ i18n_data[l]["features"]["stat_latency_value"] }}{% else %}P95 &le; 500ms{% endif %}</div>
         <div class="apex-factrow__l">
           {% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["stat_api_latency"] %}{{ i18n_data[l]["features"]["stat_api_latency"] }}{% else %}API latency SLA target (gateway){% endif %}
-          {# performance-methodology/ exists in EN only — link it un-prefixed
+          {# performance-methodology/ exists in EN only, link it un-prefixed
              ({{ lp }} made it a 404 on locale pages; broken-links.sh finding). #}
           <a href="/performance-methodology/" class="apex-link">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["stat_latency_link"] %}{{ i18n_data[l]["features"]["stat_latency_link"] }}{% else %}Target definition and methodology{% endif %}</a>
         </div>

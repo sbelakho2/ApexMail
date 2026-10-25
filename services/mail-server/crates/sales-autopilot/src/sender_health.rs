@@ -46,7 +46,7 @@
 //! so it is derived from the canonical reply stream: if the newest of the most
 //! recent N classifications is older than the max age **while sends continued
 //! after it**, the classification path is presumed broken and returns `false`.
-//! With no inbound traffic at all — or a quiet period with no sends — it
+//! With no inbound traffic at all, or a quiet period with no sends, it
 //! returns `true`. When it returns `false`, the caller must fall back to
 //! verified static content; it must never let a model hallucinate a reply
 //! interpretation while the classifier is down.
@@ -280,7 +280,7 @@ pub fn compute_health(window: HealthWindow, warmup_day: Option<i32>) -> (f64, St
         }
     } else {
         reasons.push(format!(
-            "volume {volume} below {} — rate breakers not evaluated (tiny-volume safeguard)",
+            "volume {volume} below {}, rate breakers not evaluated (tiny-volume safeguard)",
             thresholds.min_volume_for_rates
         ));
     }
@@ -290,7 +290,7 @@ pub fn compute_health(window: HealthWindow, warmup_day: Option<i32>) -> (f64, St
     penalty += AUTH_FAILURE_WEIGHT * clamp01(auth_failures as f64 / AUTH_FAILURE_SCALE);
     if auth_failures > 0 {
         reasons.push(format!(
-            "auth failures: {auth_failures} — sending identity authentication is failing"
+            "auth failures: {auth_failures}, sending identity authentication is failing"
         ));
     }
 
@@ -344,7 +344,7 @@ pub fn breaker_state(
 
     if auth_failures > 0 {
         reasons.push(
-            "paused: authentication failures detected — SPF/DKIM/DMARC path is broken".to_string(),
+            "paused: authentication failures detected, SPF/DKIM/DMARC path is broken".to_string(),
         );
         return ("paused".to_string(), reasons);
     }
@@ -436,7 +436,7 @@ pub async fn assess_and_persist(
 }
 
 /// [`assess_and_persist`] on a caller-owned transaction. The caller decides
-/// the commit boundary — the outcome projector commits it in the same
+/// the commit boundary, the outcome projector commits it in the same
 /// transaction as the per-event applied marker, so the marker and the
 /// aggregate move together or not at all.
 pub async fn assess_and_persist_tx(
@@ -543,7 +543,7 @@ pub async fn record_event(
 
 /// [`record_event`] on a caller-owned transaction. The outcome projector
 /// commits it in the same transaction as the per-event applied marker, so the
-/// marker and the aggregate counter move together or not at all — that is
+/// marker and the aggregate counter move together or not at all, that is
 /// what makes "was THIS event applied?" answerable without a sender-wide
 /// watermark.
 pub async fn record_event_tx(
@@ -605,7 +605,7 @@ pub async fn record_event_tx(
 ///
 /// Denies when the persisted state is `quarantined`/`paused`, when the health
 /// score is below [`HealthThresholds::min_health_to_send`], or when no health
-/// row exists at all — a sender that has never been assessed sends nothing
+/// row exists at all, a sender that has never been assessed sends nothing
 /// (fail closed). `throttled` is NOT a denial: the caller reduces volume via
 /// [`throttle_factor`].
 pub async fn gate(
@@ -669,11 +669,11 @@ pub async fn gate_with_thresholds(
 /// recent [`REPLY_CLASSIFICATION_SAMPLE`] classification rows is older than
 /// [`MAX_REPLY_CLASSIFICATION_AGE_HOURS`] while sends continued after it. With
 /// no inbound traffic (no classification rows at all) or a quiet period with
-/// no further sends it returns `true` — there is nothing to classify, so a
+/// no further sends it returns `true`, there is nothing to classify, so a
 /// quiet tenant is not blocked.
 ///
 /// While this returns `false`, subsequent touches must stop and any automated
-/// reply handling must fall back to verified static content — never let a
+/// reply handling must fall back to verified static content, never let a
 /// model invent an interpretation of a reply the classifier never saw.
 pub async fn reply_classification_healthy(db: &PgPool) -> Result<bool, SalesError> {
     let sample: (i64, Option<DateTime<Utc>>) = sqlx::query_as(
@@ -737,7 +737,7 @@ mod tests {
 
     #[test]
     fn tiny_volume_never_trips_a_rate_breaker() {
-        // 1 complaint out of 2 sends is 50% — 166x the quarantine threshold —
+        // 1 complaint out of 2 sends is 50%, 166x the quarantine threshold —
         // yet the tiny-volume safeguard must keep the sender sendable.
         let (score, state, reasons) = compute_health(
             HealthWindow {

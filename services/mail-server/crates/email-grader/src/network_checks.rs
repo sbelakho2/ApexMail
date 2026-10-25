@@ -242,7 +242,7 @@ pub(crate) fn validate_mta_sts_domain(domain: &str) -> Result<(), &'static str> 
 }
 
 /// Resolve the A + AAAA records for the MTA-STS policy host. Lookup errors
-/// are flattened to "no addresses" — the caller then refuses to fetch.
+/// are flattened to "no addresses", the caller then refuses to fetch.
 async fn resolve_mta_sts_ips(dns: &dyn DnsProvider, host: &str) -> Vec<IpAddr> {
     let (a, aaaa) = tokio::join!(dns.lookup_a(host), dns.lookup_aaaa(host));
     let parse = |records: Result<Vec<String>, _>| {
@@ -335,7 +335,7 @@ fn is_private_ipv6(ip: &Ipv6Addr) -> bool {
     if s[0] & 0xffc0 == 0xfec0 {
         return true;
     }
-    // 6to4:2002::/16 — embedded IPv4 in segments 1-2
+    // 6to4:2002::/16, embedded IPv4 in segments 1-2
     if s[0] == 0x2002 {
         let embedded = Ipv4Addr::new(
             (s[1] >> 8) as u8,
@@ -347,7 +347,7 @@ fn is_private_ipv6(ip: &Ipv6Addr) -> bool {
             return true;
         }
     }
-    // Teredo:2001:0000::/32 — embedded IPv4 in the last 32 bits (XORed)
+    // Teredo:2001:0000::/32, embedded IPv4 in the last 32 bits (XORed)
     if s[0] == 0x2001 && s[1] == 0x0000 {
         let embedded = Ipv4Addr::new(
             (s[6] >> 8) as u8 ^ 0xff,

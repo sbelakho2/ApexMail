@@ -4,7 +4,7 @@
 //! onto the email + name shape `POST /v1/contacts/import` already consumes.
 //! The validation (email syntax, in-file dedupe, the 512-char name bound) and
 //! the chunked `(tenant_id, email)` upsert are the EXISTING
-//! [`crate::routes::contacts::import_contact_rows`] implementation — this
+//! [`crate::routes::contacts::import_contact_rows`] implementation, this
 //! module adds provider column/field presets, never a second CSV engine.
 //!
 //! | provider | export | shape | email | name | unsubscribe signal |
@@ -17,7 +17,7 @@
 //! Contacts are only email + name here: the provider's marketing metadata
 //! (SendGrid custom fields, Mailgun `vars`, Resend ids) has no contact-column
 //! home, so each ignored header/field GROUP is named in the report's warnings
-//! — nothing about the mapping is silent.
+//!, nothing about the mapping is silent.
 //!
 //! Rows the provider marks unsubscribed are counted and warned about, never
 //! silently imported as plain contacts and never auto-suppressed: writing
@@ -125,14 +125,14 @@ pub(crate) async fn import_provider_contacts(
         }
     } else {
         // Dry run: the same validation, then the conflict probe the upsert
-        // would resolve — how many rows are NEW versus updates — and no write.
+        // would resolve, how many rows are NEW versus updates, and no write.
         let emails: Vec<String> = validation
             .valid
             .iter()
             .map(|row| row.email.clone())
             .collect();
         let mut existing_total = 0usize;
-        // Equality JOIN against the unique `(tenant_id, email)` index — a
+        // Equality JOIN against the unique `(tenant_id, email)` index, a
         // bound `= ANY($param)` array cannot use the index (see the same note
         // in `provider_import::suppressions`).
         for chunk in emails.chunks(IMPORT_CHUNK_SIZE) {
@@ -149,7 +149,7 @@ pub(crate) async fn import_provider_contacts(
         }
         counts.imported = validation.valid.len();
         // Existing matches are NOT `duplicates` here: the canonical contacts
-        // path upserts, so they would be updated, not skipped — the note says
+        // path upserts, so they would be updated, not skipped, the note says
         // exactly that instead of mislabelling them as skipped rows.
         if existing_total > 0 {
             push_note(
@@ -174,7 +174,7 @@ pub(crate) async fn import_provider_contacts(
     if unsubscribed > 0 {
         report.warnings.push(format!(
             "{unsubscribed} contact(s) are marked unsubscribed at the provider. The import keeps \
-             them as contacts (email and name only) and never writes suppression rows implicitly — \
+             them as contacts (email and name only) and never writes suppression rows implicitly, \
              that write belongs to the suppressions import so its own scope gate applies. Import \
              your provider's unsubscribe/suppression export with kind=suppressions before sending."
         ));

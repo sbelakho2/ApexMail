@@ -12,7 +12,7 @@ weight = 2
 | API acceptance | Did ApexMail accept the request? | `POST /v1/messages` response and the `message.accepted` event |
 | Recipient-MX acceptance | Did the receiving server accept the message? | Per-attempt SMTP responses, `message.delivered`, `message.bounced`, `message.deferred` |
 | Engagement | Did the recipient open or click? | `message.opened` and `message.clicked` when tracking is enabled for the message |
-| Inbox placement | Did the message reach the inbox rather than spam? | Provider reputation telemetry (Google Postmaster Tools, Microsoft SNDS) — a separate signal from MX acceptance |
+| Inbox placement | Did the message reach the inbox rather than spam? | Provider reputation telemetry (Google Postmaster Tools, Microsoft SNDS), a separate signal from MX acceptance |
 | Downstream processing | Did your systems receive the event? | Webhook delivery attempts and signature-verification status |
 
 Recipient-MX acceptance does not establish inbox placement: a `250` response means the receiving server accepted the message, not that it reached the inbox. Read the sections in that order when diagnosing a report.

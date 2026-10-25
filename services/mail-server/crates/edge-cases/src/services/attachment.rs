@@ -108,7 +108,7 @@ impl AttachmentService {
         // 3. Detect MIME type from magic bytes
         let detected_mime = detect_from_magic_bytes(&attachment.content);
 
-        // 4. MIME type blocklist — decided on BOTH the declared and the
+        // 4. MIME type blocklist, decided on BOTH the declared and the
         // detected type (F4): block if EITHER is on the blocklist. The
         // previous logic preferred the declared Content-Type, so an EXE with
         // a spoofed `Content-Type: application/pdf` sailed past the

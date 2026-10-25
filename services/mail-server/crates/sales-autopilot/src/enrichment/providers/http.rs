@@ -109,11 +109,11 @@ struct GatewayMetrics {
 impl HttpEnrichmentProvider {
     /// Create a new HTTP enrichment provider.
     ///
-    /// `base_url` — the API base URL (e.g. `https://company.clearbit.com`).
-    /// `api_key` — the API key for Bearer authentication.
+    /// `base_url`, the API base URL (e.g. `https://company.clearbit.com`).
+    /// `api_key`, the API key for Bearer authentication.
     ///
     /// PERF #24: client-construction failure makes the integration
-    /// UNAVAILABLE — a typed `Err` the caller must surface, never a fall
+    /// UNAVAILABLE, a typed `Err` the caller must surface, never a fall
     /// back to the process-default client, which silently discards the
     /// timeout, user agent and no-redirect policy this builder pins (the
     /// no-redirect policy also guards the Bearer key from leaking to
@@ -516,7 +516,7 @@ mod tests {
     }
 
     /// PERF #24: the unavailable provider refuses every lookup with a typed
-    /// error carrying the construction failure — the integration's honest
+    /// error carrying the construction failure, the integration's honest
     /// degraded state, never a silently unbounded client.
     #[tokio::test]
     async fn unavailable_provider_refuses_every_lookup_with_typed_error() {

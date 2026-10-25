@@ -53,7 +53,7 @@ pub struct AppState {
     pub templates: TemplateApprovalService,
     pub whitelabel: WhiteLabelService,
     pub qbr: QBRService,
-    /// Shared HTTP client with connection pooling — avoids creating a new
+    /// Shared HTTP client with connection pooling, avoids creating a new
     /// reqwest::Client per request (H-04).
     pub http_client: reqwest::Client,
     /// Prometheus recorder handle rendered by the unauthenticated `/metrics`
@@ -118,7 +118,7 @@ type S = Arc<AppState>;
 // member. These scope strings gate the security-relevant control-plane
 // mutations: a caller passes with the admin claim OR the explicit scope
 // (`require_scope`). Scope-issuing for non-admin principals is a jwt-minter
-// concern — until a minter hands out e.g. `compliance:write`, the gates
+// concern, until a minter hands out e.g. `compliance:write`, the gates
 // degrade to admin-only, never wider than before.
 
 /// Compliance control plane: enable frameworks, sign the BAA, enable
@@ -149,7 +149,7 @@ struct JwtClaims {
     #[serde(default)]
     admin: bool,
     /// Fine-grained authorities minted with the token (audit F8). Absent on
-    /// legacy tokens — decoded as empty, which keeps those tokens exactly as
+    /// legacy tokens, decoded as empty, which keeps those tokens exactly as
     /// powerful as the old binary model (no wider).
     #[serde(default)]
     scopes: Vec<String>,
@@ -208,7 +208,7 @@ async fn auth_middleware(
     validation.validate_exp = true;
     validation.validate_nbf = true;
     // J-1: when the deployment pins an audience/issuer, tokens that do not
-    // match — or omit the pinned claim entirely — are rejected instead of
+    // match, or omit the pinned claim entirely, are rejected instead of
     // being accepted on signature alone. When nothing is pinned, tokens are
     // not rejected merely for carrying an `aud` claim (jsonwebtoken's
     // default `validate_aud` would otherwise do so).
@@ -443,7 +443,7 @@ pub struct AuditLogBody {
 pub struct DataAccessBody {
     pub tenant_id: String,
     /// Accepted for wire compatibility but NOT authoritative: the stored
-    /// requester is the authenticated caller (audit F3 — separation of
+    /// requester is the authenticated caller (audit F3, separation of
     /// duties is only sound when the filer's identity is server-derived).
     #[allow(dead_code)]
     pub requester_id: String,
@@ -528,7 +528,7 @@ pub struct BYOIPVerifyBody {
 }
 
 /// Render + validate the dedicated-tenant deployment bundle. The release SHA
-/// is the caller's INPUT (the approved build's commit id) — never invented
+/// is the caller's INPUT (the approved build's commit id), never invented
 /// by the server.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1018,8 +1018,8 @@ fn verify_tenant_access(
 /// set `admin`. The gate therefore answered 403 for every real owner session,
 /// making `POST /sso/configure` (and its issuer-URL validation) unreachable.
 ///
-/// The operator class is the wildcard scope set — exactly the authority the
-/// existing [`require_scope`] already honours — or the legacy `admin` claim
+/// The operator class is the wildcard scope set, exactly the authority the
+/// existing [`require_scope`] already honours, or the legacy `admin` claim
 /// for tokens minted outside the canonical minter. Tenant membership is
 /// still enforced separately by each handler (`verify_tenant_access`).
 fn require_admin(auth: &AuthContext) -> Option<(StatusCode, Json<serde_json::Value>)> {
@@ -1056,7 +1056,7 @@ fn require_scope(auth: &AuthContext, scope: &str) -> Option<(StatusCode, Json<se
 /// user-agent is the request header.
 ///
 /// Best-effort: a failed audit write is logged loudly but never fails the
-/// (already authorized and completed) mutation — EXCEPT the PHI-decryption
+/// (already authorized and completed) mutation, EXCEPT the PHI-decryption
 /// path, which awaits this result and fails closed (see `decrypt_field`).
 #[allow(clippy::too_many_arguments)]
 async fn audit_server_action(
@@ -1181,7 +1181,7 @@ impl TenantOwned for crate::types::SubAccount {
 // on Business and Enterprise Cloud (docs/pricing.md). These helpers resolve
 // the OWNING tenant's entitlement snapshot through the same override-aware
 // billing-service path api-server handlers use, so the gate is the PLAN FLAG
-// — a Business (`scale`) tenant passes exactly like an Enterprise tenant,
+//, a Business (`scale`) tenant passes exactly like an Enterprise tenant,
 // and a plan that does not sell the capability is refused 403 naming the
 // plan and the field.
 
@@ -1295,7 +1295,7 @@ fn clamp_limit(limit: i64, max: i64) -> i64 {
 
 /// Fix J-8: convert a per-thousand-emails overage rate into the per-email
 /// `overage_rate` stored on contracts using proper rounding. The previous
-/// integer division (`emails_per_thousand / 10`) silently truncated — a rate
+/// integer division (`emails_per_thousand / 10`) silently truncated, a rate
 /// of 5 became 0, i.e. free overage.
 fn overage_rate_from_per_thousand(emails_per_thousand: i64) -> i64 {
     ((emails_per_thousand as f64) / 10.0).round() as i64
@@ -1308,7 +1308,7 @@ fn clamp_offset(offset: i64) -> i64 {
 /// Map a structured [`crate::types::ApiResult`] error code onto a real HTTP
 /// status.
 ///
-/// NOT_FOUND previously surfaced as HTTP 200 with `{"success":false}` — a
+/// NOT_FOUND previously surfaced as HTTP 200 with `{"success":false}`, a
 /// lie to any client checking `response.ok`. Codes with no documented HTTP
 /// meaning keep the historical 200 (the envelope still describes the
 /// outcome), so handlers whose result cannot distinguish a not-found are
@@ -1323,14 +1323,14 @@ fn api_result_error_status(code: Option<&str>) -> Option<StatusCode> {
         // An exhausted plan capacity is the same customer-visible refusal the
         // api-server's entitlement gate returns: 403 Forbidden naming the
         // limit (`max_subaccounts`, `volume_limit`, ...). It was surfacing as
-        // HTTP 200 with `{"success":false}` — a lie to any client checking
+        // HTTP 200 with `{"success":false}`, a lie to any client checking
         // `response.ok`, and inconsistent with the capacity refusals on the
         // tenant API (dogfood 2026-10-08, capability P6: the 11th subaccount
         // create answered 200).
         Some("QUOTA_EXCEEDED") => Some(StatusCode::FORBIDDEN),
         // A provisioning/retry attempted from the wrong state is a CONFLICT
         // (the request is well-formed; the resource is not in a state that
-        // permits it) — it was reported as HTTP 200 with success:false.
+        // permits it), it was reported as HTTP 200 with success:false.
         Some("INVALID_STATE") => Some(StatusCode::CONFLICT),
         _ => None,
     }
@@ -1390,7 +1390,7 @@ async fn readiness_check(State(state): State<S>) -> impl IntoResponse {
     }
 }
 
-/// GET /metrics — Prometheus scrape endpoint.
+/// GET /metrics, Prometheus scrape endpoint.
 ///
 /// Fix H-3: metrics are no longer exposed unauthenticated to any network
 /// peer. Access is granted when either:
@@ -1654,7 +1654,7 @@ async fn contract_sign(
         Err(error) => return error,
     };
 
-    // Audit F7: signer identity for the trail — captured before the body is
+    // Audit F7: signer identity for the trail, captured before the body is
     // consumed by the service call.
     let signer_name = body.signer_name.clone();
     let signer_title = body.signer_title.clone();
@@ -1710,7 +1710,7 @@ async fn contract_sign(
     // the tenant plan. Requires a tenant signature to already exist.
     let result = state.contracts.counter_sign_contract(contract_id).await;
     // Audit F7: the counter-signature activates the contract and changes the
-    // tenant plan — recorded against the contract owner's trail (the owning
+    // tenant plan, recorded against the contract owner's trail (the owning
     // tenant comes from the contract; the platform admin is not a member).
     if let Some(contract) = result.as_ref().ok().and_then(|r| r.data.as_ref()) {
         if let Err(error) = audit_server_action(
@@ -1922,7 +1922,7 @@ async fn sso_configure(
     Json(body): Json<SSOConfigureRequest>,
 ) -> impl IntoResponse {
     // Audit F8 (verifier repair): SSO (re)configuration decides WHO can log
-    // in to the tenant — IdP certificate, entity id, SSO URL, enforce_sso.
+    // in to the tenant, IdP certificate, entity id, SSO URL, enforce_sso.
     // Left to plain tenant membership, any member (a viewer) could repoint
     // the tenant's federation at an IdP they control. This gate is part of
     // the admin-only class the audit records (`sso_configure`,
@@ -1942,7 +1942,7 @@ async fn sso_configure(
     // without it, an issuer the egress guard will refuse (plain-HTTP and
     // not allowlisted) is stored happily and then 500s on EVERY unauthenticated
     // login-begin for the domain. Refuse it here with an honest 400.
-    // (The resolving half of the guard — private/reserved-address checks —
+    // (The resolving half of the guard, private/reserved-address checks —
     // still runs at begin, where DNS can be pinned.)
     if body.provider_type.eq_ignore_ascii_case("oidc") {
         if let Some(issuer) = body.oidc_issuer.as_deref().filter(|s| !s.trim().is_empty()) {
@@ -1972,7 +1972,7 @@ async fn sso_configure(
         Ok(r) => match r.data {
             Some(config) => {
                 // Audit F7: an SSO (re)configuration changes who can log in
-                // to the tenant — it is recorded server-side with the
+                // to the tenant, it is recorded server-side with the
                 // authenticated actor, never left to the client to report.
                 if let Err(error) = audit_server_action(
                     &state,
@@ -2060,7 +2060,7 @@ fn sso_refusal_status(code: Option<&str>) -> StatusCode {
 ///
 /// With the canonical session available, the callback is a REAL login: a 302
 /// to the sanitized post-login target with the `am_session` cookie attached
-/// — the identical session shape the web login issues. Without it (the
+///, the identical session shape the web login issues. Without it (the
 /// deployment has not configured the shared `JWT_PRIVATE_KEY_PEM`), the
 /// enterprise session JSON is returned as before so the bearer flow keeps
 /// working.
@@ -2100,7 +2100,7 @@ async fn sso_saml_login(
     Query(query): Query<SsoLoginQuery>,
 ) -> impl IntoResponse {
     // Audit F11: the initiator stages a DB row per call and is
-    // unauthenticated by protocol — bound the writes per client IP.
+    // unauthenticated by protocol, bound the writes per client IP.
     let client_ip = unauthenticated_client_ip(connect_info, &headers);
     if !state.sso_login_limiter.check(&client_ip) {
         return (
@@ -2202,8 +2202,8 @@ fn decode_saml_response(encoded: &str) -> Result<String, String> {
     String::from_utf8(bytes).map_err(|_| "SAMLResponse is not valid UTF-8 XML".to_string())
 }
 
-/// POST /sso/acs/:domain — the SAML Assertion Consumer Service, and
-/// POST /sso/acs — the same ACS at a configured (domain-less) `SAML_ACS_URL`,
+/// POST /sso/acs/:domain, the SAML Assertion Consumer Service, and
+/// POST /sso/acs, the same ACS at a configured (domain-less) `SAML_ACS_URL`,
 /// where the tenant domain arrives in RelayState.
 ///
 /// Full validation order, all inside the manager: XML-DSig signature against
@@ -2219,7 +2219,7 @@ async fn sso_saml_acs(
     sso_saml_acs_inner(state, Some(domain), body).await
 }
 
-/// The domain-less ACS: `SAML_ACS_URL` need not embed a tenant domain — the
+/// The domain-less ACS: `SAML_ACS_URL` need not embed a tenant domain, the
 /// domain arrives in RelayState.
 async fn sso_saml_acs_domain_less(
     State(state): State<S>,
@@ -2276,7 +2276,7 @@ async fn sso_saml_acs_inner(state: S, path_domain: Option<String>, body: SamlAcs
     // `attribute("email").unwrap_or_else(|| name_id)` fallback let an IdP
     // assert `victim@anydomain.com` (or an opaque NameID) straight into
     // `resolve_or_provision_sso_user`, whose first-link fallback binds it to
-    // an existing same-tenant account and inherits its role — a JIT
+    // an existing same-tenant account and inherits its role, a JIT
     // account-linking hijack. An opaque NameID is `external_user_id` only
     // and never provisions a `users.email`.
     let attribute = |name: &str| {
@@ -2305,7 +2305,7 @@ async fn sso_saml_acs_inner(state: S, path_domain: Option<String>, body: SamlAcs
     };
     // Audit F2 (same bar as OIDC): an IdP that ASSERTS a verification flag
     // must not assert it false. SAML has no standardized verified attribute,
-    // so an absent flag is accepted — `asserted_email_flag_is_verified`.
+    // so an absent flag is accepted, `asserted_email_flag_is_verified`.
     if !crate::sso::asserted_email_flag_is_verified(attribute("email_verified").as_deref()) {
         return err_json(
             StatusCode::UNAUTHORIZED,
@@ -2378,8 +2378,8 @@ struct OidcCallbackQuery {
     state: Option<String>,
 }
 
-/// GET /sso/callback/oidc/:domain — the OIDC redirect_uri target, and
-/// GET /sso/callback/oidc — the same callback at a configured (domain-less)
+/// GET /sso/callback/oidc/:domain, the OIDC redirect_uri target, and
+/// GET /sso/callback/oidc, the same callback at a configured (domain-less)
 /// `OIDC_REDIRECT_URI`, where the tenant domain arrives inside the state.
 ///
 /// Consumes the single-use state, exchanges the authorization code with the
@@ -2394,7 +2394,7 @@ async fn sso_oidc_callback(
 }
 
 /// The domain-less OIDC callback: `OIDC_REDIRECT_URI` need not embed a tenant
-/// domain — the domain arrives inside the single-use state.
+/// domain, the domain arrives inside the single-use state.
 async fn sso_oidc_callback_domain_less(
     State(state): State<S>,
     Query(query): Query<OidcCallbackQuery>,
@@ -2480,7 +2480,7 @@ async fn sso_validate_session(
     }
 }
 
-/// POST /sso/cleanup — purge expired SSO sessions.
+/// POST /sso/cleanup, purge expired SSO sessions.
 ///
 /// Fix J-12: this is an administrative maintenance operation; it now requires
 /// the admin claim instead of being callable by any authenticated tenant.
@@ -2504,7 +2504,7 @@ async fn compliance_enable(
     Extension(auth): Extension<AuthContext>,
     Json(body): Json<ComplianceEnableBody>,
 ) -> impl IntoResponse {
-    // Audit F8: control-plane mutation — admin or the compliance scope.
+    // Audit F8: control-plane mutation, admin or the compliance scope.
     if let Some(e) = require_scope(&auth, SCOPE_COMPLIANCE_WRITE) {
         return e;
     }
@@ -2541,7 +2541,7 @@ async fn compliance_sign_baa(
     headers: HeaderMap,
     Json(body): Json<BAABody>,
 ) -> impl IntoResponse {
-    // Audit F8: control-plane mutation — admin or the compliance scope.
+    // Audit F8: control-plane mutation, admin or the compliance scope.
     if let Some(e) = require_scope(&auth, SCOPE_COMPLIANCE_WRITE) {
         return e;
     }
@@ -2557,7 +2557,7 @@ async fn compliance_sign_baa(
             &body.signatory_email,
         )
         .await;
-    // Audit F7: a BAA signature is a contractual HIPAA attestation — the
+    // Audit F7: a BAA signature is a contractual HIPAA attestation, the
     // server records who signed, not just the client's optional echo.
     if result.as_ref().ok().and_then(|r| r.data.as_ref()).is_some() {
         if let Err(error) = audit_server_action(
@@ -2589,7 +2589,7 @@ async fn compliance_zero_retention(
     headers: HeaderMap,
     Path(tenant_id): Path<String>,
 ) -> impl IntoResponse {
-    // Audit F8: control-plane mutation — admin or the compliance scope.
+    // Audit F8: control-plane mutation, admin or the compliance scope.
     if let Some(e) = require_scope(&auth, SCOPE_COMPLIANCE_WRITE) {
         return e;
     }
@@ -2635,9 +2635,9 @@ async fn compliance_log_audit(
 
     // Fix C (audit-log forgery): identity columns are derived by the server
     // and can no longer be forged by clients:
-    //   * user_id      — always the authenticated token subject (claims.sub)
-    //   * ip_address   — always the connection peer address
-    //   * user_agent   — always the request User-Agent header
+    //   * user_id     , always the authenticated token subject (claims.sub)
+    //   * ip_address  , always the connection peer address
+    //   * user_agent  , always the request User-Agent header
     // Body-supplied identity fields (user_id / ip_address / user_agent /
     // session_id / request_id) are never persisted as identity; they are
     // preserved under `metadata.client_supplied` for troubleshooting only.
@@ -2720,7 +2720,7 @@ async fn compliance_data_access(
         return e;
     }
     // Audit F3 (verifier repair): the STORED requester is the authenticated
-    // caller — never the body's `requester_id`. The separation-of-duties
+    // caller, never the body's `requester_id`. The separation-of-duties
     // check on approval compares the approver against the stored requester,
     // so a body-controlled requester_id ("someone-else") would let a member
     // file a grant and then approve it themselves. The body field stays
@@ -2757,7 +2757,7 @@ async fn compliance_approve_access(
     }
 
     // Audit F3: separation of duties. The requester can never approve their
-    // own grant — a tenant member used to be able to file a request and then
+    // own grant, a tenant member used to be able to file a request and then
     // self-approve it into a time-boxed access token. Only an admin may
     // self-approve (a platform-level exception), everyone else needs a
     // DIFFERENT approver.
@@ -2771,7 +2771,7 @@ async fn compliance_approve_access(
     }
 
     // Fix J-3: the approver identity is derived from the authenticated token
-    // claims — the body-supplied `approved_by` is never trusted — and the
+    // claims, the body-supplied `approved_by` is never trusted, and the
     // granted duration is clamped to 1..=1440 minutes (max 24 h).
     let approved_by = auth.user_id.clone();
     let duration_minutes = body.duration_minutes.clamp(1, 1440);
@@ -2781,7 +2781,7 @@ async fn compliance_approve_access(
         .approve_data_access(id, &approved_by, duration_minutes)
         .await
     {
-        // Audit F3: the raw access token is returned EXACTLY ONCE — in this
+        // Audit F3: the raw access token is returned EXACTLY ONCE, in this
         // approval response, as the approver's handoff to the requester. The
         // database persists only its SHA-256 digest (the SSO bearer-token
         // model), so re-approving a completed request can never mint or
@@ -2800,7 +2800,7 @@ async fn compliance_data_deletion(
         return e;
     }
     // Audit F3 (verifier repair): same server-derived identity as the
-    // data-access filer — the stored requester is the authenticated caller.
+    // data-access filer, the stored requester is the authenticated caller.
     let requester_id = auth.user_id.clone();
     service_result(
         state
@@ -2959,7 +2959,7 @@ struct DecryptFieldBody {
 /// Decrypt a single field value (for testing/migration tooling).
 ///
 /// Audit F1: this is a PHI-decryption oracle. It now (a) requires the admin
-/// claim — tenant membership alone let a low-privilege insider bulk-decrypt
+/// claim, tenant membership alone let a low-privilege insider bulk-decrypt
 /// every ciphertext of their own tenant, and (b) writes a MANDATORY audit
 /// entry per call (actor, field_name, tenant). The audit write happens
 /// BEFORE any decryption and its failure fails the call closed: an
@@ -3020,7 +3020,7 @@ async fn decrypt_field(
         }
     };
 
-    // Fix B: decryption is bound to the caller's tenant — a ciphertext that
+    // Fix B: decryption is bound to the caller's tenant, a ciphertext that
     // was not encrypted for this tenant (or whose provenance is unknown)
     // is rejected instead of being decrypted with the global KEK.
     match encryptor.decrypt_with_aad(&body.value, &tenant_binding_aad(&body.tenant_id)) {
@@ -3052,7 +3052,7 @@ async fn log_stream_create(
     Extension(auth): Extension<AuthContext>,
     Json(body): Json<LogStreamCreateBody>,
 ) -> impl IntoResponse {
-    // Audit F8: control-plane mutation — admin or the log-streams scope.
+    // Audit F8: control-plane mutation, admin or the log-streams scope.
     if let Some(e) = require_scope(&auth, SCOPE_LOG_STREAMS_WRITE) {
         return e;
     }
@@ -3095,7 +3095,7 @@ async fn log_stream_update(
     Path(id): Path<Uuid>,
     Json(body): Json<LogStreamUpdateBody>,
 ) -> impl IntoResponse {
-    // Audit F8: control-plane mutation — admin or the log-streams scope.
+    // Audit F8: control-plane mutation, admin or the log-streams scope.
     if let Some(e) = require_scope(&auth, SCOPE_LOG_STREAMS_WRITE) {
         return e;
     }
@@ -3122,7 +3122,7 @@ async fn log_stream_delete(
     Extension(auth): Extension<AuthContext>,
     Path(id): Path<Uuid>,
 ) -> impl IntoResponse {
-    // Audit F8: control-plane mutation — admin or the log-streams scope.
+    // Audit F8: control-plane mutation, admin or the log-streams scope.
     if let Some(e) = require_scope(&auth, SCOPE_LOG_STREAMS_WRITE) {
         return e;
     }
@@ -3149,7 +3149,7 @@ async fn log_stream_pause(
     Extension(auth): Extension<AuthContext>,
     Path(id): Path<Uuid>,
 ) -> impl IntoResponse {
-    // Audit F8: control-plane mutation — admin or the log-streams scope.
+    // Audit F8: control-plane mutation, admin or the log-streams scope.
     if let Some(e) = require_scope(&auth, SCOPE_LOG_STREAMS_WRITE) {
         return e;
     }
@@ -3165,7 +3165,7 @@ async fn log_stream_resume(
     Extension(auth): Extension<AuthContext>,
     Path(id): Path<Uuid>,
 ) -> impl IntoResponse {
-    // Audit F8: control-plane mutation — admin or the log-streams scope.
+    // Audit F8: control-plane mutation, admin or the log-streams scope.
     if let Some(e) = require_scope(&auth, SCOPE_LOG_STREAMS_WRITE) {
         return e;
     }
@@ -3303,7 +3303,7 @@ async fn deploy_bundle(
     Path(id): Path<Uuid>,
     Json(body): Json<DeployBundleBody>,
 ) -> impl IntoResponse {
-    // Audit F8: control-plane mutation — admin or the dedicated-tenants scope.
+    // Audit F8: control-plane mutation, admin or the dedicated-tenants scope.
     if let Some(e) = require_scope(&auth, SCOPE_DEDICATED_TENANTS_WRITE) {
         return e;
     }
@@ -3321,7 +3321,7 @@ async fn deploy_bundle(
         .render_dedicated_bundle(id, &body.release_sha, &output_base)
         .await;
     // Audit F7: recording the validated bundle is the act that unlocks
-    // `provisioned`/`active` — it belongs in the tamper-evident trail.
+    // `provisioned`/`active`, it belongs in the tamper-evident trail.
     if let Some(outcome) = result.as_ref().ok().and_then(|r| r.data.as_ref()) {
         if let Err(error) = audit_server_action(
             &state,
@@ -3359,7 +3359,7 @@ async fn deploy_transition(
     Path(id): Path<Uuid>,
     Json(body): Json<DeployTransitionBody>,
 ) -> impl IntoResponse {
-    // Audit F8: control-plane mutation — admin or the dedicated-tenants scope.
+    // Audit F8: control-plane mutation, admin or the dedicated-tenants scope.
     if let Some(e) = require_scope(&auth, SCOPE_DEDICATED_TENANTS_WRITE) {
         return e;
     }
@@ -3440,7 +3440,7 @@ async fn ip_allocate(
     Extension(auth): Extension<AuthContext>,
     Json(body): Json<DedicatedIPBody>,
 ) -> impl IntoResponse {
-    // Audit F8: control-plane mutation — admin or the dedicated-IPs scope.
+    // Audit F8: control-plane mutation, admin or the dedicated-IPs scope.
     if let Some(e) = require_scope(&auth, SCOPE_DEDICATED_IPS_WRITE) {
         return e;
     }
@@ -3495,7 +3495,7 @@ async fn ip_reputation(
 
 /// A CIDR block must be a syntactically valid NETWORK address: a malformed
 /// value (bad syntax, prefix > 32/128, host bits set) is caller error and
-/// must be answered with a 4xx — previously it reached the database and
+/// must be answered with a 4xx, previously it reached the database and
 /// surfaced as a 500.
 fn is_valid_network_cidr(cidr: &str) -> bool {
     use std::net::IpAddr;
@@ -3815,7 +3815,7 @@ async fn sub_account_api_key(
         .sub_accounts
         .create_api_key(id, &body.name, body.permissions, body.rate_limit)
         .await;
-    // Audit F7: API-key minting widens who can act as the tenant — recorded
+    // Audit F7: API-key minting widens who can act as the tenant, recorded
     // server-side. The key material itself is never written to the trail.
     if let Some(parent_tenant) = parent_tenant {
         if result.as_ref().ok().and_then(|r| r.data.as_ref()).is_some() {
@@ -3842,7 +3842,7 @@ async fn sub_account_api_key(
     service_result(result)
 }
 
-/// GET /sub-accounts/:id/api-keys — list a sub-account's API keys
+/// GET /sub-accounts/:id/api-keys, list a sub-account's API keys
 /// (masked: hashes stripped, fix J-4).
 async fn sub_account_api_keys_list(
     State(state): State<S>,
@@ -3869,7 +3869,7 @@ async fn sub_account_api_keys_list(
     service_result(state.sub_accounts.list_api_keys(id).await)
 }
 
-/// POST /sub-accounts/:id/api-keys/:key_id/revoke — revoke an API key
+/// POST /sub-accounts/:id/api-keys/:key_id/revoke, revoke an API key
 /// (fix J-4). Revoked keys fail `SubAccountService::verify_api_key`.
 async fn sub_account_api_key_revoke(
     State(state): State<S>,
@@ -4162,7 +4162,7 @@ async fn template_list(
 /// Approve a template submission.
 ///
 /// Fix A: the submission must belong to the caller's tenant. Fix (role gate):
-/// approval is a reviewer action — only callers with the admin/reviewer claim
+/// approval is a reviewer action, only callers with the admin/reviewer claim
 /// may approve or reject submissions. The reviewer identity is taken from the
 /// authenticated claims, not the body.
 async fn template_approve(
@@ -4194,7 +4194,7 @@ async fn template_approve(
         .templates
         .approve(id, &auth.user_id, body.notes.as_deref())
         .await;
-    // The review is a configuration decision on a Business capability — it
+    // The review is a configuration decision on a Business capability, it
     // belongs in the tenant audit trail (docs/api/endpoints/audit.md
     // "configuration activity"). Best-effort: a committed review stands.
     if result.as_ref().ok().and_then(|r| r.data.as_ref()).is_some() {
@@ -4352,7 +4352,7 @@ async fn whitelabel_update_config(
     Extension(auth): Extension<AuthContext>,
     Json(body): Json<WhiteLabelConfigBody>,
 ) -> impl IntoResponse {
-    // Audit F8: control-plane mutation — admin or the whitelabel scope.
+    // Audit F8: control-plane mutation, admin or the whitelabel scope.
     if let Some(e) = require_scope(&auth, SCOPE_WHITELABEL_WRITE) {
         return e;
     }
@@ -4673,7 +4673,7 @@ async fn render_pdf(
     })
 }
 
-/// POST /dpa/:tenant_id/pdf — Generate a GDPR Data Processing Agreement PDF
+/// POST /dpa/:tenant_id/pdf, Generate a GDPR Data Processing Agreement PDF
 async fn dpa_generate_pdf(
     State(state): State<S>,
     Extension(auth): Extension<AuthContext>,
@@ -4716,7 +4716,7 @@ async fn dpa_generate_pdf(
 
     let pdf_bytes = render_pdf(&state, &payload).await?;
 
-    // Audit F7: DPA paper trail — a generated (signed-form) DPA document is
+    // Audit F7: DPA paper trail, a generated (signed-form) DPA document is
     // a compliance attestation artifact; the server records its issuance.
     if let Err(error) = audit_server_action(
         &state,
@@ -4747,7 +4747,7 @@ async fn dpa_generate_pdf(
     ))
 }
 
-/// GET /qbr/:id/pdf — Generate a QBR PDF for the given report
+/// GET /qbr/:id/pdf, Generate a QBR PDF for the given report
 async fn qbr_generate_pdf(
     State(state): State<S>,
     Extension(auth): Extension<AuthContext>,
@@ -4807,7 +4807,7 @@ async fn qbr_generate_pdf(
     ))
 }
 
-/// GET /compliance/report/:tenant_id/pdf — Generate a compliance report PDF
+/// GET /compliance/report/:tenant_id/pdf, Generate a compliance report PDF
 async fn compliance_report_pdf(
     State(state): State<S>,
     Extension(auth): Extension<AuthContext>,
@@ -4904,7 +4904,7 @@ mod tests {
 
     #[tokio::test]
     async fn sub_account_resume_route_exists_and_requires_auth() {
-        // T1 dogfood: suspend had no inverse — POST /sub-accounts/:id/resume
+        // T1 dogfood: suspend had no inverse, POST /sub-accounts/:id/resume
         // must be routed (401 before auth, not 404/405). Sub-account routes
         // live on the main router only (like suspend itself): the
         // /api/enterprise nest carries contract_routes, not these.
@@ -5012,7 +5012,7 @@ mod tests {
         })
     }
 
-    /// A Business tenant passes on the entitlement — submit AND approve —
+    /// A Business tenant passes on the entitlement, submit AND approve —
     /// proving the gate is the plan flag, not a tenant type (the plan is
     /// `scale`, not `enterprise`).
     #[tokio::test]
@@ -5579,7 +5579,7 @@ mod tests {
     }
 
     /// Mint the session a REAL owner login produces (dogfood F6): no `admin`
-    /// claim, `scopes = ["*"]` — exactly what the api-server password session
+    /// claim, `scopes = ["*"]`, exactly what the api-server password session
     /// and the enterprise SSO minter (`canonical_scopes_for_role`) emit.
     fn mint_sso_owner_token(tenant_id: &str, subject: &str) -> String {
         mint_sso_token_with_scopes(tenant_id, subject, false, &["*"])
@@ -5722,7 +5722,7 @@ mod tests {
     }
 
     /// Stage one SP-initiated AuthnRequest for InResponseTo correlation
-    /// (audit P2-6) — the E2E equivalent of the staging `GET
+    /// (audit P2-6), the E2E equivalent of the staging `GET
     /// /sso/login/saml/:domain` performs, without minting a new request id.
     async fn stage_saml_authn_request(
         state: &AppState,
@@ -5788,7 +5788,7 @@ mod tests {
             .to_string();
             let discovery = serde_json::json!({
                 "issuer": issuer,
-                // Audit P3-10: a NONSTANDARD authorization endpoint — the
+                // Audit P3-10: a NONSTANDARD authorization endpoint, the
                 // flow must take the authorize URL from discovery, never
                 // from `{issuer}/authorize`.
                 "authorization_endpoint": format!("{issuer}/oidc-auth"),
@@ -5924,7 +5924,7 @@ mod tests {
     }
 
     /// Dogfood F6: the configurator must accept the session a real owner
-    /// login produces — `scopes = ["*"]`, NO `admin` claim. The old gate
+    /// login produces, `scopes = ["*"]`, NO `admin` claim. The old gate
     /// checked only `admin` (which no minter emits) and answered 403 for
     /// every real session, so SSO configuration (and its issuer validation)
     /// was unreachable.
@@ -5959,7 +5959,7 @@ mod tests {
         assert_eq!(body["domain"], domain, "{body}");
 
         // A member session (scoped authorities, no wildcard) is still
-        // refused — the gate did not widen past the operator class.
+        // refused, the gate did not widen past the operator class.
         let member = mint_sso_token_with_scopes(
             &tenant,
             "routes-viewer",
@@ -5996,7 +5996,7 @@ mod tests {
         let tag = "saml_e2e";
         let tenant = sso_flow_tenant(tag);
         let domain = "saml-e2e.routes.example.com";
-        // The IDP's entity id — what we ACCEPT on responses, never what we
+        // The IDP's entity id, what we ACCEPT on responses, never what we
         // send in the AuthnRequest Issuer (audit P2-4).
         let idp_entity_id = "https://idp.routes-saml.example.com/metadata";
         let sso_url = "https://idp.routes-saml.example.com/sso";
@@ -6130,9 +6130,9 @@ mod tests {
         );
 
         // 4b. Audit F2 (verifier repair): a SIGNED assertion claiming an
-        //     OUT-OF-DOMAIN email — the exact JIT account-linking hijack the
+        //     OUT-OF-DOMAIN email, the exact JIT account-linking hijack the
         //     finding describes (`victim@anydomain.com` binds to a same-
-        //     tenant local account and inherits its role) — is refused with
+        //     tenant local account and inherits its role), is refused with
         //     401 AFTER the signature validates. Pins the ACS's email gate
         //     wiring end-to-end.
         let mut hijack = SamlFixture::valid(idp_entity_id, &sp_entity_id, &acs_url);
@@ -6170,7 +6170,7 @@ mod tests {
         );
 
         // 4c. An assertion with NO email attribute (opaque NameID only) is
-        //     refused too — the NameID is an external_user_id, never an
+        //     refused too, the NameID is an external_user_id, never an
         //     email, and must not fall back into `users.email`.
         let mut opaque = SamlFixture::valid(idp_entity_id, &sp_entity_id, &acs_url);
         opaque.in_response_to = Some(format!("_saml_{}", Uuid::new_v4()));
@@ -6209,7 +6209,7 @@ mod tests {
         // 5. A tampered (digest-flipped) response is refused at the signature gate.
         let mut tamperable = SamlFixture::valid(idp_entity_id, &sp_entity_id, &acs_url);
         // Audit F2: the untouched twin must still complete (200), so its
-        // asserted email is IN the configured SSO domain — the tamper arm
+        // asserted email is IN the configured SSO domain, the tamper arm
         // itself is refused at the signature gate before any email check.
         tamperable.name_id = asserted_email.to_string();
         tamperable.attributes = vec![("email".to_string(), asserted_email.to_string())];
@@ -6238,7 +6238,7 @@ mod tests {
                 .contains("signature verification failed"),
             "{body}"
         );
-        // The untouched document still validates (the gate is exact) — it
+        // The untouched document still validates (the gate is exact), it
         // correlates against a fresh stage of the same request id.
         stage_saml_authn_request(
             &state,
@@ -6444,7 +6444,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
 
         // 1. Login initiation → 302 to the IdP's DISCOVERED authorization
-        //    endpoint (nonstandard on the mock — audit P3-10).
+        //    endpoint (nonstandard on the mock, audit P3-10).
         let response = get_request(&app, &format!("/sso/login/oidc/{domain}")).await;
         assert_eq!(response.status(), StatusCode::FOUND);
         let location = response_header(&response, "location");
@@ -6618,7 +6618,7 @@ mod tests {
     }
 
     // ═════════════════════════════════════════════════════════════════════
-    // Audit F3: data-access approval guards — separation of duties, the
+    // Audit F3: data-access approval guards, separation of duties, the
     // `AND status = 'pending'` state guard, digest-at-rest and the one-time
     // raw-token handoff.
     // ═════════════════════════════════════════════════════════════════════
@@ -6683,7 +6683,7 @@ mod tests {
         serde_json::json!({ "approved_by": "ignored-by-j-3", "duration_minutes": 60 })
     }
 
-    /// The requester — a plain tenant member — must NOT be able to approve
+    /// The requester, a plain tenant member, must NOT be able to approve
     /// their own access request (separation of duties). A different member
     /// of the SAME tenant can. An admin self-approval remains the explicit
     /// platform exception.
@@ -6696,7 +6696,7 @@ mod tests {
         let tenant = "da-sod-tenant";
         seed_data_access_tenant(&state, tenant).await;
 
-        // The requester self-approving is a 403 — and the row stays pending.
+        // The requester self-approving is a 403, and the row stays pending.
         let request_id = seed_pending_data_access(&state, tenant, "member-self").await;
         let response = post_json(
             &app,
@@ -6736,7 +6736,7 @@ mod tests {
     }
 
     /// Audit F3 (verifier repair): the STORED requester is the authenticated
-    /// filer — the body's `requester_id` is never authoritative. A member who
+    /// filer, the body's `requester_id` is never authoritative. A member who
     /// files through the route claiming `requester_id: "someone-else"` used
     /// to defeat the separation-of-duties comparison (stored requester ≠
     /// approver) and self-approve into a live grant token.
@@ -6807,7 +6807,7 @@ mod tests {
         let request_id = seed_pending_data_access(&state, tenant, "member-d").await;
 
         // Approve through the service the route delegates to (the route
-        // returns this ApiResult verbatim — the raw token is in `data`).
+        // returns this ApiResult verbatim, the raw token is in `data`).
         let result = state
             .compliance
             .approve_data_access(request_id, "member-e", 60)
@@ -6819,7 +6819,7 @@ mod tests {
             .and_then(|r| r.access_token.clone())
             .expect("the approval response carries the raw token ONCE");
 
-        // At rest: only the digest — the raw token never touches the row.
+        // At rest: only the digest, the raw token never touches the row.
         let stored: String =
             sqlx::query_scalar("SELECT access_token FROM ent_data_access_requests WHERE id = $1")
                 .bind(request_id)
@@ -6909,8 +6909,8 @@ mod tests {
 /// `routes/admin/mod.rs` scope scan): the control-plane routes that must
 /// carry an explicit scope are enumerated here together with the scope
 /// constant their handler is required to declare. A handler that loses its
-/// `require_scope` call — or a new control-plane route added without a
-/// scope gate — fails this test, so RBAC regressions are caught by
+/// `require_scope` call, or a new control-plane route added without a
+/// scope gate, fails this test, so RBAC regressions are caught by
 /// `cargo test`, not by a penetration test.
 #[cfg(test)]
 mod rbac_scope_guards {
@@ -6975,7 +6975,7 @@ mod rbac_scope_guards {
     }
 
     /// The PHI-decryption oracle (audit F1) must keep its admin gate and its
-    /// mandatory audit emission — the scan pattern pins both.
+    /// mandatory audit emission, the scan pattern pins both.
     #[test]
     fn decrypt_field_keeps_admin_gate_and_audit() {
         let source = include_str!("routes.rs");
@@ -6992,7 +6992,7 @@ mod rbac_scope_guards {
     }
 
     /// Audit F8 (verifier repair): SSO (re)configuration decides who can log
-    /// in to the tenant — it belongs to the admin-only handler class. A
+    /// in to the tenant, it belongs to the admin-only handler class. A
     /// `require_admin` line silently dropped from `sso_configure` fails here.
     #[test]
     fn sso_configure_requires_admin() {
@@ -7006,11 +7006,11 @@ mod rbac_scope_guards {
     }
 
     /// Audit F7: the enterprise service must emit its OWN server-side audit
-    /// entries for security-relevant mutations — SSO (re)configuration and
+    /// entries for security-relevant mutations, SSO (re)configuration and
     /// zero-retention enablement at the minimum (both change who can act or
     /// what is purged), plus the other contractual/key-minting actions the
     /// work order names. A handler that loses its `audit_server_action` call
-    /// — or its action literal — fails here.
+    ///, or its action literal, fails here.
     #[test]
     fn security_mutations_emit_server_side_audit() {
         let source = include_str!("routes.rs");

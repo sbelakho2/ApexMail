@@ -63,9 +63,9 @@ pub struct Extension {
 /// Protocol context for anomaly evaluation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FingerprintContext {
-    /// HTTPS/browser-style traffic — ALPN is expected.
+    /// HTTPS/browser-style traffic, ALPN is expected.
     Browser,
-    /// Mail protocols (SMTP/IMAP/POP3 over STARTTLS) — missing ALPN is normal.
+    /// Mail protocols (SMTP/IMAP/POP3 over STARTTLS), missing ALPN is normal.
     Mail,
 }
 
@@ -220,7 +220,7 @@ impl Ja4Fingerprint {
 
     /// Check if fingerprint looks anomalous for a browser/HTTPS context.
     /// Mail protocols (SMTP/IMAP/POP3 over STARTTLS) legitimately omit
-    /// ALPN — use [`Self::is_anomalous_in`] with
+    /// ALPN, use [`Self::is_anomalous_in`] with
     /// [`FingerprintContext::Mail`] for those.
     pub fn is_anomalous(&self) -> bool {
         self.is_anomalous_in(FingerprintContext::Browser)
@@ -233,7 +233,7 @@ impl Ja4Fingerprint {
             return true;
         }
 
-        // No ALPN is only suspicious for browsers/HTTPS — mail clients
+        // No ALPN is only suspicious for browsers/HTTPS, mail clients
         // (SMTP/IMAP/POP3 STARTTLS) almost never negotiate ALPN.
         if context == FingerprintContext::Browser && self.alpn == "00" {
             return true;
@@ -247,7 +247,7 @@ impl Ja4Fingerprint {
 /// GREASE values are of the form 0xNNNN where BOTH bytes are equal and each
 /// byte's low nibble is 0x0a:0x0a0a, 0x1a1a, 0x2a2a, … 0xfafa.
 /// The old check `(value & 0x0f0f) == 0x0a0a` also matched non-GREASE
-/// values such as 0x1a0a and 0x0a1a (bytes differ — never emitted as GREASE).
+/// values such as 0x1a0a and 0x0a1a (bytes differ, never emitted as GREASE).
 fn is_grease_value(value: u16) -> bool {
     let hi = (value >> 8) as u8;
     let lo = (value & 0xff) as u8;
@@ -255,7 +255,7 @@ fn is_grease_value(value: u16) -> bool {
 }
 
 /// Validate a JA4_a component against this crate's own format:
-/// 1 protocol char (t/q/d), 1 SNI char (d/i — NOT '_', which collides with
+/// 1 protocol char (t/q/d), 1 SNI char (d/i, NOT '_', which collides with
 /// the `_` field separator in full JA4 strings and could never round-trip
 /// through [`Ja4Fingerprint::parse`]), two 2-digit decimal counts, then a
 /// lowercase alphanumeric ALPN marker ("00" when absent).
@@ -370,7 +370,7 @@ mod tests {
         for v in [0x0a0a, 0x1a1a, 0x2a2a, 0xfafa] {
             assert!(is_grease_value(v), "{v:#06x} is GREASE");
         }
-        // Mixed-byte values are NOT GREASE — the old mask check matched them.
+        // Mixed-byte values are NOT GREASE, the old mask check matched them.
         for v in [0x1a0a, 0x0a1a, 0x2a0a, 0x0a2a] {
             assert!(!is_grease_value(v), "{v:#06x} must not be GREASE");
         }

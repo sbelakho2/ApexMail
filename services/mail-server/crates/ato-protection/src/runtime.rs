@@ -1,4 +1,4 @@
-//! Process-shared ATO runtime — the deployment gate and engine handle that
+//! Process-shared ATO runtime, the deployment gate and engine handle that
 //! real login flows call.
 //!
 //! The api-server login handlers (JSON `/login` and the SSR password step)
@@ -6,14 +6,14 @@
 //! (they hold `AppState`, which deliberately carries no ATO field). This
 //! module provides the process-wide, lazily built runtime:
 //!
-//! - **Gate** — `ATO_PROTECTION_ENABLED` explicitly forces the protection on
+//! - **Gate**, `ATO_PROTECTION_ENABLED` explicitly forces the protection on
 //!   or off; when unset the default is OFF outside production/staging so
 //!   local development flows are untouched, and ON where the product
 //!   advertises account-takeover protection.
-//! - **Config** — engine tuning via `ATO_REDIS_LOCKOUT_URL`,
+//! - **Config**, engine tuning via `ATO_REDIS_LOCKOUT_URL`,
 //!   `ATO_MFA_THRESHOLD`, `ATO_BLOCK_THRESHOLD` (plus the pepper env read by
 //!   [`crate::config::AtoConfig::default`]).
-//! - **Fail-open contract** — an engine that cannot be built (invalid
+//! - **Fail-open contract**, an engine that cannot be built (invalid
 //!   configuration) leaves the runtime DEGRADED: [`AtoRuntime::evaluate_login`]
 //!   reports the error and callers allow the login with a loud log. A
 //!   security layer must never take authentication down with it.
@@ -30,9 +30,9 @@ use std::sync::Arc;
 /// The login handlers map this band onto the shared response policy:
 /// - `Low` → allow (score logged, no audit row),
 /// - `Medium` → allow, but require MFA step-up when the user has MFA
-///   enrolled (otherwise allow + flag) — always with an audit row,
+///   enrolled (otherwise allow + flag), always with an audit row,
 /// - `High` → refuse the attempt with the handler's standard
-///   wrong-password response (anti-enumeration) — always with an audit row.
+///   wrong-password response (anti-enumeration), always with an audit row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AtoBand {
     /// Composite risk below the MFA threshold.
@@ -111,9 +111,9 @@ pub fn runtime_config_from_env() -> AtoConfig {
         if let Ok(value) = raw.trim().parse::<f64>() {
             if value.is_finite() {
                 config.block_threshold = value;
-                // coverage: justified — llvm-cov closing-brace region
+                // coverage: justified, llvm-cov closing-brace region
                 // artifact: this arm executes (the ladder test applies
-                // "0.77" — the assignment above carries a hit) and the block
+                // "0.77", the assignment above carries a hit) and the block
                 // cannot be exited except through the brace.
             }
         }
@@ -135,14 +135,14 @@ pub struct AtoRuntime {
 
 impl AtoRuntime {
     /// Build a runtime. An invalid configuration is NOT a construction
-    /// error — it produces a degraded runtime whose evaluations fail open
+    /// error, it produces a degraded runtime whose evaluations fail open
     /// (this is the fail-open contract, not a panic path).
     pub fn build(enabled: bool, config: AtoConfig) -> Self {
         if let Err(error) = config.validate() {
             tracing::error!(
                 enabled,
                 error = ?error,
-                "ATO protection configuration is INVALID — runtime DEGRADED: \
+                "ATO protection configuration is INVALID, runtime DEGRADED: \
                  every evaluation fails OPEN (allow + log). Fix ATO_* settings."
             );
             return Self {
@@ -211,9 +211,9 @@ pub fn shared() -> Arc<AtoRuntime> {
     }
     let mut write = SHARED_RUNTIME.write();
     if let Some(runtime) = write.as_ref() {
-        // coverage: justified — double-checked-locking re-check: reachable
+        // coverage: justified, double-checked-locking re-check: reachable
         // only when a concurrent first builder completes between this
-        // thread's read-lock release and write-lock acquisition — a race
+        // thread's read-lock release and write-lock acquisition, a race
         // window that cannot be entered deterministically from a
         // single-threaded test (the fast path above and the build path below
         // are both covered).
@@ -389,7 +389,7 @@ mod tests {
             .evaluate_login(&second)
             .expect("healthy runtime evaluates");
         assert_eq!(band_for(verdict.action), AtoBand::Medium);
-        // coverage: justified — lazy assert-format argument: the factor-id
+        // coverage: justified, lazy assert-format argument: the factor-id
         // list is evaluated only when the assertion FAILS; a green suite by
         // definition never formats it.
         assert!(

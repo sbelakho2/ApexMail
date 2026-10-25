@@ -1,4 +1,4 @@
-//! Autopilot control endpoints — a thin proxy to the sales-autopilot service.
+//! Autopilot control endpoints, a thin proxy to the sales-autopilot service.
 //!
 //! The control plane owns no sales brain. There is no worker loop, no
 //! qualification threshold and no lead-status mutation here: the canonical
@@ -9,7 +9,7 @@
 //!
 //! Mutating calls are audit-logged (`resource_type = "sales_autopilot"`) with
 //! the upstream status. When the service is not configured the handlers fail
-//! closed with `ServiceUnavailable` — the CP never fabricates a payload and
+//! closed with `ServiceUnavailable`, the CP never fabricates a payload and
 //! never falls back to local writes.
 
 use std::time::Duration;
@@ -62,7 +62,7 @@ pub fn router() -> Router<AppState> {
 // ──────────────────────────────────────────
 
 /// The configured sales-autopilot base URL, or a fail-closed error. An empty
-/// value is "not configured" — the CP has no local autopilot to fall back to.
+/// value is "not configured", the CP has no local autopilot to fall back to.
 fn sales_autopilot_base_url(state: &AppState) -> Result<String, ApiError> {
     let base = state
         .config
@@ -162,7 +162,7 @@ async fn proxy_control_get(state: &AppState, path: &str) -> Result<Response, Api
 }
 
 /// Proxy a mutating control call and audit-log it. The audit entry is written
-/// whether the upstream call succeeded or not — an attempted autonomy change
+/// whether the upstream call succeeded or not, an attempted autonomy change
 /// is always recorded.
 async fn proxy_control_mutation(
     state: &AppState,

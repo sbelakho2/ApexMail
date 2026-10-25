@@ -126,14 +126,14 @@ Available through the applicable runtime entitlement: an approved Pro add-on; Gr
 
 ApexMail's MTA (Mail Transfer Agent) implements the full suite of modern email authentication standards.
 
-### SPF (Sender Policy Framework) — RFC 7208
+### SPF (Sender Policy Framework), RFC 7208
 
 - ApexMail publishes its own SPF record authorizing its sending infrastructure.
-- When sending through the AWS SES transport, customer domains include Amazon SES in SPF (`include:amazonses.com`) — see [SPF setup](/quickstart/#step-5-add-custom-mail-from-records) for the exact record the dashboard generates for your domain.
+- When sending through the AWS SES transport, customer domains include Amazon SES in SPF (`include:amazonses.com`), see [SPF setup](/quickstart/#step-5-add-custom-mail-from-records) for the exact record the dashboard generates for your domain.
 - SPF validation is performed on the return-path (MAIL FROM) domain.
 - Custom return-path domains ensure SPF alignment for DMARC.
 
-### DKIM (DomainKeys Identified Mail) — RFC 6376
+### DKIM (DomainKeys Identified Mail), RFC 6376
 
 - The signer rejects RSA keys shorter than 2048 bits.
 - DKIM selectors are assigned per sending domain. Copy the exact selector and DNS record from the Domains settings; do not reuse an example selector from another account.
@@ -142,22 +142,22 @@ ApexMail's MTA (Mail Transfer Agent) implements the full suite of modern email a
 - `relaxed/relaxed` canonicalization for header and body.
 - Customer-managed keys require a separately approved Enterprise arrangement.
 
-### DMARC (Domain-based Message Authentication, Reporting, and Conformance) — RFC 7489
+### DMARC (Domain-based Message Authentication, Reporting, and Conformance), RFC 7489
 
 - DMARC builds on SPF and DKIM for domain-level authentication.
 - Alignment modes: `relaxed` (default) ensures subdomain matching.
 - RUA aggregate reports processed and made available to customers.
 - RUF forensic reports supported.
 
-### DANE (DNS-based Authentication of Named Entities) — RFC 6698 / RFC 7672
+### DANE (DNS-based Authentication of Named Entities), RFC 6698 / RFC 7672
 
 [roadmap] DANE/TLSA verification of recipient MX servers is implemented in the MTA codebase but is not enforced on the default delivery path today; enabling it for supported recipient domains is on the roadmap.
 
-### MTA-STS (SMTP MTA Strict Transport Security) — RFC 8461
+### MTA-STS (SMTP MTA Strict Transport Security), RFC 8461
 
 [roadmap] MTA-STS policy publication and outbound MTA-STS enforcement (with TLSRPT/TLS Reporting) are planned; they are not enforced on the managed cloud's mail paths today.
 
-### ARC (Authenticated Received Chain) — RFC 8617
+### ARC (Authenticated Received Chain), RFC 8617
 
 [roadmap] ARC sealing is implemented in the MTA and can be enabled per deployment; it is disabled by default and is not applied on the managed cloud's default mail path today.
 
@@ -225,7 +225,7 @@ Internet
         └─ Object Storage (attachments, backups)
 ```
 
-[roadmap] Planned, not part of the managed cloud's active defense path today: WAF blocking enforcement (a request-screening WAF currently runs in monitor mode on the public API — verdicts logged, not blocked), IDS/IPS intrusion detection/prevention, and ML-based DDoS layers.
+[roadmap] Planned, not part of the managed cloud's active defense path today: WAF blocking enforcement (a request-screening WAF currently runs in monitor mode on the public API, verdicts logged, not blocked), IDS/IPS intrusion detection/prevention, and ML-based DDoS layers.
 
 ## Infrastructure Stack
 
@@ -407,15 +407,15 @@ Encryption boundary: Data at rest (customer-managed keys available)
 - **RPO (Recovery Point Objective):** 15 minutes (transaction log shipping).
 - **RTO (Recovery Time Objective):** 60 minutes (automated failover and restore).
 - **DR testing:** Quarterly full restore tests with results shared with Enterprise customers.
-- **Multi-region:** Regional routing and failover scope are deployment- and agreement-specific. [roadmap] Cross-region failover is a planned capability for Dedicated Tenant — not yet live. Multi-region active-active is not currently offered.
+- **Multi-region:** Regional routing and failover scope are deployment- and agreement-specific. [roadmap] Cross-region failover is a planned capability for Dedicated Tenant, not yet live. Multi-region active-active is not currently offered.
 
 ### High Availability
 
 The standard shared deployment runs on a single EU host with:
 
 - Health-checked services with automatic restart and automated rollback deploys.
-- Queue and message persistence to disk (PostgreSQL WAL) — no in-flight mail is lost to a service restart.
+- Queue and message persistence to disk (PostgreSQL WAL), no in-flight mail is lost to a service restart.
 - Daily encrypted backups with verified restore (see Backup Policy above).
-- Management-plane redundancy (replication, multi-node failover) is a planned Dedicated Tenant capability under a separate agreement — it is not part of the standard shared deployment. [roadmap]
+- Management-plane redundancy (replication, multi-node failover) is a planned Dedicated Tenant capability under a separate agreement, it is not part of the standard shared deployment. [roadmap]
 
 We do not claim multi-region active-active availability on the shared plans. If your workload requires it, ask about Dedicated Tenant.

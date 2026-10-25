@@ -1,4 +1,4 @@
-//! Process-liveness heartbeats — REAL process leases, never inferred from
+//! Process-liveness heartbeats, REAL process leases, never inferred from
 //! queue traffic.
 //!
 //! Background: the Control Plane's `system_health` used to report "queue
@@ -25,7 +25,7 @@
 //! The emitter is best-effort: a failed beat logs a warning and the loop
 //! continues, so a transient database error never kills the process. The
 //! heartbeat is deliberately advisory to the DB (it is not a distributed
-//! lock) — the reader decides liveness from freshness.
+//! lock), the reader decides liveness from freshness.
 
 use sqlx::PgPool;
 use std::time::Duration;
@@ -115,7 +115,7 @@ const HEARTBEAT_UPSERT_SQL: &str = "INSERT INTO service_heartbeats
          capabilities = EXCLUDED.capabilities,
          region = EXCLUDED.region";
 
-/// `{service}-{hostname}-{pid}` — one row per OS process. Uses `HOSTNAME`
+/// `{service}-{hostname}-{pid}`, one row per OS process. Uses `HOSTNAME`
 /// (set by Docker and most shells); falls back to `unknown-host`.
 pub fn process_instance_id(service: &str) -> String {
     let host = std::env::var("HOSTNAME")

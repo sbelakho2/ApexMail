@@ -18,10 +18,10 @@
 //! RFC 8058 unsubscribe tokens) travel in the request PATH or query. Every
 //! application logging boundary must therefore log the ROUTE, never the raw
 //! token-bearing URI. This module owns the shared normalizer
-//! ([`redacted_route_for_logging`] — MatchedPath first, safe fallback
+//! ([`redacted_route_for_logging`], MatchedPath first, safe fallback
 //! otherwise) used by this middleware, the outer TraceLayer span and the
 //! other middlewares that log paths. It is the application-level twin of
-//! the nginx `$sanitized_request` map (deploy/nginx/nginx.conf) — extend
+//! the nginx `$sanitized_request` map (deploy/nginx/nginx.conf), extend
 //! both together when a token-bearing endpoint is added.
 
 use axum::body::{to_bytes, Body};
@@ -145,7 +145,7 @@ fn normalize_error_payload(
 /// (SendGrid `{"errors":[…]}`, Mailgun `{"message":…}`, Postmark
 /// `{"ErrorCode":…,"Message":…}`, Resend
 /// `{"statusCode":…,"name":…,"message":…}`) and must be passed through
-/// verbatim — re-wrapping it into the canonical `{"error":{…}}` envelope
+/// verbatim, re-wrapping it into the canonical `{"error":{…}}` envelope
 /// would break the wire contract a migrated SendGrid/Mailgun/Postmark/Resend
 /// SDK parses. Only the compatibility surface sets it; every canonical route
 /// keeps the envelope normalization below.
@@ -317,7 +317,7 @@ const TOKEN_BEARING_ROUTES: [(&str, &str); 5] = [
 /// F65: normalize a raw request PATH for logging. Paths under a
 /// token-bearing route keep only the route shape; every other path is
 /// returned unchanged (no token can appear in it). Queries are never
-/// included — callers log paths, and the token-bearing query forms are
+/// included, callers log paths, and the token-bearing query forms are
 /// covered by the route entries above.
 pub fn redact_token_bearing_path(path: &str) -> String {
     let path = path.split(['?', '#']).next().unwrap_or(path);
@@ -336,7 +336,7 @@ pub fn redact_token_bearing_path(path: &str) -> String {
 /// F65: the route label every application logging boundary must use.
 ///
 /// `MatchedPath` (the route template, e.g. `/verify-email/:token`) is
-/// preferred — it is parametrized by construction, so no secret can appear
+/// preferred, it is parametrized by construction, so no secret can appear
 /// in it. When the route has not been matched yet (outer layers, fallback
 /// handler) the raw path is normalized through [`redact_token_bearing_path`],
 /// which redacts the known token-bearing routes and passes everything else

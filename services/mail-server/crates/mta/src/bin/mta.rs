@@ -67,7 +67,7 @@ async fn run_(
     //
     // F-24: METRICS_ENABLED keeps its FALSE default. Flipping it would make
     // `install_recorder()` (which binds 0.0.0.0:METRICS_PORT) part of every
-    // default boot — a port collision or a locked-down environment would
+    // default boot, a port collision or a locked-down environment would
     // then abort startup, so the safer default stays and the operator gets
     // a loud warning instead.
     if config.metrics.enabled {
@@ -155,7 +155,7 @@ async fn run_(
 
     // F-20: TLS_ENABLED deliberately defaults to false (a cert-less host
     // must still boot), but a PUBLIC plaintext SMTP listener deserves a loud
-    // startup warning — port 25 then offers no STARTTLS, and port 587/465
+    // startup warning, port 25 then offers no STARTTLS, and port 587/465
     // AUTH is permanently gated (530 Must issue STARTTLS first).
     if tls_acceptor.is_none() {
         let public_listeners: Vec<&str> = [
@@ -243,7 +243,7 @@ async fn run_(
     // Durable inbound delivery worker (migration 210 ledger): retries
     // transient mailstore failures with backoff and generates RFC 3464 DSNs
     // for permanent post-accept failures. Construction failure is fatal when
-    // inbound is enabled — an inbound server whose accepted mail has no
+    // inbound is enabled, an inbound server whose accepted mail has no
     // delivery worker would re-open the accept-then-drop hole. The worker
     // runs under the listener supervisor: if it ever exits unexpectedly the
     // process fails rather than silently dropping accepted mail.
@@ -350,7 +350,7 @@ async fn run_(
     let submission_srv = if config.submission.enabled {
         // FIX-1: TLS load failure is FATAL (propagates and aborts startup),
         // mirroring the inbound server. A warn-and-continue here would leave
-        // the server accepting AUTH PLAIN/LOGIN with no TLS gate — sending
+        // the server accepting AUTH PLAIN/LOGIN with no TLS gate, sending
         // credentials in cleartext on the publicly published port 587.
         let submission_tls = submission_tls_acceptor(&config.inbound.tls)?;
         metrics::gauge!("apexmail_mta_tls_enabled", "listener" => "submission")
@@ -669,7 +669,7 @@ fn init_tracing(log_level: &str) -> Option<TracingGuard> {
     }
 
     // try_init (not init): the binary initializes tracing exactly once, but
-    // a second initialization must be a no-op rather than a panic — the
+    // a second initialization must be a no-op rather than a panic, the
     // first installed subscriber wins, which is also the production
     // behaviour when a library has already installed one.
     tracing_subscriber::fmt()
@@ -1059,7 +1059,7 @@ mod run_tests {
         let mut config = base_config(&db_url, &ports);
         // Inbound OFF, submission + bounce ON, no TLS, no VERP secret: the
         // public-listener warning must name submission and the VERP warning
-        // must fire — coverage of both warn arms (asserted via a clean exit;
+        // must fire, coverage of both warn arms (asserted via a clean exit;
         // the guarantees themselves are the operator-visible logs).
         config.bounce.enabled = true;
         config.submission.enabled = true;
@@ -1146,7 +1146,7 @@ mod run_tests {
     /// metrics enabled installs it and serves; a SECOND `run_` in the same
     /// process cannot install it and must abort startup rather than run
     /// without its observability. Both behaviours live in ONE test because
-    /// the global recorder exists once per process — as two parallel tests
+    /// the global recorder exists once per process, as two parallel tests
     /// they raced (whichever installed first made the other fail).
     #[tokio::test]
     async fn run_installs_the_prometheus_recorder_then_fails_fast_on_a_conflicting_install() {

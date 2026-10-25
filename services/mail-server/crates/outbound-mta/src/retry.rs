@@ -3,13 +3,13 @@
 //! Every delivery attempt ends in exactly one of three classes, decided here
 //! and persisted by the ledger:
 //!
-//! * [`FailureDisposition::Retry`] — connection failures, timeouts, protocol
+//! * [`FailureDisposition::Retry`], connection failures, timeouts, protocol
 //!   errors and 4xx replies. Retried with exponential backoff until the
 //!   bounded `max_attempts` ceiling.
-//! * [`FailureDisposition::PermanentRecipient`] — a 5xx at `RCPT TO`: that
+//! * [`FailureDisposition::PermanentRecipient`], a 5xx at `RCPT TO`: that
 //!   recipient is failed (DSN due); other recipients of the same message are
 //!   unaffected.
-//! * [`FailureDisposition::PermanentMessage`] — a 5xx at `MAIL FROM`, after
+//! * [`FailureDisposition::PermanentMessage`], a 5xx at `MAIL FROM`, after
 //!   `DATA`, a null/no MX domain, or the retry ceiling itself: the whole
 //!   message is rejected and never retried.
 //!
@@ -62,7 +62,7 @@ impl AttemptStage {
 /// The classified failure of one delivery attempt.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DeliveryFailure {
-    /// Connection/timeout/4xx — retry with backoff.
+    /// Connection/timeout/4xx, retry with backoff.
     Transient {
         mx: Option<String>,
         stage: AttemptStage,
@@ -76,15 +76,15 @@ pub enum DeliveryFailure {
     /// before DATA; retryable (the peer may begin advertising STARTTLS),
     /// never downgraded to cleartext.
     TlsRequiredUnavailable { mx: String, message: String },
-    /// 5xx at RCPT TO — permanent for this recipient only.
+    /// 5xx at RCPT TO, permanent for this recipient only.
     RecipientRejected {
         mx: String,
         recipient: String,
         reply: SmtpReply,
     },
-    /// 5xx at MAIL FROM or after DATA — permanent for the whole message.
+    /// 5xx at MAIL FROM or after DATA, permanent for the whole message.
     MessageRejected { mx: String, reply: SmtpReply },
-    /// No MX / Null MX / invalid recipient domain — permanent.
+    /// No MX / Null MX / invalid recipient domain, permanent.
     DomainUndeliverable { domain: String, message: String },
     /// Every MX answered 5xx to greeting/EHLO/STARTTLS.
     AllMxRefused { message: String },
@@ -221,8 +221,8 @@ impl RetryPolicy {
     /// [`Self::next_attempt_at`] with an explicit ceiling.
     ///
     /// The ledger stores each row's own `max_attempts` (written on submit), so
-    /// a row's budget — not the process-wide `OUTBOUND_MTA_MAX_ATTEMPTS`
-    /// value — bounds its retry ladder. The column used to be written but
+    /// a row's budget, not the process-wide `OUTBOUND_MTA_MAX_ATTEMPTS`
+    /// value, bounds its retry ladder. The column used to be written but
     /// never read, making the effective ceiling non-deterministic from the
     /// row data alone (dogfood finding 2026-10-06 P3).
     pub fn next_attempt_at_with_ceiling(

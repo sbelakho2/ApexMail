@@ -1,4 +1,4 @@
-//! SDK registry — list SDKs, get install commands, validate versions.
+//! SDK registry, list SDKs, get install commands, validate versions.
 //!
 //! Provides the read-only SDK registry used by the DevEx service.
 

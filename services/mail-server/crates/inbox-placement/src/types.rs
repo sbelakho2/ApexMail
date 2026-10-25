@@ -79,7 +79,7 @@ pub enum TestStatus {
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct PlacementTest {
     pub id: Uuid,
-    /// Canonical VARCHAR(26) tenant key (TEXT in Rust) — see migration 064.
+    /// Canonical VARCHAR(26) tenant key (TEXT in Rust), see migration 064.
     pub tenant_id: String,
     pub name: Option<String>,
     pub status: String,
@@ -220,7 +220,7 @@ impl PlacementScore {
     /// A perfect run (100 % inbox, full auth, instant delivery) scores
     /// exactly 100; no combination can exceed 100:
     /// - Inbox rate: 60 % (max 60)
-    /// - Promotions rate: 20 % — *partial credit* for tabbed placement, so a
+    /// - Promotions rate: 20 %, *partial credit* for tabbed placement, so a
     ///   mixed run scores less than pure inbox but is not treated as failure
     /// - Authentication (SPF/DKIM/DMARC avg): 20 %
     /// - Speed (linear falloff, 0 at ≥ 5 s): 20 %

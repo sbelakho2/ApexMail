@@ -37,7 +37,7 @@ const KEYSET_CURSOR_SEP: char = '\n';
 ///
 /// The timestamp MUST be rendered with `to_rfc3339()`: `DateTime`'s
 /// `Display` emits "2026-01-01 00:00:00 UTC", which
-/// [`decode_audit_cursor`]'s `parse_from_rfc3339` rejects — a cursor this
+/// [`decode_audit_cursor`]'s `parse_from_rfc3339` rejects, a cursor this
 /// function minted would fail its very next request with 400.
 fn encode_audit_cursor(timestamp: &DateTime<Utc>, id: &str) -> String {
     encode_cursor(&format!(
@@ -48,10 +48,10 @@ fn encode_audit_cursor(timestamp: &DateTime<Utc>, id: &str) -> String {
 
 /// Decode and validate a `(timestamp, id)` keyset cursor. Malformed
 /// encodings, unparsable timestamps, or ids that cannot name an audit row
-/// are client errors (400) — an unvalidated cursor could otherwise surface
+/// are client errors (400), an unvalidated cursor could otherwise surface
 /// as a database error. audit_logs.id is TEXT; the writers produce
 /// identifier-shaped ids (UUID text and short prefixed forms), so the id is
-/// bounded and restricted to ASCII identifier characters — SQL
+/// bounded and restricted to ASCII identifier characters, SQL
 /// metacharacters are refused at the boundary even though every use binds
 /// the value as a parameter.
 fn decode_audit_cursor(encoded: &str) -> Result<(DateTime<Utc>, String), ApiError> {
@@ -176,7 +176,7 @@ impl AuditFilterColumn {
             Self::TenantId => format!("tenant_id = ${param_idx}"),
             Self::UserId => format!("user_id = ${param_idx}"),
             // audit_logs (migration 038) stores the affected entity in the
-            // `resource` column and the result in `outcome` — the old
+            // `resource` column and the result in `outcome`, the old
             // resource_type/metadata predicates targeted nonexistent columns.
             Self::Resource => format!("resource = ${param_idx}"),
             Self::Outcome => format!("outcome = ${param_idx}"),
@@ -263,7 +263,7 @@ fn build_audit_query_plan(
 
     let where_clause = format!("WHERE {}", conditions.join(" AND "));
     // Keyset path: strictly-less tuple comparison over the same
-    // (timestamp, id) tuple the ORDER BY uses — the tuple the
+    // (timestamp, id) tuple the ORDER BY uses, the tuple the
     // idx_audit_logs_tenant_ts index shape supports. The value is cast once
     // (`$k::timestamptz`), never the indexed column.
     let sql = if keyset.is_some() {
@@ -325,8 +325,8 @@ pub struct AuditLogEntry {
 /// The response body stays a bare JSON array (pinned by existing clients);
 /// the keyset continuation rides ADDITIVE response headers:
 ///
-/// * `x-has-more` — `"true"` when a further page exists;
-/// * `x-next-cursor` — opaque keyset cursor (hex `(timestamp, id)` of the
+/// * `x-has-more`, `"true"` when a further page exists;
+/// * `x-next-cursor`, opaque keyset cursor (hex `(timestamp, id)` of the
 ///   last returned row) to pass back as `?cursor=`. Present whenever the
 ///   page is non-empty.
 ///
@@ -521,7 +521,7 @@ mod tests {
                 "id {bad_id:?} must be rejected"
             );
         }
-        // A well-formed cursor round-trips (RFC 3339 payload — NOT
+        // A well-formed cursor round-trips (RFC 3339 payload, NOT
         // DateTime's Display form, which the decoder would reject).
         let ts = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
         let (decoded_ts, decoded_id) =
@@ -597,7 +597,7 @@ mod tests {
         details: serde_json::Value,
     ) {
         // NOW() - 5s: the container clock can drift a few seconds ahead of
-        // the test process (Docker VM skew) — a seed stamped at plain NOW()
+        // the test process (Docker VM skew), a seed stamped at plain NOW()
         // then lands OUTSIDE the handler's `timestamp <= Utc::now()` window
         // and the test flakes. Pinning the seed into the past makes the
         // test deterministic on skewed hosts.
@@ -686,7 +686,7 @@ mod tests {
         assert_eq!(envelope.user_agent.as_deref(), Some("cov-test/1"));
         assert_eq!(envelope.details["reason"], "quota");
         // A nested details envelope REPLACES the flat details in the
-        // viewer output — sibling metadata keys are not surfaced.
+        // viewer output, sibling metadata keys are not surfaced.
         assert_eq!(envelope.details["other"], serde_json::Value::Null);
 
         let bare = entries
@@ -755,7 +755,7 @@ mod tests {
             .expect("paginated audit list");
         assert_eq!(entries.len(), 1, "offset=1&limit=1 leaves one of two rows");
         // Two probe rows seeded above: offset=1 is the FINAL page, so
-        // has-more is honestly false — but a non-empty page still mints the
+        // has-more is honestly false, but a non-empty page still mints the
         // continuation cursor.
         assert_eq!(headers.get("x-has-more").unwrap(), "false");
         assert!(headers.contains_key("x-next-cursor"));
@@ -880,7 +880,7 @@ mod tests {
     }
 
     /// The resource cohort's total order per the SAME ORDER BY the endpoint
-    /// uses — the ground truth every walk must reproduce exactly.
+    /// uses, the ground truth every walk must reproduce exactly.
     async fn expected_audit_order(pool: &sqlx::PgPool) -> Vec<String> {
         sqlx::query_scalar(
             "SELECT id FROM audit_logs WHERE resource = 'audit_probe'
@@ -902,7 +902,7 @@ mod tests {
 
     /// Page through the audit cohort one row at a time following the
     /// x-next-cursor header: the cursor walk must reproduce the offset walk
-    /// and the database order exactly — zero skips, zero duplicates — even
+    /// and the database order exactly, zero skips, zero duplicates, even
     /// though every seeded row shares ONE timestamp (the bulk-write shape
     /// where a timestamp-only cursor is lossy). Cursor continuation also
     /// honours the tenantId filter on every page.

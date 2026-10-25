@@ -4,17 +4,17 @@
 {# every locale (en fallbacks are inline in the templates). The former  #}
 {# data/i18n_{de,fr,es}_additions.json side-files were never loaded by  #}
 {# any template (audit finding) and contained only keys already present #}
-{# in i18n.json with identical values — they were deleted rather than  #}
+{# in i18n.json with identical values, they were deleted rather than  #}
 {# wired, so there is exactly one source of truth. New translations    #}
 {# go straight into i18n.json.                                         #}
 {# templates reference this as: {% if i18n_data and i18n_data[l]... %}.    #}
 {# l is the active language code (e.g. "en", "de"), always defined here.   #}
 {# set_global so the macros::t() macro (macros.html) and all included      #}
-{# partials can read these — Tera macros do NOT see the caller's scope.    #}
+{# partials can read these, Tera macros do NOT see the caller's scope.    #}
 {%- set_global i18n_data = load_data(path="data/i18n.json", format="json", required=false) -%}
 {%- set_global l = lang | default(value=config.default_language) -%}
 {# Locale URL prefix: "" for the default language, "/de" etc. for
-   translated trees — every internal link prefixes with {{ lp }} so locale
+   translated trees, every internal link prefixes with {{ lp }} so locale
    pages stay inside their language except deliberately shared paths. #}
 {%- set_global lp = "" -%}
 {%- if l and l != config.default_language -%}{%- set_global lp = "/" ~ l -%}{%- endif -%}
@@ -53,11 +53,11 @@
     {% endif %}
   {% endfor %}
   <link rel="alternate" hreflang="{{ l }}" href="{{ current_url | default(value=config.base_url) }}" />
-  {# x-default must be the language-neutral URL — the default-language (en)
+  {# x-default must be the language-neutral URL, the default-language (en)
      version of this page, never the current locale's own URL (a self-
      referring x-default told crawlers every locale was the fallback).
      If this page has no default-language translation, no x-default is
-     emitted — there is no language-neutral URL to point at. #}
+     emitted, there is no language-neutral URL to point at. #}
   {% set_global xdefault_url = "" %}
   {% if l == config.default_language %}
     {% set_global xdefault_url = current_url | default(value=config.base_url) %}
@@ -104,7 +104,7 @@
   <meta property="og:image" content="{{ config.base_url }}{% block og_image %}{{ config.extra.og_image }}{% endblock og_image %}" />
   <meta property="og:image:width" content="1200" />
   <meta property="og:image:height" content="630" />
-  <meta property="og:image:alt" content="{% block og_image_alt %}{{ config.extra.site_name }} — Transactional Email API{% endblock og_image_alt %}" />
+  <meta property="og:image:alt" content="{% block og_image_alt %}{{ config.extra.site_name }}, Transactional Email API{% endblock og_image_alt %}" />
   <meta name="twitter:card" content="summary_large_image" />
   <meta name="twitter:title" content="{% block twitter_title %}{{ config.title }}{% endblock twitter_title %}" />
   <meta name="twitter:description" content="{% block twitter_description %}{{ config.description }}{% endblock twitter_description %}" />
@@ -112,11 +112,11 @@
   <meta name="twitter:creator" content="{{ config.extra.twitter_handle }}" />
   <link rel="icon" href="/icon.svg" type="image/svg+xml" />
   <link rel="manifest" href="/manifest.json" />
-  {# Font preloads — the two faces ark.css sets above the fold: Overpass
+  {# Font preloads, the two faces ark.css sets above the fold: Overpass
      (body text) and Spectral (display headings), both weight-critical on
      every page. OverpassMono is deliberately NOT preloaded: it only styles
      code samples and identifiers on a minority of pages, so a site-wide
-     preload would push bytes that most page views never render — it loads
+     preload would push bytes that most page views never render, it loads
      normally via the @font-face rules in styles.css when actually used. #}
   <link rel="preload" href="{{ sans_font_url }}" as="font" type="font/woff2" crossorigin />
   <link rel="preload" href="{{ display_font_url }}" as="font" type="font/woff2" crossorigin />
@@ -150,7 +150,7 @@
       {#- Comma-safe assembly: every social URL is OPTIONAL (github_url has
           always been empty; twitter_url is empty since the @apexmail
           account does not exist) and the old per-item trailing commas left
-          a dangling comma — invalid JSON-LD — whenever the last item was
+          a dangling comma, invalid JSON-LD, whenever the last item was
           absent. Assemble an array first and let loop.last place commas. -#}
       {%- set_global socials = [] -%}
       {%- if config.extra.github_url %}{% set_global socials = socials | concat(with=config.extra.github_url) %}{% endif -%}

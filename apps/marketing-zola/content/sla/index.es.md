@@ -1,6 +1,6 @@
 +++
 title = "Acuerdo de Nivel de Servicio (SLA)"
-description = "SLA de ApexMail — compromisos contractuales de disponibilidad para clientes de los planes Business y Enterprise."
+description = "SLA de ApexMail, compromisos contractuales de disponibilidad para clientes de los planes Business y Enterprise."
 template = "prose.html"
 
 [extra]
@@ -37,7 +37,7 @@ La disponibilidad se mide mediante nuestro sistema de monitoreo externo (Blackbo
 
 ## 5. Créditos de servicio
 
-Los planes elegibles tienen un compromiso de disponibilidad mensual del 99,9 %. Cuando la disponibilidad mensual medida cae por debajo de ese umbral, se aplica un crédito de servicio según la matriz específica del plan que aparece a continuación — el porcentaje de crédito corresponde al cargo recurrente mensual del inquilino por el mes afectado.
+Los planes elegibles tienen un compromiso de disponibilidad mensual del 99,9 %. Cuando la disponibilidad mensual medida cae por debajo de ese umbral, se aplica un crédito de servicio según la matriz específica del plan que aparece a continuación, el porcentaje de crédito corresponde al cargo recurrente mensual del inquilino por el mes afectado.
 
 | Disponibilidad mensual medida | Business | Enterprise Cloud / contractual |
 |---|---:|---:|
@@ -48,8 +48,8 @@ Los planes elegibles tienen un compromiso de disponibilidad mensual del 99,9 %. 
 
 **Notas del plan:**
 
-- **Business** — porcentajes graduados como se indica; sin tope fijo por debajo de los tramos.
-- **Enterprise Cloud y despliegues contractuales** — porcentajes como se indica, con un tope del 25 % (o la figura contractual cuando un formulario de pedido la especifica).
+- **Business**, porcentajes graduados como se indica; sin tope fijo por debajo de los tramos.
+- **Enterprise Cloud y despliegues contractuales**, porcentajes como se indica, con un tope del 25 % (o la figura contractual cuando un formulario de pedido la especifica).
 
 Los créditos se calculan a partir de la disponibilidad mensual medida por debajo del compromiso y se limitan según el plan del cliente.
 

@@ -17,7 +17,7 @@
       </div>
 
       {# Balanced decision rules (review SS47): when each product is the
-         better fit — no winner language. #}
+         better fit, no winner language. #}
       <div class="grid sm:grid-cols-2 gap-6 mb-12">
         <div class="p-6 border">
           <h3 class="mb-3 apex-h3">{% if i18n_data and i18n_data[l] and i18n_data[l]["compare"] and i18n_data[l]["compare"]["choose_apexmail"] %}{{ i18n_data[l]["compare"]["choose_apexmail"] }}{% else %}Choose ApexMail when…{% endif %}</h3>
@@ -53,7 +53,7 @@
     {# Complete applicable competitor set: all five published comparisons,
        with the current page marked. Pages share this partial; the slug is
        compared against page.extra.competitor_slug. Plain route links: the
-       current page is marked with aria-current (no state class — the law
+       current page is marked with aria-current (no state class, the law
        gate allows only apex-* and structural tokens). #}
     {% set competitor_slugs = ["sendgrid", "resend", "postmark", "mailgun", "amazon-ses"] %}
     {% set competitor_names = ["SendGrid", "Resend", "Postmark", "Mailgun", "Amazon SES"] %}

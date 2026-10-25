@@ -27,14 +27,14 @@
 //!    ([`crate::scoring::score`] + [`crate::scoring::persist`]); the stored
 //!    latest score remains the fallback when the account has no economic basis
 //!    (no open pipeline amount), and the source actually used is recorded;
-//! 4. choose the next best action again on the refreshed state — a non-send
+//! 4. choose the next best action again on the refreshed state, a non-send
 //!    action is a recorded, non-retryable skip;
 //! 5. for an external send: choose an angle, compose the structured strategy
 //!    from evidence, validate every claim and draft it through the
 //!    [`crate::personalization::ProseWriter`];
 //! 6. select and persist the experiment arm (when the step declares an
 //!    `experiment_key`) onto `sales_step_executions.variant` and
-//!    `sales_enrollments.experiment_id`/`experiment_variant` — the variant
+//!    `sales_enrollments.experiment_id`/`experiment_variant`, the variant
 //!    survives an enqueue failure and an outcome can be attributed even if the
 //!    process dies immediately after;
 //! 7. resolve the actual sender identity, run the Decision Engine, dispatch.
@@ -49,10 +49,10 @@
 //! * a strategy whose claims do not validate (evidence outside the allowed
 //!   live set, an unbacked proof point, a value proposition that is not a
 //!   verified external-copy fact, or a restricted-capability promise) is
-//!   rejected outright and replaced by the template — never by unvalidated
+//!   rejected outright and replaced by the template, never by unvalidated
 //!   prose.
 //!
-//! A denial is not an error — it is a recorded, non-retryable skip. Retrying a
+//! A denial is not an error, it is a recorded, non-retryable skip. Retrying a
 //! policy denial would be exactly the "legal-policy denial bypassed through
 //! another route" failure the release gates forbid.
 
@@ -102,7 +102,7 @@ use crate::types::{
 /// Seven days is the documented horizon: `signals::combined_urgency` already
 /// treats a week-old change signal as materially weaker, and refreshing at
 /// least weekly means the planner never composes copy from facts that have
-/// gone cold. Staleness alone never forces a send — it only authorizes the
+/// gone cold. Staleness alone never forces a send, it only authorizes the
 /// information-gathering branch of the §28 next-best-action policy.
 pub const EVIDENCE_STALENESS_HOURS: i64 = 168;
 
@@ -126,7 +126,7 @@ pub enum ScoreSource {
     Fresh,
     /// The most recent stored `sales_scores` row. Used when the account has no
     /// economic basis (no open pipeline amount) to derive an expected value
-    /// from — the pre-existing behaviour for scored accounts.
+    /// from, the pre-existing behaviour for scored accounts.
     Stored,
     /// No score and no economic basis: the economic branch of the §28 gate is
     /// not evaluable, so it does not block and the existing hard gates govern
@@ -243,7 +243,7 @@ struct PlannerFacts {
     signals: Vec<SignalObservation>,
     /// Live (unexpired) evidence aggregate.
     evidence: EvidenceFeatures,
-    /// Live evidence ids, newest first — the only ids the claims gate accepts.
+    /// Live evidence ids, newest first, the only ids the claims gate accepts.
     evidence_ids: Vec<Uuid>,
     freshness: EvidenceFreshness,
     reachability: ReachabilityFeatures,
@@ -648,7 +648,7 @@ impl SequenceStepHandler {
             stack_confidence = stack_confidence.max(confidence.clamp(0.0, 1.0) as f32);
         }
         // Wave G: the authentication quality comes from the account's LIVE
-        // DNS-observation evidence — the propositions
+        // DNS-observation evidence, the propositions
         // `signals::email_stack::analyse_email_stack` emitted and
         // `persist_email_stack_observations` stored for THIS tenant. An
         // account with no such evidence keeps the fail-closed 0.0 (never an
@@ -949,8 +949,8 @@ impl SequenceStepHandler {
     /// Run the `signals::email_stack` composite over raw observations and
     /// persist every evidence row for the (tenant, account) subject. Returns
     /// the number of rows persisted. The entry point
-    /// (`analyse_email_stack`) is called HERE — this is its production
-    /// caller — and `persist_evidence` binds the tenant, so no row can leak
+    /// (`analyse_email_stack`) is called HERE, this is its production
+    /// caller, and `persist_evidence` binds the tenant, so no row can leak
     /// across tenants.
     async fn persist_email_stack_observations(
         &self,
@@ -981,7 +981,7 @@ impl SequenceStepHandler {
     /// The body may only come from this path when the strategy survives
     /// validation intact: a dropped claim or a refused capability rejects the
     /// strategy outright and the caller renders the operator-approved static
-    /// template instead — never unvalidated prose. An intelligence outage also
+    /// template instead, never unvalidated prose. An intelligence outage also
     /// returns the template fallback.
     async fn plan_message(&self, ctx: &StepContext, facts: &PlannerFacts) -> MessagePlan {
         let mut plan = MessagePlan::template_fallback();
@@ -1185,7 +1185,7 @@ impl SequenceStepHandler {
         };
 
         // §103¹ consent evidence, loaded from the canonical
-        // `sales_consent_evidence` store — never taken on trust from a
+        // `sales_consent_evidence` store, never taken on trust from a
         // boolean. An active row (withdrawn_at IS NULL, newest by
         // collected_at) yields `consent_status = "granted"`; a withdrawn row
         // yields "withdrawn", which the legal engine treats as an absolute
@@ -1316,11 +1316,11 @@ impl SequenceStepHandler {
         if skipped.rows_affected() == 0 {
             // The row moved (another worker claimed it, or a replay hit an
             // already-stranded state): the refusal must still be VISIBLE, not
-            // silently dropped (audit SM7 F2 family — no lost state transitions).
+            // silently dropped (audit SM7 F2 family, no lost state transitions).
             tracing::warn!(
                 step_execution_id = %step_execution_id,
                 reason,
-                "sequence step skip refused by the claim guard — the row is no longer in a \
+                "sequence step skip refused by the claim guard, the row is no longer in a \
                  claimable state; the skip is logged, not applied"
             );
         }
@@ -1984,7 +1984,7 @@ impl ActionHandler for SequenceStepHandler {
 
 /// How long an `executing` claim is held before the reaper requeues the step
 /// (audit SM7 F2). The executing window is one enqueue insert plus two
-/// updates — sub-second normally — so five minutes is orders of magnitude
+/// updates, sub-second normally, so five minutes is orders of magnitude
 /// above any legitimate hold while staying short enough that a retry backoff
 /// meets a requeued step.
 pub const STEP_EXECUTION_LEASE_SECS: i64 = 300;
@@ -1994,7 +1994,7 @@ const _: () = assert!(STEP_EXECUTION_LEASE_SECS > 0);
 const _: () = assert!(STEP_EXECUTION_LEASE_SECS <= 3600);
 
 /// Reaper (audit SM7 F2): return step executions whose `executing` lease
-/// expired to the queue, so a transient failure — or a crash — between the
+/// expired to the queue, so a transient failure, or a crash, between the
 /// claim and the terminal write is RECOVERED instead of stranding the step
 /// (and the whole enrollment) in `executing` forever. Wired into the action
 /// worker's tick (`actions::tick`), next to the sales-queue lease reaper.
@@ -2022,7 +2022,7 @@ pub async fn requeue_stale_executing_steps_scoped(
     let affected = sqlx::query(
         "UPDATE sales_step_executions \
          SET state = 'queued', claimed_at = NULL, \
-             last_error = COALESCE(last_error, 'executing lease expired — requeued for delivery'), \
+             last_error = COALESCE(last_error, 'executing lease expired, requeued for delivery'), \
              updated_at = NOW() \
          WHERE state = 'executing' \
            AND COALESCE(claimed_at, updated_at) < NOW() - make_interval(secs => $1::double precision) \
@@ -2051,7 +2051,7 @@ pub async fn requeue_stale_executing_steps_scoped(
 /// * `sent`/`skipped`/`cancelled` → `Succeeded` (the replay no-op);
 /// * `failed` → `DeadLetter` (terminal failure; the action cannot deliver);
 /// * any other non-terminal state (`executing`, `scheduled`, `queued`) →
-///   `Retry` — another worker owns it, or its expired `executing` lease is
+///   `Retry`, another worker owns it, or its expired `executing` lease is
 ///   awaiting the reaper;
 /// * missing row → `DeadLetter` (the entity vanished under us).
 fn claim_miss_outcome(state: Option<&str>, step_execution_id: Uuid) -> ActionOutcome {
@@ -2059,15 +2059,15 @@ fn claim_miss_outcome(state: Option<&str>, step_execution_id: Uuid) -> ActionOut
         Some("sent") | Some("skipped") | Some("cancelled") => {
             tracing::info!(
                 step_execution_id = %step_execution_id,
-                "sequence step already terminal — the other worker's claim stands"
+                "sequence step already terminal, the other worker's claim stands"
             );
             ActionOutcome::Succeeded
         }
         Some("failed") => ActionOutcome::DeadLetter(format!(
-            "step execution {step_execution_id} is terminal-failed — the action cannot deliver it"
+            "step execution {step_execution_id} is terminal-failed, the action cannot deliver it"
         )),
         Some(other) => ActionOutcome::Retry(format!(
-            "step execution {step_execution_id} claim lost while state is '{other}' — another \
+            "step execution {step_execution_id} claim lost while state is '{other}', another \
              worker owns it or its executing lease is awaiting the reaper; retrying after the \
              backoff, never reporting an unsent touch as success (audit SM7 F2)"
         )),
@@ -2113,7 +2113,7 @@ impl SequenceStepHandler {
             tracing::info!(
                 step_execution_id = %ctx.step_execution_id,
                 state = %ctx.state,
-                "sequence step already terminal — replay is a no-op"
+                "sequence step already terminal, replay is a no-op"
             );
             return Ok(ActionOutcome::Succeeded);
         }
@@ -2329,7 +2329,7 @@ impl SequenceStepHandler {
         };
         if !pool.is_sales_pool() {
             return Ok(ActionOutcome::DeadLetter(format!(
-                "step declares non-sales sender pool '{}' — refusing to send",
+                "step declares non-sales sender pool '{}', refusing to send",
                 pool
             )));
         }
@@ -2388,7 +2388,7 @@ impl SequenceStepHandler {
         };
 
         // Invariant I11: an autonomous send says how it was produced and how
-        // to reach a human — appended to BOTH bodies (HTML and plain text).
+        // to reach a human, appended to BOTH bodies (HTML and plain text).
         let disclosure = crate::reply_autosend::AUTO_SEND_AI_DISCLOSURE;
         rendered.html = rendered
             .html
@@ -2400,7 +2400,7 @@ impl SequenceStepHandler {
         // switch, suppression, address verification, legal policy, the
         // human-reply lock, sender health and the frequency budget. The worker
         // no longer keeps its own copy of these gates, because a second copy is
-        // a second thing to keep in sync — and the copy was what the live path
+        // a second thing to keep in sync, and the copy was what the live path
         // was actually using.
         let evidence_ids = facts.evidence_ids.clone();
         let confidence = (decision_score.total / 100.0).clamp(0.0, 1.0);
@@ -2449,8 +2449,8 @@ impl SequenceStepHandler {
         // would be silently discarded.
         //
         // Approval is NOT permission to bypass a gate that changed since: the
-        // approval is only honoured when `revalidate_execution` — which re-runs
-        // every hard constraint against current state — still allows it. That
+        // approval is only honoured when `revalidate_execution`, which re-runs
+        // every hard constraint against current state, still allows it. That
         // is why this path revalidates instead of trusting `review_status`.
         let mut approved_decision_id: Option<Uuid> = None;
         if let Some(existing_decision_id) = action.action.decision_id {
@@ -2478,7 +2478,7 @@ impl SequenceStepHandler {
                     approved_decision_id = Some(existing_decision_id);
                 } else {
                     // The world moved. The approval no longer authorizes this
-                    // send — and the refusal must be EXPLAINABLE, so fall
+                    // send, and the refusal must be EXPLAINABLE, so fall
                     // through to `decide` rather than returning a bare skip:
                     // the engine re-evaluates the same gates and records a
                     // fresh packet whose `block_reasons` name exactly what
@@ -2489,7 +2489,7 @@ impl SequenceStepHandler {
                         decision_id = %existing_decision_id,
                         step_execution_id = %ctx.step_execution_id,
                         reasons = ?revalidation.reasons,
-                        "approved decision failed revalidation — re-deciding to record the refusal"
+                        "approved decision failed revalidation, re-deciding to record the refusal"
                     );
                 }
             }
@@ -2604,7 +2604,7 @@ impl SequenceStepHandler {
         // in-flight and stop. The claim is LEASE-BASED (audit SM7 F2):
         // `claimed_at` is the lease, and `requeue_stale_executing_steps`
         // (wired into the worker tick next to the action-queue reaper)
-        // requeues steps whose lease expired — a transient failure after the
+        // requeues steps whose lease expired, a transient failure after the
         // claim is recovered, never a silently dropped touch.
         let claimed: Option<Uuid> = sqlx::query_scalar(
             "UPDATE sales_step_executions \
@@ -2620,7 +2620,7 @@ impl SequenceStepHandler {
         if claimed.is_none() {
             // Audit SM7 F2: a claim miss is a success ONLY when the row
             // reached a terminal state. A non-terminal state under a lost
-            // claim used to return `Succeeded` here — permanently cancelling
+            // claim used to return `Succeeded` here, permanently cancelling
             // the touch and freezing the enrollment mid-sequence.
             let state: Option<String> =
                 sqlx::query_scalar("SELECT state FROM sales_step_executions WHERE id = $1")
@@ -2690,14 +2690,14 @@ impl SequenceStepHandler {
             // Admission refused the recipient permanently (the canonical
             // suppression list): a NON-RETRYABLE skip. Retrying a suppression
             // is the loop the release gates forbid, so this is a terminal
-            // state — never `ActionOutcome::Retry`.
+            // state, never `ActionOutcome::Retry`.
             EnqueueOutcome::Suppressed => ("cancelled", None),
             // The lease was recovered by another worker between the decision
             // and the enqueue: no external effect was produced, and this worker
             // must not report success for work it no longer owns.
             EnqueueOutcome::LeaseLost => {
                 return Ok(ActionOutcome::Retry(
-                    "lease lost before the external enqueue — no message was sent".into(),
+                    "lease lost before the external enqueue, no message was sent".into(),
                 ))
             }
         };
@@ -2971,7 +2971,7 @@ mod tests {
 
     /// Every autonomous sales email body must be rendered through the central
     /// compliant footer/unsubscribe renderer. The worker has exactly two
-    /// content arms — validated strategy and static template — and both must
+    /// content arms, validated strategy and static template, and both must
     /// consume the footer renderer's output before the enqueue. This is a
     /// structural gate so a future third arm cannot quietly enqueue a bare
     /// body.
@@ -3003,7 +3003,7 @@ mod tests {
         );
 
         // Invariant I11: the send path appends the AI disclosure to both
-        // bodies — the constant must be referenced in THIS module's send arm.
+        // bodies, the constant must be referenced in THIS module's send arm.
         assert!(
             source.contains("AUTO_SEND_AI_DISCLOSURE"),
             "the sequence send path must carry the AI disclosure constant"
@@ -3055,7 +3055,7 @@ mod tests {
     }
 
     // =====================================================================
-    // Audit item 13 — adversarial tests for the grounded planning pipeline
+    // Audit item 13, adversarial tests for the grounded planning pipeline
     // =====================================================================
 
     use crate::intelligence::{
@@ -3696,7 +3696,7 @@ mod tests {
         .expect("count email_queue")
     }
 
-    // ── 0. Audit SM7 F2 — the executing dead-end ─────────────────────────
+    // ── 0. Audit SM7 F2, the executing dead-end ─────────────────────────
 
     #[test]
     fn claim_miss_only_succeeds_on_terminal_states() {
@@ -3716,8 +3716,8 @@ mod tests {
             claim_miss_outcome(Some("failed"), id),
             ActionOutcome::DeadLetter(_)
         ));
-        // EVERY non-terminal state — including a stale 'executing' claim from
-        // a failed first attempt — is RETRYABLE, never a bogus success (the
+        // EVERY non-terminal state, including a stale 'executing' claim from
+        // a failed first attempt, is RETRYABLE, never a bogus success (the
         // pre-fix bug: 'executing' returned Succeeded without sending and
         // without advancing).
         for non_terminal in ["executing", "scheduled", "queued"] {
@@ -3739,7 +3739,7 @@ mod tests {
     #[test]
     fn executing_lease_is_bounded_and_the_reaper_requeues_only_expired_claims() {
         // The lease must be short enough to recover within a few worker
-        // ticks — the constant IS the liveness contract. Both invariants
+        // ticks, the constant IS the liveness contract. Both invariants
         // (positivity AND the 1h ceiling) are const-asserted next to the
         // constant's definition; clippy::assertions_on_constants rightly
         // rejects runtime asserts on consts, so this test pins the compile
@@ -3855,7 +3855,7 @@ mod tests {
         };
         // Same determinism pins as the reaper test above: three live evidence
         // rows (the NBA's evidence bar for a send) plus REAL open pipeline
-        // (a deterministic §28 EV on every execution) — so the replay outcome
+        // (a deterministic §28 EV on every execution), so the replay outcome
         // cannot drift with the SHARED canonical database's calibration and
         // outcome data.
         for index in 0..3 {
@@ -3902,7 +3902,7 @@ mod tests {
             "the loser produced no external effect"
         );
 
-        // The live lease is NOT reapable — the winner keeps its exclusivity.
+        // The live lease is NOT reapable, the winner keeps its exclusivity.
         // (Scoped to THIS test's tenant: the shared canonical database
         // carries abandoned 'executing' rows from other runs.)
         let requeued = requeue_stale_executing_steps_scoped(&fx.db, Some(&fx.tenant))
@@ -4666,7 +4666,7 @@ mod tests {
     }
 
     /// A `send_step` action whose entity belongs to another tenant is a dead
-    /// letter — cross-tenant work must never be executed.
+    /// letter, cross-tenant work must never be executed.
     #[tokio::test]
     async fn cross_tenant_action_is_dead_lettered() {
         let Some(fx) = fixture("lib_cross_tenant", "allowed", "ZR").await else {
@@ -4691,7 +4691,7 @@ mod tests {
     }
 
     /// A non-email step reaching the send worker is a recorded skip naming the
-    /// kind — never a silent success.
+    /// kind, never a silent success.
     #[tokio::test]
     async fn non_email_step_kind_is_a_recorded_skip() {
         let Some(fx) = fixture("lib_wait_step", "allowed", "ZQ").await else {
@@ -5109,7 +5109,7 @@ mod tests {
             parse_legal(Some("  PROHIBITED  ")),
             ContactDecision::Prohibited
         ));
-        // Anything else — including an unrecognized value and an absent row —
+        // Anything else, including an unrecognized value and an absent row —
         // fails closed to approval-required.
         assert!(matches!(
             parse_legal(Some("weird")),
@@ -5461,7 +5461,7 @@ mod tests {
     // `sales_sequence_steps.sender_pool`, whose canonical CHECK constraint
     // (`sales_sequence_steps_sender_pool_check`) permits exactly
     // 'sales_outbound' and 'sales_warmup'. Both arms are therefore
-    // unreachable through the canonical schema — they are defense-in-depth
+    // unreachable through the canonical schema, they are defense-in-depth
     // against a future schema change, and no test can reach them without
     // corrupting the schema itself.
 

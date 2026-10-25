@@ -133,7 +133,7 @@ fn build_state(
         }
         None => {
             tracing::warn!(
-                "no Postgres pool — ingested alerts stay in-memory only (CP system_alerts surfaces will remain empty)"
+                "no Postgres pool, ingested alerts stay in-memory only (CP system_alerts surfaces will remain empty)"
             );
             state
         }
@@ -287,7 +287,7 @@ fn spawn_background_tasks(
 
 /// Resolve the listen address. G.2: the /metrics endpoint is unauthenticated,
 /// so the server binds to loopback by default. Set METRICS_BIND_ADDR (e.g.
-/// "0.0.0.0") to expose it on other interfaces — restrict access with
+/// "0.0.0.0") to expose it on other interfaces, restrict access with
 /// network policy. An invalid override falls back to loopback with a warning.
 fn bind_addr(port: u16) -> SocketAddr {
     let bind_ip: std::net::IpAddr = std::env::var("METRICS_BIND_ADDR")
@@ -295,7 +295,7 @@ fn bind_addr(port: u16) -> SocketAddr {
         .trim()
         .parse()
         .unwrap_or_else(|_| {
-            tracing::warn!("invalid METRICS_BIND_ADDR — falling back to 127.0.0.1");
+            tracing::warn!("invalid METRICS_BIND_ADDR, falling back to 127.0.0.1");
             std::net::IpAddr::from([127, 0, 0, 1])
         });
     SocketAddr::from((bind_ip, port))
@@ -326,7 +326,7 @@ async fn run(
     let redis_pool = match redis_cfg.create_pool(Some(Runtime::Tokio1)) {
         Ok(pool) => Arc::new(pool),
         Err(err) => {
-            // Never log the full URL — it embeds the percent-encoded Redis
+            // Never log the full URL, it embeds the percent-encoded Redis
             // password. Log only the scheme://host:port/db part.
             tracing::error!(
                 error = %err,
@@ -383,7 +383,7 @@ async fn run(
         let flag = shutdown_flag.clone();
         async move {
             shutdown.await;
-            tracing::info!("shutdown signal received — draining");
+            tracing::info!("shutdown signal received, draining");
             flag.store(true, Ordering::Release);
         }
     };
@@ -412,10 +412,10 @@ async fn shutdown_signal() {
     let terminate = std::future::pending::<()>();
     tokio::select! {
         _ = ctrl_c => {
-            tracing::info!("received Ctrl+C — shutting down");
+            tracing::info!("received Ctrl+C, shutting down");
         }
         _ = terminate => {
-            tracing::info!("received SIGTERM — shutting down");
+            tracing::info!("received SIGTERM, shutting down");
         }
     }
 }
@@ -510,7 +510,7 @@ mod tests {
         assert_eq!(
             state.redis_pool.as_ref().expect("redis pool").status().size,
             0,
-            "the pool is created lazily — nothing connects at startup"
+            "the pool is created lazily, nothing connects at startup"
         );
     }
 
@@ -668,7 +668,7 @@ mod tests {
     }
 
     /// SIGTERM (the container stop signal) must trigger the shutdown flag the
-    /// background tasks observe — a plain ctrl_c-only service would leave the
+    /// background tasks observe, a plain ctrl_c-only service would leave the
     /// monitor and eval loops running until the process died.
     #[tokio::test]
     async fn shutdown_signal_fires_on_sigterm() {

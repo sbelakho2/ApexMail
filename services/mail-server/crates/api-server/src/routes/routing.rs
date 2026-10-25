@@ -6,17 +6,17 @@
 //! [`mail_common::RoutingMode`] so this surface and the worker that enforces
 //! the mode cannot disagree:
 //!
-//! * `global` (default, and always selectable) — the historical routing: a
+//! * `global` (default, and always selectable), the historical routing: a
 //!   selected dedicated IP rides ApexMail's own relay MTA, everything else
 //!   the shared pool.
-//! * `eu_only` — every send must leave through ApexMail's OWN MTAs; the
+//! * `eu_only`, every send must leave through ApexMail's OWN MTAs; the
 //!   shared third-party transport (SES) is forbidden and an unavailable
 //!   own-MTA route HOLDS the message (the worker enforces this; see
 //!   `worker-processors`' `handle_eu_only_hold`).
 //!
 //! Entitlement mapping (docs/pricing.md, platform-catalog):
 //!
-//! * INCLUDED on Enterprise Cloud (and the Compliance contract line) — the
+//! * INCLUDED on Enterprise Cloud (and the Compliance contract line), the
 //!   plan's `eu_only_routing` feature flag;
 //! * sold as the `eu_only_routing` add-on on self-serve Pro and above
 //!   (€149/$165 per month). There is no generic add-on table in the billing
@@ -26,24 +26,24 @@
 //!
 //! Activating `eu_only` requires one of the two grants; without either the
 //! request is refused with a named 4xx. Deactivating (back to `global`) is
-//! deliberately NOT gated — a tenant whose add-on lapsed must always be able
+//! deliberately NOT gated, a tenant whose add-on lapsed must always be able
 //! to return to the default mode, exactly like retention cleanup.
 //!
 //! Routes:
-//! * `GET /v1/routing` — current mode + entitlement state (`routing:read`);
-//! * `PUT /v1/routing` — set the mode (`routing:write`); `eu_only` is
+//! * `GET /v1/routing`, current mode + entitlement state (`routing:read`);
+//! * `PUT /v1/routing`, set the mode (`routing:write`); `eu_only` is
 //!   entitlement-gated, an invalid mode is a named 400.
 //!
-//! # Public receipt verification (B3 — "the proof is signed per message")
+//! # Public receipt verification (B3, "the proof is signed per message")
 //!
 //! The DELIVERY acceptance ledger signs one Ed25519 receipt per accepted
 //! message (`mail_common::routing_receipt`, migration 255). Two routes make
 //! that proof verifiable by ANYONE, with no account and no shared secret:
 //!
-//! * `GET /v1/routing/receipts/public-key` — the published Ed25519 public
+//! * `GET /v1/routing/receipts/public-key`, the published Ed25519 public
 //!   key + its fingerprint (`key_id`), or 503 when this deployment publishes
 //!   no key (never a fabricated one);
-//! * `POST /v1/routing/receipts/verify` — `{payload, signature}` (plus an
+//! * `POST /v1/routing/receipts/verify`, `{payload, signature}` (plus an
 //!   optional `public_key` to verify against a key snapshot instead of the
 //!   deployment's) → a determinate `valid: true|false` verdict.
 //!
@@ -72,7 +72,7 @@ pub fn router() -> Router<AppState> {
 
 /// The PUBLIC (unauthenticated) receipt-verification surface. Mounted by
 /// `app::build_app` on the public rate-limited router under
-/// `/v1/routing/receipts` — deliberately separate from [`router`], which
+/// `/v1/routing/receipts`, deliberately separate from [`router`], which
 /// rides the authenticated stack.
 pub fn public_receipts_router() -> Router<AppState> {
     Router::new()
@@ -88,9 +88,9 @@ const MAX_RECEIPT_PAYLOAD_BYTES: usize = 4 * 1024;
 /// The published verification material.
 #[derive(Debug, Serialize)]
 pub struct ReceiptPublicKeyResponse {
-    /// Signature scheme — always `ed25519`.
+    /// Signature scheme, always `ed25519`.
     pub scheme: &'static str,
-    /// `hex(sha256(public_key))[..16]` — stable across key rotations of other
+    /// `hex(sha256(public_key))[..16]`, stable across key rotations of other
     /// keys; recorded next to every stored signature.
     pub key_id: String,
     /// Base64 (standard, no padding) of the 32-byte Ed25519 public key.
@@ -103,7 +103,7 @@ pub struct ReceiptPublicKeyResponse {
     pub payload_format: &'static str,
 }
 
-/// Build the public-key response from a resolved public key (pure — the
+/// Build the public-key response from a resolved public key (pure, the
 /// HTTP handler only resolves the key and calls this).
 pub fn receipt_public_key_response(public_key: &[u8; 32]) -> ReceiptPublicKeyResponse {
     ReceiptPublicKeyResponse {
@@ -112,7 +112,7 @@ pub fn receipt_public_key_response(public_key: &[u8; 32]) -> ReceiptPublicKeyRes
         public_key_base64: base64_no_pad(public_key),
         public_key_hex: public_key.iter().map(|b| format!("{b:02x}")).collect(),
         verify_url: "/v1/routing/receipts/verify",
-        payload_format: "apexmail-routing-receipt/v1 — LF-delimited fields: message_id,                          tenant_id, transport, accepted_at, actual_source_ip (only when the                          transport reported one); the exact bytes are signed as-is",
+        payload_format: "apexmail-routing-receipt/v1, LF-delimited fields: message_id,                          tenant_id, transport, accepted_at, actual_source_ip (only when the                          transport reported one); the exact bytes are signed as-is",
     }
 }
 
@@ -121,10 +121,10 @@ fn base64_no_pad(bytes: &[u8]) -> String {
     base64::engine::general_purpose::STANDARD_NO_PAD.encode(bytes)
 }
 
-/// `GET /v1/routing/receipts/public-key` — public, no auth.
+/// `GET /v1/routing/receipts/public-key`, public, no auth.
 ///
 /// Fail-closed: with no key configured this answers 503 with a named error
-/// and NO key material — a fabricated or empty key would make every
+/// and NO key material, a fabricated or empty key would make every
 /// subsequent verification a lie.
 async fn receipt_public_key() -> Response {
     match mail_common::routing_receipt::verification_key_from_env() {
@@ -204,15 +204,15 @@ pub fn parse_receipt_payload(payload: &str) -> Result<Vec<(String, String)>, Str
     Ok(fields)
 }
 
-/// `POST /v1/routing/receipts/verify` — public, no auth, stateless:
+/// `POST /v1/routing/receipts/verify`, public, no auth, stateless:
 /// `{payload, signature}` (+ optional `public_key`) → `{valid, ...}`.
 ///
 /// A VALID verdict is a determinate cryptographic statement; an INVALID one
 /// is returned as HTTP 200 with `valid: false` and a reason (the signature
-/// was checked and did not hold — that is the answer, not a request error).
+/// was checked and did not hold, that is the answer, not a request error).
 /// Malformed INPUT (oversized payload, non-receipt payload shape, bad
 /// encodings) is a named 400; a deployment with no verification key is a
-/// named 503 (fail closed — never `valid: true` by absence of a key).
+/// named 503 (fail closed, never `valid: true` by absence of a key).
 async fn receipt_verify(Json(body): Json<VerifyReceiptRequest>) -> Response {
     let bad_request = |reason: &str| {
         (
@@ -288,7 +288,7 @@ pub struct UpdateRoutingModeRequest {
 #[derive(Debug, Serialize, PartialEq, Eq)]
 pub struct RoutingSettingsResponse {
     pub plan: String,
-    /// `global` | `eu_only` — the ACTIVE mode the worker executes.
+    /// `global` | `eu_only`, the ACTIVE mode the worker executes.
     pub mode: String,
     /// Whether the current tenant may activate EU-only routing (plan grant
     /// OR the purchased add-on).
@@ -318,7 +318,7 @@ pub(crate) fn parse_routing_mode(mode: &str) -> Result<RoutingMode, ApiError> {
 }
 
 /// The tenant's stored settings object (or `{}` when the row has no settings
-/// — the column is `NOT NULL DEFAULT '{}'`, so this is belt and braces).
+///, the column is `NOT NULL DEFAULT '{}'`, so this is belt and braces).
 async fn tenant_settings(state: &AppState, tenant_id: &str) -> Result<serde_json::Value, ApiError> {
     let row = sqlx::query("SELECT settings FROM tenants WHERE id = $1")
         .bind(tenant_id)
@@ -373,8 +373,8 @@ async fn update_routing(
         // The purchased self-serve add-on is a per-tenant GRANT on top of the
         // plan; express it through the snapshot's override channel so the
         // canonical `require_feature` gate below performs the check (the
-        // plan's own `eu_only_routing` flag — Enterprise Cloud / the
-        // Compliance contract line — is already in the snapshot).
+        // plan's own `eu_only_routing` flag, Enterprise Cloud / the
+        // Compliance contract line, is already in the snapshot).
         if eu_only_addon_enabled(&settings) {
             snapshot.apply_override(
                 FeatureKey::EuOnlyRouting.as_str(),
@@ -624,7 +624,7 @@ mod tests {
         pool.close().await;
     }
 
-    /// Put the tenant on the REAL Enterprise Cloud `plans` row — the plan
+    /// Put the tenant on the REAL Enterprise Cloud `plans` row, the plan
     /// whose seed INCLUDES `eu_only_routing`, so activation needs no add-on.
     async fn seed_enterprise_plan(pool: &sqlx::PgPool, tenant: &str) {
         let features = serde_json::to_value(
@@ -691,7 +691,7 @@ mod tests {
     /// Run `body` with the receipt key env vars set as given, restoring the
     /// previous state afterwards (the same convention the worker tests use).
     /// ASYNC on purpose: the env must still be in place while the request
-    /// future runs — a sync helper would restore the vars before the handler
+    /// future runs, a sync helper would restore the vars before the handler
     /// ever read them (the bug this signature exists to prevent).
     // The env lock is held ACROSS the request on purpose: the vars must stay
     // in place while the handler runs (two receipts tests serializing on one
@@ -754,7 +754,7 @@ mod tests {
 
     /// `GET /v1/routing/receipts/public-key` is public (no credential needed)
     /// and publishes the key a third party must use; with no key configured
-    /// it answers 503 — never a fabricated key.
+    /// it answers 503, never a fabricated key.
     #[tokio::test]
     async fn public_receipt_key_endpoint_is_open_and_fail_closed() {
         let Some(pool) = crate::test_db::canonical_pool("receipt_pubkey").await else {
@@ -797,7 +797,7 @@ mod tests {
 
     /// The verify endpoint accepts an EXTERNALLY produced signature (the test
     /// holds the private key), returns a determinate verdict, catches
-    /// tampering, and 400s malformed input — all without a credential.
+    /// tampering, and 400s malformed input, all without a credential.
     #[tokio::test]
     async fn public_receipt_verify_accepts_external_signatures_and_refuses_tampering() {
         let Some(pool) = crate::test_db::canonical_pool("receipt_verify").await else {
@@ -840,7 +840,7 @@ mod tests {
         assert_eq!(verdict["fields"]["message_id"], "msg-public-2");
 
         // Tampered payload: a determinate `valid: false` (not a 4xx) with a
-        // reason — the signature was checked and did not hold.
+        // reason, the signature was checked and did not hold.
         let tampered = serde_json::json!({
             "payload": signed.payload.replace("tenant-public", "tenant-other"),
             "signature": signed.signature,

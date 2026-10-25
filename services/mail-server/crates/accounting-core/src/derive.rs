@@ -7,7 +7,7 @@
 //!
 //! Filters on every function below: `posted_at IS NOT NULL` (drafts are not
 //! authoritative) and the requested `(legal_entity_id, fiscal_period_id)`.
-//! Reversal entries are included by design — they net against their
+//! Reversal entries are included by design, they net against their
 //! original exactly as accounting requires.
 
 use chrono::{DateTime, NaiveDate, Utc};
@@ -153,7 +153,7 @@ where
     Ok(rows)
 }
 
-/// Every VAT-recognizable posted line in `(entity, period)` — the KMD read
+/// Every VAT-recognizable posted line in `(entity, period)`, the KMD read
 /// contract ("VAT-recognizable entries for period P").
 pub async fn vat_entries_for_period<'e, E>(
     executor: E,
@@ -212,7 +212,7 @@ where
     })
 }
 
-/// Payroll tax postings for `(entity, period)` — the TSD read contract.
+/// Payroll tax postings for `(entity, period)`, the TSD read contract.
 pub async fn payroll_taxes_for_period<'e, E>(
     executor: E,
     legal_entity_id: Uuid,

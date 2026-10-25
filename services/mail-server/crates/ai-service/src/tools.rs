@@ -1,4 +1,4 @@
-//! Deterministic computation tools for the LLM — tenant-isolated, RBAC-guarded, 0 leakage.
+//! Deterministic computation tools for the LLM, tenant-isolated, RBAC-guarded, 0 leakage.
 //!
 //! Every tool call carries tenant_id + role. Cross-tenant access and privilege
 //! escalation are both blocked at execution. 18 tools with role-appropriate access.
@@ -10,7 +10,7 @@ use crate::{defense, domain_dns::DomainDnsStore};
 use serde::{Deserialize, Serialize};
 
 // Pricing tool facts are DERIVED from `platform_catalog` (see
-// `canonical_tool_plan` / `canonical_price_eur`) — there is deliberately no
+// `canonical_tool_plan` / `canonical_price_eur`), there is deliberately no
 // flat overage-rate constant here: the per-plan ladder lives in the catalog.
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -51,12 +51,12 @@ impl Role {
 /// Permission matrix: which roles can use which tools
 fn tool_permission(tool: &str) -> &[Role] {
     match tool {
-        // Pricing — all roles can read
+        // Pricing, all roles can read
         "calculate_overage" | "calculate_payg" | "get_price_diff" | "compare_plans"
         | "get_plan_details" => &[Role::Owner, Role::Admin, Role::Developer, Role::Viewer],
-        // DNS — all roles
+        // DNS, all roles
         "get_dns_record" => &[Role::Owner, Role::Admin, Role::Developer, Role::Viewer],
-        // Support tools — all roles
+        // Support tools, all roles
         "get_warmup_schedule"
         | "get_blocklist_status"
         | "map_provider_events"
@@ -68,13 +68,13 @@ fn tool_permission(tool: &str) -> &[Role] {
         | "get_dmarc_analysis"
         | "get_bounce_classification"
         | "get_webhook_setup" => &[Role::Owner, Role::Admin, Role::Developer, Role::Viewer],
-        // Security & audit — admin+
+        // Security & audit, admin+
         "generate_incident_timeline" | "get_audit_log" | "get_security_events" => {
             &[Role::Owner, Role::Admin]
         }
-        // Billing history — owner only
+        // Billing history, owner only
         "get_billing_history" | "get_send_history" | "get_api_key_usage" => &[Role::Owner],
-        // Sensitive — owner only
+        // Sensitive, owner only
         "get_suppression_count"
         | "get_contact_count"
         | "get_deliverability_report"
@@ -119,7 +119,7 @@ pub fn execute_tool(
     caller_tenant_id: &str,
     caller_role: &Role,
 ) -> serde_json::Value {
-    // Guard 1: RBAC — does the caller's role have permission?
+    // Guard 1: RBAC, does the caller's role have permission?
     if !role_can_execute(caller_role, &call.tool) {
         return serde_json::json!({
             "error": format!("role {:?} cannot execute tool '{}'. Required: {:?}",
@@ -128,7 +128,7 @@ pub fn execute_tool(
         });
     }
 
-    // Guard 2: Tenant isolation — block cross-tenant data access
+    // Guard 2: Tenant isolation, block cross-tenant data access
     // Also block tenant-scoped tools when caller has no tenant identity.
     let tools_needing_isolation = [
         "get_audit_log",
@@ -156,7 +156,7 @@ pub fn execute_tool(
         }
     }
 
-    // Guard 3: Parameter validation — prevent injection through tool parameters
+    // Guard 3: Parameter validation, prevent injection through tool parameters
     if let Err(param_errors) = defense::validate_tool_params(&call.tool, &call.params) {
         return serde_json::json!({
             "error": format!("parameter validation failed: {}", param_errors.join("; "))
@@ -173,7 +173,7 @@ pub fn execute_tool(
         "compare_plans" => compare_plans(&call.params),
         "get_plan_details" => get_plan_details(&call.params),
         "get_price_diff" => get_price_diff(&call.params),
-        // NEW — support tools for customer scenarios
+        // NEW, support tools for customer scenarios
         "get_warmup_schedule" => get_warmup_schedule(&call.params),
         "get_blocklist_status" => get_blocklist_status(&call.params),
         "map_provider_events" => map_provider_events(&call.params),
@@ -240,7 +240,7 @@ pub async fn execute_tool_with_authoritative_data(
 }
 
 pub const TOOL_DEFINITIONS: &str = r##"
-Available tools — emit tool_call for exact computation:
+Available tools, emit tool_call for exact computation:
 
 ## Pricing & Math (no tenant_id needed)
 ```tool_call {"tool":"calculate_overage","params":{"plan":"pro","emails_sent":160000}}
@@ -254,7 +254,7 @@ Available tools — emit tool_call for exact computation:
 ```tool_call {"tool":"get_dns_record","params":{"domain":"example.com","type":"dkim"},"tenant_id":"<tenant_id>"}
 ```
 
-## Support (tenant_id required — prevents cross-tenant data leak)
+## Support (tenant_id required, prevents cross-tenant data leak)
 ```tool_call {"tool":"get_warmup_schedule","params":{"ip_count":3},"tenant_id":"<tenant_id>"}
 {"tool":"get_blocklist_status","params":{"domain":"example.com"}}
 {"tool":"map_provider_events","params":{"from_provider":"sendgrid"}}
@@ -288,10 +288,10 @@ fn fmt_number(n: i64) -> String {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Existing tools (6 — unchanged except tenant isolation wrapper)
+// Existing tools (6, unchanged except tenant isolation wrapper)
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Canonical plan facts for the pricing tools — DERIVED from
+/// Canonical plan facts for the pricing tools, DERIVED from
 /// `platform-catalog` (the source the billing runtime seeds from), never a
 /// second hardcoded price table. Returns `(base EUR, included emails,
 /// EUR per 1,000 extra emails)` for the six self-serve/contract plans the
@@ -379,7 +379,7 @@ fn calculate_payg(params: &serde_json::Value) -> serde_json::Value {
 fn compare_plans(params: &serde_json::Value) -> serde_json::Value {
     let a = params.get("plan_a").and_then(|v| v.as_str()).unwrap_or("");
     let b = params.get("plan_b").and_then(|v| v.as_str()).unwrap_or("");
-    // Canonical catalog prices (whole EUR) — the billing runtime's numbers.
+    // Canonical catalog prices (whole EUR), the billing runtime's numbers.
     let (pa_price, pb_price) = match (canonical_price_eur(a), canonical_price_eur(b)) {
         (Some(pa), Some(pb)) => (pa, pb),
         _ => return serde_json::json!({"error":format!("unknown plan: {a} or {b}")}),
@@ -402,8 +402,8 @@ fn get_plan_details(params: &serde_json::Value) -> serde_json::Value {
     };
     // Presentation extras the catalog does not model (domain/webhook
     // allowances, SLA credit, support tier, contact ceilings). EVERY
-    // catalog-owned fact — price, email/API quotas, team, retention,
-    // capability flags, subaccount ceiling, dedicated-IP inclusions — is
+    // catalog-owned fact, price, email/API quotas, team, retention,
+    // capability flags, subaccount ceiling, dedicated-IP inclusions, is
     // derived below so this tool can never quote a second price table.
     let mut details = match n {
         "free" => {
@@ -472,7 +472,7 @@ fn get_price_diff(params: &serde_json::Value) -> serde_json::Value {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// NEW: Support tools — resolve all fault scenarios from customer tests
+// NEW: Support tools, resolve all fault scenarios from customer tests
 // ═══════════════════════════════════════════════════════════════════════════
 
 fn get_warmup_schedule(params: &serde_json::Value) -> serde_json::Value {
@@ -539,7 +539,7 @@ fn get_compliance_info(params: &serde_json::Value) -> serde_json::Value {
         }),
         "soc2_incident" => serde_json::json!({
             "impact": "SOC2 Type II report may note incident in management's description of the system",
-            "auditor_notification": "Yes — notify auditor within 30 days with incident timeline and remediation",
+            "auditor_notification": "Yes, notify auditor within 30 days with incident timeline and remediation",
             "apexmail_provides": "SOC2 bridge letter describing incident scope and mitigation"
         }),
         "gdpr_dsar" => serde_json::json!({
@@ -556,10 +556,10 @@ fn get_compliance_info(params: &serde_json::Value) -> serde_json::Value {
     }
 }
 
-/// Canonical audit_logs column set (migration 038/050 lineage) — the
+/// Canonical audit_logs column set (migration 038/050 lineage), the
 /// generated investigation query may only reference columns from this set,
 /// which tests pin (audit F89: the previous output referenced
-/// audit_logs.api_key_id, a column that does not exist — its SQL failed
+/// audit_logs.api_key_id, a column that does not exist, its SQL failed
 /// with 42703).
 #[cfg(test)]
 const AUDIT_LOG_CANONICAL_COLUMNS: &[&str] = &[
@@ -590,7 +590,7 @@ const AUDIT_LOG_CANONICAL_COLUMNS: &[&str] = &[
 /// What the canonical schema records per entry: the principal `user_id`,
 /// `session_id`, `tenant_id` and free-form `details`. It does NOT persist
 /// an `api_key_id` (API-key-authenticated requests carry user_id NULL),
-/// so a key-scoped audit timeline is NOT claimed here — the response says
+/// so a key-scoped audit timeline is NOT claimed here, the response says
 /// so explicitly and scopes the query by the recorded principal instead.
 ///
 /// The window is DERIVED from the caller's exposure estimate, not a fixed
@@ -613,7 +613,7 @@ fn incident_investigation_guidance(key_id: &str, exposure_hours: i64) -> serde_j
             "note": "window derived from the reported exposure, not a fixed interval"
         },
         // Tenant-owned, parameterized investigation endpoint (the supported
-        // audit search interface — GET /v1/admin/audit/search with from/to
+        // audit search interface, GET /v1/admin/audit/search with from/to
         // filters, plus the CSV/JSON export for the evidence pack).
         "apexmail_investigation_endpoint": format!(
             "GET /v1/admin/audit/search?tenant_id=<your-tenant>&from={}&to={}",
@@ -642,7 +642,7 @@ fn incident_investigation_guidance(key_id: &str, exposure_hours: i64) -> serde_j
             "recorded_identity": "audit_logs records user_id/session_id/tenant_id per entry; api_keys.id is not persisted on audit entries",
             "limitation": "a KEY-scoped audit timeline is not available until key identity is recorded at audit-write time; identify the key's tenant via api_keys.key_prefix, then investigate by tenant + principal within the derived window"
         },
-        // The tool itself retrieved NO evidence — say so (audit F89).
+        // The tool itself retrieved NO evidence, say so (audit F89).
         "evidence_status": "advisory_only: no audit evidence has been retrieved by this tool; execute the investigation endpoint/SQL above to collect it"
     })
 }
@@ -723,7 +723,7 @@ fn get_ab_test_guidance(params: &serde_json::Value) -> serde_json::Value {
         "sample_per_variant": min_sample,
         "recommended_duration_days": days,
         "statistical_significance": {"tool":"Use chi-squared test","confidence":"≥95%","min_difference_for_significance":"≥2% absolute"},
-        "best_practices": ["Test one variable at a time","Hold back 10% as control group","Run on same day/time to control for send-time bias","Don't peek early — let test complete"],
+        "best_practices": ["Test one variable at a time","Hold back 10% as control group","Run on same day/time to control for send-time bias","Don't peek early, let test complete"],
         "loser_follow_up": {"method":"Manual","steps":["Wait for A/B test to complete","Identify losing variant via campaign API","Create new campaign targeting losing-variant recipients only","Send with winning variant content"]}
     })
 }
@@ -754,7 +754,7 @@ fn get_retry_guidance(params: &serde_json::Value) -> serde_json::Value {
             serde_json::json!({"from":"437 on SendGrid","replace_with":"429+Retry-After header on ApexMail","backoff":"Exponential: 1s, 2s, 4s, 8s","max_retries":3,"idempotency":"Use Idempotency-Key header to prevent duplicates"})
         }
         "mailgun" => {
-            serde_json::json!({"from":"429 on Mailgun","replace_with":"Same — 429+Retry-After on ApexMail","backoff":"Exponential from Retry-After value","max_retries":3})
+            serde_json::json!({"from":"429 on Mailgun","replace_with":"Same, 429+Retry-After on ApexMail","backoff":"Exponential from Retry-After value","max_retries":3})
         }
         _ => {
             serde_json::json!({"generic":"Exponential backoff from Retry-After header, max 3 retries, use Idempotency-Key header"})
@@ -1167,7 +1167,7 @@ mod tests {
     }
 
     /// The generated query must reference ONLY canonical audit_logs
-    /// columns — the old output's audit_logs.api_key_id failed with 42703.
+    /// columns, the old output's audit_logs.api_key_id failed with 42703.
     #[test]
     fn f89_generated_sql_uses_only_canonical_audit_columns() {
         let output = incident_output(4);
@@ -1245,7 +1245,7 @@ mod tests {
     }
 
     /// The response is honest about key scoping and about which evidence
-    /// has actually been retrieved (none — advisory only).
+    /// has actually been retrieved (none, advisory only).
     #[test]
     fn f89_response_states_key_scoping_limit_and_evidence_status() {
         let output = incident_output(4);
@@ -1284,7 +1284,7 @@ mod tests {
         assert_eq!(Role::parse_role("OWNER"), Role::Owner);
         assert_eq!(Role::parse_role("admin"), Role::Admin);
         assert_eq!(Role::parse_role("Developer"), Role::Developer);
-        // Everything else — including hostile junk — lands at Viewer.
+        // Everything else, including hostile junk, lands at Viewer.
         assert_eq!(Role::parse_role("owner; drop table"), Role::Viewer);
         assert_eq!(Role::parse_role(""), Role::Viewer);
         assert_eq!(Role::parse_role("ROOT"), Role::Viewer);
@@ -1486,7 +1486,7 @@ mod tests {
     #[tokio::test]
     async fn authoritative_executor_guards_every_arm() {
         // Note: get_dns_record is all-role in the permission matrix, so the
-        // executor's RBAC arm cannot fire through any Role — verified in
+        // executor's RBAC arm cannot fire through any Role, verified in
         // permission_matrix_grants_by_role_tier. Viewers stop at the tenant
         // binding instead.
         let caller = TrustedToolCaller {
@@ -1594,7 +1594,7 @@ mod tests {
     }
 
     /// Against the canonical database, the executor returns the tenant's own
-    /// authoritative records for owned domains — and refuses domains the
+    /// authoritative records for owned domains, and refuses domains the
     /// tenant does not own (no guessing domain names across tenants).
     #[tokio::test]
     async fn authoritative_dns_reads_owned_domains_only() {
@@ -1672,7 +1672,7 @@ mod tests {
             "private key material must never leave the store"
         );
 
-        // A domain the tenant does NOT own is not found — even though it
+        // A domain the tenant does NOT own is not found, even though it
         // exists for another tenant namespace.
         let mut stranger = call.clone_value();
         stranger.params = serde_json::json!({"domain":"not-ours.example.com","type":"dkim"});

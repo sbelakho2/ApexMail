@@ -6,12 +6,12 @@
 //!
 //! # Precedence
 //!
-//! 1. **Tenant override** — `feature_flag_overrides.value` for
+//! 1. **Tenant override**, `feature_flag_overrides.value` for
 //!    `(tenant_id, flag_key)`. The column is JSONB and MUST hold a boolean;
 //!    any other JSON type is treated as invalid (see below).
-//! 2. **Global flag** — `feature_flags.enabled` for `name = flag`
+//! 2. **Global flag**, `feature_flags.enabled` for `name = flag`
 //!    (`name` is the canonical key; migration 093:170-176).
-//! 3. **Caller default** — the `default` argument: the behaviour the product
+//! 3. **Caller default**, the `default` argument: the behaviour the product
 //!    path has when no row exists. New capabilities should pass `false`.
 //!
 //! # Failure semantics
@@ -27,7 +27,7 @@
 //!   never turn a global `false` into `true` through the caller's `default`.
 //!   A string `"true"`, an object, or a number never enables a flag that the
 //!   global row disables.
-//! * Database errors are returned as [`ApiError`] — flag evaluation failing
+//! * Database errors are returned as [`ApiError`], flag evaluation failing
 //!   must be visible, not silently reinterpreted as "disabled" or "enabled".
 //!
 //! # Cache
@@ -48,7 +48,7 @@ use crate::error::ApiError;
 /// is not a database query per request.
 pub const DEFAULT_CACHE_TTL: Duration = Duration::from_secs(30);
 
-/// Upper bound on cached `(tenant, flag)` entries — the cache must never grow
+/// Upper bound on cached `(tenant, flag)` entries, the cache must never grow
 /// with tenant count without limit.
 const CACHE_MAX_ENTRIES: u64 = 10_000;
 
@@ -73,7 +73,7 @@ const RESOLVE_FLAG_SQL: &str = "SELECT \
 /// Why both: tracing caches a callsite's interest PROCESS-WIDE, so once any
 /// subscriber that filters warnings out has registered the callsite (this
 /// crate's test binary installs a global `error`-level fmt subscriber), a
-/// subscriber installed later — a test's capture layer — can never receive the
+/// subscriber installed later, a test's capture layer, can never receive the
 /// event. Asserting the behaviour through the log alone is therefore
 /// order-dependent; the record is the deterministic channel, the log line
 /// stays for operators.
@@ -126,7 +126,7 @@ impl FeatureFlagService {
     ///
     /// Precedence: tenant override → global `feature_flags.enabled` → the
     /// caller's `default`. A non-boolean override is ignored (logged) and the
-    /// global row answers instead — see the module docs for why.
+    /// global row answers instead, see the module docs for why.
     pub async fn enabled(
         &self,
         tenant_id: &str,
@@ -146,7 +146,7 @@ impl FeatureFlagService {
                 .await?;
 
         let resolved = match override_value {
-            // A tenant override is authoritative — in BOTH directions: a
+            // A tenant override is authoritative, in BOTH directions: a
             // `false` override must beat a globally enabled flag.
             Some(serde_json::Value::Bool(value)) => value,
             Some(other) => {
@@ -154,7 +154,7 @@ impl FeatureFlagService {
                 // exactly as if the override did not exist. Falling back to
                 // the caller's `default` here would let a malformed override
                 // turn `global = false` into `true` for a caller that passes
-                // `default = true` (AI chat does exactly that) — the
+                // `default = true` (AI chat does exactly that), the
                 // adversarial case the audit found.
                 tracing::warn!(
                     tenant_id = %tenant_id,
@@ -335,7 +335,7 @@ mod tests {
     /// behaviour), the ignore is RECORDED, and the flag resolves exactly as if
     /// the override did not exist.
     ///
-    /// The RECORD — not the log — is the assertion channel. tracing caches a
+    /// The RECORD, not the log, is the assertion channel. tracing caches a
     /// callsite's interest process-wide, so a capture subscriber installed
     /// after another test's global `error`-level fmt subscriber can never
     /// receive this warn event; asserting through the log alone is therefore
@@ -409,7 +409,7 @@ mod tests {
         );
 
         // A well-formed override is NOT an ignore, and it wins in both
-        // directions — the failure mode must not shadow good data.
+        // directions, the failure mode must not shadow good data.
         upsert_override(&pool, "tenant-bad-override", flag, serde_json::json!(false)).await;
         service.invalidate(flag);
         assert!(
@@ -443,7 +443,7 @@ mod tests {
         let service = FeatureFlagService::new(pool.clone());
 
         // Every non-boolean JSON shape, with the caller default deliberately
-        // `true` — the old fallback returned `default` here and enabled the
+        // `true`, the old fallback returned `default` here and enabled the
         // globally-disabled flag.
         for malformed in [
             serde_json::json!("true"),
@@ -579,7 +579,7 @@ mod tests {
 
         // Same process, same state: the route now gets past the flag gate.
         // (The test config has no ai_service_base_url, so the next stop is
-        // the "not configured" 500 — anything but Forbidden proves the gate
+        // the "not configured" 500, anything but Forbidden proves the gate
         // opened.)
         let permitted =
             crate::routes::ai_chat::chat(State(state.clone()), auth.clone(), body()).await;

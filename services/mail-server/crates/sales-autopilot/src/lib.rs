@@ -1,5 +1,5 @@
 #![deny(unsafe_code)]
-//! Sales autopilot — the canonical outbound sales engine.
+//! Sales autopilot, the canonical outbound sales engine.
 //!
 //! One brain, one source of truth. The control plane reads and steers this
 //! service through the authenticated `/control/*` surface; it does not run a

@@ -19,7 +19,7 @@ After you submit the form, our enterprise team reviews your requirements and res
 
 <div id="enquiry-submitted" class="apex-notice apex-notice--ok" role="status">
   <b>Received</b>
-  <p>Thank you — your submission was received. Our team reviews submissions and responds within 2 business days.</p>
+  <p>Thank you, your submission was received. Our team reviews submissions and responds within 2 business days.</p>
 </div>
 <div id="enquiry-error" class="apex-notice apex-notice--fail" role="alert">
   <b>Not accepted</b>
@@ -62,15 +62,15 @@ After you submit the form, our enterprise team reviews your requirements and res
     <div class="space-y-3 mt-3">
       <label class="apex-check">
         <input type="radio" name="deployment_model" value="shared" checked />
-        <span><strong>Shared Cloud</strong> — Multi-tenant EU infrastructure</span>
+        <span><strong>Shared Cloud</strong>, Multi-tenant EU infrastructure</span>
       </label>
       <label class="apex-check">
         <input type="radio" name="deployment_model" value="dedicated" />
-        <span><strong>Dedicated Tenant</strong> — Single-tenant isolated infrastructure, subject to architecture and contract review</span>
+        <span><strong>Dedicated Tenant</strong>, Single-tenant isolated infrastructure, subject to architecture and contract review</span>
       </label>
       <label class="apex-check">
         <input type="radio" name="deployment_model" value="byoc" />
-        <span><strong>BYOC / Private Deployment</strong> — Managed deployment in your cloud account, subject to architecture and contract review</span>
+        <span><strong>BYOC / Private Deployment</strong>, Managed deployment in your cloud account, subject to architecture and contract review</span>
       </label>
     </div>
   </fieldset>

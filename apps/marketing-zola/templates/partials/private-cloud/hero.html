@@ -22,9 +22,9 @@
         </p>
 
         <ul class="list-none space-y-3 mb-10">
-          <li><span class="apex-em">{% if i18n_data and i18n_data[l] and i18n_data[l]["private_cloud"] and i18n_data[l]["private_cloud"]["hero_benefit_1_title"] %}{{ i18n_data[l]["private_cloud"]["hero_benefit_1_title"] }}{% else %}Single-Tenant Isolation{% endif %}</span> — {% if i18n_data and i18n_data[l] and i18n_data[l]["private_cloud"] and i18n_data[l]["private_cloud"]["hero_benefit_1_desc"] %}{{ i18n_data[l]["private_cloud"]["hero_benefit_1_desc"] }}{% else %}Dedicated tenancy options scoped for your risk profile{% endif %}</li>
-          <li><span class="apex-em">{% if i18n_data and i18n_data[l] and i18n_data[l]["private_cloud"] and i18n_data[l]["private_cloud"]["hero_benefit_2_title"] %}{{ i18n_data[l]["private_cloud"]["hero_benefit_2_title"] }}{% else %}Deployment Lifecycle{% endif %}</span> — {% if i18n_data and i18n_data[l] and i18n_data[l]["private_cloud"] and i18n_data[l]["private_cloud"]["hero_benefit_2_desc"] %}{{ i18n_data[l]["private_cloud"]["hero_benefit_2_desc"] }}{% else %}Region, sizing, health checks, and status tracked before launch{% endif %}</li>
-          <li><span class="apex-em">{% if i18n_data and i18n_data[l] and i18n_data[l]["private_cloud"] and i18n_data[l]["private_cloud"]["hero_benefit_3_title"] %}{{ i18n_data[l]["private_cloud"]["hero_benefit_3_title"] }}{% else %}BYOIP &amp; Dedicated IPs{% endif %}</span> — {% if i18n_data and i18n_data[l] and i18n_data[l]["private_cloud"] and i18n_data[l]["private_cloud"]["hero_benefit_3_desc"] %}{{ i18n_data[l]["private_cloud"]["hero_benefit_3_desc"] }}{% else %}Dedicated sending IPs with CIDR verification and reputation tracking{% endif %}</li>
+          <li><span class="apex-em">{% if i18n_data and i18n_data[l] and i18n_data[l]["private_cloud"] and i18n_data[l]["private_cloud"]["hero_benefit_1_title"] %}{{ i18n_data[l]["private_cloud"]["hero_benefit_1_title"] }}{% else %}Single-Tenant Isolation{% endif %}</span>, {% if i18n_data and i18n_data[l] and i18n_data[l]["private_cloud"] and i18n_data[l]["private_cloud"]["hero_benefit_1_desc"] %}{{ i18n_data[l]["private_cloud"]["hero_benefit_1_desc"] }}{% else %}Dedicated tenancy options scoped for your risk profile{% endif %}</li>
+          <li><span class="apex-em">{% if i18n_data and i18n_data[l] and i18n_data[l]["private_cloud"] and i18n_data[l]["private_cloud"]["hero_benefit_2_title"] %}{{ i18n_data[l]["private_cloud"]["hero_benefit_2_title"] }}{% else %}Deployment Lifecycle{% endif %}</span>, {% if i18n_data and i18n_data[l] and i18n_data[l]["private_cloud"] and i18n_data[l]["private_cloud"]["hero_benefit_2_desc"] %}{{ i18n_data[l]["private_cloud"]["hero_benefit_2_desc"] }}{% else %}Region, sizing, health checks, and status tracked before launch{% endif %}</li>
+          <li><span class="apex-em">{% if i18n_data and i18n_data[l] and i18n_data[l]["private_cloud"] and i18n_data[l]["private_cloud"]["hero_benefit_3_title"] %}{{ i18n_data[l]["private_cloud"]["hero_benefit_3_title"] }}{% else %}BYOIP &amp; Dedicated IPs{% endif %}</span>, {% if i18n_data and i18n_data[l] and i18n_data[l]["private_cloud"] and i18n_data[l]["private_cloud"]["hero_benefit_3_desc"] %}{{ i18n_data[l]["private_cloud"]["hero_benefit_3_desc"] }}{% else %}Dedicated sending IPs with CIDR verification and reputation tracking{% endif %}</li>
         </ul>
 
         <div class="apex-mkt-hero__actions">
@@ -37,7 +37,7 @@
         </div>
       </div>
 
-      {# Right: VPC Architecture Diagram — the illustrative reference
+      {# Right: VPC Architecture Diagram, the illustrative reference
          panel renders as ARK evidence (head, seal, hatched rule, body).
          The strip below is an illustrative reference architecture, not a
          provisioned deployment: the shown range is an RFC 5737 example

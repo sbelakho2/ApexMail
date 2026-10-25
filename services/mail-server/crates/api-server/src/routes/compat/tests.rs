@@ -7,13 +7,13 @@
 //! suites, and then asserts:
 //!
 //! * the provider-shaped SUCCESS response (status + body/headers);
-//! * **that the canonical send path is what ran** — the `messages` row AND
+//! * **that the canonical send path is what ran**, the `messages` row AND
 //!   the per-recipient `email_queue` rows are read back and compared field by
 //!   field against the provider payload's mapping (the queue-row spy: a
 //!   mapping layer that bypassed or duplicated the canonical insert could not
 //!   produce these rows);
 //! * auth refusals in each provider's own error shape;
-//! * validation parity — a suppressed recipient, an unverified sender domain
+//! * validation parity, a suppressed recipient, an unverified sender domain
 //!   and a missing subject are refused by the CANONICAL gates and rendered in
 //!   the provider's shape, with nothing queued;
 //! * the named refusals for fields this surface cannot honour (no silent
@@ -319,7 +319,7 @@ async fn missing_credentials_answer_in_each_providers_error_shape() {
 }
 
 /// An UNKNOWN key (well-formed, but not in the credential store) is refused
-/// in every provider's shape — and never creates a message row.
+/// in every provider's shape, and never creates a message row.
 #[tokio::test]
 async fn unknown_keys_are_refused_in_each_providers_error_shape() {
     let Some(fixture) = fixture("compat_auth_unknown").await else {
@@ -379,7 +379,7 @@ async fn unknown_keys_are_refused_in_each_providers_error_shape() {
 }
 
 /// A valid key WITHOUT the `messages:send` scope is refused (403) in the
-/// provider's shape — the same scope gate `POST /v1/messages` applies.
+/// provider's shape, the same scope gate `POST /v1/messages` applies.
 #[tokio::test]
 async fn a_key_without_the_send_scope_is_refused_in_the_provider_shape() {
     let Some(fixture) = fixture("compat_auth_scope").await else {
@@ -429,8 +429,8 @@ async fn a_key_without_the_send_scope_is_refused_in_the_provider_shape() {
 }
 
 /// Validation parity, per provider: the canonical suppression gate refuses a
-/// suppressed recipient on EVERY compat surface — in that provider's own
-/// error shape — and nothing is queued. A mapping layer that had bypassed or
+/// suppressed recipient on EVERY compat surface, in that provider's own
+/// error shape, and nothing is queued. A mapping layer that had bypassed or
 /// re-implemented the gate would answer a success here.
 #[tokio::test]
 async fn every_provider_refuses_a_suppressed_recipient_in_its_own_shape() {
@@ -696,7 +696,7 @@ async fn sendgrid_send_maps_every_field_onto_the_canonical_send_path() {
 }
 
 /// The `X-ApexMail-Category` extension is the documented opt-in for the
-/// canonical server-owned category — and an invalid value is refused by the
+/// canonical server-owned category, and an invalid value is refused by the
 /// canonical normalizer (validation parity, in the provider's shape).
 #[tokio::test]
 async fn sendgrid_category_extension_is_validated_by_the_canonical_normalizer() {
@@ -1308,7 +1308,7 @@ async fn postmark_send_maps_every_field_onto_the_canonical_send_path() {
         "MessageStream=outbound maps onto the transactional category"
     );
     // `Headers[].Reply-To` folds into the dedicated canonical field (the
-    // same value as `ReplyTo` here — set differently it would be a named
+    // same value as `ReplyTo` here, set differently it would be a named
     // refusal, covered by the refusals suite).
     assert_eq!(row.reply_to.as_deref(), Some("reply@example.com"));
     let headers = row.headers.expect("stored MIME headers");
@@ -1326,7 +1326,7 @@ async fn postmark_send_maps_every_field_onto_the_canonical_send_path() {
 }
 
 /// `/email/batch` maps the canonical per-item results into Postmark's
-/// ordered array — including a partial batch, which is never reported as a
+/// ordered array, including a partial batch, which is never reported as a
 /// full success.
 #[tokio::test]
 async fn postmark_batch_maps_per_item_results_in_request_order() {
@@ -1638,7 +1638,7 @@ async fn resend_unmappable_fields_are_named_refusals() {
         );
     }
     // The provider's own batch ceiling (Resend answers its validation error
-    // shape — 422 — for an unusable batch).
+    // shape, 422, for an unusable batch).
     let oversized: Vec<serde_json::Value> = (0..101)
         .map(|_| serde_json::json!({"from": from, "to": "to@example.com", "subject": "s"}))
         .collect();
@@ -1659,7 +1659,7 @@ async fn resend_unmappable_fields_are_named_refusals() {
 // ─── Surface-level contracts ───────────────────────────────────
 
 /// Body-size parity: a declared body above the documented send ceiling
-/// (`MAX_SEND_BODY_BYTES` — the same limit `/v1/messages` enforces and nginx's
+/// (`MAX_SEND_BODY_BYTES`, the same limit `/v1/messages` enforces and nginx's
 /// `client_max_body_size` mirrors) is refused with `413` on EVERY compat
 /// surface, before any mapping or canonical work, and nothing is queued.
 #[tokio::test]
@@ -1701,7 +1701,7 @@ async fn oversized_bodies_are_refused_on_every_compat_surface() {
 }
 
 /// Every compat route is registered on the REAL app: a POST with a VALID
-/// credential reaches the mapping layer (its own named refusal — never a 404),
+/// credential reaches the mapping layer (its own named refusal, never a 404),
 /// while an unknown sibling path still 404s (so the assertion is not vacuous).
 #[tokio::test]
 async fn every_compat_route_is_wired_on_the_real_app() {

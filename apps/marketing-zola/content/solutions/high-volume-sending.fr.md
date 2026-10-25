@@ -26,12 +26,12 @@ Grandes plateformes SaaS envoyant plus d'1M d'emails/mois. Plateformes e-commerc
 
 ## La solution ApexMail
 
-- **IP dédiées** — Option additionnelle approuvée sur Pro ; 1 incluse sur Growth et Business, et 3 sur Enterprise Cloud. Les options de déploiement contractualisées sont revues séparément.
-- **Réchauffement automatisé** — Montée en charge progressive selon des calendriers propres à chaque fournisseur. Supervisé au regard des signaux de réputation. Override manuel disponible.
-- **Priorisation des files** — Le trafic transactionnel est traité en priorité devant les envois massifs en période de charge. Objectifs de temps jusqu'à la boîte de réception supervisés.
-- **API par lots** (`POST /v1/messages/batch`) — Soumettez jusqu'à 100 messages par requête. Surcoût par message inférieur aux appels API individuels.
-- **Limites de débit** — Les limites sont appliquées par clé API et par forfait ; consultez la documentation API actuelle pour les limites publiques.
-- **SLA contractuel** — Business et Enterprise incluent des engagements SLA au niveau du forfait ; les déploiements non standards requièrent une revue contractuelle distincte.
+- **IP dédiées**, Option additionnelle approuvée sur Pro ; 1 incluse sur Growth et Business, et 3 sur Enterprise Cloud. Les options de déploiement contractualisées sont revues séparément.
+- **Réchauffement automatisé**, Montée en charge progressive selon des calendriers propres à chaque fournisseur. Supervisé au regard des signaux de réputation. Override manuel disponible.
+- **Priorisation des files**, Le trafic transactionnel est traité en priorité devant les envois massifs en période de charge. Objectifs de temps jusqu'à la boîte de réception supervisés.
+- **API par lots** (`POST /v1/messages/batch`), Soumettez jusqu'à 100 messages par requête. Surcoût par message inférieur aux appels API individuels.
+- **Limites de débit**, Les limites sont appliquées par clé API et par forfait ; consultez la documentation API actuelle pour les limites publiques.
+- **SLA contractuel**, Business et Enterprise incluent des engagements SLA au niveau du forfait ; les déploiements non standards requièrent une revue contractuelle distincte.
 
 ## Implémentation technique
 

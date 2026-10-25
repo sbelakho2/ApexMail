@@ -14,7 +14,7 @@
 //!   acknowledgement → amendment, plus failure) enforced in
 //!   [`transition_oss_return`] / [`transition_vd_return`].
 //! * Recording of amendments ([`create_oss_return_adjustment`]) and of
-//!   payments ([`record_oss_payment`]) — recording only.
+//!   payments ([`record_oss_payment`]), recording only.
 //!
 //! # Submission transport (implemented behind a configuration gate)
 //!
@@ -55,7 +55,7 @@ use crate::filing_transport::{
 
 /// Documented gate for the machine transport. When this condition is not
 /// met, the exact package is generated and a mandatory authenticated human
-/// task is opened — the return is never marked submitted.
+/// task is opened, the return is never marked submitted.
 pub const SUBMISSION_REQUIRES_CONFIGURATION: &str =
     "a machine submission requires APEXMAIL_FILING_TRANSPORT=http plus APEXMAIL_FILING_ENDPOINT \
      and APEXMAIL_FILING_TOKEN; otherwise the exact package is generated and a MANDATORY \
@@ -312,7 +312,7 @@ pub async fn generate_oss_return(
         .map_err(|error| format!("failed to upsert OSS return: {error}"))?;
     let Some(return_id) = return_id else {
         return Err(format!(
-            "OSS return for {period} was already submitted/acknowledged — amendments require a \
+            "OSS return for {period} was already submitted/acknowledged, amendments require a \
              new adjustment, not regeneration"
         ));
     };
@@ -382,7 +382,7 @@ pub async fn generate_vd_return(db: &PgPool, period: &str) -> Result<Uuid, Strin
         .map_err(|error| format!("failed to upsert VD return: {error}"))?;
     let Some(return_id) = return_id else {
         return Err(format!(
-            "VD return for {period} was already submitted/acknowledged — amendments require a \
+            "VD return for {period} was already submitted/acknowledged, amendments require a \
              new return, not regeneration"
         ));
     };
@@ -452,7 +452,7 @@ pub(crate) async fn transition_return_in(
         let reference = acknowledgement_reference.unwrap_or("").trim();
         if reference.is_empty() {
             return Err(
-                "acknowledgement requires the portal reference — refusing to acknowledge a \
+                "acknowledgement requires the portal reference, refusing to acknowledge a \
                  return without evidence of the portal's reply"
                     .to_string(),
             );
@@ -605,7 +605,7 @@ pub async fn create_oss_return_adjustment(
     };
     if !matches!(status.as_str(), "acknowledged" | "amended") {
         return Err(format!(
-            "cannot amend an OSS return in status {status:?} — it must be acknowledged first"
+            "cannot amend an OSS return in status {status:?}, it must be acknowledged first"
         ));
     }
 
@@ -642,7 +642,7 @@ pub async fn create_oss_return_adjustment(
     Ok(id)
 }
 
-/// Record a remittance fact for an OSS period. Recording only — no money
+/// Record a remittance fact for an OSS period. Recording only, no money
 /// moves here; `status = 'pending'` is the default until a bank/operator
 /// reference marks it paid.
 #[allow(clippy::too_many_arguments)]
@@ -1083,7 +1083,7 @@ mod db_tests {
             .await
             .expect("validate");
         // Submission without a receipt stays explicit (a human task is
-        // opened) — acknowledgement is never implied.
+        // opened), acknowledgement is never implied.
         transition_oss_return(&pool, return_id, FilingStatus::Submitted, None)
             .await
             .expect("submit");
@@ -1440,7 +1440,7 @@ mod db_tests {
         // The derivation judges evidence in force by the TALLINN issue date
         // (`AT TIME ZONE 'Europe/Tallinn'`): computing "today" in UTC let the
         // not-yet-in-force case slip inside the window during Tallinn's
-        // evening. Ask the DATABASE for that date — the exact contract the
+        // evening. Ask the DATABASE for that date, the exact contract the
         // SQL applies, with no Rust-side timezone arithmetic to drift.
         let today: chrono::NaiveDate =
             sqlx::query_scalar("SELECT (NOW() AT TIME ZONE 'Europe/Tallinn')::date")
@@ -1448,7 +1448,7 @@ mod db_tests {
                 .await
                 .expect("tallinn date");
 
-        // (evidence INSERT, taxable amount) — only the first is in force.
+        // (evidence INSERT, taxable amount), only the first is in force.
         let evidence_sql = "INSERT INTO vat_validation_evidence \
                (id, vat_number, country, source, requested_at, valid, response_hash, \
                 valid_from, valid_until, outage_state) \

@@ -1,7 +1,7 @@
 //! Automatic dedicated-IP warmup graduation (P1).
 //!
 //! The canonical 60-day schedule (see `mail_common::warmup`) grows a warming
-//! IP's daily ceiling until day 60, after which the limit is unbounded — but
+//! IP's daily ceiling until day 60, after which the limit is unbounded, but
 //! nothing in the tree used to SCHEDULE the lifecycle transition, so a
 //! fully-warmed IP stayed labelled `warming` until an operator intervened.
 //! Send-time admission derives the cap from `warmup_started_at`, so an
@@ -12,7 +12,7 @@
 //! `warming → active` for every IP whose warmup anchor is at or past
 //! `FULL_WARMUP_DAYS`, writing one audit row per graduation. The worker
 //! spawns it on an HOURLY cadence (see `bin/worker.rs`; the compose `worker`
-//! service description names the reconciler) — each pass is a no-op unless an
+//! service description names the reconciler), each pass is a no-op unless an
 //! IP matured, and the control plane's manual graduation route keeps working:
 //! the reconciler only ever performs the same transition the state machine
 //! allows. `warmup_progress` interpolation itself has no periodic caller —
@@ -24,7 +24,7 @@ use sqlx::PgPool;
 /// Graduate every warming IP whose 60-day term is complete.
 ///
 /// Returns the graduated `dedicated_ips.id` list (for logging). A database
-/// failure is returned to the caller — graduation never silently skips.
+/// failure is returned to the caller, graduation never silently skips.
 pub async fn graduate_mature_warmup_ips(db: &PgPool) -> Result<Vec<String>, String> {
     let mut tx = db
         .begin()
@@ -51,7 +51,7 @@ pub async fn graduate_mature_warmup_ips(db: &PgPool) -> Result<Vec<String>, Stri
         // Audit inside the same transaction, chained onto the canonical
         // audit hash chain. The append advances the single `audit_chain_head`
         // row atomically (migration 105) instead of reading the newest
-        // `audit_logs` row with no lock — the old pattern forked the chain
+        // `audit_logs` row with no lock, the old pattern forked the chain
         // under concurrency and left the platform sequencer blind to the
         // worker's rows. A graduation without evidence is an unreviewable
         // lifecycle change.
@@ -259,7 +259,7 @@ mod db_tests {
     /// The hash chain's GENESIS: on a deployment whose `audit_logs` is empty
     /// there is no previous hash to chain onto. The graduation must still
     /// commit, writing its audit row with a NULL `previous_hash` and a full
-    /// sha256 hex digest — a genesis that errored would make the very first
+    /// sha256 hex digest, a genesis that errored would make the very first
     /// warmup graduation of a fresh deployment impossible.
     #[tokio::test]
     async fn graduation_is_the_genesis_link_of_an_empty_audit_chain(

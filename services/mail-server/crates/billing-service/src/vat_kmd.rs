@@ -14,7 +14,7 @@ use uuid::Uuid;
 /// KMD returns periods are calendar months in Europe/Tallinn converted to UTC.
 pub const KMD_PERIOD_TIMEZONE: &str = "Europe/Tallinn";
 
-/// Fix B — KMD (Estonian VAT) returns may only aggregate EUR invoices.
+/// Fix B, KMD (Estonian VAT) returns may only aggregate EUR invoices.
 /// Every invoice-selection query in this module applies this filter;
 /// non-EUR invoices are reported in `excluded_other_currency` instead.
 #[cfg_attr(not(test), allow(dead_code))]
@@ -31,8 +31,8 @@ pub(crate) const EUR_INVOICE_FILTER: &str = "UPPER(currency) = 'EUR'";
 /// `vat_recognition_entries` (migration 218, materialized by
 /// [`crate::vat_recognition`]) and this module consumes that ledger.
 ///
-/// The constants below exist so tests can assert the ledger — not invoice
-/// status — is the source.
+/// The constants below exist so tests can assert the ledger, not invoice
+/// status, is the source.
 #[allow(unused_imports)]
 pub(crate) use crate::vat_recognition::{
     KMD_RECOGNITION_EXCLUDED_SQL, KMD_RECOGNITION_RATES_SQL, KMD_RECOGNITION_TOTALS_SQL,
@@ -169,7 +169,7 @@ pub fn map_kmd_row(
 
 /// Compute the VAT return due date: 20th of the following month at
 /// 23:59:59 Europe/Tallinn (local Estonian deadline), expressed in UTC
-/// (Fix I14 — previously the wall clock was interpreted as UTC, making the
+/// (Fix I14, previously the wall clock was interpreted as UTC, making the
 /// deadline 2–3 hours too early).
 pub fn vat_return_due_date(year: i32, month: u32) -> DateTime<Utc> {
     let due_month = if month == 12 { 1 } else { month + 1 };
@@ -306,16 +306,16 @@ pub(crate) fn kmd_period_key(tax_year: i32, tax_month: u32) -> Result<String, St
 /// tenant's accounting basis: the general scheme on supply, and the
 /// explicitly-authorised cash-accounting scheme on payment or on the first
 /// day of the third calendar month following supply, whichever is earlier.
-/// Invoice status (`paid`/`pending`/`draft`) is never consulted — it was the
+/// Invoice status (`paid`/`pending`/`draft`) is never consulted, it was the
 /// wrong abstraction (see the module-level note on `PAID_INVOICE_FILTER`).
 ///
-/// Fix B — only EUR entries feed the Estonian VAT return; non-EUR entries
+/// Fix B, only EUR entries feed the Estonian VAT return; non-EUR entries
 /// are aggregated into `excluded_other_currency` so they stay visible to
 /// finance without corrupting the EUR figures.
 ///
 /// Concurrency: generation is serialized per (year, month) with a
 /// `pg_advisory_xact_lock` and backed by the
-/// `uq_vat_kmd_returns_period` unique index (migration 126) — two sweep
+/// `uq_vat_kmd_returns_period` unique index (migration 126), two sweep
 /// replicas used to be able to double-generate the same period.
 pub async fn generate_kmd_return(
     db: &PgPool,
@@ -631,7 +631,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // Fix B — KMD aggregates only EUR; other currencies are reported
+    // Fix B, KMD aggregates only EUR; other currencies are reported
     // separately so finance can see them instead of them silently
     // inflating the Estonian VAT return.
     // ------------------------------------------------------------------
@@ -719,7 +719,7 @@ mod tests {
     // ------------------------------------------------------------------
 
     // ------------------------------------------------------------------
-    // Fix I14 — due date is 23:59:59 Europe/Tallinn, not UTC.
+    // Fix I14, due date is 23:59:59 Europe/Tallinn, not UTC.
     // ------------------------------------------------------------------
 
     #[test]
@@ -741,7 +741,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // Fix I5 — backfill walks every missing month between the last
+    // Fix I5, backfill walks every missing month between the last
     // generated return and the target period.
     // ------------------------------------------------------------------
 

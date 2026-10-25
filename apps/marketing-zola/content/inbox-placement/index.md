@@ -10,7 +10,7 @@ og_image = "/images/og-image.png"
 ## Inbox Placement, Backed By the Mailbox Providers Themselves
 
 Most deliverability dashboards only measure a fixed seed list. ApexMail reads the
-**actual** signal that Gmail and Outlook publish about your domain — and
+**actual** signal that Gmail and Outlook publish about your domain, and
 acts on it.
 
 ## What We Measure
@@ -50,7 +50,7 @@ Every six hours, ApexMail's reputation scheduler:
    - Green → 0% throttle (full speed)
    - Amber → 50% throttle (probabilistic deferral)
    - Red → 90% throttle (near-stop, alert sent)
-5. **Notifies your team** — webhook, email, or Slack — when a band drops.
+5. **Notifies your team**, webhook, email, or Slack, when a band drops.
 
 When your reputation rebounds, throttle releases without a human in the loop.
 
@@ -69,5 +69,5 @@ audit and customer transparency.
 
 ## Get a Reputation Snapshot
 
-We can audit your existing domain — typically within one business day — using
+We can audit your existing domain, typically within one business day, using
 the same Google and Microsoft data feeds we use in production. [Book a deliverability review](/contact/).

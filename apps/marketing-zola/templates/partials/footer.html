@@ -1,12 +1,12 @@
 {% import "macros.html" as macros %}
 {# ── Footer Partial ──────────────────────────────────────────── #}
 {# Footer partial rendered directly in Tera.                    #}
-{# Pure static — no JS needed.                                  #}
+{# Pure static, no JS needed.                                  #}
 {# ARK marketing revision: the surface is .apex-mkt-footer (ink #}
-{# recipe — headings paper, links light blue, wordmark Mail in  #}
+{# recipe, headings paper, links light blue, wordmark Mail in  #}
 {# paper); horizontal padding comes from the one container, and #}
 {# the bottom rule is .apex-mkt-footer__rule. Headings stay     #}
-{# apex-h3 and links stay apex-link — the recipe recolors them. #}
+{# apex-h3 and links stay apex-link, the recipe recolors them. #}
 {# NOTE: uses inline i18n conditionals (not macros::t) because   #}
 {# Tera macros cannot read the caller's scope variables          #}
 {# (i18n_data / l). Inline form matches the rest of the site.    #}
@@ -14,7 +14,7 @@
 <footer class="apex-mkt-footer" aria-label="{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["site_footer"] %}{{ i18n_data[l]["footer"]["site_footer"] }}{% else %}Site footer{% endif %}">
   <div class="apex-mkt-container">
     <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-8 lg:gap-12">
-      {# At sm/md the grid has TWO tracks — md:col-span-3 created an implicit third track. #}
+      {# At sm/md the grid has TWO tracks, md:col-span-3 created an implicit third track. #}
       <div class="col-span-2 lg:col-span-1">
         <div class="mb-8">
           {# ApexMail wordmark lockup (footer variant) #}
@@ -75,7 +75,7 @@
           <li><a href="{{ lp }}/privacy/" class="apex-link">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["privacy"] %}{{ i18n_data[l]["footer"]["privacy"] }}{% else %}Privacy{% endif %}</a></li>
           {# CCPA notice: deliberately footer-linked on every page (conspicuous placement). #}
           {# The privacy folder is a true Zola section (_index.md), so the leaf page is a #}
-          {# section child — `zola check` reports zero orphans. #}
+          {# section child, `zola check` reports zero orphans. #}
           <li><a href="/privacy/do-not-sell/" class="apex-link">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["your_privacy_choices"] %}{{ i18n_data[l]["footer"]["your_privacy_choices"] }}{% else %}Your Privacy Choices{% endif %}</a></li>
           <li><a href="{{ lp }}/terms/" class="apex-link">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["terms"] %}{{ i18n_data[l]["footer"]["terms"] }}{% else %}Terms{% endif %}</a></li>
           <li><a href="{{ lp }}/cookies/" class="apex-link">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["cookies"] %}{{ i18n_data[l]["footer"]["cookies"] }}{% else %}Cookies{% endif %}</a></li>
@@ -97,10 +97,10 @@
       </div>
       <div class="mt-8 flex flex-col md:flex-row justify-between items-center gap-8">
         {# Zero-JS policy: no client-side status polling. The honest static
-           presentation is a plain link to the live status page — no dot
+           presentation is a plain link to the live status page, no dot
            implying a refresh that never happens. #}
         <div id="footer-status-container" class="flex items-center gap-2 apex-em">
-          <a href="{{ config.extra.status_url }}" class="apex-link">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["status_link"] %}{{ i18n_data[l]["footer"]["status_link"] }}{% else %}Service status{% endif %} — {{ config.extra.status_url | replace(from="https://", to="") }}</a>
+          <a href="{{ config.extra.status_url }}" class="apex-link">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["status_link"] %}{{ i18n_data[l]["footer"]["status_link"] }}{% else %}Service status{% endif %}, {{ config.extra.status_url | replace(from="https://", to="") }}</a>
         </div>
       </div>
     </div>

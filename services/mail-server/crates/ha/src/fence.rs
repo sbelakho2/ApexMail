@@ -1,8 +1,8 @@
-//! SM10 F4 — data-plane STONITH fencing machinery.
+//! SM10 F4, data-plane STONITH fencing machinery.
 //!
 //! The failover coordinator (`crate::failover`) PLACES fence keys in Redis,
 //! but until now the only consumer of those keys was the HA service's own
-//! HTTP guard — api-server, worker and mta kept writing through a fenced
+//! HTTP guard, api-server, worker and mta kept writing through a fenced
 //! node. This module is the pub helper those data-plane crates consume to
 //! enforce the fence where the writes actually happen.
 //!
@@ -30,11 +30,11 @@
 //! 2. Before accepting ANY mutating operation (HTTP write, claim
 //!    completion, SMTP acceptance), call
 //!    [`FenceChecker::ensure_not_fenced`]:
-//!    - `Ok(())` → the node is PROVEN not fenced — serve the write;
+//!    - `Ok(())` → the node is PROVEN not fenced, serve the write;
 //!    - `Err(FenceError::Fenced)` → the node's fence key is present —
 //!      refuse the write (HTTP 503 / reject the job);
 //!    - `Err(FenceError::Unreadable(_))` → the fence authority could not be
-//!      read — FAIL CLOSED and refuse the write (a node that cannot prove
+//!      read, FAIL CLOSED and refuse the write (a node that cannot prove
 //!      it is not fenced must not write to the primary).
 //! 3. Latency & bounded staleness: a fresh not-fenced verdict is cached
 //!    locally for [`DEFAULT_NEGATIVE_CACHE_TTL`] so the common path costs
@@ -45,7 +45,7 @@
 //!    with [`FenceChecker::with_negative_cache_ttl`].
 //!
 //! The HA service's own guard (`routes::fence_guard`) deliberately does NOT
-//! use the cached checker — the control plane must observe fence state
+//! use the cached checker, the control plane must observe fence state
 //! live; the negative cache exists for hot data-plane write paths.
 
 use std::future::Future;
@@ -66,12 +66,12 @@ pub const FENCE_TTL_SECS: u64 = 3600;
 /// the key is placed).
 pub const DEFAULT_NEGATIVE_CACHE_TTL: Duration = Duration::from_secs(5);
 
-/// The fence key for a node — the exact layout every fence consumer agrees on.
+/// The fence key for a node, the exact layout every fence consumer agrees on.
 pub fn fence_key(node: &str) -> String {
     format!("{FENCE_KEY_PREFIX}{node}")
 }
 
-/// Outcome of a fence check. Both variants mean "refuse the write" — the
+/// Outcome of a fence check. Both variants mean "refuse the write", the
 /// distinction is diagnostic only (fenced vs. cannot-prove-not-fenced).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FenceError {
@@ -85,10 +85,10 @@ pub enum FenceError {
 impl std::fmt::Display for FenceError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Fenced => write!(f, "node is fenced — writes refused"),
+            Self::Fenced => write!(f, "node is fenced, writes refused"),
             Self::Unreadable(e) => write!(
                 f,
-                "fence status unreadable ({e}) — failing closed, writes refused"
+                "fence status unreadable ({e}), failing closed, writes refused"
             ),
         }
     }
@@ -150,7 +150,7 @@ impl FenceStore for RedisFenceStore {
 }
 
 /// Freshness timestamp of the last PROVEN "not fenced" verdict. A `Fenced`
-/// verdict is never cached — refusals are always backed by the authority.
+/// verdict is never cached, refusals are always backed by the authority.
 struct NegativeCache(Mutex<Option<Instant>>);
 
 impl NegativeCache {
@@ -219,7 +219,7 @@ impl<S: FenceStore> FenceChecker<S> {
 
     /// The gate: `Ok(())` only when this node is PROVEN not fenced (via the
     /// authority or a fresh negative-cache entry). Any other outcome is an
-    /// `Err` — refuse the write.
+    /// `Err`, refuse the write.
     pub async fn ensure_not_fenced(&self) -> Result<(), FenceError> {
         if let Some(until) = self.not_fenced_until.get() {
             if Instant::now() < until {
@@ -311,7 +311,7 @@ mod tests {
             // Not fenced: first check consults the mock and caches the verdict.
             assert!(checker.ensure_not_fenced().await.is_ok());
 
-            // The node becomes fenced — the cached verdict still holds for
+            // The node becomes fenced, the cached verdict still holds for
             // the (bounded) TTL window.
             store.0.lock().unwrap().insert("node-a".into(), Ok(true));
             assert!(
@@ -398,7 +398,7 @@ mod tests {
     fn test_fence_error_display() {
         assert_eq!(
             FenceError::Fenced.to_string(),
-            "node is fenced — writes refused"
+            "node is fenced, writes refused"
         );
         let unreadable = FenceError::Unreadable("boom".into()).to_string();
         assert!(unreadable.contains("failing closed"));
@@ -429,7 +429,7 @@ mod tests {
                 "the production fence key must be seen by the data-plane checker"
             );
 
-            // TTL was placed by the coordinator — the checker is read-only.
+            // TTL was placed by the coordinator, the checker is read-only.
             let ttl: i64 = redis::cmd("TTL")
                 .arg(fence_key("node-x"))
                 .query_async(
@@ -456,7 +456,7 @@ mod tests {
     /// Ephemeral throwaway Redis on a random port (same pattern as
     /// `failover.rs` tests). The server comes from
     /// `migrator::test_support::spawn_isolated_redis` (binary when present,
-    /// else a throwaway container — the deploy host ships Redis as an image
+    /// else a throwaway container, the deploy host ships Redis as an image
     /// only and these assertions used to silently skip there, deploy
     /// 2026-10-11). The `Option` keeps the existing call sites; the spawner
     /// panics when no provider exists, so `None` is unreachable.

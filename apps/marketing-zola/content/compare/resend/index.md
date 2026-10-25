@@ -14,7 +14,7 @@ og_image = "/images/og-image.png"
 # Feature comparison counts are not displayed (review 2026-09-08 §19)
 verdict_title = "How ApexMail differs from Resend"
 verdict_points = [
-  "Core email data (content, delivery events, sender and recipient data) stored in the EEA by default — not just sent from an EU region",
+  "Core email data (content, delivery events, sender and recipient data) stored in the EEA by default, not just sent from an EU region",
   "Private deployment paths (Dedicated Tenant, BYOC) alongside the shared cloud",
   "Delivery forensics: per-attempt timelines, deferral diagnostics, and the Email Deliverability Grader",
   "Honest capability disclosure: SDK availability, certification status, and data locations documented as they are, not as aspirational",
@@ -26,7 +26,7 @@ verdict_points = [
 # spans and any inline markup. Winner is one of: apexmail | competitor | tie | none.
 comparison_sections = [
   { title = "DELIVERABILITY", rows = [
-    { feature = "Delivery Rate", apex = '<span>Not directly comparable — provider-defined measurement</span>', comp = '<span class="">Not directly comparable — provider-defined measurement</span>', winner = "none" },
+    { feature = "Delivery Rate", apex = '<span>Not directly comparable, provider-defined measurement</span>', comp = '<span class="">Not directly comparable, provider-defined measurement</span>', winner = "none" },
     { feature = "Dedicated IP", apex = '<span>Approved add-on on Pro; 1 included on Growth and Business; 3 on Enterprise Cloud</span>', comp = '<span class="">See provider pricing</span>', winner = "none" },
     { feature = "IP Warming", apex = '<span>Automatic geometric</span>', comp = '<span class="">Automatic (managed)</span>', winner = "tie" },
     { feature = "BIMI Support", apex = '<span class="">✗</span>', comp = '<span class="">✗</span>', winner = "none" },

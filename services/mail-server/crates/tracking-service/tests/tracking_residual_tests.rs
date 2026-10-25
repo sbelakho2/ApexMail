@@ -24,7 +24,7 @@ fn compose_database_url_falls_back_to_db_parts() {
     std::env::set_var("DB_USER", "qa");
     std::env::set_var("DB_PASSWORD", "qa-pass");
     // JWT_PUBLIC_KEY_PEM is also required by load; the ancestor .env usually
-    // supplies it — provide a minimal placeholder for the bare dir.
+    // supplies it, provide a minimal placeholder for the bare dir.
     let saved_pem = std::env::var("JWT_PUBLIC_KEY_PEM").ok();
     if saved_pem.is_none() {
         std::env::set_var("JWT_PUBLIC_KEY_PEM", "-----BEGIN PUBLIC KEY-----");

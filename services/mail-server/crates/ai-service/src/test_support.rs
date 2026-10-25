@@ -1,5 +1,5 @@
 //! Shared test-only support: env serialization, the canonical-database pool,
-//! and a scripted localhost model endpoint. No real network egress — every
+//! and a scripted localhost model endpoint. No real network egress, every
 //! mock binds `127.0.0.1:0` and serves only the test process's own client.
 
 use std::sync::{Arc, LazyLock, Mutex};
@@ -56,7 +56,7 @@ pub(crate) fn assert_soft_skip_allowed(env_var: &str) {
     }
     if std::env::var("APEXMAIL_RELEASE_TEST_MODE").as_deref() == Ok("1") {
         panic!(
-            "APEXMAIL_RELEASE_TEST_MODE: required variable {env_var} is missing — \
+            "APEXMAIL_RELEASE_TEST_MODE: required variable {env_var} is missing, \
              release CI must not skip infrastructure tests"
         );
     }

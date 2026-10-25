@@ -159,7 +159,7 @@ impl IpBlocklist {
 
     /// Add a CIDR range to the blocklist.
     /// The CIDR store is bounded by the same `max_entries` cap as exact
-    /// entries — previously CIDR ranges were appended without any limit,
+    /// entries, previously CIDR ranges were appended without any limit,
     /// so a hostile or misbehaving feed could grow memory without bound.
     pub fn add_cidr(
         &self,
@@ -748,7 +748,7 @@ pub fn parse_hosts_file(
 
 /// Parse a URL-per-line feed (e.g. abuse.ch URLhaus `text` export) and
 /// extract the HOST of each URL as an IP entry when it is a literal IP
-/// address. Non-IP hosts are ignored here — use
+/// address. Non-IP hosts are ignored here, use
 /// [`crate::domain_blocklist::parse_url_list_domains`] for those.
 pub fn parse_url_list_ips(
     content: &str,

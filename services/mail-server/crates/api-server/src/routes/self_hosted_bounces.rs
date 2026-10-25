@@ -21,9 +21,9 @@ use tracing::{debug, info, warn};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BounceType {
-    /// Permanent failure — email should never be retried.
+    /// Permanent failure, email should never be retried.
     Hard,
-    /// Temporary failure — may succeed on retry.
+    /// Temporary failure, may succeed on retry.
     Soft,
     /// Unknown bounce type.
     Unknown,
@@ -307,7 +307,7 @@ fn verp_bounce_disposition(
 ///
 /// Return-Path format: bounce+{tenant_id}+{message_id}@returns.{SYSTEM_DOMAIN}
 /// The domain is anchored to the platform's product domain (audit M-4: the
-/// pattern previously tolerated — and tests hardcoded — a drifted
+/// pattern previously tolerated, and tests hardcoded, a drifted
 /// `returns.apexmail.io`, while the platform operates `apexmail.ee`).
 fn return_path_regex_pattern() -> String {
     format!(
@@ -404,7 +404,7 @@ pub async fn process_bounce_email(
             warn!(
                 tenant_id = %tenant_id,
                 message_id = %message_id,
-                "Bounce references an unknown or mismatched message — skipping processing"
+                "Bounce references an unknown or mismatched message, skipping processing"
             );
             return Ok(());
         }
@@ -429,8 +429,8 @@ pub async fn process_bounce_email(
     record_bounce(db, &event).await?;
 
     // Add to suppressions if hard bounce. The suppression targets the
-    // recipient from the validated queue row — the address this system
-    // actually sent to — not the DSN-claimed Final-Recipient, which is
+    // recipient from the validated queue row, the address this system
+    // actually sent to, not the DSN-claimed Final-Recipient, which is
     // attacker-influenceable content (M-12).
     if bounce_type == BounceType::Hard {
         add_suppression(
@@ -514,7 +514,7 @@ pub async fn process_fbl_complaint(
 
     // Update tenant metrics. The canonical table declares every column
     // NOT NULL (id, period_end, the sent/delivered counters and the
-    // rates), so a fresh day-row must supply them all — the previous
+    // rates), so a fresh day-row must supply them all, the previous
     // three-column insert failed against the production schema on every
     // complaint.
     sqlx::query(
@@ -603,7 +603,7 @@ async fn add_suppression(
     reason: &str,
 ) -> Result<(), BounceError> {
     // `suppressions.id VARCHAR(26)` is NOT NULL without a default
-    // (migration 088) — supply one (`sup_` + 18 hex = 22 chars, matching
+    // (migration 088), supply one (`sup_` + 18 hex = 22 chars, matching
     // the mta crate's suppression row ids).
     let suppression_id = format!("sup_{}", &uuid::Uuid::new_v4().simple().to_string()[..18]);
 
@@ -637,7 +637,7 @@ fn parse_dsn_email(
     // Basic DSN parsing - in production, use a proper MIME parser
     let email_str = String::from_utf8_lossy(raw_email);
 
-    // M-12: look up DSN fields ONLY within trusted header regions — a
+    // M-12: look up DSN fields ONLY within trusted header regions, a
     // "Final-Recipient:" line planted inside the bounced message's original
     // content must not win the lookup.
     let recipient = extract_dsn_header(&email_str, "Final-Recipient")
@@ -701,7 +701,7 @@ fn split_header_body(block: &str) -> (&str, Option<&str>) {
 }
 
 /// Extract a header value from a bounded header region (line-start match on
-/// the header name, case-insensitive — same matching rule the previous
+/// the header name, case-insensitive, same matching rule the previous
 /// whole-message scanner used, now scope-limited).
 fn extract_header_in_region(region: &str, header_name: &str) -> Option<String> {
     let pattern = format!("{}:", header_name);
@@ -760,7 +760,7 @@ fn split_mime_parts(body: &str, boundary: &str) -> Vec<String> {
 }
 
 /// Whether a Content-Type header value denotes `message/delivery-status`
-/// content — the MIME part whose entire payload is header-format DSN fields.
+/// content, the MIME part whose entire payload is header-format DSN fields.
 ///
 /// Note: a top-level `multipart/report; report-type=delivery-status` is NOT
 /// delivery-status content itself (only its dedicated part is), so it must
@@ -774,7 +774,7 @@ fn is_delivery_status_content(content_type: &str) -> bool {
 /// The header regions a DSN field may legitimately appear in, in priority
 /// order (M-12):
 ///
-/// 1. the `message/delivery-status` part — its content is header-format
+/// 1. the `message/delivery-status` part, its content is header-format
 ///    per-message/per-recipient fields (`Final-Recipient`, `Status`,
 ///    `Diagnostic-Code`, ...), which is where RFC 3464 puts them;
 /// 2. the top-level header block (a bare `message/delivery-status` message
@@ -782,8 +782,8 @@ fn is_delivery_status_content(content_type: &str) -> bool {
 /// 3. the header block of every other MIME part (part headers over body
 ///    hits).
 ///
-/// The body of the `message/rfc822` part — the original bounced message,
-/// whose content the sender's correspondent controls — is never a region.
+/// The body of the `message/rfc822` part, the original bounced message,
+/// whose content the sender's correspondent controls, is never a region.
 fn dsn_header_regions(email: &str) -> Vec<String> {
     let (top_headers, body) = split_header_body(email);
     let top_content_type =
@@ -1205,7 +1205,7 @@ mod tests {
             return;
         };
 
-        // A real queued message — but owned by tenant-b, while the VERP
+        // A real queued message, but owned by tenant-b, while the VERP
         // address claims tenant-a.
         let message_id = uuid::Uuid::new_v4();
         sqlx::query("INSERT INTO email_queue (id, tenant_id, to_addresses) VALUES ($1, 'tenant-b', ARRAY['real-recipient@example.com'])")
@@ -1260,7 +1260,7 @@ mod tests {
                 .await
                 .unwrap();
         let (suppressed_email, suppressed_reason) = suppressed.expect("hard bounce suppresses");
-        // The VALIDATED queued recipient is suppressed — never the address
+        // The VALIDATED queued recipient is suppressed, never the address
         // planted in the original message body.
         assert_eq!(suppressed_email, "real-recipient@example.com");
         assert!(
@@ -1509,7 +1509,7 @@ mod adversarial_tests {
     #[test]
     fn dsn_lookup_ignores_attacker_text_in_the_bounced_message_body() {
         // The ONLY Final-Recipient in the message is planted inside the
-        // message/rfc822 body (attacker-controlled) — it must NOT win.
+        // message/rfc822 body (attacker-controlled), it must NOT win.
         let forged = "Content-Type: multipart/report; boundary=\"b\"\r\n\r\n--b\r\nContent-Type: message/rfc822\r\n\r\nFrom: attacker@evil.example\r\n\r\nFinal-Recipient: rfc822; victim@target.example\r\nStatus: 5.1.1\r\n--b--\r\n";
         assert_eq!(extract_dsn_header(forged, "Final-Recipient"), None);
         assert_eq!(extract_dsn_header(forged, "Status"), None);
@@ -1724,7 +1724,7 @@ mod processor_tests {
     }
 
     /// Outage arms: hiding the target relation must surface a database
-    /// error — never a silent success.
+    /// error, never a silent success.
     #[tokio::test]
     async fn processor_surfaces_database_outages_instead_of_success() {
         let Some(db) = pool("bounce_outage").await else {

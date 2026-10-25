@@ -494,7 +494,7 @@ async fn get_plan_feature(
     Query(q): Query<TenantIdQuery>,
     Extension(scope): Extension<TenantAuthScope>,
 ) -> Result<Response, ApiError> {
-    // Fix I8 — this is the only tenant-scoped plan route that previously
+    // Fix I8, this is the only tenant-scoped plan route that previously
     // skipped check_tenant_access, letting a cross-tenant token probe any
     // tenant's feature flags.
     if let Err(response) = check_tenant_access(&scope, &q.tenant_id) {
@@ -755,12 +755,12 @@ struct LegacyOverageEstimateBody {
     tenant_id: Option<String>,
 }
 
-/// Money display formatting — the only float-tolerated line in the crate's
+/// Money display formatting, the only float-tolerated line in the crate's
 /// money surface (see the money_invariants gate, audit item 4).
 ///
 /// Renders EUR, not USD: plans are seeded EUR-denominated, checkout creates
 /// EUR Mollie prices, invoices carry EE 24% VAT, and the KMD return is
-/// EUR-only — no USD amount is ever charged anywhere in the platform. The
+/// EUR-only, no USD amount is ever charged anywhere in the platform. The
 /// `$` prefix quoted a currency the billing system never charges to a
 /// European customer base. (Field names keep their `*_usd` suffix for API
 /// compatibility; the VALUES are EUR.)
@@ -880,11 +880,11 @@ async fn estimate_payg_cost(
     .into_response())
 }
 
-/// Fix I13 companion (pure, unit-tested) — the effective email limit for an
+/// Fix I13 companion (pure, unit-tested), the effective email limit for an
 /// overage estimate. A server-resolved plan limit (including `-1` =
 /// unlimited) always overrides the client-supplied value; without a plan
 /// row (legacy callers that send no tenant) the validated client value
-/// stands. The client value must already be non-negative — enforced by
+/// stands. The client value must already be non-negative, enforced by
 /// `validate_non_negative` before this runs.
 fn resolve_overage_email_limit(client_limit: i64, server_limit: Option<i64>) -> i64 {
     server_limit.unwrap_or(client_limit)
@@ -900,7 +900,7 @@ async fn estimate_overage_cost(
         Err(response) => return Ok(response),
     };
 
-    // Fix I13 — a negative client-supplied limit used to be passed straight
+    // Fix I13, a negative client-supplied limit used to be passed straight
     // into calculate_overage_cost, where negative means "unlimited". Reject
     // it, and recompute the limit server-side when a tenant is named.
     let client_email_limit = match validate_non_negative(body.email_limit, "emailLimit") {
@@ -929,7 +929,7 @@ async fn estimate_overage_cost(
 
     let email_limit = resolve_overage_email_limit(client_email_limit, server_limit);
 
-    // Fix I10 — overage pricing comes from BillingConfig instead of the
+    // Fix I10, overage pricing comes from BillingConfig instead of the
     // hardcoded 4/100 in plans.rs (default stays 40 millicents/email).
     let overage_cost_cents = plans::calculate_overage_cost_with_rate(
         emails_sent,
@@ -1128,7 +1128,7 @@ fn preview_plan_proration(
 // Replaced by billing_common::proration::build_proration_explanation
 
 // ---------------------------------------------------------------------------
-// Proration preview (deployed-config aware — audit item 3a)
+// Proration preview (deployed-config aware, audit item 3a)
 // ---------------------------------------------------------------------------
 
 /// Subscription shape loaded from `mollie_subscriptions` (migration 071
@@ -1277,7 +1277,7 @@ fn audit_log_signature(previous_hash: &str, hash: &str) -> String {
         Ok(key) if !key.trim().is_empty() => key,
         _ => {
             tracing::warn!(
-                "AUDIT_SIGNING_KEY is not configured — signing with the documented development fallback key"
+                "AUDIT_SIGNING_KEY is not configured, signing with the documented development fallback key"
             );
             "apexmail-audit-fallback-key".to_string()
         }
@@ -1299,7 +1299,7 @@ fn audit_log_signature(previous_hash: &str, hash: &str) -> String {
 // shape inline.
 
 /// The canonical audit row-hash payload: `tenant|user|action|resource|
-/// resource_id|details|timestamp` — byte-for-byte the input the api-server's
+/// resource_id|details|timestamp`, byte-for-byte the input the api-server's
 /// `audit_log::compute_hash` hashes (its `user_id.unwrap_or_default()` makes
 /// the `user` segment EMPTY, never absent, for machine-context writers).
 /// Delegates to the ONE shared implementation (`apexmail_lib::audit`) so
@@ -1316,7 +1316,7 @@ fn audit_hash_payload(
     metadata: &serde_json::Value,
     timestamp: &chrono::DateTime<chrono::Utc>,
 ) -> String {
-    // Machine context: user segment EMPTY (never absent) — same as
+    // Machine context: user segment EMPTY (never absent), same as
     // api-server's machine rows (`user_id = None`).
     apexmail_lib::audit::audit_hash_payload(
         Some(tenant_id),
@@ -1344,7 +1344,7 @@ async fn insert_audit_log(
     // `compliance::audit_logger`).
     let timestamp = apexmail_lib::audit::truncate_timestamp_to_micros(timestamp);
 
-    // Canonical hash shape — the SAME formula the api-server's canonical
+    // Canonical hash shape, the SAME formula the api-server's canonical
     // `audit_log::compute_hash` writer uses (tenant|user|action|resource|
     // resource_id|details|timestamp; the chain link is NOT hashed into the
     // row hash). The previous per-writer formula (per-tenant chaining with
@@ -1354,7 +1354,7 @@ async fn insert_audit_log(
     //
     // The `user` segment MUST be present even though this writer is machine
     // context (no user): api-server contributes `user_id.unwrap_or_default()`
-    // — the empty string — for the same case, and omitting the SEGMENT
+    //, the empty string, for the same case, and omitting the SEGMENT
     // (rather than the value) produces a 6-field payload no canonical
     // verifier can re-derive (live dogfood DF-7c: a billing row's hash did
     // not match its own columns while api-server rows on the same chain did).
@@ -1372,7 +1372,7 @@ async fn insert_audit_log(
     // (identical statement to api-server `advance_chain_head`): concurrent
     // appenders serialise on the single head row; the loser links onto the
     // winner, keeping the chain linear. The atomic UPDATE returns the hash it
-    // replaced — the `previous_hash` this entry links to.
+    // replaced, the `previous_hash` this entry links to.
     let previous_hash: Option<String> = sqlx::query_scalar(
         r#"
         INSERT INTO audit_chain_head (chain_id, head_hash, prev_hash, head_seq, updated_at)
@@ -1686,7 +1686,7 @@ async fn get_revenue_report(
     Ok(Json(serde_json::json!({ "report": report })).into_response())
 }
 
-/// Fix I9 — normalize a yearly plan price to monthly MRR with round-half-up
+/// Fix I9, normalize a yearly plan price to monthly MRR with round-half-up
 /// integer math (equivalent to SQL `ROUND(price_yearly / 12.0)`), so a
 /// yearly €25 000 plan counts as 2 083 cents/month instead of being
 /// truncated to 2 082.
@@ -1695,10 +1695,10 @@ fn yearly_price_to_monthly_mrr(price_yearly: i64) -> i64 {
     (price_yearly + 6) / 12
 }
 
-/// Shared MRR report SQL (Fix C + Fix I9) — the single source for both the
+/// Shared MRR report SQL (Fix C + Fix I9), the single source for both the
 /// billing-service route and api-server's twin admin route, so the two
 /// consoles cannot diverge again (audit 2: api-server's copy retained the
-/// bugs this fixed — truncated yearly/12, creation-date bucketing, no
+/// bugs this fixed, truncated yearly/12, creation-date bucketing, no
 /// tenants join).
 pub const MRR_REPORT_SQL: &str = r#"
         SELECT COALESCE(json_agg(row_to_json(report_row) ORDER BY report_row.month DESC), '[]'::json)
@@ -1729,9 +1729,9 @@ async fn get_mrr_report(
     if let Err(response) = require_any_scope(&scope) {
         return Ok(response);
     }
-    // Fix C — MRR is computed from mollie_subscriptions (the table the
+    // Fix C, MRR is computed from mollie_subscriptions (the table the
     // webhook writers populate) joined via tenants.plan to plans pricing.
-    // Fix I9 — yearly prices are normalized with proper rounding and rows
+    // Fix I9, yearly prices are normalized with proper rounding and rows
     // are bucketed by the subscription's active month (billing cycle start,
     // falling back to creation), not by raw creation date.
     let report: serde_json::Value = sqlx::query_scalar(MRR_REPORT_SQL)
@@ -1743,15 +1743,15 @@ async fn get_mrr_report(
 }
 
 /// Monthly churn report. `churned_mrr` prices each canceled subscription
-/// from its own price snapshot — the subscription's `mollie_plan_code`
+/// from its own price snapshot, the subscription's `mollie_plan_code`
 /// resolved against `plans.mollie_plan_code_monthly/yearly` (falling back to
-/// the tenant's current plan only while it is still non-free) — because
+/// the tenant's current plan only while it is still non-free), because
 /// `tenants.plan` is set to `'free'` on cancellation (audit F10): pricing
 /// churn from `t.plan` made `churned_mrr` always ≈ 0. Subscriptions with no
 /// resolvable price (snapshot missing AND tenant already downgraded to
 /// free) are EXCLUDED from `churned_mrr` and reported separately as
 /// `churned_mrr_unpriced` so the metric's coverage is explicit.
-/// Shared churn report SQL (Fix C + Fix F10) — single source for both the
+/// Shared churn report SQL (Fix C + Fix F10), single source for both the
 /// billing-service route and api-server's twin admin route. Prices churn
 /// from the subscription's own `mollie_plan_code` snapshot (falling back to
 /// the tenant's plan only while still non-free); rounds yearly/12.
@@ -1817,8 +1817,8 @@ async fn get_churn_report(
     if let Err(response) = require_any_scope(&scope) {
         return Ok(response);
     }
-    // Fix C — churn computed from mollie_subscriptions (join tenants/plans).
-    // Fix F10 — churned_mrr prices the CHURNED SUBSCRIPTION via its own
+    // Fix C, churn computed from mollie_subscriptions (join tenants/plans).
+    // Fix F10, churned_mrr prices the CHURNED SUBSCRIPTION via its own
     // mollie_plan_code snapshot, not the tenant's (post-cancellation, free)
     // plan; see CHURN_REPORT_SQL above.
     let report: serde_json::Value = sqlx::query_scalar(CHURN_REPORT_SQL)
@@ -2056,7 +2056,7 @@ struct TenantQuery {
 
 /// GET /usage?tenant_id=...&tz=Europe/Tallinn
 ///
-/// Fix I15 — the period boundaries default to the historical UTC month, but
+/// Fix I15, the period boundaries default to the historical UTC month, but
 /// an explicit IANA `tz` shifts them to local midnight so usage reporting
 /// can align with the Tallinn-based VAT periods. (KMD itself always uses
 /// Europe/Tallinn; this documented difference remains intentional.)
@@ -2169,10 +2169,10 @@ async fn record_usage_checked(
         .into_response())
 }
 
-/// POST /usage/ingest — batch metering ingest for the edge/worker.
+/// POST /usage/ingest, batch metering ingest for the edge/worker.
 ///
 /// Service-authenticated (like every route on this router). Intended for
-/// event types with no derivable platform source table — notably
+/// event types with no derivable platform source table, notably
 /// `api_calls`: the api-server request middleware should POST one event
 /// (or a micro-batch) per request with a deterministic `eventId` for
 /// idempotency.
@@ -2471,7 +2471,7 @@ fn product_line_write_error(error: crate::product_lines::ProductLineError) -> Re
     }
 }
 
-/// `POST /v1/admin/billing/product-lines` — create or renew a contract line
+/// `POST /v1/admin/billing/product-lines`, create or renew a contract line
 /// for a tenant. CP-only: a full service token (`require_any_scope`); a
 /// tenant-scoped token is refused even for its own tenant because this is a
 /// platform-wide commercial write.
@@ -2548,7 +2548,7 @@ async fn cancel_product_line_route(
     }
 }
 
-/// `GET /v1/admin/billing/product-lines?tenantId=...` — the tenant's
+/// `GET /v1/admin/billing/product-lines?tenantId=...`, the tenant's
 /// contract rows (all statuses), for the CP billing console.
 async fn list_product_lines_route(
     State(state): State<Arc<AppState>>,
@@ -2711,8 +2711,8 @@ enum TenantAuthScope {
 /// Parse a token value against the configured service auth token.
 ///
 /// Supports two formats:
-/// - `"<service_token>"` — full access (`TenantAuthScope::Any`)
-/// - `"<tenant_id>:<service_token>"` — tenant-scoped access (`TenantAuthScope::Scoped(...)`)
+/// - `"<service_token>"`, full access (`TenantAuthScope::Any`)
+/// - `"<tenant_id>:<service_token>"`, tenant-scoped access (`TenantAuthScope::Scoped(...)`)
 fn parse_token_scope(token: &str, service_token: &str) -> Option<TenantAuthScope> {
     if service_token.is_empty() {
         return None;
@@ -3381,7 +3381,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // Fix I9 — yearly → monthly MRR rounding.
+    // Fix I9, yearly → monthly MRR rounding.
     // ------------------------------------------------------------------
 
     #[test]
@@ -3399,7 +3399,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // Fix I8 — /plans/features/:feature must enforce tenant scoping.
+    // Fix I8, /plans/features/:feature must enforce tenant scoping.
     // ------------------------------------------------------------------
 
     #[tokio::test]
@@ -3427,7 +3427,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // Fix I13 — overage estimate must reject negative limits.
+    // Fix I13, overage estimate must reject negative limits.
     // ------------------------------------------------------------------
 
     #[tokio::test]
@@ -3452,13 +3452,13 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // Audit item 3c — server-side limit recomputation.
+    // Audit item 3c, server-side limit recomputation.
     // ------------------------------------------------------------------
 
     #[test]
     fn overage_limit_server_side_recompute_overrides_client() {
         // Client claims a 30 000 limit; the tenant's resolved plan says
-        // 250 000 — the server value must win so overage is not overstated.
+        // 250 000, the server value must win so overage is not overstated.
         let limit = resolve_overage_email_limit(30_000, Some(250_000));
         assert_eq!(limit, 250_000);
 
@@ -3499,7 +3499,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // Audit item 3a — proration preview must honor the deployed config.
+    // Audit item 3a, proration preview must honor the deployed config.
     // ------------------------------------------------------------------
 
     fn sample_proration_inputs() -> (Plan, Plan, RouteSubscription) {
@@ -3540,7 +3540,7 @@ mod tests {
         let (current_plan, new_plan, subscription) = sample_proration_inputs();
 
         // A deployed config with a tiny charge cap must reject what the
-        // default config would happily preview — proving the config is
+        // default config would happily preview, proving the config is
         // forwarded, not defaulted (audit item 3a).
         let tight_config = BillingConfig {
             max_proration_charge_cents: 1_000,

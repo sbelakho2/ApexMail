@@ -114,7 +114,7 @@ async fn list_crm_leads(
         //
         // `stage` and `last_contacted_at` DO NOT EXIST on the canonical
         // `sales_leads` (they were legacy-lineage columns), so the previous
-        // query failed with 42703 on every call — this endpoint had no test
+        // query failed with 42703 on every call, this endpoint had no test
         // that executed it, only none at all. `stage` is now the canonical
         // status derivation (shared with the CP list so the two cannot
         // disagree) and `last_contacted_at` is the newest executed sequence

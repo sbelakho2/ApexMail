@@ -5,7 +5,7 @@
 //! while the api-server exposes the **`metrics` facade's**
 //! `metrics-exporter-prometheus` recorder on `:9090/metrics`. The two
 //! registries never met, so a scrape showed ZERO `ddos_*` samples despite 42
-//! live WAF verdicts and the 429/403 refusals — the A-3 reputation counters
+//! live WAF verdicts and the 429/403 refusals, the A-3 reputation counters
 //! had no observable surface. Every metric now emits through the `metrics`
 //! facade (the SAME recorder the scrape target renders), keeping the
 //! documented series names and label keys
@@ -24,7 +24,7 @@ fn metadata(target: &'static str) -> Metadata<'static> {
 //
 // The tiny wrappers below preserve the call-site API this crate already
 // used (`REQUESTS_TOTAL.as_ref()` → `.with_label_values(&[..]).inc()`), so
-// the emission sites needed no rewrite — only the registry behind them
+// the emission sites needed no rewrite, only the registry behind them
 // changed. Labels are positional (the key names are fixed per metric).
 
 /// A counter family with a fixed, static set of label keys.
@@ -397,7 +397,7 @@ pub fn normalize_endpoint_label(path: &str) -> String {
 ///
 /// Without this bound an attacker probing random paths creates unbounded
 /// time-series (one per label × histogram buckets), exhausting Prometheus
-/// memory — a metrics-cardinality DoS.
+/// memory, a metrics-cardinality DoS.
 pub fn endpoint_label(path: &str) -> String {
     let normalized = normalize_endpoint_label(path);
     let mut known = KNOWN_ENDPOINT_LABELS.lock();
@@ -522,7 +522,7 @@ mod tests {
 
     /// OPS-5 regression: the ddos counters must render through the EXPOSED
     /// exporter (`metrics-exporter-prometheus`, the recorder the api-server
-    /// installs on :9090) — not only into the `prometheus` crate's private
+    /// installs on :9090), not only into the `prometheus` crate's private
     /// registry. A local facade recorder renders the exact live series.
     #[test]
     fn ddos_counters_render_on_the_metrics_facade_exporter() {

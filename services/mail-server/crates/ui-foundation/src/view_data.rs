@@ -9,7 +9,7 @@
 //!
 //! Honesty rule: when the backing table has no rows (or no writer yet),
 //! the loader passes an empty `rows` vector and the renderer shows a real
-//! empty state — demo data is never fabricated on the data path.
+//! empty state, demo data is never fabricated on the data path.
 
 use crate::shell::html_escape;
 
@@ -50,7 +50,7 @@ impl KpiCardData {
 /// A single table cell. Every variant is escaped at render time:
 /// `Text`/`Mono` escape their value, `Link` escapes href + label, and
 /// `Status` renders through `StatusIndicator` (whose badge escapes the
-/// label — including the raw fallback for unrecognized status strings).
+/// label, including the raw fallback for unrecognized status strings).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DataCell {
     /// Plain text (HTML-escaped).
@@ -60,7 +60,7 @@ pub enum DataCell {
     Mono(String),
     /// Link to a same-origin path.
     Link { href: String, text: String },
-    /// Status pill (draft/sent/active/… — rendered as an indicator).
+    /// Status pill (draft/sent/active/…, rendered as an indicator).
     Status(String),
     /// Timestamp under the one timestamp policy: relative prose for the
     /// cell, RFC 3339 UTC in `title` + `datetime` for the exact value.
@@ -237,7 +237,7 @@ impl ListPageData {
         let rows_len = self.rows_len();
         if rows_len == 0 {
             return format!(
-                "No {plural} on this page — {total} in total.",
+                "No {plural} on this page, {total} in total.",
                 total = self.total_count
             );
         }
@@ -306,7 +306,7 @@ pub struct PlacementProviderRow {
 }
 
 /// The campaign editor's live option sources plus optional prefilled values.
-/// Lists and segments are the TENANT's own rows (id, display name) — the old
+/// Lists and segments are the TENANT's own rows (id, display name), the old
 /// placeholder select values ('vip', 'newsletter') were never persisted.
 #[derive(Debug, Clone, Default)]
 pub struct CampaignEditorData {
@@ -362,7 +362,7 @@ pub struct ListEditData {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ContactEditData {
     pub id: String,
-    /// The contact's address — the row's identity, rendered read-only.
+    /// The contact's address, the row's identity, rendered read-only.
     pub email: String,
     pub name: String,
     /// One of `subscribed` / `unsubscribed` / `bounced`.
@@ -374,7 +374,7 @@ pub struct ContactEditData {
 }
 
 /// Server-loaded list detail state for `/lists/{id}`: the real list name
-/// plus its subscriber counts (rendered verbatim — "unavailable" when a
+/// plus its subscriber counts (rendered verbatim, "unavailable" when a
 /// count could not be read, never a fabricated zero).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ListDetailData {
@@ -426,7 +426,7 @@ pub struct MfaSetupData {
 //
 // The CP owns no sales brain: every field below mirrors what the
 // authenticated `sales-autopilot` control API returns (proxied by the
-// api-server). The page renders only these values — it never invents a
+// api-server). The page renders only these values, it never invents a
 // metric to fill space.
 
 /// One `outcomes30d.revenueEur[]` entry (summed EUR per outcome).
@@ -446,7 +446,7 @@ pub struct SalesEnrollmentCountData {
     pub count: i64,
 }
 
-/// `overview.autonomy` — the engine's steering state.
+/// `overview.autonomy`, the engine's steering state.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SalesAutonomyData {
     /// One of `disabled` / `shadow` / `assisted` / `approval_required` /
@@ -463,7 +463,7 @@ pub struct SalesAutonomyData {
     pub last_action_at: Option<String>,
 }
 
-/// `overview.actions` — durable action-queue stats.
+/// `overview.actions`, durable action-queue stats.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SalesActionStatsData {
     pub total: i64,
@@ -531,8 +531,8 @@ pub struct SalesOverviewData {
 /// Server-loaded data for the CP sales-autopilot page.
 ///
 /// Honesty contract: `None` on any section means the control API did not
-/// answer — the page renders an explicit unavailable state, never a zero.
-/// `Some(vec![])` means the API answered with no rows — the page renders
+/// answer, the page renders an explicit unavailable state, never a zero.
+/// `Some(vec![])` means the API answered with no rows, the page renders
 /// an explicit empty state instead of an empty table.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct SalesPageData {
@@ -562,7 +562,7 @@ pub struct AssistantTurnData {
 ///
 /// `session_id` is `None` before the first message: the form still renders
 /// (posting creates the session), so the empty state and the popuated state
-/// share one page. `unavailable` is the honest failure state — the loader
+/// share one page. `unavailable` is the honest failure state, the loader
 /// could not reach the session store, which is NOT an empty conversation.
 ///
 /// `capability_disabled` is the per-tenant `ai_chat` feature flag saying the
@@ -600,7 +600,7 @@ pub struct DemoSessionData {
 
 /// Control-plane presenter page (`/cp/demos`).
 ///
-/// `viewer_url` is the reveal-once value from a just-created session — the
+/// `viewer_url` is the reveal-once value from a just-created session, the
 /// only place the plaintext token ever appears. `unavailable` is the honest
 /// failure state of the list query.
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -625,7 +625,7 @@ pub struct AlertRuleData {
     pub metric_type: String,
     pub threshold_percent: i32,
     pub notification_channel: String,
-    /// info | warning | critical — carried onto the fired incident.
+    /// info | warning | critical, carried onto the fired incident.
     pub severity: String,
     pub enabled: bool,
     /// Preformatted "last fired" line; None when the rule never fired.
@@ -641,7 +641,7 @@ pub struct TenantChoiceData {
 
 /// Control-plane alert-rules management page (`/alerts/rules`).
 ///
-/// `unavailable` is the honest failure state of the store queries — the page
+/// `unavailable` is the honest failure state of the store queries, the page
 /// then says the list could not be loaded instead of rendering the empty
 /// state (`unavailable_note` carries the correlation reference). `editing`
 /// is the `?edit=<id>` target when that rule exists.
@@ -655,7 +655,7 @@ pub struct AlertRulesPageData {
 }
 
 /// One selectable plan on the `/tenants/new` create form. The value is the
-/// catalog `plans.name` — the exact token the create handler validates
+/// catalog `plans.name`, the exact token the create handler validates
 /// against, so the form can only submit plans that resolve entitlements.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct TenantPlanChoiceData {
@@ -663,14 +663,14 @@ pub struct TenantPlanChoiceData {
     /// Human catalog name (`plans.display_name`).
     pub display_name: String,
     /// Included monthly email volume (`plans.email_limit`); 0/negative means
-    /// unlimited — the option label then carries no number.
+    /// unlimited, the option label then carries no number.
     pub email_limit: i64,
 }
 
 /// `/tenants/new` control-plane form state: the ACTIVE billing catalog.
 ///
 /// Dogfood 2026-10-08 F11: the form rendered no plan field while the handler
-/// validated one — every CP-created tenant silently landed on `free`. With
+/// validated one, every CP-created tenant silently landed on `free`. With
 /// the catalog bound here, the operator picks a real plan and the created
 /// tenant resolves that plan's entitlements immediately.
 ///
@@ -684,8 +684,8 @@ pub struct TenantNewPageData {
 }
 
 /// One selectable plan on the `/tenants/{id}` detail plan select. The value
-/// is the catalog `plans.name` — the exact token the plan-change handler
-/// validates against — so the select can only submit plans that resolve
+/// is the catalog `plans.name`, the exact token the plan-change handler
+/// validates against, so the select can only submit plans that resolve
 /// entitlements.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct TenantDetailPlanChoiceData {
@@ -693,7 +693,7 @@ pub struct TenantDetailPlanChoiceData {
     /// Human catalog name (`plans.display_name`).
     pub display_name: String,
     /// Included monthly email volume (`plans.email_limit`); 0/negative means
-    /// unlimited — the option label then carries no number.
+    /// unlimited, the option label then carries no number.
     pub email_limit: i64,
 }
 
@@ -710,7 +710,7 @@ pub struct TenantDetailPlanChoiceData {
 /// be validated against the catalog).
 ///
 /// `missing` distinguishes an ABSENT tenant (the id resolved to no row) from
-/// a failed read — the two states carry different copy, because "no such
+/// a failed read, the two states carry different copy, because "no such
 /// workspace" is not a service problem.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct TenantDetailPageData {
@@ -748,7 +748,7 @@ pub struct JobRowData {
 /// Control-plane jobs page state: the recent `queue_jobs` rows plus the
 /// status counters the controls' affordances are derived from.
 ///
-/// `unavailable` is the honest store-read failure state — the page then
+/// `unavailable` is the honest store-read failure state, the page then
 /// renders no rows and no controls instead of an empty (idle) queue.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct JobsPageData {
@@ -852,7 +852,7 @@ pub fn render_data_cell(cell: &DataCell) -> String {
 }
 
 /// Signed form state for one failed (or secret-bearing) POST → GET round
-/// trip — the view-layer mirror of the api-server's `FormFieldMap` cookie.
+/// trip, the view-layer mirror of the api-server's `FormFieldMap` cookie.
 /// Values re-populate inputs, errors render as per-field helper text under
 /// the matching control, and reveal-once secrets render as mono chips.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -966,7 +966,7 @@ mod tests {
         });
         assert_eq!(
             empty_page.summary("campaign"),
-            "No campaigns on this page — 42 in total."
+            "No campaigns on this page, 42 in total."
         );
 
         // A total smaller than the page offset still clamps the end bound.

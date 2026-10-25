@@ -15,14 +15,14 @@
 //! Release gates this module implements:
 //!
 //! * **100% of external sales messages map to a `sales_decision`.** Every
-//!   sales route — the live sequence worker included — builds its send through
+//!   sales route, the live sequence worker included, builds its send through
 //!   [`decide`] instead of an inline copy of the gates; the decision id is
 //!   attached to the queued action and the packet stores the enforcement
 //!   verdict the worker acts on.
 //! * **Legal-policy denial is impossible to bypass through another sales
 //!   route.** Every external decision re-evaluates the legal policy from the
-//!   current canonical store — a verdict supplied by a caller is never
-//!   trusted — and a missing input fails closed; the resolved policy uuid is
+//!   current canonical store, a verdict supplied by a caller is never
+//!   trusted, and a missing input fails closed; the resolved policy uuid is
 //!   stored on the packet, and [`revalidate_execution`] repeats the evaluation
 //!   before the send.
 //! * **An approval cannot resurrect a gate that changed.** An operator
@@ -288,7 +288,7 @@ pub async fn decide(db: &PgPool, ctx: DecisionContext) -> Result<DecisionOutcome
 
     let mut failures: Vec<String> = Vec::new();
 
-    // Gate 1 — global kill switch. Immediate stop for NEW outbound actions;
+    // Gate 1, global kill switch. Immediate stop for NEW outbound actions;
     // data and inbound processing are untouched.
     if autonomy.kill_switch {
         failures.push(
@@ -297,7 +297,7 @@ pub async fn decide(db: &PgPool, ctx: DecisionContext) -> Result<DecisionOutcome
         );
     }
 
-    // Gate 2 — autonomy disabled. Fail closed for tenants that never granted
+    // Gate 2, autonomy disabled. Fail closed for tenants that never granted
     // autonomy.
     if autonomy.mode == AutonomyMode::Disabled {
         failures.push(
@@ -306,7 +306,7 @@ pub async fn decide(db: &PgPool, ctx: DecisionContext) -> Result<DecisionOutcome
         );
     }
 
-    // Gates 3, 4 and 9 — suppression status and contact-point verification.
+    // Gates 3, 4 and 9, suppression status and contact-point verification.
     // Only possible when the decision carries a contact point; the address is
     // an attribute of the point, never a field on the decision.
     if let Some(contact_point_id) = ctx.contact_point_id {
@@ -333,7 +333,7 @@ pub async fn decide(db: &PgPool, ctx: DecisionContext) -> Result<DecisionOutcome
                          the sales gate only sends email"
                     ));
                 } else {
-                    // Gate 3 — suppression (both the sales fast path and the
+                    // Gate 3, suppression (both the sales fast path and the
                     // platform-wide authority).
                     if check_suppression(db, tenant_id, &value).await? {
                         failures.push(format!(
@@ -342,7 +342,7 @@ pub async fn decide(db: &PgPool, ctx: DecisionContext) -> Result<DecisionOutcome
                     }
                 }
 
-                // Gate 4 — only a sendable address may ever be contacted.
+                // Gate 4, only a sendable address may ever be contacted.
                 // The rule is the one canonical definition shared with
                 // enrollment and approval revalidation:
                 // `verification IN ('valid', 'risky')`.
@@ -354,7 +354,7 @@ pub async fn decide(db: &PgPool, ctx: DecisionContext) -> Result<DecisionOutcome
                     ));
                 }
 
-                // Gate 9 — the point itself was suppressed.
+                // Gate 9, the point itself was suppressed.
                 if suppressed_at.is_some() {
                     failures.push(format!(
                         "contact_point_suppressed: contact point {contact_point_id} has \
@@ -365,7 +365,7 @@ pub async fn decide(db: &PgPool, ctx: DecisionContext) -> Result<DecisionOutcome
         }
     }
 
-    // Gate 5 — legal policy. The context carries recipient FACTS (jurisdiction,
+    // Gate 5, legal policy. The context carries recipient FACTS (jurisdiction,
     // contact type, consent state), never a verdict or an authorization: the
     // verdict is re-evaluated from the current canonical store on every call,
     // so a policy that changed since the caller assembled the context is
@@ -408,7 +408,7 @@ pub async fn decide(db: &PgPool, ctx: DecisionContext) -> Result<DecisionOutcome
         }
     };
 
-    // Gate 6 — a human reply must prevent the next touch racing out.
+    // Gate 6, a human reply must prevent the next touch racing out.
     if let Some(enrollment_id) = ctx.enrollment_id {
         if check_enrollment_replied(db, enrollment_id).await? {
             failures.push(format!(
@@ -418,7 +418,7 @@ pub async fn decide(db: &PgPool, ctx: DecisionContext) -> Result<DecisionOutcome
         }
     }
 
-    // Gate 7 — sender health (only when a sender was resolved; resolution is
+    // Gate 7, sender health (only when a sender was resolved; resolution is
     // upstream and a missing sender is handled by the dispatcher).
     if let Some(sender_identity_id) = ctx.selected_sender {
         if let Err(err) = sender_health::gate(db, tenant_id, sender_identity_id).await {
@@ -426,7 +426,7 @@ pub async fn decide(db: &PgPool, ctx: DecisionContext) -> Result<DecisionOutcome
         }
     }
 
-    // Gate 8 — per-account weekly frequency budget.
+    // Gate 8, per-account weekly frequency budget.
     if let Some(account_id) = ctx.account_id {
         if !check_frequency_budget(db, tenant_id, account_id).await? {
             failures.push(format!(
@@ -442,7 +442,7 @@ pub async fn decide(db: &PgPool, ctx: DecisionContext) -> Result<DecisionOutcome
     // other verdict is recorded as requiring no review.
     let review_status = review_status_for(enforcement);
 
-    // Persist the Decision Packet — ALWAYS, including denials and shadowed
+    // Persist the Decision Packet, ALWAYS, including denials and shadowed
     // decisions. The decision id is what makes the machine explainable. The
     // enforcement verdict, the sender reference and the review status make the
     // packet the execution contract the worker acts on; the deprecated TEXT
@@ -560,8 +560,8 @@ fn action_is_external(action: &str) -> bool {
     }
 }
 
-/// Map a freshly evaluated legal verdict — plus the decision's recorded review
-/// state — to a revalidation failure. Pure, so every combination is
+/// Map a freshly evaluated legal verdict, plus the decision's recorded review
+/// state, to a revalidation failure. Pure, so every combination is
 /// unit-tested.
 ///
 /// `Prohibited` always fails. `ApprovalRequired` fails unless a human has
@@ -580,7 +580,7 @@ fn legal_revalidation_failure(
         ContactDecision::ApprovalRequired if review_status == Some("approved") => None,
         ContactDecision::ApprovalRequired => Some(format!(
             "legal_policy_approval_required: {verdict_reason}; the decision's review_status is \
-             '{}' — a human must approve under the current policy before this can execute",
+             '{}', a human must approve under the current policy before this can execute",
             review_status.unwrap_or("none")
         )),
     }
@@ -766,7 +766,7 @@ async fn newest_email_contact_point_conn(
 /// `suppressed_at`; its current address verification, through the one
 /// canonical rule [`email_point_is_sendable`] (`valid`/`risky` only); the
 /// enrollment's `has_human_reply`; the selected sender's current health; the
-/// account's weekly touch budget — now an atomic **reservation**, not a
+/// account's weekly touch budget, now an atomic **reservation**, not a
 /// count-and-compare; the current legal policy (re-evaluated from the
 /// canonical store, never replayed from the packet).
 ///
@@ -786,7 +786,7 @@ async fn newest_email_contact_point_conn(
 /// `allowed` is true only when no gate failed. A missing decision is
 /// [`SalesError::InvalidInput`]. Internal actions (not
 /// [`DecisionAction::is_external_send`]) short-circuit to `allowed: true` with
-/// `checked: []` — there is no external effect to protect.
+/// `checked: []`, there is no external effect to protect.
 /// Re-open the decision and all its gates in one transaction. This is the
 /// safe wrapper for callers that do not already hold one; the approval path
 /// uses [`revalidate_execution_tx`] so its decision lock, revalidation,
@@ -855,7 +855,7 @@ async fn revalidate_execution_conn(
     let mut checked: Vec<&'static str> = Vec::new();
     let tenant_id = decision.tenant_id.as_str();
 
-    // Gates 1 and 2 — the autonomy state as it is NOW. The kill switch stops
+    // Gates 1 and 2, the autonomy state as it is NOW. The kill switch stops
     // new outbound actions immediately, and a mode that blocks all execution
     // (`disabled`/`shadow`) must not be bypassed by replaying an old decision.
     let autonomy = load_autonomy_state_conn(conn, tenant_id).await?;
@@ -894,12 +894,12 @@ async fn revalidate_execution_conn(
             None => newest_email_contact_point_conn(conn, tenant_id, decision.contact_id).await?,
         };
 
-    // Gates 3-5 — the contact point's current suppression status, its own
+    // Gates 3-5, the contact point's current suppression status, its own
     // suppressed flag, and its current verification.
     match contact_point_id {
         None => reasons.push(format!(
             "contact_point_not_found: decision {decision_id} has no resolvable email contact \
-             point; the suppression and verification gates cannot be evaluated — fail closed"
+             point; the suppression and verification gates cannot be evaluated, fail closed"
         )),
         Some(point_id) => {
             let point: Option<(String, String, String, Option<DateTime<Utc>>)> = sqlx::query_as(
@@ -919,7 +919,7 @@ async fn revalidate_execution_conn(
                      tenant; fail closed"
                 )),
                 Some((channel, value, verification, suppressed_at)) => {
-                    // Gate 3 — both suppression authorities, on the address as
+                    // Gate 3, both suppression authorities, on the address as
                     // it is NOW, not as it was at decision time.
                     if channel != "email" {
                         reasons.push(format!(
@@ -935,7 +935,7 @@ async fn revalidate_execution_conn(
                         }
                     }
 
-                    // Gate 4 — the point itself was suppressed after the
+                    // Gate 4, the point itself was suppressed after the
                     // decision.
                     checked.push(GATE_CONTACT_POINT_SUPPRESSED);
                     if suppressed_at.is_some() {
@@ -945,7 +945,7 @@ async fn revalidate_execution_conn(
                         ));
                     }
 
-                    // Gate 5 — an address that is not sendable NOW must never
+                    // Gate 5, an address that is not sendable NOW must never
                     // be contacted. The rule is the one canonical definition
                     // shared with enrollment and the live worker
                     // ([`email_point_is_sendable`]): only `valid`/`risky` pass,
@@ -963,7 +963,7 @@ async fn revalidate_execution_conn(
         }
     }
 
-    // Gate 6 — a human reply that arrived after the decision stops the send.
+    // Gate 6, a human reply that arrived after the decision stops the send.
     if let Some(enrollment) = enrollment.as_ref() {
         checked.push(GATE_HUMAN_REPLY);
         if enrollment.has_human_reply {
@@ -974,7 +974,7 @@ async fn revalidate_execution_conn(
         }
     }
 
-    // Gate 7 — the selected sender's current health, on this connection.
+    // Gate 7, the selected sender's current health, on this connection.
     if let Some(sender_identity_id) = decision.selected_sender_id {
         checked.push(GATE_SENDER_HEALTH);
         if let Err(err) = sender_health_gate_conn(conn, tenant_id, sender_identity_id).await {
@@ -982,7 +982,7 @@ async fn revalidate_execution_conn(
         }
     }
 
-    // Gate 8 — the account's weekly touch budget as an atomic RESERVATION.
+    // Gate 8, the account's weekly touch budget as an atomic RESERVATION.
     // The count and the insert happen on this connection while the account
     // row is locked below (`SELECT ... FOR UPDATE`), so two concurrent
     // workers cannot both take the last slot the way a bare `count < budget`
@@ -1002,7 +1002,7 @@ async fn revalidate_execution_conn(
         }
     }
 
-    // Gate 9 — the legal policy as it stands NOW. The recorded inputs are
+    // Gate 9, the legal policy as it stands NOW. The recorded inputs are
     // recipient facts; the verdict is re-derived from the current canonical
     // store (on this connection), never replayed from the decision's
     // policy_id.
@@ -1043,7 +1043,7 @@ async fn revalidate_execution_conn(
 
     // A refusal must not leak the slot it just reserved: release the
     // reservation in this same transaction when any gate failed. This is the
-    // documented policy — a reservation whose send is refused is released;
+    // documented policy, a reservation whose send is refused is released;
     // one that sends is settled (see [`settle_account_touch_tx`]).
     if !reasons.is_empty() {
         if let Some((account_id, logical_send)) = reserved.as_ref() {
@@ -1160,7 +1160,7 @@ async fn check_suppression_conn(
 
 /// The legal-policy row shape [`evaluate_legal_policy_conn`] reads. It mirrors
 /// the private `PolicyRow` in `legal_policy.rs`; the decision logic itself is
-/// never duplicated — the public pure helpers
+/// never duplicated, the public pure helpers
 /// ([`legal_policy::resolve_jurisdiction`], [`legal_policy::policy_is_authoritative`],
 /// [`legal_policy::decide_with_state`]) are called with this row.
 #[derive(sqlx::FromRow)]
@@ -1208,7 +1208,7 @@ async fn evaluate_legal_policy_conn(
 
     // Highest version for the exact triple, regardless of approval/validity:
     // an unapproved or expired top version must not silently delegate to an
-    // older row — it falls through to the unknown default instead.
+    // older row, it falls through to the unknown default instead.
     let row: Option<TxPolicyRow> = sqlx::query_as(
         "SELECT id, jurisdiction, channel, contact_type, decision, basis, \
                 required_disclosure, version, approved_by, approved_at, \
@@ -1281,7 +1281,7 @@ async fn evaluate_legal_policy_conn(
 /// Realised touches for an account over the rolling 7-day window, counted as
 /// distinct logical sends (one `sales_outcomes` row per step execution at
 /// most). `open`/`click` are deliberately excluded as weak, machine-generatable
-/// signals; every other outcome is a send that reached a terminal fate — the
+/// signals; every other outcome is a send that reached a terminal fate, the
 /// same set the budget check has always counted.
 async fn count_realised_touches_conn(
     conn: &mut PgConnection,
@@ -1366,7 +1366,7 @@ async fn lock_account_budget_conn(
 /// `sales_accounts` row lock; this function acquires it itself with
 /// `SELECT ... FOR UPDATE`, so the count of reservations plus realised
 /// outcomes and the insert cannot race. Returns `Ok(false)` when the budget
-/// is exhausted — a refusal, not an error. An unknown account is an error
+/// is exhausted, a refusal, not an error. An unknown account is an error
 /// (fail closed, never a silent refusal).
 ///
 /// Idempotent per `(account_id, logical_send)`: an existing `reserved` or
@@ -1450,7 +1450,7 @@ async fn reserve_account_touch_with_budget_conn(
 /// `settled = true` keeps the slot consumed (the send happened; its outcome
 /// becomes the durable touch record). `settled = false` releases the slot
 /// (the touch was refused or will never happen). Only a live `reserved` row
-/// transitions, so repeated calls — and a call after the other transition —
+/// transitions, so repeated calls, and a call after the other transition —
 /// are a safe no-op.
 pub async fn settle_account_touch_tx(
     tx: &mut Transaction<'_, Postgres>,
@@ -2949,8 +2949,8 @@ mod tests {
         assert!(blocked);
     }
 
-    /// A human reply that arrived after the decision is re-read here — not
-    /// just at decision time — so an approved touch cannot race it out.
+    /// A human reply that arrived after the decision is re-read here, not
+    /// just at decision time, so an approved touch cannot race it out.
     #[tokio::test]
     async fn revalidation_denies_after_a_human_reply_and_records_every_gate() {
         let Some(pool) = live_pool("decision_engine::tests::revalidation_every_gate").await else {
@@ -3165,7 +3165,7 @@ mod tests {
     /// Every hard-gate refusal at decision time: no autonomy row, a missing
     /// contact point, a non-email channel, an unsendable verification, a
     /// suppressed point, a suppressed address and a human reply. Each is
-    /// DENIED with the gate named — and not one of them writes a message or a
+    /// DENIED with the gate named, and not one of them writes a message or a
     /// queue row (the decision packet is the only durable record).
     #[tokio::test]
     async fn every_decision_gate_refuses_and_writes_no_external_effect() {
@@ -3331,7 +3331,7 @@ mod tests {
             outcome.block_reasons
         );
 
-        // The clean context still executes — the refusals above are not a
+        // The clean context still executes, the refusals above are not a
         // permanently broken fixture.
         let clean = decide(&pool, baseline).await.unwrap();
         assert_eq!(
@@ -3375,7 +3375,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     /// An INTERNAL action has no external effect to protect: revalidation is
-    /// allowed with zero gates re-read — even with the kill switch engaged,
+    /// allowed with zero gates re-read, even with the kill switch engaged,
     /// the address suppressed and the verification regressed. Those states
     /// must stop SENDS, not freeze internal bookkeeping.
     #[tokio::test]
@@ -3433,7 +3433,7 @@ mod tests {
 
     /// Recorded policy INPUTS are recipient facts re-evaluated at revalidation
     /// time. If the audit row cannot be deserialized at all, the gate fails
-    /// CLOSED with the corruption named — never silently allowed.
+    /// CLOSED with the corruption named, never silently allowed.
     #[tokio::test]
     async fn revalidation_fails_closed_when_recorded_policy_inputs_are_unreadable() {
         let Some(pool) = live_pool("decision_engine::wave::unreadable_inputs").await else {
@@ -3481,7 +3481,7 @@ mod tests {
     /// When the direct links are missing (no linked action, no step-execution
     /// decision, no decision_id on the enrollment, no point on the
     /// enrollment), revalidation must STILL find the contact's newest email
-    /// point and newest enrollment through the fallback carriers — and the
+    /// point and newest enrollment through the fallback carriers, and the
     /// suppression and human-reply gates must fire on what it finds.
     #[tokio::test]
     async fn revalidation_resolves_points_and_enrollments_through_the_fallbacks() {
@@ -3499,7 +3499,7 @@ mod tests {
         // enrollment's own contact point, and the audit row's point
         // reference. No sales_actions row exists for a bare decide, and the
         // fixture enrollment carries no decision_id. The audit row itself
-        // stays (readable inputs, keyed only by contact) — exactly the
+        // stays (readable inputs, keyed only by contact), exactly the
         // degraded-shape case the fallback carriers exist for.
         sqlx::query("UPDATE sales_step_executions SET decision_id = NULL WHERE id = $1")
             .bind(fixture.step_execution_id)
@@ -3567,8 +3567,8 @@ mod tests {
             .await
             .unwrap();
 
-        // And a human reply on the enrollment — found via the contact's
-        // newest-enrollment fallback — blocks the next touch too.
+        // And a human reply on the enrollment, found via the contact's
+        // newest-enrollment fallback, blocks the next touch too.
         sqlx::query("UPDATE sales_enrollments SET has_human_reply = TRUE WHERE id = $1")
             .bind(fixture.enrollment_id)
             .execute(&pool)
@@ -3590,7 +3590,7 @@ mod tests {
 
     /// The sender-health matrix, fail closed in every direction: a sender
     /// that was never health-assessed, a paused sender, and a sender below
-    /// the minimum score are all refused — at decide time AND through an
+    /// the minimum score are all refused, at decide time AND through an
     /// approved decision's revalidation.
     #[tokio::test]
     async fn sender_health_fails_closed_when_missing_paused_or_low_score() {
@@ -3864,7 +3864,7 @@ mod tests {
         );
     }
 
-    /// Crash consistency — a decision worker dies BETWEEN the budget
+    /// Crash consistency, a decision worker dies BETWEEN the budget
     /// reservation (committed by `revalidate_execution`) and the send's
     /// settle. The crashed run's slot must not leak a budget slot: while it
     /// is live it holds budget (blocking NEW logical sends), and the
@@ -3928,7 +3928,7 @@ mod tests {
             "the crashed run's live reservation must hold the last budget slot"
         );
 
-        // Recovery path A — the retry re-validates the SAME logical send:
+        // Recovery path A, the retry re-validates the SAME logical send:
         // idempotent (no second slot) and still admitted.
         let retry = revalidate_execution(&pool, outcome.decision_id)
             .await
@@ -3947,7 +3947,7 @@ mod tests {
             "the same logical send never consumes a second slot"
         );
 
-        // Recovery path B — the gates now REFUSE (the recipient suppressed
+        // Recovery path B, the gates now REFUSE (the recipient suppressed
         // while the worker was dead): the refusal releases the crashed run's
         // slot in the same transaction.
         sqlx::query("INSERT INTO sales_unsubscribes (tenant_id, email) VALUES ($1, $2)")

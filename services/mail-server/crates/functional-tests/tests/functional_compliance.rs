@@ -1,4 +1,4 @@
-//! Functional tests for compliance types — risk scoring business logic.
+//! Functional tests for compliance types, risk scoring business logic.
 //! The full RiskScoringEngine requires a PgPool, so we test the pure
 //! functions and types that don't need a database.
 

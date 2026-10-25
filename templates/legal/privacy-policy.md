@@ -8,7 +8,7 @@
 
 This Privacy Policy explains how we collect, use, disclose, and safeguard personal data in compliance with:
 
-- Regulation (EU) 2016/679 (General Data Protection Regulation — GDPR).
+- Regulation (EU) 2016/679 (General Data Protection Regulation, GDPR).
 - The Estonian Personal Data Protection Act (Isikuandmete kaitse seadus).
 - Applicable EU and Estonian data protection law.
 
@@ -25,9 +25,9 @@ We process personal data about the following categories of individuals.
 | Data collected | IP address, browser type, device information, pages visited, referring URL, timestamp |
 | Source | Automated collection via web server logs and analytics |
 | Purpose | Website operation, security monitoring, performance analytics |
-| Legal basis | Legitimate interest (GDPR Art. 6(1)(f)) — website security and improvement |
+| Legal basis | Legitimate interest (GDPR Art. 6(1)(f)), website security and improvement |
 | Processor or recipient | Hetzner (hosting) |
-| Location | EU data centers (Hetzner Germany, Finland) — web server logs, analytics |
+| Location | EU data centers (Hetzner Germany, Finland), web server logs, analytics |
 | Retention | 30 days for raw logs; aggregated analytics retained indefinitely |
 | Rights | Access, erasure, objection |
 
@@ -38,9 +38,9 @@ We process personal data about the following categories of individuals.
 | Data collected | Name, email address, company name, phone number (if provided), communication history |
 | Source | Directly from the individual via web forms, email, or sales contact |
 | Purpose | Responding to inquiries, providing product information, sales communication |
-| Legal basis | Legitimate interest (GDPR Art. 6(1)(f)) — business development; Consent (Art. 6(1)(a)) for marketing |
+| Legal basis | Legitimate interest (GDPR Art. 6(1)(f)), business development; Consent (Art. 6(1)(a)) for marketing |
 | Processor or recipient | Internal sales team (in-house tooling) |
-| Location | EU data centers (Hetzner Germany, Finland) — CRM hosted in EU |
+| Location | EU data centers (Hetzner Germany, Finland), CRM hosted in EU |
 | Retention | 24 months after last contact, or until consent is withdrawn |
 | Rights | Access, rectification, erasure, objection, data portability |
 
@@ -51,9 +51,9 @@ We process personal data about the following categories of individuals.
 | Data collected | Name, email address, company name, billing address, VAT ID, payment method details, API key metadata, login timestamps, IP addresses, audit log entries |
 | Source | Directly from the account holder during registration and account management |
 | Purpose | Service provision, authentication, billing, support, security, compliance |
-| Legal basis | Contract performance (GDPR Art. 6(1)(b)); Legal obligation (Art. 6(1)(c)) — accounting/tax |
+| Legal basis | Contract performance (GDPR Art. 6(1)(b)); Legal obligation (Art. 6(1)(c)), accounting/tax |
 | Processor or recipient | Mollie B.V. (payment processing), Hetzner (infrastructure), internal support team |
-| Location | EU data centers (Hetzner Germany, Finland) — account data; Mollie B.V. processes payment data in the Netherlands (EU); card-scheme networks under Mollie's DPA |
+| Location | EU data centers (Hetzner Germany, Finland), account data; Mollie B.V. processes payment data in the Netherlands (EU); card-scheme networks under Mollie's DPA |
 | Retention | Duration of contract + 30 days; billing records 7 years per Estonian accounting law |
 | Rights | Access, rectification, erasure (subject to legal obligations), data portability, restriction |
 
@@ -64,9 +64,9 @@ We process personal data about the following categories of individuals.
 | Data collected | Email address, name (if provided by customer), email content (subject, body, headers, attachments), delivery events (accepted, delivered, opened, clicked), bounce information, complaint data, IP address and user agent (open/click tracking) |
 | Source | Provided by ApexMail customers when sending email through the platform |
 | Purpose | Email delivery, deliverability monitoring, abuse prevention, compliance, customer analytics |
-| Legal basis | Contract performance (GDPR Art. 6(1)(b)) — we act as processor on behalf of our customer (the data controller) |
-| Processor or recipient | Hetzner (infrastructure — Germany, Finland), AWS SES (delivery transport — EU region), Redis (caching — Hetzner Germany), ClickHouse (analytics — Hetzner Germany) |
-| Location | EU data centers (Hetzner Germany, Finland) — PostgreSQL (Germany), Redis (Germany), file storage (Germany) |
+| Legal basis | Contract performance (GDPR Art. 6(1)(b)), we act as processor on behalf of our customer (the data controller) |
+| Processor or recipient | Hetzner (infrastructure, Germany, Finland), AWS SES (delivery transport, EU region), Redis (caching, Hetzner Germany), ClickHouse (analytics, Hetzner Germany) |
+| Location | EU data centers (Hetzner Germany, Finland), PostgreSQL (Germany), Redis (Germany), file storage (Germany) |
 | Retention | Email content: 7 days by default (plan-dependent, up to 365 days for Enterprise); Event metadata: 30 days by default (up to 365 days for Enterprise); billing records 7 years per Estonian accounting law; Configurable per customer contract within plan limits |
 | Rights | Exercised via the data controller (ApexMail customer); We assist controllers with DSR fulfillment |
 
@@ -90,7 +90,7 @@ We process personal data about the following categories of individuals.
 | Data collected | Name, email address, vulnerability report content, communication history |
 | Source | Directly via security@apexmail.ee or vulnerability disclosure program |
 | Purpose | Vulnerability assessment, remediation coordination, responsible disclosure |
-| Legal basis | Legitimate interest (Art. 6(1)(f)) — security of our services |
+| Legal basis | Legitimate interest (Art. 6(1)(f)), security of our services |
 | Location | EU data centers (Hetzner Germany, Finland) |
 | Retention | Duration of disclosure process + 90 days after resolution |
 | Rights | Access, rectification, erasure |

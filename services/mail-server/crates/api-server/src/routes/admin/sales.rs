@@ -89,7 +89,7 @@ fn empty_leads_response() -> LeadsResponse {
 }
 
 /// The sales-autopilot base URL, or a fail-closed error when unconfigured.
-/// An empty value is "not configured" — there is no local fallback engine.
+/// An empty value is "not configured", there is no local fallback engine.
 fn configured_sales_autopilot_base_url(state: &AppState) -> Result<String, ApiError> {
     let base = sales_autopilot_base_url(state);
     if base.is_empty() {
@@ -101,7 +101,7 @@ fn configured_sales_autopilot_base_url(state: &AppState) -> Result<String, ApiEr
 }
 
 /// A buffered upstream response forwarded to the caller verbatim (status,
-/// content type and body) — the CP never rewrites the engine's answer.
+/// content type and body), the CP never rewrites the engine's answer.
 struct UpstreamResponse {
     status: StatusCode,
     content_type: Option<HeaderValue>,
@@ -113,7 +113,7 @@ impl UpstreamResponse {
         self.status.as_u16()
     }
 
-    /// The body parsed as JSON, when it is JSON — used only for audit
+    /// The body parsed as JSON, when it is JSON, used only for audit
     /// metadata/ids, never to alter what the caller receives.
     fn body_json(&self) -> Option<serde_json::Value> {
         serde_json::from_slice(&self.body).ok()
@@ -480,7 +480,7 @@ async fn load_lead_entries(
 /// `new`, `contacted`, `engaged` and `demo_scheduled` are deliberately NOT
 /// accepted: the canonical read derives them from live enrollment/contact
 /// activity, and the canonical model exposes no operator-settable field for
-/// them — accepting them would fabricate outreach history.
+/// them, accepting them would fabricate outreach history.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CanonicalLeadStatus {
     /// Write `sales_accounts.lifecycle` for the lead's linked account.
@@ -1047,11 +1047,11 @@ async fn apply_lead_update(
 
 /// CP lead update request. Identity and status are canonical:
 ///
-/// - `status` — see [`CanonicalLeadStatus`]; unsupported values are rejected
+/// - `status`, see [`CanonicalLeadStatus`]; unsupported values are rejected
 ///   with a message naming the supported vocabulary.
-/// - `contactEmail` / `contactName` — written to `sales_contact_points` /
+/// - `contactEmail` / `contactName`, written to `sales_contact_points` /
 ///   `sales_contacts`; single-lead requests only.
-/// - `notes` / `tags` / `dealValue` — the bounded legacy projection on the
+/// - `notes` / `tags` / `dealValue`, the bounded legacy projection on the
 ///   `sales_leads` bridge row (see [`LeadEntry`]).
 ///
 /// The whole request is atomic (one transaction): a partial write is never
@@ -1195,7 +1195,7 @@ async fn enrich_leads(
     }
 
     for (lead_id, contact_email, domain) in rows {
-        // The sales_leads view COALESCEs the account domain to '' — an
+        // The sales_leads view COALESCEs the account domain to '', an
         // empty domain is "no domain", not a target the engine can enrich.
         let domain = domain.filter(|domain| !domain.trim().is_empty());
         let payload = if let Some(email) = contact_email {
@@ -1294,7 +1294,7 @@ pub struct Campaign {
 /// Primary path: proxy the canonical enrollment read model
 /// (`GET {base}/enrollments`) so the CP reports exactly what the engine
 /// scheduled. When the service is unconfigured, fall back to the canonical
-/// `sales_enrollments` rows joined to `sales_sequences` — never the retired
+/// `sales_enrollments` rows joined to `sales_sequences`, never the retired
 /// CP-local campaign tables.
 async fn list_campaigns(
     State(state): State<AppState>,
@@ -1592,7 +1592,7 @@ async fn run_discovery(
 
         // Imported leads arrive without an email address, so they can only be
         // linked to their canonical account: there is no address to put in a
-        // `sales_contact_points` row and none is fabricated — the lead has no
+        // `sales_contact_points` row and none is fabricated, the lead has no
         // reachable contact point until enrichment supplies one. Since
         // migration 223 the lead itself is a canonical contact carrying the
         // id mapping; the account write and the contact write share one
@@ -1721,7 +1721,7 @@ pub struct OutreachRequest {
 /// no campaign and no recipient rows. It forwards `{"sequenceId",
 /// "contactIds","autonomyPolicyId","experimentId"}` to
 /// `POST {base}/enrollments` and returns the service's response verbatim.
-/// Without a configured service the call fails closed — there is no local
+/// Without a configured service the call fails closed, there is no local
 /// fallback.
 async fn start_outreach(
     State(state): State<AppState>,
@@ -1838,7 +1838,7 @@ async fn get_settings(
     crate::middleware::auth::require_scopes(&auth, &["*"])?;
     crate::middleware::auth::require_system_tenant(&state, &auth).await?;
 
-    // Real database errors propagate — settings are never silently faked.
+    // Real database errors propagate, settings are never silently faked.
     let row: Option<(serde_json::Value, serde_json::Value, serde_json::Value)> = sqlx::query_as(
         "SELECT scoring_weights, schedule, notifications
          FROM sales_settings
@@ -2021,7 +2021,7 @@ mod tests {
 
     /// Item 17 test 7: CP read parity. For a seeded lead, the canonical-join
     /// read returns the same identity/email the old lead-only query returned —
-    /// so the UI shape does not change — while `status` now derives from the
+    /// so the UI shape does not change, while `status` now derives from the
     /// canonical lifecycle instead of the legacy independently mutable column.
     ///
     /// DB-backed on the api-server canonical test pool; soft-skips without
@@ -2289,7 +2289,7 @@ mod tests {
     /// Adversarial test 1: the operator round trip. An `unqualified` decision
     /// through the admin update path must land on the canonical contact
     /// lifecycle AND be visible in the CP's own read AND in the derived view
-    /// — not merely written to a column.
+    ///, not merely written to a column.
     #[tokio::test]
     async fn operator_unqualified_decision_is_canonical_and_visible_in_the_cp_read() {
         let Some(pool) = crate::test_db::optional_pg_pool("cp_item17_unqualified").await else {
@@ -2402,7 +2402,7 @@ mod tests {
     }
 
     /// Adversarial test 6a: a bulk update mixing a valid and an unknown id is
-    /// rejected as a whole — no partial write. The transaction contract is
+    /// rejected as a whole, no partial write. The transaction contract is
     /// all-or-nothing (one transaction, ids prevalidated before any write).
     #[tokio::test]
     async fn bulk_update_mixing_valid_and_invalid_ids_writes_nothing() {
@@ -2961,7 +2961,7 @@ mod adversarial_handler_tests {
 
     // ── Honest refusals with no database ─────────────────────────
 
-    /// A dead lazy pool: probing it now yields `Err` (P1 fix — schema probes
+    /// A dead lazy pool: probing it now yields `Err` (P1 fix, schema probes
     /// no longer collapse storage outages into "table absent"), so every
     /// handler must refuse honestly with a 5xx. A fabricated 200 with empty
     /// rows was exactly the "outage masquerading as a healthy empty state"
@@ -3250,7 +3250,7 @@ mod adversarial_handler_tests {
             "cross-tenant write must not land"
         );
 
-        // Successful projection update (notes/tags/dealValue) — the canonical
+        // Successful projection update (notes/tags/dealValue), the canonical
         // contact columns the CP read renders.
         let response = app
             .clone()
@@ -4109,7 +4109,7 @@ mod adversarial_handler_tests {
     /// Dogfood 2026-10-06 P1 (item 6): with the execution plane unconfigured
     /// (empty `SALES_CAMPAIGN_FROM_EMAIL`, so the outbound action worker is
     /// disabled), `POST /v1/admin/sales/outreach/start` must REFUSE with the
-    /// named reason — never accept work no worker can execute — and the
+    /// named reason, never accept work no worker can execute, and the
     /// audit trail must record the refusal, not a started outreach.
     ///
     /// The real sales-autopilot answers this shape with 503 + the named
@@ -4172,7 +4172,7 @@ mod adversarial_handler_tests {
         );
 
         // The engine was asked exactly once and the audit trail records the
-        // REFUSAL (with its reason) — not a started outreach.
+        // REFUSAL (with its reason), not a started outreach.
         let calls = engine.take_calls();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].path, "/enrollments");
@@ -4445,7 +4445,7 @@ mod coverage_residual_tests {
         let api_error = lead_status_write_error(LeadStatusWriteError::LeadNotFound("x".into()));
         assert!(matches!(api_error, ApiError::Validation(_)));
 
-        // A hidden table makes the lock query itself fail — the sqlx error
+        // A hidden table makes the lock query itself fail, the sqlx error
         // rides the From impl into the Database variant and out as 500.
         crate::routes::fault::hide_table(&pool, "sales_contacts")
             .await
@@ -4499,7 +4499,7 @@ mod coverage_residual_tests {
         );
 
         // Dead link: canonical schemas carry an FK on the link columns, so
-        // a dangling account id cannot be seeded — the guard is named and
+        // a dangling account id cannot be seeded, the guard is named and
         // proven directly instead.
         let lead = "cov_lead_dead".to_string();
         let dead = uuid::Uuid::new_v4();
@@ -4572,7 +4572,7 @@ mod coverage_residual_tests {
             "got {refused:?}"
         );
 
-        // A lead with no live canonical contact refuses email edits — the
+        // A lead with no live canonical contact refuses email edits, the
         // refusal message names the lead. (Canonical schemas resolve every
         // lead's contact through the view; legacy deployment schemas carry
         // dangling contact_id, so the guard is proven at its constructor.)

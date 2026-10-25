@@ -15,7 +15,7 @@ Para compras empresariales, revisiones de seguridad o planificación de nube pri
 
 <div id="enquiry-submitted" class="apex-notice apex-notice--ok" role="status" hidden>
   <b>Recibida</b>
-  <p>Gracias — su solicitud se ha recibido correctamente. Nuestro equipo la revisa y responde en un plazo de 2 días laborables.</p>
+  <p>Gracias, su solicitud se ha recibido correctamente. Nuestro equipo la revisa y responde en un plazo de 2 días laborables.</p>
 </div>
 <div id="enquiry-error" class="apex-notice apex-notice--fail" role="alert" hidden>
   <b>No aceptada</b>
@@ -86,19 +86,19 @@ Para compras empresariales, revisiones de seguridad o planificación de nube pri
     <div class="space-y-3 mt-3">
       <label class="apex-check">
         <input type="radio" class="apex-checkbox apex-input" name="deployment_preference" value="shared" checked />
-        <span><strong>Nube compartida</strong> — Infraestructura multi-tenant en la UE</span>
+        <span><strong>Nube compartida</strong>, Infraestructura multi-tenant en la UE</span>
       </label>
       <label class="apex-check">
         <input type="radio" class="apex-checkbox apex-input" name="deployment_preference" value="dedicated" />
-        <span><strong>Inquilino dedicado</strong> — Infraestructura aislada de inquilino único</span>
+        <span><strong>Inquilino dedicado</strong>, Infraestructura aislada de inquilino único</span>
       </label>
       <label class="apex-check">
         <input type="radio" class="apex-checkbox apex-input" name="deployment_preference" value="byoc" />
-        <span><strong>BYOC / Implementación privada</strong> — Despliegue gestionado en su propia cuenta cloud</span>
+        <span><strong>BYOC / Implementación privada</strong>, Despliegue gestionado en su propia cuenta cloud</span>
       </label>
       <label class="apex-check">
         <input type="radio" class="apex-checkbox apex-input" name="deployment_preference" value="not_sure" />
-        <span><strong>Aún no lo tengo claro</strong> — Necesito orientación sobre el modelo más adecuado</span>
+        <span><strong>Aún no lo tengo claro</strong>, Necesito orientación sobre el modelo más adecuado</span>
       </label>
     </div>
   </fieldset>
@@ -142,7 +142,7 @@ Para compras empresariales, revisiones de seguridad o planificación de nube pri
       <option value="30_days">En 30 días</option>
       <option value="90_days">En 90 días</option>
       <option value="6_months">En 6 meses</option>
-      <option value="exploring">Explorando opciones — sin plazo fijo</option>
+      <option value="exploring">Explorando opciones, sin plazo fijo</option>
     </select>
     </div>
   </div>
@@ -152,8 +152,8 @@ Para compras empresariales, revisiones de seguridad o planificación de nube pri
     <div class="apex-select-wrap">
       <select id="security-review" name="security_review_needs">
       <option value="" selected>Seleccione el nivel de revisión</option>
-      <option value="standard">Estándar — cuestionario de seguridad respondido caso por caso con material de revisión actual (ningún paquete SIG/CAIQ/HECVAT estandarizado forma parte del producto)</option>
-      <option value="detailed">Detallada — Se requiere un cuestionario de seguridad personalizado</option>
+      <option value="standard">Estándar, cuestionario de seguridad respondido caso por caso con material de revisión actual (ningún paquete SIG/CAIQ/HECVAT estandarizado forma parte del producto)</option>
+      <option value="detailed">Detallada, Se requiere un cuestionario de seguridad personalizado</option>
       <option value="pen_test">Se requiere informe de test de intrusión</option>
       <option value="on_site">Se requiere auditoría presencial o revisión de arquitectura</option>
       <option value="none">No se requiere revisión de seguridad en esta fase</option>

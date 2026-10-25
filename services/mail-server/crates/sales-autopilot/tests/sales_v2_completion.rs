@@ -205,7 +205,7 @@ async fn insert_reply_classification(
 }
 
 // ---------------------------------------------------------------------------
-// §19 — outcome idempotency and revenue attribution
+// §19, outcome idempotency and revenue attribution
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -338,7 +338,7 @@ async fn attribution_zero_denominator_is_none_not_zero_or_infinity() {
 }
 
 // ---------------------------------------------------------------------------
-// §38 — coordination race
+// §38, coordination race
 // ---------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -463,7 +463,7 @@ async fn coordination_rules_against_live_state() {
 }
 
 // ---------------------------------------------------------------------------
-// §8 — score persistence
+// §8, score persistence
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -518,7 +518,7 @@ async fn score_persist_and_latest_roundtrip() {
 }
 
 // ---------------------------------------------------------------------------
-// §7/§11 — signals and evidence
+// §7/§11, signals and evidence
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -598,7 +598,7 @@ async fn signals_respect_expiry_and_link_evidence() {
 }
 
 // ---------------------------------------------------------------------------
-// §8 — pure scoring module is exported with the frozen types
+// §8, pure scoring module is exported with the frozen types
 // ---------------------------------------------------------------------------
 
 #[test]

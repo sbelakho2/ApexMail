@@ -13,16 +13,16 @@ ApexMail does **not** sell personal information. We have never sold personal dat
 
 Under the CCPA, California residents have the right to:
 
-- **Right to Know** — Request information about the categories and specific pieces of personal data we collect, use, disclose, and share.
-- **Right to Delete** — Request deletion of personal data we have collected from you.
-- **Right to Opt-Out of Sale** — Direct a business that sells personal data to stop selling it.
+- **Right to Know**, Request information about the categories and specific pieces of personal data we collect, use, disclose, and share.
+- **Right to Delete**, Request deletion of personal data we have collected from you.
+- **Right to Opt-Out of Sale**, Direct a business that sells personal data to stop selling it.
 
 ## ApexMail's Position
 
 We do not sell, rent, or trade personal information for monetary consideration. This means:
 
 - We do not share email addresses, names, or any personal data with advertisers, data brokers, or third-party data aggregators.
-- Our revenue comes from paid subscriptions — not from selling or monetising user data.
+- Our revenue comes from paid subscriptions, not from selling or monetising user data.
 - We have no plans to change this model.
 
 ## How We Use Your Data

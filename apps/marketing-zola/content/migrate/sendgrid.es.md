@@ -58,7 +58,7 @@ Cada uno de estos elementos se rechaza con la forma de error propia de SendGrid 
 
 | Elemento de SendGrid | Rechazo |
 |---|---|
-| Más de una entrada de `personalizations` | `more than one 'personalizations' entry is not supported by the ApexMail compatibility surface: per-personalization subject/headers would be dropped — send one request per personalization` |
+| Más de una entrada de `personalizations` | `more than one 'personalizations' entry is not supported by the ApexMail compatibility surface: per-personalization subject/headers would be dropped, send one request per personalization` |
 | `personalizations[].substitutions`, `.dynamic_template_data` | Campo sin equivalente canónico |
 | `template_id`, `dynamic_template_data` | Los identificadores de plantilla de SendGrid no son identificadores de plantilla de ApexMail |
 | `attachments[].content_id`, `disposition: "inline"` | La ruta de envío canónica no tiene concepto de parte en línea; adjunte el archivo en lugar de incrustarlo |

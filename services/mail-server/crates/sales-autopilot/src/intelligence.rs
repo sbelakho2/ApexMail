@@ -1,16 +1,16 @@
-//! §12 — evidence-grounded, provider-agnostic sales intelligence.
+//! §12, evidence-grounded, provider-agnostic sales intelligence.
 //!
 //! The engine talks to an AI service through one trait, [`SalesIntelligence`],
 //! so the deployment can replace the provider without touching the sales
 //! pipeline. Two implementations ship here:
 //!
-//! * [`HttpSalesIntelligence`] — the ApexMail AI service over HTTP, following
+//! * [`HttpSalesIntelligence`], the ApexMail AI service over HTTP, following
 //!   the same base-URL/api-key pattern as the enrichment HTTP provider
 //!   (`crates/sales-autopilot/src/enrichment/providers/http.rs`), reading
 //!   `APEXMAIL_AI_BASE_URL` / `SALES_AI_BASE_URL` and
 //!   `APEXMAIL_AI_API_KEY` / `SALES_AI_API_KEY` from the environment (read
 //!   here rather than in `config.rs`, which this workstream must not edit);
-//! * [`OfflineIntelligence`] — deterministic, no network. Used when no AI is
+//! * [`OfflineIntelligence`], deterministic, no network. Used when no AI is
 //!   configured, which keeps the service working without AI and makes every
 //!   call testable.
 //!
@@ -23,7 +23,7 @@
 //! [`validate_claims`] is that rule as a pure function: it takes AI output and
 //! the set of `evidence_id`s the caller is willing to stand behind, and
 //! returns the surviving claims plus every omitted claim with a reason. A
-//! citation to an id outside the allowed set is omitted — a **hallucinated
+//! citation to an id outside the allowed set is omitted, a **hallucinated
 //! citation is worse than no citation**, because it launders an invention as
 //! provenance.
 //!
@@ -311,7 +311,7 @@ impl HttpSalesIntelligence {
     /// Construct with an explicit base URL and key.
     ///
     /// PERF #24: client-construction failure makes the AI integration
-    /// UNAVAILABLE — a typed `Err` (callers degrade to the offline
+    /// UNAVAILABLE, a typed `Err` (callers degrade to the offline
     /// intelligence), never a fall back to the process-default client,
     /// which silently discards the timeout this builder pins.
     pub fn try_new(base_url: &str, api_key: &str) -> Result<Self, String> {
@@ -340,7 +340,7 @@ impl HttpSalesIntelligence {
             Err(error) => {
                 tracing::error!(
                     error = %error,
-                    "AI intelligence HTTP client unavailable — degrading to offline intelligence (PERF #24)"
+                    "AI intelligence HTTP client unavailable, degrading to offline intelligence (PERF #24)"
                 );
                 None
             }
@@ -820,7 +820,7 @@ pub fn validate_claims(claims: &[ResearchClaim], allowed_evidence_ids: &[Uuid]) 
                         proposition,
                         reason: format!(
                             "cites evidence id {evidence_id} which is not in the allowed set; \
-                             a hallucinated citation is worse than no citation — omitted"
+                             a hallucinated citation is worse than no citation, omitted"
                         ),
                     });
                     continue;
@@ -1022,7 +1022,7 @@ mod tests {
                 ReplyDisposition::OutOfOffice,
             ),
             ("No thanks, not interested", ReplyDisposition::NotInterested),
-            ("Yes, interested — let's talk", ReplyDisposition::Positive),
+            ("Yes, interested, let's talk", ReplyDisposition::Positive),
             ("What does pricing look like?", ReplyDisposition::Question),
             ("Talk to my colleague instead", ReplyDisposition::Referral),
             ("Lorem ipsum dolor", ReplyDisposition::Unknown),

@@ -5,12 +5,12 @@
 //! (`apps/marketing-zola/public/**`) with 100+ `include_str!`s. That directory
 //! is generated output and gitignored, so a bare clone cannot compile the
 //! crate until the marketing site is built. Docker images always COPY a built
-//! `public/` in, and the CI pipeline builds it before the test stage — but a
+//! `public/` in, and the CI pipeline builds it before the test stage, but a
 //! fresh `cargo build` must not depend on that.
 //!
 //! This script picks the directory the includes resolve against:
 //!
-//! * `apps/marketing-zola/public` when it exists (built site — production,
+//! * `apps/marketing-zola/public` when it exists (built site, production,
 //!   Docker, dev after `make marketing`), embedding the real pages as before;
 //! * otherwise a generated fallback tree under `OUT_DIR`, with one minimal
 //!   placeholder page per included route, so the crate compiles from a bare
@@ -63,7 +63,7 @@ fn main() {
         // Every include-site literal is an absolute marketing path
         // ("/route/index.html"). A bare `env!("…")` used elsewhere (the
         // test-only `Path::new(env!(...))`) makes the scan see the next `"`
-        // in the file, which can be an empty string — skipping non-`/`
+        // in the file, which can be an empty string, skipping non-`/`
         // candidates keeps the fallback tree and the completeness check
         // honest instead of manufacturing an empty route.
         if candidate.starts_with('/') {
@@ -73,7 +73,7 @@ fn main() {
     }
     assert!(
         !relpaths.is_empty(),
-        "no {ENV_NAME} includes found in src/axum_router.rs — did the include style change?"
+        "no {ENV_NAME} includes found in src/axum_router.rs, did the include style change?"
     );
 
     // Locate the repo root (the crate lives at <root>/services/mail-server/crates/ui-foundation).
@@ -93,8 +93,8 @@ fn main() {
     );
 
     // COMPLETENESS, not merely "an index.html exists" (review §5.2 build.rs:
-    // "Require complete, provenance-stamped marketing output — not merely an
-    // existing homepage — to establish build freshness"). Every route the
+    // "Require complete, provenance-stamped marketing output, not merely an
+    // existing homepage, to establish build freshness"). Every route the
     // router includes must be present, otherwise the tree is treated as
     // unbuilt and the OUT_DIR placeholders are embedded with a loud warning
     // naming exactly what is missing.
@@ -166,7 +166,7 @@ fn main() {
         return;
     }
     println!(
-        "cargo:warning=marketing output is INCOMPLETE: {} of {} included routes missing ({}) — embedding placeholders from OUT_DIR instead",
+        "cargo:warning=marketing output is INCOMPLETE: {} of {} included routes missing ({}), embedding placeholders from OUT_DIR instead",
         missing.len(),
         relpaths.len(),
         missing.join(", ")
@@ -192,7 +192,7 @@ fn main() {
         };
         let page = format!(
             "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n\
-             <title>ApexMail — {route}</title>\n</head>\n<body>\n\
+             <title>ApexMail, {route}</title>\n</head>\n<body>\n\
              <h1>ApexMail</h1>\n\
              <p>This is a build placeholder for the marketing route <code>{route}</code>: \
              apps/marketing-zola/public has not been built yet. Build the Zola site \
@@ -202,7 +202,7 @@ fn main() {
         fs::write(&target, page)
             .unwrap_or_else(|e| panic!("failed to write {}: {e}", target.display()));
     }
-    println!("cargo:warning=apps/marketing-zola/public not built (or incomplete) — embedding placeholder pages for {} marketing routes under OUT_DIR", relpaths.len());
+    println!("cargo:warning=apps/marketing-zola/public not built (or incomplete), embedding placeholder pages for {} marketing routes under OUT_DIR", relpaths.len());
     println!("cargo:rustc-env={ENV_NAME}={}", fallback_root.display());
 }
 

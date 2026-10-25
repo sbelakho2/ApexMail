@@ -4,7 +4,7 @@
 //! implementation of the ISO/IEC 18004 QR specification (structure follows
 //! the well-known Nayuki reference generator, MIT licensed). Rendering is
 //! an inline SVG path so the MFA page can display a TOTP `otpauth://` URI
-//! with **no client-side code and no third-party service** — the secret
+//! with **no client-side code and no third-party service**, the secret
 //! never leaves the origin.
 //!
 //! Tests decode the generated matrices back with an independent inverse
@@ -773,7 +773,7 @@ mod tests {
     fn encodes_and_round_trips_payloads() {
         let urls = [
             "otpauth://totp/ApexMail:ops@apexmail.ee?secret=JBSWY3DPEHPK3PXP&issuer=ApexMail",
-            "otpauth://totp/ApexMail:a.very-long.username%40example.co.uk?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ&algorithm=SHA256&digits=8&period=30&issuer=ApexMail%20Console", // nosemgrep: generic.secrets.security.detected-generic-secret.detected-generic-secret — named test constant / well-known example value in a unit test — no credential
+            "otpauth://totp/ApexMail:a.very-long.username%40example.co.uk?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ&algorithm=SHA256&digits=8&period=30&issuer=ApexMail%20Console", // nosemgrep: generic.secrets.security.detected-generic-secret.detected-generic-secret, named test constant / well-known example value in a unit test, no credential
             "https://apexmail.ee/verify?token=short",
             "x",
             "ünicode-päyload-õ",

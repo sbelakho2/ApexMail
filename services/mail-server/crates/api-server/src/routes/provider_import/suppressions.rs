@@ -31,7 +31,7 @@
 //! # Provenance and idempotency
 //!
 //! Rows are inserted with `source = "<provider>_import"`, 500 per chunked
-//! `INSERT … ON CONFLICT (tenant_id, email) DO NOTHING` — exactly the
+//! `INSERT … ON CONFLICT (tenant_id, email) DO NOTHING`, exactly the
 //! conflict semantics `bulk_suppress` uses. An existing row (manual, bulk,
 //! webhook, anything) is NEVER overwritten: it is counted as a duplicate and
 //! listed as a conflict. Replaying the same file therefore writes nothing.
@@ -41,7 +41,7 @@
 //! The file is read through an incremental cursor (CSV records one at a time,
 //! JSON array elements sliced out of the document one at a time), drained in
 //! [`IMPORT_CHUNK_SIZE`]-row working sets, so a 100k-row export is processed
-//! in 200 chunk statements with a bounded footprint — the 10,000-entry inline
+//! in 200 chunk statements with a bounded footprint, the 10,000-entry inline
 //! cap does not apply. [`MAX_PROVIDER_IMPORT_ROWS`] bounds the stream with a
 //! named refusal.
 
@@ -60,7 +60,7 @@ use crate::state::AppState;
 /// The provider sub-type an export carries. SendGrid and Mailgun export each
 /// suppression class as its OWN file with near-identical columns, so the
 /// sub-type is either passed explicitly (`?source_type=`) or inferred from the
-/// file's shape (header/field sniffing) — always named in the report.
+/// file's shape (header/field sniffing), always named in the report.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SuppressionType {
     Bounces,
@@ -85,7 +85,7 @@ impl SuppressionType {
     }
 
     /// Parse the caller's `?source_type=` against the values the provider
-    /// actually exports — a value from another provider is a named refusal,
+    /// actually exports, a value from another provider is a named refusal,
     /// never silently reinterpreted.
     fn parse(provider: ImportProvider, raw: &str) -> Result<Self, ApiError> {
         let normalized = raw.trim().to_ascii_lowercase().replace(' ', "_");
@@ -313,7 +313,7 @@ pub(super) fn suppression_cursor<'a>(
         ImportFormat::Csv => {
             // Pre-pass: the whole file must parse BEFORE the first chunk is
             // written. Streaming cannot un-write a chunk, and a mid-file
-            // quoting error must not leave a half-imported file behind — the
+            // quoting error must not leave a half-imported file behind, the
             // pass is O(1) memory (records are visited and discarded) and
             // cheap next to the database work it guards.
             validate_csv_stream(data)?;
@@ -537,7 +537,7 @@ pub(crate) async fn import_suppressions(
                     &mut conflicts,
                     notes_limit,
                     row.row_number,
-                    "duplicate email within the file — the first row is the one kept",
+                    "duplicate email within the file, the first row is the one kept",
                 );
                 continue;
             }
@@ -556,7 +556,7 @@ pub(crate) async fn import_suppressions(
         // already present (any source) are duplicates, never overwritten.
         //
         // The probe is an equality JOIN against the unique `(tenant_id,
-        // email)` index — NOT `LOWER(email) = ANY($2)`: a bound array
+        // email)` index, NOT `LOWER(email) = ANY($2)`: a bound array
         // parameter gives the planner no element values, so `= ANY($param)`
         // cannot use a btree index and degrades to a sequential scan of the
         // tenant's rows per chunk (measured 52-90 ms per 500-row probe, i.e.
@@ -586,7 +586,7 @@ pub(crate) async fn import_suppressions(
                     &mut conflicts,
                     notes_limit,
                     candidate.0,
-                    "already suppressed — the existing row (and its source/reason) was kept",
+                    "already suppressed, the existing row (and its source/reason) was kept",
                 );
             } else {
                 fresh.push(candidate);
@@ -638,7 +638,7 @@ pub(crate) async fn import_suppressions(
                             &mut conflicts,
                             notes_limit,
                             fresh[0].0,
-                            format!("{raced} row(s) were suppressed concurrently — kept"),
+                            format!("{raced} row(s) were suppressed concurrently, kept"),
                         );
                     }
                 }

@@ -141,10 +141,10 @@ async fn list_tickets(
     require_scopes(&auth, &["support:read"])?;
 
     // SM3 (audit F8): `cursor` used to be accepted here as a raw integer
-    // OFFSET — contradicting the crate's documented opaque-keyset contract.
+    // OFFSET, contradicting the crate's documented opaque-keyset contract.
     // The mislabeled param is gone; pagination is the honestly-named
     // `offset`. (This list returns a plain array, so a true keyset migration
-    // needs the CursorPage envelope — a breaking client contract — and is
+    // needs the CursorPage envelope, a breaking client contract, and is
     // deliberately out of this pass.)
     let offset = params.offset.clamp(0, 100_000);
     let rows = sqlx::query_as::<_, TicketRow>(
@@ -226,7 +226,7 @@ async fn update_ticket(
     }
     let assigned_to = body.assigned_to.or(existing.assigned_to);
     if let Some(ref assignee) = assigned_to {
-        // support_tickets.assigned_to is VARCHAR(26) — validating against
+        // support_tickets.assigned_to is VARCHAR(26), validating against
         // 255 let an over-long assignee reach the column and 500.
         if assignee.len() > 26 {
             return Err(ApiError::Validation(vec![
@@ -378,7 +378,7 @@ async fn list_ticket_messages(
     })))
 }
 
-/// Maximum ticket-message body length (64 KiB) — an unbounded body would
+/// Maximum ticket-message body length (64 KiB), an unbounded body would
 /// be stored verbatim in ticket_messages and echoed back in list views.
 const MAX_MESSAGE_BODY_BYTES: usize = 64 * 1024;
 
@@ -417,7 +417,7 @@ async fn create_ticket_message(
     let user_id_str = auth.user_id.as_ref().map(|id| id.to_string());
 
     // Bind the generated id so the 201 response returns the id that was
-    // actually persisted — the previous statement used gen_random_uuid()
+    // actually persisted, the previous statement used gen_random_uuid()
     // and discarded this one, so responses named a row that did not exist.
     sqlx::query(
         "INSERT INTO ticket_messages (id, ticket_id, author_id, body, is_internal, created_at)

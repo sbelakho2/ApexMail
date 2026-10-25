@@ -27,11 +27,11 @@ El email transaccional es infraestructura de misión crítica. Los restablecimie
 
 ## Solución de ApexMail
 
-- **API REST** (`POST /v1/messages`) — Payloads JSON con claves de idempotencia. Envíe y olvídese.
-- **Relé SMTP** (`smtp.apexmail.ee:587` con STARTTLS) — Sustitución directa para clientes SMTP existentes.
-- **Configuración de envío aislada** — Las IP dedicadas, dominios personalizados y listas de supresión pueden delimitarse por tipo de email.
-- **Webhooks firmados** — Eventos `delivered`, `bounced`, `complained`, `opened` y `clicked` en tiempo real, cada uno con un ID de evento único y firma HMAC.
-- **Idempotencia** — Deduplique envíos con claves suministradas por el cliente. Reenvíe con seguridad tras errores de red.
+- **API REST** (`POST /v1/messages`), Payloads JSON con claves de idempotencia. Envíe y olvídese.
+- **Relé SMTP** (`smtp.apexmail.ee:587` con STARTTLS), Sustitución directa para clientes SMTP existentes.
+- **Configuración de envío aislada**, Las IP dedicadas, dominios personalizados y listas de supresión pueden delimitarse por tipo de email.
+- **Webhooks firmados**, Eventos `delivered`, `bounced`, `complained`, `opened` y `clicked` en tiempo real, cada uno con un ID de evento único y firma HMAC.
+- **Idempotencia**, Deduplique envíos con claves suministradas por el cliente. Reenvíe con seguridad tras errores de red.
 
 ## Implementación técnica
 

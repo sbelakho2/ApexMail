@@ -10,7 +10,7 @@ og_image = "/images/og-image.png"
 ## Inbox-Platzierung, belegt durch die Postfachanbieter selbst
 
 Die meisten „Zustellbarkeits-Dashboards“ sind Seed-Listen-Theater. ApexMail liest das
-**tatsächliche** Signal, das Gmail und Outlook über Ihre Domain veröffentlichen — und
+**tatsächliche** Signal, das Gmail und Outlook über Ihre Domain veröffentlichen, und
 handelt danach.
 
 ## Was wir messen
@@ -50,7 +50,7 @@ Alle sechs Stunden durchläuft der Reputations-Scheduler von ApexMail:
    - Grün → 0% Drosselung (volle Geschwindigkeit)
    - Gelb → 50% Drosselung (probabilistische Verzögerung)
    - Rot → 90% Drosselung (nahezu Stopp, Alarm wird versendet)
-5. **Benachrichtigen** der richtigen Personen — per Webhook, E-Mail oder Slack —, wenn ein Band abfällt.
+5. **Benachrichtigen** der richtigen Personen, per Webhook, E-Mail oder Slack, , wenn ein Band abfällt.
 
 Erholt sich Ihre Reputation, wird die Drosselung ohne manuellen Eingriff aufgehoben.
 
@@ -58,16 +58,16 @@ Erholt sich Ihre Reputation, wird die Drosselung ohne manuellen Eingriff aufgeho
 
 Eine einzige fehlerhafte Sendung kann eine Absender-Domain für 30+ Tage auf Gmails BAD-Liste
 bringen. Die meisten ESPs überbringen die schlechte Nachricht im nächsten Quartals-Review.
-ApexMail begrenzt den Schadensradius **noch in derselben Schicht** — Ihre High-Volume-Tenants
+ApexMail begrenzt den Schadensradius **noch in derselben Schicht**, Ihre High-Volume-Tenants
 stellen weiterhin über saubere Pfade zu, während sich die betroffene Domain abkühlt.
 
 ## Drossel-Overrides je Anbieter
 
 Betreibende können eine Drosselung fixieren (z. B. 100% für zwei Stunden während eines
 bekannten Vorfalls), ohne Code zu ändern. Jede Entscheidung wird mit Score, Band und Quelle
-protokolliert — für Audits und Transparenz gegenüber Kunden.
+protokolliert, für Audits und Transparenz gegenüber Kunden.
 
 ## Reputations-Snapshot anfordern
 
-Wir können Ihre bestehende Domain in weniger als einer Stunde auditieren — mit denselben
+Wir können Ihre bestehende Domain in weniger als einer Stunde auditieren, mit denselben
 Google- und Microsoft-Datenströmen, die wir produktiv nutzen. [Zustellbarkeits-Review buchen](/de/contact/).

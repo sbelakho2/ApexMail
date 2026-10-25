@@ -87,7 +87,7 @@ fn test_config() -> PlacementConfig {
         max_tests_per_hour: 5,
         encrypt_stored_passwords: false,
         smtp_host: "127.0.0.1".into(),
-        smtp_port: 1, // send will fail — irrelevant to scheduler logic
+        smtp_port: 1, // send will fail, irrelevant to scheduler logic
         ..PlacementConfig::default()
     }
 }
@@ -377,6 +377,6 @@ async fn scheduler_executes_due_tests_and_stops_cleanly() {
     assert!(done, "the scheduler executed the due test");
     scheduler.shutdown().await;
     // Give the loop a moment to observe the cancellation, then assert it
-    // stopped by checking no further transitions happen — simply awaiting
+    // stopped by checking no further transitions happen, simply awaiting
     // shutdown is the contract under test here.
 }

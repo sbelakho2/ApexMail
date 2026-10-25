@@ -70,7 +70,7 @@ impl std::hash::Hash for DeviceFingerprint {
 /// Maximum number of known devices retained per user. Eviction is
 /// least-recently-seen: a device's `last_seen` is refreshed every time it
 /// appears, so an attacker rotating user-agents can only evict devices
-/// that have not been seen lately — never the victim's active device
+/// that have not been seen lately, never the victim's active device
 /// (which used to be the case with FIFO eviction).
 const MAX_KNOWN_DEVICES: usize = 20;
 
@@ -85,7 +85,7 @@ fn ip_network_prefix(ip: &str) -> String {
         return format!("{:x}:{:x}:{:x}:{:x}::/64", seg[0], seg[1], seg[2], seg[3]);
     }
     if trimmed.contains(':') {
-        // IPv6-ish but unparseable — fall back to the whole address.
+        // IPv6-ish but unparseable, fall back to the whole address.
         return trimmed.to_string();
     }
     // IPv4 /24
@@ -116,7 +116,7 @@ impl DeviceFingerprint {
         hasher.update(event.user_agent.as_bytes());
 
         // IP prefix:IPv4 /24 (tightened from /16 to defeat credential
-        // stuffing pivoting across cloud /16 ranges) or IPv6 /64 — the old
+        // stuffing pivoting across cloud /16 ranges) or IPv6 /64, the old
         // code blindly dot-split IPv6 addresses into a garbage prefix.
         let ip_prefix = ip_network_prefix(&event.ip_address);
         hasher.update(ip_prefix.as_bytes());
@@ -475,7 +475,7 @@ mod tests {
 
     #[test]
     fn test_known_devices_lru_not_fifo() {
-        // Fail-first: known_devices was a FIFO — an attacker rotating 20
+        // Fail-first: known_devices was a FIFO, an attacker rotating 20
         // user-agents evicted the victim's long-lived device, and every
         // subsequent legitimate login looked "new" (permanent MFA
         // prompts). Eviction must be least-recently-seen, with the
@@ -500,7 +500,7 @@ mod tests {
         for i in 0..10 {
             history.record(event(&format!("rot-a-{i}"), 5 + i));
         }
-        // Victim's device is seen again — refresh its last-seen time.
+        // Victim's device is seen again, refresh its last-seen time.
         history.record(event("victim-ua", 30));
         // 10 more rotations: 21 distinct devices, one must be evicted.
         for i in 0..10 {

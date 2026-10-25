@@ -12,8 +12,8 @@
 //!   before the `250` (see [`super::inbound`]).
 //! * [`run_sweep`] claims due jobs, attempts mailbox delivery, records every
 //!   attempt in `inbound_delivery_attempts`, backs off transient failures,
-//!   and — for a permanent post-accept failure whose original envelope
-//!   sender is non-null — generates an RFC 3464 DSN exactly once (guarded by
+//!   and, for a permanent post-accept failure whose original envelope
+//!   sender is non-null, generates an RFC 3464 DSN exactly once (guarded by
 //!   `inbound_recipients.dsn_generated_at`).
 //! * A NULL return path (`<>`) never receives a DSN (RFC 5321 §4.5.5); the
 //!   job is marked `undeliverable` instead.
@@ -157,7 +157,7 @@ pub struct RetryPolicy {
 
 impl Default for RetryPolicy {
     fn default() -> Self {
-        // ~30 s, 2 min, 10 min, 30 min, 1 h, 2 h, 6 h, 12 h — then the
+        // ~30 s, 2 min, 10 min, 30 min, 1 h, 2 h, 6 h, 12 h, then the
         // permanent/DSN path. The total window comfortably exceeds a
         // mailstore rolling restart.
         Self {
@@ -755,7 +755,7 @@ async fn dispatch_dsn(
     // Single-dispatch guard: a finalized (`dsn_sent`) row can never be
     // claimed again, so a second sweep/worker sees false and sends nothing.
     // A crash between claim and `mark_dsn_sent` re-dispatches on a later
-    // sweep — at-least-once, never a lost DSN.
+    // sweep, at-least-once, never a lost DSN.
     if !store.claim_dsn(job).await? {
         debug!(
             message_id = %job.message_id,
@@ -1238,7 +1238,7 @@ impl DsnDispatcher for PgDsnDispatcher {
         // accepted the message), exactly like any other outbound mail: the
         // outbound worker validates the envelope sender's domain and needs a
         // ready DKIM identity for it. A domain that is not ready yet is a
-        // retryable dispatch failure — the claim is released and retried.
+        // retryable dispatch failure, the claim is released and retried.
         let domain_row: Option<(uuid::Uuid, Option<uuid::Uuid>)> = sqlx::query_as(
             "SELECT id, tenant_id FROM domains
               WHERE LOWER(name) = LOWER($1)
@@ -2013,7 +2013,7 @@ mod tests {
     #[tokio::test]
     async fn claimed_lease_expiry_recovers_a_crashed_worker() {
         // A row left in 'delivering' with an expired lease is claimable
-        // again — a crashed worker cannot strand a message forever.
+        // again, a crashed worker cannot strand a message forever.
         let mut row = job_row("inb_7", "user@managed.test");
         row.status = STATUS_DELIVERING.to_string();
         row.next_attempt_at = utc(0);
@@ -2261,8 +2261,8 @@ mod adversarial_delivery_tests {
 
         // Crash window (documented at-least-once): a row claimed for a DSN
         // (dsn_generated_at stamped) whose dispatch never completed is
-        // re-dispatched on the next sweep — a duplicate DSN is preferable to
-        // a lost one — and is finalized exactly once, after which it can
+        // re-dispatched on the next sweep, a duplicate DSN is preferable to
+        // a lost one, and is finalized exactly once, after which it can
         // never be claimed again.
         let mut row = job_row("inb_crash", "user@managed.test");
         row.status = STATUS_FAILED.to_string();
@@ -2498,7 +2498,7 @@ mod adversarial_delivery_tests {
     #[test]
     fn original_part_drops_the_body_and_bounded_headers_beyond_the_cap() {
         // A > 256 KiB original must contribute ONLY its header block, further
-        // capped at 64 KiB — never the (possibly huge) body.
+        // capped at 64 KiB, never the (possibly huge) body.
         let headers = format!("Subject: big\r\nX-A: {}\r\n\r\n", "h".repeat(1024));
         let mut raw = headers.clone().into_bytes();
         let body = vec![b'b'; DSN_MAX_ORIGINAL_BYTES]; // body alone exceeds the cap
@@ -2561,7 +2561,7 @@ mod adversarial_delivery_tests {
     #[tokio::test]
     async fn a_store_failure_while_loading_the_message_defers_the_job() {
         // `load_message` erroring (a real DB outage between claim and load)
-        // must defer — with the error recorded — never panic and never
+        // must defer, with the error recorded, never panic and never
         // deliver.
         struct LoadFails {
             inner: MemStore,
@@ -2662,7 +2662,7 @@ mod adversarial_delivery_tests {
     async fn a_dsn_finalized_by_a_concurrent_worker_is_not_redispatched() {
         // The race: this sweep claimed a failed row for its DSN dispatch,
         // but between the claim and `claim_dsn` ANOTHER worker finalized the
-        // row (`dsn_sent`). The dispatch must be skipped — exactly-once
+        // row (`dsn_sent`). The dispatch must be skipped, exactly-once
         // finalization, no duplicate DSN.
         struct ConcurrentFinalizer {
             inner: MemStore,
@@ -2762,7 +2762,7 @@ mod pg_store_tests {
     //! The REAL PostgreSQL delivery store and DSN dispatcher (migration 210):
     //! claim ordering and leases, the SKIP LOCKED race between concurrent
     //! workers, every state transition, the DSN single-dispatch guard, and
-    //! the honest RFC 3464 queue row — against a live Postgres.
+    //! the honest RFC 3464 queue row, against a live Postgres.
     //! TEST_DATABASE_URL unset soft-skips; a configured provisioning failure
     //! panics.
 
@@ -2949,7 +2949,7 @@ mod pg_store_tests {
         // Two workers racing on the SAME pool at the SAME instant: SKIP
         // LOCKED must never hand one row to two workers, and no due row may
         // be lost. (The second statement can legitimately observe zero rows
-        // when it runs after the first committed its leases — that is the
+        // when it runs after the first committed its leases, that is the
         // lease doing its job, not a lost row.)
         let (left, right) =
             tokio::join!(store.claim_due(now, 10, 120), store.claim_due(now, 10, 120),);
@@ -3406,7 +3406,7 @@ mod pg_store_tests {
         assert_eq!(to_addresses, vec!["s@remote.test".to_string()]);
         assert_eq!(subject, DSN_SUBJECT);
         // The transported MIME is the complete RFC 3464 report with honest
-        // failure fields — no invented successes.
+        // failure fields, no invented successes.
         for needle in [
             "multipart/report; report-type=delivery-status",
             "Final-Recipient: rfc822; gone@ready.test",

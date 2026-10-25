@@ -1,4 +1,4 @@
-//! §8 — explainable multi-dimensional opportunity scoring.
+//! §8, explainable multi-dimensional opportunity scoring.
 //!
 //! Replaces the single weighted 0-100 lead score with a feature vector whose
 //! every dimension is stored in `sales_scores` and whose every point of the
@@ -166,7 +166,7 @@ pub enum EeaRelevance {
 }
 
 /// Detected email-stack facts (from `signals::email_stack` evidence, never
-/// asserted as facts — the confidence travels with them).
+/// asserted as facts, the confidence travels with them).
 #[derive(Debug, Clone, Default)]
 pub struct EmailStackFeatures {
     pub providers: Vec<String>,

@@ -101,7 +101,7 @@ impl TemplatesRepo {
                 .await
             }
             _ => {
-                // First page — no cursor
+                // First page, no cursor
                 sqlx::query_as::<_, Template>(
                     "SELECT id, tenant_id, name, subject, html_body, text_body, version, status, created_at, updated_at \
                      FROM templates WHERE tenant_id = $1 \

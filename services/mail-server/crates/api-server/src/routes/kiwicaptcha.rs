@@ -18,7 +18,7 @@ use crate::middleware::rate_limiter::extract_public_client_ip;
 use crate::state::AppState;
 
 /// The Redis key prefix under which issued KiwiCaptcha challenges are stored.
-/// (Mirrors the constant in `routes::auth` — kept here so this module is standalone.)
+/// (Mirrors the constant in `routes::auth`, kept here so this module is standalone.)
 const KIWI_CHALLENGE_PREFIX: &str = "apexmail:kiwi:";
 
 /// Per-IP rate limit for challenge issuance, preventing a bot from requesting
@@ -41,9 +41,9 @@ fn challenge_cache() -> &'static Mutex<kiwicaptcha::ChallengeCache> {
 /// Outcome of the per-IP challenge-issuance rate-limit check.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChallengeRateLimit {
-    /// Under the limit — issuance may proceed.
+    /// Under the limit, issuance may proceed.
     Allowed,
-    /// Over the limit — issuance must be rejected with 429.
+    /// Over the limit, issuance must be rejected with 429.
     Exceeded,
     /// Redis is unavailable (L-26). Issuance must FAIL CLOSED (503):
     /// silently skipping the rate limit would let a bot mint unbounded
@@ -62,7 +62,7 @@ async fn check_challenge_rate_limit(
         Err(error) => {
             tracing::error!(
                 error = %error,
-                "KiwiCaptcha rate-limit store unavailable — failing challenge issuance closed"
+                "KiwiCaptcha rate-limit store unavailable, failing challenge issuance closed"
             );
             return ChallengeRateLimit::RedisUnavailable;
         }
@@ -93,7 +93,7 @@ async fn check_challenge_rate_limit(
     .unwrap_or_else(|error| {
         tracing::error!(
             error = %error,
-            "KiwiCaptcha rate-limit script failed — failing challenge issuance closed"
+            "KiwiCaptcha rate-limit script failed, failing challenge issuance closed"
         );
         1
     });
@@ -117,7 +117,7 @@ pub fn router() -> Router<AppState> {
 // challenge (solver exhaustion / deadline), so the server can retire the
 // record instead of waiting out the TTL. Best-effort by contract (the
 // driver ignores failures and rate-limits itself per nonce): a Redis
-// unavailability is acknowledged, never an error — the record dies with
+// unavailability is acknowledged, never an error, the record dies with
 // its TTL regardless.
 
 #[derive(Debug, Deserialize)]
@@ -133,7 +133,7 @@ async fn cancel_challenge_handler(
     // Shape-validate the nonce before it becomes part of a Redis key.
     // kiwicaptcha mints nonces with the STANDARD base64 alphabet (see
     // challenge.rs: `base64::engine::general_purpose::STANDARD`), so the
-    // accepted charset must include `+`, `/` and the `=` padding — the
+    // accepted charset must include `+`, `/` and the `=` padding, the
     // previous base64url-only check silently dropped ~29% of real nonces
     // (any containing those characters), leaving their records to linger
     // until TTL instead of being retired.
@@ -204,8 +204,8 @@ async fn issue_challenge_handler(
     // solve. (Mirrors the bypass in verify_kiwi_token.)
     //
     // SHAPE CONTRACT (2026-10-22): the widget's kiwiValidateChallenge
-    // requires the canonical nonce shape — standard base64 of exactly 32
-    // bytes (44 chars, one '=') — and a valid base64 salt. The original
+    // requires the canonical nonce shape, standard base64 of exactly 32
+    // bytes (44 chars, one '='), and a valid base64 salt. The original
     // nonce/salt of "dev" failed that gate, the widget never solved, and
     // the client-side gate blocked every login on a dev environment
     // (observed live: "Challenge failed … unexpected response"). The
@@ -235,7 +235,7 @@ async fn issue_challenge_handler(
 
     // Validate scope against an allowlist to prevent abuse. Each scope is
     // minted for exactly one auth surface and verified against that surface's
-    // handler scope (see `app::KIWI_AUTH_PAGES` — the two lists stay in
+    // handler scope (see `app::KIWI_AUTH_PAGES`, the two lists stay in
     // lockstep).
     let scope = body.scope.as_str();
     if !matches!(
@@ -266,7 +266,7 @@ async fn issue_challenge_handler(
     // Per-IP rate limiting: prevent bots from requesting thousands of
     // challenges. PRIVACY: the key is a keyed digest of the IP
     // (kiwicaptcha::hash_ip = sha256(secret||ip) with the kiwi secret as
-    // pepper) — the raw client IP never appears in the Redis key.
+    // pepper), the raw client IP never appears in the Redis key.
     let ip_rate_key = format!(
         "apexmail:kiwi_challenge_rate:hmac:{}",
         kiwicaptcha::hash_ip(&client_ip, &state.config.kiwi_secret_key)
@@ -293,7 +293,7 @@ async fn issue_challenge_handler(
         .unwrap_or(0);
     let now_ns = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_micros() as u64) // epoch MICROseconds — kiwicaptcha's issued_at_ns/now_ns unit
+        .map(|d| d.as_micros() as u64) // epoch MICROseconds, kiwicaptcha's issued_at_ns/now_ns unit
         .unwrap_or(0);
 
     let kc_config = kiwicaptcha::ChallengeConfig {
@@ -316,7 +316,7 @@ async fn issue_challenge_handler(
         policy_version: 1,
         // Single-region, single-key deployment: no region/issuer binding and
         // kid 1 (the primary key) signs every challenge. No per-tenant key
-        // root either — every ApexMail challenge derives under the global
+        // root either, every ApexMail challenge derives under the global
         // purpose keys (`tenant: None`), byte-identical to the tenant-free
         // verification in `routes::auth::verify_kiwi_token`.
         region: None,
@@ -333,7 +333,7 @@ async fn issue_challenge_handler(
     };
 
     // Serve repeat requests from the same client (IP hash + scope) within the
-    // cache window from memory — the challenge record is already in Redis from
+    // cache window from memory, the challenge record is already in Redis from
     // the first issuance, so no extra Redis write happens per page load.
     let ip_hash = kiwicaptcha::hash_ip(&client_ip, &state.config.kiwi_secret_key);
     if let Some(issued) = challenge_cache().lock().get(&ip_hash, scope) {
@@ -347,7 +347,7 @@ async fn issue_challenge_handler(
     // Issuance failures are CONFIGURATION problems, not transient faults:
     // the crate deterministically refuses HMAC secrets < 16 bytes
     // (SignError::WeakSecret), invalid difficulty params, or disallowed
-    // scopes. A 500 would read as a server fault and hide the cause — log
+    // scopes. A 500 would read as a server fault and hide the cause, log
     // the specific error and answer with the deployment-misconfiguration
     // shape (503) clients already handle for this endpoint.
     let issued = match kiwicaptcha::issue_challenge(
@@ -357,10 +357,10 @@ async fn issue_challenge_handler(
         Err(error) => {
             tracing::error!(
                 error = %error,
-                "KiwiCaptcha issuance failed — check KIWI_SECRET_KEY length (>=16 bytes) and difficulty settings"
+                "KiwiCaptcha issuance failed, check KIWI_SECRET_KEY length (>=16 bytes) and difficulty settings"
             );
             return Err(ApiError::ServiceUnavailable(
-                "captcha challenge issuance failed — the deployment's KiwiCaptcha configuration is invalid; please retry shortly".into(),
+                "captcha challenge issuance failed, the deployment's KiwiCaptcha configuration is invalid; please retry shortly".into(),
             ));
         }
     };
@@ -413,7 +413,7 @@ mod tests {
     use super::*;
 
     /// L-26 regression: when Redis is unreachable the issuance rate-limit
-    /// check must report unavailability — never silently allow.
+    /// check must report unavailability, never silently allow.
     #[tokio::test]
     async fn challenge_rate_limit_fails_closed_when_redis_is_down() {
         // Port 1 is guaranteed-closed on loopback; the pool is created lazily
@@ -434,7 +434,7 @@ mod tests {
     /// it (skipped when no local Redis is available).
     #[tokio::test]
     async fn challenge_rate_limit_allows_then_exceeds_on_live_redis() {
-        // F6: never probe the ambient 6379 — the variable must name the
+        // F6: never probe the ambient 6379, the variable must name the
         // Redis under test explicitly; unset means skip.
         let Ok(redis_url) = std::env::var("TEST_REDIS_URL") else {
             eprintln!("skipping: TEST_REDIS_URL not set");
@@ -541,7 +541,7 @@ mod adversarial_tests {
             .post("/api/kcaptcha/challenge", r#"{"scope":"login"}"#)
             .await;
         assert_eq!(status, axum::http::StatusCode::OK, "{body}");
-        // The bypass challenge must carry the CANONICAL nonce shape — the
+        // The bypass challenge must carry the CANONICAL nonce shape, the
         // widget's kiwiValidateChallenge rejects anything else, and a
         // rejected challenge blocked every dev login (live run 2026-10-22).
         let nonce = body["nonce"].as_str().expect("nonce is a string");
@@ -598,7 +598,7 @@ mod adversarial_tests {
     }
 
     /// A deployment that enables the captcha with a secret below the crate's
-    /// HMAC minimum (16 bytes — e.g. the historical compose default `dev`)
+    /// HMAC minimum (16 bytes, e.g. the historical compose default `dev`)
     /// must get an honest 503-shaped refusal, never a raw 500 that hides the
     /// cause.
     #[tokio::test]
@@ -619,7 +619,7 @@ mod adversarial_tests {
         );
         // Where the harness has a live Redis the failure arm is specifically
         // the issuance/configuration one; without Redis the fail-closed
-        // rate-limit precheck answers first. Both are honest 503s — the
+        // rate-limit precheck answers first. Both are honest 503s, the
         // property pinned here is that a configuration error never surfaces
         // as a 500.
         let message = body["error"]["message"].as_str().unwrap_or_default();
@@ -633,7 +633,7 @@ mod adversarial_tests {
     /// K2 wave: the two scopes added for the fully-integrated auth surfaces
     /// (`resend-verification` on the verify-email resend form and
     /// `mfa-verify` on both MFA steps) are accepted by the issuance
-    /// allowlist — a rejected scope would render a widget whose challenge
+    /// allowlist, a rejected scope would render a widget whose challenge
     /// fetch 400s and whose form could never be submitted.
     #[tokio::test]
     async fn k2_auth_surface_scopes_are_issued() {

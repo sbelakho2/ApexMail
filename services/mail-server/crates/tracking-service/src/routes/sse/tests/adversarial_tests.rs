@@ -429,7 +429,7 @@ async fn stream_delivers_connected_then_applies_both_filters_exactly() {
     let state = state_with_url(pool.clone(), &url, PUBLIC_PEM);
     let token = sse_token(&tenant, &["stream"], 600);
 
-    // events=opened AND message_id=msg_ok — both filters must hold. The
+    // events=opened AND message_id=msg_ok, both filters must hold. The
     // filter string also proves trimming and empty-segment handling.
     let resp = handle_stream(
         State(state.clone()),
@@ -468,7 +468,7 @@ async fn stream_delivers_connected_then_applies_both_filters_exactly() {
         }
     });
 
-    // Frame 1 is always `connected` — nothing can be delivered before the
+    // Frame 1 is always `connected`, nothing can be delivered before the
     // subscription handshake frame.
     let connected = tokio::time::timeout(Duration::from_millis(1_000), rx.recv())
         .await

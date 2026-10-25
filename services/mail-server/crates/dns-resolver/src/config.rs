@@ -19,11 +19,11 @@ pub struct DnsConfig {
     /// Maximum cache entries. Default:10,000.
     pub max_cache_entries: u64,
     /// Positive cache size (max entries in the records cache). Default:10,000.
-    /// Controls LRU eviction — when the positive cache exceeds this many
+    /// Controls LRU eviction, when the positive cache exceeds this many
     /// entries, the least recently used entries are evicted.
     pub positive_cache_size: u64,
     /// Negative cache size (max entries for NXDOMAIN). Default:1,000.
-    /// Controls LRU eviction — when the negative cache exceeds this many
+    /// Controls LRU eviction, when the negative cache exceeds this many
     /// entries, the least recently used entries are evicted.
     pub negative_cache_size: u64,
     /// Negative cache TTL (for NXDOMAIN). Default:60.

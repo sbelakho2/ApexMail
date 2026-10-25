@@ -1,16 +1,16 @@
-//! Bank statement ingestion — the control-plane operator surface of the bank
+//! Bank statement ingestion, the control-plane operator surface of the bank
 //! ledger loop whose sweep the compliance cron hosts
 //! (`compliance::ledger_sweep::sweep_ledger_sources`).
 //!
 //! `POST /v1/admin/accounting/bank-statements/import`
 //!
 //! Why here and not in the compliance service: the compliance HTTP API
-//! (port 3011) is internal-only — docker-compose does not publish it — so a
+//! (port 3011) is internal-only, docker-compose does not publish it, so a
 //! route there would not be reachable by an operator. This control-plane
 //! route rides the same admin stack as every other operator mutation
 //! (`require_auth` → system-tenant gate → CP session/machine-key gate) plus
 //! the wildcard scope check, and the ledger write itself is the shared
-//! `accounting_core::bank_ingest::ingest_bank_statement` — no accounting
+//! `accounting_core::bank_ingest::ingest_bank_statement`, no accounting
 //! logic lives in this crate.
 //!
 //! Body (JSON, `deny_unknown_fields`):
@@ -41,7 +41,7 @@
 //! Malformed rows (unparseable amount/date, currency disagreeing with the
 //! account, unknown account, duplicates, dates outside the declared period)
 //! are a `400 VALIDATION_ERROR` whose `details` array carries one entry per
-//! offending CSV line — nothing is partially imported.
+//! offending CSV line, nothing is partially imported.
 //!
 //! The sweep runs on the compliance cron every 5 minutes; ingested non-zero
 //! lines post exactly once, zero-amount lines are reported unpostable and

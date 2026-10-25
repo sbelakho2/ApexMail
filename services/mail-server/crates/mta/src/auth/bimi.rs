@@ -615,7 +615,7 @@ fn parse_vmc_cert_chain(raw: &[u8]) -> Option<Vec<Vec<u8>>> {
 ///   self-signed root is rejected.
 ///
 /// Any error (parse failure, unsupported algorithm, missing CA constraints,
-/// failed signature) yields `false` — verification fails closed.
+/// failed signature) yields `false`, verification fails closed.
 fn verify_x509_chain(chain_der: &[Vec<u8>], pinned_ca_der: &[Vec<u8>]) -> bool {
     if chain_der.is_empty() {
         return false;
@@ -667,7 +667,7 @@ fn verify_x509_chain(chain_der: &[Vec<u8>], pinned_ca_der: &[Vec<u8>]) -> bool {
     // The trust anchor must be a self-signed certificate pinned in the
     // configurable trust set. Any other root (unpinned self-signed, or a
     // certificate whose issuer is not part of the presented chain) is
-    // rejected — fail closed.
+    // rejected, fail closed.
     if root.issuer() != root.subject() {
         return false;
     }
@@ -920,7 +920,7 @@ mod tests {
             .signed_by(&leaf_key, &ca_cert, &ca_key)
             .unwrap();
 
-        // The chain stops at an intermediate — no trust anchor present.
+        // The chain stops at an intermediate, no trust anchor present.
         let chain = vec![leaf.der().to_vec(), ca_cert.der().to_vec()];
         let _ = &ca_cert;
         assert!(!verify_x509_chain(&chain, &[]));
@@ -1121,8 +1121,8 @@ mod verify_bimi_wire_tests {
     }
 
     fn trusting_client() -> reqwest::Client {
-        reqwest::Client::builder() // nosemgrep: rust.lang.security.reqwest-accept-invalid.reqwest-accept-invalid — test helper for a local self-signed TLS server; never a production client
-            .danger_accept_invalid_certs(true) // nosemgrep: rust.lang.security.reqwest-accept-invalid.reqwest-accept-invalid — test helper for a local self-signed TLS server; never a production client
+        reqwest::Client::builder() // nosemgrep: rust.lang.security.reqwest-accept-invalid.reqwest-accept-invalid, test helper for a local self-signed TLS server; never a production client
+            .danger_accept_invalid_certs(true) // nosemgrep: rust.lang.security.reqwest-accept-invalid.reqwest-accept-invalid, test helper for a local self-signed TLS server; never a production client
             .timeout(std::time::Duration::from_secs(5))
             .build()
             .unwrap()

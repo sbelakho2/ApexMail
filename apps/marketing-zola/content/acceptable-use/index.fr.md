@@ -1,13 +1,13 @@
 +++
 title = "Politique d'utilisation acceptable"
-description = "Politique d'utilisation acceptable d'ApexMail — règles régissant l'utilisation du service de messagerie, organisées par catégorie de message."
+description = "Politique d'utilisation acceptable d'ApexMail, règles régissant l'utilisation du service de messagerie, organisées par catégorie de message."
 template = "prose.html"
 
 [extra]
 last_updated = "2026-07-30"
 +++
 
-Cette Politique d'utilisation acceptable (« PUA ») définit les utilisations interdites et acceptables de l'infrastructure de messagerie ApexMail. Toute violation peut entraîner une suspension ou une résiliation. Cette PUA distingue les emails marketing et promotionnels des emails transactionnels et de service — chaque catégorie est soumise à des obligations de consentement, de désabonnement et d'envoi différentes, décrites ci-dessous.
+Cette Politique d'utilisation acceptable (« PUA ») définit les utilisations interdites et acceptables de l'infrastructure de messagerie ApexMail. Toute violation peut entraîner une suspension ou une résiliation. Cette PUA distingue les emails marketing et promotionnels des emails transactionnels et de service, chaque catégorie est soumise à des obligations de consentement, de désabonnement et d'envoi différentes, décrites ci-dessous.
 
 ## Quelles règles s'appliquent à votre message
 

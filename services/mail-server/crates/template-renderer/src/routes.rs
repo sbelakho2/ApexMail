@@ -29,7 +29,7 @@ pub struct AppState {
     pub sandbox: Sandbox,
     pub cache: TemplateCache,
     pub config: RendererConfig,
-    /// P1 #6: per-workload credentials — the dedicated
+    /// P1 #6: per-workload credentials, the dedicated
     /// `TEMPLATE_RENDERER_AUTH_TOKEN` is the only accepted secret when
     /// configured; the universal token is legacy fallback (non-production).
     pub service_auth: ServiceAuth,
@@ -85,12 +85,12 @@ async fn require_service_token(
         return Ok(next.run(req).await);
     }
     // P1 #6: a configured dedicated token means the universal
-    // INTERNAL_SERVICE_TOKEN no longer authorizes anything here — call out
+    // INTERNAL_SERVICE_TOKEN no longer authorizes anything here, call out
     // unmigrated callers loudly (they get 401 either way).
     if state.service_auth.is_refused_universal_attempt(&provided) {
         tracing::warn!(
             "request refused: the universal INTERNAL_SERVICE_TOKEN was presented but \
-             TEMPLATE_RENDERER_AUTH_TOKEN is configured — the caller must migrate to the \
+             TEMPLATE_RENDERER_AUTH_TOKEN is configured, the caller must migrate to the \
              dedicated per-workload token"
         );
     }
@@ -140,7 +140,7 @@ async fn render_handler(
     };
 
     // P1 #11: the render cache is consulted on the HTTP path. The key is a
-    // SHA-256 over the template SOURCE (never an id alone — the request
+    // SHA-256 over the template SOURCE (never an id alone, the request
     // carries inline source), the canonicalized props, every output-affecting
     // option and the renderer semantics version, so any content or option
     // change rotates the key.
@@ -149,7 +149,7 @@ async fn render_handler(
         cached.metadata.cached = true;
         return (
             StatusCode::OK,
-            // coverage: justified — RenderResult is plain strings/numbers,
+            // coverage: justified, RenderResult is plain strings/numbers,
             // so serde_json::to_value cannot fail; the fallback guards
             // future field types only.
             Json(serde_json::to_value(&cached).unwrap_or_else(
@@ -162,7 +162,7 @@ async fn render_handler(
     // minify). Running it inline on the async worker starves the runtime:
     // the TimeoutLayer cannot fire while a future is stuck inside a poll,
     // so one slow render used to hang the whole request (and worker) until
-    // the sandbox finished. `spawn_blocking` moves it off the worker — the
+    // the sandbox finished. `spawn_blocking` moves it off the worker, the
     // future yields Pending, the 30s HTTP timeout can fire (408), and the
     // worker keeps serving other requests.
     let sandbox = state.sandbox.clone();
@@ -175,7 +175,7 @@ async fn render_handler(
     {
         Ok(result) => result,
         Err(join_err) => {
-            // coverage: justified — panic containment for the blocking render
+            // coverage: justified, panic containment for the blocking render
             // task; the sandbox is panic-free by its own test contract, so no
             // input deterministically reaches this arm.
             tracing::error!(error = %join_err, "render blocking task panicked");
@@ -198,7 +198,7 @@ async fn render_handler(
             };
 
             // Subject-bound resolution also strips CR/LF/NUL (header
-            // injection hardening — see the transpiler's subject variant).
+            // injection hardening, see the transpiler's subject variant).
             let subject = opts.subject.as_ref().map(|s| {
                 transpiler::resolve_placeholders_subject_reported(
                     s,
@@ -228,7 +228,7 @@ async fn render_handler(
 
             (
                 StatusCode::OK,
-                // coverage: justified — RenderResult is plain strings/numbers,
+                // coverage: justified, RenderResult is plain strings/numbers,
                 // so serde_json::to_value cannot fail; the fallback guards
                 // future field types only.
                 Json(serde_json::to_value(&render_result).unwrap_or_else(|e| {
@@ -242,7 +242,7 @@ async fn render_handler(
                 TemplateError::OutputTooLarge { .. } => StatusCode::PAYLOAD_TOO_LARGE,
                 TemplateError::Timeout { .. } => StatusCode::GATEWAY_TIMEOUT,
                 TemplateError::ForbiddenModule { .. } => StatusCode::FORBIDDEN,
-                // coverage: justified — NotFound is produced by the
+                // coverage: justified, NotFound is produced by the
                 // stored-template renderer only; the HTTP path renders inline
                 // source and can never produce it (arm kept for totality).
                 TemplateError::NotFound { .. } => StatusCode::NOT_FOUND,
@@ -266,7 +266,7 @@ async fn validate_handler(
     let result = transpiler::validate_source(&req.source, state.config.sandbox.max_source_length);
     (
         StatusCode::OK,
-        // coverage: justified — ValidationResult is plain strings/bools, so
+        // coverage: justified, ValidationResult is plain strings/bools, so
         // serde_json::to_value cannot fail; the fallback guards future field
         // types only.
         Json(serde_json::to_value(&result).unwrap_or_else(
@@ -285,7 +285,7 @@ async fn starter_handler() -> (StatusCode, Json<serde_json::Value>) {
 }
 
 /// Liveness probe: the process is up. It deliberately says NOTHING about
-/// dependencies (P1 #12) — restart loops driven by a blind "healthy" answer
+/// dependencies (P1 #12), restart loops driven by a blind "healthy" answer
 /// are exactly what the readiness probe below exists to prevent.
 async fn health_handler() -> (StatusCode, Json<serde_json::Value>) {
     (
@@ -431,7 +431,7 @@ mod tests {
     ///
     /// The sandbox's own 60s timeout deliberately cannot fire here (it only
     /// checks between phases), so the only thing that can bound this request
-    /// is the HTTP layer — which requires the sandbox work to run off the
+    /// is the HTTP layer, which requires the sandbox work to run off the
     /// async worker (`spawn_blocking`).
     #[tokio::test]
     async fn render_handler_slow_render_times_out_and_runtime_stays_responsive() {
@@ -650,7 +650,7 @@ mod tests {
     /// PINNED (considered by the 2026-09 privilege-boundary audit): the
     /// template renderer has NO tenant dimension to fail closed on. It never
     /// fetches tenant rows: templates arrive as `source` in the token-gated
-    /// request body (the callers — api-server/enterprise — select the tenant
+    /// request body (the callers, api-server/enterprise, select the tenant
     /// row and pass its compiled source), the handlers touch neither the
     /// `db` pool nor the response cache, and no route accepts a tenant
     /// selector. Identical inputs render identical output for any caller,
@@ -716,7 +716,7 @@ mod tests {
         );
         // P1 #11: the two callers render DISTINCT sources, so both remain
         // cache misses (the comment below previously said the HTTP path was
-        // uncached entirely — the wired cache is content-addressed, so only
+        // uncached entirely, the wired cache is content-addressed, so only
         // byte-identical (source, props, options) requests share an entry).
         assert_eq!(
             json_b["metadata"]["cached"], false,
@@ -776,7 +776,7 @@ mod tests {
     }
 
     /// Legacy fallback (dedicated env unset): the universal token still
-    /// authenticates outside production — migration-safe behavior.
+    /// authenticates outside production, migration-safe behavior.
     #[tokio::test]
     async fn unset_dedicated_token_keeps_universal_token_working() {
         use axum::body::Body;
@@ -936,7 +936,7 @@ mod tests {
 
         let config = test_config();
         let state = Arc::new(AppState {
-            // Port 1 on loopback: nothing listens there — deterministically down.
+            // Port 1 on loopback: nothing listens there, deterministically down.
             db: sqlx::PgPool::connect_lazy("postgres://127.0.0.1:1/none").expect("lazy pool"),
             sandbox: Sandbox::new(config.sandbox.clone()),
             cache: TemplateCache::new(config.cache.max_entries, config.cache.ttl_secs),
@@ -998,7 +998,7 @@ mod tests {
     }
 
     /// `/ready` with a live database (same TEST_DATABASE_URL convention as
-    /// the F62 stored-template tests — skipped when unset).
+    /// the F62 stored-template tests, skipped when unset).
     #[tokio::test]
     async fn ready_reports_ready_when_database_is_up() {
         use tower::ServiceExt;
@@ -1008,7 +1008,7 @@ mod tests {
             .ok()
             .filter(|value| !value.trim().is_empty())
         else {
-            // coverage: justified — env-gated soft-skip; this branch runs when
+            // coverage: justified, env-gated soft-skip; this branch runs when
             // the suite executes WITHOUT TEST_DATABASE_URL (the coverage run
             // sets it and exercises the DB-backed assertions below instead).
             eprintln!("skipping: set TEST_DATABASE_URL to run DB-backed test");
@@ -1047,7 +1047,7 @@ mod tests {
 
     /// `/ready` when the DB check FAILS (not times out): a closed pool errors
     /// the query immediately, so the handler must answer 503 degraded with
-    /// `database: "down"` — the honest failure arm, distinct from the
+    /// `database: "down"`, the honest failure arm, distinct from the
     /// timeout arm.
     #[tokio::test]
     async fn ready_names_the_database_down_when_the_check_errors_without_timing_out() {
@@ -1055,7 +1055,7 @@ mod tests {
 
         let config = test_config();
         let pool = sqlx::PgPool::connect_lazy("postgres://127.0.0.1:1/none").expect("lazy pool");
-        // A closed pool fails `SELECT 1` immediately with PoolClosed — no
+        // A closed pool fails `SELECT 1` immediately with PoolClosed, no
         // acquire timeout, so the handler's error arm (not the timeout arm)
         // runs.
         pool.close().await;

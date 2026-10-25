@@ -281,7 +281,7 @@ async fn unreachable_redis_fails_closed_for_every_operation() {
     };
     let quota = quota();
 
-    // Every enforcement path returns an error — the caller must treat that
+    // Every enforcement path returns an error, the caller must treat that
     // as a denial, never as an allow.
     assert!(service.check_rate_limit("k", &config).await.is_err());
     assert!(service.check_token_bucket("k", &bucket, 1).await.is_err());

@@ -183,7 +183,7 @@ impl ComplianceService {
                 .any(|f| f == "soc2" || f == "iso27001" || f == "gdpr");
         let encryption_in_transit = true; // Always require encryption in transit
 
-        let retention_days = 2555i32; // 7 years — meets HIPAA §164.316(b)(2)(i), SOC2 CC3.1, GDPR Article 5(1)(e)
+        let retention_days = 2555i32; // 7 years, meets HIPAA §164.316(b)(2)(i), SOC2 CC3.1, GDPR Article 5(1)(e)
         let row = sqlx::query_as::<_, ComplianceConfigRow>(
             "INSERT INTO ent_compliance_configs (id, tenant_id, enabled_frameworks, status, zero_retention_mode, encryption_at_rest, encryption_in_transit, audit_log_retention_days, require_mfa, baa_signed, dpa_signed, created_at, updated_at)
              VALUES ($1,$2,$3,'active',false,$4,$5,$6,false,false,false,$7,$7)
@@ -382,7 +382,7 @@ impl ComplianceService {
 
     /// Get a data access request by ID (used for tenant ownership checks).
     ///
-    /// Audit F3: the stored `access_token` is a SHA-256 digest — reads never
+    /// Audit F3: the stored `access_token` is a SHA-256 digest, reads never
     /// surface it (masked as a non-guessable grant reference).
     pub async fn get_data_access_request(
         &self,
@@ -411,11 +411,11 @@ impl ComplianceService {
     /// Approve a data access request.
     ///
     /// Audit F3 (three hardenings):
-    /// * the UPDATE carries `AND status = 'pending'` — a completed, expired
+    /// * the UPDATE carries `AND status = 'pending'`, a completed, expired
     ///   or already-approved request can never be re-approved to refresh its
     ///   token (previously any row could be flipped back to `approved`);
     /// * the database stores ONLY a SHA-256 digest of the grant token (the
-    ///   SSO bearer-token model) — a DB read can no longer recover a usable
+    ///   SSO bearer-token model), a DB read can no longer recover a usable
     ///   grant;
     /// * the raw token is returned ONCE, in this approval response, as the
     ///   approver's handoff to the requester.

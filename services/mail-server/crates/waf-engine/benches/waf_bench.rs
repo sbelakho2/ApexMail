@@ -1,4 +1,4 @@
-//! Benchmarks for WAF engine performance — critical hot path.
+//! Benchmarks for WAF engine performance, critical hot path.
 //!
 //! Measures throughput for://! - Clean requests (fast path)
 //! - SQLi payloads

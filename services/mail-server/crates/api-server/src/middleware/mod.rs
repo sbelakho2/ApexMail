@@ -21,12 +21,12 @@ use axum::response::{IntoResponse, Response};
 /// Paths whose consumers are human browsers (zero-JS form posts and
 /// server-rendered pages) rather than machine API clients:
 ///
-/// - `/web/*` — the SSR form routes (auth, console actions, `/web/admin/*`);
-/// - `/consent` — the no-JS cookie-consent endpoint the marketing banner
+/// - `/web/*`, the SSR form routes (auth, console actions, `/web/admin/*`);
+/// - `/consent`, the no-JS cookie-consent endpoint the marketing banner
 ///   links to;
-/// - `/domains/*` and `/campaigns/*` at the root — the data-backed SSR
+/// - `/domains/*` and `/campaigns/*` at the root, the data-backed SSR
 ///   detail pages (the API twins live under `/v1/`);
-/// - `/cp` and `/cp/*` — the control-plane page renders.
+/// - `/cp` and `/cp/*`, the control-plane page renders.
 ///
 /// API surfaces (`/v1/*`, `/api/*`) never match, so their JSON error
 /// contract is untouched.
@@ -42,7 +42,7 @@ pub(crate) fn is_browser_facing_path(path: &str) -> bool {
         || path.starts_with("/cp/")
 }
 
-/// Suffixes of a document's own sub-resources — the stylesheet, script,
+/// Suffixes of a document's own sub-resources, the stylesheet, script,
 /// font or image a page loads alongside its HTML.
 ///
 /// These are browser furniture even though nothing about their path says
@@ -70,8 +70,8 @@ fn header_str<'a>(headers: &'a axum::http::HeaderMap, name: &str) -> Option<&'a 
 /// browser showing something to a human, or a machine client?
 ///
 /// [`is_browser_facing_path`] is not enough on its own. The console lives
-/// at `/dashboard`, `/campaigns`, `/settings` … — none of them under
-/// `/web/` — and every one of those pages loads `/assets/*`. So the
+/// at `/dashboard`, `/campaigns`, `/settings` …, none of them under
+/// `/web/`, and every one of those pages loads `/assets/*`. So the
 /// decision is taken from the request itself, where the browser
 /// advertises what it is about to do:
 ///
@@ -85,7 +85,7 @@ fn header_str<'a>(headers: &'a axum::http::HeaderMap, name: &str) -> Option<&'a 
 ///   straight from the browser's second connection).
 ///
 /// The path list remains the fallback for callers that send neither
-/// header — the zero-JS form posts driven by tests and older browsers.
+/// header, the zero-JS form posts driven by tests and older browsers.
 pub(crate) fn is_browser_request(path: &str, headers: &axum::http::HeaderMap) -> bool {
     if is_browser_facing_path(path) || has_static_asset_extension(path) {
         return true;
@@ -103,7 +103,7 @@ pub(crate) fn is_browser_request(path: &str, headers: &axum::http::HeaderMap) ->
 }
 
 /// Small branded HTML error page in the tracking-service template idiom
-/// (white card, `#dc2626` accent, mono type, zero radius) — inline-styled,
+/// (white card, `#dc2626` accent, mono type, zero radius), inline-styled,
 /// zero-JS, ~15 lines. Every input is a compile-site constant, never user
 /// data, so no escaping is required.
 ///
@@ -114,7 +114,7 @@ pub(crate) fn is_browser_request(path: &str, headers: &axum::http::HeaderMap) ->
 /// ARK document, attribute-styled: paper and ink, Spectral display,
 /// Overpass text, a 3px ink rule, square corners, the onward action as the
 /// ink fill. Red is reserved for the wordmark and destruction, so the error
-/// is stated in ink. A `<style>` block is deliberately absent — the page
+/// is stated in ink. A `<style>` block is deliberately absent, the page
 /// carries NO braces at all, which is the guarantee that it can never be
 /// mistaken for a JSON error body nor smuggle a template interpolation
 /// (scheme is pinned light-only in the `color-scheme` declaration).
@@ -131,7 +131,7 @@ pub(crate) fn browser_error_html(
 <head>\n\
 <meta charset=\"utf-8\">\n\
 <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n\
-<title>{title} — ApexMail</title>\n\
+<title>{title} | ApexMail</title>\n\
 </head>\n\
 <body style=\"margin:0;padding:24px;min-height:100vh;display:flex;align-items:center;justify-content:center;background:#FFFFFF;color:#0E141B;font-family:'Overpass',-apple-system,'Segoe UI',Arial,sans-serif;font-size:15px;line-height:1.55\">\n\
 <main style=\"background:#FFFFFF;border-top:3px solid #0E141B;border-bottom:1px solid #C4CDD5;padding:28px 0 0;max-width:34rem;width:100%\">\n\
@@ -220,7 +220,7 @@ mod tests {
         );
         assert!(html.starts_with("<!DOCTYPE html>"));
         assert!(html.contains("lang=\"en\""));
-        assert!(html.contains("<title>Too Many Requests — ApexMail</title>"));
+        assert!(html.contains("<title>Too Many Requests | ApexMail</title>"));
         assert!(html.contains("'Spectral'"), "display face: {html}");
         assert!(html.contains("'Overpass'"), "text face: {html}");
         assert!(html.contains("#0E141B"), "ink token: {html}");
@@ -282,7 +282,7 @@ mod tests {
 
     /// Live run 2026-10-22: the console's own pages are not under `/web/`,
     /// so the path list alone sent a blocked `/dashboard` and a blocked
-    /// `/assets/globals.css` down the JSON branch — the user saw an
+    /// `/assets/globals.css` down the JSON branch, the user saw an
     /// untitled blank page. The request itself says what it is.
     #[test]
     fn console_documents_and_their_assets_are_browser_requests() {
@@ -310,7 +310,7 @@ mod tests {
             &headers(&[("sec-fetch-dest", "font")])
         ));
         // A form post from a page (the zero-JS surfaces) with no
-        // `Sec-Fetch-*` at all — `Accept: text/html` carries it.
+        // `Sec-Fetch-*` at all, `Accept: text/html` carries it.
         assert!(is_browser_request(
             "/login",
             &headers(&[("accept", "text/html,application/xhtml+xml")])

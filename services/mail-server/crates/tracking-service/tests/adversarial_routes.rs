@@ -329,7 +329,7 @@ async fn pixel_always_returns_the_gif_and_never_leaks_recipient_data() {
 /// `domains` table when neither the in-memory nor the Redis cache has an
 /// answer: a tenant-owned verified domain redirects and records, an
 /// unowned domain is refused with the named reason (400) and recorded as an
-/// explicit `click_refused` event — never bounced to the vendor fallback.
+/// explicit `click_refused` event, never bounced to the vendor fallback.
 #[tokio::test]
 async fn click_redirect_authorises_owned_domains_via_the_database() {
     let Some(db) = canonical_pool("tracking_click_domain").await else {
@@ -346,7 +346,7 @@ async fn click_redirect_authorises_owned_domains_via_the_database() {
     let tenant = unique("tn_clk");
     seed_tenant(&db, &tenant).await;
     // An OWNED, verified domain row. Nothing is seeded into the Redis
-    // `redirect_domain:` cache — the database is the authority here.
+    // `redirect_domain:` cache, the database is the authority here.
     sqlx::query("INSERT INTO domains (tenant_id, name, verified) VALUES ($1, $2, true)")
         .bind(&tenant)
         .bind("owned-click.example")
@@ -381,8 +381,8 @@ async fn click_redirect_authorises_owned_domains_via_the_database() {
     drop_wal_entries(&redis, &tenant).await;
 
     // A domain owned by nobody (no row, no cache entry for this tenant)
-    // must be REFUSED with the reason — never redirected to the vendor
-    // fallback (dogfood 2026-10-06) — and recorded as an explicit
+    // must be REFUSED with the reason, never redirected to the vendor
+    // fallback (dogfood 2026-10-06), and recorded as an explicit
     // `click_refused` event, not as a real click.
     let stranger_tenant = unique("tn_clk2");
     let stranger_message = unique("msg");
@@ -411,7 +411,7 @@ async fn click_redirect_authorises_owned_domains_via_the_database() {
     drop_wal_entries(&redis, &stranger_tenant).await;
 
     // The patterns tier of the same lookup: `tenant_settings.allowed_
-    // redirect_domains` is a JSONB array — a `*.wild.example` entry must
+    // redirect_domains` is a JSONB array, a `*.wild.example` entry must
     // authorise any subdomain.
     let wildcard_tenant = unique("tn_clk3");
     seed_tenant(&db, &wildcard_tenant).await;
@@ -439,7 +439,7 @@ async fn click_redirect_authorises_owned_domains_via_the_database() {
     assert_eq!(location, "https://promo.wild.example/offer");
 
     // The wildcard must NOT authorise the bare apex (documented semantics:
-    // `*.example` matches `sub.example` only) — the apex is refused, not
+    // `*.example` matches `sub.example` only), the apex is refused, not
     // bounced to the fallback.
     let apex = click_token(
         &wildcard_tenant,
@@ -996,7 +996,7 @@ async fn sse_wrong_tenant_token_cannot_read_another_tenants_channel() {
 
 /// `prefs_post` against hostile database states: a bad token (400), a dead
 /// database at BEGIN (500), a deferred trigger fault at COMMIT (500), a
-/// dropped table at UPDATE (500) — and the no-op submission that never
+/// dropped table at UPDATE (500), and the no-op submission that never
 /// touches the database at all.
 #[tokio::test]
 async fn prefs_post_survives_database_faults() {
@@ -1027,7 +1027,7 @@ async fn prefs_post_survives_database_faults() {
         .expect("prefs token");
 
     // (a) A token that fails the shape check → 400, never a panic.
-    //     FIXED (batch 2): the prefs POST is a browser form surface — the
+    //     FIXED (batch 2): the prefs POST is a browser form surface, the
     //     failure renders the branded HTML error page (was raw JSON
     //     `{"error":"Invalid token"}`); the status stays a client error.
     let response = srv
@@ -1167,7 +1167,7 @@ async fn dedup_side_channels_survive_a_dead_redis() {
             .unwrap();
     assert_eq!(count, 1, "the suppression landed without dedup marking");
 
-    // Resubscribe: the dedup CLEAR fails the same way — the suppression is
+    // Resubscribe: the dedup CLEAR fails the same way, the suppression is
     // still removed.
     let prefs_token = codec()
         .generate_preferences_token(&tenant, recipient)
@@ -1188,7 +1188,7 @@ async fn dedup_side_channels_survive_a_dead_redis() {
 }
 
 /// A database that cannot record the unsubscribe answers the honest error
-/// page — never a fabricated success.
+/// page, never a fabricated success.
 #[tokio::test]
 async fn confirm_with_a_dead_database_answers_the_error_page() {
     migrator::test_support::assert_soft_skip_allowed("TEST_REDIS_URL");

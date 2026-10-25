@@ -17,7 +17,7 @@ use crate::types::*;
 const REPLY_CACHE_MAX: u64 = 50_000;
 
 /// F68:bounds for the metrics time window. `days` is caller-supplied and
-/// must be clamped BEFORE any `chrono::Duration::days` construction — a
+/// must be clamped BEFORE any `chrono::Duration::days` construction, a
 /// huge value panics the duration builder and a non-positive one inverts
 /// the window (since in the future → empty metrics).
 const MIN_METRICS_WINDOW_DAYS: i64 = 1;
@@ -29,7 +29,7 @@ fn clamp_window_days(days: i64) -> i64 {
     days.clamp(MIN_METRICS_WINDOW_DAYS, MAX_METRICS_WINDOW_DAYS)
 }
 
-/// F67:idempotent event identity — SHA-256 over the tenant-qualified
+/// F67:idempotent event identity, SHA-256 over the tenant-qualified
 /// message identity (tenant + external RFC 5322 Message-ID). The crate
 /// computes it before INSERT; `reply_events.event_id` carries a UNIQUE
 /// constraint so a re-delivered event collapses to the stored row.
@@ -43,7 +43,7 @@ fn reply_event_id(tenant_id: &str, message_id: &str) -> String {
     format!("{:x}", hasher.finalize())
 }
 
-/// F67:canonical sentiment storage — the bare enum variant label, not a
+/// F67:canonical sentiment storage, the bare enum variant label, not a
 /// JSON-encoded string (matches `reply_events.sentiment` VARCHAR(32)).
 fn sentiment_label(sentiment: &ReplySentiment) -> &'static str {
     match sentiment {
@@ -56,7 +56,7 @@ fn sentiment_label(sentiment: &ReplySentiment) -> &'static str {
     }
 }
 
-/// F69:saturating thread-depth successor — a poisoned/degenerate chain
+/// F69:saturating thread-depth successor, a poisoned/degenerate chain
 /// cannot overflow i32 and wrap negative (the CHECK constraint on
 /// `thread_depth` would then reject the insert, losing the event).
 fn next_thread_depth(parent_depth: Option<i32>) -> i32 {
@@ -167,7 +167,7 @@ impl ReplyTrackingService {
         self.generations.get(tenant_id).map(|g| *g).unwrap_or(0)
     }
 
-    /// F68:advance the tenant's data generation — all cached metric
+    /// F68:advance the tenant's data generation, all cached metric
     /// windows for the tenant become unreachable in one step.
     fn bump_generation(&self, tenant_id: &str) {
         *self.generations.entry(tenant_id.to_string()).or_insert(0) += 1;
@@ -196,7 +196,7 @@ impl ReplyTrackingService {
             .await?;
 
         // F67:canonical persistence (migration 159) with idempotent event
-        // identity — ON CONFLICT DO NOTHING collapses re-delivered events.
+        // identity, ON CONFLICT DO NOTHING collapses re-delivered events.
         let event_id = reply_event_id(&event.tenant_id, &event.message_id);
         let stored = sqlx::query(
             "INSERT INTO reply_events (event_id, message_id, in_reply_to, tenant_id, recipient, \
@@ -252,7 +252,7 @@ impl ReplyTrackingService {
         // and the average depth come from a single FILTER aggregate, and the
         // sent total is a scalar subquery over the same window. Before this,
         // a cache miss issued FOUR sequential queries (COUNT, COUNT ... AND
-        // is_auto_reply, COUNT(DISTINCT) on events, AVG) — three of them
+        // is_auto_reply, COUNT(DISTINCT) on events, AVG), three of them
         // scanning the same reply_events slice. The result columns are
         // identical to the four-query path (COUNT never NULL, AVG over zero
         // rows NULL).
@@ -294,8 +294,8 @@ impl ReplyTrackingService {
     }
 
     /// F69:tenant-qualified thread-depth lookup. Depth is resolved against
-    /// the owning (tenant_id, message_id) identity — never the external
-    /// Message-ID alone, which is attacker-aliasable across tenants — and
+    /// the owning (tenant_id, message_id) identity, never the external
+    /// Message-ID alone, which is attacker-aliasable across tenants, and
     /// the successor arithmetic saturates instead of overflowing.
     async fn get_thread_depth(&self, tenant_id: &str, in_reply_to: &str) -> anyhow::Result<i32> {
         let (depth,): (Option<i32>,) = sqlx::query_as(
@@ -315,7 +315,7 @@ impl ReplyTrackingService {
     /// canonical ReplyEvent contract and commits it through
     /// [`Self::process_reply`]: tenant-scoped, canonical message identity,
     /// replier as recipient, the inbound headers (auto-reply detection), and
-    /// a STABLE provider/inbound event id — the RFC 5322 Message-ID header
+    /// a STABLE provider/inbound event id, the RFC 5322 Message-ID header
     /// when present, else the inbound row id (both survive restarts and
     /// re-delivery collapses through the same event_id hash).
     pub async fn process_inbound_reply(
@@ -340,7 +340,7 @@ impl ReplyTrackingService {
     }
 
     /// F67: ingestion readiness and lag. `schema_ready` is false when the
-    /// canonical reply_events relation (migration 159) is missing — the
+    /// canonical reply_events relation (migration 159) is missing, the
     /// component must not pretend to ingest. `pending_inbound` is the count
     /// of accepted-but-unprocessed inbound messages (the analytics handoff's
     /// backlog); `latest_reply_at` makes the explicit no-events state
@@ -728,7 +728,7 @@ fn metrics_cache_key_parts(tenant_id: &str, generation: u64, days: i64) -> Strin
 mod db_tests {
     //! DB-backed tests for the reply-tracking ingress and metrics paths.
     //!
-    //! Gated on `TEST_DATABASE_URL` (workspace convention — see the
+    //! Gated on `TEST_DATABASE_URL` (workspace convention, see the
     //! compliance crate's gdpr_compliance_db_tests). A dedicated database
     //! (`<db>_analytics_replies`) is derived from the URL, dropped and
     //! recreated once per test, and the canonical reply_events shape
@@ -747,7 +747,7 @@ mod db_tests {
     /// shared test subscriber counts those on the calling thread.
     use crate::test_support::count_queries_on_this_thread;
 
-    /// Canonical reply_events shape — migration 159.
+    /// Canonical reply_events shape, migration 159.
     const REPLY_EVENTS_DDL: &str = r#"
 CREATE TABLE IF NOT EXISTS reply_events (
     id            BIGSERIAL PRIMARY KEY,
@@ -929,7 +929,7 @@ CREATE TABLE IF NOT EXISTS events (
         let now = Utc::now();
         let tenant = "tenant_windows";
 
-        // Seed replies at 2h, 5d, 20d, 50d old — one per window bucket.
+        // Seed replies at 2h, 5d, 20d, 50d old, one per window bucket.
         let ages_hours: [i64; 4] = [2, 24 * 5, 24 * 20, 24 * 50];
         for (i, hours) in ages_hours.iter().enumerate() {
             let event = reply_event(
@@ -943,7 +943,7 @@ CREATE TABLE IF NOT EXISTS events (
             svc.process_reply(&event).await.expect("seed ingest");
         }
 
-        // Warm the cache with the WIDEST window first — the pre-fix code
+        // Warm the cache with the WIDEST window first, the pre-fix code
         // cached by tenant alone, so the subsequent 1-day request would be
         // served the 30-day result.
         let m30 = svc.get_metrics(tenant, 30).await.expect("30d metrics");
@@ -982,7 +982,7 @@ CREATE TABLE IF NOT EXISTS events (
         assert_eq!(svc.get_metrics(tenant, 30).await.unwrap().total_replies, 4);
     }
 
-    /// F69:thread depth is resolved per tenant — the same external
+    /// F69:thread depth is resolved per tenant, the same external
     /// Message-ID must not carry another tenant's chain depth.
     #[tokio::test]
     async fn db_thread_depth_is_tenant_isolated() {

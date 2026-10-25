@@ -60,7 +60,7 @@ impl AutonomyMode {
 
     /// Does the brain run at all (observe, verify, score, plan, generate)?
     ///
-    /// True for every mode except `Disabled` — including `Shadow`, which is
+    /// True for every mode except `Disabled`, including `Shadow`, which is
     /// the point of the mode.
     pub fn runs_brain(self) -> bool {
         !matches!(self, Self::Disabled)
@@ -250,7 +250,7 @@ impl std::fmt::Display for DecisionAction {
     }
 }
 
-/// A stored Decision Packet — the explanation and replay record behind every
+/// A stored Decision Packet, the explanation and replay record behind every
 /// automated external action.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SalesDecision {
@@ -457,7 +457,7 @@ pub struct SenderIdentity {
 impl SenderIdentity {
     /// The display name a message from this identity must show. Falls back to
     /// the deployment default ONLY when the identity itself sets no
-    /// `from_name` — the footer/metadata must name the sender actually used,
+    /// `from_name`, the footer/metadata must name the sender actually used,
     /// never a different identity.
     pub fn display_name(&self, default_name: &str) -> String {
         self.from_name
@@ -553,11 +553,11 @@ pub enum MessageCategory {
     Support,
     Spam,
     /// Fix I-5: opt-out requests are a first-class category handled with
-    /// priority — they are legally significant (CAN-SPAM) and previously
+    /// priority, they are legally significant (CAN-SPAM) and previously
     /// fell through the spam keyword heuristic.
     Unsubscribe,
     /// Fix #19: the heuristic classifier's confidence fell below
-    /// [`AUTOMATION_CONFIDENCE_THRESHOLD`] — the message may be any category
+    /// [`AUTOMATION_CONFIDENCE_THRESHOLD`], the message may be any category
     /// and MUST NOT drive any irreversible downstream action (suppression,
     /// auto-reply send, enrollment trigger). It goes to human review instead.
     /// Ambiguity is a distinct category (not a soft flag), so the structural
@@ -793,7 +793,7 @@ pub enum SalesError {
 
     /// The tenant's email quota is exhausted (billing quota reservation
     /// denied). Campaign dispatch pauses the campaign with an error state
-    /// when this surfaces — never a silent partial send.
+    /// when this surfaces, never a silent partial send.
     #[error("email quota exhausted: {0}")]
     QuotaExhausted(String),
 

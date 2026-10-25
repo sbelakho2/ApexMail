@@ -1,4 +1,4 @@
-//! Reputation scoring — composite multi-source scoring
+//! Reputation scoring, composite multi-source scoring
 
 use serde::{Deserialize, Serialize};
 

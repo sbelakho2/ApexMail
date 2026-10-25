@@ -1,6 +1,6 @@
 +++
 title = "Subprocesadores"
-description = "Registro de subprocesadores de ApexMail — la lista de proveedores autorizados que procesan datos en nuestro nombre."
+description = "Registro de subprocesadores de ApexMail, la lista de proveedores autorizados que procesan datos en nuestro nombre."
 template = "prose.html"
 
 [extra]
@@ -10,7 +10,7 @@ last_updated = "2026-07-29"
 
 Esta página enumera los proveedores externos contratados por Bel Consulting OÜ (que opera como ApexMail) que pueden tratar datos personales de clientes en el curso de la prestación del servicio ApexMail. Este registro se mantiene de conformidad con el artículo 28 del RGPD y la sección 5 del Acuerdo de Tratamiento de Datos de ApexMail.
 
-Con el enrutamiento EU-only, la entrada de AWS SES no transporta el correo de ningún inquilino: los mensajes salen exclusivamente por los MTA propios de ApexMail sobre infraestructura de Hetzner. El enrutamiento EU-only y su evidencia — incluida la distinción frente al modo global predeterminado, que usa AWS SES en su región de la UE — se explican en la [página de soberanía de la UE](/es/eu-sovereign/).
+Con el enrutamiento EU-only, la entrada de AWS SES no transporta el correo de ningún inquilino: los mensajes salen exclusivamente por los MTA propios de ApexMail sobre infraestructura de Hetzner. El enrutamiento EU-only y su evidencia, incluida la distinción frente al modo global predeterminado, que usa AWS SES en su región de la UE, se explican en la [página de soberanía de la UE](/es/eu-sovereign/).
 
 ### Subprocesadores de infraestructura
 
@@ -19,11 +19,11 @@ Las siguientes entidades externas tratan datos personales de clientes por cuenta
 | Entidad legal | Marca | Servicio | Finalidad | Categorías de datos | País de tratamiento | País de almacenamiento | País corporativo | Mecanismo de transferencia | Obligatorio |
 |---|---|---|---|---|---|---|---|---|---|
 | Hetzner Online GmbH | Hetzner | Alojamiento en la nube | Cómputo, almacenamiento, red | Datos del servicio principal en la implementación compartida predeterminada | Región UE/EEE configurada | Región UE/EEE configurada | Finlandia | Tratamiento intra-EEE; las normas de transferencia del capítulo V del RGPD no se aplican | Sí |
-| Amazon Web Services, Inc. | AWS S3 | Almacenamiento de objetos de telemetría | Almacenamiento de telemetría cuando está activado | Los registros de Loki y las trazas de Tempo pueden contener metadatos operativos | Región de S3 configurada (predeterminada: `eu-central-1`) | Región de S3 configurada (predeterminada: `eu-central-1`) | EE. UU. | Cláusulas Contractuales Tipo de la UE (DPA de AWS) | No — solo cuando la implementación activa usa almacenamiento S3 |
-| Amazon Web Services, Inc. | AWS SES | Transporte de entrega de email | Entrega de email cuando está activada | Contenido de los emails y direcciones de los destinatarios | Región de SES configurada | Región de SES configurada | EE. UU. | Cláusulas Contractuales Tipo de la UE (DPA de AWS) | No — solo cuando la implementación activa usa SES |
-| Google LLC | Google | Autenticación OAuth | Inicio de sesión mediante Google OAuth | Tokens OAuth, dirección de email, nombre | Global (datos de la UE) | Usuarios con sede en el EEE: EEE | EE. UU. | Cláusulas Contractuales Tipo (SCC) | No — solo si el cliente activa Google OAuth |
-| GitHub, Inc. | GitHub | Autenticación OAuth | Inicio de sesión mediante GitHub OAuth | Tokens OAuth, nombre de usuario, dirección de email | Global (datos de la UE) | Usuarios con sede en el EEE: EEE | EE. UU. | Cláusulas Contractuales Tipo (SCC) | No — solo si el cliente activa GitHub OAuth |
-| Mollie B.V. | Mollie | Procesamiento de pagos | Facturación por suscripción, facturación, almacenamiento de métodos de pago | Tokens de métodos de pago, metadatos de transacciones, datos de facturas | Países Bajos | Países Bajos | Países Bajos | Entidad contratante establecida en la UE (Mollie B.V., Ámsterdam); las redes de tarjetas procesan globalmente según el DPA de Mollie; certificación PCI DSS Nivel 1 | Sí — necesario para los planes de pago |
+| Amazon Web Services, Inc. | AWS S3 | Almacenamiento de objetos de telemetría | Almacenamiento de telemetría cuando está activado | Los registros de Loki y las trazas de Tempo pueden contener metadatos operativos | Región de S3 configurada (predeterminada: `eu-central-1`) | Región de S3 configurada (predeterminada: `eu-central-1`) | EE. UU. | Cláusulas Contractuales Tipo de la UE (DPA de AWS) | No, solo cuando la implementación activa usa almacenamiento S3 |
+| Amazon Web Services, Inc. | AWS SES | Transporte de entrega de email | Entrega de email cuando está activada | Contenido de los emails y direcciones de los destinatarios | Región de SES configurada | Región de SES configurada | EE. UU. | Cláusulas Contractuales Tipo de la UE (DPA de AWS) | No, solo cuando la implementación activa usa SES |
+| Google LLC | Google | Autenticación OAuth | Inicio de sesión mediante Google OAuth | Tokens OAuth, dirección de email, nombre | Global (datos de la UE) | Usuarios con sede en el EEE: EEE | EE. UU. | Cláusulas Contractuales Tipo (SCC) | No, solo si el cliente activa Google OAuth |
+| GitHub, Inc. | GitHub | Autenticación OAuth | Inicio de sesión mediante GitHub OAuth | Tokens OAuth, nombre de usuario, dirección de email | Global (datos de la UE) | Usuarios con sede en el EEE: EEE | EE. UU. | Cláusulas Contractuales Tipo (SCC) | No, solo si el cliente activa GitHub OAuth |
+| Mollie B.V. | Mollie | Procesamiento de pagos | Facturación por suscripción, facturación, almacenamiento de métodos de pago | Tokens de métodos de pago, metadatos de transacciones, datos de facturas | Países Bajos | Países Bajos | Países Bajos | Entidad contratante establecida en la UE (Mollie B.V., Ámsterdam); las redes de tarjetas procesan globalmente según el DPA de Mollie; certificación PCI DSS Nivel 1 | Sí, necesario para los planes de pago |
 
 ### Infraestructura autoalojada (no son subprocesadores externos)
 

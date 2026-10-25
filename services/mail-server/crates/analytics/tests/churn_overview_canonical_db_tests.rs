@@ -1,6 +1,6 @@
 //! Dogfood 2026-10-06 wave B: the audience-level churn overview
 //! (`GET /v1/ai/churn-prediction`) is computed from REAL data by the churn
-//! engine's signal rules — not the two hardcoded factor strings the route
+//! engine's signal rules, not the two hardcoded factor strings the route
 //! returned before. Canonical-schema tests (the production migrator's
 //! `contacts` / `events` shapes).
 //!

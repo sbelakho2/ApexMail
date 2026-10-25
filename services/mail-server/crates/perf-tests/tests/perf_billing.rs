@@ -8,10 +8,10 @@
 //!
 //! * plan lookup → `billing_service::plans::{is_builtin_plan_name,
 //!   builtin_quota_limits, builtin_email_limit_for_plan,
-//!   plan_overage_rate_millicents}` — the actual lookup helpers the plan
+//!   plan_overage_rate_millicents}`, the actual lookup helpers the plan
 //!   seed/enforcement path uses;
 //! * quota check → `billing_entitlements::EntitlementSnapshot::
-//!   require_capacity/require_feature` — the backend authority handlers
+//!   require_capacity/require_feature`, the backend authority handlers
 //!   call to refuse over-quota requests.
 //!
 //! Every input and output crosses `std::hint::black_box`, so LLVM cannot
@@ -174,7 +174,7 @@ fn test_vat_calculation_throughput() {
 /// The REAL quota-enforcement path (audit finding 9): handlers call
 /// `EntitlementSnapshot::require_capacity` / `require_feature` to refuse
 /// over-quota or unentitled requests. This measures that authority check,
-/// including the verdicts (an over-limit amount must be REJECTED — the
+/// including the verdicts (an over-limit amount must be REJECTED, the
 /// assertion at the bottom fails if the enforcement ever degrades into a
 /// rubber stamp).
 #[test]

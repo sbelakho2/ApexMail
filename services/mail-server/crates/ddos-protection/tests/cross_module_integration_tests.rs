@@ -31,7 +31,7 @@ fn make_ctx(ip: &str, path: &str, method: &str) -> RequestContext {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// SCENARIO 1:Full Pipeline — allowed request flows through all layers
+// SCENARIO 1:Full Pipeline, allowed request flows through all layers
 // ═══════════════════════════════════════════════════════════════
 
 #[tokio::test]
@@ -202,7 +202,7 @@ async fn test_suspicious_fingerprint_penalty_is_ip_scoped() {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// SCENARIO 4:Middleware integration — evaluates and translates decisions
+// SCENARIO 4:Middleware integration, evaluates and translates decisions
 // ═══════════════════════════════════════════════════════════════
 
 #[tokio::test]
@@ -239,7 +239,7 @@ async fn test_middleware_allow_maps_correctly() {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// SCENARIO 5:SMTP + Connection Tracker — concurrent limit enforcement
+// SCENARIO 5:SMTP + Connection Tracker, concurrent limit enforcement
 // ═══════════════════════════════════════════════════════════════
 
 #[test]
@@ -307,7 +307,7 @@ fn test_smtp_tarpit_based_on_reputation_and_invalids() {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// SCENARIO 7:Bot detection + adaptive limiter — attack coordination
+// SCENARIO 7:Bot detection + adaptive limiter, attack coordination
 // ═══════════════════════════════════════════════════════════════
 
 #[test]
@@ -502,7 +502,7 @@ async fn test_block_expiration() {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// SCENARIO 12:Multiple IPs interacting — isolation check
+// SCENARIO 12:Multiple IPs interacting, isolation check
 // ═══════════════════════════════════════════════════════════════
 
 #[tokio::test]

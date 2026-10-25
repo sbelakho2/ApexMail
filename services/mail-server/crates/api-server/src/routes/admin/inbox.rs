@@ -242,11 +242,11 @@ async fn update_message(
     crate::middleware::auth::require_scopes(&auth, &["*"])?;
     // autopilot_inbox_messages.id is a UUID: parse the client-supplied id
     // here so a malformed value is a 400 (validation) and the WHERE bind is
-    // typed — the previous text bind against a uuid column errored with
+    // typed, the previous text bind against a uuid column errored with
     // 42883 on EVERY update, and malformed ids surfaced as 500s.
     let id = uuid::Uuid::parse_str(body.id.trim())
         .map_err(|_| ApiError::Validation(vec!["id must be a UUID".into()]))?;
-    // Slug-aware system-tenant resolution (audit F1) — see list_inbox.
+    // Slug-aware system-tenant resolution (audit F1), see list_inbox.
     let tenant_scoped = !crate::routes::web::is_system_tenant(&state, &auth.tenant_id).await?;
     let sql = build_update_inbox_sql(&body, tenant_scoped)?;
 
@@ -482,7 +482,7 @@ mod adversarial_tests {
     #[tokio::test]
     async fn inbox_customer_sessions_are_scoped_to_their_tenant() {
         // A customer SESSION (non-system tenant) with wildcard scope lists
-        // ONLY its own tenant's messages — the slug-aware scoping arm.
+        // ONLY its own tenant's messages, the slug-aware scoping arm.
         let Some(pool) = crate::test_db::canonical_pool("inbox_tenant_scope").await else {
             return;
         };

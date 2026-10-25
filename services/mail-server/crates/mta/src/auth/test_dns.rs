@@ -47,7 +47,7 @@ pub(crate) struct MockDns {
 impl MockDns {
     /// Spawn the server on a loopback UDP port and return a resolver whose
     /// ONLY nameserver is the mock (deterministic; no system resolver, no
-    /// real network — everything stays on 127.0.0.1).
+    /// real network, everything stays on 127.0.0.1).
     pub async fn start(rules: HashMap<&'static str, DnsAnswer>) -> Self {
         let socket = tokio::net::UdpSocket::bind(("127.0.0.1", 0))
             .await
@@ -107,7 +107,7 @@ impl MockDns {
     }
 }
 
-/// A workspace resolver pointed at an already-running mock's port — for
+/// A workspace resolver pointed at an already-running mock's port, for
 /// consumers that construct their resolver independently (the inbound
 /// server's EmailAuthenticator injection seam).
 pub(crate) fn resolver_at(port: u16) -> TokioResolver {
@@ -151,7 +151,7 @@ pub(crate) fn answer(query_bytes: &[u8], rules: &HashMap<&'static str, DnsAnswer
     if let Some(asked) = asked {
         response.add_query(asked.clone());
         // hickory renders queried names WITH the trailing root dot; rule keys
-        // are written without it — compare on the trimmed form and answer
+        // are written without it, compare on the trimmed form and answer
         // with the queried name itself (bit-identical owner name).
         let qname = asked.name().to_lowercase().to_string();
         let qname = qname.strip_suffix('.').unwrap_or(&qname).to_string();

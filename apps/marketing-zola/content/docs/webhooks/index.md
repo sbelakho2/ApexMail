@@ -361,7 +361,7 @@ ApexMail retries failed webhook deliveries on a fixed ladder sized to survive mu
 - HTTP `429` (Too Many Requests)
 - HTTP `5xx` (Server errors)
 
-**Default retry policy — 10 total attempts:**
+**Default retry policy, 10 total attempts:**
 
 | Attempt | Delay before attempt |
 |---------|---------------------|
@@ -452,7 +452,7 @@ Failed events are retained for 7 days.
 
 - **Verify every payload** using the signature header before taking any action. Reject unverified payloads with HTTP `401`.
 - **Make handlers idempotent** by deduplicating on the `id` field. Webhooks use at-least-once delivery and the same event can arrive multiple times.
-- **Respond with `2xx` immediately** (200, 201, or 202 accepted). Do not block the webhook request on downstream work — push it to an internal queue instead.
+- **Respond with `2xx` immediately** (200, 201, or 202 accepted). Do not block the webhook request on downstream work, push it to an internal queue instead.
 - **Read the raw body** before letting any framework parse it. Pass the raw bytes to the signature verification function; do not parse and re-serialize.
 - **Return `4xx` for client errors** (malformed payload, invalid signature, stale timestamp) so ApexMail can distinguish permanent failures from transient ones.
 - **Monitor the Failed Deliveries tab** in the dashboard and set up alerts so you can investigate and replay events before the 7-day retention window expires.

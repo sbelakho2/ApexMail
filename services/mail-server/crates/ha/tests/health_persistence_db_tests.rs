@@ -1,6 +1,6 @@
 //! F63 canonical persistence tests for the HA component's health-check
 //! results (ha_health_checks, migration 194): record → read → restart →
-//! reread, plus the readiness probe and retention cleanup — against the
+//! reread, plus the readiness probe and retention cleanup, against the
 //! canonical migration chain, not migration-content substring assertions.
 //!
 //! Gated on `TEST_DATABASE_URL` (workspace convention).
@@ -24,7 +24,7 @@ fn service(pool: &PgPool, node: &str) -> HealthCheckService {
     HealthCheckService::new(pool.clone(), Arc::new(config))
 }
 
-/// F63: readiness — the relation exists on the canonical chain.
+/// F63: readiness, the relation exists on the canonical chain.
 #[tokio::test]
 async fn persistence_ready_on_canonical_schema() {
     let Some(pool) = canonical_pool("ready").await else {

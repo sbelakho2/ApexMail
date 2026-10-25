@@ -25,12 +25,12 @@ Las plataformas que envían email por sus clientes heredan el riesgo de reputaci
 
 ## Solución de ApexMail
 
-- **Aislamiento de tenants** — Cada tenant recibe sus propios dominios, claves de API, endpoints de webhooks con un secreto HMAC por tenant, listas de supresión, IP dedicadas y flujos de eventos.
-- **Aislamiento de dominios** — La verificación y autenticación de dominios por tenant (SPF, DKIM, DMARC) evita la contaminación cruzada de reputación.
-- **RBAC personalizado** — Administrador a nivel de plataforma, administrador a nivel de tenant y roles de solo lectura. Aprovisionamiento SCIM en Enterprise.
-- **SSO** — SAML 2.0 para operadores de plataforma y administradores de tenants.
-- **Cuotas de uso** — Límites duros y blandos por tenant para volumen, velocidad y concurrencia.
-- **Marca blanca** — Elimine la marca de ApexMail de paneles, pies de email y plantillas de notificación.
+- **Aislamiento de tenants**, Cada tenant recibe sus propios dominios, claves de API, endpoints de webhooks con un secreto HMAC por tenant, listas de supresión, IP dedicadas y flujos de eventos.
+- **Aislamiento de dominios**, La verificación y autenticación de dominios por tenant (SPF, DKIM, DMARC) evita la contaminación cruzada de reputación.
+- **RBAC personalizado**, Administrador a nivel de plataforma, administrador a nivel de tenant y roles de solo lectura. Aprovisionamiento SCIM en Enterprise.
+- **SSO**, SAML 2.0 para operadores de plataforma y administradores de tenants.
+- **Cuotas de uso**, Límites duros y blandos por tenant para volumen, velocidad y concurrencia.
+- **Marca blanca**, Elimine la marca de ApexMail de paneles, pies de email y plantillas de notificación.
 
 ## Implementación técnica
 

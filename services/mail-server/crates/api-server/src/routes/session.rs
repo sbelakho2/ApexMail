@@ -99,7 +99,7 @@ async fn get_session(
     // nothing about server state, so every presentation is revalidated
     // against the stores routes/impersonate.rs wrote at exchange time
     // (jti tombstone, absolute lifetime cap, operator status). Failures
-    // surface as authenticated:false plus a reason — the endpoint's
+    // surface as authenticated:false plus a reason, the endpoint's
     // contract is a state report, not an error status.
     let impersonation_token = extract_cookie(&headers, "impersonation_session");
     if let Some(token) = impersonation_token {
@@ -145,9 +145,9 @@ async fn get_session(
         });
 
         if let Some(token) = user_token {
-            // Route the SAME validation require_auth performs — blacklist,
+            // Route the SAME validation require_auth performs, blacklist,
             // revocation registry, per-request status recheck, absolute
-            // lifetime — so introspection can never vouch for a token the
+            // lifetime, so introspection can never vouch for a token the
             // API surface would refuse. Failures surface as
             // authenticated:false plus a human-readable reason (the
             // endpoint's contract is a state report, not an error status).
@@ -312,7 +312,7 @@ fn impersonation_lifetime_within_cap(exp_ms: i64, now_ms: i64) -> bool {
 ///
 /// Observable semantics are unchanged for both real callers: a session
 /// `operatorId` is either the ULID/UUID user id (users.id is UUID, migration
-/// 052) or an operator email — an email can never parse as a UUID, and a
+/// 052) or an operator email, an email can never parse as a UUID, and a
 /// UUID string can never equal an email, so the two arms never overlap.
 /// A garbage value that is neither keeps returning `None` (unknown operator),
 /// exactly as the `id::text = 'garbage'` arm did.
@@ -341,15 +341,15 @@ async fn operator_status_by_id_or_email(
 /// Every introspection re-derives liveness from the same stores the token
 /// exchange wrote:
 ///
-///   * jti tombstone — `apexmail:impersonation_used:{jti}` is `SET NX`'d
+///   * jti tombstone, `apexmail:impersonation_used:{jti}` is `SET NX`'d
 ///     at exchange with a TTL ≥ the session's remaining life, so its
 ///     existence proves the session was minted by a single-use exchange
 ///     that has not outlived its recorded validity. A missing tombstone
-///     means forged jti, Redis flush, or a stale cookie — all refused,
+///     means forged jti, Redis flush, or a stale cookie, all refused,
 ///     failing closed exactly like the exchange itself does on Redis
 ///     unavailability.
-///   * absolute lifetime cap — [`MAX_IMPERSONATION_SESSION_TTL_MS`].
-///   * operator status — a deactivated operator's live cookies must stop
+///   * absolute lifetime cap, [`MAX_IMPERSONATION_SESSION_TTL_MS`].
+///   * operator status, a deactivated operator's live cookies must stop
 ///     vouching immediately; the operator resolves by user id or email
 ///     against the users table the control plane manages.
 async fn revalidate_impersonation_session(
@@ -404,7 +404,7 @@ async fn revalidate_impersonation_session(
         })?;
     match operator_status.as_deref() {
         Some("active") => Ok(()),
-        // A missing row is a deleted operator — treated exactly like a
+        // A missing row is a deleted operator, treated exactly like a
         // deactivated one: the session stops vouching.
         _ => Err("impersonation operator is no longer active".into()),
     }
@@ -475,7 +475,7 @@ mod tests {
     #[test]
     fn session_payload_with_token_id_deserializes() {
         // Regression: SessionPayload carries deny_unknown_fields and used
-        // to lack `tokenId` — every cookie minted by routes/impersonate.rs
+        // to lack `tokenId`, every cookie minted by routes/impersonate.rs
         // FAILED to deserialize, so the impersonation branch silently
         // reported unauthenticated for all real sessions.
         let now_ms = chrono::Utc::now().timestamp_millis();
@@ -489,7 +489,7 @@ mod tests {
 
     #[test]
     fn session_token_without_expiry_is_rejected() {
-        // Expiry used to be optional — a signed token with no `exp` was
+        // Expiry used to be optional, a signed token with no `exp` was
         // valid forever.
         let mut payload = impersonation_session_payload(0);
         payload.as_object_mut().unwrap().remove("exp");
@@ -527,7 +527,7 @@ mod tests {
             now_ms + MAX_IMPERSONATION_SESSION_TTL_MS,
             now_ms
         ));
-        // Two hours: over the cap — a cookie whose signature promised more
+        // Two hours: over the cap, a cookie whose signature promised more
         // than the exchange could ever have granted must be refused.
         assert!(!impersonation_lifetime_within_cap(
             now_ms + 2 * 60 * 60 * 1000,
@@ -726,7 +726,7 @@ mod tests {
         }
 
         /// A session revoked by a password reset must introspect as
-        /// unauthenticated WITH a reason — the endpoint previously decoded
+        /// unauthenticated WITH a reason, the endpoint previously decoded
         /// the JWT and never consulted the revocation registry.
         #[tokio::test]
         async fn introspection_reports_revoked_sessions_as_unauthenticated() {
@@ -1130,7 +1130,7 @@ mod tests {
         }
 
         /// Redis unreachable during revalidation must fail CLOSED with the
-        /// could-not-revalidate reason — never as an authenticated report.
+        /// could-not-revalidate reason, never as an authenticated report.
         #[tokio::test]
         async fn revalidation_fails_closed_when_redis_is_unreachable() {
             let Some(pool) = crate::test_db::canonical_pool("intro_reval_dead_redis").await else {

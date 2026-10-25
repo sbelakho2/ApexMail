@@ -23,7 +23,7 @@ pub const MILLISECONDS_PER_DAY: i64 = 86_400_000;
 /// quoted a currency that is never charged and routed the amount through
 /// f64. Display code everywhere (billing-service routes, api-server invoice
 /// renderers, these explanation strings) must render euros with this
-/// integer helper — money formatting never round-trips through a float.
+/// integer helper, money formatting never round-trips through a float.
 pub fn cents_to_eur_string(cents: i64) -> String {
     // The sign leads the currency symbol ("-€59.18"): a negative amount
     // is a negative quantity of euros, and the explanation strings that
@@ -48,7 +48,7 @@ pub fn ceil_day_count(duration_ms: i64) -> i64 {
 ///
 /// Elapsed time must floor (a half-day elapsed has not consumed a whole
 /// day yet); ceil-ing BOTH elapsed and period length discarded up to a full
-/// day of remaining time on mid-period plan changes — a systematic
+/// day of remaining time on mid-period plan changes, a systematic
 /// customer-unfavorable bias.
 pub fn floor_day_count(duration_ms: i64) -> i64 {
     if duration_ms <= 0 {
@@ -95,8 +95,8 @@ pub fn prorated_amount(
 ///
 /// The subtraction ran in plain `i64` at both call sites (api-server
 /// `preview_plan_proration` and billing-service's twin). With adversarial
-/// catalog prices — an `i64::MAX`-priced target plan against an `i64::MIN`
-/// current plan — the wrapped result crossed the proration guards as a
+/// catalog prices, an `i64::MAX`-priced target plan against an `i64::MIN`
+/// current plan, the wrapped result crossed the proration guards as a
 /// bogus multi-quadrillion *credit* (live dogfood J7: the guard then
 /// rejected with a fabricated magnitude instead of an honest error).
 pub fn net_amount(charge_cents: i64, credit_cents: i64) -> Result<i64, String> {
@@ -182,7 +182,7 @@ mod tests {
     fn floor_day_count_rounds_down_and_never_discards_elapsed_time() {
         assert_eq!(floor_day_count(MILLISECONDS_PER_DAY - 1), 0);
         assert_eq!(floor_day_count(MILLISECONDS_PER_DAY), 1);
-        // 15.5 days elapsed is 15 WHOLE days consumed — not 16. Together
+        // 15.5 days elapsed is 15 WHOLE days consumed, not 16. Together
         // with ceil(days_in_period) this credits the full fractional
         // remainder instead of discarding it.
         assert_eq!(
@@ -291,7 +291,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // Euro display formatting — integer math only, never f64.
+    // Euro display formatting, integer math only, never f64.
     // ------------------------------------------------------------------
 
     #[test]

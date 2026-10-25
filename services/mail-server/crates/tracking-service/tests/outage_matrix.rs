@@ -264,7 +264,7 @@ async fn bounded<T, F: std::future::IntoFuture<Output = T>>(cell: &str, fut: F) 
     match tokio::time::timeout(BOUNDED, fut.into_future()).await {
         Ok(value) => value,
         Err(_) => {
-            panic!("outage-matrix cell `{cell}` exceeded the {BOUNDED:?} bound — unbounded hang")
+            panic!("outage-matrix cell `{cell}` exceeded the {BOUNDED:?} bound, unbounded hang")
         }
     }
 }
@@ -311,7 +311,7 @@ async fn lrem(pool: &deadpool_redis::Pool, key: &str, needle: &str) {
 }
 
 /// Cross-process serialization for the whole logical Redis DB 9 (the WAL and
-/// the suppression-retry queue are single global lists — a flush loop in a
+/// the suppression-retry queue are single global lists, a flush loop in a
 /// parallel test process would drain another test's entries). Same shape as
 /// the lib tests' `redis_wal_serial`: a session-level Postgres advisory lock
 /// on the admin server, released when the pool drops.
@@ -386,7 +386,7 @@ async fn poll_until(cell: &str, attempts: usize, mut predicate: impl AsyncFnMut(
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// Matrix 1a — Postgres DOWN (Redis live): subscription surfaces + health
+// Matrix 1a, Postgres DOWN (Redis live): subscription surfaces + health
 // ═════════════════════════════════════════════════════════════════════════════
 
 #[tokio::test]
@@ -415,7 +415,7 @@ async fn pg_down_subscription_surfaces_are_honest_bounded_and_queue_the_suppress
     let token = unsub_token(&tenant, recipient);
     let prefs = prefs_token(&tenant, recipient);
 
-    // GET /u/:token — pure render (no DB on the path): the recipient still
+    // GET /u/:token, pure render (no DB on the path): the recipient still
     // gets the branded confirmation form.
     let response = bounded("pg_down GET /u", srv.get(&format!("/u/{token}"))).await;
     assert_eq!(response.status_code().as_u16(), 200);
@@ -428,7 +428,7 @@ async fn pg_down_subscription_surfaces_are_honest_bounded_and_queue_the_suppress
         "the confirm form must still POST to /confirm: {body}"
     );
 
-    // POST /u/:token/confirm — the browser surface: a branded HTML error
+    // POST /u/:token/confirm, the browser surface: a branded HTML error
     // page, NEVER a raw JSON blob or stack trace.
     let response = bounded(
         "pg_down POST /u/:token/confirm",
@@ -460,7 +460,7 @@ async fn pg_down_subscription_surfaces_are_honest_bounded_and_queue_the_suppress
         "a failed suppression write must enqueue a pending retry, got: {retries:?}"
     );
 
-    // POST /u/:token — the RFC 8058 MUA surface keeps its JSON contract: an
+    // POST /u/:token, the RFC 8058 MUA surface keeps its JSON contract: an
     // honest 5xx so the MUA retries, plus the queued retry row.
     let response = bounded(
         "pg_down POST /u",
@@ -480,7 +480,7 @@ async fn pg_down_subscription_surfaces_are_honest_bounded_and_queue_the_suppress
         "the one-click failure must also enqueue the retry"
     );
 
-    // GET /p/:token — the preferences center degrades to the branded error
+    // GET /p/:token, the preferences center degrades to the branded error
     // page ("unknown, please retry"), never a fabricated empty form.
     let response = bounded("pg_down GET /p", srv.get(&format!("/p/{prefs}"))).await;
     assert_eq!(response.status_code().as_u16(), 200);
@@ -494,7 +494,7 @@ async fn pg_down_subscription_surfaces_are_honest_bounded_and_queue_the_suppress
         "a browser surface must never receive raw JSON: {body}"
     );
 
-    // POST /p/:token (unsubscribe all) — HTML 500, the status is preserved.
+    // POST /p/:token (unsubscribe all), HTML 500, the status is preserved.
     let response = bounded(
         "pg_down POST /p",
         srv.post(&format!("/p/{prefs}"))
@@ -508,7 +508,7 @@ async fn pg_down_subscription_surfaces_are_honest_bounded_and_queue_the_suppress
         "{body}"
     );
 
-    // /health stays 200 (liveness: the PROCESS is alive — documented
+    // /health stays 200 (liveness: the PROCESS is alive, documented
     // contract), /ready flips to 503 "not ready" (honest dependency report).
     let response = bounded("pg_down /health", srv.get("/health")).await;
     assert_eq!(response.status_code().as_u16(), 200);
@@ -548,7 +548,7 @@ async fn pg_down_subscription_surfaces_are_honest_bounded_and_queue_the_suppress
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// Matrix 1b — Redis DOWN (Postgres live): recipient surfaces
+// Matrix 1b, Redis DOWN (Postgres live): recipient surfaces
 // ═════════════════════════════════════════════════════════════════════════════
 
 #[tokio::test]
@@ -689,7 +689,7 @@ async fn redis_down_recipient_surfaces_stay_bounded_honest_and_durable() {
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// Matrix 1c — ClickHouse DOWN (Postgres + Redis live): the flush loop
+// Matrix 1c, ClickHouse DOWN (Postgres + Redis live): the flush loop
 // ═════════════════════════════════════════════════════════════════════════════
 
 #[tokio::test]
@@ -790,7 +790,7 @@ async fn clickhouse_down_flush_still_persists_every_event_and_never_wedges() {
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// Matrix 4 — restart under load: no lost events, no double-recorded ones
+// Matrix 4, restart under load: no lost events, no double-recorded ones
 // ═════════════════════════════════════════════════════════════════════════════
 
 #[tokio::test]
@@ -866,7 +866,7 @@ async fn processor_restart_with_postgres_down_loses_nothing_and_never_doubles() 
     .await;
     b.stop().await;
 
-    // Exactly N rows, N distinct recipients — no double-recorded events.
+    // Exactly N rows, N distinct recipients, no double-recorded events.
     let rows: Vec<(String,)> = sqlx::query_as(
         "SELECT recipient FROM events WHERE message_id LIKE $1 || '%' ORDER BY recipient",
     )
@@ -977,7 +977,7 @@ async fn closing_the_pool_mid_flight_reenqueues_and_a_restart_drains_cleanly() {
 
     // Phase-2 accounting: each of the five phase-2 events is either already
     // in the database (its flush won the race with the pool close) or still
-    // in the WAL awaiting re-enqueue — exactly once, never lost, never
+    // in the WAL awaiting re-enqueue, exactly once, never lost, never
     // double-counted. The fixed `pending == 5` this replaces assumed no
     // flush could win that 50ms race; under the deploy host's parallel load
     // two did (pending 3 of 5) and the assertion misfired (deploy

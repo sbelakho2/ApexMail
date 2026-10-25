@@ -9,7 +9,7 @@
 //! DB-10: Prepared statement caching is configured via `statement_cache_capacity`
 //! on `PgConnectOptions` (see [`pool_with_statement_cache`] example).
 //! DB-18: Pool metrics (size, active, idle, wait) are exported via the `metrics`
-//! crate — see [`PoolMetricsCollector`] registration in main.
+//! crate, see [`PoolMetricsCollector`] registration in main.
 //!
 //! # TLS (O-18.1)
 //!
@@ -72,7 +72,7 @@ fn normalized_min_connections(max_connections: u32, requested_min_connections: u
 /// (workers). The formula is `max(4, num_cpus * 2)` which ensures:
 ///
 /// - Small instances (1-2 cores) get at least 4 connections.
-/// - Standard instances (4-8 cores) get 8-16 connections — sufficient for most
+/// - Standard instances (4-8 cores) get 8-16 connections, sufficient for most
 ///   CRUD workloads without overwhelming the database.
 /// - Large instances (16+ cores) get 32+ connections, scaling linearly with
 ///   concurrency while still leaving headroom for the DB server.
@@ -99,13 +99,13 @@ pub fn pool_size_for_workers() -> u32 {
 /// Type alias for the database pool.
 pub type DatabasePool = PgPool;
 
-/// A pair of PostgreSQL connection pools — one for read-write (primary),
+/// A pair of PostgreSQL connection pools, one for read-write (primary),
 /// one for read-only (replica). If no replica URL is configured, both pools
 /// point to the same primary.
 pub struct PoolPair {
     /// Read-write pool (primary)
     pub rw: PgPool,
-    /// Read-only pool (replica — falls back to primary if unconfigured)
+    /// Read-only pool (replica, falls back to primary if unconfigured)
     pub ro: PgPool,
 }
 
@@ -113,7 +113,7 @@ impl PoolPair {
     /// Create a new pool pair from primary and (optional) replica URLs.
     /// If replica_url is None, the replica pool shares the primary URL.
     ///
-    /// G.5: `max_connections` is honored (previously ignored) — both pools
+    /// G.5: `max_connections` is honored (previously ignored), both pools
     /// are configured with it plus the same acquire timeout, liveness
     /// validation, lifetime limits and statement cache as the sibling
     /// constructors (`create_pool`).
@@ -524,7 +524,7 @@ pub fn create_lazy_pool(database_url: &str) -> Result<DatabasePool, sqlx::Error>
     PgPool::connect_lazy(database_url)
 }
 
-/// Create a pair of connection pools — primary (read-write) and replica (read-only).
+/// Create a pair of connection pools, primary (read-write) and replica (read-only).
 ///
 /// T-304: `statement_cache_capacity` controls prepared statement caching.
 /// Pass 0 to disable caching (backward compatible).

@@ -75,7 +75,7 @@ pub async fn ensure_period(
     .await?
     .ok_or_else(|| {
         AccountingError::Invalid(
-            "fiscal period not found after insert conflict — concurrent delete?".to_string(),
+            "fiscal period not found after insert conflict, concurrent delete?".to_string(),
         )
     })
 }
@@ -218,7 +218,7 @@ pub async fn close_period(
 
     if updated.rows_affected() != 1 {
         return Err(AccountingError::Invalid(format!(
-            "fiscal period {period_id} changed state during close — aborted"
+            "fiscal period {period_id} changed state during close, aborted"
         )));
     }
 
@@ -308,7 +308,7 @@ pub async fn lock_period(pool: &PgPool, period_id: Uuid, actor: &str) -> Result<
 
     if updated.rows_affected() != 1 {
         return Err(AccountingError::Invalid(format!(
-            "fiscal period {period_id} changed state during lock — aborted"
+            "fiscal period {period_id} changed state during lock, aborted"
         )));
     }
 

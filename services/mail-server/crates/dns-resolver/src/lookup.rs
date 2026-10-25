@@ -47,7 +47,7 @@ pub struct DnsLookup {
 }
 
 fn build_resolver(config: ResolverConfig, opts: ResolverOpts) -> Result<TokioResolver, DnsError> {
-    // hickory 0.26: ResolverConfig::default() carries NO nameservers — the
+    // hickory 0.26: ResolverConfig::default() carries NO nameservers, the
     // system configuration comes from builder_tokio() (/etc/resolv.conf).
     // When the caller passes the empty default, fall back to system conf.
     if config.name_servers().is_empty() {
@@ -194,7 +194,7 @@ impl DnsLookup {
     /// Lookup SPF record for a domain, preserving the TXT lookup TTL.
     ///
     /// RFC 7208 §4.5: a domain publishing MORE THAN ONE SPF record is a
-    /// permanent error — check_host() cannot proceed. This surfaces as
+    /// permanent error, check_host() cannot proceed. This surfaces as
     /// [`DnsError::MultipleSpfRecords`] instead of the old first-wins pick,
     /// so grading/verification UIs can report the misconfiguration. (The
     /// SMTP accept path uses mail-auth; these lookups feed the graders.)
@@ -345,7 +345,7 @@ impl DnsLookup {
     /// Distinguishes definitive answers from transient failures: only a
     /// definitive "no MX and no A/AAAA" is reported as [`Deliverability::No`]
     /// (safe to negative-cache); a SERVFAIL/timeout/network error on ANY of
-    /// the lookups is [`Deliverability::Transient`] — swallowing it as a plain
+    /// the lookups is [`Deliverability::Transient`], swallowing it as a plain
     /// `Ok(false)` used to let the caller cache a false "undeliverable"
     /// verdict under the POSITIVE TTL.
     pub async fn can_receive_email(&self, domain: &str) -> Deliverability {
@@ -387,13 +387,13 @@ impl DnsLookup {
 /// Deliverability outcome of [`DnsLookup::can_receive_email`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Deliverability {
-    /// MX or implicit-MX (A/AAAA) records exist — the domain can receive mail.
+    /// MX or implicit-MX (A/AAAA) records exist, the domain can receive mail.
     Yes,
-    /// Definitively no MX and no A/AAAA records (NXDOMAIN/NODATA) — a
+    /// Definitively no MX and no A/AAAA records (NXDOMAIN/NODATA), a
     /// definitive negative answer the caller may negative-cache.
     No,
     /// The lookup transiently failed (timeout/SERVFAIL/network) on any of
-    /// MX/A/AAAA — the caller must surface an error and cache NOTHING.
+    /// MX/A/AAAA, the caller must surface an error and cache NOTHING.
     Transient,
 }
 
@@ -459,7 +459,7 @@ mod tests {
     // ── Adversarial: transient failures stay transient for every family ──
 
     /// Every lookup family must surface an unreachable nameserver as a
-    /// transient error — never as a definitive NoRecords, and never as a
+    /// transient error, never as a definitive NoRecords, and never as a
     /// silent empty answer.
     #[tokio::test]
     async fn unreachable_nameserver_is_never_a_definitive_no_records() {

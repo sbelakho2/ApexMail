@@ -17,10 +17,10 @@
 //!
 //! # Alert Conditions
 //!
-//! * **High eviction rate** — When [`DEFAULT_EVICTION_RATE_THRESHOLD`]
+//! * **High eviction rate**, When [`DEFAULT_EVICTION_RATE_THRESHOLD`]
 //!   (100 keys/min) is exceeded, a `tracing::warn!` is emitted with the
 //!   current rate and the cumulative evicted count.
-//! * **Redis connection failure** — On any error from the `INFO memory`
+//! * **Redis connection failure**, On any error from the `INFO memory`
 //!   command, a `tracing::warn!` is logged and the error counter is
 //!   incremented. All other metric gauges retain their previous values.
 
@@ -310,7 +310,7 @@ impl RedisKeyMonitor {
                     used_memory_bytes = info.used_memory,
                     maxmemory_bytes = info.maxmemory,
                     utilization_ratio = utilization,
-                    "HIGH REDIS EVICTION RATE: eviction rate exceeds threshold — \
+                    "HIGH REDIS EVICTION RATE: eviction rate exceeds threshold, \
                      review Redis maxmemory policy and key TTLs",
                 );
             }
@@ -361,8 +361,8 @@ impl RedisKeyMonitor {
     ///
     /// # Errors
     ///
-    /// * **Pool error** — logged as `warn!`, error counter incremented.
-    /// * **Command error** — logged as `warn!`, error counter incremented.
+    /// * **Pool error**, logged as `warn!`, error counter incremented.
+    /// * **Command error**, logged as `warn!`, error counter incremented.
     ///
     /// In both error cases the method returns `None` so callers can detect
     /// failures if needed.
@@ -406,7 +406,7 @@ impl RedisKeyMonitor {
 /// process metrics recorder.
 ///
 /// OPS-4 (live dogfood 2026-10-08): the documented `redis_*` eviction
-/// gauges were UNREACHABLE in the running stack — their only emitter lived
+/// gauges were UNREACHABLE in the running stack, their only emitter lived
 /// in the profile-gated observability service, which the dev stack does not
 /// run. The api-server is always on and its `metrics`-facade exporter on
 /// :9090 is the exposed scrape target, so it spawns the SAME monitor (this
@@ -603,11 +603,11 @@ evicted_keys:invalid
         assert!((info.utilization_ratio() - 0.0).abs() < f64::EPSILON);
     }
 
-    // ─── RedisKeyMonitor — Normal (no eviction) ────────────────────────
+    // ─── RedisKeyMonitor, Normal (no eviction) ────────────────────────
 
     #[test]
     fn test_process_info_response_normal_no_eviction() {
-        // No evictions, low memory usage — should not trigger warning
+        // No evictions, low memory usage, should not trigger warning
         let monitor = RedisKeyMonitor::new(None);
         let now = Instant::now();
 
@@ -648,7 +648,7 @@ evicted_keys:invalid
         assert!(!exceeded, "first-call delta should not exceed threshold");
     }
 
-    // ─── RedisKeyMonitor — Low eviction rate (below threshold) ─────────
+    // ─── RedisKeyMonitor, Low eviction rate (below threshold) ─────────
 
     #[test]
     fn test_process_info_response_low_eviction_rate() {
@@ -664,7 +664,7 @@ evicted_keys:invalid
         monitor.process_info_response(&info1, start);
 
         // Second call: simulate a poll after ~60 seconds with 10 more evictions
-        // That's 10 keys/min — well below threshold.
+        // That's 10 keys/min, well below threshold.
         let later = start + std::time::Duration::from_secs(60);
         let info2 = InfoMemoryResponse {
             used_memory: 4_194_304,
@@ -684,7 +684,7 @@ evicted_keys:invalid
         );
     }
 
-    // ─── RedisKeyMonitor — High eviction rate (above threshold) ────────
+    // ─── RedisKeyMonitor, High eviction rate (above threshold) ────────
 
     #[test]
     fn test_process_info_response_high_eviction_rate() {
@@ -700,7 +700,7 @@ evicted_keys:invalid
         monitor.process_info_response(&info1, start);
 
         // Second call: ~30 seconds later with 100 more evictions
-        // That's 100 / 0.5 = 200 keys/min — well above threshold.
+        // That's 100 / 0.5 = 200 keys/min, well above threshold.
         let later = start + std::time::Duration::from_secs(30);
         let info2 = InfoMemoryResponse {
             used_memory: 6_291_456,
@@ -733,7 +733,7 @@ evicted_keys:invalid
         };
         monitor.process_info_response(&info1, start);
 
-        // Second call: high rate — triggers warning
+        // Second call: high rate, triggers warning
         let spike_time = start + std::time::Duration::from_secs(30);
         let info2 = InfoMemoryResponse {
             used_memory: 6_291_456,
@@ -744,7 +744,7 @@ evicted_keys:invalid
         assert!(exceeded);
         assert!(monitor.is_high_eviction_warning_active());
 
-        // Third call: rate drops below threshold — warning should reset
+        // Third call: rate drops below threshold, warning should reset
         let recovery_time = spike_time + std::time::Duration::from_secs(60);
         let info3 = InfoMemoryResponse {
             used_memory: 6_291_456,
@@ -759,7 +759,7 @@ evicted_keys:invalid
         );
     }
 
-    // ─── RedisKeyMonitor — reset_state ─────────────────────────────────
+    // ─── RedisKeyMonitor, reset_state ─────────────────────────────────
 
     #[test]
     fn test_reset_state_clears_warning() {
@@ -837,7 +837,7 @@ evicted_keys:invalid
         let info_same = InfoMemoryResponse {
             used_memory: 4_194_304,
             maxmemory: 8_388_608,
-            evicted_keys: 500, // same as before — no delta
+            evicted_keys: 500, // same as before, no delta
         };
         let exceeded = monitor.process_info_response(&info_same, later);
         assert!(!exceeded, "zero delta must not trigger warning");
@@ -870,7 +870,7 @@ evicted_keys:invalid
 
     #[test]
     fn test_very_rapid_polling() {
-        // Two polls within the same millisecond — elapsed_minutes ≈ 0
+        // Two polls within the same millisecond, elapsed_minutes ≈ 0
         let monitor = RedisKeyMonitor::new(Some(100.0));
         let now = Instant::now();
 
@@ -881,7 +881,7 @@ evicted_keys:invalid
         };
         monitor.process_info_response(&info1, now);
 
-        // Same instant — elapsed = 0
+        // Same instant, elapsed = 0
         let info2 = InfoMemoryResponse {
             used_memory: 4_194_304,
             maxmemory: 8_388_608,
@@ -891,7 +891,7 @@ evicted_keys:invalid
         // The monitor should handle this gracefully (rate may be very large,
         // but that's a reflection of real data).
         let _ = monitor.process_info_response(&info2, now);
-        // No assertion on the result — just ensuring no panic or crash.
+        // No assertion on the result, just ensuring no panic or crash.
     }
 
     // ── Adversarial: INFO parsing edges, collector mirroring, degradation ──
@@ -961,7 +961,7 @@ evicted_keys:invalid
     #[tokio::test]
     async fn check_evictions_degrades_to_none_on_unreachable_backend() {
         // `Some(false)` thresholds: the assertion below proves the honest
-        // unknown — an unreachable backend yields None, never a boolean.
+        // unknown, an unreachable backend yields None, never a boolean.
         // A configured-but-unreachable Redis must degrade to None (honest
         // "unknown"), never panic or fabricate a boolean.
         let cfg = deadpool_redis::Config::from_url("redis://127.0.0.1:1");
@@ -986,7 +986,7 @@ evicted_keys:invalid
         }
         if std::env::var("APEXMAIL_RELEASE_TEST_MODE").as_deref() == Ok("1") {
             panic!(
-                "APEXMAIL_RELEASE_TEST_MODE: required variable {env_var} is missing — \
+                "APEXMAIL_RELEASE_TEST_MODE: required variable {env_var} is missing, \
              release CI must not skip infrastructure tests"
             );
         }

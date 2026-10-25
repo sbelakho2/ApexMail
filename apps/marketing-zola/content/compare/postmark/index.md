@@ -19,7 +19,7 @@ og_image = "/images/og-image.png"
 # spans and any inline markup. Winner is one of: apexmail | competitor | tie | none.
 # Postmark rows editorially avoid declaring a winner; the one exception is
 # MTA-STS (competitor supports it; ApexMail does not enforce it in delivery
-# — see docs/deployment-facts.json mta_sts_enforcement).
+#, see docs/deployment-facts.json mta_sts_enforcement).
 comparison_sections = [
   { title = "DELIVERABILITY", rows = [
     { feature = "Delivery Rate", apex = '<span>High</span>', comp = '<span class="">High</span>', winner = "none" },
@@ -49,14 +49,14 @@ comparison_sections = [
   ]},
   { title = "PRICING", rows = [
     { feature = "Free Tier", apex = '<span>3,000/mo + one-time 30,000 launch allowance</span>', comp = '<span class="">100/mo</span>', winner = "none" },
-    { feature = "100K emails/mo", apex = '<span>€89 (Pro: 150K)</span>', comp = '<span class="">€122.82 (US$133.50) — Pro: €15.18 (US$16.50)/mo + 90K overage @ €1.20 (US$1.30)/1K</span>', winner = "none" },
+    { feature = "100K emails/mo", apex = '<span>€89 (Pro: 150K)</span>', comp = '<span class="">€122.82 (US$133.50), Pro: €15.18 (US$16.50)/mo + 90K overage @ €1.20 (US$1.30)/1K</span>', winner = "none" },
     { feature = "Unlimited team members", apex = '<span>Enterprise plan</span>', comp = '<span class="">✗</span>', winner = "none" },
     { feature = "Custom enterprise terms", apex = '<span>Annual contracts</span>', comp = '<span class="">✗</span>', winner = "none" }
   ]}
 ]
 
 # Trailing methodology paragraph (rendered via macros::methodology_note).
-# Raw HTML — the inner <p> content with the methodology link. Uses a TOML
+# Raw HTML, the inner <p> content with the methodology link. Uses a TOML
 # multi-line basic string (""" """) because the text contains both a single
 # quote ("provider's") and double-quoted HTML attributes; the leading \ trims
 # the opening newline and literal newlines collapse to spaces per TOML spec.

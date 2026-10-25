@@ -15,7 +15,7 @@
 //!
 //! Validation rule (fail closed):
 //! 1. the source IP's PTR hostname must match an ENABLED provider's
-//!    `rdns_patterns` (exact domain or a real subdomain — never a bare
+//!    `rdns_patterns` (exact domain or a real subdomain, never a bare
 //!    string suffix);
 //! 2. the provider's `validation_method` must be evaluable for an SMTP ARF
 //!    report (`rdns_fcrcdns` today; webhook/DKIM methods belong to other
@@ -29,7 +29,7 @@
 //! rDNS domains; the source networks are intentionally left empty (to be
 //! configured by operators) because the repository contains no substantiated
 //! provider network data. An empty `source_networks` means "no network
-//! restriction is registered for this provider" — the rDNS/FCrDNS method
+//! restriction is registered for this provider", the rDNS/FCrDNS method
 //! alone is the registered expectation, which preserves the previously
 //! documented behaviour while making it explicit and versioned.
 //!
@@ -187,7 +187,7 @@ pub enum FblAuthority {
 }
 
 impl FblAuthority {
-    /// True only for [`FblAuthority::Candidate`] — and even then the caller
+    /// True only for [`FblAuthority::Candidate`], and even then the caller
     /// must complete FCrDNS confirmation before treating the traffic as
     /// authoritative.
     pub fn is_candidate(&self) -> bool {
@@ -195,7 +195,7 @@ impl FblAuthority {
     }
 }
 
-/// Compiled seed list — the providers substantiated by the repository's
+/// Compiled seed list, the providers substantiated by the repository's
 /// pre-existing FBL sender list (crates/mta/src/servers/feedback_loop.rs,
 /// `TRUSTED_FBL_SENDERS`) grouped by operator. Source networks are NOT
 /// seeded: nothing in the repository substantiates any provider's network

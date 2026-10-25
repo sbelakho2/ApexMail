@@ -1,4 +1,4 @@
-//! Insights engine — auto-generates actionable insights from analytics data.
+//! Insights engine, auto-generates actionable insights from analytics data.
 //!
 //! Compares recent metrics against historical baselines and surfaces meaningful
 //! observations. Every insight is backed by real database queries. If a metric
@@ -75,7 +75,7 @@ pub struct TrendInsight {
     pub data_points: i64,
     pub trend_direction: String,
     /// Sample-size label ("high" / "medium"), NOT a statistical confidence
-    /// level — the trend is a heuristic comparison of daily averages.
+    /// level, the trend is a heuristic comparison of daily averages.
     pub confidence: String,
 }
 
@@ -212,7 +212,7 @@ async fn get_insights(
                         "Bounce rate decreased".into()
                     },
                     description: format!(
-                        "Bounce rate changed {:+2.1}% this period — check DNS configuration for affected domains",
+                        "Bounce rate changed {:+2.1}% this period, check DNS configuration for affected domains",
                         pct
                     ),
                     severity: if dir == "up" && pct > 20.0 {
@@ -365,7 +365,7 @@ async fn get_insights(
     }
 
     // ─── Send Volume Growth Trend ───────────────────────────────────────
-    // Successful sends from the canonical send-cohort series — never message
+    // Successful sends from the canonical send-cohort series, never message
     // creation, which counts mail that may never have left the queue.
     let volume_rows = sent_volume_by_day(db, columns, AnalyticsRange::Days30).await?;
 
@@ -410,7 +410,7 @@ async fn get_insights(
 
     // ─── Complaint Rate Insight ─────────────────────────────────────────
     // DISTINCT complained messages (canonical counts), not raw complaint
-    // events — a repeated callback for one message cannot fake a spike.
+    // events, a repeated callback for one message cannot fake a spike.
     let (com_pct, com_dir) = calc_change_pct(current.complained as f64, previous.complained as f64);
 
     if current.complained > 0 && (com_dir == "up" || com_pct.abs() > 50.0) {
@@ -500,7 +500,7 @@ async fn get_trends(
     let db = &state.db;
     let mut trends: Vec<TrendInsight> = Vec::new();
 
-    // Send volume trend — successful sends from the canonical cohort series.
+    // Send volume trend, successful sends from the canonical cohort series.
     let columns: EventColumns = detect_event_columns(&state).await;
     let volume_rows = sent_volume_by_day(db, columns, AnalyticsRange::Days30).await?;
 
@@ -596,7 +596,7 @@ async fn get_trends(
 }
 
 /// Counts active tenants with no verified sending domain. The domains
-/// table's column is `verified` (migration 052) — the previous query read a
+/// table's column is `verified` (migration 052), the previous query read a
 /// non-existent `d.is_verified`, which errored the count to 0 (via
 /// unwrap_or(0)) so this recommendation could never fire.
 const UNVERIFIED_DOMAINS_SQL: &str = "SELECT COUNT(DISTINCT t.id)::bigint
@@ -628,7 +628,7 @@ async fn get_recommendations(
     let db = &state.db;
     let mut recommendations: Vec<Recommendation> = Vec::new();
 
-    // Check bounce rate for DNS recommendation — canonical send-cohort rate
+    // Check bounce rate for DNS recommendation, canonical send-cohort rate
     // (fraction 0..1, absent when there is no send cohort).
     let columns = detect_event_columns(&state).await;
     let counts = send_cohort_counts(db, None, "7 days", columns).await?;
@@ -656,7 +656,7 @@ async fn get_recommendations(
         recommendations.push(recommendation);
     }
 
-    // Check for stale trials (mollie_subscriptions — the table billing
+    // Check for stale trials (mollie_subscriptions, the table billing
     // webhooks write; the legacy `subscriptions` table has no writer)
     let stale_trials: i64 = sqlx::query_scalar(
         "SELECT COUNT(*)::bigint FROM mollie_subscriptions
@@ -811,7 +811,7 @@ mod tests {
         };
 
         // Two copies of message A today (one cohort row); one copy of B
-        // today and one three days ago — the SAME recipient-send, so one
+        // today and one three days ago, the SAME recipient-send, so one
         // cohort row bucketed at its first send.
         seed(message_a.clone(), 2).await;
         seed(message_a, 3).await;
@@ -822,7 +822,7 @@ mod tests {
         // Scoped to THIS test's tenant. `sent_volume_by_day` is deliberately
         // fleet-wide (it backs the CP insights page), so asserting on it here
         // made the expected counts depend on every other test writing `events`
-        // into the same shared database — an intermittent failure.
+        // into the same shared database, an intermittent failure.
         let rows: Vec<(String, i64)> = crate::analytics_metrics::send_cohort_time_series(
             &pool,
             Some(&tenant),
@@ -840,7 +840,7 @@ mod tests {
             "one cohort row per recipient-send, bucketed at MIN(sent_at): {rows:?}"
         );
         // A buckets today (both copies today); B buckets on its FIRST send,
-        // three days ago — the second copy does not create a new cohort row
+        // three days ago, the second copy does not create a new cohort row
         // or a second day bucket.
         assert_eq!(
             rows.len(),
@@ -1237,7 +1237,7 @@ mod router_adversarial_tests {
         let env = AdvEnv::admin(pool.clone()).await;
 
         // Current window (7d): 20 sends, 20 delivered. Previous window
-        // (7-14d): 20 sends, 10 delivered — a delivery-rate improvement.
+        // (7-14d): 20 sends, 10 delivered, a delivery-rate improvement.
         for i in 0..20 {
             seed_cohort_event(
                 &pool,
@@ -1320,7 +1320,7 @@ mod router_adversarial_tests {
         assert_eq!(status, StatusCode::OK, "{body}");
         // No FABRICATED data insights: the 5 seeded sends are below every
         // evidence threshold. (The growth signup insight legitimately fires —
-        // the fixture itself created tenants this period — so the guard is
+        // the fixture itself created tenants this period, so the guard is
         // scoped to the data-derived categories.)
         let insights = body["insights"].as_array().cloned().unwrap_or_default();
         let fabricated: Vec<_> = insights
@@ -1604,7 +1604,7 @@ mod coverage_residual_tests {
         // CURRENT: 85 sends, all delivered, 85 opened, 30 bounced.
         // PREVIOUS: 100 sends, all delivered, 100 opened, none bounced.
         seed_cohort_batch(&pool, tenant, 1, 85, &["delivered", "opened"]).await;
-        // The bounced messages carry no open — they must not inflate the
+        // The bounced messages carry no open, they must not inflate the
         // engagement numerator.
         for n in 0..30 {
             seed_cohort_message(&pool, tenant, 500 + n, 1, &["delivered", "bounced"]).await;
@@ -1638,7 +1638,7 @@ mod coverage_residual_tests {
         assert_eq!(engagement.severity, "info");
 
         // Signups 3(+ε) vs 10: a mild-looking decline stays inside the
-        // warning band boundary checks — asserted on the direction only,
+        // warning band boundary checks, asserted on the direction only,
         // because the canonical chain seeds a tenant of its own.
         let signups = by_metric.get("signups").expect("signup insight");
         assert_eq!(signups.direction, "down");

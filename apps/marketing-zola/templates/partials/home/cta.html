@@ -1,16 +1,18 @@
-{# CTA section — ARK round (lane T). Facts as stacked rows, no icon bullets,
+{# CTA section, ARK round (lane T). Facts as stacked rows, no icon bullets,
    no rhetorical heading. This is the page's ONE crimson field:
    .apex-mkt-section--brand and the recipe recolor the heading, lead,
    feature rows and the trust meta to paper, invert .apex-btn--primary to
-   paper-on-crimson and rule the plain .apex-btn white — no color classes
+   paper-on-crimson and rule the plain .apex-btn white, no color classes
    are written here. #}
 <section class="apex-mkt-section apex-mkt-section--brand" aria-label="Get started">
   <div class="apex-mkt-container">
-  <h2 class="apex-h2">
+  <div class="apex-mkt-heading--statement">
+  <h2 class="apex-mkt-heading__title">
     {% if i18n_data and i18n_data[l] and i18n_data[l]["cta"] and i18n_data[l]["cta"]["heading_1"] %}{{ i18n_data[l]["cta"]["heading_1"] }}{% else %}Create your account and send{% endif %}
   </h2>
+  </div>
   <p class="apex-lead max-w-2xl mt-2">
-    {% if i18n_data and i18n_data[l] and i18n_data[l]["cta"] and i18n_data[l]["cta"]["subtitle"] %}{{ i18n_data[l]["cta"]["subtitle"] }}{% else %}Start on the free tier and grow into the same API — no migration, no renegotiation, no surprise overage rates.{% endif %}
+    {% if i18n_data and i18n_data[l] and i18n_data[l]["cta"] and i18n_data[l]["cta"]["subtitle"] %}{{ i18n_data[l]["cta"]["subtitle"] }}{% else %}Start on the free tier and grow into the same API, no migration, no renegotiation, no surprise overage rates.{% endif %}
   </p>
   <div class="mt-8 max-w-2xl">
     <p>{% if i18n_data and i18n_data[l] and i18n_data[l]["cta"] and i18n_data[l]["cta"]["feature_test"] %}{{ i18n_data[l]["cta"]["feature_test"] }}{% else %}Send your first email in minutes (after domain verification){% endif %}</p>

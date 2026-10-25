@@ -57,7 +57,7 @@ async fn start_impersonation(
     Json(body): Json<ImpersonateRequest>,
 ) -> Result<Response, ApiError> {
     // CRITICAL: Only platform admins can start impersonation sessions.
-    // Audit D: `require_scopes(&["*"])` alone is NOT sufficient — every
+    // Audit D: `require_scopes(&["*"])` alone is NOT sufficient, every
     // customer tenant owner also carries the wildcard scope (see
     // `scopes_for_role`), which would let any tenant admin mint an
     // impersonation session. Impersonation is a control-plane capability
@@ -88,7 +88,7 @@ async fn start_impersonation(
         .as_deref()
         .ok_or_else(|| ApiError::BadRequest("missing operator_id in impersonation token".into()))?;
     let operator_name = payload.operator_name.as_deref().unwrap_or("Operator");
-    // Audit D: `exp` and `jti` are mandatory — `verify_impersonation_token`
+    // Audit D: `exp` and `jti` are mandatory, `verify_impersonation_token`
     // already rejected missing/expired/too-long-lived tokens, and the jti is
     // consumed single-use below. `unwrap_or(0)`/`unwrap_or_default()` used to
     // silently accept tokens with no expiry at all.
@@ -101,7 +101,7 @@ async fn start_impersonation(
         .filter(|jti| !jti.is_empty())
         .ok_or_else(|| ApiError::Unauthorized("impersonation token missing token ID".into()))?;
 
-    // Audit D: consume-on-use — the jti is recorded in Redis with a TTL for
+    // Audit D: consume-on-use, the jti is recorded in Redis with a TTL for
     // the remaining token lifetime, so a captured token cannot be replayed.
     // Fails CLOSED when Redis is unavailable (a replayable impersonation
     // session is worse than a temporarily unavailable one).
@@ -153,7 +153,7 @@ async fn start_impersonation(
         "impersonation_session={session_token}; HttpOnly; Path=/; Max-Age={max_age_secs}; SameSite=Strict{}",
         if state.config.environment.is_production() { "; Secure" } else { "" }
     );
-    // The token is base64url(payload).base64url(HMAC) — the URL-safe
+    // The token is base64url(payload).base64url(HMAC), the URL-safe
     // Base64 alphabet plus '.' is entirely visible ASCII, and
     // HeaderValue::from_str rejects only non-visible-ASCII and control
     // bytes, so this parse cannot fail.
@@ -225,7 +225,7 @@ async fn end_impersonation(
             ""
         }
     );
-    // A constant, entirely visible-ASCII string — HeaderValue::from_str
+    // A constant, entirely visible-ASCII string, HeaderValue::from_str
     // rejects only non-visible-ASCII and control bytes, so this parse
     // cannot fail.
     let val = clear_cookie
@@ -307,7 +307,7 @@ fn verify_impersonation_token(
         .map_err(|_| ApiError::Unauthorized("invalid token payload".into()))?;
 
     // Audit D: expiry is MANDATORY. Previously `if let Some(exp)` meant a
-    // token without `exp` never expired — a permanent impersonation backdoor.
+    // token without `exp` never expired, a permanent impersonation backdoor.
     let exp = payload
         .exp
         .ok_or_else(|| ApiError::Unauthorized("impersonation token missing expiry".into()))?;
@@ -347,7 +347,7 @@ async fn consume_impersonation_jti(
     let mut conn = state.redis.get().await.map_err(|error| {
         tracing::error!(error = %error, "Redis unavailable for impersonation single-use check");
         ApiError::ServiceUnavailable(
-            "impersonation is temporarily unavailable — try again later".into(),
+            "impersonation is temporarily unavailable, try again later".into(),
         )
     })?;
 
@@ -362,7 +362,7 @@ async fn consume_impersonation_jti(
         .map_err(|error| {
             tracing::error!(error = %error, "Redis SET NX failed for impersonation single-use check");
             ApiError::ServiceUnavailable(
-                "impersonation is temporarily unavailable — try again later".into(),
+                "impersonation is temporarily unavailable, try again later".into(),
             )
         })?;
 
@@ -467,7 +467,7 @@ mod tests {
     #[test]
     fn impersonation_token_without_expiry_is_rejected() {
         // A correctly signed token carrying no `exp` used to be valid
-        // forever — it must now be rejected outright.
+        // forever, it must now be rejected outright.
         let token = impersonation_token("secret", None, Some("jti-1"));
         match verify_impersonation_token(&token, "secret") {
             Err(ApiError::Unauthorized(message)) => {
@@ -492,7 +492,7 @@ mod tests {
     #[test]
     fn impersonation_token_lifetime_capped_at_one_hour() {
         let now_ms = chrono::Utc::now().timestamp_millis();
-        // Valid for 2 hours — within signature validity but over the cap.
+        // Valid for 2 hours, within signature validity but over the cap.
         let too_long = now_ms + 2 * 60 * 60 * 1000;
         let token = impersonation_token("secret", Some(too_long), Some("jti-3"));
         match verify_impersonation_token(&token, "secret") {
@@ -502,7 +502,7 @@ mod tests {
             other => panic!("expected Unauthorized, got {other:?}"),
         }
 
-        // Valid for 30 minutes — accepted.
+        // Valid for 30 minutes, accepted.
         let reasonable = now_ms + 30 * 60 * 1000;
         let token = impersonation_token("secret", Some(reasonable), Some("jti-4"));
         let payload = verify_impersonation_token(&token, "secret")
@@ -792,7 +792,7 @@ mod adversarial_tests {
     // ── Outage + wire-detail arms ────────────────────────────────
     //
     // A local driver over the REAL router with caller-controlled Redis
-    // endpoint and environment — AdvEnv always uses the shared test Redis
+    // endpoint and environment, AdvEnv always uses the shared test Redis
     // and a non-production config, so the fail-closed arms and the
     // `; Secure` cookie arms are unreachable through it.
 
@@ -883,7 +883,7 @@ mod adversarial_tests {
     }
 
     /// Redis reachable at TCP level but refusing commands (the socket is
-    /// torn down on accept): the SET NX itself fails — the same fail-closed
+    /// torn down on accept): the SET NX itself fails, the same fail-closed
     /// contract applies.
     #[tokio::test]
     async fn start_fails_closed_when_the_set_nx_command_fails() {
@@ -914,7 +914,7 @@ mod adversarial_tests {
     }
 
     /// The audit write is on the critical path: when it fails the exchange
-    /// is refused (500) — an unaudited impersonation session must never be
+    /// is refused (500), an unaudited impersonation session must never be
     /// minted. The audit_logs relation is renamed in this throwaway
     /// per-test database.
     #[tokio::test]
@@ -1023,7 +1023,7 @@ mod adversarial_tests {
             .await;
         assert_eq!(status, StatusCode::OK);
         // The payload carries no operatorId/tenantId, so the audit metadata
-        // has no attribution keys at all — the handler must still persist
+        // has no attribution keys at all, the handler must still persist
         // the end-of-session record (attributed by tokenId only).
         let (operator, tenant): (Option<String>, Option<String>) = sqlx::query_as(
             "SELECT details->>'operatorId', details->>'tenantId' FROM audit_logs \

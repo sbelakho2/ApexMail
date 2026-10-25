@@ -56,7 +56,7 @@ pub struct RevenueStats {
     pub arr_growth: f64,
     pub ltv: f64,
     /// Customer acquisition cost. Omitted (not zero) when no marketing-spend
-    /// data has been recorded — a zero would be a fabricated metric.
+    /// data has been recorded, a zero would be a fabricated metric.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cac: Option<f64>,
     pub churn_rate: f64,
@@ -174,9 +174,9 @@ fn recent_month_starts(now: DateTime<Utc>, count: u32) -> Vec<DateTime<Utc>> {
         .collect()
 }
 
-/// Subscriptions are read from `mollie_subscriptions` — the table the
+/// Subscriptions are read from `mollie_subscriptions`, the table the
 /// billing-service webhook writers populate (the legacy `subscriptions`
-/// table has no writer) — joined via `tenants.plan` to `plans` pricing,
+/// table has no writer), joined via `tenants.plan` to `plans` pricing,
 /// mirroring billing-service's `get_mrr_report` pattern. `cancel_expr` is
 /// validated at the call site to be a known column ref or a safe CASE
 /// expression.
@@ -230,7 +230,7 @@ fn audit_log_spend_sql(audit_time_col: &str) -> Result<String, ApiError> {
 }
 
 /// Marketing spend since `cutoff`. Returns `Ok(None)` when no spend source
-/// has any rows — the CAC block is then omitted from the response instead
+/// has any rows, the CAC block is then omitted from the response instead
 /// of reporting a fabricated zero.
 async fn marketing_spend_cents_since(
     db: &sqlx::PgPool,
@@ -406,7 +406,7 @@ async fn get_revenue(
     // Plan-change velocity from the activation audit: every verified paid
     // checkout writes the before/after monthly MRR into
     // `billing.subscription_activated`, so upgrades, downgrades and expansion
-    // MRR are derived from recorded facts — not inferred or fabricated.
+    // MRR are derived from recorded facts, not inferred or fabricated.
     let plan_changes = plan_changes_since(db, cutoff_30).await?;
     let mut upgrades = 0i64;
     let mut downgrades = 0i64;

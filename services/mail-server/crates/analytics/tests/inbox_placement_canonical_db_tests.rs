@@ -86,7 +86,7 @@ async fn delivery_only_events_leave_placement_unknown() {
         eprintln!("skipping: set TEST_DATABASE_URL to run DB-backed test");
         return;
     };
-    // Canonical events carry 26-char tenant ids (the ULID domain) — and no
+    // Canonical events carry 26-char tenant ids (the ULID domain), and no
     // placement tests exist for such a tenant (placement_tests.tenant_id is
     // UUID-typed), so placement stays unknown while deliveries count.
     let simple = Uuid::new_v4().simple().to_string();
@@ -148,7 +148,7 @@ async fn measured_seed_results_drive_the_rate() {
         .expect("summary");
 
     // Overall rate over ALL measured inbox vs spam placements: 8 / (8 + 3)
-    // — the outlook spam row is a measurement too.
+    //, the outlook spam row is a measurement too.
     assert!((summary.overall_inbox_rate.unwrap() - 8.0 / 11.0).abs() < 1e-9);
     assert_eq!(summary.measured.inbox, 8);
     assert_eq!(summary.measured.spam, 3);

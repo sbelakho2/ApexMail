@@ -195,7 +195,7 @@ impl GraderEngine {
             apexmail_dns_resolver::lookup::DnsLookup::new()
                 .map_err(|e| format!("DNS resolver init failed: {e}"))?,
         );
-        // NOTE: no shared HTTP client anymore — the MTA-STS policy fetch
+        // NOTE: no shared HTTP client anymore, the MTA-STS policy fetch
         // builds a per-request client pinned to pre-validated IPs (SSRF
         // hardening; see network_checks::lookup_mta_sts).
         // Validate all configured tenant scoring weights at startup so
@@ -463,27 +463,27 @@ impl GraderEngine {
             findings.push(Finding {
                 severity: FindingSeverity::Error,
                 category: "dns".into(),
-                message: "No MX records found — domain cannot receive email".into(),
+                message: "No MX records found, domain cannot receive email".into(),
             });
         } else if a.mx.len() < 2 {
             findings.push(Finding {
                 severity: FindingSeverity::Info,
                 category: "dns".into(),
-                message: "Only one MX record — add a backup MX for redundancy".into(),
+                message: "Only one MX record, add a backup MX for redundancy".into(),
             });
         }
         if a.spf.is_none() {
             findings.push(Finding {
                 severity: FindingSeverity::Error,
                 category: "authentication".into(),
-                message: "No SPF record found — emails may be marked as spam".into(),
+                message: "No SPF record found, emails may be marked as spam".into(),
             });
         }
         if a.dkim.is_empty() {
             findings.push(Finding {
                 severity: FindingSeverity::Error,
                 category: "authentication".into(),
-                message: "No DKIM records found for common selectors — add DKIM signing".into(),
+                message: "No DKIM records found for common selectors, add DKIM signing".into(),
             });
         }
         if let Some(ref dmarc) = a.dmarc {
@@ -492,7 +492,7 @@ impl GraderEngine {
                     severity: FindingSeverity::Warning,
                     category: "authentication".into(),
                     message: format!(
-                        "DMARC policy is '{}' — consider upgrading to 'reject'",
+                        "DMARC policy is '{}', consider upgrading to 'reject'",
                         dmarc.policy
                     ),
                 });
@@ -501,7 +501,7 @@ impl GraderEngine {
             findings.push(Finding {
                 severity: FindingSeverity::Error,
                 category: "authentication".into(),
-                message: "No DMARC record found — consider adding DMARC to prevent spoofing".into(),
+                message: "No DMARC record found, consider adding DMARC to prevent spoofing".into(),
             });
         }
         if a.mta_sts.is_none() {
@@ -509,7 +509,7 @@ impl GraderEngine {
                 severity: FindingSeverity::Info,
                 category: "transport_security".into(),
                 message:
-                    "No MTA-STS policy detected — add `_mta-sts` TXT and well-known policy file"
+                    "No MTA-STS policy detected, add `_mta-sts` TXT and well-known policy file"
                         .into(),
             });
         }
@@ -517,7 +517,7 @@ impl GraderEngine {
             findings.push(Finding {
                 severity: FindingSeverity::Info,
                 category: "transport_security".into(),
-                message: "No TLS-RPT record — add `_smtp._tls` TXT to receive TLS failure reports"
+                message: "No TLS-RPT record, add `_smtp._tls` TXT to receive TLS failure reports"
                     .into(),
             });
         }
@@ -649,7 +649,7 @@ impl GraderEngine {
         let domain = submission.domain.clone();
         let selectors = submission.selectors.clone();
 
-        // Reuse cache when possible — dramatically reduces DNS load on retries.
+        // Reuse cache when possible, dramatically reduces DNS load on retries.
         let cache_key = format!("{}|{}", domain, selectors.join(","));
         let domain_check = if let Some(cached) = self.cache.get(&cache_key) {
             metrics::counter!("grader.domain_cache.hit").increment(1);
@@ -732,7 +732,7 @@ impl GraderEngine {
             spam_verdict.classification
         ));
         if content_score.score > 0.5 {
-            all_recs.push("Improve email content quality — avoid spam trigger phrases".to_string());
+            all_recs.push("Improve email content quality, avoid spam trigger phrases".to_string());
         }
         all_recs.sort();
         all_recs.dedup();
@@ -839,7 +839,7 @@ impl GraderEngine {
                 severity: FindingSeverity::Info,
                 category: "content".into(),
                 message: format!(
-                    "High URL count ({}) — may trigger spam filters",
+                    "High URL count ({}), may trigger spam filters",
                     verdict.url_score.url_count
                 ),
             });
@@ -956,7 +956,7 @@ pub(crate) fn validate_submission(
     }
     // Header-injection guard: `from` becomes the synthesized MIME's From:
     // line, so CR/LF anywhere in it rejects the submission outright (same
-    // policy as the subject — it is a single required field, there is
+    // policy as the subject, it is a single required field, there is
     // nothing sensible to skip).
     if from.contains('\r') || from.contains('\n') {
         return Err(GraderError::InvalidDomain("`from` contains CR/LF".into()));
@@ -973,7 +973,7 @@ pub(crate) fn validate_submission(
             "too many recipients (max {MAX_RECIPIENTS})"
         )));
     }
-    // Recipients are spliced into the synthesized To: line — any entry
+    // Recipients are spliced into the synthesized To: line, any entry
     // carrying CR/LF is skipped and flagged (same policy as custom
     // headers), never spliced into the MIME.
     let mut skipped_recipients = 0usize;
@@ -1234,7 +1234,7 @@ mod tests {
 
     #[test]
     fn validate_submission_rejects_crlf_from() {
-        // `from` is spliced into the synthesized From: line — a CR/LF there
+        // `from` is spliced into the synthesized From: line, a CR/LF there
         // is a header-injection attempt and rejects the whole submission.
         let req = EmailSubmitRequest {
             domain: Some("example.com".into()),
@@ -1451,7 +1451,7 @@ mod tests {
 
     /// PII regression: the body content (and unique sentinel) MUST NEVER appear
     /// in any field of the serialized GraderResponse. The grader returns
-    /// scores, breakdowns, findings, and recommendations — it must not echo
+    /// scores, breakdowns, findings, and recommendations, it must not echo
     /// back the email body, headers, or addresses anywhere in the response or
     /// breakdown JSON.
     #[test]
@@ -1474,7 +1474,7 @@ mod tests {
         let validated = validate_submission(&req, &cfg()).unwrap();
 
         // Build a representative response using the public scoring layer
-        // (no DNS, no auth verification — those are network-dependent).
+        // (no DNS, no auth verification, those are network-dependent).
         let mut findings: Vec<Finding> = Vec::new();
         let (score, grade, breakdown, findings_out, recs) =
             crate::scoring::GradeCalculator::calculate(
@@ -1832,7 +1832,7 @@ mod tests {
             domain: Some("example.com".into()),
             from: Some("alice@example.com".into()),
             to: vec!["bob@example.net".into()],
-            subject: Some("Act now — free money!!!".into()),
+            subject: Some("Act now, free money!!!".into()),
             body_text: Some(
                 "Congratulations! You have won a FREE prize. Click here now to claim \
                  your cash reward. Limited time offer! Viagra cheap pills."

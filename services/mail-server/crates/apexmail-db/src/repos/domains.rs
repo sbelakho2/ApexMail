@@ -145,7 +145,7 @@ impl DomainsRepo {
             .fetch_all(pool)
             .await,
             _ => {
-                // First page — no cursor
+                // First page, no cursor
                 sqlx::query_as::<_, Domain>(
                     "SELECT id, tenant_id, name, status, spf_verified, dkim_verified, dmarc_verified, \
                      return_path_verified, mta_sts_verified, bimi_verified, tlsrpt_verified, \

@@ -80,7 +80,7 @@ pub static ENDPOINT_COSTS: Lazy<HashMap<&'static str, RequestCost>> = Lazy::new(
 /// These are the cheapest thing the server does: a static file, no database,
 /// no auth, no rendering. The default "unknown endpoint" cost is 1 020 units
 /// because it models a real handler, and charging a stylesheet that made every
-/// browser page cost ~40 × 1 020 units — two page loads per minute exhausted
+/// browser page cost ~40 × 1 020 units, two page loads per minute exhausted
 /// the whole per-client budget, and the third request of the second page came
 /// back 429 (live run 2026-10-22: `/assets/globals.css` answered with
 /// `DDOS_RATE_LIMITED`, which the browser then refused as a stylesheet of the
@@ -330,7 +330,7 @@ impl CostBasedLimiter {
     ///
     /// Audit SM5 F3: the old rule only evicted entries that were BOTH
     /// stale AND at full capacity, so a PARTIALLY-drained bucket (the
-    /// common case after a handful of requests) was immortal — an
+    /// common case after a handful of requests) was immortal, an
     /// attacker rotating IPv6 /64s minted one permanent entry per
     /// address. Staleness alone now evicts, regardless of remaining
     /// budget; the hard cap is re-enforced as well.
@@ -551,7 +551,7 @@ mod tests {
     //    are evicted regardless of remaining budget ─────────────────────
 
     /// Fail-first for the finding: a PARTIALLY-drained bucket (remaining
-    /// < capacity) used to be immortal — `cleanup` evicted only
+    /// < capacity) used to be immortal, `cleanup` evicted only
     /// at-capacity entries, so client-IP rotation grew the map forever.
     #[test]
     fn test_cleanup_evicts_partially_drained_stale_bucket() {
@@ -620,7 +620,7 @@ mod tests {
     /// Live run 2026-10-22: the tenant budget refilled only when
     /// `elapsed.as_secs()` was non-zero AND reset `last_refill` on every
     /// check, so a client making requests more often than once per second
-    /// never refilled at all — the budget only ever went down. A browser
+    /// never refilled at all, the budget only ever went down. A browser
     /// hitting its limit stayed limited for the rest of the session, because
     /// the idle pause needed to trigger a refill is not something an active
     /// client takes. Refill must be continuous.
@@ -649,7 +649,7 @@ mod tests {
         assert_eq!(allowed, 600, "the whole minute budget must be spendable");
 
         // Now stay continuously active: 10 ms apart, 40 requests. At 60
-        // units/second that credits ~24 units — enough for ~4 more requests.
+        // units/second that credits ~24 units, enough for ~4 more requests.
         // Under the old whole-second refill this was 0.
         let mut allowed_after = 0usize;
         for _ in 0..40 {
@@ -684,7 +684,7 @@ mod tests {
             system_capacity: 10_000_000,
             max_tracked_budgets: 100,
         });
-        // One document plus 30 assets plus 8 API calls — a single page load.
+        // One document plus 30 assets plus 8 API calls, a single page load.
         let mut spend = 0u64;
         for path in ["/dashboard"]
             .into_iter()

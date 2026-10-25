@@ -1,4 +1,4 @@
-//! Thread-parallel tests — std::thread::spawn for true parallelism.
+//! Thread-parallel tests, std::thread::spawn for true parallelism.
 
 use std::sync::Arc;
 use std::thread;
@@ -13,7 +13,7 @@ use sales_autopilot::crm::CrmService;
 const NUM_THREADS: usize = 8;
 
 // ---------------------------------------------------------------------------
-// 1. Parallel crypto — 8 threads doing HMAC
+// 1. Parallel crypto, 8 threads doing HMAC
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -34,7 +34,7 @@ fn test_parallel_crypto_threads() {
     for (i, h) in handles.into_iter().enumerate() {
         h.join().unwrap_or_else(|_| {
             panic!(
-                "crypto thread {} panicked — possible invariant violation",
+                "crypto thread {} panicked, possible invariant violation",
                 i
             )
         });
@@ -42,7 +42,7 @@ fn test_parallel_crypto_threads() {
 }
 
 // ---------------------------------------------------------------------------
-// 2. Parallel validation — 8 threads validating emails
+// 2. Parallel validation, 8 threads validating emails
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -65,7 +65,7 @@ fn test_parallel_validation_threads() {
 }
 
 // ---------------------------------------------------------------------------
-// 3. Parallel scoring — 8 threads scoring leads
+// 3. Parallel scoring, 8 threads scoring leads
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -102,7 +102,7 @@ fn test_parallel_scoring_threads() {
 }
 
 // ---------------------------------------------------------------------------
-// 4. Parallel billing — 8 threads calculating costs
+// 4. Parallel billing, 8 threads calculating costs
 // ---------------------------------------------------------------------------
 
 #[test]

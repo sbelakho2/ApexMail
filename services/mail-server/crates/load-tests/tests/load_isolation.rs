@@ -1,12 +1,12 @@
-//! Tenant isolation tests — heavy load on one tenant must not degrade others.
+//! Tenant isolation tests, heavy load on one tenant must not degrade others.
 //!
 //! Implemented for audit finding SM12 F4 (the file used to contain only this
 //! doc comment and zero `#[test]`s). The noisy-neighbour guarantee is now
 //! exercised against the REAL production machinery, in-process:
 //!
-//! * [`apexmail_rate_limiter::KeyedRateLimiter`] — the per-key governor map
-//!   production API limiting actually uses — with one key per tenant, and
-//! * [`observability_service::metrics_collector::MetricsCollector`] — the
+//! * [`apexmail_rate_limiter::KeyedRateLimiter`], the per-key governor map
+//!   production API limiting actually uses, with one key per tenant, and
+//! * [`observability_service::metrics_collector::MetricsCollector`], the
 //!   shared in-memory analytics aggregation both tenants write into.
 //!
 //! Tenant A hammers its own key at maximum sustainable rate while tenant B
@@ -47,14 +47,14 @@ const TENANT_B: &str = "tenant-quiet-b";
 const TENANT_B_OPS: usize = 4_000;
 
 /// A p50 at or below this many nanoseconds is treated as "effectively
-/// instant" for the ratio floor — see the module doc on scheduler slack.
+/// instant" for the ratio floor, see the module doc on scheduler slack.
 const P50_ABSOLUTE_SLACK: Duration = Duration::from_micros(2);
 const P90_ABSOLUTE_SLACK: Duration = Duration::from_micros(10);
 
 /// Scheduler-slack scale for the CI/deploy runner, which measures B's noisy
 /// phase while the ENTIRE workspace suite competes for the same cores (the
 /// dev-machine bounds assume the test has the box to itself: the first host
-/// run missed the p50 bound by 0.33µs — 7.131µs vs 6.8µs — a scheduler
+/// run missed the p50 bound by 0.33µs, 7.131µs vs 6.8µs, a scheduler
 /// artifact, not an isolation failure; a real noisy-neighbour breach is
 /// orders of magnitude beyond it). `LOAD_TEST_ISOLATION_SLACK_SCALE=10`
 /// widens both absolute slacks; the RATIOS are unchanged.
@@ -112,11 +112,11 @@ fn throughput(ops: usize, elapsed: Duration) -> f64 {
 #[test]
 fn noisy_neighbour_tenant_b_stays_within_documented_bounds() {
     // Budget design (per key, both tenants share the config):
-    // * burst 20 000 — covers tenant B's ENTIRE test allowance (500 warm-up
+    // * burst 20 000, covers tenant B's ENTIRE test allowance (500 warm-up
     //   + 4 000 baseline + 4 000 noisy = 8 500) with margin, so the
     //   "B is denied" assertion can only ever fire on REAL cross-tenant
     //   leakage, never on B outrunning its own burst;
-    // * refill 10 rps — negligible within a test's lifetime, so once
+    // * refill 10 rps, negligible within a test's lifetime, so once
     //   tenant A's key is drained it STAYS drained (deterministic), and a
     //   hammering tenant can never ride the refill.
     let limiter = Arc::new(KeyedRateLimiter::from_params(10, 20_000, 1_000));
@@ -146,7 +146,7 @@ fn noisy_neighbour_tenant_b_stays_within_documented_bounds() {
 
     // ── Phase 2: drain tenant A's budget, then hammer ───────────────────
     // Worst-case noisy neighbour: A is at ZERO budget before the hammer
-    // starts. This makes the isolation proof deterministic — the denials
+    // starts. This makes the isolation proof deterministic, the denials
     // below cannot depend on how fast the hammer loop runs on this host.
     let mut a_drained = false;
     for _ in 0..(3 * 20_000) {
@@ -157,7 +157,7 @@ fn noisy_neighbour_tenant_b_stays_within_documented_bounds() {
     }
     assert!(
         a_drained,
-        "tenant A's key did not exhaust after 60 000 checks against a 20 000 burst — per-key accounting is broken"
+        "tenant A's key did not exhaust after 60 000 checks against a 20 000 burst, per-key accounting is broken"
     );
 
     let stop = Arc::new(AtomicBool::new(false));
@@ -168,7 +168,7 @@ fn noisy_neighbour_tenant_b_stays_within_documented_bounds() {
         let mut ops = 0u64;
         while !stop_a.load(Ordering::Relaxed) {
             // Maximum-rate loop on A's OWN drained key: the limiter must
-            // deny — that denial is the isolation proof.
+            // deny, that denial is the isolation proof.
             let _ = noisy_limiter.check(TENANT_A);
             noisy_collector.record_counter(&format!("isolation::{TENANT_A}"), 1.0, "noisy tenant");
             ops += 1;
@@ -203,21 +203,21 @@ fn noisy_neighbour_tenant_b_stays_within_documented_bounds() {
     let p90_bound = base_p90.mul_f64(3.0) + P90_ABSOLUTE_SLACK * slack_scale();
     assert!(
         noisy_p50 <= p50_bound,
-        "tenant B p50 {:?} exceeds 2× baseline {:?} (+ {:?} slack) under tenant A load — noisy neighbour",
+        "tenant B p50 {:?} exceeds 2× baseline {:?} (+ {:?} slack) under tenant A load, noisy neighbour",
         noisy_p50,
         base_p50,
         P50_ABSOLUTE_SLACK
     );
     assert!(
         noisy_p90 <= p90_bound,
-        "tenant B p90 {:?} exceeds 3× baseline {:?} (+ {:?} slack) under tenant A load — noisy neighbour",
+        "tenant B p90 {:?} exceeds 3× baseline {:?} (+ {:?} slack) under tenant A load, noisy neighbour",
         noisy_p90,
         base_p90,
         P90_ABSOLUTE_SLACK
     );
     assert!(
         noisy_tput >= base_tput * 0.5,
-        "tenant B throughput {:.0} ops/s fell below 50% of baseline {:.0} ops/s — noisy neighbour",
+        "tenant B throughput {:.0} ops/s fell below 50% of baseline {:.0} ops/s, noisy neighbour",
         noisy_tput,
         base_tput
     );
@@ -225,21 +225,21 @@ fn noisy_neighbour_tenant_b_stays_within_documented_bounds() {
     // ── Isolation actually happened ─────────────────────────────────────
     // A started the hammer phase with a fully drained key (asserted above),
     // the 10 rps refill cannot quench a hot loop, and B is asserted
-    // all-allowed below — so every global denial belongs to A, and any
+    // all-allowed below, so every global denial belongs to A, and any
     // B denial would prove cross-tenant leakage.
     assert!(
         limiter.total_denied() > 0,
-        "a drained tenant A was never denied — per-key accounting is not enforcing budgets"
+        "a drained tenant A was never denied, per-key accounting is not enforcing budgets"
     );
     // Tenant B stayed under its own budget: every B op in the noisy phase
     // was admitted (its whole allowance fits the 20 000 burst).
     assert_eq!(
         noisy_allowed, TENANT_B_OPS,
-        "tenant B was denied while under its own budget — tenant A's load leaked into B's key"
+        "tenant B was denied while under its own budget, tenant A's load leaked into B's key"
     );
 
     // ── Shared analytics aggregation integrity ──────────────────────────
-    // Every tenant's ops were counted exactly — concurrent writers on the
+    // Every tenant's ops were counted exactly, concurrent writers on the
     // shared collector must not lose or double-count increments. Tenant B
     // recorded warm-up + baseline + noisy under its own metric name.
     let summary = collector.get_summary();

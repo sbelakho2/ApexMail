@@ -92,7 +92,7 @@ pub fn resolve_local_to_utc(tz: Tz, local: NaiveDateTime) -> Option<DateTime<Utc
 /// Some zones transition at midnight (e.g. `America/Santiago`), which makes
 /// 00:00 nonexistent on the transition date; in that case the day start is
 /// normalised forward to the first existing local minute (documented
-/// behaviour — no invalid instant is ever produced).
+/// behaviour, no invalid instant is ever produced).
 pub fn local_day_bounds(tz: Tz, date: NaiveDate) -> Option<(DateTime<Utc>, DateTime<Utc>)> {
     let start = resolve_day_boundary(tz, date)?;
     let end = resolve_day_boundary(tz, date.succ_opt()?)?;
@@ -189,21 +189,21 @@ const LANGUAGE_ZONES: &[(&str, &str)] = &[
 /// Infer the recipient's timezone from whatever context the reply engine has.
 ///
 /// Precedence (first hit wins):
-/// 1. `existing` — an explicit IANA zone already on the contact
+/// 1. `existing`, an explicit IANA zone already on the contact
 ///    (`sales_contacts.timezone`, migration
 ///    `200_sales_autopilot_v2_unification.sql:260`). Fixed-offset
 ///    expressions (`+02:00`, `UTC+2`) and free text are **rejected**, not
 ///    coerced: a fixed offset cannot represent DST. (tzdb zone names such as
-///    `UTC` and `EET` do parse — they are zones, not offsets.)
-/// 2. `country` — ISO 3166-1 alpha-2 mapping, but **only for single-zone
+///    `UTC` and `EET` do parse, they are zones, not offsets.)
+/// 2. `country`, ISO 3166-1 alpha-2 mapping, but **only for single-zone
 ///    countries**. Multi-zone countries (US, CA, AU, BR, RU, CN, …) return
 ///    `None`: with no further evidence, picking e.g. `America/New_York` for
 ///    "US" would be wrong for a large share of recipients, and a wrong local
 ///    meeting time is worse than asking. `None` is the defensible default.
-/// 3. `language` — ISO 639-1 mapping, only for languages concentrated in a
+/// 3. `language`, ISO 639-1 mapping, only for languages concentrated in a
 ///    single zone; `en`/`es`/`pt`/`ar` return `None`.
 ///
-/// Returns `None` when there is no usable evidence — never a guess.
+/// Returns `None` when there is no usable evidence, never a guess.
 pub fn infer_recipient_timezone(
     country: Option<&str>,
     language: Option<&str>,
@@ -284,7 +284,7 @@ mod tests {
             .unwrap());
         assert_eq!(after, Utc.with_ymd_and_hms(2031, 3, 30, 1, 30, 0).unwrap());
         // A fixed +02:00 offset (the "today is CEST" trap) computes 23:30
-        // UTC for the 01:30 wall time — one hour wrong.
+        // UTC for the 01:30 wall time, one hour wrong.
         let fixed = Utc.with_ymd_and_hms(2031, 3, 30, 0, 30, 0).unwrap() - Duration::hours(1);
         assert_ne!(
             before, fixed,
@@ -321,7 +321,7 @@ mod tests {
         let summer = resolve_local_to_utc(tz, naive(2031, 7, 14, 9, 0)).unwrap();
         assert_eq!(summer, Utc.with_ymd_and_hms(2031, 7, 14, 7, 0, 0).unwrap());
         // A naive fixed +02:00 (summer offset) applied to the winter date is
-        // 07:00 UTC — the bug this module exists to prevent.
+        // 07:00 UTC, the bug this module exists to prevent.
         let fixed_summer = Utc.with_ymd_and_hms(2031, 1, 13, 7, 0, 0).unwrap();
         assert_ne!(
             winter, fixed_summer,
@@ -489,7 +489,7 @@ mod tests {
     #[test]
     fn multi_zone_country_returns_none() {
         // Documented decision: for countries spanning multiple zones (US, CA,
-        // AU, BR, RU, …) there is no defensible single default — a wrong
+        // AU, BR, RU, …) there is no defensible single default, a wrong
         // local time is worse than returning None and asking.
         for country in ["US", "CA", "AU", "BR", "RU", "CN", "MX", "ID"] {
             assert_eq!(

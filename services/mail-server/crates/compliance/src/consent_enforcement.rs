@@ -211,7 +211,7 @@ impl ConsentEnforcer {
                     "Send blocked: marketing consent revoked under strict framework"
                 );
                 return Ok(SendDecision::Blocked(
-                    "marketing consent has been revoked — recipient must re-subscribe \
+                    "marketing consent has been revoked, recipient must re-subscribe \
                      via preference center"
                         .into(),
                 ));
@@ -220,13 +220,13 @@ impl ConsentEnforcer {
             if !has_active_marketing_consent {
                 if has_pending_double_opt_in {
                     return Ok(SendDecision::RequiresConfirmation(
-                        "double opt-in pending — consent not yet confirmed".into(),
+                        "double opt-in pending, consent not yet confirmed".into(),
                     ));
                 }
 
                 if has_expired_marketing {
                     return Ok(SendDecision::RequiresConfirmation(
-                        "marketing consent has expired — re-confirmation required".into(),
+                        "marketing consent has expired, re-confirmation required".into(),
                     ));
                 }
 
@@ -236,7 +236,7 @@ impl ConsentEnforcer {
                     "Send blocked: no active marketing consent under strict framework"
                 );
                 return Ok(SendDecision::Blocked(
-                    "no active marketing consent — recipient must opt in via preference center"
+                    "no active marketing consent, recipient must opt in via preference center"
                         .into(),
                 ));
             }
@@ -249,19 +249,19 @@ impl ConsentEnforcer {
                 "Send blocked: marketing consent revoked (opt-out honored per CAN-SPAM)"
             );
             return Ok(SendDecision::Blocked(
-                "marketing consent revoked — recipient has opted out".into(),
+                "marketing consent revoked, recipient has opted out".into(),
             ));
         }
 
         if has_pending_double_opt_in {
             return Ok(SendDecision::RequiresConfirmation(
-                "double opt-in pending — consent not yet confirmed".into(),
+                "double opt-in pending, consent not yet confirmed".into(),
             ));
         }
 
         if has_expired_marketing {
             return Ok(SendDecision::RequiresConfirmation(
-                "marketing consent has expired — re-confirmation required".into(),
+                "marketing consent has expired, re-confirmation required".into(),
             ));
         }
 
@@ -272,7 +272,7 @@ impl ConsentEnforcer {
                 "Send blocked: no marketing consent record found"
             );
             return Ok(SendDecision::Blocked(
-                "no marketing consent on file — recipient must opt in".into(),
+                "no marketing consent on file, recipient must opt in".into(),
             ));
         }
 
@@ -350,7 +350,7 @@ impl ConsentEnforcer {
                     "Send blocked: marketing consent revoked under strict framework"
                 );
                 return Ok(SendDecision::Blocked(
-                    "marketing consent has been revoked — recipient must re-subscribe \
+                    "marketing consent has been revoked, recipient must re-subscribe \
                      via preference center"
                         .into(),
                 ));
@@ -359,13 +359,13 @@ impl ConsentEnforcer {
             if !has_active_marketing_consent {
                 if has_pending_double_opt_in {
                     return Ok(SendDecision::RequiresConfirmation(
-                        "double opt-in pending — consent not yet confirmed".into(),
+                        "double opt-in pending, consent not yet confirmed".into(),
                     ));
                 }
 
                 if has_expired_marketing {
                     return Ok(SendDecision::RequiresConfirmation(
-                        "marketing consent has expired — re-confirmation required".into(),
+                        "marketing consent has expired, re-confirmation required".into(),
                     ));
                 }
 
@@ -375,7 +375,7 @@ impl ConsentEnforcer {
                     "Send blocked: no active marketing consent under strict framework"
                 );
                 return Ok(SendDecision::Blocked(
-                    "no active marketing consent — recipient must opt in via preference center"
+                    "no active marketing consent, recipient must opt in via preference center"
                         .into(),
                 ));
             }
@@ -388,19 +388,19 @@ impl ConsentEnforcer {
                 "Send blocked: marketing consent revoked (opt-out honored per CAN-SPAM)"
             );
             return Ok(SendDecision::Blocked(
-                "marketing consent revoked — recipient has opted out".into(),
+                "marketing consent revoked, recipient has opted out".into(),
             ));
         }
 
         if has_pending_double_opt_in {
             return Ok(SendDecision::RequiresConfirmation(
-                "double opt-in pending — consent not yet confirmed".into(),
+                "double opt-in pending, consent not yet confirmed".into(),
             ));
         }
 
         if has_expired_marketing {
             return Ok(SendDecision::RequiresConfirmation(
-                "marketing consent has expired — re-confirmation required".into(),
+                "marketing consent has expired, re-confirmation required".into(),
             ));
         }
 
@@ -411,7 +411,7 @@ impl ConsentEnforcer {
                 "Send blocked: no marketing consent record found"
             );
             return Ok(SendDecision::Blocked(
-                "no marketing consent on file — recipient must opt in".into(),
+                "no marketing consent on file, recipient must opt in".into(),
             ));
         }
 
@@ -420,7 +420,7 @@ impl ConsentEnforcer {
 
     /// Batch form of the send-time MARKETING decision (performance audit
     /// 2026-10-18): the send-admission gate called the single-recipient path
-    /// once per recipient, i.e. 3-4 queries each — a 1000-recipient batch
+    /// once per recipient, i.e. 3-4 queries each, a 1000-recipient batch
     /// could issue ~4,000 round trips inside one request. This runs TWO
     /// queries for the whole set and applies the SAME precedence as
     /// [`Self::check_send_allowed_with_transactional`] with no frameworks
@@ -481,19 +481,19 @@ impl ConsentEnforcer {
             let record = consent.get(email);
             let decision = match record {
                 Some((false, _)) => SendDecision::Blocked(
-                    "marketing consent revoked — recipient has opted out".into(),
+                    "marketing consent revoked, recipient has opted out".into(),
                 ),
                 _ if pending.contains(email) => SendDecision::RequiresConfirmation(
-                    "double opt-in pending — consent not yet confirmed".into(),
+                    "double opt-in pending, consent not yet confirmed".into(),
                 ),
                 Some((true, Some(expires))) if *expires < Utc::now() => {
                     SendDecision::RequiresConfirmation(
-                        "marketing consent has expired — re-confirmation required".into(),
+                        "marketing consent has expired, re-confirmation required".into(),
                     )
                 }
                 Some((true, None)) | Some((true, Some(_))) => SendDecision::Allowed,
                 None => SendDecision::Blocked(
-                    "no marketing consent on file — recipient must opt in".into(),
+                    "no marketing consent on file, recipient must opt in".into(),
                 ),
             };
             outcome.insert(email.clone(), decision);
@@ -638,7 +638,7 @@ fn is_consent_expired(expires_at: Option<DateTime<Utc>>) -> bool {
 ///
 /// M7: the classification MUST come from an explicit caller declaration
 /// (`declared_transactional`). Keyword heuristics over tags/subjects are no
-/// longer sufficient to bypass consent — a "welcome" tag on a marketing blast
+/// longer sufficient to bypass consent, a "welcome" tag on a marketing blast
 /// used to silently classify the send as transactional. Default (absent
 /// declaration) is NON-transactional, i.e. consent is required.
 ///
@@ -653,7 +653,7 @@ pub fn is_transactional_email(
     declared_transactional
 }
 
-/// Best-effort keyword hint (observability only — never an authorization
+/// Best-effort keyword hint (observability only, never an authorization
 /// signal). Returns the first keyword found in the tags or subject.
 pub fn transactional_keyword_hint(tags: &[String], subject: &str) -> Option<&'static str> {
     const TRANSACTIONAL_KEYWORDS: [&str; 25] = [
@@ -944,7 +944,7 @@ mod tests {
         assert!(!is_transactional_email(false, &[], "Hello World"));
     }
 
-    /// M7: a 'welcome' tag alone must NOT be transactional — consent required.
+    /// M7: a 'welcome' tag alone must NOT be transactional, consent required.
     #[test]
     fn test_welcome_tag_alone_is_not_transactional() {
         assert!(!is_transactional_email(

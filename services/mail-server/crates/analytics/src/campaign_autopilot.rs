@@ -67,7 +67,7 @@ impl CampaignAutopilot {
         })
     }
 
-    /// F85: component readiness — the canonical arm store (migration 197)
+    /// F85: component readiness, the canonical arm store (migration 197)
     /// must exist before optimization reads/writes run.
     pub async fn schema_ready(&self) -> bool {
         sqlx::query_scalar::<_, Option<String>>("SELECT to_regclass('public.campaign_arms')::text")
@@ -196,13 +196,13 @@ impl CampaignAutopilot {
             if updated != 1 {
                 anyhow::bail!(
                     "outcome {outcome_key}: arm {arm_idx} of campaign {campaign_id} \
-                     does not exist — create arms through the campaign workflow first"
+                     does not exist, create arms through the campaign workflow first"
                 );
             }
         }
         tx.commit().await?;
 
-        // Invalidate cache — strictly best-effort: a Redis outage must not
+        // Invalidate cache, strictly best-effort: a Redis outage must not
         // fail a committed outcome (the cache key carries no authority).
         let cache_key = format!("autopilot:{campaign_id}");
         if let Ok(mut conn) = self.redis.get().await {
@@ -217,7 +217,7 @@ impl CampaignAutopilot {
 
     /// Tenant ownership verification for a campaign.
     async fn campaign_owned(&self, tenant_id: &str, campaign_id: &str) -> anyhow::Result<bool> {
-        // Canonical campaign identity is UUID — bind the parsed value (a
+        // Canonical campaign identity is UUID, bind the parsed value (a
         // text parameter against the uuid column is an operator error).
         let campaign_uuid = uuid::Uuid::parse_str(campaign_id)
             .map_err(|e| anyhow::anyhow!("campaign id must be a canonical UUID: {e}"))?;
@@ -255,7 +255,7 @@ impl CampaignAutopilot {
         let campaign_uuid = uuid::Uuid::parse_str(campaign_id)
             .map_err(|e| anyhow::anyhow!("campaign id must be a canonical UUID: {e}"))?;
 
-        // F85: verify the mutation actually landed — a missing arm used to
+        // F85: verify the mutation actually landed, a missing arm used to
         // report success while updating nothing.
         let updated = sqlx::query(
             "UPDATE campaign_arms SET alpha = alpha + $1, beta = beta + $2, \
@@ -276,7 +276,7 @@ impl CampaignAutopilot {
             );
         }
 
-        // Invalidate cache — best-effort (see record_outcome).
+        // Invalidate cache, best-effort (see record_outcome).
         let cache_key = format!("autopilot:{campaign_id}");
         if let Ok(mut conn) = self.redis.get().await {
             let _: Result<(), _> = redis::cmd("DEL")
@@ -332,7 +332,7 @@ impl CampaignAutopilot {
         tenant_id: &str,
         campaign_id: &str,
     ) -> anyhow::Result<Vec<TemplateArm>> {
-        // Canonical campaign identity is UUID — parse once at the boundary.
+        // Canonical campaign identity is UUID, parse once at the boundary.
         let campaign_uuid = uuid::Uuid::parse_str(campaign_id)
             .map_err(|e| anyhow::anyhow!("campaign id must be a canonical UUID: {e}"))?;
         // Join with sales_campaigns to enforce tenant isolation
@@ -982,7 +982,7 @@ mod tests {
 
     /// **Statistical rationale:** With a moderate number of trials but a small
     /// true difference (CTR 6% vs 5%), the algorithm should NOT strongly
-    /// converge — the selection probabilities should remain well short of the
+    /// converge, the selection probabilities should remain well short of the
     /// 95% convergence threshold.  This tests that `is_converged` correctly
     /// returns `false` when arms are practically indistinguishable given the
     /// data available.
@@ -1111,13 +1111,13 @@ mod tests {
             .expect("valid arms should sample");
         assert!(
             probs[0] > 0.99,
-            "Extreme prior arm (Beta(1000,1)) selected only {:.4} — expected > 0.99",
+            "Extreme prior arm (Beta(1000,1)) selected only {:.4}, expected > 0.99",
             probs[0]
         );
     }
 
     /// **Statistical rationale:** With only one arm, `monte_carlo_selection_probs`
-    /// must return `[1.0]` — the only available arm always wins by default.
+    /// must return `[1.0]`, the only available arm always wins by default.
     #[tokio::test]
     async fn test_edge_case_single_arm() {
         let arms = vec![TemplateArm {

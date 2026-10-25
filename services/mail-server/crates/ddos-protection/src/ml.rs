@@ -238,7 +238,7 @@ pub struct IsolationForest {
     sample_size: usize,
     /// Configuration
     config: IsolationForestConfig,
-    /// Training data buffer (for online learning) — VecDeque for O(1) pop_front
+    /// Training data buffer (for online learning), VecDeque for O(1) pop_front
     training_buffer: RwLock<VecDeque<[f64; 10]>>,
     /// Number of samples in the buffer at the time of last training.
     /// Used by needs_retraining to detect when enough NEW data has
@@ -437,7 +437,7 @@ impl IsolationForest {
     /// Restore a model from a previously saved snapshot.
     /// This replaces the current trees and configuration, allowing the model
     /// to start scoring immediately without waiting for online learning data.
-    /// The training buffer is NOT restored — new observations will accumulate
+    /// The training buffer is NOT restored, new observations will accumulate
     /// and eventually trigger a `retrain` that incorporates fresh data.
     pub fn restore_snapshot(snapshot_bytes: &[u8]) -> Option<Self> {
         let snap: ModelSnapshot = serde_json::from_slice(snapshot_bytes).ok()?;

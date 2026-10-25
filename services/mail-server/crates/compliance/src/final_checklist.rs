@@ -1,4 +1,4 @@
-//! Final acceptance checklist — verifiable capability certification.
+//! Final acceptance checklist, verifiable capability certification.
 //!
 //! The `FinalChecklist` encodes the 11-item sign-off standard from the
 //! project acceptance criteria. Every feature must pass all 11 checks
@@ -367,7 +367,7 @@ impl ReleaseGate {
             blockers.push("Commercial sign-off missing".into());
         }
 
-        // Buyer review check — all profiles must be covered
+        // Buyer review check, all profiles must be covered
         let required_profiles = [
             BuyerReviewerProfile::BackendDeveloper,
             BuyerReviewerProfile::CtoEngineeringManager,

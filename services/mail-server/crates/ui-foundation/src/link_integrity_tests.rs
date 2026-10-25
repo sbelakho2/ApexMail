@@ -1,4 +1,4 @@
-//! GATE I — link integrity for the web and control-plane surfaces plus the
+//! GATE I, link integrity for the web and control-plane surfaces plus the
 //! Zola-built marketing documents.
 //!
 //! Every `href="…"` and form `action="…"` a rendered document emits must
@@ -65,7 +65,7 @@ fn link_targets(html: &str) -> Vec<String> {
             let attribute_start = cursor + rel;
             let start = attribute_start + needle.len();
             // The character before the attribute name must be whitespace or
-            // a tag opener — `data-href=` is not a link.
+            // a tag opener, `data-href=` is not a link.
             let preceded_ok = html[..attribute_start]
                 .chars()
                 .next_back()
@@ -153,7 +153,7 @@ fn target_resolves(
     }
     if path_only.starts_with("data:") {
         // Deferred-feature 8: the favicon rides an inline `data:image/svg+xml`
-        // URL in every root layout's <link rel="icon"> — self-contained by
+        // URL in every root layout's <link rel="icon">, self-contained by
         // construction, never a navigation.
         return true;
     }
@@ -193,7 +193,7 @@ fn target_resolves(
 }
 
 /// Every `href` and form action in every web/control-plane document —
-/// manifest routes AND the stateful PRG variants — resolves.
+/// manifest routes AND the stateful PRG variants, resolves.
 #[test]
 fn every_web_and_cp_href_and_form_action_resolves() {
     let manifests: std::collections::HashMap<&str, std::collections::HashSet<String>> =
@@ -234,7 +234,7 @@ fn every_stateful_variant_is_rendered_by_its_surface_sweep() {
     for (surface, path, query) in STATEFUL_RENDER_VARIANTS {
         assert!(
             APPEARANCE_SURFACES.contains(surface),
-            "stateful variant surface {surface:?} is not a gate surface — typo?",
+            "stateful variant surface {surface:?} is not a gate surface, typo?",
         );
         let document = format!("{path}?{query}");
         let rendered = crate::gate_support::gate_documents(surface)
@@ -242,7 +242,7 @@ fn every_stateful_variant_is_rendered_by_its_surface_sweep() {
             .any(|(name, _)| name == document);
         assert!(
             rendered,
-            "stateful variant [{surface}] {document} is never rendered by the gate sweep — the registry field order and the reader have drifted apart",
+            "stateful variant [{surface}] {document} is never rendered by the gate sweep, the registry field order and the reader have drifted apart",
         );
     }
 }
@@ -351,7 +351,7 @@ fn web_documents_do_not_link_into_the_control_plane() {
 }
 
 /// Forms declare a real method, and a form carrying the double-submit CSRF
-/// token is a POST — a GET form with `_csrf` would put the token in the URL
+/// token is a POST, a GET form with `_csrf` would put the token in the URL
 /// and still not be accepted by the handler.
 #[test]
 fn form_methods_are_declared_and_csrf_forms_are_post() {
@@ -409,7 +409,7 @@ fn web_dead_link_allowlist_entries_are_still_dead() {
         });
         assert!(
             still_dead,
-            "DEAD_LINK_ALLOWLIST entry ({surface}, {document}, {target}) is dead no more — fix applied? Delete the entry.",
+            "DEAD_LINK_ALLOWLIST entry ({surface}, {document}, {target}) is dead no more, fix applied? Delete the entry.",
         );
     }
 }
@@ -449,7 +449,7 @@ fn marketing_dead_link_allowlist_entries_are_still_dead() {
         }
         assert!(
             still_dead,
-            "MARKETING_DEAD_LINK_ALLOWLIST entry ({document}, {target}) is dead no more — delete the entry.",
+            "MARKETING_DEAD_LINK_ALLOWLIST entry ({document}, {target}) is dead no more, delete the entry.",
         );
     }
 }
@@ -462,7 +462,7 @@ fn marketing_dead_link_allowlist_entries_are_still_dead() {
 ///
 /// The BUILT page is the authority: `public/**/index.html` files that the
 /// router serves (locale variants, /security/, /solutions/*, /api-explorer)
-/// resolve even when the UI manifest has not listed them yet — the manifest
+/// resolve even when the UI manifest has not listed them yet, the manifest
 /// is a gate inventory, not the site's routing table.
 fn marketing_target_resolves(target: &str) -> bool {
     let Some(path_only) = target.split(['?', '#']).next() else {

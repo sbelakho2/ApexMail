@@ -13,7 +13,7 @@ pricing_as_of = "2026-10-04"
 verification_date = "2026-08-19"
 currency_note = "Preise werden in EUR angezeigt. Veröffentlicht ein Anbieter nur USD, wird der EUR-Betrag zum Kurs 1 USD = €0.92 (Referenzkurs, 2026-08-19) umgerechnet und der vom Anbieter veröffentlichte USD-Preis in Klammern angegeben. Angaben ohne anfallende Steuern."
 og_image = "/images/og-image.png"
-# Feature comparison counts — update when capabilities change
+# Feature comparison counts, update when capabilities change
 verdict_title = "Wie sich ApexMail von SendGrid unterscheidet"
 verdict_points = [
   "Bessere Zustellbarkeit durch automatisches IP-Warm-up und Reputationsschutz",
@@ -52,7 +52,7 @@ comparison_sections = [
   ]},
   { title = "PREISE", rows = [
     { feature = "Kostenlose Stufe", apex = '<span>3.000 E-Mails/Monat + einmaliges Startguthaben von 30.000</span>', comp = '<span class="">100 E-Mails/Tag</span>', winner = "none" },
-    { feature = "100K E-Mails/Monat", apex = '<span>€89 (Pro: 150K)</span>', comp = '<span class="">€82.75 (US$89.95) — Pro; Essentials ab €18.35 (US$19.95)</span>', winner = "apexmail" },
+    { feature = "100K E-Mails/Monat", apex = '<span>€89 (Pro: 150K)</span>', comp = '<span class="">€82.75 (US$89.95), Pro; Essentials ab €18.35 (US$19.95)</span>', winner = "apexmail" },
     { feature = "SSO inklusive", apex = '<span>Business- und Enterprise-Tarife</span>', comp = '<span class="">Ab Pro enthalten</span>', winner = "none" },
     { feature = "Prüfung individueller Bereitstellungen", apex = '<span>Enterprise-Review</span>', comp = '<span class="">✗</span>', winner = "none" }
   ]},

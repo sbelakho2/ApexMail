@@ -1,13 +1,13 @@
 #![allow(clippy::doc_lazy_continuation)]
-//! # Threat Intelligence — Feed Ingestion & Reputation
+//! # Threat Intelligence, Feed Ingestion & Reputation
 //!
 //! Aggregates threat intelligence from multiple sources to provide
 //! real-time IP/domain reputation scoring for the mail pipeline://!
-//! 1. **Feed ingestion** — Parses Spamhaus DROP, AbuseIPDB CSV, Cymru bogon lists,
+//! 1. **Feed ingestion**, Parses Spamhaus DROP, AbuseIPDB CSV, Cymru bogon lists,
 //! and other standard formats
-//! 2. **IP blocklist** — Efficient in-memory IP set (v4/v6) with CIDR support
-//! 3. **Domain blocklist** — Exact + wildcard domain matching
-//! 4. **Reputation scoring** — Multi-source composite score //! 5. **TTL management** — Automatic expiration of stale entries
+//! 2. **IP blocklist**, Efficient in-memory IP set (v4/v6) with CIDR support
+//! 3. **Domain blocklist**, Exact + wildcard domain matching
+//! 4. **Reputation scoring**, Multi-source composite score //! 5. **TTL management**, Automatic expiration of stale entries
 //!
 //! ## Design
 //!

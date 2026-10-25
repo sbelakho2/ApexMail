@@ -502,7 +502,7 @@ mod tests {
     fn marketing_islands_removed_after_js_elimination() {
         assert!(
             MARKETING_ISLANDS.is_empty(),
-            "islands replaced with CSS/HTML — array must be empty"
+            "islands replaced with CSS/HTML, array must be empty"
         );
     }
 

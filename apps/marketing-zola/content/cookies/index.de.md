@@ -1,6 +1,6 @@
 +++
 title = "Cookie-Richtlinie"
-description = "ApexMail Cookie-Richtlinie — wie wir Cookies und ähnliche Technologien verwenden."
+description = "ApexMail Cookie-Richtlinie, wie wir Cookies und ähnliche Technologien verwenden."
 template = "prose.html"
 
 [extra]
@@ -15,9 +15,9 @@ Cookies sind kleine Textdateien, die auf Ihrem Gerät gespeichert werden, wenn S
 
 ### Marketing-Website (apexmail.ee)
 
-Die Marketing-Website liefert **überhaupt keine Skripte** aus — ihre Content-Security-Policy blockiert die Skript-Ausführung vollständig — und bettet daher **keine Analyse-Skripte, keine Tracking-Pixel und keine Werbe-Cookies** ein. Das einzige mit dieser Website verbundene Cookie ist:
+Die Marketing-Website liefert **überhaupt keine Skripte** aus, ihre Content-Security-Policy blockiert die Skript-Ausführung vollständig, und bettet daher **keine Analyse-Skripte, keine Tracking-Pixel und keine Werbe-Cookies** ein. Das einzige mit dieser Website verbundene Cookie ist:
 
-- **`apexmail_consent` (Einwilligungspräferenz):** Speichert Ihre Auswahl im Cookie-Banner. Es wird von unserem API-Endpunkt mit `Domain=.apexmail.ee` und einer Gültigkeit von einem Jahr gesetzt. Es enthält keine persönlichen Kennzeichen — nur Ihre Banner-Präferenz — und hat auf dieser Website ausschließlich die Wirkung, das Banner bei künftigen Besuchen auszublenden.
+- **`apexmail_consent` (Einwilligungspräferenz):** Speichert Ihre Auswahl im Cookie-Banner. Es wird von unserem API-Endpunkt mit `Domain=.apexmail.ee` und einer Gültigkeit von einem Jahr gesetzt. Es enthält keine persönlichen Kennzeichen, nur Ihre Banner-Präferenz, und hat auf dieser Website ausschließlich die Wirkung, das Banner bei künftigen Besuchen auszublenden.
 
 Auf dieser Website laufen keine clientseitigen Analysen, unsere Webserver führen jedoch Standard-Zugriffsprotokolle (einschließlich IP-Adressen) zu Sicherheits- und Betriebszwecken. Zugriffsprotokolle sind in unserer [Datenschutzerklärung](/de/privacy/) abgedeckt.
 
@@ -42,7 +42,7 @@ Wenn Sie die Marketing-Website zum ersten Mal besuchen, bietet Ihnen ein JavaScr
 
 - **Alle akzeptieren:** Speichert eine „Alle“-Präferenz und blendet das Banner aus. Da die Website keine Analyse-Skripte ausführt, wird dadurch nichts über die gespeicherte Präferenz hinaus aktiviert.
 - **Nur notwendige:** Speichert eine „Nur notwendige“-Präferenz und blendet das Banner aus.
-- **Schließen:** Gleiche Wirkung wie „Nur notwendige“ — speichert eine „Nur notwendige“-Präferenz.
+- **Schließen:** Gleiche Wirkung wie „Nur notwendige“, speichert eine „Nur notwendige“-Präferenz.
 
 Ihre gespeicherte Auswahl steuert auf dieser Website ausschließlich das Banner. Sie können Ihre Präferenz jederzeit ändern, indem Sie Ihre Browser-Cookies löschen und die Seite neu laden.
 

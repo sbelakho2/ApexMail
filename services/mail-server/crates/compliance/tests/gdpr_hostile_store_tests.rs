@@ -291,7 +291,7 @@ async fn clickhouse_purge_reports_mutation_submitted_when_reachable() {
             .and_then(|response| response.error_for_status())
             .is_err()
         {
-            eprintln!("ClickHouse node unreachable — soft skip");
+            eprintln!("ClickHouse node unreachable, soft skip");
             return;
         }
     }

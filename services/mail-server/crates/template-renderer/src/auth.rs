@@ -6,7 +6,7 @@
 //! pattern:
 //!
 //! * `TEMPLATE_RENDERER_AUTH_TOKEN` SET → requests must present EXACTLY it
-//!   (timing-safe compare). The universal token is REFUSED — and detected
+//!   (timing-safe compare). The universal token is REFUSED, and detected
 //!   (loudly logged) so operators can spot unmigrated callers.
 //! * `TEMPLATE_RENDERER_AUTH_TOKEN` UNSET → the universal token is still
 //!   accepted (legacy behavior) so existing deployments keep working, BUT a
@@ -20,7 +20,7 @@ pub const DEDICATED_TOKEN_ENV: &str = "TEMPLATE_RENDERER_AUTH_TOKEN";
 
 /// Production detection following the workspace convention (see
 /// sales-autopilot / ai-service): `APP_ENV == "production"`
-/// case-insensitively — and an UNSET `APP_ENV` counts as production
+/// case-insensitively, and an UNSET `APP_ENV` counts as production
 /// (fail closed).
 fn is_production_mode() -> bool {
     std::env::var("APP_ENV")
@@ -32,7 +32,7 @@ fn is_production_mode() -> bool {
 #[derive(Debug, Clone)]
 pub struct ServiceAuth {
     /// The token that authorizes requests. Empty = deny all (nothing is
-    /// configured — the same fail-closed behavior as before this change).
+    /// configured, the same fail-closed behavior as before this change).
     accepted_token: String,
     /// The universal token, retained ONLY to detect and loudly log its use
     /// after the dedicated token is configured. It NEVER authorizes.
@@ -59,7 +59,7 @@ impl ServiceAuth {
                 if universal == Some(token) {
                     tracing::warn!(
                         "{DEDICATED_TOKEN_ENV} is set to the SAME value as the universal \
-                         INTERNAL_SERVICE_TOKEN — that defeats the per-workload boundary; \
+                         INTERNAL_SERVICE_TOKEN, that defeats the per-workload boundary; \
                          generate a distinct secret for this service"
                     );
                 }
@@ -74,11 +74,11 @@ impl ServiceAuth {
                     return Err(format!(
                         "{DEDICATED_TOKEN_ENV} must be set when APP_ENV is production (or \
                          unset): the universal INTERNAL_SERVICE_TOKEN must not authorize \
-                         this service — the per-workload credential pattern is complete"
+                         this service, the per-workload credential pattern is complete"
                     ));
                 }
                 tracing::warn!(
-                    "{DEDICATED_TOKEN_ENV} is not set — falling back to the universal \
+                    "{DEDICATED_TOKEN_ENV} is not set, falling back to the universal \
                      INTERNAL_SERVICE_TOKEN. This is REQUIRED-SOON: production boots refuse \
                      without {DEDICATED_TOKEN_ENV}"
                 );
@@ -91,7 +91,7 @@ impl ServiceAuth {
             (None, None) => {
                 tracing::warn!(
                     "no service token configured ({DEDICATED_TOKEN_ENV} unset, \
-                     INTERNAL_SERVICE_TOKEN unset) — every authenticated route rejects \
+                     INTERNAL_SERVICE_TOKEN unset), every authenticated route rejects \
                      requests (401)"
                 );
                 Ok(Self {
@@ -121,7 +121,7 @@ impl ServiceAuth {
     }
 
     /// True when the caller presented the UNIVERSAL token while the
-    /// dedicated one is configured — an unmigrated caller to log loudly
+    /// dedicated one is configured, an unmigrated caller to log loudly
     /// about (it is refused either way).
     pub fn is_refused_universal_attempt(&self, provided: &str) -> bool {
         self.refused_universal
@@ -168,7 +168,7 @@ mod tests {
         assert!(auth.authorize("universal"), "legacy behavior preserved");
         assert!(!auth.authorize("dedicated-secret"));
         assert!(!auth.dedicated_configured());
-        // Nothing retained to detect — the universal token IS the credential.
+        // Nothing retained to detect, the universal token IS the credential.
         assert!(!auth.is_refused_universal_attempt("universal"));
     }
 
@@ -192,7 +192,7 @@ mod tests {
     #[test]
     fn dedicated_equal_to_universal_is_flagged_but_still_required() {
         // Misconfiguration (same secret everywhere) still authorizes ONLY the
-        // one value — resolve() logs the warning at boot.
+        // one value, resolve() logs the warning at boot.
         let auth =
             ServiceAuth::resolve(Some("same"), Some("same"), false).expect("resolve succeeds");
         assert!(auth.authorize("same"));
@@ -221,7 +221,7 @@ mod tests {
     }
 
     /// Sets env vars for its lifetime and restores the previous values
-    /// (including "unset") on drop — the same pattern as ai-service's
+    /// (including "unset") on drop, the same pattern as ai-service's
     /// `test_support::EnvGuard`.
     struct EnvGuard {
         saved: Vec<(String, Option<String>)>,
@@ -318,7 +318,7 @@ mod tests {
             assert!(!auth.dedicated_configured());
         }
 
-        // Production — explicit AND fail-closed-unset — without the
+        // Production, explicit AND fail-closed-unset, without the
         // dedicated token refuses to boot, naming the env to set.
         for app_env in [Some("production"), None] {
             let _guard = EnvGuard::with(&[

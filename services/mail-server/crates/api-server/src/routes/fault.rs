@@ -1,7 +1,7 @@
 //! Test-only fault injection for adversarial route tests.
 //!
 //! Every helper here arms a database-level fault inside the CALLER's
-//! per-test canonical database (`crate::test_db::canonical_pool` — each test
+//! per-test canonical database (`crate::test_db::canonical_pool`, each test
 //! provisions its own throwaway database, so armed triggers and renamed
 //! tables never leak between tests and need no cleanup).
 //!
@@ -9,7 +9,7 @@
 //!
 //! * **raise mode** ([`arm_write_fault`]): the Nth statement executed against
 //!   `table` (INSERT/UPDATE/DELETE) fails with a database error. This is how
-//!   a handler's `?` arm on its 2nd, 3rd, … write is reached — the earlier
+//!   a handler's `?` arm on its 2nd, 3rd, … write is reached, the earlier
 //!   writes succeed, then the armed statement raises, flipping the flag
 //!   "mid-handler".
 //!
@@ -72,7 +72,7 @@ async fn ensure_machinery(pool: &PgPool) -> Result<(), sqlx::Error> {
 /// Arm a statement-level trigger on `table`: the first `skip` writes succeed,
 /// every write from the (`skip` + 1)-th on fails with a database error.
 ///
-/// Statement-level counting means a multi-row INSERT is ONE fire — to make
+/// Statement-level counting means a multi-row INSERT is ONE fire, to make
 /// the second INSERT of a handler fail, pass `skip: 1`.
 ///
 /// `tag` must be unique per armed trigger within the test's database.

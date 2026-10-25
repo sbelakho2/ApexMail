@@ -1,8 +1,8 @@
 //! Adversarial mail / campaign workflow contracts (cross-surface).
 //!
 //! These tests pin the contracts a user or attacker can observe from the
-//! WORKFLOW layer — form actions, refusal strings, schedule authorization
-//! copy — and, where the contract is behavioral, drive the REAL campaign
+//! WORKFLOW layer, form actions, refusal strings, schedule authorization
+//! copy, and, where the contract is behavioral, drive the REAL campaign
 //! worker against a canonical database so the copy and the machinery must
 //! agree. A failure here means the product is lying to its customers about
 //! what mail will do.
@@ -30,14 +30,14 @@ use worker_processors::campaigns::CampaignExecutor;
 /// from `SendAdmissionError::QuotaExceeded` via `map_send_admission_error`.
 /// Softening or rewriting this string without updating the endpoint breaks
 /// every client that matches on the documented refusal.
-const QUOTA_EXCEEDED_MESSAGE: &str = "email quota exceeded: the plan volume and its overage allowance are exhausted — upgrade the plan or contact sales for a higher ceiling";
+const QUOTA_EXCEEDED_MESSAGE: &str = "email quota exceeded: the plan volume and its overage allowance are exhausted, upgrade the plan or contact sales for a higher ceiling";
 
 /// The console start-action refusal for a campaign in a non-startable
 /// status. Source of truth: `api-server/src/routes/web.rs`
 /// (`form_campaign_start`). Curly quotes and the em dash are part of the
 /// flashed copy.
 fn campaign_start_refusal(status: &str) -> String {
-    format!("Campaign is “{status}” — only draft or paused campaigns can be started.")
+    format!("Campaign is “{status}”, only draft or paused campaigns can be started.")
 }
 
 // ---------------------------------------------------------------------------
@@ -45,7 +45,7 @@ fn campaign_start_refusal(status: &str) -> String {
 // ---------------------------------------------------------------------------
 
 /// INVARIANT: the campaign EDIT surface posts to the UPDATE handler and
-/// carries the row id — editing is identity-preserving. DANGER: a create
+/// carries the row id, editing is identity-preserving. DANGER: a create
 /// action on the edit form silently duplicates the campaign and abandons
 /// the original (the "editing duplicated my campaign" data-loss workflow).
 #[test]
@@ -87,7 +87,7 @@ fn campaign_edit_form_updates_the_row_and_never_creates_a_duplicate() {
         "edit copy must promise an in-place update, matching the handler: {valued}"
     );
 
-    // CREATE is a distinct surface with its own action — the two must not
+    // CREATE is a distinct surface with its own action, the two must not
     // share a form target.
     let create = ui_foundation::leptos_views::web_campaigns_new_page();
     assert!(
@@ -112,14 +112,14 @@ fn campaign_edit_form_updates_the_row_and_never_creates_a_duplicate() {
 #[test]
 fn quota_exceeded_refusal_is_the_documented_forbidden_string() {
     // The literal is pinned against messages.rs. If production changes the
-    // constant, this test must change in the same commit — never one-sided.
+    // constant, this test must change in the same commit, never one-sided.
     assert_eq!(
         QUOTA_EXCEEDED_MESSAGE,
-        "email quota exceeded: the plan volume and its overage allowance are exhausted — upgrade the plan or contact sales for a higher ceiling"
+        "email quota exceeded: the plan volume and its overage allowance are exhausted, upgrade the plan or contact sales for a higher ceiling"
     );
 
     // The refusal must be actionable and name the exhaustion (not "error",
-    // not "try again later" — the cap is not transient).
+    // not "try again later", the cap is not transient).
     assert!(
         QUOTA_EXCEEDED_MESSAGE.contains("quota exceeded"),
         "the refusal must name the quota exhaustion: {QUOTA_EXCEEDED_MESSAGE}"
@@ -131,7 +131,7 @@ fn quota_exceeded_refusal_is_the_documented_forbidden_string() {
     );
     assert!(
         !QUOTA_EXCEEDED_MESSAGE.contains("try again"),
-        "quota exhaustion is not transient — 'try again' copy would lie: {QUOTA_EXCEEDED_MESSAGE}"
+        "quota exhaustion is not transient, 'try again' copy would lie: {QUOTA_EXCEEDED_MESSAGE}"
     );
 }
 
@@ -234,7 +234,7 @@ async fn schedule_authorization_copy_matches_worker_autostart_behavior() {
 // Pause / resume / start lifecycle rules
 // ---------------------------------------------------------------------------
 
-/// INVARIANT: `scheduled` campaigns are NOT manually startable — the worker
+/// INVARIANT: `scheduled` campaigns are NOT manually startable, the worker
 /// owns them; only `draft` and `paused` may be started by hand. DANGER: a
 /// manual start on a scheduled campaign double-fires against the worker's
 /// automatic claim (two paths to `sending` = double-send risk) and breaks
@@ -246,11 +246,11 @@ async fn schedule_authorization_copy_matches_worker_autostart_behavior() {
 /// details, so this test freezes the contract surface a user can observe.
 #[test]
 fn scheduled_campaigns_are_not_manually_startable_but_draft_and_paused_are() {
-    // Production refusal for a non-startable status — verbatim, curly
+    // Production refusal for a non-startable status, verbatim, curly
     // quotes and em dash included (web.rs `form_campaign_start`).
     assert_eq!(
         campaign_start_refusal("scheduled"),
-        "Campaign is “scheduled” — only draft or paused campaigns can be started."
+        "Campaign is “scheduled”, only draft or paused campaigns can be started."
     );
 
     // The startable set (campaign_start_allowed: matches!(status, "draft" | "paused")).
@@ -301,7 +301,7 @@ fn scheduled_campaigns_are_not_manually_startable_but_draft_and_paused_are() {
 // Empty audience honesty (workflow-visible contract)
 // ---------------------------------------------------------------------------
 
-/// INVARIANT: an empty audience is reported as empty — zero recipients, zero
+/// INVARIANT: an empty audience is reported as empty, zero recipients, zero
 /// sends, zero fabricated success. DANGER: a "sent" badge over a zero
 /// audience trains operators to trust a pipeline that sent nothing; a
 /// fallback to "everyone" is a privacy incident.
@@ -339,7 +339,7 @@ async fn empty_audience_workflow_is_honest_zero_recipients_zero_sends() {
     assert_eq!(report.campaigns_started, 1, "the campaign is still claimed");
     assert_eq!(
         report.recipients_sent, 0,
-        "an empty audience sends nothing — never the bystander roster"
+        "an empty audience sends nothing, never the bystander roster"
     );
 
     let recipients: i64 =
@@ -350,7 +350,7 @@ async fn empty_audience_workflow_is_honest_zero_recipients_zero_sends() {
             .expect("recipient count");
     assert_eq!(
         recipients, 0,
-        "zero recipients — honest empty, not everyone"
+        "zero recipients, honest empty, not everyone"
     );
 
     let messages: i64 =
@@ -359,7 +359,7 @@ async fn empty_audience_workflow_is_honest_zero_recipients_zero_sends() {
             .fetch_one(&pool)
             .await
             .expect("message count");
-    assert_eq!(messages, 0, "zero sends — no fabricated messages");
+    assert_eq!(messages, 0, "zero sends, no fabricated messages");
 
     let (_, sent_count): (String, i32) =
         sqlx::query_as("SELECT status, sent_count FROM campaigns WHERE id = $1")
@@ -369,7 +369,7 @@ async fn empty_audience_workflow_is_honest_zero_recipients_zero_sends() {
             .expect("campaign status");
     assert_eq!(
         sent_count, 0,
-        "sent_count must stay zero — a non-zero count over an empty audience is a lie"
+        "sent_count must stay zero, a non-zero count over an empty audience is a lie"
     );
     pool.close().await;
 }

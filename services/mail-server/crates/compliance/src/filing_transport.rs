@@ -26,7 +26,7 @@
 //!    (`filing_submission_packages`), and
 //! 2. opens a MANDATORY authenticated human task (`filing_human_tasks`)
 //!    carrying the package hash, and
-//! 3. returns [`SubmissionOutcome::HumanTaskRequired`] — **not** a success.
+//! 3. returns [`SubmissionOutcome::HumanTaskRequired`], **not** a success.
 //!
 //! The return stays `validated` until a human records the real portal
 //! reference ([`record_manual_submission`]); that call requires an
@@ -75,8 +75,8 @@
 //! * the package's validation report is not `valid` (a required field is
 //!   absent, or the source declaration itself declares its data insufficient),
 //!   naming every offending field;
-//! * the package carries a named gap — a legally required field no repository
-//!   model can supply — naming the gap;
+//! * the package carries a named gap, a legally required field no repository
+//!   model can supply, naming the gap;
 //! * the stored package's payload no longer hashes to its recorded digest
 //!   (mutated after validation).
 //!
@@ -88,8 +88,8 @@
 //!
 //! When a TSA is configured (`APEXMAIL_TSA_URL`, see
 //! [`crate::signing::timestamp`]), the transport obtains an RFC 3161
-//! timestamp for the package's canonical payload bytes — the same bytes the
-//! digest is computed over — and stores the full evidence (nonce, genTime,
+//! timestamp for the package's canonical payload bytes, the same bytes the
+//! digest is computed over, and stores the full evidence (nonce, genTime,
 //! policy, signer certificate summary, per-check verdicts, proven /
 //! not-proven property lists) with the submission. A timestamp verification
 //! failure is a submission refusal, not a warning. When no TSA is configured
@@ -127,7 +127,7 @@ use crate::vat_oss::{transition_return_in, FilingStatus};
 /// Where the TSA configuration for a submission comes from.
 pub enum TimestampPolicy<'a> {
     /// Read `APEXMAIL_TSA_URL` (and the other `APEXMAIL_TSA_*` variables)
-    /// from the environment — the production default. An invalid configured
+    /// from the environment, the production default. An invalid configured
     /// value refuses the submission; unset means "no TSA configured".
     FromEnv,
     /// Explicit configuration (tests, embedders). `Explicit(None)` means no
@@ -365,7 +365,7 @@ pub struct SubmissionPackage {
     pub idempotency_key: String,
 }
 
-/// What a transport returns when — and only when — it received the filing.
+/// What a transport returns when, and only when, it received the filing.
 #[derive(Debug, Clone)]
 pub struct TransportReceipt {
     /// Non-empty portal reference. Empty is never accepted as success.
@@ -1193,7 +1193,7 @@ async fn open_human_task(
          The exact submission package (sha256 {payload_sha256}) is stored in \
          filing_submission_packages {package_id}; the statutory deadline is tracked in \
          statutory_obligations. After submitting, record the portal reference and receipt in the \
-         compliance service — the return stays `validated` until then.",
+         compliance service, the return stays `validated` until then.",
         kind.as_str().to_uppercase()
     );
 

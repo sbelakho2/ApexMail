@@ -96,7 +96,7 @@ async fn get_support_analytics(
     // Status counts
     let status_row = sqlx::query_as::<_, (i64, i64, i64, i64, i64, i64, i64)>(
         // COALESCE every SUM: over zero matching rows each SUM is NULL, and
-        // the row decodes as non-optional i64 — without this, any empty
+        // the row decodes as non-optional i64, without this, any empty
         // window (a fresh deployment, a quiet week) made the whole console
         // 500 with a decode error instead of reporting zeroes.
         "SELECT
@@ -116,7 +116,7 @@ async fn get_support_analytics(
 
     // Average resolution time. The EXTRACT result is NUMERIC on Postgres 14:
     // without the ::double precision cast sqlx cannot decode it as f64, and
-    // the previous `.ok()` swallowed that decode error — the console reported
+    // the previous `.ok()` swallowed that decode error, the console reported
     // 0.0 average resolution for EVERY real dataset while appearing healthy.
     let avg_res: Option<(Option<f64>,)> = sqlx::query_as(
         "SELECT AVG(EXTRACT(EPOCH FROM (updated_at - created_at))::double precision / 3600.0)

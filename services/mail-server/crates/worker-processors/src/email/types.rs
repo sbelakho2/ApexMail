@@ -55,7 +55,7 @@ pub struct EmailJob {
 
 /// F26: one structured RFC 5322 mailbox (`Name <local@domain>`). Visible
 /// To/Cc lists and Reply-To are carried as ARRAYS of these end-to-end
-/// (queue JSONB → `EmailJob` → `PreparedEmail` → MIME) — never as one
+/// (queue JSONB → `EmailJob` → `PreparedEmail` → MIME), never as one
 /// comma-joined string, which mail-builder 0.3.2's `From<&str>` would wrap
 /// into a single angle-bracket mailbox (`<a@x, b@y>`).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -101,7 +101,7 @@ impl Mailbox {
     }
 
     /// Parse a header VALUE that may hold several comma-separated
-    /// mailboxes — the LEGACY comma-joined representation stored by older
+    /// mailboxes, the LEGACY comma-joined representation stored by older
     /// writers (F26 backfill path: parse, do not re-serialize). Splitting
     /// is QUOTE-AWARE so a display name like `"Doe, Jane"` survives as one
     /// mailbox. Empty segments are skipped; unparsable segments are
@@ -178,14 +178,14 @@ pub struct Domain {
     pub dkim_private_key: Option<String>,
     pub warmup_enabled: bool,
     pub warmup_day: i32,
-    /// `domains.ses_verified` — required for a [`DeliveryRoute::SesShared`]
+    /// `domains.ses_verified`, required for a [`DeliveryRoute::SesShared`]
     /// send (SES refuses unverified senders) and deliberately NOT required
     /// for a dedicated relay route, which binds a tenant IP and does not
     /// traverse SES.
     pub ses_verified: bool,
     /// The tenant's dedicated-IP routing candidates, ordered by preference
     /// (warming first, least-warmed first; active/graduated after). `empty`
-    /// means the domain rides the shared pool — see `DedicatedIp`.
+    /// means the domain rides the shared pool, see `DedicatedIp`.
     pub dedicated_ips: Vec<DedicatedIp>,
     pub return_path: Option<String>,
 }
@@ -195,14 +195,14 @@ pub struct Domain {
 /// keyed on the IP, not the sending domain.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DedicatedIp {
-    /// `dedicated_ips.id` — the row that owns the warmup state.
+    /// `dedicated_ips.id`, the row that owns the warmup state.
     pub id: String,
     /// Source IP address (`dedicated_ips.ip_address`).
     pub ip_address: String,
     /// True while the row is still warming (`dedicated_ips.status =
     /// 'warming'`): the canonical daily cap is derived from
     /// `warmup_started_at` and `mail_common::warmup`. False for a graduated
-    /// (`active`) row — it keeps being routed as dedicated WITHOUT warmup
+    /// (`active`) row, it keeps being routed as dedicated WITHOUT warmup
     /// throttling.
     pub warming: bool,
     /// Canonical warmup start (`dedicated_ips.warmup_started_at`).
@@ -227,16 +227,16 @@ pub struct Suppression {
 /// message.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerpBinding {
-    /// `email_queue.id` — the queue row the bounce is attributed to.
+    /// `email_queue.id`, the queue row the bounce is attributed to.
     pub queue_id: String,
-    /// `email_queue.tenant_id` — the owning tenant.
+    /// `email_queue.tenant_id`, the owning tenant.
     pub tenant_id: String,
 }
 
 /// Prepared email ready for sending.
 #[derive(Debug, Clone)]
 pub struct PreparedEmail {
-    /// Stable logical send identity for this per-recipient copy — EXACTLY the
+    /// Stable logical send identity for this per-recipient copy, EXACTLY the
     /// `send_unit` the processor reserves on `sales_delivery_acceptances`
     /// (`send_unit_of`: `sa-send:{step_execution_id}` or
     /// `email_queue:{queue row id}:{canonical recipient}`). The outbound MTA
@@ -251,7 +251,7 @@ pub struct PreparedEmail {
     /// `to` (legacy single-recipient rows).
     pub mime_to: Vec<Mailbox>,
     /// F26: the ORIGINAL visible MIME `Cc` mailbox list. Bcc intentionally
-    /// has no representation here — it lives only in the delivery data.
+    /// has no representation here, it lives only in the delivery data.
     pub mime_cc: Vec<Mailbox>,
     /// F26: structured Reply-To mailbox (display-name capable).
     pub reply_to: Option<Mailbox>,
@@ -293,22 +293,22 @@ pub struct DkimConfig {
     pub private_key: Zeroizing<String>,
 }
 
-/// The delivery route selected for ONE send unit — the decision the
+/// The delivery route selected for ONE send unit, the decision the
 /// transport layer must actually execute.
 ///
 /// This is derived by the processor from state it already relies on:
-/// * [`Domain::warmup_ip`] — the dedicated-IP identity selected per tenant
+/// * [`Domain::warmup_ip`], the dedicated-IP identity selected per tenant
 ///   (its `ip_address` is the reputation boundary the warmup admission
 ///   reserves capacity on) → [`DeliveryRoute::Dedicated`];
 /// * no warming dedicated IP → [`DeliveryRoute::SesShared`] (the shared
 ///   pool rides platform reputation; there is no per-IP binding to honour).
 ///
 /// The route is NOT a replacement for `EmailJob.metadata` / `Domain::warmup_ip`
-/// — it is the derived, per-send value that travels with the send so the
+///, it is the derived, per-send value that travels with the send so the
 /// admission decision and the network path cannot disagree.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DeliveryRoute {
-    /// AWS SES shared IP pool — no dedicated source IP to bind. The
+    /// AWS SES shared IP pool, no dedicated source IP to bind. The
     /// dedicated-source-IP verification deliberately does NOT apply.
     SesShared,
     /// Self-hosted relay MTA must send from the tenant's dedicated source
@@ -322,7 +322,7 @@ pub enum DeliveryRoute {
 }
 
 impl DeliveryRoute {
-    /// True for the dedicated-IP route — the only route whose source IP must
+    /// True for the dedicated-IP route, the only route whose source IP must
     /// be confirmed by the transport before warmup capacity counts as spent.
     pub fn is_dedicated(&self) -> bool {
         matches!(self, Self::Dedicated { .. })
@@ -383,7 +383,7 @@ pub struct DeliveryReceipt {
     /// record (migration 202's rationale). The value is persisted on the
     /// `sent`/`bounced` events rows together with `provider_source`.
     pub recipient_provider: Option<String>,
-    /// How `recipient_provider` was obtained — one of `mx_resolved`,
+    /// How `recipient_provider` was obtained, one of `mx_resolved`,
     /// `provider_callback`, or `inferred` (the `events.provider_source`
     /// CHECK constraint, migration
     /// `202_sales_feedback_delivery_binding.sql:154-163`). `None` whenever

@@ -21,8 +21,8 @@ pub struct ProtocolAnomaly {
 ///
 /// The NUL-byte rule (3000004) is a COMMAND-stream evasion signal: NULs
 /// inside SMTP verbs can smuggle or confuse command parsing. During DATA,
-/// NUL bytes are ORDINARY MAIL CONTENT — 8BITMIME bodies, base64-decoded
-/// attachments (PDFs, images, zip archives) all contain `0x00` — so the
+/// NUL bytes are ORDINARY MAIL CONTENT, 8BITMIME bodies, base64-decoded
+/// attachments (PDFs, images, zip archives) all contain `0x00`, so the
 /// same rule applied to DATA refused every binary message.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SmtpPhase {
@@ -52,7 +52,7 @@ pub fn analyze_smtp(payload: &[u8], phase: SmtpPhase) -> Vec<ProtocolAnomaly> {
         }
     }
 
-    // Bare LF (without CR) — RFC violation, common in attack tools
+    // Bare LF (without CR), RFC violation, common in attack tools
     let bytes = payload;
     for i in 0..bytes.len() {
         if bytes[i] == b'\n' && (i == 0 || bytes[i - 1] != b'\r') {
@@ -118,7 +118,7 @@ pub fn analyze_smtp(payload: &[u8], phase: SmtpPhase) -> Vec<ProtocolAnomaly> {
     }
 
     // Null bytes in the SMTP COMMAND stream (audit SM5 F6: DATA payloads
-    // are exempt — binary mail content legitimately contains NULs, and a
+    // are exempt, binary mail content legitimately contains NULs, and a
     // DATA-phase Drop here refused every non-base64 binary attachment).
     if phase == SmtpPhase::Command && payload.contains(&0u8) {
         anomalies.push(ProtocolAnomaly {

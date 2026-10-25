@@ -69,7 +69,7 @@ System integrity is verified through automated, recurring checks across the depl
 | **Deployment artifact integrity** | Container images are digest-verified, not signed: each pipeline run records a release manifest (per-image SHA-256 digests, `SHA256SUMS.images`) and renders a digest-pinned compose override; deployment refuses to bring up any image whose digest does not match that manifest. | Every deployment | Release manifest + pre-deploy digest verification in the deploy stage |
 | **Audit-log integrity** | Audit-log tables carry a hash chain: each row's SHA-256 digest is chained to its predecessor. | Continuous (per write) | Audit-log hash chain |
 | **Deployment records** | Every pipeline run records a manifest (stage, status, exit code, duration) plus per-stage logs. These are internal operational records with no tamper-proofing guarantee and no customer-facing query surface. | Every deployment | CI run manifests (`ci/runs/<ts>/manifest.json`) |
-| **Backup verification** | Every backup is automatically decrypted and structurally validated (`pg_restore --list`) before the plaintext is deleted — a backup that cannot be read is never counted as good. Full restore drills are manual at the documented quarterly cadence. | Every backup (automated validation); quarterly (manual drills) | Backup-time restorability validation; DR drill records |
+| **Backup verification** | Every backup is automatically decrypted and structurally validated (`pg_restore --list`) before the plaintext is deleted, a backup that cannot be read is never counted as good. Full restore drills are manual at the documented quarterly cadence. | Every backup (automated validation); quarterly (manual drills) | Backup-time restorability validation; DR drill records |
 | **Runtime resilience** | Services run health-checked with automatic restart; a failed post-deploy content probe triggers automatic rollback to the previous image pins. | Continuous | Container healthchecks; deploy-stage verify + rollback |
 
 All verification results are internal operational controls. Current security-review material may be made available to qualified Enterprise prospects or customers upon request; it is not an external certification or a product entitlement.
@@ -90,13 +90,13 @@ The term "System Integrity Controls" refers to the combination of these controls
 
 - Automated dependency scanning in CI/CD pipeline.
 - Automated infrastructure vulnerability scanning (weekly cadence).
-- Annual third-party penetration test (first external test planned — currently in procurement; results will be published after completion and remediation).
+- Annual third-party penetration test (first external test planned, currently in procurement; results will be published after completion and remediation).
 - Responsible disclosure program: [security@apexmail.ee](mailto:security@apexmail.ee)
 - Vulnerability remediation targets by severity:
   - **Critical:** Immediate containment; target permanent remediation within 7 days.
   - **High:** Target within 30 days.
   - **Medium:** Target within 90 days.
-  - **Low:** Risk-based — addressed in regular maintenance cycles.
+  - **Low:** Risk-based, addressed in regular maintenance cycles.
   - **Actively exploited:** Emergency process regardless of severity.
 
 ## Incident Response

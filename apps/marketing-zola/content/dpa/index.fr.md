@@ -1,6 +1,6 @@
 +++
 title = "Accord de traitement des données"
-description = "DPA ApexMail — conditions de traitement des données relevant de l'article 28 du RGPD."
+description = "DPA ApexMail, conditions de traitement des données relevant de l'article 28 du RGPD."
 template = "prose.html"
 
 [extra]

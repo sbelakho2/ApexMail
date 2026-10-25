@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Default window: matches the 10-minute staging-row TTL — a window that
+/// Default window: matches the 10-minute staging-row TTL, a window that
 /// outlives the rows it guards keeps the abusive client blocked across the
 /// sweep gap.
 pub const SSO_LOGIN_WINDOW_SECS: u64 = 600;

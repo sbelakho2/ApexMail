@@ -1,4 +1,4 @@
-//! Sender reputation tracking — Google Postmaster Tools v1 and Microsoft SNDS.
+//! Sender reputation tracking, Google Postmaster Tools v1 and Microsoft SNDS.
 //!
 //! Persists raw daily snapshots, computes a normalised reputation score band
 //! per (scope, identity), and emits events when a domain or IP transitions
@@ -6,11 +6,11 @@
 //! respond.
 //!
 //! ## Modules
-//! * [`google`] — Postmaster Tools v1 client (OAuth2 + traffic-stats).
-//! * [`snds`] — Microsoft Smart Network Data Services client (CSV ingest).
-//! * [`aggregator`] — Recomputes `postmaster_reputation_summary` and emits
+//! * [`google`], Postmaster Tools v1 client (OAuth2 + traffic-stats).
+//! * [`snds`], Microsoft Smart Network Data Services client (CSV ingest).
+//! * [`aggregator`], Recomputes `postmaster_reputation_summary` and emits
 //!   `postmaster_reputation_events` on band transitions.
-//! * [`scheduler`] — Periodic poller (fires every `interval_secs`).
+//! * [`scheduler`], Periodic poller (fires every `interval_secs`).
 //!
 //! Schema lives in migration `040_postmaster_reputation.sql`.
 

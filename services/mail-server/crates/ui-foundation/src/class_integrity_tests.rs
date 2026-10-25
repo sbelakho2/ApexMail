@@ -1,8 +1,8 @@
-//! GATE K — every class a rendered console document uses is DEFINED.
+//! GATE K, every class a rendered console document uses is DEFINED.
 //!
 //! `globals.css` is a prebuilt, hand-maintained artifact (it is not
 //! regenerated from source), so a utility class that is absent from it
-//! renders as NOTHING — silently. A page can look subtly broken with no
+//! renders as NOTHING, silently. A page can look subtly broken with no
 //! error anywhere: `lg:grid-cols-2` collapsed a two-column action row into
 //! one column because only `lg:grid-cols-3|4` exist in the stylesheet
 //! (found by eye on /reviews/ai-drafts, dogfood 2026-10-06).
@@ -38,7 +38,7 @@ const NON_STYLE_CLASSES: &[&str] = &[
 /// The scanner is selector-aware: only class selectors in RULE PRELUDES
 /// count. Comments (`/* .ghost */`), string literals (`content: ".ghost"`),
 /// decimal numbers (`opacity: .5`, `0.75px`), and url tokens
-/// (`url(./icon.svg)`) never define a class — treating them as definitions
+/// (`url(./icon.svg)`) never define a class, treating them as definitions
 /// let a page use `.ghost` without any rule existing.
 fn defined_classes(css: &str) -> HashSet<String> {
     let mut out = HashSet::new();
@@ -133,7 +133,7 @@ fn collect_prelude_classes(prelude: &str, out: &mut HashSet<String>) {
                 }
                 break;
             }
-            // A bare `:` ends the class (`.hover\:x:hover` — the pseudo
+            // A bare `:` ends the class (`.hover\:x:hover`, the pseudo
             // class is not part of the name); only an ESCAPED colon
             // (`.hover\:x`) belongs to it, handled above.
             if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
@@ -215,7 +215,7 @@ fn every_class_a_console_document_uses_is_defined_in_the_stylesheet() {
     violations.dedup();
     assert!(
         violations.is_empty(),
-        "classes used by rendered pages that globals.css does not define (they render as nothing — add the class to the stylesheet or use a canonical `.apex-*` recipe):\n{}",
+        "classes used by rendered pages that globals.css does not define (they render as nothing, add the class to the stylesheet or use a canonical `.apex-*` recipe):\n{}",
         violations.join("\n"),
     );
 }

@@ -17,7 +17,7 @@ og_image = "/images/og-image.png"
 # single loop, so design changes to the row/winner markup happen in ONE place.
 # Cell values are raw HTML (rendered with | safe) to preserve color-emphasis
 # spans and any inline markup. Winner is one of: apexmail | competitor | tie | none.
-# Postmark never declares a winner — every row uses winner = "none".
+# Postmark never declares a winner, every row uses winner = "none".
 comparison_sections = [
   { title = "ZUSTELLBARKEIT", rows = [
     { feature = "Zustellrate", apex = '<span>Hoch</span>', comp = '<span class="">Hoch</span>', winner = "none" },
@@ -47,14 +47,14 @@ comparison_sections = [
   ]},
   { title = "PREISE", rows = [
     { feature = "Kostenlose Stufe", apex = '<span>3.000/Monat + einmaliges Startguthaben von 30.000</span>', comp = '<span class="">100/Monat</span>', winner = "none" },
-    { feature = "100K E-Mails/Monat", apex = '<span>€89 (Pro: 150K)</span>', comp = '<span class="">€122.82 (US$133.50) — Pro: €15.18 (US$16.50)/Monat + 90K Überschreitung @ €1.20 (US$1.30)/1K</span>', winner = "none" },
+    { feature = "100K E-Mails/Monat", apex = '<span>€89 (Pro: 150K)</span>', comp = '<span class="">€122.82 (US$133.50), Pro: €15.18 (US$16.50)/Monat + 90K Überschreitung @ €1.20 (US$1.30)/1K</span>', winner = "none" },
     { feature = "Unbegrenzte Teammitglieder", apex = '<span>Enterprise-Tarif</span>', comp = '<span class="">✗</span>', winner = "none" },
     { feature = "Individuelle Enterprise-Konditionen", apex = '<span>Jahresverträge</span>', comp = '<span class="">✗</span>', winner = "none" }
   ]}
 ]
 
 # Trailing methodology paragraph (rendered via macros::methodology_note).
-# Raw HTML — the inner <p> content with the methodology link. Uses a TOML
+# Raw HTML, the inner <p> content with the methodology link. Uses a TOML
 # multi-line basic string (""" """) because the text contains both a single
 # quote ("provider's") and double-quoted HTML attributes; the leading \ trims
 # the opening newline and literal newlines collapse to spaces per TOML spec.

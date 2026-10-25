@@ -51,13 +51,13 @@ pub struct EmtaConfig {
     pub client_key_path: String,
     /// Estonian business registry code (äriregistri kood).
     pub company_registry_code: String,
-    /// Master switch — filing is only attempted when `true`.
+    /// Master switch, filing is only attempted when `true`.
     pub enabled: bool,
 }
 
 impl EmtaConfig {
     /// Create an [`EmtaConfig`] from environment variables with sensible
-    /// defaults (all disabled by default — safe for development).
+    /// defaults (all disabled by default, safe for development).
     pub fn from_env() -> Self {
         Self {
             api_base_url: std::env::var("EMTA_API_BASE_URL")
@@ -233,8 +233,8 @@ impl EmtaClient {
     /// Submit a KMD VAT return to the e-MTA API.
     ///
     /// # Arguments
-    /// * `kmd` — The KMD return result (from [`generate_kmd_return`]).
-    /// * `breakdown` — The full breakdown JSON stored in `vat_kmd_returns`.
+    /// * `kmd`, The KMD return result (from [`generate_kmd_return`]).
+    /// * `breakdown`, The full breakdown JSON stored in `vat_kmd_returns`.
     ///
     /// # Returns
     /// An [`EmtaSubmissionResult`] with the filing acknowledgment.
@@ -460,7 +460,7 @@ impl EmtaClient {
         let rate_0_non_eu = Self::rate_sum(&kmd.rates, 0.0, Some("non_eu"));
 
         // The XML header declares EUR and the KMD XSD expects euro DECIMALS
-        // (2-fraction dot format) — the internal integer-cents values MUST
+        // (2-fraction dot format), the internal integer-cents values MUST
         // be divided by 100 at this boundary. Interpolating raw cents used
         // to overstate the filed return 100× (audit 1.3). Integer math
         // only (same shape as the e-arve renderer's
@@ -616,7 +616,7 @@ impl EmtaClient {
     // ------------------------------------------------------------------
 
     /// Simple XML tag content extractor (case‑sensitive, no namespace
-    /// awareness — sufficient for the well-known EMTA response fields).
+    /// awareness, sufficient for the well-known EMTA response fields).
     fn extract_xml_tag(xml: &str, open_tag: &str, close_tag: &str) -> Option<String> {
         let start = xml.find(open_tag)?;
         let value_start = start + open_tag.len();
@@ -635,7 +635,7 @@ impl EmtaClient {
     }
 
     /// Render integer cents as a euro decimal string ("15000.00") with a
-    /// dot separator and exactly two fraction digits — the format the KMD
+    /// dot separator and exactly two fraction digits, the format the KMD
     /// XSD expects for every `<Amount>` given the header's
     /// `<Currency>EUR</Currency>`. Integer math only: money formatting
     /// must never round-trip through f64 (see money_invariants).
@@ -861,7 +861,7 @@ mod tests {
         assert!(xml.contains("<Line number=\"2\">"), "Should have line 2");
         assert!(xml.contains("<Line number=\"3\">"), "Should have line 3");
 
-        // Contains correct amounts — in EUROS (2-decimal dot format), not
+        // Contains correct amounts, in EUROS (2-decimal dot format), not
         // raw cents: the header declares EUR and the XSD expects decimals.
         assert!(
             xml.contains("12000.00"),
@@ -887,7 +887,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // Audit 1.3 — the KMD XML must divide cents by 100. A one-env flip of
+    // Audit 1.3, the KMD XML must divide cents by 100. A one-env flip of
     // EMTA_ENABLED used to file a 100× overstated return.
     // ------------------------------------------------------------------
 
@@ -1121,7 +1121,7 @@ mod tests {
 
     // ------------------------------------------------------------------
     // Coverage residuals: every EmtaError arm, every config/TLS arm, the
-    // retry ladder and the status-check client — driven against loopback
+    // retry ladder and the status-check client, driven against loopback
     // TCP mocks (no real network). `start_paused` makes the production
     // 250ms/500ms backoff sleeps advance instantly on tokio's virtual
     // clock, so the retry tests stay deterministic and fast.
@@ -1134,7 +1134,7 @@ mod tests {
     /// `tag`) and return their paths. Uses the configured temp dir, not the
     /// repository, so parallel test runs never collide.
     fn write_tls_fixtures(tag: &str) -> (std::path::PathBuf, std::path::PathBuf) {
-        let dir = std::env::temp_dir(); // nosemgrep: rust.lang.security.temp-dir.temp-dir — test fixture under a unique pid/uuid path — no predictable-name temp collision
+        let dir = std::env::temp_dir(); // nosemgrep: rust.lang.security.temp-dir.temp-dir, test fixture under a unique pid/uuid path, no predictable-name temp collision
         let cert_path = dir.join(format!("emta_cov_cert_{tag}.pem"));
         let key_path = dir.join(format!("emta_cov_key_{tag}.pem"));
         std::fs::write(&cert_path, FIXTURE_CERT_PEM).expect("write cert fixture");
@@ -1216,7 +1216,7 @@ mod tests {
 
     #[test]
     fn from_config_reports_missing_key_file_and_unparsable_pem() {
-        let dir = std::env::temp_dir(); // nosemgrep: rust.lang.security.temp-dir.temp-dir — test fixture under a unique pid/uuid path — no predictable-name temp collision
+        let dir = std::env::temp_dir(); // nosemgrep: rust.lang.security.temp-dir.temp-dir, test fixture under a unique pid/uuid path, no predictable-name temp collision
         let cert_path = dir.join("emta_cov_ok_cert.pem");
         std::fs::write(&cert_path, FIXTURE_CERT_PEM).expect("write cert");
         // Cert exists, key path does not → key read arm.

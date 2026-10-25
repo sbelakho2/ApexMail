@@ -51,7 +51,7 @@ impl SmtpReply {
             // reply code. A peer that changes the code mid-reply (e.g. a
             // `250-...` line followed by `550 ...`) is protocol-confused at
             // best and smuggling a failure past a first-line-only reader at
-            // worst — the whole reply is unparseable.
+            // worst, the whole reply is unparseable.
             if parse_reply_code(line) != Some(code) {
                 return None;
             }
@@ -123,7 +123,7 @@ impl SmtpReply {
     }
 
     /// The DSN inputs for a PERMANENT post-accept failure at this reply.
-    /// `None` when the reply is not a 5xx — a DSN is only due for a permanent
+    /// `None` when the reply is not a 5xx, a DSN is only due for a permanent
     /// failure. This is the single place a permanent reply is converted into
     /// RFC 3464 fields; [`crate::dsn`] renders them.
     pub fn permanent_dsn_inputs(
@@ -251,15 +251,15 @@ impl std::fmt::Display for SmtpStage {
 pub enum ReplyDisposition {
     /// 2xx.
     Accepted,
-    /// 354 — send the message body.
+    /// 354, send the message body.
     Intermediate,
-    /// 4xx — retryable.
+    /// 4xx, retryable.
     Transient,
-    /// 5xx at RCPT TO — permanent for this recipient.
+    /// 5xx at RCPT TO, permanent for this recipient.
     PermanentRecipient,
-    /// 5xx at MAIL FROM or after DATA — permanent for the whole message.
+    /// 5xx at MAIL FROM or after DATA, permanent for the whole message.
     PermanentMessage,
-    /// 5xx at greeting/EHLO/STARTTLS — this MX cannot carry the message.
+    /// 5xx at greeting/EHLO/STARTTLS, this MX cannot carry the message.
     PeerRefusal,
     /// A code outside 2xx..5xx or an impossible stage reply.
     Unexpected,
@@ -445,7 +445,7 @@ mod tests {
 
     #[test]
     fn multiline_text_is_joined_and_enhanced_status_reads_the_first_token() {
-        // The enhanced status is the FIRST token of the reply text — a
+        // The enhanced status is the FIRST token of the reply text, a
         // multiline reply whose first line is a greeting leaves it unset.
         let reply = multiline(&["250-2.1.5 Ok", "250-SIZE 10485760", "250 8BITMIME"]);
         assert_eq!(reply.text, "2.1.5 Ok SIZE 10485760 8BITMIME");

@@ -1,18 +1,18 @@
-//! §35 — replay simulation that is not test-only: historical replay,
+//! §35, replay simulation that is not test-only: historical replay,
 //! champion/challenger shadowing and the promotion registry.
 //!
 //! The previous version of this module was a `#[cfg(test)]` harness with mock
 //! leads; that cannot validate a policy, because it never compares a proposed
 //! decision with what reality did. This module now provides:
 //!
-//! * [`ReplayCase`] / [`load_replay_cases`] — historical decision points built
+//! * [`ReplayCase`] / [`load_replay_cases`], historical decision points built
 //!   from the canonical tables (account, contact, signals, evidence, policy
 //!   decisions, prior outcomes) with the **realised** outcome attached;
-//! * [`replay`] — a pure function that runs a [`Policy`] over the cases and
+//! * [`replay`], a pure function that runs a [`Policy`] over the cases and
 //!   reports agreement with reality, the action distribution and the signed
 //!   expected-value error;
-//! * [`shadow`] — champion/challenger comparison over the same cases;
-//! * [`PolicyRegistry`] — a new scoring/model version may **not** immediately
+//! * [`shadow`], champion/challenger comparison over the same cases;
+//! * [`PolicyRegistry`], a new scoring/model version may **not** immediately
 //!   control live outbound: [`PolicyRegistry::stage`] refuses unless a
 //!   completed shadow comparison over at least [`MIN_SHADOW_CASES`] cases
 //!   exists, its calibration passes [`calibration::may_promote`], and it has
@@ -499,7 +499,7 @@ fn outcome_significance(kind: OutcomeKind) -> u8 {
 /// canonical tables **as of** the decision instant:
 ///
 /// * account/contact firmographics and persona;
-/// * `sales_signals` active at `as_of` (verified intent only — opens/clicks
+/// * `sales_signals` active at `as_of` (verified intent only, opens/clicks
 ///   are never intent);
 /// * `sales_evidence` grounded before `as_of` (count, mean confidence, age);
 /// * `sales_contact_points` verification for reachability;
@@ -1378,7 +1378,7 @@ mod tests {
         }
     }
 
-    /// Hostile windows and empty tenants are refused before any query — the
+    /// Hostile windows and empty tenants are refused before any query, the
     /// loader can never be turned into an unbounded/tenant-less scan.
     #[tokio::test]
     async fn load_replay_cases_refuses_empty_tenants_and_inverted_windows() {

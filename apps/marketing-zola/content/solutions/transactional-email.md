@@ -27,11 +27,11 @@ Transactional email is mission-critical infrastructure. Delayed password resets 
 
 ## ApexMail Solution
 
-- **REST API** (`POST /v1/messages`) — JSON payloads with idempotency keys. Submit and forget.
-- **SMTP Relay** (`smtp.apexmail.ee:587` with STARTTLS) — Drop-in for existing SMTP clients.
-- **Isolated sending configuration** — Dedicated IPs, custom domains, and suppression-list settings can be scoped per email type.
-- **Signed Webhooks** — Real-time `delivered`, `bounced`, `complained`, `opened`, `clicked` events, each with a unique event ID and HMAC signature.
-- **Idempotency** — Deduplicate submissions using client-supplied keys. Resubmit safely after network errors.
+- **REST API** (`POST /v1/messages`), JSON payloads with idempotency keys. Submit and forget.
+- **SMTP Relay** (`smtp.apexmail.ee:587` with STARTTLS), Drop-in for existing SMTP clients.
+- **Isolated sending configuration**, Dedicated IPs, custom domains, and suppression-list settings can be scoped per email type.
+- **Signed Webhooks**, Real-time `delivered`, `bounced`, `complained`, `opened`, `clicked` events, each with a unique event ID and HMAC signature.
+- **Idempotency**, Deduplicate submissions using client-supplied keys. Resubmit safely after network errors.
 
 ## Technical Implementation
 

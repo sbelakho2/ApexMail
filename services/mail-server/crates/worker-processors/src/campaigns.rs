@@ -3,7 +3,7 @@
 //! # Why this module exists
 //!
 //! Dogfood finding DF-3: campaigns could be created, scheduled and "sent" via
-//! the API, but NOTHING consumed them — no worker read `campaigns.scheduled_at`
+//! the API, but NOTHING consumed them, no worker read `campaigns.scheduled_at`
 //! or drained `campaign_jobs`, so a scheduled campaign never sent and the
 //! resend endpoint's `campaign_jobs` row sat `queued` forever. This executor is
 //! the missing consumer, ticked by the worker binary next to the automation
@@ -11,16 +11,16 @@
 //!
 //! # The pipeline
 //!
-//! 1. **Due scheduled campaigns** — `status = 'scheduled' AND scheduled_at <=
+//! 1. **Due scheduled campaigns**, `status = 'scheduled' AND scheduled_at <=
 //!    NOW()` is claimed with `FOR UPDATE SKIP LOCKED`, the audience is expanded
 //!    from `list_ids` / `exclude_list_ids` into `campaign_recipients` and the
 //!    campaign flips to `sending` (the drain phase's gate).
-//! 2. **Resend jobs** — `campaign_jobs` rows with `job_type = 'resend'` are
+//! 2. **Resend jobs**, `campaign_jobs` rows with `job_type = 'resend'` are
 //!    claimed the same way: failed recipients are requeued (`failed` →
 //!    `queued`), the campaign returns to `sending`, and the job completes.
 //!    Suppressed recipients are NEVER retried (compliance), and already-sent
 //!    recipients are never re-sent.
-//! 3. **Drain** — a bounded page of `campaign_recipients` rows whose campaign
+//! 3. **Drain**, a bounded page of `campaign_recipients` rows whose campaign
 //!    is `sending`/`resending` is claimed under a lease (`FOR UPDATE SKIP
 //!    LOCKED` + stale-lease recovery) and sent as ONE PAGE (perf audit
 //!    2026-10-18, findings 6+8): per-tenant
@@ -33,14 +33,14 @@
 //!    ONE recipient-mark `UPDATE ... FROM UNNEST` for the whole page.
 //!    Suppression and consent refusals stay PER-RECIPIENT terminal states
 //!    (same statuses/metadata as ever); the page's enqueue transaction is
-//!    ALL-OR-NOTHING — an insert failure rolls the page back (recipients stay
+//!    ALL-OR-NOTHING, an insert failure rolls the page back (recipients stay
 //!    queued, quota compensated, attempts counted) where the per-recipient
 //!    ladder lost only that recipient's attempt; a refused batch falls back
 //!    to the untouched single-recipient ladder
 //!    ([`CampaignExecutor::send_to_recipient`]) preserving today's granular
 //!    behavior. Per-recipient idempotency keys keep the recovery
 //!    exactly-once.
-//! 4. **Converge** — a `sending`/`resending` campaign with no in-flight or
+//! 4. **Converge**, a `sending`/`resending` campaign with no in-flight or
 //!    queued recipient rows left is finalized: `sent` when nothing failed,
 //!    `partial` otherwise, and `sent_count` is set from the real per-recipient
 //!    outcomes.
@@ -48,7 +48,7 @@
 //! # Pause / resume
 //!
 //! Every claim joins `campaigns.status IN ('sending', 'resending')`: pausing a
-//! campaign (`paused`) stops the drain mid-flight — claimed rows stall under
+//! campaign (`paused`) stops the drain mid-flight, claimed rows stall under
 //! their lease until recovery re-claims them after resume, and no new rows are
 //! claimed. Resume flips the campaign back to `sending` (or `scheduled` when
 //! its `scheduled_at` is still in the future) and the pipeline continues where
@@ -84,7 +84,7 @@ use crate::automations::TemplateContent;
 pub const DEFAULT_BATCH_SIZE: i64 = 25;
 
 /// Recipient rows drained per tick (bounded work; the rest waits for the next
-/// tick — the email processor delivers concurrently).
+/// tick, the email processor delivers concurrently).
 pub const DRAIN_BATCH_SIZE: i64 = 100;
 
 /// Lease held while one claimed recipient row is being processed. A crashed
@@ -194,7 +194,7 @@ struct PageCandidate<'a> {
     scheduled_at: Option<chrono::DateTime<Utc>>,
 }
 
-/// One page mark — the exact `mark_recipient` contract, accumulated across
+/// One page mark, the exact `mark_recipient` contract, accumulated across
 /// the page and flushed with ONE `UPDATE ... FROM UNNEST`.
 struct RecipientMark {
     id: Uuid,
@@ -220,7 +220,7 @@ struct PageSendRow<'a> {
     recipient: &'a ClaimedRecipient,
     context: &'a CampaignSendContext,
     scheduled_at: Option<chrono::DateTime<Utc>>,
-    /// Per-recipient idempotency key — the unchanged exactly-once contract
+    /// Per-recipient idempotency key, the unchanged exactly-once contract
     /// (`campaign:{campaign_id}:{contact_id}`).
     idempotency_key: String,
     rendered: RenderedCampaign,
@@ -237,7 +237,7 @@ struct PageEnqueue {
     /// (recipient id, message id) for rows whose message INSERT landed.
     fresh: Vec<(Uuid, Uuid)>,
     /// (recipient id, EXISTING message id) for rows that hit the
-    /// per-recipient idempotency conflict — a previous attempt's crash
+    /// per-recipient idempotency conflict, a previous attempt's crash
     /// window. No second queue row is written; the caller marks the
     /// recipient sent against the existing message.
     duplicates: Vec<(Uuid, Option<Uuid>)>,
@@ -567,7 +567,7 @@ impl CampaignExecutor {
             })
             .collect();
 
-        // 1. ONE grouped outcomes refresh per metric group — the set form of
+        // 1. ONE grouped outcomes refresh per metric group, the set form of
         //    apexmail_lib::ab_testing::AB_OUTCOMES_REFRESH_SQL: identical
         //    per-arm counts (sent trials, DISTINCT metric events) and the
         //    same `updated_at = a.updated_at` no-touch (that column is the
@@ -604,7 +604,7 @@ WHERE a.campaign_id = per_arm.campaign_id AND a.arm_index = per_arm.arm";
         // 2. ONE grouped gate query for the WHOLE batch: the drained test
         //    sample and the elapsed window per campaign, in one round trip.
         //    The test phase must be fully drained and the window must have
-        //    elapsed since the split — the legacy `continue` arms. A
+        //    elapsed since the split, the legacy `continue` arms. A
         //    campaign without arm rows (never in practice: the split
         //    inserts arms with the phases) reads MIN(updated_at) = NULL;
         //    COALESCE keeps the window NOT open, so the holdout keeps
@@ -645,7 +645,7 @@ WHERE a.campaign_id = per_arm.campaign_id AND a.arm_index = per_arm.arm";
         // 3. ONE grouped arms read per metric group for the READY campaigns,
         //    then the decision IN MEMORY: rows arrive ORDER BY campaign_id,
         //    arm_index, so each campaign's arm vector is ordered exactly
-        //    like the legacy single-campaign read fed `decide_winner` — the
+        //    like the legacy single-campaign read fed `decide_winner`, the
         //    same leader, the same z, the same refusals.
         const GROUPED_OUTCOMES_SELECT_SQL: &str = "\
 SELECT a.campaign_id, a.arm_index, \
@@ -753,7 +753,7 @@ ORDER BY a.campaign_id, a.arm_index";
             }
 
             // The decision is persisted with its provenance: which rule ran
-            // (auto), on which metric, with which z — one statement for the
+            // (auto), on which metric, with which z, one statement for the
             // whole batch.
             let metrics: Vec<String> = decisions
                 .iter()
@@ -915,7 +915,7 @@ ORDER BY a.campaign_id, a.arm_index";
         }
 
         // An EMPTY include set with no segment match rules is an empty
-        // audience — never "every contact". (The cardinality escape in the
+        // audience, never "every contact". (The cardinality escape in the
         // SQL below only ever selects when tag/status rules constrain the
         // audience, i.e. a tag-targeted segment with no lists.)
         if include.is_empty() && tags_all.is_none() && tags_any.is_none() {
@@ -986,7 +986,7 @@ ORDER BY a.campaign_id, a.arm_index";
 
             match status.as_deref() {
                 // The live state: requeue failed recipients (suppressed rows
-                // stay terminal — compliance) and hand the campaign back to
+                // stay terminal, compliance) and hand the campaign back to
                 // the drain phase.
                 Some("resending") => {
                     let requeued = sqlx::query(
@@ -1017,7 +1017,7 @@ ORDER BY a.campaign_id, a.arm_index";
                     report.jobs_completed += 1;
                 }
                 // Paused between the resend request and this tick: honor the
-                // pause — put the job back for the post-resume tick.
+                // pause, put the job back for the post-resume tick.
                 Some("paused") => {
                     sqlx::query(
                         "UPDATE campaign_jobs \
@@ -1103,7 +1103,7 @@ ORDER BY a.campaign_id, a.arm_index";
         }
 
         // Resolve per-campaign send context once (sender + content + settings
-        // + A/B arms). P3: ONE context query per page — the per-campaign
+        // + A/B arms). P3: ONE context query per page, the per-campaign
         // "sent in the last hour" throttle input is folded into it as a
         // grouped LEFT JOIN, and templates shared by several campaigns are
         // loaded ONCE per page (deduped by tenant + template reference).
@@ -1173,7 +1173,7 @@ ORDER BY a.campaign_id, a.arm_index";
 
             // Every DISTINCT (tenant, template reference) for the page, in
             // one query. A reference may be an id or a slug, and the highest
-            // version wins — exactly the single-row lookup's contract.
+            // version wins, exactly the single-row lookup's contract.
             let mut distinct_refs: Vec<(String, String)> = Vec::new();
             let mut seen_refs: std::collections::HashSet<(String, String)> =
                 std::collections::HashSet::new();
@@ -1308,7 +1308,7 @@ ORDER BY a.campaign_id, a.arm_index";
                 // optimal engagement hour and takes precedence over the
                 // campaign-level distribution; `timezone` is the IANA zone
                 // used to interpret those windows. A malformed timezone
-                // (possible only through a directly seeded row — the API
+                // (possible only through a directly seeded row, the API
                 // validates IANA names) falls back to the tenant offset.
                 let send_time_optimization = settings
                     .get("sendTimeOptimization")
@@ -1363,7 +1363,7 @@ ORDER BY a.campaign_id, a.arm_index";
         let mut marks: Vec<RecipientMark> = Vec::new();
         let mut requeues: Vec<Uuid> = Vec::new();
 
-        // Static per-recipient gates — the same outcomes the per-recipient
+        // Static per-recipient gates, the same outcomes the per-recipient
         // ladder produced (vanish / no sender / no content / over budget),
         // accumulated for the page's batched bookkeeping. The throttle
         // budget still decrements in claim order, so the deferral suffix per
@@ -1418,14 +1418,14 @@ ORDER BY a.campaign_id, a.arm_index";
         }
 
         // Send-time optimization: ONE grouped profile read for the page
-        // (per-recipient failures defer exactly that recipient — the batch
+        // (per-recipient failures defer exactly that recipient, the batch
         // read defers the page's STO recipients together, the same
         // "optimal hour, not immediately" contract).
         self.resolve_sto_schedules(&mut candidates, &mut requeues, &mut report)
             .await?;
 
         // Admission: ONE admit_batch per tenant group (a page normally
-        // carries one tenant) — category validated once, one suppression
+        // carries one tenant), category validated once, one suppression
         // probe, one batched consent decision, ONE quota reservation for the
         // allowed count under the page's identity.
         let mut grouped: Vec<(String, Vec<PageCandidate<'_>>)> = Vec::new();
@@ -1471,7 +1471,7 @@ ORDER BY a.campaign_id, a.arm_index";
             if let Some(failure) = failure {
                 // The batch's infrastructure steps failed (probe / consent
                 // store / metering / plan gate). FALL BACK to the untouched
-                // per-recipient ladder for the whole group — today's exact
+                // per-recipient ladder for the whole group, today's exact
                 // granular behavior (a quota-refused page admits what fits
                 // and defers the rest; nothing was reserved by the failed
                 // batch). Nothing in the failed batch touched the world.
@@ -1506,7 +1506,7 @@ ORDER BY a.campaign_id, a.arm_index";
                 reservations.push(reservation);
             }
 
-            // Walk the outcomes in group order — refusal parity: the same
+            // Walk the outcomes in group order, refusal parity: the same
             // terminal statuses and metadata the per-recipient ladder lands.
             for (candidate, outcome) in group.into_iter().zip(outcomes) {
                 match outcome {
@@ -1584,11 +1584,11 @@ ORDER BY a.campaign_id, a.arm_index";
         }
 
         // ONE page transaction: the page's sender-domain gate (held with
-        // FOR SHARE in THIS transaction — the identical ready-conditions
+        // FOR SHARE in THIS transaction, the identical ready-conditions
         // SQL), then the page's messages rows, then its email_queue rows.
         //
         // ALL-OR-NOTHING (loudly documented deviation): any insert failure
-        // rolls the WHOLE page back — recipients stay queued, quota is
+        // rolls the WHOLE page back, recipients stay queued, quota is
         // compensated, and every page recipient gets the same
         // attempt-counted bookkeeping the per-recipient ladder applied to
         // its failing recipient (`fail_recipient`'s contract). The
@@ -1618,7 +1618,7 @@ ORDER BY a.campaign_id, a.arm_index";
                         // This (campaign, contact) already enqueued in a
                         // previous attempt (the crash window between enqueue
                         // and bookkeeping): mark sent against the EXISTING
-                        // message — no second queue row.
+                        // message, no second queue row.
                         marks.push(RecipientMark::new(recipient_id, "sent", "", existing));
                         report.recipients_sent += 1;
                     }
@@ -1664,7 +1664,7 @@ ORDER BY a.campaign_id, a.arm_index";
             }
         }
 
-        // Flush the page's accumulated bookkeeping — ONE requeue statement
+        // Flush the page's accumulated bookkeeping, ONE requeue statement
         // and ONE marks statement with mark_recipient's exact column
         // contract.
         if !requeues.is_empty() {
@@ -1686,7 +1686,7 @@ ORDER BY a.campaign_id, a.arm_index";
     /// per-recipient ladder paid one profile query + one offset lookup per
     /// recipient). A profile-read failure is transient infrastructure: the
     /// STO recipients are requeued (the contract is "optimal hour", not
-    /// "immediately") while the non-STO rest of the page proceeds — the same
+    /// "immediately") while the non-STO rest of the page proceeds, the same
     /// arm the per-recipient ladder deferred with.
     async fn resolve_sto_schedules<'a>(
         &self,
@@ -1767,7 +1767,7 @@ ORDER BY a.campaign_id, a.arm_index";
     /// The send ladder for ONE recipient (the batch-admission fallback):
     /// admission (suppression + quota) → render → one transaction writing
     /// `messages` + `email_queue`. Returns the tick delta. `scheduled_at`
-    /// (resolved for the whole page by [`Self::resolve_sto_schedules`] — the
+    /// (resolved for the whole page by [`Self::resolve_sto_schedules`], the
     /// batched form of the per-recipient optimal-window read) is the
     /// send-time-optimization window; the email processor's claim only picks
     /// the row up when due.
@@ -1782,7 +1782,7 @@ ORDER BY a.campaign_id, a.arm_index";
             recipient.campaign_id, recipient.contact_id
         );
 
-        // 1. Admission — the ONE shared gate, explicit marketing category
+        // 1. Admission, the ONE shared gate, explicit marketing category
         //    (campaign mail is commercial mail; suppression applies).
         let admission = match self
             .admission
@@ -1869,7 +1869,7 @@ ORDER BY a.campaign_id, a.arm_index";
         let admitted_category = admission.category().to_string();
 
         // 2. Render per contact ({{name}} / {{first_name}} / {{email}},
-        //    HTML-escaped in the HTML part — same policy as automations).
+        //    HTML-escaped in the HTML part, same policy as automations).
         let (template, subject_override, _) = context.content_for(recipient);
         let rendered = render_content(context, template, subject_override, &recipient.email);
 
@@ -1894,7 +1894,7 @@ ORDER BY a.campaign_id, a.arm_index";
             }
         };
 
-        // Ready sender-domain resolution under the transaction — the exact
+        // Ready sender-domain resolution under the transaction, the exact
         // SQL the REST/automations/sales paths use.
         let domain_id = match resolve_sender_domain_id(
             &mut tx,
@@ -2010,7 +2010,7 @@ ORDER BY a.campaign_id, a.arm_index";
         .bind(&rendered.subject)
         .bind(&rendered.html)
         .bind(&rendered.text)
-        // email_queue.tags is TEXT[] (messages.tags is JSONB) — the same
+        // email_queue.tags is TEXT[] (messages.tags is JSONB), the same
         // split the automations ladder binds.
         .bind(vec!["campaign".to_string()])
         .bind(&metadata)
@@ -2104,7 +2104,7 @@ ORDER BY a.campaign_id, a.arm_index";
     }
 
     /// The page-granular [`Self::fail_recipient`]: ONE attempt-increment
-    /// statement for every recipient of a failed page — the same SQL contract
+    /// statement for every recipient of a failed page, the same SQL contract
     /// (`attempts + 1`, `queued` under the cap, `failed` at it, bounded error
     /// text). Returns `(recipients_failed, recipients_deferred)`.
     async fn fail_recipients(
@@ -2171,10 +2171,10 @@ ORDER BY a.campaign_id, a.arm_index";
     /// otherwise; `sent_count` becomes the real per-recipient count.
     ///
     /// P1: the whole discovered batch is finalized with a bounded number of
-    /// statements — ONE `GROUP BY campaign_id` count over `= ANY($1)`, ONE
+    /// statements, ONE `GROUP BY campaign_id` count over `= ANY($1)`, ONE
     /// `UPDATE ... FROM (VALUES ...)` whose `RETURNING` also replaces the old
     /// per-campaign tenant/A-B read, and ONE multi-row `webhook_queue` insert
-    /// for every `campaign.completed` event — instead of 3+ statements (and
+    /// for every `campaign.completed` event, instead of 3+ statements (and
     /// one insert per subscribed webhook) per campaign.
     async fn finalize_finished_campaigns(&self) -> Result<TickReport, CampaignError> {
         let finished: Vec<Uuid> = sqlx::query_scalar(
@@ -2218,7 +2218,7 @@ ORDER BY a.campaign_id, a.arm_index";
         // `status IN ('sending', 'resending')` condition per row. RETURNING
         // yields exactly the campaigns this worker actually transitioned (the
         // old `rows_affected > 0` gate, per row) plus the data the completed
-        // event needs — tenant and A/B winner — without a second read.
+        // event needs, tenant and A/B winner, without a second read.
         let mut update_sql = String::from(
             "UPDATE campaigns c \
              SET status = v.status, sent_count = v.sent_count, updated_at = NOW() \
@@ -2307,7 +2307,7 @@ struct CampaignWebhookEvent {
 
 /// P1: enqueue a whole batch of lifecycle events with ONE subscription
 /// lookup (per (tenant, event_type) pair) and ONE multi-row `webhook_queue`
-/// insert (chunked to keep the statement bounded) — instead of one lookup +
+/// insert (chunked to keep the statement bounded), instead of one lookup +
 /// one insert per webhook per event.
 ///
 /// Failures keep the historical posture: a failed lookup or insert is logged
@@ -2477,7 +2477,7 @@ struct RenderedCampaign {
 }
 
 /// Minimal `{{name}}`-style interpolation for the campaign subject and the
-/// template bodies, HTML-escaping in the HTML part — the same policy as the
+/// template bodies, HTML-escaping in the HTML part, the same policy as the
 /// automations renderer (which renders from an automation EventContext, not a
 /// bare contact). Unknown placeholders are left untouched; the delivery
 /// pipeline substitutes `{{unsubscribe_url}}` itself for marketing mail.
@@ -2667,7 +2667,7 @@ fn contact_name(email: &str) -> String {
 }
 
 /// Ready sender-domain resolution with a row lock held through the queue
-/// insert — the exact SQL the REST, automations and sales paths use. Returns
+/// insert, the exact SQL the REST, automations and sales paths use. Returns
 /// `None` when the sender address has no domain or the domain is not
 /// verified + DKIM-ready (the send ladder's skip condition).
 async fn resolve_sender_domain_id(
@@ -2703,7 +2703,7 @@ fn sender_domain(from: &str) -> Option<String> {
         .filter(|domain| !domain.is_empty())
 }
 
-/// The `messages`/`email_queue` metadata for one campaign send — the
+/// The `messages`/`email_queue` metadata for one campaign send, the
 /// per-message knobs the processor honors: source, campaign/contact
 /// back-references, the owning quota event, per-campaign tracking toggles,
 /// display name, dedicated-IP pool (`dedicated_ips.ses_pool_name`) for SES
@@ -2740,7 +2740,7 @@ fn campaign_message_metadata(
 /// The claimed page's idempotency identity for the ONE batched quota
 /// reservation: SHA-256 over the SORTED (campaign, contact) pairs of the
 /// page. Deterministic for a re-claim of the same page (crash recovery
-/// collapses onto the original reservation instead of double-charging — the
+/// collapses onto the original reservation instead of double-charging, the
 /// F22 duplicate contract), independent of row order.
 pub(crate) fn page_idempotency_key(tenant_id: &str, pairs: &[(Uuid, Uuid)]) -> String {
     let mut identities: Vec<String> = pairs
@@ -2765,7 +2765,7 @@ const PAGE_INSERT_CHUNK: usize = 1000;
 const MARK_FLUSH_CHUNK: usize = 1000;
 
 /// The `messages` page insert: ONE multi-row statement (UNNEST arrays,
-/// chunked) — the per-recipient ladder's exact column list, with `status`
+/// chunked), the per-recipient ladder's exact column list, with `status`
 /// pinned to `'queued'` as before. `ON CONFLICT (tenant_id, idempotency_key)
 /// DO NOTHING` keeps the per-recipient exactly-once contract; the returned
 /// keys separate freshly inserted rows from crash-window conflicts.
@@ -2786,7 +2786,7 @@ ON CONFLICT (tenant_id, idempotency_key) DO NOTHING \
 RETURNING id, tenant_id, idempotency_key";
 
 /// The `email_queue` page insert: ONE multi-row statement (UNNEST arrays,
-/// chunked) for the freshly inserted messages only — the per-recipient
+/// chunked) for the freshly inserted messages only, the per-recipient
 /// ladder's exact column list, `priority 5` / `status 'pending'` pinned as
 /// before, `to_addresses` built from the scalar recipient (`ARRAY[r.rcpt]`;
 /// the alias avoids the reserved keyword `to`) and `tags` the constant
@@ -2808,7 +2808,7 @@ FROM UNNEST($1::uuid[], $2::uuid[], $3::text[], $4::uuid[], $5::text[], $6::text
 
 /// One page enqueue transaction: sender-domain gate + messages rows +
 /// email_queue rows, committed together. On ANY failure the transaction is
-/// dropped (rolled back) and the error returned — the CALLER compensates the
+/// dropped (rolled back) and the error returned, the CALLER compensates the
 /// page's quota reservations and applies the attempt-counted bookkeeping.
 async fn run_page_transaction(
     db: &sqlx::PgPool,
@@ -2824,13 +2824,13 @@ async fn run_page_transaction(
 /// The page enqueue transaction body (runs inside the caller's transaction):
 ///
 /// 1. ONE sender-domain resolution for the page's DISTINCT (tenant,
-///    sender-domain) pairs — the identical ready-conditions SQL the
+///    sender-domain) pairs, the identical ready-conditions SQL the
 ///    single-recipient ladder resolves (`resolve_sender_domain_id`), as a
 ///    `FOR SHARE` CTE so the lock is held in the transaction that inserts.
 ///    Recipients whose domain is missing/not-ready come back per recipient
 ///    in [`PageEnqueue::unready_domains`].
 /// 2. ONE multi-row `messages` insert (`ON CONFLICT DO NOTHING` +
-///    `RETURNING`) — rows whose per-recipient idempotency key already has a
+///    `RETURNING`), rows whose per-recipient idempotency key already has a
 ///    message reuse the EXISTING message (crash-window recovery; no second
 ///    queue row), exactly the single-recipient duplicate arm.
 /// 3. ONE multi-row `email_queue` insert for the freshly inserted messages.
@@ -2846,7 +2846,7 @@ async fn enqueue_page(
     };
 
     // -- 1. The page's DISTINCT (tenant, sender-domain) pairs, one FOR SHARE
-    //       statement — the same readiness conditions, same nullable outcome.
+    //       statement, the same readiness conditions, same nullable outcome.
     let mut pairs: Vec<(String, String)> = Vec::new();
     let mut seen_pairs: HashSet<(String, String)> = HashSet::new();
     for row in rows {
@@ -3003,7 +3003,7 @@ async fn enqueue_page(
             .map(|row| row.idempotency_key.as_str())
             .collect();
         // The single-recipient ladder swallows a lookup error and falls back
-        // to the generated id (`unwrap_or(None)`) — same posture here: a
+        // to the generated id (`unwrap_or(None)`), same posture here: a
         // lookup failure degrades to the generated-id fallback, never to a
         // page failure.
         let existing: Vec<(Uuid, String, String)> = sqlx::query_as(
@@ -3265,7 +3265,7 @@ mod tests {
             return;
         };
         let tenant = fresh_tenant("camp-poison");
-        // webhooks.id is VARCHAR(26), not UUID — a UUID's 36-char text form
+        // webhooks.id is VARCHAR(26), not UUID, a UUID's 36-char text form
         // would overflow it.
         let webhook_id = format!("wh{}", &Uuid::new_v4().simple().to_string()[..20]);
         sqlx::query(
@@ -3330,7 +3330,7 @@ mod tests {
     }
 
     /// In-memory admission backend: quota limit, suppression set, duplicate
-    /// detection — the same harness the automations executor tests use.
+    /// detection, the same harness the automations executor tests use.
     #[derive(Debug)]
     struct FakeAdmission {
         limit: AtomicI64,
@@ -3464,7 +3464,7 @@ mod tests {
                 Ok(AdmissionSendDecision::Allowed)
             } else {
                 Ok(AdmissionSendDecision::Blocked(
-                    "no marketing consent on file — recipient must opt in".into(),
+                    "no marketing consent on file, recipient must opt in".into(),
                 ))
             }
         }
@@ -3816,7 +3816,7 @@ mod tests {
         }
 
         // Idempotency: a second tick finds no claimable work and changes
-        // nothing — no double sends, no re-convergence.
+        // nothing, no double sends, no re-convergence.
         let report = exec.tick().await.expect("tick 2");
         assert_eq!(report.recipients_sent, 0);
         let (status, _) = campaign_status(&pool, campaign).await;
@@ -3824,7 +3824,7 @@ mod tests {
         pool.close().await;
     }
 
-    /// Suppressed recipients are terminal `suppressed`, never retried — and
+    /// Suppressed recipients are terminal `suppressed`, never retried, and
     /// the campaign still converges `partial` with the rest `sent`.
     #[tokio::test]
     async fn suppression_is_terminal_and_yields_partial() {
@@ -3863,7 +3863,7 @@ mod tests {
         assert_eq!(status, "partial", "a suppressed recipient is a failure");
         assert_eq!(sent_count, 2);
 
-        // A resend job must NOT requeue the suppressed row — only `failed`.
+        // A resend job must NOT requeue the suppressed row, only `failed`.
         sqlx::query(
             "INSERT INTO campaign_jobs (id, campaign_id, tenant_id, job_type, status) \
              VALUES ($1, $2, $3, 'resend', 'queued')",
@@ -3938,7 +3938,7 @@ mod tests {
         assert_eq!(status, "sending");
 
         // Drain state is recoverable: rows are back to `queued` for the next
-        // tick (their admission identity is stable — a later quota raise
+        // tick (their admission identity is stable, a later quota raise
         // admits them without double-billing).
         let (queued,): (i64,) = sqlx::query_as(
             "SELECT COUNT(*) FROM campaign_recipients WHERE campaign_id = $1 AND status = 'queued'",
@@ -4191,7 +4191,7 @@ mod tests {
             .expect("drop sender");
 
         // Campaign with sender but an UNKNOWN template id (26-char ids are
-        // the templates.id shape — the reference just doesn't resolve).
+        // the templates.id shape, the reference just doesn't resolve).
         let bad_template = apexmail_lib::id::generate_id("", 26);
         let domain = insert_domain(&pool, &tenant).await;
         let no_template = Uuid::new_v4();
@@ -4452,7 +4452,7 @@ mod tests {
         );
 
         // Replay 2: rebuilding the audience in REVERSE insertion order still
-        // assigns the same arm — the hash is keyed on (experiment,
+        // assigns the same arm, the hash is keyed on (experiment,
         // contact), not on row order.
         sqlx::query("DELETE FROM campaign_recipients WHERE campaign_id = $1")
             .bind(campaign)
@@ -4482,7 +4482,7 @@ mod tests {
         );
 
         // Replay 3: the audience GREW (a resend re-expansion adds contacts).
-        // The original recipients keep their arms — the assignment is keyed
+        // The original recipients keep their arms, the assignment is keyed
         // on each recipient, never on the audience size or row rank.
         let extra = insert_seeded_contacts(&pool, &tenant, "bound-extra", 50).await;
         for (contact_id, email) in &extra {
@@ -4702,7 +4702,7 @@ mod tests {
 
         let campaign = insert_ready_campaign(&pool, &tenant, "sending", None).await;
         attach_ab_experiment(&pool, &tenant, campaign, 0.2, 2).await;
-        // 10 trials per arm — below the documented 30-trial floor — with a
+        // 10 trials per arm, below the documented 30-trial floor, with a
         // huge apparent lead (3/10 vs 0/10).
         seed_arm_outcome(&pool, &tenant, campaign, 0, "small-a", 10, 3).await;
         seed_arm_outcome(&pool, &tenant, campaign, 1, "small-b", 10, 0).await;
@@ -4770,7 +4770,7 @@ mod tests {
         assert!(z >= apexmail_lib::ab_testing::Z_CRITICAL, "z = {z}");
         // Z parity with the documented rule: the persisted z is EXACTLY the
         // z `decide_winner` computes from the same (trials, successes) the
-        // set-based refresh derived — the old path's number, bit for bit.
+        // set-based refresh derived, the old path's number, bit for bit.
         let verdict = apexmail_lib::ab_testing::decide_winner(&[
             apexmail_lib::ab_testing::ArmOutcome {
                 arm_index: 0,
@@ -4866,7 +4866,7 @@ mod tests {
 
         // A webhook subscriber so the winner events fan out and the payload
         // parity below can be asserted from `webhook_queue`. webhooks.id is
-        // VARCHAR(26), not UUID — a UUID's 36-char text form overflows it.
+        // VARCHAR(26), not UUID, a UUID's 36-char text form overflows it.
         let webhook_id = format!("wh{}", &Uuid::new_v4().simple().to_string()[..20]);
         sqlx::query(
             "INSERT INTO webhooks (id, tenant_id, name, url, secret, events, enabled, created_at) \
@@ -4897,7 +4897,7 @@ mod tests {
             capture.statements()
         );
         // Set-based evaluation (findings 6+8): the refresh, the gates and
-        // the arms read are O(1) per batch — one grouped statement each (the
+        // the arms read are O(1) per batch, one grouped statement each (the
         // two candidates share the 'open' metric), not 4 queries per
         // campaign.
         assert_eq!(
@@ -4999,7 +4999,7 @@ mod tests {
         pool.close().await;
     }
 
-    /// P3: one context query serves the whole page — the throttling budget is
+    /// P3: one context query serves the whole page, the throttling budget is
     /// folded into it (no per-campaign sent-in-the-last-hour COUNT), and a
     /// template shared by three campaigns is loaded once.
     #[tokio::test]
@@ -5170,7 +5170,7 @@ mod tests {
 
         // The recipient's profile under its own tenant: 8 opens at 14:00 UTC
         // on a Tuesday (2026-06-16). The SAME address under another tenant
-        // carries 20 opens at 09:00 — a leak would make 09:00 dominant, so
+        // carries 20 opens at 09:00, a leak would make 09:00 dominant, so
         // the 14:00 assertion below doubles as the tenant-scoping proof.
         for (tenant_id, hour, count) in [(&tenant, 14, 8u32), (&other_tenant, 9, 20u32)] {
             for _ in 0..count {
@@ -5326,8 +5326,8 @@ mod tests {
     }
 
     /// Statement-count regression (brief, finding 6): the four per-recipient
-    /// statements of the legacy ladder — sender-domain resolution, `messages`
-    /// INSERT, `email_queue` INSERT and the recipient mark — are O(1) per
+    /// statements of the legacy ladder, sender-domain resolution, `messages`
+    /// INSERT, `email_queue` INSERT and the recipient mark, are O(1) per
     /// page: a 1-recipient page and a 5-recipient page issue the SAME
     /// statements, exactly once each.
     #[tokio::test]
@@ -5389,7 +5389,7 @@ mod tests {
 
     /// Behavior parity (brief): suppression-terminal, consent-refused,
     /// STO-windowed and normal recipients on ONE page land in exactly the
-    /// rows/statuses/metadata the per-recipient ladder produced — asserted
+    /// rows/statuses/metadata the per-recipient ladder produced, asserted
     /// with concrete values.
     #[tokio::test]
     async fn drain_page_parity_suppressed_consent_refused_sto_and_normal() {
@@ -5420,7 +5420,7 @@ mod tests {
             .expect("attach STO settings");
 
         // The STO recipient's engagement profile: 8 opens at 14:00 UTC on a
-        // Tuesday (2026-06-16) — the window the drain must schedule.
+        // Tuesday (2026-06-16), the window the drain must schedule.
         let sto_email = "sto@example.test";
         for _ in 0..8 {
             sqlx::query(
@@ -5624,8 +5624,8 @@ mod tests {
     }
 
     /// Batch admission through the drain (brief): ONE quota reservation per
-    /// page; an insert failure rolls the WHOLE page back — quota compensated,
-    /// recipients back to `queued` with the attempt recorded — and the retry
+    /// page; an insert failure rolls the WHOLE page back, quota compensated,
+    /// recipients back to `queued` with the attempt recorded, and the retry
     /// re-admits under the same page identity.
     #[tokio::test]
     async fn drain_page_reserves_quota_once_and_a_failed_page_compensates_together() {

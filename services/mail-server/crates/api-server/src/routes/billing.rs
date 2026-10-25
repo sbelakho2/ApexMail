@@ -80,8 +80,8 @@ pub fn router() -> Router<AppState> {
 }
 
 /// SM3 (audit F3): the platform billing-admin routes. These used to ride the
-/// plain `authenticated` router guarded only by `has_admin_access` — a JWT
-/// tenant-id + scope string check — so a stolen system-tenant session JWT
+/// plain `authenticated` router guarded only by `has_admin_access`, a JWT
+/// tenant-id + scope string check, so a stolen system-tenant session JWT
 /// (a sliding window: `refresh_token` mints a fresh `iat` that resets the
 /// 7-day absolute check) could mint wallet credits and override plans with
 /// none of the CP ceremony app.rs calls CRITICAL for read-only analytics.
@@ -90,7 +90,7 @@ pub fn router() -> Router<AppState> {
 /// (`require_system_tenant_middleware` → `require_cp_auth`), giving billing
 /// admin the same MFA'd-session, idle/absolute-timeout, per-request-recheck
 /// and `cp_access_log` policy. The CP gate's explicit machine-credential
-/// carve-out (a system-tenant API key with no user identity — audited as
+/// carve-out (a system-tenant API key with no user identity, audited as
 /// `cp_machine_key`) keeps programmatic callers working.
 pub fn admin_router() -> Router<AppState> {
     Router::new()
@@ -110,7 +110,7 @@ pub fn admin_router() -> Router<AppState> {
             post(admin_reset_dunning),
         )
         .route("/tenants/:tenantId/invoices", post(admin_create_invoice))
-        // DF-5 finding B — the invoice state machine's missing transitions,
+        // DF-5 finding B, the invoice state machine's missing transitions,
         // wired on the SAME operator surface (system-tenant + CP gate):
         //   POST .../invoices/:invoiceId/void          draft/open → void
         //   POST .../invoices/:invoiceId/credit-notes  paid-invoice refund
@@ -132,7 +132,7 @@ pub fn admin_router() -> Router<AppState> {
         .route("/export", get(admin_export_billing_data))
 }
 
-/// `GET /v1/billing/entitlements` — the caller tenant's resolved
+/// `GET /v1/billing/entitlements`, the caller tenant's resolved
 /// entitlement snapshot, for UI/console presentation ONLY.
 ///
 /// Backend authority stays in the handlers (`require_feature` /
@@ -377,7 +377,7 @@ fn usage_payload(summary: billing_service::types::UsageSummary) -> serde_json::V
     let emails_sent = summary.emails_sent.max(0);
     let api_calls = summary.api_calls.max(0);
     let percent_used = if summary.emails_limit > 0 {
-        // Integer percentage, rounded half-up — no float round-trip.
+        // Integer percentage, rounded half-up, no float round-trip.
         (emails_sent * 100 + summary.emails_limit / 2) / summary.emails_limit
     } else {
         0
@@ -478,7 +478,7 @@ struct OverageEstimateBody {
     emails_sent: i64,
     email_limit: i64,
     /// Optional tenant for server-side limit recomputation. When present the
-    /// client-supplied email_limit is ignored — the server resolves the
+    /// client-supplied email_limit is ignored, the server resolves the
     /// tenant's override-aware plan limit (mirror of billing-service Fix
     /// I13; plan limits are published pricing, not tenant secrets).
     #[serde(default)]
@@ -880,7 +880,7 @@ struct LegacyBillingAddressDto {
     // `invoices.rs` and the admin writer in this file); the API contract
     // serializes camelCase. Without the aliases every real snapshot
     // decoded to the empty address (the billing-service readers already
-    // accept both dialects — this DTO is the api-server one that did not).
+    // accept both dialects, this DTO is the api-server one that did not).
     #[serde(alias = "company_name")]
     company_name: String,
     #[serde(alias = "vat_number")]
@@ -918,7 +918,7 @@ struct LegacyInvoiceDto {
     issued_at: chrono::DateTime<Utc>,
     due_at: chrono::DateTime<Utc>,
     paid_at: Option<chrono::DateTime<Utc>>,
-    /// Nullable on the table — every Rust writer (api-server admin writer,
+    /// Nullable on the table, every Rust writer (api-server admin writer,
     /// billing-service invoice/credit-note/sweep writers) populates the
     /// period bounds, but nothing in the schema enforces it and no migration
     /// backfills it. Decoded as an Option so one legacy/imported row with
@@ -948,14 +948,14 @@ struct LegacyInvoiceRow {
     total: i64,
     line_items: String,
     /// Nullable on the table (rows written by the Mollie invoice.paid
-    /// persistence predate address snapshotting) — decoded as an empty
+    /// persistence predate address snapshotting), decoded as an empty
     /// address so a NULL snapshot can never fail the whole list/detail
     /// query (audit F05).
     billing_address: Option<String>,
     issued_at: chrono::DateTime<Utc>,
     due_at: chrono::DateTime<Utc>,
     paid_at: Option<chrono::DateTime<Utc>>,
-    /// See [`LegacyInvoiceDto::period_start`] — nullable on the table,
+    /// See [`LegacyInvoiceDto::period_start`], nullable on the table,
     /// decoded as an Option so a NULL bound can never fail the whole
     /// invoice surface.
     period_start: Option<chrono::DateTime<Utc>>,
@@ -1295,7 +1295,7 @@ fn admin_invoice_export_query(use_legacy_schema: bool) -> &'static str {
 ///
 /// SECURITY (audit A): the wildcard scope `"*"` is granted to every tenant's
 /// admin/owner role (`scopes_for_role` in routes/auth.rs) so customers can
-/// manage their OWN tenant — it must never grant platform-level billing
+/// manage their OWN tenant, it must never grant platform-level billing
 /// administration. Platform billing admin (`/v1/billing/admin/*`) is a
 /// system-tenant capability, exactly like the `/v1/admin/*` control plane
 /// (see `require_system_tenant_middleware`), so the caller must BOTH be a
@@ -1306,7 +1306,7 @@ fn admin_invoice_export_query(use_legacy_schema: bool) -> &'static str {
 /// ([`crate::middleware::auth::require_system_tenant`], backed by
 /// `routes::web::is_system_tenant`'s `slug = 'system'` lookup). The previous
 /// check hardcoded the literal `system` plus the seeded id
-/// (`system_sender::SYSTEM_TENANT_ID`) — safe only while the seeded row kept
+/// (`system_sender::SYSTEM_TENANT_ID`), safe only while the seeded row kept
 /// that exact id; any re-seed/rename would have silently locked every human
 /// operator out of billing admin, the exact failure class the CP gate was
 /// already fixed for. A database error fails CLOSED.
@@ -1603,7 +1603,7 @@ fn format_invoice_date(date: chrono::DateTime<Utc>) -> String {
 }
 
 /// Render an optional invoice date (the period bounds are nullable on the
-/// table — see [`LegacyInvoiceRow`]); an absent bound renders as an em dash
+/// table, see [`LegacyInvoiceRow`]); an absent bound renders as an em dash
 /// instead of inventing a date.
 fn format_optional_invoice_date(date: Option<chrono::DateTime<Utc>>) -> String {
     date.map(format_invoice_date).unwrap_or_else(|| "—".into())
@@ -1621,7 +1621,7 @@ fn format_invoice_currency_with(cents: i64, currency: &str) -> String {
 }
 
 /// Format integer cents as a plain decimal string ("123.45") using integer
-/// math only — money formatting must not round-trip through f64.
+/// math only, money formatting must not round-trip through f64.
 fn cents_to_decimal_string(cents: i64) -> String {
     let sign = if cents < 0 { "-" } else { "" };
     let abs = cents.unsigned_abs();
@@ -1677,7 +1677,7 @@ fn invoice_style_nonce() -> String {
 ///
 /// The global security-headers middleware injects
 /// `Content-Security-Policy: default-src 'none'; frame-ancestors 'none'`
-/// into every response that does not carry its own CSP — which blocked the
+/// into every response that does not carry its own CSP, which blocked the
 /// document's inline `<style>` and left the browser print dialog rendering
 /// an unstyled invoice. Instead of loosening the global policy, the route
 /// emits its own COMPLETE document-scoped CSP: everything stays `default-src
@@ -2023,7 +2023,7 @@ fn render_invoice_xml(invoice: &LegacyInvoiceDto, outstanding_cents: Option<i64>
 
     // <PaidAmount>/<PayableAmount> must reflect the invoice's settlement
     // state: a paid invoice carries its full total as paid (and nothing
-    // payable); an open one shows the DURABLY settled amount — confirmed
+    // payable); an open one shows the DURABLY settled amount, confirmed
     // payment allocations plus credit notes (audit F35), falling back to
     // the binary 0/total view when no allocation data exists (legacy
     // invoices). The hardcoded 0.00 told every recipient's accounting
@@ -2202,8 +2202,8 @@ async fn query_invoice_list_rows_with_legacy_fallback(
         Ok(rows) => Ok(rows),
         Err(error) if is_missing_column_error_for(&error, &INVOICE_FALLBACK_OPTIONAL_COLUMNS) => {
             // Legacy adapter: the canonical totals (subtotal/vat_total/
-            // total) and due_at stay AS-IS — migrations 076/093 guarantee
-            // them on every completed chain — and only the optional
+            // total) and due_at stay AS-IS, migrations 076/093 guarantee
+            // them on every completed chain, and only the optional
             // metadata columns are NULL-adapted. The pre-fix fallback
             // selected `amount_cents`/`due_date`, columns the canonical
             // chain no longer has, so BOTH paths failed (audit F05).
@@ -2378,7 +2378,7 @@ fn preview_plan_proration(
     let price_divisor = if is_yearly { 12 } else { 1 };
 
     // Money math goes through proration::prorated_amount (i128, half-up,
-    // overflow-checked) — never f64.
+    // overflow-checked), never f64.
     let credit_amount =
         proration::prorated_amount(current_price_numerator, days_remaining, days_in_period)?;
     let charge_amount =
@@ -2705,7 +2705,7 @@ async fn get_usage(
     auth: AuthUser,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
     // SM3 (audit F2): billing reads carry the registered `billing:read`
-    // scope — the same least-privilege bar every other read surface
+    // scope, the same least-privilege bar every other read surface
     // (messages:read, webhooks:read, analytics:read) enforces. Fail-closed
     // by design: read-side role grants (viewer/developer) and narrow API
     // keys deliberately scoped away from finance data no longer reach
@@ -2861,12 +2861,12 @@ async fn estimate_overage_cost(
         ]));
     }
 
-    // Fix I13 mirror (billing-service routes.rs) — recompute the limit
+    // Fix I13 mirror (billing-service routes.rs), recompute the limit
     // server-side: a client-supplied limit is only a display default,
     // never the billing truth. The resolved limit honours active admin
     // plan overrides via plans::get_plan_for_tenant.
     //
-    // Audit F64 — the estimate uses the AUTHENTICATED tenant. Naming a
+    // Audit F64, the estimate uses the AUTHENTICATED tenant. Naming a
     // DIFFERENT tenant is an explicit admin action and requires admin
     // access to that tenant; the old handler resolved ANY tenant's billing
     // data from an unauthenticated body field.
@@ -2887,11 +2887,11 @@ async fn estimate_overage_cost(
         .as_ref()
         .map(|plan| plan.email_limit)
         // Unknown tenant: fall back to the validated client value (legacy
-        // callers) — the estimate is advisory.
+        // callers), the estimate is advisory.
         .unwrap_or(body.email_limit);
 
     // Quote the rate the overage sweep actually INVOICES with: the per-plan
-    // ladder (`plan_overage_rate_millicents` — pricing.md "Developer €0.80,
+    // ladder (`plan_overage_rate_millicents`, pricing.md "Developer €0.80,
     // Pro €0.60, Growth/Business €0.35", the ladder `overage.rs` snapshots).
     // The flat `OVERAGE_RATE_MILLICENTS` default (40) is only a fallback for
     // plans without a ladder entry; quoting the flat rate for paid plans used
@@ -3009,7 +3009,7 @@ async fn configure_usage_alerts(
     // One statement can touch each (tenant, metric, percent) row only ONCE
     // (`ON CONFLICT ... DO UPDATE cannot affect row a second time`), while the
     // old sequential upserts applied duplicates in order. Deduplicate by the
-    // conflict key keeping the LAST occurrence — exactly the state the
+    // conflict key keeping the LAST occurrence, exactly the state the
     // sequential statements converged to. The map makes this O(n) (the old
     // `position()` scan was O(n²) and unbounded once the cap was removed).
     let mut last_index: std::collections::HashMap<(String, i32), usize> =
@@ -3110,7 +3110,7 @@ async fn create_checkout_session(
     };
     // Mollie sends amounts inline as decimal strings; the local amount is the
     // canonical
-    // platform-catalog price for the matched interval — never a client input,
+    // platform-catalog price for the matched interval, never a client input,
     // never a provider-side price object.
     let Some(plan_row) = platform_catalog::plan_by_name(&plan_name) else {
         return Ok((
@@ -3121,7 +3121,7 @@ async fn create_checkout_session(
     };
     // Currency follows the tenant's billing currency (the plan doc: cards in
     // either currency; SEPA Direct Debit for EU customers). The USD list
-    // lives on the same catalog row — one source, two currencies.
+    // lives on the same catalog row, one source, two currencies.
     let checkout_currency = resolve_tenant_billing_currency(&state, &auth.tenant_id).await;
     let checkout_in_usd = checkout_currency.eq_ignore_ascii_case("USD");
     let amount_cents = if checkout_in_usd {
@@ -3284,7 +3284,7 @@ async fn create_portal_session(
     // Mollie has no hosted billing portal: payment-method management and
     // cancellation live in the console. Return the real billing settings page
     // (the old `/web/billing/portal` target is a POST-only form route, so a
-    // GET on it could never render — audit 15 Oct, H1).
+    // GET on it could never render, audit 15 Oct, H1).
     let mut console_url = match url::Url::parse(&body.return_url) {
         Ok(url) => url,
         Err(_) => {
@@ -3469,7 +3469,7 @@ async fn get_subscription(
     auth: AuthUser,
 ) -> Result<Response, ApiError> {
     // SM3 (audit F2): billing reads require the registered `billing:read`
-    // scope (fail-closed — see get_usage).
+    // scope (fail-closed, see get_usage).
     crate::middleware::auth::require_scopes(&auth, &["billing:read"])?;
 
     let query = sqlx::query_as::<_, LegacyMollieSubscriptionRow>(
@@ -3519,8 +3519,8 @@ async fn list_invoices(
     auth: AuthUser,
     Query(query): Query<BillingListQuery>,
 ) -> Result<Response, ApiError> {
-    // SM3 (audit F2): invoice lists are finance data — `billing:read` is
-    // required (fail-closed — see get_usage).
+    // SM3 (audit F2): invoice lists are finance data, `billing:read` is
+    // required (fail-closed, see get_usage).
     crate::middleware::auth::require_scopes(&auth, &["billing:read"])?;
 
     let limit = clamp_limit(query.limit.unwrap_or(50), 200);
@@ -3551,8 +3551,8 @@ async fn get_invoice(
     auth: AuthUser,
     Path(id): Path<String>,
 ) -> Result<Response, ApiError> {
-    // SM3 (audit F2): invoice line items are finance data — `billing:read`
-    // is required (fail-closed — see get_usage).
+    // SM3 (audit F2): invoice line items are finance data, `billing:read`
+    // is required (fail-closed, see get_usage).
     crate::middleware::auth::require_scopes(&auth, &["billing:read"])?;
 
     match load_legacy_invoice_detail(&state.db, &id, &auth.tenant_id).await? {
@@ -3571,7 +3571,7 @@ async fn get_invoice_pdf_html(
     Path(id): Path<String>,
 ) -> Result<Response, ApiError> {
     // SM3 (audit F2): the printable invoice export requires `billing:read`
-    // (fail-closed — see get_usage).
+    // (fail-closed, see get_usage).
     crate::middleware::auth::require_scopes(&auth, &["billing:read"])?;
 
     match load_legacy_invoice_detail(&state.db, &id, &auth.tenant_id).await? {
@@ -3590,12 +3590,12 @@ async fn get_invoice_xml(
     Path(id): Path<String>,
 ) -> Result<Response, ApiError> {
     // SM3 (audit F2): the e-invoice XML export requires `billing:read`
-    // (fail-closed — see get_usage).
+    // (fail-closed, see get_usage).
     crate::middleware::auth::require_scopes(&auth, &["billing:read"])?;
 
     match load_legacy_invoice_detail(&state.db, &id, &auth.tenant_id).await? {
         Some(invoice) => {
-            // Audit F35 — the e-invoice's paid/payable split derives from
+            // Audit F35, the e-invoice's paid/payable split derives from
             // the durable outstanding balance (total − confirmed payment
             // allocations − credit notes), not the binary status flag.
             let outstanding_cents = match uuid::Uuid::parse_str(&invoice.id) {
@@ -3642,7 +3642,7 @@ async fn load_legacy_invoice_detail(
 
 async fn check_quota(State(state): State<AppState>, auth: AuthUser) -> Result<Response, ApiError> {
     // SM3 (audit F2): quota status exposes plan headroom and consumption —
-    // `billing:read` is required (fail-closed — see get_usage).
+    // `billing:read` is required (fail-closed, see get_usage).
     crate::middleware::auth::require_scopes(&auth, &["billing:read"])?;
 
     let status = usage::check_quota(&state.db, &state.redis, &auth.tenant_id)
@@ -3896,7 +3896,7 @@ async fn admin_apply_credit(
 
     // Currency guard (mirrors credit_notes.rs): the credit lands in the
     // tenant's BILLING currency, and a wallet that already exists in a
-    // DIFFERENT currency is refused instead of mixed — a 10 000-cent USD
+    // DIFFERENT currency is refused instead of mixed, a 10 000-cent USD
     // credit in a EUR wallet is €100.00 of phantom money. New wallets are
     // created with the billing currency rather than the column's legacy
     // 'USD' default.
@@ -3912,7 +3912,7 @@ async fn admin_apply_credit(
                 tenant_id = %tenant_id,
                 wallet_currency = %wallet_currency,
                 billing_currency = %billing_currency,
-                "admin wallet credit currency mismatch refused — refund via the payment provider instead"
+                "admin wallet credit currency mismatch refused, refund via the payment provider instead"
             );
             return Ok((
                 StatusCode::CONFLICT,
@@ -3929,7 +3929,7 @@ async fn admin_apply_credit(
     // The wallet must exist BEFORE the crediting statement: data-modifying
     // CTEs share one snapshot, so an `ensure_wallet` CTE that inserts the
     // row in the SAME statement is invisible to a sibling `UPDATE wallets`
-    // CTE — the first credit of a wallet-less tenant matched zero rows,
+    // CTE, the first credit of a wallet-less tenant matched zero rows,
     // returned `RowNotFound` (404) and left a 0-balance wallet behind.
     // The `reference` column is GLOBALLY unique
     // (`uq_wallet_transactions_reference`), while the Redis claim above is
@@ -4035,7 +4035,7 @@ async fn admin_apply_credit(
 
     // SM3 (audit F5): the one endpoint that mints balance must attribute its
     // operator like every sibling admin surface (plan override, dunning
-    // reset) does — `admin_actor_id` falls back to "system" for machine
+    // reset) does, `admin_actor_id` falls back to "system" for machine
     // credentials, but the AUDIT row keeps the raw operator identity
     // (`None` here used to leave the money-minting event unattributed).
     crate::audit_log::insert_audit_log(
@@ -4101,7 +4101,7 @@ async fn admin_apply_plan_override(
             .into_response());
     }
     let admin_id = admin_actor_id(&auth);
-    // Audit F06 — a malformed expiry must be REJECTED, not silently turned
+    // Audit F06, a malformed expiry must be REJECTED, not silently turned
     // into "no expiry" (the old and_then(parse_query_date) mapped a typo to
     // an unlimited override). Only an absent/empty field means no expiry.
     let expires_at = match body.expires_at.as_deref().map(str::trim) {
@@ -4112,7 +4112,7 @@ async fn admin_apply_plan_override(
                 return Ok((
                     StatusCode::BAD_REQUEST,
                     Json(serde_json::json!({
-                        "error": "Invalid expiresAt — must be an RFC 3339 timestamp or YYYY-MM-DD date"
+                        "error": "Invalid expiresAt, must be an RFC 3339 timestamp or YYYY-MM-DD date"
                     })),
                 )
                     .into_response());
@@ -4122,7 +4122,7 @@ async fn admin_apply_plan_override(
 
     let actor_id: Option<uuid::Uuid> = uuid::Uuid::parse_str(&admin_id).ok();
 
-    // Audit F06 — the override and its audit record commit together: a
+    // Audit F06, the override and its audit record commit together: a
     // crash between two separate statements must never leave an unaudited
     // override (or an audit record for a override that never landed).
     let mut tx = state.db.begin().await?;
@@ -4172,7 +4172,7 @@ async fn admin_apply_plan_override(
 
     tx.commit().await?;
 
-    // Audit F06 — the override may move the tenant between priced and
+    // Audit F06, the override may move the tenant between priced and
     // unpriced plans; drop the cached paid-subscription gate so quota
     // enforcement picks up the new effective plan immediately.
     billing_service::overage::invalidate_subscription_cache(&tenant_id);
@@ -4266,7 +4266,7 @@ async fn admin_reset_dunning(
 
     let admin_id = admin_actor_id(&auth);
 
-    // Audit F09 — the manual reset follows the SAME restriction-aware rule
+    // Audit F09, the manual reset follows the SAME restriction-aware rule
     // as payment recovery, through the shared billing-service contract:
     // clear ONLY the billing restriction, preserve pending verification,
     // administrative and abuse restrictions, and recompute tenant state +
@@ -4423,7 +4423,7 @@ async fn admin_create_invoice(
     // stamped US sales-tax line (the operator typing line items chooses their
     // amounts). What it must never do is SILENTLY issue a US invoice in a
     // state the operator has REGISTERED: that is an under-collection with
-    // legal exposure. Refuse by name — the operator can add an explicit tax
+    // legal exposure. Refuse by name, the operator can add an explicit tax
     // line, and the product invoicing path (billing-service) applies the
     // stamped line automatically.
     if billing_address.country.trim().eq_ignore_ascii_case("US") {
@@ -4439,13 +4439,13 @@ async fn admin_create_invoice(
             .await?;
             if registered {
                 // The route's own validation style (a 400 with a named
-                // `error`), not an ApiError — this handler reports every
+                // `error`), not an ApiError, this handler reports every
                 // validation problem the same way.
                 return Ok((
                     StatusCode::BAD_REQUEST,
                     Json(serde_json::json!({
                         "error": format!(
-                            "US sales tax: {state} is a registered state — this manual writer \
+                            "US sales tax: {state} is a registered state, this manual writer \
                              does not compute the stamped sales-tax line, so it refuses rather \
                              than issue an invoice that silently omits the state's tax. Add the \
                              tax as an explicit line item, or let the product invoicing path \
@@ -4458,7 +4458,7 @@ async fn admin_create_invoice(
         }
     }
 
-    // Audit F08 — the admin writer snapshots the SAME versioned address
+    // Audit F08, the admin writer snapshots the SAME versioned address
     // contract billing-service writers use: snapshotVersion + the
     // export-relevant registry identity frozen at issue time. Null/empty
     // optional fields stay null in the snapshot (readers choose
@@ -4491,7 +4491,7 @@ async fn admin_create_invoice(
 
     // Line-item validation (audit 2): quantity must be strictly positive,
     // unit price non-negative, and each line total computed with checked
-    // multiplication — the previous unchecked `quantity * unit_price`
+    // multiplication, the previous unchecked `quantity * unit_price`
     // accepted negative quantities/prices (negative totals netting out
     // other lines) and could overflow.
     let mut base_line_items: Vec<(String, i64, i64, i64)> =
@@ -4546,7 +4546,7 @@ async fn admin_create_invoice(
     );
 
     // Single platform VAT allocator (round half-up per line, reconcile the
-    // final line to the rounded total) — must not diverge from
+    // final line to the rounded total), must not diverge from
     // billing-service's invoice writer.
     let amounts: Vec<i64> = base_line_items
         .iter()
@@ -4675,14 +4675,14 @@ struct AdminVoidInvoiceBody {
 struct AdminCreditNoteBody {
     /// Amount to credit in the invoice currency's smallest unit (cents).
     /// Must be positive and within the invoice's remaining creditable
-    /// balance — the billing-service state machine enforces both.
+    /// balance, the billing-service state machine enforces both.
     amount: i64,
     reason: String,
 }
 
 /// Map a billing-service [`billing_service::invoices::InvoiceVoidError`] to
 /// an honest HTTP answer. State-machine and provider refusals are 4xx WITH
-/// the refusing state/provider named — never a 500, never a fake success.
+/// the refusing state/provider named, never a 500, never a fake success.
 fn invoice_void_error_response(error: billing_service::invoices::InvoiceVoidError) -> Response {
     use billing_service::invoices::InvoiceVoidError as VoidError;
     let (status, message) = match &error {
@@ -4820,7 +4820,7 @@ async fn admin_void_invoice(
         Err(error) => return Ok(invoice_void_error_response(error)),
     };
 
-    // Operator attribution on the platform audit chain — the voided invoice
+    // Operator attribution on the platform audit chain, the voided invoice
     // row itself carries the billing-service machine event
     // (`billing.invoice_voided`); this row answers WHO ordered it (the same
     // split `admin_apply_credit` uses for wallet credits).
@@ -4849,8 +4849,8 @@ async fn admin_void_invoice(
 ///
 /// Issues a credit note against an issued invoice (the paid-refund path:
 /// the paid part becomes wallet value once, exactly-once per idempotency
-/// key). All money semantics — creditable states, the creditable balance,
-/// the debt/refund split, replay safety — are the credit_notes.rs
+/// key). All money semantics, creditable states, the creditable balance,
+/// the debt/refund split, replay safety, are the credit_notes.rs
 /// internals' contract; this handler never re-implements them.
 async fn admin_issue_credit_note(
     State(state): State<AppState>,
@@ -4979,7 +4979,7 @@ async fn admin_get_mrr_report(
     }
 
     // Shared with billing-service (audit 2: this local copy retained the
-    // bugs billing-service fixed — truncated yearly/12 pricing,
+    // bugs billing-service fixed, truncated yearly/12 pricing,
     // creation-date instead of billing-cycle-start bucketing, and no
     // tenants join). Single source: billing_service::routes::MRR_REPORT_SQL.
     let report: serde_json::Value = sqlx::query_scalar(billing_service::routes::MRR_REPORT_SQL)
@@ -5000,7 +5000,7 @@ async fn admin_get_churn_report(
     }
 
     // Shared with billing-service (audit 2: this local copy priced churn
-    // from the tenant's post-cancellation 'free' plan — structurally ~0 —
+    // from the tenant's post-cancellation 'free' plan, structurally ~0 —
     // and truncated yearly/12). Single source:
     // billing_service::routes::CHURN_REPORT_SQL (mollie_plan_code snapshot
     // join + unpriced-churn coverage).
@@ -5244,7 +5244,7 @@ mod tests {
             Some("hello@acme.test".into())
         );
         // The billing address's email (the invoice identity) is the last
-        // resort — a tenant with only an address can still check out.
+        // resort, a tenant with only an address can still check out.
         assert_eq!(
             resolve_billing_email("{}", Some("  addr@acme.test ".into())),
             Some("addr@acme.test".into())
@@ -5465,7 +5465,7 @@ mod tests {
     async fn billing_routes_admin_access_rejects_tenant_only_scope() {
         // NOTE (audit A): this test previously asserted that a non-system
         // tenant holding "*" or "billing:admin" passes the billing-admin gate.
-        // That was the vulnerability — every customer tenant owner is granted
+        // That was the vulnerability, every customer tenant owner is granted
         // "*" by scopes_for_role, so they could reach ALL
         // /v1/billing/admin/* handlers (list tenants, apply credits, plan
         // overrides, revenue reports, exports). Platform billing admin now
@@ -5493,7 +5493,7 @@ mod tests {
         // System-tenant admins (platform staff) still pass. SM3 (audit F9):
         // the slug-aware shared gate accepts BOTH the literal `system`
         // sentinel and the SEEDED system tenant (`system_internal_tenant01`,
-        // migration 072, slug `system`) — the seeded row lives in the
+        // migration 072, slug `system`), the seeded row lives in the
         // canonical migration set every fixture database applies.
         let Some(pool) = crate::test_db::canonical_pool("billing_admin_gate_admits").await else {
             return;
@@ -5585,7 +5585,7 @@ mod tests {
         // F7: the read path delegates key selection to
         // billing_service::usage::enforced_counter_key. Whatever key that
         // returns, the reported period must be the label embedded in the
-        // key — cycle-anchored (`:c2026-03`) and calendar (`:2026-03`)
+        // key, cycle-anchored (`:c2026-03`) and calendar (`:2026-03`)
         // shapes both reduce to `2026-03`.
         assert_eq!(
             usage_counter_period_label("meter:rt:tenant_123:emails_sent:c2026-03"),
@@ -5596,7 +5596,7 @@ mod tests {
             "2026-03"
         );
         // Degenerate key (no period segment): the last segment is the
-        // metric, NOT a period — fall back to the current calendar month
+        // metric, NOT a period, fall back to the current calendar month
         // instead of reporting the metric name as the period.
         let now = Utc::now();
         assert_eq!(
@@ -5688,7 +5688,7 @@ mod tests {
         assert!(html.contains("PO: PO-&lt;123&gt;"));
         assert!(html.contains("Handle &lt;carefully&gt; &amp; confirm"));
         // The sample charges 22 % VAT, so the reverse-charge note must NOT
-        // appear — printing it on a VAT-charged invoice contradicts the
+        // appear, printing it on a VAT-charged invoice contradicts the
         // document itself.
         assert!(!html.contains("Reverse charge"));
         assert!(html.contains("€122.00"));
@@ -5701,8 +5701,8 @@ mod tests {
 
     // ── ARK document previews (browser-rendered by tools/ark_email_dogfood.py)
 
-    /// Write the ARK document previews to `target/ark-email-preview/` — the
-    /// exact bytes the API and mail queue emit — so the browser dogfood can
+    /// Write the ARK document previews to `target/ark-email-preview/`, the
+    /// exact bytes the API and mail queue emit, so the browser dogfood can
     /// render them. The assertions below are the law for a document that
     /// cannot load `ark.css` and must carry its own inline styles.
     #[test]
@@ -5718,7 +5718,7 @@ mod tests {
         std::fs::create_dir_all(&dir).expect("preview dir");
 
         let reset = render_transactional_email(&TransactionalEmail {
-            document_title: "Reset your password — ApexMail",
+            document_title: "Reset your password | ApexMail",
             heading: "Reset Your Password",
             body_html: "<p style=\"margin:0 0 12px\">Someone asked to reset the password for this ApexMail account. Choose a new password with the link below.</p><p style=\"margin:0 0 12px;font-size:12px;color:#5B6B7A\">The link expires in 30 minutes. If this was not you, no action is needed.</p>",
             actions: &[EmailAction {
@@ -5729,7 +5729,7 @@ mod tests {
             footer_link: true,
         });
         let verify = render_transactional_email(&TransactionalEmail {
-            document_title: "Verify your email — ApexMail",
+            document_title: "Verify your email | ApexMail",
             heading: "Confirm Your Address",
             body_html: "<p style=\"margin:0 0 12px\">Confirm this address to finish setting up the account. Mail stays paused until it is verified.</p>",
             actions: &[EmailAction {
@@ -5805,7 +5805,7 @@ mod tests {
             );
             assert!(
                 !html.to_ascii_lowercase().contains("border-radius"),
-                "{name}: ARK is square — no border-radius in the document"
+                "{name}: ARK is square, no border-radius in the document"
             );
             assert!(
                 !html.contains("linear-gradient"),
@@ -5947,7 +5947,7 @@ mod tests {
     fn billing_routes_invoice_html_escapes_env_configured_iban() {
         // The IBAN comes from BILLING_COMPANY_IBAN (deployment configuration):
         // a stray HTML metacharacter must never break out of the footer text.
-        // (Checked via the escaping primitive plus a template pin — mutating
+        // (Checked via the escaping primitive plus a template pin, mutating
         // the env var here races with parallel tests calling
         // `initialize_billing_test_env`.)
         assert_eq!(
@@ -5988,7 +5988,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // Audit F05 — the invoice fallback may only run for a NAMED optional
+    // Audit F05, the invoice fallback may only run for a NAMED optional
     // column, and it must keep the canonical totals/due_at.
     // ------------------------------------------------------------------
 
@@ -6043,7 +6043,7 @@ mod tests {
             &error,
             &INVOICE_FALLBACK_OPTIONAL_COLUMNS
         ));
-        // …a CORE column miss (e.g. the totals) must NOT — the fallback
+        // …a CORE column miss (e.g. the totals) must NOT, the fallback
         // keeps canonical totals, so falling back for them would be wrong.
         let totals_error =
             sqlx::Error::Database(Box::new(FakeDbError(r#"column "subtotal" does not exist"#)));
@@ -6054,7 +6054,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // Audit F35 — the XML paid/payable split honors the durable
+    // Audit F35, the XML paid/payable split honors the durable
     // outstanding balance for open invoices.
     // ------------------------------------------------------------------
 
@@ -6774,8 +6774,8 @@ mod adversarial_tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 
-        // A customer tenant key — even one carrying "*" and "billing:admin"
-        // — must NOT reach the platform billing-admin surface (audit A).
+        // A customer tenant key, even one carrying "*" and "billing:admin"
+        //, must NOT reach the platform billing-admin surface (audit A).
         for scopes in [vec!["*"], vec!["billing:admin"]] {
             let customer_key = seed_key(&pool, &tenant, &scopes).await;
             let (status, body) =
@@ -6848,7 +6848,7 @@ mod adversarial_tests {
         assert_eq!(body["data"]["name"], "advpro");
         assert_eq!(body["data"]["molliePlanCodeMonthly"], "price_pro_m");
         // An inactive plan is still readable by name (legacy clients need
-        // it for renewal copy) but is never in the catalog — asserted above.
+        // it for renewal copy) but is never in the catalog, asserted above.
         let (status, body) = get(&env, "/v1/billing/plans/advlegacy").await;
         assert_eq!(status, StatusCode::OK, "{body}");
         assert_eq!(body["data"]["isActive"], false);
@@ -6866,7 +6866,7 @@ mod adversarial_tests {
         // The STATIC `/plans/tenant/features` and `/plans/tenant/limits`
         // routes are reachable by an ordinary tenant key: the path-tenant
         // parser no longer mistakes the sub-resource word for a tenant id
-        // (fixed 2026-09-13 — every real key used to get a 403 here).
+        // (fixed 2026-09-13, every real key used to get a 403 here).
         for path in [
             "/v1/billing/plans/tenant/features",
             "/v1/billing/plans/tenant/limits",
@@ -7182,7 +7182,7 @@ mod adversarial_tests {
             "server-side plan limit must override the client value"
         );
         // J4/J12 sweep parity: `advest` is a KNOWN plan without a ladder
-        // entry — the overage sweep marks those periods skipped and never
+        // entry, the overage sweep marks those periods skipped and never
         // raises an invoice, so the estimate must not fabricate a flat-rate
         // fee for them (it used to quote (1500-1000) × 40 millicents = €0.20
         // that could never be billed).
@@ -7350,7 +7350,7 @@ mod adversarial_tests {
         assert_eq!(body["data"][0]["isEnabled"], true);
 
         // Re-posting the same (tenant, metric, percent) is an idempotent
-        // upsert: one row, channel updated — not a duplicate.
+        // upsert: one row, channel updated, not a duplicate.
         let (status, body) = post_json(
             &env,
             "/v1/billing/alerts",
@@ -7460,7 +7460,7 @@ mod adversarial_tests {
     /// statements, N round trips). The new one issues exactly ONE multi-row
     /// UPSERT (verified with a FOR EACH STATEMENT trigger on
     /// `usage_alert_configs`), and the rows it lands are the same rows the
-    /// sequential upserts converged to — including a duplicate key, which the
+    /// sequential upserts converged to, including a duplicate key, which the
     /// old loop resolved last-wins.
     #[tokio::test]
     async fn usage_alert_batch_is_one_upsert_statement_and_matches_sequential_upserts() {
@@ -7506,7 +7506,7 @@ mod adversarial_tests {
 
         crate::test_db::install_statement_counters(&pool, &["usage_alert_configs"]).await;
 
-        // 5 entries — one duplicate key — so a sequential loop would issue 5
+        // 5 entries, one duplicate key, so a sequential loop would issue 5
         // INSERT statements and end with the LAST duplicate's channel.
         let batch = r#"{"thresholds":[
             {"metricType":"emails","thresholdPercent":10,"notificationChannel":"email"},
@@ -7738,7 +7738,7 @@ mod adversarial_tests {
             .unwrap();
         assert_eq!(tenant_plan, "free", "immediate cancel downgrades now");
 
-        // Unknown fields are refused (deny_unknown_fields) — 422, no write.
+        // Unknown fields are refused (deny_unknown_fields), 422, no write.
         let (status, _) = post_json(
             &env,
             "/v1/billing/switch-plan",
@@ -8068,7 +8068,7 @@ mod adversarial_tests {
     }
 
     /// A row with NULL period bounds (nullable columns; no migration
-    /// backfills them — legacy Mollie-era or externally imported rows) used
+    /// backfills them, legacy Mollie-era or externally imported rows) used
     /// to 500 the ENTIRE invoice surface: the FromRow decode demanded a
     /// non-Option timestamp. Same class as audit F05's nullable
     /// billing_address: decode as Option, render null, never fail the read.
@@ -8134,7 +8134,7 @@ mod adversarial_tests {
             String::from_utf8_lossy(&bytes)
         );
         let html = String::from_utf8_lossy(&bytes);
-        assert!(html.contains("Period: — to —"), "{html}");
+        assert!(html.contains("Period:, to —"), "{html}");
         let (status, _, bytes) = get_raw(&env, &format!("/v1/billing/invoices/{id}/xml")).await;
         assert_eq!(
             status,
@@ -8146,7 +8146,7 @@ mod adversarial_tests {
     // ── Mollie checkout / portal (against a local mock) ─────────
 
     /// Held across awaits on purpose (serialises Mollie env mutation for the
-    /// duration of the request) — async-aware so the guard is legitimate.
+    /// duration of the request), async-aware so the guard is legitimate.
     /// The lock is shared with the webhook tests in `app`: `cargo test` runs
     /// the whole lib suite in one process with one set of credential vars.
     async fn lock_mollie_env() -> tokio::sync::MutexGuard<'static, ()> {
@@ -8207,7 +8207,7 @@ mod adversarial_tests {
             "idempotencyKey": headers.get("idempotency-key").and_then(|v| v.to_str().ok()),
             "body": serde_json::from_slice::<serde_json::Value>(body).unwrap_or(serde_json::Value::Null),
         });
-        // Mollie has no version header — the version lives in the URL path
+        // Mollie has no version header, the version lives in the URL path
         // (`/v2/...`). Recorded only when actually sent so its absence is
         // assertable.
         if let Some(version) = headers.get("mollie-version").and_then(|v| v.to_str().ok()) {
@@ -8220,7 +8220,7 @@ mod adversarial_tests {
         record_call_with_path(state, kind, headers, body, None);
     }
 
-    /// `POST /v2/customers` — a real Mollie customer object (`cst_…`).
+    /// `POST /v2/customers`, a real Mollie customer object (`cst_…`).
     async fn mock_create_customer(
         State(state): State<MockMollie>,
         headers: HeaderMap,
@@ -8247,7 +8247,7 @@ mod adversarial_tests {
         .into_response()
     }
 
-    /// `POST /v2/payments` — the payment document, whose checkout URL is
+    /// `POST /v2/payments`, the payment document, whose checkout URL is
     /// `_links.checkout.href`; amounts are decimal strings.
     async fn mock_create_payment(
         State(state): State<MockMollie>,
@@ -8297,7 +8297,7 @@ mod adversarial_tests {
         .into_response()
     }
 
-    /// `POST /v2/payments/{payment_id}/refunds` — Mollie returns the refund
+    /// `POST /v2/payments/{payment_id}/refunds`, Mollie returns the refund
     /// object (`re_…`) and echoes the decimal amount.
     async fn mock_create_refund(
         State(state): State<MockMollie>,
@@ -8622,7 +8622,7 @@ mod adversarial_tests {
             );
             assert!(
                 checkout.get("mollieVersion").is_none(),
-                "Mollie has no version header — the version lives in the URL path"
+                "Mollie has no version header, the version lives in the URL path"
             );
             let sent = &checkout["body"];
             let plan = platform_catalog::plan_by_name("pro").expect("catalog plan");
@@ -8716,7 +8716,7 @@ mod adversarial_tests {
         }
 
         // Portal: the console billing settings page (Mollie has no hosted
-        // portal; audit 15 Oct H1 also removed the POST-only target) — the
+        // portal; audit 15 Oct H1 also removed the POST-only target), the
         // customer must exist, and no provider call is made.
         let portal_body = json!({"returnUrl": valid_url}).to_string();
         let payment_calls_before_portal = mock.lock().unwrap().payment_calls;
@@ -8766,7 +8766,7 @@ mod adversarial_tests {
         );
         assert_eq!(
             body_resp["data"]["url"], "https://app.apexmail.ee/settings/billing",
-            "the portal target is the console billing settings page — Mollie has no hosted portal"
+            "the portal target is the console billing settings page, Mollie has no hosted portal"
         );
         assert_eq!(
             mock.lock().unwrap().payment_calls,
@@ -8850,7 +8850,7 @@ mod adversarial_tests {
         assert_eq!(stored_payment.as_deref(), Some("tr_void_paid"));
 
         // The refund id returned by Mollie is recorded against the payment
-        // it belongs to — the only mapping the refund webhook can use.
+        // it belongs to, the only mapping the refund webhook can use.
         let (refund_id, refund_payment, refund_cents, refund_status): (
             String,
             String,
@@ -9243,7 +9243,7 @@ mod adversarial_tests {
 
         // `billing:admin` alone grants access to every tenant
         // (`has_tenant_access` accepts it), as does an explicit tenant scope
-        // — while a non-admin scope is still refused by the first gate.
+        //, while a non-admin scope is still refused by the first gate.
         let scoped_admin = seed_key(&pool, "system", &["billing:admin"]).await;
         let (status, body) = get_with_key(
             &env,
@@ -9420,7 +9420,7 @@ mod adversarial_tests {
         .await;
         assert_eq!(status, StatusCode::CONFLICT);
         // With the edge cache dropped, the retry reaches the handler's own
-        // fail-closed Redis claim — still 409, still no money movement.
+        // fail-closed Redis claim, still 409, still no money movement.
         // The edge cache is scoped to the AUTHENTICATED principal (the
         // platform admin's "system" tenant), not the path tenant.
         let route = format!("/v1/billing/admin/tenants/{tenant}/credits");
@@ -9479,7 +9479,7 @@ mod adversarial_tests {
         // ledger's global unique reference (`uq_wallet_transactions_reference`).
         // The handler now REFUSES it as a conflict with a message naming the
         // reason, instead of letting the unique violation surface as a 500
-        // (fixed 2026-09-13 — a 500 lied about both the cause and the
+        // (fixed 2026-09-13, a 500 lied about both the cause and the
         // retryability), and the loser tenant's wallet stays untouched.
         let (other_tenant, _) = tenant_with_key(&pool, "advcredit", &["billing:read"]).await;
         let (status, body) = post_credit(
@@ -9648,7 +9648,7 @@ mod adversarial_tests {
         );
 
         // A credit to a tenant that does not exist is refused by the wallet
-        // FK — no orphan wallet or ledger row may be created.
+        // FK, no orphan wallet or ledger row may be created.
         let ghost = unique_id();
         let (status, body) = post_credit(
             &env,
@@ -10492,7 +10492,7 @@ mod adversarial_tests {
         assert!(csv.contains("\"{\"\"k\"\":1}\""), "{csv}");
 
         // Export date sanitising keeps only digits and dashes.
-        // Every digit survives (no truncation at the time separator) — the
+        // Every digit survives (no truncation at the time separator), the
         // filter is a character whitelist, not a date parser.
         assert_eq!(safe_export_date("2026-01-02T03:04:05Z"), "2026-01-02030405");
         assert_eq!(safe_export_date("abc"), "");
@@ -10860,7 +10860,7 @@ mod adversarial_tests {
     }
 
     /// US sales tax (plan WP C2): the legacy manual admin invoice writer keeps
-    /// its own SQL and response contract, so it has no stamped tax line — but
+    /// its own SQL and response contract, so it has no stamped tax line, but
     /// it must never SILENTLY issue a US invoice in a state the operator has
     /// registered (an under-collection with legal exposure). It refuses by
     /// name, and stays untouched for every other tenant.
@@ -10886,7 +10886,7 @@ mod adversarial_tests {
             .await
             .expect("seed tenant");
             // A COMPLETE address: the admin writer's row decode requires the
-            // non-null columns (address_line1 / city / postal_code) — the
+            // non-null columns (address_line1 / city / postal_code), the
             // signup flow always writes them.
             sqlx::query(
                 "INSERT INTO billing_addresses
@@ -10917,7 +10917,7 @@ mod adversarial_tests {
         };
 
         // No registration row yet: the manual writer issues the invoice (its
-        // historical behavior — nothing US-tax related is registered).
+        // historical behavior, nothing US-tax related is registered).
         let created = admin_create_invoice(
             State(state.clone()),
             admin.clone(),
@@ -11139,8 +11139,8 @@ mod adversarial_tests {
     /// SM3 (audit F2): the seven billing read surfaces require the
     /// registered `billing:read` scope. A deliberately narrow key (no
     /// finance scopes) is refused with 403 BEFORE any data access on every
-    /// listed handler; a `billing:read` key — the mintable-but-never
-    /// role-granted scope — passes.
+    /// listed handler; a `billing:read` key, the mintable-but-never
+    /// role-granted scope, passes.
     #[tokio::test]
     async fn billing_reads_require_the_registered_billing_read_scope() {
         let Some(pool) = pool_for("billing_reads_scope_gate").await else {
@@ -11387,7 +11387,7 @@ mod adversarial_tests {
 
     /// SM3 (audit F5): the wallet-credit audit row names the OPERATOR.
     /// The row's existence is pinned by the idempotency suite; this test
-    /// pins the ATTRIBUTION — reverting the audit call to an unattributed
+    /// pins the ATTRIBUTION, reverting the audit call to an unattributed
     /// `None` actor must fail here.
     #[tokio::test]
     async fn wallet_credit_audit_row_names_the_operator() {

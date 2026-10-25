@@ -53,11 +53,11 @@
   {% set consent_policy_link = "Cookie Policy" %}
 {% endif %}
 
-{# role="region" — NOT role="dialog" aria-modal="true" (design audit
+{# role="region", NOT role="dialog" aria-modal="true" (design audit
    item 6): the banner neither traps focus nor blocks the page behind
    it, so modal semantics were a lie. A labelled region is truthful;
    the inner tabindex="0" focus hack (a deleted-JS leftover) is gone
-   too — the action links are the keyboard path. The former
+   too, the action links are the keyboard path. The former
    cookie-consent-* component classes are gone: the bar is a fixed,
    full-width strip (structural utilities) whose visible styling comes
    from the apex vocabulary; the recorded-consent collapse stays

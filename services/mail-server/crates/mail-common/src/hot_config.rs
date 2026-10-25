@@ -4,7 +4,7 @@
 //!
 //! Each security engine holds its configuration inside a [`HotConfig<T>`].
 //! Normal reads (millions per second on production traffic) pay only the cost
-//! of an atomic pointer load — no lock, no heap allocation. When an operator
+//! of an atomic pointer load, no lock, no heap allocation. When an operator
 //! pushes a new config (e.g., updated DDoS thresholds from a control-plane
 //! API), a single `reload` call atomically swaps in the new value.
 //!
@@ -18,7 +18,7 @@
 //!
 //! let cfg = HotConfig::new(DdosConfig::default);
 //!
-//! // Fast read path — pays one atomic load://! let current = cfg.load;
+//! // Fast read path, pays one atomic load://! let current = cfg.load;
 //! println!("{}", current.block_threshold);
 //!
 //! // Hot-reload (e.g., from a filesystem watcher or gRPC call)://! cfg.reload(DdosConfig { block_threshold:200, ..DdosConfig::default });
@@ -66,7 +66,7 @@ where
     /// Atomically swap in a new configuration value.
     /// All subsequent calls to [`load`] return the new value. Active readers
     /// holding a guard from a previous [`load`] continue using the old config
-    /// safely until they drop their guard — there is no blocking or data race.
+    /// safely until they drop their guard, there is no blocking or data race.
     /// [`load`]:Self::load
     pub fn reload(&self, new_config: T) {
         self.inner.store(Arc::new(new_config));

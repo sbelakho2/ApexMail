@@ -13,16 +13,16 @@ ApexMail provides security documentation to qualified Enterprise prospects and c
 
 ## What We Provide
 
-- **SIG / CAIQ / HECVAT** — Standardised security assessment responses for qualified Enterprise customers.
-- **Penetration test summary** — A summary of findings and remediation will be available after the first external application penetration test is completed.
-- **Security architecture review** — A walkthrough of ApexMail's security controls, encryption architecture, audit logging, and deployment isolation models.
-- **Data flow diagrams** — Visual documentation of data processing, storage locations, and subprocessor relationships.
+- **SIG / CAIQ / HECVAT**, Standardised security assessment responses for qualified Enterprise customers.
+- **Penetration test summary**, A summary of findings and remediation will be available after the first external application penetration test is completed.
+- **Security architecture review**, A walkthrough of ApexMail's security controls, encryption architecture, audit logging, and deployment isolation models.
+- **Data flow diagrams**, Visual documentation of data processing, storage locations, and subprocessor relationships.
 
 ## Security Questionnaire Request Form
 
 <div id="enquiry-submitted" class="apex-notice apex-notice--ok" role="status">
   <b>Received</b>
-  <p>Thank you — your submission was received. Our team reviews submissions and responds within 2 business days.</p>
+  <p>Thank you, your submission was received. Our team reviews submissions and responds within 2 business days.</p>
 </div>
 <div id="enquiry-error" class="apex-notice apex-notice--fail" role="alert">
   <b>Not accepted</b>

@@ -1,4 +1,4 @@
-//! Estonia OÜ (Osaühing — Private Limited Company) legal compliance.
+//! Estonia OÜ (Osaühing, Private Limited Company) legal compliance.
 //!
 //! Implements document generation and deadline tracking for Bel Consulting OÜ
 //! (Registry Code 16588745), Tallinn, Estonia, as required by the Estonian
@@ -20,7 +20,7 @@
 //!   profits (dividends) are taxed. Until end-2024 the split was 80/20;
 //!   from 2025-01-01 it is 78/22, i.e. a NET-to-tax fraction of 22/78 —
 //!   see `tax_policy::dividend_tax_on_net` (F81).
-//! - **VAT (Käibemaks)**: 24% standard rate (since July 1, 2025) — all
+//! - **VAT (Käibemaks)**: 24% standard rate (since July 1, 2025), all
 //!   rates resolved date-effectively through `tax_policy` (F81).
 //! - **Social tax (Sotsiaalmaks)**: 33% on gross salary, declared via TSD.
 //! - **Unemployment insurance**: 1.6% employee + 0.8% employer.
@@ -52,11 +52,11 @@ pub const COMPANY_ADDRESS: &str = "Sakala tn 7-2, 10141 Tallinn, Estonia";
 pub const EST_VAT_RATE: i32 = 24;
 /// Social tax rate on gross salary (employer contribution).
 pub const SOCIAL_TAX_RATE: f64 = 0.33;
-/// Unemployment insurance — employer share.
+/// Unemployment insurance, employer share.
 pub const UNEMPLOYMENT_INSURANCE_EMPLOYER: f64 = 0.008;
-/// Unemployment insurance — employee share.
+/// Unemployment insurance, employee share.
 pub const UNEMPLOYMENT_INSURANCE_EMPLOYEE: f64 = 0.016;
-/// Funded pension (II pillar) — LEGACY default. The actual rate is an
+/// Funded pension (II pillar), LEGACY default. The actual rate is an
 /// employee-specific 2/4/6% choice recorded per payment period
 /// (payroll_records.funded_pension_rate, migration 199); this constant is
 /// only a documentation anchor, computations use the recorded input (F81).
@@ -870,7 +870,7 @@ impl ComplianceCalendar {
 }
 
 // ---------------------------------------------------------------------------
-// EstoniaOuCompliance — document generation
+// EstoniaOuCompliance, document generation
 // ---------------------------------------------------------------------------
 
 /// Core engine for generating Estonian OÜ compliance documents.
@@ -1016,12 +1016,12 @@ impl EstoniaOuCompliance {
         expenses.push(ExpenseCategory {
             category: "Cloud infrastructure (Hetzner)".into(),
             amount_cents: 0,
-            description: "Hetzner Cloud servers — actual costs not yet ingested".into(),
+            description: "Hetzner Cloud servers, actual costs not yet ingested".into(),
         });
         expenses.push(ExpenseCategory {
             category: "Cloud infrastructure (AWS)".into(),
             amount_cents: 0,
-            description: "AWS SES + S3 — actual costs not yet ingested".into(),
+            description: "AWS SES + S3, actual costs not yet ingested".into(),
         });
 
         Ok(expenses)
@@ -1042,7 +1042,7 @@ impl EstoniaOuCompliance {
         }
 
         // F81: the payment period and the per-employee pension/exemption
-        // inputs drive the calculation — rates come from the date-effective
+        // inputs drive the calculation, rates come from the date-effective
         // tax policy, never from one permanent constant.
         let rows = if let Some(m) = month {
             sqlx::query_as::<_, PayrollRow>(
@@ -1092,7 +1092,7 @@ impl EstoniaOuCompliance {
                 // Employee-specific II-pillar choice (2/4/6%, or 0% when
                 // exempt). None = participation UNKNOWN: the pension
                 // contribution stays 0 but the record is flagged so the
-                // declaration is explicitly not-ready — a rate is never
+                // declaration is explicitly not-ready, a rate is never
                 // silently assumed.
                 let pension_rate = if r.pension_exemption {
                     Some(0.0)
@@ -1168,7 +1168,7 @@ impl EstoniaOuCompliance {
                 // F81: the recorded amount is the NET distribution; the CIT
                 // due is the applicable NET-TO-TAX FRACTION on the
                 // distribution date (20/80 until end-2024, 22/78 from
-                // 2025-01-01) — not a gross-amount percentage constant.
+                // 2025-01-01), not a gross-amount percentage constant.
                 let fraction = tax_policy::dividend_tax_on_net(r.distribution_date);
                 let tax = ((amount as f64) * fraction).round() as i64;
                 DividendDistribution {
@@ -1196,7 +1196,7 @@ impl EstoniaOuCompliance {
             has_sufficient_data: has_sufficient,
             // `missing` is the list of sources that could NOT be read. An
             // empty list means every source was available and must be
-            // reported as such — a blanket "no tables found" would be a false
+            // reported as such, a blanket "no tables found" would be a false
             // provenance statement in a statutory document.
             missing_fields: missing.iter().map(|f| f.as_ref().to_string()).collect(),
             note: if has_sufficient {
@@ -1446,7 +1446,7 @@ impl EstoniaOuCompliance {
 
         // Input VAT: from EXPLICIT eligible input-tax records only. The
         // canonical chain has no input-tax store, so deductible input VAT is
-        // zero — multiplying total operating costs by the VAT rate (the old
+        // zero, multiplying total operating costs by the VAT rate (the old
         // behavior) fabricated a deduction.
         let input_vat_cents: i64 = 0;
 
@@ -1462,7 +1462,7 @@ impl EstoniaOuCompliance {
         // by complete source data.
         let mut incomplete_reasons = Vec::new();
         if !has_invoices {
-            incomplete_reasons.push("invoices table absent — no source records".into());
+            incomplete_reasons.push("invoices table absent, no source records".into());
         }
         if non_eur_invoices > 0 {
             incomplete_reasons.push(format!(
@@ -1487,7 +1487,7 @@ impl EstoniaOuCompliance {
                 vat_amount_cents: output_vat,
                 transaction_count: domestic_count,
                 description: format!(
-                    "Domestic (EE) sales incl. EU B2C — output VAT from invoice tax                      snapshots (standard rate {vat_rate_percent}% in force)"
+                    "Domestic (EE) sales incl. EU B2C, output VAT from invoice tax                      snapshots (standard rate {vat_rate_percent}% in force)"
                 ),
             },
             intra_eu_supplies: VatCategory {
@@ -1509,7 +1509,7 @@ impl EstoniaOuCompliance {
                 domestic_purchases: VatInputLine {
                     amount_cents: 0,
                     vat_amount_cents: 0,
-                    description: "Domestic purchases — no input-tax store;                                   deductible VAT requires eligible records"
+                    description: "Domestic purchases, no input-tax store;                                   deductible VAT requires eligible records"
                         .into(),
                 },
                 intra_eu_acquisitions: VatInputLine {
@@ -1733,7 +1733,7 @@ impl EstoniaOuCompliance {
             generated_at: Utc::now(),
             revenue_bands: vec![
                 RevenueBand {
-                    category: "EMTAK 6201 — Computer programming".into(),
+                    category: "EMTAK 6201, Computer programming".into(),
                     amount_cents: total_revenue,
                 },
             ],
@@ -1838,7 +1838,7 @@ impl EstoniaOuCompliance {
     /// Generate a minimal PDF binary from the document JSON.
     ///
     /// Produces a valid PDF with embedded JSON content. Uses a minimal PDF
-    /// generator without external dependencies — suitable for archiving.
+    /// generator without external dependencies, suitable for archiving.
     pub fn build_pdf_bytes(
         st: SubmissionType,
         year: i32,
@@ -1877,7 +1877,7 @@ impl EstoniaOuCompliance {
         let content = format!(
             "BT /F1 14 Tf 50 750 Td ({}) Tj T*\n\
              /F1 12 Tf 50 730 Td (Period: {}) Tj T*\n\
-             50 710 Td (Company: {} — Registry Code: {}) Tj T*\n\
+             50 710 Td (Company: {}, Registry Code: {}) Tj T*\n\
              50 690 Td (Generated: {}) Tj T*\n\
              ET\n",
             escape_pdf_string(&title),

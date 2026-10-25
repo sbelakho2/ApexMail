@@ -8,7 +8,7 @@
 {# 72px desktop / 56px mobile, hairline bottom); neutral links and   #}
 {# the [aria-current="page"] ink rule are styled by the class, so    #}
 {# top-level links are plain <a> elements. The old h-16 lg:h-20 row  #}
-{# is gone — the class owns the height.                              #}
+{# is gone, the class owns the height.                              #}
 {# NOTE: uses inline i18n conditionals (not macros::t) because   #}
 {# Tera macros cannot read the caller's scope variables          #}
 {# (i18n_data / l). Inline form matches the rest of the site.    #}
@@ -26,7 +26,7 @@
 
       {# ── Desktop Navigation ─────────────────────── #}
       <div class="hidden lg:flex items-center gap-2">
-        {# Product dropdown — native <details> disclosure (design audit
+        {# Product dropdown, native <details> disclosure (design audit
            item 5): Enter/Space toggles and the open state is real markup
            instead of a frozen aria-expanded. No Escape-handling promise
            (browser-dependent without script). The chevron rotation lives
@@ -55,7 +55,7 @@
           </div>
         </details>
 
-        {# Developers dropdown — same native <details> disclosure #}
+        {# Developers dropdown, same native <details> disclosure #}
         <details class="relative" data-dropdown="developers">
           <summary
             class="flex items-center gap-1.5 py-2"
@@ -124,8 +124,8 @@
         {# The panel is inside the disclosure, so a closed <details> hides it
            natively (details:not([open]) > *:not(summary) in no-js.css keeps
            that authoritative even if a UA stylesheet is overridden). The
-           absolute positioning against the sticky header — the floating
-           full-width sheet the old .mobile-nav-panel class provided — is
+           absolute positioning against the sticky header, the floating
+           full-width sheet the old .mobile-nav-panel class provided, is
            expressed with structural utilities instead. #}
         <nav id="mobile-menu" class="lg:hidden absolute left-0 right-0 top-full max-h-[calc(100vh-4rem)] overflow-y-auto border-b" aria-label="{% if i18n_data and i18n_data[l] and i18n_data[l]["header"] and i18n_data[l]["header"]["mobile_nav"] %}{{ i18n_data[l]["header"]["mobile_nav"] }}{% else %}Mobile navigation{% endif %}">
           <div>

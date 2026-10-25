@@ -298,7 +298,7 @@ impl billing_service::send_admission::SendAdmissionBackend for FailingAdmissionB
 }
 
 // ---------------------------------------------------------------------------
-// §17 — reward ledger idempotency and the ladder
+// §17, reward ledger idempotency and the ladder
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -492,7 +492,7 @@ async fn hostile_reward_inputs_fail_before_any_write() {
 }
 
 // ---------------------------------------------------------------------------
-// §18 — contextual fallback and shrinkage
+// §18, contextual fallback and shrinkage
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -532,7 +532,7 @@ async fn sparse_context_bucket_falls_back_to_global_and_a_populated_one_takes_ov
     };
 
     // Sparse bucket: the global posterior is authoritative and is never a
-    // random arm — it is one of the experiment's arms.
+    // random arm, it is one of the experiment's arms.
     let first = engine
         .select_variant(&tenant, &loaded, &context)
         .await
@@ -617,7 +617,7 @@ async fn sparse_context_bucket_falls_back_to_global_and_a_populated_one_takes_ov
 }
 
 // ---------------------------------------------------------------------------
-// §37 — budgets enforced through the engine
+// §37, budgets enforced through the engine
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -749,7 +749,7 @@ async fn high_value_accounts_are_exploit_only_unless_explicitly_overridden() {
 }
 
 // ---------------------------------------------------------------------------
-// §17 — variant persisted BEFORE the send survives an enqueue error
+// §17, variant persisted BEFORE the send survives an enqueue error
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -873,7 +873,7 @@ async fn variant_is_persisted_before_send_and_survives_enqueue_failure() {
 }
 
 // ---------------------------------------------------------------------------
-// §28 — the next-best-action gate against live state
+// §28, the next-best-action gate against live state
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -977,7 +977,7 @@ async fn next_best_action_gate_skips_a_weak_prospect_with_a_recorded_reason() {
 }
 
 // ---------------------------------------------------------------------------
-// §36 — calibration joins predictions to realisations
+// §36, calibration joins predictions to realisations
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -1072,7 +1072,7 @@ async fn calibration_measures_scores_against_realised_outcomes() {
 }
 
 // ---------------------------------------------------------------------------
-// §35 — historical replay reads canonical state
+// §35, historical replay reads canonical state
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -1148,7 +1148,7 @@ async fn replay_cases_compare_proposed_actions_with_realised_outcomes() {
 }
 
 // ---------------------------------------------------------------------------
-// §12/§26 — research writes grounded evidence; an outage writes nothing
+// §12/§26, research writes grounded evidence; an outage writes nothing
 // ---------------------------------------------------------------------------
 
 #[derive(Debug)]

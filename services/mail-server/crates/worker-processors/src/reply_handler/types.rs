@@ -81,7 +81,7 @@ impl std::fmt::Display for ReplyClassification {
 // Canonical reply intelligence vocabulary (§20/§21 unification)
 // ---------------------------------------------------------------------------
 
-/// Canonical inbound reply disposition — the 11-variant vocabulary of
+/// Canonical inbound reply disposition, the 11-variant vocabulary of
 /// `sales_reply_classifications.disposition` (migration 200) and
 /// `sales_autopilot::types::ReplyDisposition`.
 ///
@@ -530,7 +530,7 @@ pub struct InboundMessage {
     #[sqlx(rename = "bodyHtml")]
     pub body_html: Option<String>,
     pub headers: Option<serde_json::Value>,
-    /// F67: the inbound reply's RFC 5322 Message-ID — the stable
+    /// F67: the inbound reply's RFC 5322 Message-ID, the stable
     /// provider/inbound event identity for the analytics handoff.
     #[sqlx(rename = "messageIdHeader")]
     pub message_id_header: Option<String>,

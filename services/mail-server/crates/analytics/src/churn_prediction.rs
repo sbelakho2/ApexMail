@@ -49,7 +49,7 @@ struct TenantChurnTotals {
 /// F10:the Redis-cached form of a churn prediction.
 ///
 /// Redis is an external store, so the cache carries ONLY the salted
-/// identifier plus the prediction payload — never the raw email (which the
+/// identifier plus the prediction payload, never the raw email (which the
 /// caller already has and gets back on the returned [`ChurnPrediction`]).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct CachedChurnPrediction {
@@ -62,7 +62,7 @@ struct CachedChurnPrediction {
     predicted_at: chrono::DateTime<Utc>,
 }
 
-/// F10:salted, tenant-scoped cache key — the crate's configured-key hash
+/// F10:salted, tenant-scoped cache key, the crate's configured-key hash
 /// (`ANALYTICS_STO_HMAC_KEY`, see [`crate::email_hash`]) instead of the old
 /// unsalted SHA-256 (rainbow-tableable), with no raw email in the key.
 fn churn_cache_key(tenant_id: &str, email: &str) -> String {
@@ -130,8 +130,8 @@ impl ChurnPredictionEngine {
     /// recommendations without touching any data beyond the at-risk count,
     /// while this engine (with its weights and thresholds) was dead code
     /// outside its tests. This aggregates the SAME signal rules the
-    /// per-subscriber [`Self::predict`] applies — complaint / bounce /
-    /// inactivity / decay, weighted by the constants above — over the tenant's
+    /// per-subscriber [`Self::predict`] applies, complaint / bounce /
+    /// inactivity / decay, weighted by the constants above, over the tenant's
     /// active contacts, so the route's factors are real counts.
     pub async fn tenant_overview(&self, tenant_id: &str) -> anyhow::Result<TenantChurnOverview> {
         // One aggregate pass; every sub-select is tenant-scoped. `at_risk` is
@@ -255,7 +255,7 @@ impl ChurnPredictionEngine {
         }
         if recommendations.is_empty() {
             recommendations
-                .push("No churn signals in the last 90 days — no action needed".to_string());
+                .push("No churn signals in the last 90 days, no action needed".to_string());
         }
 
         let churn_probability = if active_contacts > 0 {
@@ -281,7 +281,7 @@ impl ChurnPredictionEngine {
     ) -> anyhow::Result<Vec<ChurnSignal>> {
         let mut signals = Vec::new();
 
-        // Complaint signal — scoped to tenant
+        // Complaint signal, scoped to tenant
         let (complaint_count,): (i64,) = sqlx::query_as(
             "SELECT COUNT(*) FROM events WHERE tenant_id = $1 AND recipient = $2 AND event_type = 'complained' AND timestamp >= NOW() - INTERVAL '90 days'",
         )
@@ -297,7 +297,7 @@ impl ChurnPredictionEngine {
             weight: COMPLAINT_WEIGHT,
         });
 
-        // Bounce signal — scoped to tenant
+        // Bounce signal, scoped to tenant
         let (bounce_count,): (i64,) = sqlx::query_as(
             "SELECT COUNT(*) FROM events WHERE tenant_id = $1 AND recipient = $2 AND event_type = 'bounced' AND timestamp >= NOW() - INTERVAL '90 days'",
         )
@@ -313,7 +313,7 @@ impl ChurnPredictionEngine {
             weight: BOUNCE_WEIGHT,
         });
 
-        // Inactivity signal — scoped to tenant. `MAX(timestamp)` is NULL for
+        // Inactivity signal, scoped to tenant. `MAX(timestamp)` is NULL for
         // a recipient with no engagement history: the tuple element itself
         // must be Option, or a cold-start prediction (the most important
         // churn case) fails to decode.
@@ -336,7 +336,7 @@ impl ChurnPredictionEngine {
             weight: INACTIVITY_WEIGHT,
         });
 
-        // Decay signal — scoped to tenant
+        // Decay signal, scoped to tenant
         let decay_score = self.compute_decay(tenant_id, email).await?;
         signals.push(ChurnSignal {
             name: "decay".into(),

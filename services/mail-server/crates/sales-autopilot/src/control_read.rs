@@ -5,7 +5,7 @@
 //! 1. the authenticated `/control/*` HTTP surface ([`crate::control`]), whose
 //!    JSON responses are built by serializing these snapshot structs; and
 //! 2. the api-server's SSR control-plane page (`cp_sales_autopilot`), which
-//!    used to issue its own direct `sales_*` queries — a second, silently
+//!    used to issue its own direct `sales_*` queries, a second, silently
 //!    drifting read contract. The finding was exactly that duplication: the
 //!    admin mutations/read APIs proxied this service while SSR queried the
 //!    canonical tables itself. The shared module lives in this crate because
@@ -72,7 +72,7 @@ pub(crate) fn mode_description(mode: AutonomyMode) -> &'static str {
 // Overview
 // ---------------------------------------------------------------------------
 
-/// `overview.autonomy` — the engine's steering state.
+/// `overview.autonomy`, the engine's steering state.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AutonomySnapshot {
@@ -86,7 +86,7 @@ pub struct AutonomySnapshot {
     pub last_action_at: Option<DateTime<Utc>>,
 }
 
-/// `overview.actions` — durable action-queue stats.
+/// `overview.actions`, durable action-queue stats.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ActionStatsSnapshot {
@@ -98,7 +98,7 @@ pub struct ActionStatsSnapshot {
     pub by_state: BTreeMap<String, i64>,
 }
 
-/// `overview.enrollments[]` — one state count.
+/// `overview.enrollments[]`, one state count.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct EnrollmentCountSnapshot {
     pub state: String,
@@ -314,7 +314,7 @@ const DECISION_COLUMNS: &str = "id, account_id, contact_id, action, expected_val
      policy_id, model_version, autonomy_mode, rationale, blocked, block_reasons, \
      execute_after, created_at";
 
-/// `GET /control/decisions` — what did it decide, and why?
+/// `GET /control/decisions`, what did it decide, and why?
 pub async fn load_decisions(
     db: &PgPool,
     tenant: &str,
@@ -335,12 +335,12 @@ pub async fn load_decisions(
         .map_err(db_error)
 }
 
-/// `GET /control/exceptions` — decisions a human must act on.
+/// `GET /control/exceptions`, decisions a human must act on.
 ///
 /// Two kinds qualify: decisions a hard gate refused
 /// (`enforcement = 'denied'`) and decisions waiting for an operator
 /// (`enforcement = 'await_approval'`, or any decision whose review is still
-/// `pending`). The predicate is the decision's OWN recorded state — autonomy
+/// `pending`). The predicate is the decision's OWN recorded state, autonomy
 /// mode is context, not authority, and an `execute` decision recorded under an
 /// old mode must not surface as an exception forever.
 pub async fn load_exceptions(

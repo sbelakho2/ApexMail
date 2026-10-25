@@ -397,7 +397,7 @@ mod tests {
         }
         assert!(
             checked > 0,
-            "no baseline fixture was comparable — the baseline set would be vacuous",
+            "no baseline fixture was comparable, the baseline set would be vacuous",
         );
     }
 

@@ -1,4 +1,4 @@
-//! Circuit breaker pattern — CLOSED → OPEN → HALF_OPEN state machine.
+//! Circuit breaker pattern, CLOSED → OPEN → HALF_OPEN state machine.
 //! Tracks per-circuit failure/success counts, enforces thresholds.
 
 use chrono::Utc;
@@ -76,7 +76,7 @@ const DEFAULT_CIRCUITS: &[(&str, u32, u32)] = &[
     ("webhook-delivery", 3, 45000),
 ];
 
-/// Circuit breaker pattern — CLOSED → OPEN → HALF_OPEN state machine.
+/// Circuit breaker pattern, CLOSED → OPEN → HALF_OPEN state machine.
 /// Tracks per-circuit failure/success counts, enforces thresholds.
 pub struct CircuitBreakerService {
     circuits: Arc<RwLock<HashMap<String, CircuitRuntime>>>,
@@ -168,7 +168,7 @@ impl CircuitBreakerService {
                     warn!(
                         circuit = circuit_name,
                         reset_timeout_ms = self.reset_timeout_ms,
-                        "half-open probe deadline elapsed without a result — circuit re-opened"
+                        "half-open probe deadline elapsed without a result, circuit re-opened"
                     );
                     return Ok(false);
                 }
@@ -186,7 +186,7 @@ impl CircuitBreakerService {
     ///
     /// Fix #15: in the CLOSED state each success RETIRES one prior
     /// failure (count-based decay, 1:1). Previously `failure_count` only
-    /// ever grew in Closed — five lifetime errors (however long ago, with
+    /// ever grew in Closed, five lifetime errors (however long ago, with
     /// any number of healthy calls in between) tripped a healthy
     /// dependency. With the decay, `threshold` CONSECUTIVE failures (no
     /// interleaved success) are still required to open the circuit.
@@ -357,7 +357,7 @@ mod tests {
     }
 
     /// Fix #15 (fail-first): scattered failures must NOT accumulate into
-    /// an open circuit — 4 failures + enough successes to retire them +
+    /// an open circuit, 4 failures + enough successes to retire them +
     /// 1 more failure stays CLOSED (the old code opened here: 5 lifetime
     /// failures tripped the breaker regardless of intervening successes).
     #[test]
@@ -386,7 +386,7 @@ mod tests {
     }
 
     /// Fix #15: the decay must not weaken protection against CLUSTERED
-    /// failures — 5 failures with no interleaved success still open.
+    /// failures, 5 failures with no interleaved success still open.
     #[test]
     fn test_clustered_failures_still_open_circuit() {
         test_runtime().block_on(async {
@@ -603,7 +603,7 @@ mod tests {
     }
 
     /// The deployment config (CIRCUIT_BREAKER_THRESHOLD / _TIMEOUT) must
-    /// govern the DEFAULT circuits — previously those values were hardcoded
+    /// govern the DEFAULT circuits, previously those values were hardcoded
     /// and the parsed fields were read nowhere, so operators could set the
     /// env vars and no runtime circuit changed.
     #[test]

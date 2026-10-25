@@ -2,7 +2,7 @@
 //!
 //! These tests exercise the HTTP surface end-to-end against a real Postgres
 //! instance when one is available. The target database is taken from
-//! `ENTERPRISE_TEST_DATABASE_URL` (F6: no localhost default — an ambient
+//! `ENTERPRISE_TEST_DATABASE_URL` (F6: no localhost default, an ambient
 //! brew/compose postgres on 5432 must not be probed implicitly; CI points
 //! the variable at an ephemeral container). When the variable is unset or
 //! the database is unreachable the tests **skip** (print a SKIP notice
@@ -109,7 +109,7 @@ fn mint_token(tenant: &str, admin: bool, aud: Option<&str>, iss: Option<&str>) -
 }
 
 /// Audit F3 (verifier repair): a subject-parameterized mint, so tests can
-/// act as TWO different members of the same tenant — the repaired
+/// act as TWO different members of the same tenant, the repaired
 /// separation-of-duties refuses self-approval, and approval happy paths need
 /// a distinct approver.
 fn mint_token_as(
@@ -166,7 +166,7 @@ fn mint_token_as(
 // (these already exist; IF NOT EXISTS is a no-op), but without them the
 // gated handlers would fail closed with a 500 on a bare database.
 //
-// NOTE: every statement must be comment-free — `execute_loose` drops any
+// NOTE: every statement must be comment-free, `execute_loose` drops any
 // split chunk whose first non-space character is `-` (a chunk with a leading
 // SQL comment would swallow the CREATE that follows it).
 const EXTRA_DDL: &str = r#"
@@ -221,7 +221,7 @@ CREATE TABLE IF NOT EXISTS feature_flag_overrides (
 "#;
 
 async fn try_setup() -> Option<TestApp> {
-    // F6: no localhost default — an ambient brew/compose postgres on 5432
+    // F6: no localhost default, an ambient brew/compose postgres on 5432
     // must not be probed implicitly (CI points this variable at an ephemeral
     // container; unset means skip).
     let url = std::env::var("ENTERPRISE_TEST_DATABASE_URL").ok()?;
@@ -367,7 +367,7 @@ async fn setup() -> Option<TestApp> {
 /// capabilities. The row is written through the canonical
 /// `billing_service::plans::upsert_plan` (the same fixture shape as wave-1's
 /// `routes.rs::seed_capability_plan`), so the stored features JSONB is the
-/// complete `PlanFeatures` object — a partial object fails deserialization
+/// complete `PlanFeatures` object, a partial object fails deserialization
 /// closed with a 500 by design.
 ///
 /// The name is unique to this fixture, so `upsert_plan`'s
@@ -401,7 +401,7 @@ async fn entitle_tenant(app: &TestApp, tenant: &str) {
         .expect("seed entitled plan");
     // The fixture plan is a TEST artifact, not a sellable plan. `upsert_plan`
     // inserts it `is_active = true`, so a run against a shared database left
-    // it on the PUBLIC `GET /v1/billing/plans` catalog — the live stack
+    // it on the PUBLIC `GET /v1/billing/plans` catalog, the live stack
     // served "Security Regression Entitled" (emailLimit 1,000,000) to
     // customers (dogfood 2026-10-08). Deactivate it; entitlement resolution
     // joins `plans` by name WITHOUT an is_active filter, so the fixture
@@ -468,7 +468,7 @@ async fn cross_tenant_by_id_handlers_are_blocked() {
     let b = app.token(&app.tenant_b, false);
     // Wave-1 fixture: seeding/reading tenant A's template goes through the
     // plan-entitlement gate, so tenant A must be on an entitled plan
-    // (tenant B stays free — the cross-tenant refusals below are pinned by
+    // (tenant B stays free, the cross-tenant refusals below are pinned by
     // the token/tenant guard, which runs before the plan gate).
     entitle_tenant(&app, &app.tenant_a).await;
 
@@ -737,7 +737,7 @@ async fn template_approve_reject_require_admin() {
     );
 
     // The wave-1 gate itself, kept covered: tenant B is on the free plan, so
-    // its submit is refused 403 naming the capability AND the plan — the
+    // its submit is refused 403 naming the capability AND the plan, the
     // entitled fixture tenant above is what admits the RBAC flow, never a
     // weakened check.
     let admin_b = app.token(&app.tenant_b, true);
@@ -786,7 +786,7 @@ async fn decrypt_field_is_tenant_bound() {
     let ciphertext = encrypted["value"].as_str().unwrap().to_string();
     assert!(ciphertext.starts_with("ENC:v1:"));
 
-    // Audit F1: decrypt-field is the PHI oracle — a NON-ADMIN member of the
+    // Audit F1: decrypt-field is the PHI oracle, a NON-ADMIN member of the
     // owning tenant is refused before any decryption (403), so a
     // low-privilege insider cannot bulk-decrypt their tenant's ciphertexts.
     let (status, body) = app
@@ -1283,7 +1283,7 @@ async fn cors_policy_is_enforced_from_config() {
         skip_notice("test");
         return;
     };
-    // Default dev config allows "*" — a preflight/request with any Origin
+    // Default dev config allows "*", a preflight/request with any Origin
     // must be answered with an Access-Control-Allow-Origin header, proving
     // the previously-dead cors_origins config is actually attached.
     let response = app
@@ -1324,7 +1324,7 @@ async fn sso_login_refuses_unknown_domains_instead_of_redirecting() {
     };
     // The callbacks ARE wired now (`POST /sso/acs/:domain`,
     // `GET /sso/callback/oidc/:domain`), so a configured domain redirects to
-    // its IdP — but a domain with no SSO configuration must still be refused
+    // its IdP, but a domain with no SSO configuration must still be refused
     // outright, never bounced toward an IdP that is not ours.
     for path in ["/sso/login/saml/example.com", "/sso/login/oidc/example.com"] {
         let response = app
@@ -1476,7 +1476,7 @@ async fn data_access_approval_derives_approver_and_clamps_duration() {
     let id = req["data"]["id"].as_str().unwrap().to_string();
 
     // Audit F3 (verifier repair): the approver is a DIFFERENT member of the
-    // same tenant — the repaired separation of duties refuses the filer's
+    // same tenant, the repaired separation of duties refuses the filer's
     // own approval (the stored requester is now the token subject, so the
     // old self-approval here would 403).
     let approver = mint_token_as(&app.tenant_a, "user-test-approver", false, None, None);
@@ -1503,10 +1503,10 @@ async fn data_access_approval_derives_approver_and_clamps_duration() {
     );
     assert_eq!(duration, Some(1440), "duration must clamp to 1440 min");
 
-    // Audit F3: the raw grant token is returned EXACTLY ONCE — in this
+    // Audit F3: the raw grant token is returned EXACTLY ONCE, in this
     // approval response, as the approver's handoff to the requester. The
     // database persists ONLY its SHA-256 digest (the SSO bearer-token
-    // model), so no DB read — and no re-approval — can recover a usable
+    // model), so no DB read, and no re-approval, can recover a usable
     // token. (The old contract masked the response with `ref:{id}`; the
     // masking moved to where it belongs: the storage layer.)
     let raw_token = body["data"]["access_token"]
@@ -1795,7 +1795,7 @@ async fn sub_account_api_key_lifecycle_enforces_revocation() {
     );
 
     // The wave-1 gate itself, kept covered: tenant B's free plan is refused
-    // 403 naming `subaccounts` — the entitled fixture tenant above is what
+    // 403 naming `subaccounts`, the entitled fixture tenant above is what
     // admits the lifecycle, never a weakened check.
     let (status, body) = app
         .post(

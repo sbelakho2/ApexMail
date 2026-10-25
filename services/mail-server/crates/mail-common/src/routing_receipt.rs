@@ -1,4 +1,4 @@
-//! Signed routing receipts — Ed25519 proof for every accepted send.
+//! Signed routing receipts, Ed25519 proof for every accepted send.
 //!
 //! The delivery acceptance ledger (`sales_delivery_acceptances`) records the
 //! transport's per-message acceptance. The ledger row alone is only as
@@ -9,19 +9,19 @@
 //! # Scheme
 //!
 //! * Algorithm: **Ed25519** (RFC 8032), signature 64 bytes.
-//! * Secret key: `RECEIPT_SIGNING_KEY` — the 32-byte seed as **64 hex
+//! * Secret key: `RECEIPT_SIGNING_KEY`, the 32-byte seed as **64 hex
 //!   characters** or **base64** (standard or URL-safe, padding optional).
 //!   Same shape as the repo's other 32-byte secrets
 //!   (`.env.production.example`'s `openssl rand -hex 32` convention).
 //! * Public key: base64 / hex of the 32-byte Ed25519 public key, served
 //!   unauthenticated at `GET /v1/routing/receipts/public-key`.
-//! * Key id: `hex(sha256(public_key))[..16]` — recorded next to every
+//! * Key id: `hex(sha256(public_key))[..16]`, recorded next to every
 //!   signature so a key rotation is auditable.
 //!
 //! # Canonical payload (the exact bytes that are signed)
 //!
 //! UTF-8, LF-separated, no trailing newline, no padding, no canonicalization
-//! library — a verifier re-derives these bytes from the published fields:
+//! library, a verifier re-derives these bytes from the published fields:
 //!
 //! ```text
 //! apexmail-routing-receipt/v1
@@ -32,7 +32,7 @@
 //! actual_source_ip=<ip>            ← present ONLY when the transport reported one
 //! ```
 //!
-//! Field values must not contain `\n` or `\r` (enforced — a receipt whose
+//! Field values must not contain `\n` or `\r` (enforced, a receipt whose
 //! canonical form would be ambiguous is REFUSED rather than escaped, so the
 //! wire format stays trivially recomputable by any Ed25519 library).
 //!
@@ -58,7 +58,7 @@ pub const RECEIPT_SIGNING_KEY_ENV: &str = "RECEIPT_SIGNING_KEY";
 /// for services that publish/verify receipts but must never hold the signing
 /// seed (the api-server serves `GET /v1/routing/receipts/public-key` and the
 /// stateless verify endpoint). When unset, [`verification_key_from_env`]
-/// falls back to deriving the public half of `RECEIPT_SIGNING_KEY` — a
+/// falls back to deriving the public half of `RECEIPT_SIGNING_KEY`, a
 /// convenience for single-process dev setups, NOT the recommended production
 /// custody (the API process should not be able to sign).
 pub const RECEIPT_PUBLIC_KEY_ENV: &str = "RECEIPT_PUBLIC_KEY";
@@ -110,14 +110,14 @@ impl std::error::Error for ReceiptKeyError {}
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RoutingReceiptFields<'a> {
     /// The platform message id (`email_queue.message_id` / the API-visible
-    /// message identity) — one receipt per message.
+    /// message identity), one receipt per message.
     pub message_id: &'a str,
     /// The tenant the message belongs to.
     pub tenant_id: &'a str,
     /// Which transport/route carried the message (the ledger's `transport`
     /// label, e.g. `ses-shared` / `dedicated`).
     pub transport: &'a str,
-    /// When the transport accepted the message, RFC 3339 UTC — the SAME
+    /// When the transport accepted the message, RFC 3339 UTC, the SAME
     /// value persisted on the ledger row.
     pub accepted_at: &'a str,
     /// The recipient-facing source IP the transport actually used, when it
@@ -184,7 +184,7 @@ pub fn canonical_payload(fields: &RoutingReceiptFields<'_>) -> Result<String, Re
     payload.push('\n');
     payload.push_str("accepted_at=");
     payload.push_str(fields.accepted_at);
-    // Present only when the transport reported a source IP — the absence
+    // Present only when the transport reported a source IP, the absence
     // itself is part of the signed statement.
     if let Some(ip) = fields.actual_source_ip {
         payload.push('\n');
@@ -319,7 +319,7 @@ impl RoutingReceiptSigner {
     /// * key set + malformed → `Err` (always fatal: a malformed key must
     ///   never silently degrade into unsigned receipts)
     /// * key unset → `Ok(None)`; the CALLER decides whether absence is
-    ///   acceptable (dev) or fatal (production — see
+    ///   acceptable (dev) or fatal (production, see
     ///   [`receipt_signer_required_in_production`]).
     pub fn from_env() -> Result<Option<Self>, ReceiptKeyError> {
         match std::env::var(RECEIPT_SIGNING_KEY_ENV) {
@@ -348,7 +348,7 @@ impl RoutingReceiptSigner {
         self.public_key
     }
 
-    /// Base64 (standard, no padding) public key — the published form.
+    /// Base64 (standard, no padding) public key, the published form.
     pub fn public_key_base64(&self) -> String {
         STANDARD_NO_PAD.encode(self.public_key)
     }
@@ -358,7 +358,7 @@ impl RoutingReceiptSigner {
         hex::encode(self.public_key)
     }
 
-    /// `hex(sha256(public_key))[..16]` — recorded with every signature.
+    /// `hex(sha256(public_key))[..16]`, recorded with every signature.
     pub fn key_id(&self) -> &str {
         &self.key_id
     }
@@ -482,7 +482,7 @@ pub fn verify_payload(
 /// Whether this process must refuse to run without `RECEIPT_SIGNING_KEY`.
 ///
 /// Follows the repo-wide production detection (`NODE_ENV` / `ENVIRONMENT` /
-/// `APP_ENV` = production|prod — the same set `apexmail-lib`'s
+/// `APP_ENV` = production|prod, the same set `apexmail-lib`'s
 /// `secret_at_rest` uses). In production an unsigned acceptance path is a
 /// contradiction of the "no claim without evidence" invariant, so the
 /// services that write receipts refuse to boot without a key; in dev the
@@ -502,7 +502,7 @@ pub fn receipt_signer_required_in_production() -> bool {
 ///
 /// * `RECEIPT_PUBLIC_KEY` set and valid → `Ok(Some(public_key))`.
 /// * unset, `RECEIPT_SIGNING_KEY` set and valid → its derived public half.
-/// * both unset → `Ok(None)` — the caller must answer 503, never fabricate a
+/// * both unset → `Ok(None)`, the caller must answer 503, never fabricate a
 ///   key (fail closed).
 /// * either set but malformed → `Err` (always fatal for the endpoint).
 pub fn verification_key_from_env() -> Result<Option<[u8; RECEIPT_KEY_BYTES]>, ReceiptVerifyError> {

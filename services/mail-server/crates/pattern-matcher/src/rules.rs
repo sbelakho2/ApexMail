@@ -74,7 +74,7 @@ pub struct RuleMatch {
 
 /// Default cap on how many occurrences of a single rule contribute to
 /// [`RuleSet::total_score`]. Without a cap, a message repeating one keyword
-/// ("free money" × 500) inflates the score without bound — a cheap
+/// ("free money" × 500) inflates the score without bound, a cheap
 /// adversarial score-pumping vector.
 pub const DEFAULT_MAX_OCCURRENCES_PER_RULE: usize = 3;
 
@@ -269,7 +269,7 @@ mod tests {
             .collect();
         let rs = RuleSet::new(test_rules());
         // The accented 'o\u{0301}' in NFD should normalize to 'ó' in NFC,
-        // which does NOT match "account" — so no match expected here.
+        // which does NOT match "account", so no match expected here.
         // This ensures NFC normalization on input is working.
         let matches_nfd = rs.evaluate(&nfd_text);
         assert!(
@@ -300,7 +300,7 @@ mod tests {
     #[test]
     fn test_total_score_caps_occurrences_per_rule() {
         // 10 occurrences of a 3-point rule must contribute 3×3=9 (default
-        // cap 3), not 30 — repeated keywords cannot pump the score.
+        // cap 3), not 30, repeated keywords cannot pump the score.
         let rs = RuleSet::new(test_rules());
         let text = "buy now ".repeat(10);
         assert_eq!(rs.evaluate(&text).len(), 10, "all matches still reported");

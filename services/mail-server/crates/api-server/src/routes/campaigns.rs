@@ -6,7 +6,7 @@
 //! `campaign_recipients` and flips the campaign to `sending`;
 //! `POST /:id/schedule` stores a due time. The actual delivery is the WORKER
 //! campaign consumer's job (`crates/worker-processors/src/campaigns.rs`),
-//! which drains recipient rows through the shared admission gate — this file
+//! which drains recipient rows through the shared admission gate, this file
 //! never enqueues mail itself, it only records intent and audience.
 //!
 //! Wire truth: this module is the authority for the campaigns contract; the
@@ -145,7 +145,7 @@ fn parse_list_ids(raw: &[String], field: &str) -> Result<Vec<Uuid>, ApiError> {
     Ok(out)
 }
 
-/// Every referenced list must exist AND belong to the tenant — a
+/// Every referenced list must exist AND belong to the tenant, a
 /// cross-tenant or unknown list id is a 404, matching the template
 /// reference behavior (never a silent FK error).
 async fn validate_lists_exist(
@@ -217,7 +217,7 @@ pub struct CreateCampaignRequest {
     /// ahead of the body.
     #[serde(default, alias = "previewText")]
     pub preview_text: Option<String>,
-    /// Raw HTML body — the alternative to `template_id` (exactly one of the
+    /// Raw HTML body, the alternative to `template_id` (exactly one of the
     /// two is required before send).
     #[serde(default)]
     pub html: Option<String>,
@@ -335,7 +335,7 @@ pub struct ListCampaignsQuery {
     pub limit: i64,
     #[serde(default)]
     pub offset: i64,
-    /// Cursor for cursor-based pagination — hex-encoded `created_at` + row id
+    /// Cursor for cursor-based pagination, hex-encoded `created_at` + row id
     /// pair of the last item from the previous page. When provided, overrides
     /// `offset`.
     #[serde(default)]
@@ -626,7 +626,7 @@ pub(crate) fn validate_utm_params(raw: &Option<Value>) -> Result<Value, ApiError
 }
 
 /// The documented `settings` object: sendTimeOptimization, timezone,
-/// throttleRate, ipPool — validated, unknown keys refused.
+/// throttleRate, ipPool, validated, unknown keys refused.
 pub(crate) fn validate_campaign_settings(raw: &Option<Value>) -> Result<Value, ApiError> {
     let Some(value) = raw else {
         return Ok(serde_json::json!({}));
@@ -767,7 +767,7 @@ async fn validate_ab_test(
     Ok(value.clone())
 }
 
-/// The audience-expansion INSERT — the same SQL the worker's consumer runs
+/// The audience-expansion INSERT, the same SQL the worker's consumer runs
 /// when a scheduled campaign comes due (`worker_processors::campaigns`).
 /// Subscribed contacts on any `list_ids` list, minus anyone on any
 /// `exclude_list_ids` list. Existing rows are never duplicated or downgraded.
@@ -801,7 +801,7 @@ async fn expand_audience(
     let mut tags_all: Option<Vec<String>> = None;
     let mut tags_any: Option<Vec<String>> = None;
 
-    // Segment merge — MUST mirror the worker's expansion semantics
+    // Segment merge, MUST mirror the worker's expansion semantics
     // (worker_processors::campaigns::expand_audience): union of lists and
     // excludes, status/ tag match rules from segment.match.
     if let Some(segment_id) = segment_id {
@@ -861,7 +861,7 @@ async fn expand_audience(
     }
 
     // An EMPTY include set with no segment match rules is an empty
-    // audience — never "every contact". (The cardinality escape in the
+    // audience, never "every contact". (The cardinality escape in the
     // SQL below only ever selects when tag/status rules constrain the
     // audience, i.e. a tag-targeted segment with no lists.)
     if include.is_empty() && tags_all.is_none() && tags_any.is_none() {
@@ -902,7 +902,7 @@ async fn expand_audience(
     Ok(result.rows_affected())
 }
 
-/// Assign A/B phases for a freshly expanded audience — the SAME shared
+/// Assign A/B phases for a freshly expanded audience, the SAME shared
 /// deterministic contract the worker applies to scheduled campaigns
 /// (`apexmail_lib::ab_testing::AB_SPLIT_SQL`): a hash of
 /// `(campaign_id, contact_id)` picks the test sample and its arm, so the
@@ -1140,7 +1140,7 @@ async fn list_campaigns(
     let limit = clamp_limit(params.limit, 100);
 
     // Cursor-based pagination: decode and validate the hex-encoded
-    // `created_at\nid` pair BEFORE binding — a bogus cursor used to reach the
+    // `created_at\nid` pair BEFORE binding, a bogus cursor used to reach the
     // `::timestamp` cast and surface as a database 500 instead of a client 400.
     let cursor_value = match params.cursor.as_deref() {
         Some(encoded) => Some(decode_keyset_cursor(encoded)?),
@@ -1183,7 +1183,7 @@ async fn list_campaigns(
         .map(|s| format!("%{}%", s.to_lowercase()));
 
     let rows = if let Some((ref cursor_ts, ref cursor_id)) = cursor_value {
-        // campaigns.id is UUID — the VALUE is cast once, never the column,
+        // campaigns.id is UUID, the VALUE is cast once, never the column,
         // so the primary-key index remains usable for the tie-break.
         sqlx::query_as::<_, CampaignRow>(
             &format!(
@@ -1279,7 +1279,7 @@ async fn get_campaign(
     Ok(Json(row.into()))
 }
 
-/// PATCH /:id — update a not-yet-drained campaign. Docs contract: "Cannot
+/// PATCH /:id, update a not-yet-drained campaign. Docs contract: "Cannot
 /// update campaigns that are sending or completed". Only draft/scheduled/
 /// paused campaigns are editable (a `paused` mid-drain campaign resumes into
 /// its edited audience on the next tick).
@@ -1472,7 +1472,7 @@ async fn delete_campaign(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// POST /:id/send — resolve the audience and start sending. DRAFT-only; the
+/// POST /:id/send, resolve the audience and start sending. DRAFT-only; the
 /// response reflects the REAL outcome: recipientCount is the audience the
 /// worker will drain, and a zero-audience send converges to `sent`
 /// immediately instead of pretending to start.
@@ -1500,7 +1500,7 @@ async fn send_campaign(
     }
     // Content may live on the campaign (template or raw html) OR on the
     // A/B arms (an abTest campaign with no campaign-level template renders
-    // per-arm content — the arm templates were validated at write time).
+    // per-arm content, the arm templates were validated at write time).
     if row.template_id.as_deref().unwrap_or("").is_empty()
         && row.html_body.as_deref().unwrap_or("").is_empty()
         && row.ab_config.is_none()
@@ -1564,7 +1564,7 @@ async fn send_campaign(
         // Nothing to drain. Converging silently to `sent` reported a "send"
         // that reached nobody (adversarial dogfood: `a campaign start with no
         // audience is a named refusal, never a silent success`). Revert the
-        // claim and refuse with an actionable named error instead — the
+        // claim and refuse with an actionable named error instead, the
         // caller can add a list/segment/recipients and start for real.
         sqlx::query(
             "UPDATE campaigns SET status = 'draft', updated_at = NOW() \
@@ -1585,7 +1585,7 @@ async fn send_campaign(
     Ok(Json(row.into()))
 }
 
-/// POST /:id/schedule — store a due time; the WORKER sends when due
+/// POST /:id/schedule, store a due time; the WORKER sends when due
 /// (`status = 'scheduled' AND scheduled_at <= NOW()` is claimed by the
 /// campaign consumer each tick).
 async fn schedule_campaign(
@@ -1634,7 +1634,7 @@ async fn resume_campaign(
 ) -> Result<Json<CampaignResponse>, ApiError> {
     require_scopes(&auth, &["campaigns:write"])?;
     let current = fetch_campaign(&state, &auth.tenant_id, id.clone()).await?;
-    // A `scheduled` campaign is already queued for its due time — resume is
+    // A `scheduled` campaign is already queued for its due time, resume is
     // idempotent and returns it unchanged (the consumer will start it when
     // due). This is the state a paused-scheduled campaign resumes INTO, so
     // an immediate follow-up resume must not be a validation error.
@@ -1740,7 +1740,7 @@ struct CampaignRow {
     variables: Value,
     status: String,
     scheduled_at: Option<DateTime<Utc>>,
-    // campaigns.sent_count is INT4 — sqlx refuses to decode INT4 into i64.
+    // campaigns.sent_count is INT4, sqlx refuses to decode INT4 into i64.
     sent_count: i32,
     list_ids: Value,
     exclude_list_ids: Value,
@@ -1878,7 +1878,7 @@ async fn resend_campaign(
 
 // ─── Stats Handler ─────────────────────────────────────────────
 
-/// GET /:id/stats — real per-campaign delivery + engagement numbers, joined
+/// GET /:id/stats, real per-campaign delivery + engagement numbers, joined
 /// through the `campaign_recipients.message_id` back-reference the send
 /// pipeline writes. The docs' device/client/geo/timeline breakdowns have no
 /// wire implementation and were removed from the contract.
@@ -2028,7 +2028,7 @@ mod tests {
         assert!(req.template_id.is_none());
     }
 
-    /// The docs' camelCase field names parse too (serde aliases) — the
+    /// The docs' camelCase field names parse too (serde aliases), the
     /// documented request bodies must not 400 against the real wire.
     #[test]
     fn test_create_campaign_deser_accepts_documented_camel_case() {
@@ -3117,7 +3117,7 @@ mod adversarial_tests {
         let tag = uuid::Uuid::new_v4().simple().to_string();
 
         // Seed the audience: one list with two subscribed contacts, one
-        // excluded list with one of them (via direct SQL — the lists API has
+        // excluded list with one of them (via direct SQL, the lists API has
         // its own route tests). One INSERT per row: a multi-row VALUES with
         // reused parameters makes Postgres infer parameter types across rows
         // and mis-type the uuid columns.
@@ -3231,7 +3231,7 @@ mod adversarial_tests {
         assert_eq!(created.list_ids, vec![list_id.to_string()]);
         let campaign_id: Uuid = created.id.parse().expect("campaign id");
 
-        // Sending without sender/template is a clean 400 — a campaign created
+        // Sending without sender/template is a clean 400, a campaign created
         // without them must not strand its recipients in `failed`.
         let (_s, Json(incomplete)) = create_campaign(
             State(state.clone()),
@@ -3272,7 +3272,7 @@ mod adversarial_tests {
         );
 
         // Schedule from draft, then PATCH the draft fields. The fixture
-        // truncates to MICROSECONDS — Postgres stores timestamptz at µs, and
+        // truncates to MICROSECONDS, Postgres stores timestamptz at µs, and
         // Utc::now() carries ns on Linux (µs on macOS): untruncated, the
         // round-tripped string differed only in sub-µs digits on the deploy
         // host (deploy 2026-10-11).
@@ -3293,7 +3293,7 @@ mod adversarial_tests {
         );
 
         // PATCH while scheduled: rename + set an exclude list. NOTE: the
-        // include list itself must NOT appear in the exclude set — excluding
+        // include list itself must NOT appear in the exclude set, excluding
         // it would empty the audience, and the send below asserts the
         // include/exclude/status rules yield exactly the two eligible
         // contacts.
@@ -3357,7 +3357,7 @@ mod adversarial_tests {
         assert_eq!(sent_campaign.status, "sending");
         // Audience = the two active/subscribed members of the include list,
         // minus the excluded contact (still a member of the include list but
-        // on the exclude list) — the unsubscribed contact is never eligible.
+        // on the exclude list), the unsubscribed contact is never eligible.
         assert_eq!(
             sent_campaign.recipient_count, 2,
             "audience must honor include, exclude and contact status"
@@ -3547,7 +3547,7 @@ mod adversarial_tests {
         .is_err());
         assert!(serde_json::from_str::<ListCampaignsQuery>(r#"{"limit":1,"evil":true}"#).is_err());
         // The documented fidelity fields are REAL fields now (settings,
-        // segmentId, html, ...) — an unknown key is still refused.
+        // segmentId, html, ...), an unknown key is still refused.
         assert!(serde_json::from_str::<UpdateCampaignRequest>(r#"{"settings":{}}"#).is_ok());
         assert!(serde_json::from_str::<UpdateCampaignRequest>(r#"{"bogusField":1}"#).is_err());
         assert!(serde_json::from_str::<UpdateCampaignRequest>(r#"{"segmentId":"x"}"#).is_ok());

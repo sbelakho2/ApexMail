@@ -53,7 +53,7 @@ fn migrations_match_column_types_bound_by_code() {
     assert!(MIGRATION_163.contains("enabled        BOOLEAN      NOT NULL DEFAULT TRUE"));
 
     // health_check.rs record_health_check INSERTs (node_id, region, status,
-    // components, checked_at) with ON CONFLICT DO NOTHING — which needs the
+    // components, checked_at) with ON CONFLICT DO NOTHING, which needs the
     // unique observation key; get_cluster_status scans checked_at DESC.
     assert!(MIGRATION_194.contains("node_id     VARCHAR(255) NOT NULL"));
     assert!(MIGRATION_194.contains("components  JSONB        NOT NULL"));

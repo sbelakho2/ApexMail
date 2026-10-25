@@ -1,13 +1,15 @@
-{# ── Pricing CTA — ARK round: the final conversion moment. ── #}
+{# ── Pricing CTA, ARK round: the final conversion moment. ── #}
 {# The calculator link uses the LOCAL anchor (#apexmail-calculator #}
 {# on this page) instead of restarting the estimate journey on a  #}
 {# separate page. #}
 
 <section class="apex-mkt-section apex-mkt-section--brand">
   <div class="apex-mkt-container">
-    <h2 class="apex-h2">
+    <div class="apex-mkt-heading--statement">
+  <h2 class="apex-mkt-heading__title">
       {% if i18n_data and i18n_data[l] and i18n_data[l]["pricing"] and i18n_data[l]["pricing"]["questions_title"] %}{{ i18n_data[l]["pricing"]["questions_title"] }}{% else %}Talk to our team{% endif %}
     </h2>
+  </div>
     <p class="apex-lead max-w-2xl mt-2">
       {% if i18n_data and i18n_data[l] and i18n_data[l]["pricing"] and i18n_data[l]["pricing"]["questions_body"] %}{{ i18n_data[l]["pricing"]["questions_body"] }}{% else %}Talk to our team about procurement, annual contracts, migration, or which plan fits your volume.{% endif %}
     </p>

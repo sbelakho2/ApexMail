@@ -21,7 +21,7 @@ impl Default for ContentOptimizer {
 ///
 /// An ALLOWLIST, not a blocklist: anything not explicitly permitted
 /// (unknown tags, unknown attributes, `javascript:` URLs, event handlers)
-/// is removed regardless of how novel the payload shape is — pattern-based
+/// is removed regardless of how novel the payload shape is, pattern-based
 /// strippers can always be bypassed by payloads their detectors never saw.
 fn model_output_allowlist() -> ammonia::Builder<'static> {
     use std::collections::{HashMap, HashSet};
@@ -102,7 +102,7 @@ fn model_output_allowlist() -> ammonia::Builder<'static> {
 /// `/chat` path runs it on every answer before both the HTTP response and
 /// the audit persistence, and the streaming pipeline runs its incremental
 /// variant ([`StreamingSanitizer`]) on every token. Unconditional by
-/// design — there is no detector gate that novel payloads can slip past.
+/// design, there is no detector gate that novel payloads can slip past.
 pub fn sanitize_model_output(raw: &str) -> String {
     model_output_allowlist().clean(raw).to_string()
 }
@@ -128,7 +128,7 @@ pub struct StreamingSanitizer {
 /// already bounded by its token budget, but a hostile/degenerate stream
 /// must not be able to grow the buffer without limit: past the cap the
 /// entire pending candidate is flushed through the allowlist anyway (an
-/// unterminated tag is dropped as inert — never forwarded as markup), so
+/// unterminated tag is dropped as inert, never forwarded as markup), so
 /// flushing early stays safe.
 const STREAM_SANITIZER_PENDING_CAP: usize = 4096;
 
@@ -151,7 +151,7 @@ impl StreamingSanitizer {
         self.pending.push_str(token);
         // Bound the buffer first: a hostile/degenerate stream must not be
         // able to grow the pending candidate without limit. Past the cap
-        // everything is flushed through the allowlist — an incomplete tag
+        // everything is flushed through the allowlist, an incomplete tag
         // is escaped to inert text, so flushing early stays safe.
         if self.pending.len() > STREAM_SANITIZER_PENDING_CAP {
             let rest = std::mem::take(&mut self.pending);
@@ -207,7 +207,7 @@ impl ContentOptimizer {
         let word_count = text.split_whitespace().count();
         let lower = text.to_lowercase();
 
-        // Length — sweet spot 30-60 chars
+        // Length, sweet spot 30-60 chars
         score += if (30..=60).contains(&len) {
             25
         } else if (20..=80).contains(&len) {
@@ -216,7 +216,7 @@ impl ContentOptimizer {
             5
         };
 
-        // Word count — 4-9 words ideal
+        // Word count, 4-9 words ideal
         score += if (4..=9).contains(&word_count) {
             20
         } else if (2..=12).contains(&word_count) {
@@ -278,7 +278,7 @@ impl ContentOptimizer {
         }
 
         if len < 20 {
-            let expanded = format!("Discover: {} — learn more today", text);
+            let expanded = format!("Discover: {}, learn more today", text);
             suggestions.push(ContentSuggestion::new(
                 text,
                 &expanded,
@@ -301,7 +301,7 @@ impl ContentOptimizer {
             .iter()
             .any(|w| lower.contains(w));
         if !has_urgency {
-            let urgent_version = format!("{} — act now!", text);
+            let urgent_version = format!("{}, act now!", text);
             suggestions.push(ContentSuggestion::new(
                 text,
                 &urgent_version,
@@ -462,7 +462,7 @@ mod tests {
     // ── SM9 #1: the shared ammonia allowlist pass ───────────────────────
 
     /// Raw (non-entity-encoded) XSS payloads are stripped by the allowlist
-    /// regardless of detector coverage — an allowlist cannot be bypassed by
+    /// regardless of detector coverage, an allowlist cannot be bypassed by
     /// pattern novelty. (`<img src=…>` is an ALLOWED element: the assertions
     /// for it target the handler/URL payload, not the tag itself.)
     #[test]
@@ -518,7 +518,7 @@ mod tests {
     fn sanitize_model_output_preserves_benign_text() {
         let answer = "The Pro plan costs €89 per month with 150,000 emails included.";
         assert_eq!(sanitize_model_output(answer), answer);
-        let html_answer = "<p>Hello <strong>world</strong> — see <a href=\"https://apexmail.ee/docs\">the docs</a>.</p>";
+        let html_answer = "<p>Hello <strong>world</strong>, see <a href=\"https://apexmail.ee/docs\">the docs</a>.</p>";
         let out = sanitize_model_output(html_answer);
         assert!(out.contains("<p>"), "{out}");
         assert!(out.contains("<strong>world</strong>"), "{out}");
@@ -534,7 +534,7 @@ mod tests {
     /// markup: the sanitizer holds every unclosed `<` region, so no emitted
     /// fragment can carry a raw `<…` prefix that reassembles into a tag
     /// downstream. (The inert text of an incomplete unknown tag may pass
-    /// through — `alert(1)` as plain text is harmless; the *tag* cannot.)
+    /// through, `alert(1)` as plain text is harmless; the *tag* cannot.)
     #[test]
     fn streaming_sanitizer_strips_tags_split_across_tokens() {
         let tokens = ["Sure: ", "<scr", "ipt>alert(", "1)</scr", "ipt> done"];
@@ -595,7 +595,7 @@ mod tests {
         assert!(emitted.contains("hello"));
     }
 
-    /// An `<` inside ordinary prose is escaped, not swallowed — and a long
+    /// An `<` inside ordinary prose is escaped, not swallowed, and a long
     /// tag-less candidate past the buffer cap is flushed rather than
     /// buffering forever (the unterminated tag is dropped as inert, and
     /// the drained buffer keeps streaming).

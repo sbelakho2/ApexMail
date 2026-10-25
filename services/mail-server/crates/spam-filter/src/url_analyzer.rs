@@ -109,7 +109,7 @@ fn find_ignore_ascii_case(haystack: &str, needle: &str, from: usize) -> Option<u
 /// Extract URLs from text (simple extraction, not a full parser).
 ///
 /// Scheme prefixes such as `HTTP://` and `HTTPS://` are matched
-/// case-insensitively — email clients routinely render mixed-case schemes as
+/// case-insensitively, email clients routinely render mixed-case schemes as
 /// clickable links. The match is performed directly on the original text (no
 /// lowercased copy), so all byte offsets share a single coordinate system and
 /// remain valid even when the text contains characters whose lowercased form
@@ -119,7 +119,7 @@ pub fn extract_urls(text: &str) -> Vec<String> {
     let mut urls = Vec::new();
     let mut offset = 0;
     loop {
-        // Case-insensitive scheme detection on the ORIGINAL text — never mix
+        // Case-insensitive scheme detection on the ORIGINAL text, never mix
         // offsets computed against a transformed copy with slices of `text`.
         let http_pos = find_ignore_ascii_case(text, "http://", offset);
         let https_pos = find_ignore_ascii_case(text, "https://", offset);
@@ -309,7 +309,7 @@ fn has_mixed_scripts(host: &str) -> bool {
     for c in host.chars() {
         // Script-neutral characters: '.', '-', and digits carry no script
         // information. Counting them as "Latin" flagged every legitimate
-        // single-script IDN (почта.рф) as a homograph attack — only ASCII
+        // single-script IDN (почта.рф) as a homograph attack, only ASCII
         // LETTERS establish a Latin component.
         if c == '.' || c == '-' || c.is_ascii_digit() {
             continue;
@@ -332,7 +332,7 @@ fn has_mixed_scripts(host: &str) -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// URL Detonation — follow redirects to reveal the final landing URL
+// URL Detonation, follow redirects to reveal the final landing URL
 // ---------------------------------------------------------------------------
 
 /// Result of detonating (following redirects on) a single URL.
@@ -568,7 +568,7 @@ async fn detonate_url_impl(url: &str) -> DetonationResult {
 
         // SSRF pre-flight on every hop (initial URL and each redirect):
         // resolve ONCE and keep the validated addresses. The request below
-        // connects ONLY to these addresses — the hostname is never resolved
+        // connects ONLY to these addresses, the hostname is never resolved
         // a second time, so a DNS rebinding attack (public answer to the
         // guard, private answer to the connection) has no window to act in.
         let validated = match ssrf_guard_validated_addrs(&current).await {
@@ -642,7 +642,7 @@ async fn detonate_url_impl(url: &str) -> DetonationResult {
                 break; // redirect without Location header
             }
         } else {
-            break; // non-redirect status — we've arrived
+            break; // non-redirect status, we've arrived
         }
     }
 
@@ -729,7 +729,7 @@ pub async fn detonate_urls(body: &str) -> DetonationReport {
                 findings.push(UrlFinding {
                     id: "DETONATION_TRUNCATED",
                     description: format!(
-                        "Redirect chain exceeded {} hops — possible redirect loop: {}",
+                        "Redirect chain exceeded {} hops, possible redirect loop: {}",
                         MAX_REDIRECT_HOPS, result.original_url
                     ),
                     penalty: 3.0,
@@ -1076,7 +1076,7 @@ mod tests {
     #[cfg(feature = "phishing")]
     #[tokio::test]
     async fn ssrf_guard_blocks_private_literals_without_network() {
-        // IP literals are checked directly — no DNS, no HTTP.
+        // IP literals are checked directly, no DNS, no HTTP.
         for blocked in [
             "http://127.0.0.1/admin",
             "http://10.0.0.5/",
@@ -1141,7 +1141,7 @@ mod tests {
                 .collect::<Vec<_>>()
         );
         // Reserved literals are refused, and an unresolvable name fails
-        // closed (.invalid is reserved by RFC 2606 — hermetic).
+        // closed (.invalid is reserved by RFC 2606, hermetic).
         assert!(ssrf_guard_validated_addrs("http://169.254.169.254/")
             .await
             .is_err());
@@ -1222,7 +1222,7 @@ mod tests {
         // Here the target host is a guaranteed-nonexistent name (RFC 6761
         // `.test`), so any second, DNS-based resolution would fail the
         // request. The request can only succeed by connecting to the
-        // guard-validated address — a local listener standing in for the
+        // guard-validated address, a local listener standing in for the
         // approved destination.
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await

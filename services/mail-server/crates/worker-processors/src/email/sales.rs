@@ -1,10 +1,10 @@
-//! SALES SENDING ISOLATION — the dedicated sales transport slot.
+//! SALES SENDING ISOLATION, the dedicated sales transport slot.
 //!
 //! The platform invariant: **"Sales sending is isolated. It never shares a
 //! transport account, IP, sending domain or suppression list with customer
 //! mail."** Sales-autopilot mail is enqueued by `sales-autopilot`'s dispatcher
 //! (`ProductionCampaignDispatcher`) into the same `email_queue` the customer
-//! worker drains — so the WORKER, not the enqueuer, is where the transport
+//! worker drains, so the WORKER, not the enqueuer, is where the transport
 //! boundary must be enforced. This module is that boundary:
 //!
 //! * [`SalesSend::classify`] recognises a sales queue row from the provenance
@@ -12,7 +12,7 @@
 //!   marker it sets on every campaign and sequenced row, plus the typed
 //!   `sales_step_execution_id` column migration 202 added). Classification is
 //!   the SAME signal `send_unit_of` and the sales feedback ledger already key
-//!   on — no second, drifting marker is introduced.
+//!   on, no second, drifting marker is introduced.
 //! * [`plan_sales_route`] is the PURE decision point (mirroring
 //!   [`super::processor`]'s `plan_delivery_route` for EU-only): it is total,
 //!   and there is NO input that yields a route the customer transport could
@@ -50,11 +50,11 @@ use crate::common::{
 
 // ─────────────────────────────────────────────────────────────────────────────
 // The named hold reasons (distinct, prefix-scoped, never shared with a
-// deferral reason — mirroring the `eu_only_*` vocabulary)
+// deferral reason, mirroring the `eu_only_*` vocabulary)
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// The sales transport is not configured on this deployment
-/// (`SALES_TRANSPORT` unset/`none`): HOLD — the customer transport is
+/// (`SALES_TRANSPORT` unset/`none`): HOLD, the customer transport is
 /// forbidden for a sales send, so there is nowhere to send it.
 pub const SALES_HOLD_TRANSPORT_UNCONFIGURED: &str = "sales_transport_unconfigured";
 /// The configured sales transport could not be built/dispatch the route on
@@ -88,7 +88,7 @@ pub const SALES_HOLD_REASONS: [&str; 6] = [
 ];
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Classification — the exact provenance the dispatcher writes
+// Classification, the exact provenance the dispatcher writes
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// The `metadata.source` value `sales-autopilot`'s dispatcher writes on
@@ -103,11 +103,11 @@ pub const SALES_METADATA_SOURCE: &str = "sales-autopilot";
 /// [`SalesSend::classify`] means "an ordinary customer send".
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SalesSend {
-    /// `metadata.sales_sender_identity_id` — the resolved
+    /// `metadata.sales_sender_identity_id`, the resolved
     /// `sales_sender_identities.id` (absent on the legacy campaign path,
     /// which still sends from the deployment-wide `SALES_CAMPAIGN_FROM_EMAIL`).
     pub sender_identity_id: Option<String>,
-    /// `metadata.sales_sender_pool` — `sales_outbound` / `sales_warmup`.
+    /// `metadata.sales_sender_pool`, `sales_outbound` / `sales_warmup`.
     pub sender_pool: Option<String>,
     /// `metadata.sales_sender_source_ip`, when it parses. `None` covers both
     /// "absent" and "unparsable": for an own-MTA send both mean the binding
@@ -120,9 +120,9 @@ impl SalesSend {
     /// dispatcher already writes:
     ///
     /// * the typed `email_queue.sales_step_execution_id` column (migration
-    ///   202) — set on every sequenced send and already read by
+    ///   202), set on every sequenced send and already read by
     ///   `send_unit_of` / the acceptance ledger; or
-    /// * `metadata.source == "sales-autopilot"` — set on every sales row
+    /// * `metadata.source == "sales-autopilot"`, set on every sales row
     ///   (campaign and sequenced).
     ///
     /// Both markers are reserved at the API submission boundary
@@ -172,7 +172,7 @@ impl SalesSend {
 /// The outcome of planning one sales send (pure).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PlannedSalesRoute {
-    /// Hand this route to the SALES transport — and to nothing else.
+    /// Hand this route to the SALES transport, and to nothing else.
     Send(DeliveryRoute),
     /// HOLD the message with this named reason instead of routing it
     /// anywhere (the customer transport is not an option, ever).
@@ -191,7 +191,7 @@ impl PlannedSalesRoute {
     }
 }
 
-/// Plan the route for one sales send (PURE — no database, no transport, no
+/// Plan the route for one sales send (PURE, no database, no transport, no
 /// clock). This is where the isolation invariant lives, and it is
 /// deliberately total: for an unconfigured, misprovisioned, or
 /// domain-disallowed sales send there is exactly one outcome, a named HOLD.
@@ -215,7 +215,7 @@ pub fn plan_sales_route(
             SALES_HOLD_TRANSPORT_UNCONFIGURED,
             "no dedicated sales transport is configured (SALES_TRANSPORT is unset or \
              'none'); a sales send is never routed through the customer SES/relay \
-             transport — configure the sales transport or leave the message held",
+             transport, configure the sales transport or leave the message held",
         ),
         SalesTransportMode::Relay => {
             let Some(source_ip) = sales.source_ip else {
@@ -223,7 +223,7 @@ pub fn plan_sales_route(
                     SALES_HOLD_SOURCE_IP_MISSING,
                     "the sales relay is an own-MTA route: the message must bind the \
                      sales identity's recorded source IP, and \
-                     metadata.sales_sender_source_ip is absent or unparsable — refusing \
+                     metadata.sales_sender_source_ip is absent or unparsable, refusing \
                      to send from an unrecorded IP",
                 );
             };
@@ -231,7 +231,7 @@ pub fn plan_sales_route(
                 return PlannedSalesRoute::hold(
                     SALES_HOLD_SOURCE_IP_MISSING,
                     "the sales send carries a source IP but no stable sender/step \
-                     identity to key the dedicated route on — refusing to invent one",
+                     identity to key the dedicated route on, refusing to invent one",
                 );
             };
             PlannedSalesRoute::Send(DeliveryRoute::Dedicated {
@@ -268,8 +268,8 @@ pub fn sales_route_guard_violation(
 // The single-slot sales transport router
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// The dedicated sales transport slot. Holds AT MOST ONE backend — the one
-/// the deployment configured for sales — and can never reach the customer
+/// The dedicated sales transport slot. Holds AT MOST ONE backend, the one
+/// the deployment configured for sales, and can never reach the customer
 /// [`super::transport::HybridTransport`]: the two are separate values with
 /// separate construction paths, so no input can make a sales send fall back.
 pub struct SalesTransport {
@@ -335,7 +335,7 @@ impl SalesTransport {
         if route.is_dedicated() && !backend.supports_source_binding() {
             return Err(ProcessorError::Config(format!(
                 "the configured sales transport '{}' cannot bind and report the source IP \
-                 required by route {route} — refusing before DATA rather than sending \
+                 required by route {route}, refusing before DATA rather than sending \
                  from an unverified IP",
                 self.backend_name
             )));
@@ -343,7 +343,7 @@ impl SalesTransport {
         Ok(())
     }
 
-    /// Submit a sales send on the sales transport — and only there. Defense
+    /// Submit a sales send on the sales transport, and only there. Defense
     /// in depth over the dispatch-time gate: a missing backend refuses
     /// BEFORE any call, and a backend whose declared name does not match the
     /// route shape is refused too (the customer SES client can never be
@@ -400,7 +400,7 @@ pub async fn create_sales_transport(
         SalesTransportMode::Relay => {
             let relay = config.relay.as_ref().ok_or_else(|| {
                 ProcessorError::Config(
-                    "SALES_TRANSPORT=relay requires SALES_RELAY_URL (smtp:// or smtps://) — \
+                    "SALES_TRANSPORT=relay requires SALES_RELAY_URL (smtp:// or smtps://), \
                      the sales relay endpoint is not configured"
                         .into(),
                 )
@@ -440,7 +440,7 @@ pub async fn create_sales_transport(
 /// the bound source IP (`OutboundMtaTransport`), which is exactly what an
 /// own-MTA sales route requires. The configured endpoint names the relay
 /// identity the sales messages present (`HELO`/`Reporting-MTA`), so one
-/// explicit endpoint — never an implicit default — identifies the sales
+/// explicit endpoint, never an implicit default, identifies the sales
 /// relay. Without the worker's database pool the relay's durable acceptance
 /// ledger cannot exist, and the sales slot stays UNCONFIGURED (fail closed:
 /// every sales send holds; nothing is submitted).
@@ -453,7 +453,7 @@ async fn build_sales_relay_transport(
         tracing::warn!(
             relay_host = %relay.host,
             "SALES_TRANSPORT=relay without a database pool: the own-MTA acceptance ledger \
-             cannot exist — the sales slot stays unconfigured and sales sends HOLD \
+             cannot exist, the sales slot stays unconfigured and sales sends HOLD \
              (fail closed; nothing is submitted through the customer transport)"
         );
         return Ok(SalesTransport::unconfigured());
@@ -569,7 +569,7 @@ mod tests {
 
     /// THE invariant, at its decision point: with no sales transport there
     /// is NO input that yields a sendable route. This is the fail-before
-    /// test for the feature — if anyone "allows the fallback" by planning a
+    /// test for the feature, if anyone "allows the fallback" by planning a
     /// customer route here, this fails.
     #[test]
     fn unconfigured_sales_transport_never_plans_a_route() {
@@ -598,7 +598,7 @@ mod tests {
     }
 
     /// Relay mode binds the recorded IP; a missing or corrupt IP (and a
-    /// missing identity to key on) HOLDS by name — never a send from an
+    /// missing identity to key on) HOLDS by name, never a send from an
     /// unrecorded IP.
     #[test]
     fn relay_mode_requires_the_recorded_source_ip() {
@@ -820,7 +820,7 @@ mod tests {
         }
     }
 
-    /// An unconfigured slot refuses BOTH route shapes before any call — the
+    /// An unconfigured slot refuses BOTH route shapes before any call, the
     /// zero-transport-calls arm of the unconfigured hold.
     #[tokio::test]
     async fn an_unconfigured_sales_slot_refuses_every_route_before_any_call() {
@@ -971,7 +971,7 @@ mod tests {
     }
 
     /// The default SesConfig used by the sales account is the same shape the
-    /// customer transport uses — asserted so the account construction cannot
+    /// customer transport uses, asserted so the account construction cannot
     /// silently borrow the customer configuration set.
     #[test]
     fn the_sales_ses_account_config_is_a_separate_value() {

@@ -92,7 +92,7 @@ Submit reports to {{SECURITY_EMAIL}}. Your report should include:
 5. **Severity assessment**: Your assessment using CVSS 3.1 scoring or a qualitative rating (Critical / High / Medium / Low / Informational).
 6. **Proof of concept**: Step-by-step reproduction instructions and any supporting material (screenshots, request/response captures, proof-of-concept code).
 7. **Impact**: Description of the potential impact if exploited.
-8. **Suggested remediation**: Optional — your recommendation for fixing the issue.
+8. **Suggested remediation**: Optional, your recommendation for fixing the issue.
 9. **Contact information**: Name/handle and email for follow-up communication.
 10. **Disclosure preference**: Whether you plan to disclose after resolution and your preferred coordination timeline.
 

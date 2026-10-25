@@ -16,7 +16,7 @@ pub struct AuditRepo;
 
 impl AuditRepo {
     /// Record an audit event (canonical 038 shape). `hash`, `previous_hash`
-    /// and `signature` are supplied by the caller — the hash chain is the
+    /// and `signature` are supplied by the caller, the hash chain is the
     /// writer's responsibility, not the repo's.
     #[allow(clippy::too_many_arguments)]
     pub async fn create(

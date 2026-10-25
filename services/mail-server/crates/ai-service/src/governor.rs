@@ -10,7 +10,7 @@
 //!
 //! Eviction note: dashmap 5.x `iter()` swaps entire shards out of the map,
 //! so it must not be used to pick eviction victims. A bounded FIFO of
-//! recently inserted keys is used instead — every eviction is O(1).
+//! recently inserted keys is used instead, every eviction is O(1).
 
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
@@ -131,7 +131,7 @@ impl RateGovernor {
                     if self.events.remove(&key).is_some() {
                         return;
                     }
-                    // Key already pruned by its window — try the next one.
+                    // Key already pruned by its window, try the next one.
                 }
                 None => return,
             }

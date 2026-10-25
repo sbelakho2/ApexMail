@@ -47,7 +47,7 @@ pub struct SandboxConfig {
     #[serde(default = "default_max_output_len")]
     pub max_output_length: usize,
     /// F8:prop paths whose `*_html` values are trusted to substitute RAW
-    /// (pre-rendered HTML fragments). Empty by default — every value,
+    /// (pre-rendered HTML fragments). Empty by default, every value,
     /// including `*_html` ones, is HTML-escaped unless its exact path is
     /// listed here. The `*_html` leaf-name convention is still required for
     /// a listed path to take effect.

@@ -79,7 +79,7 @@ impl GoogleCalendarProvider {
             .unwrap_or_else(|| "primary".into());
         // PERF #24: a client-construction failure must make the Google
         // integration UNAVAILABLE, never substitute the process-default
-        // (unbounded) client — the old fallback silently discarded the
+        // (unbounded) client, the old fallback silently discarded the
         // timeout. `None` is the documented unavailable shape here: the
         // caller degrades to the internal provider.
         let client = reqwest::Client::builder()
@@ -88,7 +88,7 @@ impl GoogleCalendarProvider {
             .map_err(|error| {
                 tracing::error!(
                     %error,
-                    "failed to build Google Calendar HTTP client — Google Calendar integration is UNAVAILABLE (PERF #24)"
+                    "failed to build Google Calendar HTTP client, Google Calendar integration is UNAVAILABLE (PERF #24)"
                 )
             })
             .ok()?;
@@ -958,7 +958,7 @@ mod provider_wire_tests {
         };
 
         // Transport failure: port 1 on the loopback interface is reserved and
-        // refuses connections — nothing can be listening there.
+        // refuses connections, nothing can be listening there.
         let (provider, _pool) = make_provider("http://127.0.0.1:1").await;
         let error = provider
             .create_event(&request)
@@ -1119,7 +1119,7 @@ mod provider_wire_tests {
         .await
         .expect("insert the availability row");
 
-        // 404: tolerated — the internal record is cancelled anyway.
+        // 404: tolerated, the internal record is cancelled anyway.
         let mut routes = HashMap::new();
         routes.insert(
             ("DELETE", "/calendars/primary/events/g_evt_gone".to_string()),

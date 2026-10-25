@@ -167,7 +167,7 @@ pub struct FeedRefreshConfig {
 impl Default for FeedRefreshConfig {
     fn default() -> Self {
         Self {
-            interval: Duration::from_secs(86_400), // 24h — matches default_ttl_secs
+            interval: Duration::from_secs(86_400), // 24h, matches default_ttl_secs
             enabled: true,
         }
     }
@@ -224,14 +224,14 @@ pub async fn run_refresh_loop<F>(
                 tracing::error!(
                     error = %error,
                     failures = engine.refresh_failure_count(),
-                    "Threat-intel feed refresh task failed — retrying with backoff"
+                    "Threat-intel feed refresh task failed, retrying with backoff"
                 );
             }
             Ok(()) => {
                 if engine.refresh_failure_count() > failures_before {
                     tracing::error!(
                         consecutive_failures = engine.refresh_failure_count(),
-                        "Threat-intel feed refresh recorded a failure —                          keeping last-known-good data and retrying with backoff"
+                        "Threat-intel feed refresh recorded a failure,                          keeping last-known-good data and retrying with backoff"
                     );
                 }
             }

@@ -18,7 +18,7 @@ pub fn escape_html(s: &str) -> String {
 }
 
 /// The terminal error/success pages are served from the configured
-/// `base_url` origin, so a plain `href="/"` IS the base_url home — the
+/// `base_url` origin, so a plain `href="/"` IS the base_url home, the
 /// "safe path back" every browser-facing terminal page must offer (batch 2).
 const BACK_LINK_HTML: &str = r#"<p class="back-link"><a href="/">Return to ApexMail</a></p>"#;
 
@@ -28,7 +28,7 @@ const BACK_LINK_HTML: &str = r#"<p class="back-link"><a href="/">Return to ApexM
 /// the authority's tokens and the few primitives these pages use are inlined:
 /// paper and ink, the 3px rule, Spectral display, Overpass text, Overpass
 /// Mono for machine data. Red marks destruction (an unsubscribe) and the
-/// wordmark — never a "save" or "resubscribe" action. The dark block mirrors
+/// wordmark, never a "save" or "resubscribe" action. The dark block mirrors
 /// `ark.css`'s `prefers-color-scheme` tokens so a dark reader never gets a
 /// white flash.
 const ARK_DOC_STYLE: &str = r#"
@@ -241,7 +241,7 @@ pub fn render_error_page(message: &str) -> String {
 
 /// The honest destination-refused page (dogfood 2026-10-06 P1): a click to a
 /// host this tenant has not authorized used to 302 to the vendor homepage and
-/// record nothing — the recipient landed somewhere they never asked for and
+/// record nothing, the recipient landed somewhere they never asked for and
 /// the operator saw no trace. Now the recipient is told exactly why the link
 /// was refused, and the refusal is recorded as an explicit `click_refused`
 /// event for the operator.
@@ -261,7 +261,7 @@ pub fn render_click_refused_page(reason: &str) -> String {
 /// The honest tracking-host-refused page (capability wave 2): a request
 /// arrived on a Host that is neither the platform tracking host nor a
 /// VERIFIED custom tracking domain for the link's workspace. The recipient
-/// and the operator both get the named reason — the request is never
+/// and the operator both get the named reason, the request is never
 /// silently bounced to the vendor fallback.
 pub fn render_tracking_domain_refused_page(host: &str, reason: &str) -> String {
     let host_safe = escape_html(host);
@@ -414,7 +414,7 @@ pub fn render_preferences_page_with_saved(
     };
 
     // Batch-2: the post-save confirmation banner (the previously dead
-    // .alert-success class) — shown on the ?saved=1 redirect target
+    // .alert-success class), shown on the ?saved=1 redirect target
     // regardless of which consent branch the card renders below.
     let saved_banner = if just_saved {
         r#"<div class="alert alert-success">Your preferences have been saved.</div>"#
@@ -537,7 +537,7 @@ mod tests {
     }
 
     /// Batch-2: the terminal error/success pages offer a safe path back to
-    /// the base_url home (`href="/"`) — they are dead ends no longer.
+    /// the base_url home (`href="/"`), they are dead ends no longer.
     #[test]
     fn error_and_success_pages_offer_a_safe_path_back() {
         for html in [
@@ -591,7 +591,7 @@ mod tests {
 mod adversarial_tests {
     use super::*;
 
-    /// Hostile values must be HTML-escaped on every rendered page — a token
+    /// Hostile values must be HTML-escaped on every rendered page, a token
     /// or email is attacker-controlled input reflected into HTML.
     #[test]
     fn rendered_pages_escape_all_interpolated_values() {

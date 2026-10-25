@@ -1,4 +1,4 @@
-//! Benchmarks for IDS engine performance — network payload inspection.
+//! Benchmarks for IDS engine performance, network payload inspection.
 //!
 //! Measures throughput for://! - Clean payloads (fast path)
 //! - Malicious payloads (signature matching)

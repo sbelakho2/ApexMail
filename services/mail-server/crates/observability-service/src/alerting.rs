@@ -18,7 +18,7 @@ use std::collections::HashMap;
 
 /// Redact everything secret-bearing from a webhook URL before it reaches the
 /// logs (SM10 F13): userinfo inside the authority and the ENTIRE query and
-/// fragment — dispatch tokens routinely travel as `?key=…` or `#/hook/…`.
+/// fragment, dispatch tokens routinely travel as `?key=…` or `#/hook/…`.
 /// Scheme, host:port and path stay legible so operators can still identify
 /// the failing endpoint. Mirrors `redact_url_credentials` from the server
 /// binary (which cannot be imported from here), extended with the query and
@@ -151,7 +151,7 @@ impl AlertManager {
     /// POST the given alerts as JSON to every configured webhook URL.
     ///
     /// Minimal, fail-safe dispatch: network and endpoint errors are logged
-    /// and never propagated to the caller — alerting must not take down the
+    /// and never propagated to the caller, alerting must not take down the
     /// evaluation loop.
     pub async fn dispatch_alerts(&self, alerts: &[Alert]) {
         let urls = self.webhook_urls.read().clone();
@@ -225,7 +225,7 @@ impl AlertManager {
 
             // Check condition using the rule's comparison operator
             if !rule.operator.evaluate(value, rule.threshold) {
-                // Condition is false — auto-resolve any Firing alerts for
+                // Condition is false, auto-resolve any Firing alerts for
                 // this rule so recovered rules do not stay firing forever.
                 let mut resolved_count = 0_usize;
                 for alert in alerts_guard.iter_mut() {
@@ -241,7 +241,7 @@ impl AlertManager {
                         resolved_count,
                         value,
                         threshold = rule.threshold,
-                        "alert condition cleared — auto-resolved firing alerts"
+                        "alert condition cleared, auto-resolved firing alerts"
                     );
                 }
                 continue;
@@ -409,7 +409,7 @@ mod tests {
         assert_eq!(
             redact_webhook_url("not-a-url"),
             "<redacted-url>",
-            "input without a scheme is not provably parseable — redact wholesale"
+            "input without a scheme is not provably parseable, redact wholesale"
         );
     }
 
@@ -514,7 +514,7 @@ mod tests {
         assert_eq!(fired.len(), 1);
         assert_eq!(mgr.list_active_alerts().len(), 1);
 
-        // Error rate recovers below the threshold — the firing alert must be
+        // Error rate recovers below the threshold, the firing alert must be
         // auto-resolved even though no new alert fires.
         let fired = mgr.evaluate_all(&[summary("error_rate", 0.01)]);
         assert!(fired.is_empty());
@@ -535,7 +535,7 @@ mod tests {
         let fired = mgr.evaluate_all(&[summary("error_rate", 0.10)]);
         assert_eq!(fired.len(), 1);
 
-        // Metric absent (no data) must NOT resolve the alert — no data is
+        // Metric absent (no data) must NOT resolve the alert, no data is
         // not the same as a healthy value.
         let fired = mgr.evaluate_all(&[]);
         assert!(fired.is_empty());
@@ -552,7 +552,7 @@ mod tests {
         mgr.add_rule(error_rate_rule(0.05));
         let fired = mgr.evaluate_all(&[summary("error_rate", 0.10)]);
 
-        // No webhook URLs configured — dispatch must return without error.
+        // No webhook URLs configured, dispatch must return without error.
         mgr.dispatch_alerts(&fired).await;
     }
 
@@ -630,7 +630,7 @@ mod tests {
         // No URLs configured: dispatch is a no-op, not an error.
         mgr.dispatch_alerts(std::slice::from_ref(&alert)).await;
         mgr.dispatch_alerts(&[]).await;
-        // An unreachable endpoint is logged and swallowed — alerting must
+        // An unreachable endpoint is logged and swallowed, alerting must
         // never take down the evaluation loop.
         mgr.set_webhook_urls(vec!["http://127.0.0.1:1/hook".to_string()]);
         mgr.dispatch_alerts(std::slice::from_ref(&alert)).await;

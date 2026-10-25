@@ -30,7 +30,8 @@
       "purpose": "Payment processing, subscription management, invoicing (Mollie)",
       "location": "Netherlands; storage Netherlands",
       "data_categories": [
-        "Payment card details (tokenized — ApexMail never receives full card numbers)",
+        "Payment card details (tokenized",
+        "ApexMail never receives full card numbers)",
         "billing address",
         "transaction metadata"
       ],
@@ -42,7 +43,7 @@
     },
     {
       "name": "ClickHouse (open-source) (self-hosted)",
-      "purpose": "Analytics database (delivery events, opens, clicks, bounce/complaint data) — self-hosted by ApexMail; the publisher is not a subprocessor",
+      "purpose": "Analytics database (delivery events, opens, clicks, bounce/complaint data), self-hosted by ApexMail; the publisher is not a subprocessor",
       "location": "Hetzner deployment region",
       "data_categories": [
         "Operational telemetry"
@@ -53,7 +54,7 @@
     },
     {
       "name": "Redis (open-source) (self-hosted)",
-      "purpose": "In-memory cache (session tokens, rate-limit counters) — self-hosted by ApexMail; the publisher is not a subprocessor",
+      "purpose": "In-memory cache (session tokens, rate-limit counters), self-hosted by ApexMail; the publisher is not a subprocessor",
       "location": "Hetzner deployment region",
       "data_categories": [
         "Operational telemetry"
@@ -64,7 +65,7 @@
     },
     {
       "name": "Grafana / Loki / Tempo / Prometheus (open-source) (self-hosted)",
-      "purpose": "Observability stack (dashboards, logs, traces, metrics) — self-hosted by ApexMail; the publisher is not a subprocessor",
+      "purpose": "Observability stack (dashboards, logs, traces, metrics), self-hosted by ApexMail; the publisher is not a subprocessor",
       "location": "Hetzner deployment region",
       "data_categories": [
         "Operational telemetry"

@@ -93,7 +93,7 @@ fn has_shell_token_shape(input: &str) -> bool {
         if t.starts_with('/') || t.starts_with("./") || t.starts_with("../") {
             return true;
         }
-        // Flag-like argument (`-rf`, `--exfiltrate`) — the shape an
+        // Flag-like argument (`-rf`, `--exfiltrate`), the shape an
         // invocation carries; prose words and OS-version tokens do not.
         if t.starts_with('-') && t.len() > 1 && t.len() <= 24 {
             return true;
@@ -110,14 +110,14 @@ fn has_shell_token_shape(input: &str) -> bool {
 ///
 /// Two-tier detection:
 /// - Rule 932100 (score 5): a chaining metacharacter followed (within a small
-///   window) by a known dangerous command — a confirmed injection.
+///   window) by a known dangerous command, a confirmed injection.
 /// - Rule 932050 (score 3): a chaining metacharacter whose chain target has
-///   the SHAPE of a shell invocation — a path (`/opt/bin`, `./x`), a flag
+///   the SHAPE of a shell invocation, a path (`/opt/bin`, `./x`), a flag
 ///   (`-rf`), a command substitution (`$(`, backtick) or a redirect (`>`).
 ///
 /// The shape requirement on the second tier is load-bearing (live run
 /// 2026-10-22): the rule used to fire on a bare `"; "`, which is ubiquitous
-/// in legitimate input — every browser User-Agent contains
+/// in legitimate input, every browser User-Agent contains
 /// `(Macintosh; Intel Mac OS X …)`, CSS carries `; ` between declarations and
 /// prose contains semicolons. That scored 3 points on EVERY browser request,
 /// and two requests reached the anomaly threshold: with `WAF_ENFORCE=true`
@@ -143,7 +143,7 @@ pub fn analyze_command_injection(input: &str, location: MatchLocation) -> Vec<Ru
     // Shell metacharacters used for chaining (space-separated forms)
     let space_meta_patterns = ["; ", "| ", "|| ", "&& ", "& ", "$(", "`", "\n", "\r\n"];
 
-    // Dangerous commands — expanded to include env/xargs/awk/lua/sed/tee
+    // Dangerous commands, expanded to include env/xargs/awk/lua/sed/tee
     let dangerous_cmds = [
         "cat ",
         "wget ",
@@ -191,7 +191,7 @@ pub fn analyze_command_injection(input: &str, location: MatchLocation) -> Vec<Ru
         "openssl",
         "socat ",
         "busybox",
-        // Windows builtins and LOLBins — the interpreter's own command set.
+        // Windows builtins and LOLBins, the interpreter's own command set.
         // These were never listed, so `; dir C:\\` and `| net user` only ever
         // scored through the bare-metacharacter tier; once that tier required
         // a shell SHAPE (live run 2026-10-22) they stopped scoring at all.
@@ -240,7 +240,7 @@ pub fn analyze_command_injection(input: &str, location: MatchLocation) -> Vec<Ru
     // start within a small window after a real chaining metacharacter
     // (`;` `|` `&` backtick `$(`). Mere co-presence of a metacharacter
     // anywhere in the input plus an English word like "sort"/"head"
-    // anywhere else is prose, not injection — and newline is deliberately
+    // anywhere else is prose, not injection, and newline is deliberately
     // NOT an adjacency metachar because prose bodies are full of newlines.
     let adjacent_cmd = cmd_in_window_after_metachar(&normalized_shell, &cmd_names);
 
@@ -261,7 +261,7 @@ pub fn analyze_command_injection(input: &str, location: MatchLocation) -> Vec<Ru
         .any(|p| normalized_shell.contains(p))
         && has_shell_token_shape(&normalized_shell)
     {
-        // Metacharacter-only rule: fires for unlisted/custom binaries — but
+        // Metacharacter-only rule: fires for unlisted/custom binaries, but
         // only when the chain target has a shell-invocation SHAPE. Without
         // that guard a bare `"; "` (browser User-Agents, CSS declarations,
         // ordinary prose) scored every request (live run 2026-10-22).
@@ -293,7 +293,7 @@ pub fn analyze_command_injection(input: &str, location: MatchLocation) -> Vec<Ru
 
 /// Maximum bytes between the end of a chaining metacharacter and the start
 /// of a dangerous command for the pair to count as an injection chain.
-/// Real chains are `; cat`, `&& curl`, `` `wget` `` — the command is the
+/// Real chains are `; cat`, `&& curl`, `` `wget` ``, the command is the
 /// FIRST word after the metacharacter (modulo separators/whitespace), so
 /// the window only needs room for repeats like `||` or `;;;`. Keeping the
 /// window this tight is what prevents prose following a semicolon
@@ -317,8 +317,8 @@ fn cmd_in_window_after_metachar<'a>(input: &str, cmd_names: &[&'a str]) -> Optio
                 continue;
             }
             let after = &input[idx + meta.len()..];
-            // Skip the separator run (`||`, `;;;`, spaces/tabs) — bounded by
-            // the window — then require the command word to start there.
+            // Skip the separator run (`||`, `;;;`, spaces/tabs), bounded by
+            // the window, then require the command word to start there.
             let rest = after.trim_start_matches(['|', '&', ';', ' ', '\t']);
             if after.len() - rest.len() > META_CMD_WINDOW {
                 continue;
@@ -359,7 +359,7 @@ pub fn analyze_protocol_anomalies(
 ) -> Vec<RuleMatch> {
     let mut results = Vec::new();
 
-    // Invalid HTTP method — TRACE intentionally excluded from valid_methods
+    // Invalid HTTP method, TRACE intentionally excluded from valid_methods
     // so that it triggers BOTH the invalid-method rule (911100, score 3) AND
     // the specific TRACE/XST rule (911200, score 5) for higher composite score.
     let valid_methods = [
@@ -435,8 +435,8 @@ pub fn analyze_protocol_anomalies(
 }
 
 /// A MongoDB operator counts as an injection signal only when it appears
-/// in the position of a JSON/BSON KEY — `"$in"`, `{$or:`, `[$ne]`,
-/// `: $gt` — rather than as a substring of an ordinary value: `$invoice_id`
+/// in the position of a JSON/BSON KEY, `"$in"`, `{$or:`, `[$ne]`,
+/// `: $gt`, rather than as a substring of an ordinary value: `$invoice_id`
 /// contains `$in` and `$order_id` contains `$or`, and flagging those as
 /// NoSQL injection broke every JSON body that mentioned them.
 fn has_operator_as_key(input: &str, op: &str) -> bool {
@@ -687,7 +687,7 @@ pub fn analyze_ssrf(input: &str, location: MatchLocation) -> Vec<RuleMatch> {
     // in URL position). Parse every `://[host]` occurrence and compare the
     // parsed address against the internal ranges instead of matching text.
     // The string patterns above stay as belt-and-braces for non-parsing
-    // edge cases (zones, odd spellings) — this check is purely additive.
+    // edge cases (zones, odd spellings), this check is purely additive.
     if ipv6_host_targets_internal_network(&lower) {
         results.push(RuleMatch {
             rule_id: 934200,
@@ -724,13 +724,13 @@ pub fn analyze_ssrf(input: &str, location: MatchLocation) -> Vec<RuleMatch> {
 }
 
 /// Audit SM5 F16 helper: true when a bracketed IPv6 URL host parses to an
-/// address on an internal network — loopback, unspecified, unique-local
+/// address on an internal network, loopback, unspecified, unique-local
 /// (`fc00::/7`), link-local (`fe80::/10`), or an IPv4-mapped private /
 /// loopback address (`::ffff:10.0.0.1` and friends).
 ///
 /// Textual patterns cannot cover every spelling of the same host
 /// (`[0:0:0:0:0:0:0:1]` is `[::1]`), so the host is parsed and compared
-/// against the ranges instead — the codebase canonicalizes IPs the same
+/// against the ranges instead, the codebase canonicalizes IPs the same
 /// way in the DDoS allowlist paths.
 fn ipv6_host_targets_internal_network(input: &str) -> bool {
     let mut rest = input;
@@ -796,8 +796,8 @@ pub fn analyze_ldap_injection(input: &str, location: MatchLocation) -> Vec<RuleM
 /// Detect server-side template injection payloads.
 ///
 /// Two tiers:
-/// - score 5 (blocking): a template delimiter together with — or a payload
-///   consisting solely of — a real exploitation sink. The sinks alone
+/// - score 5 (blocking): a template delimiter together with, or a payload
+///   consisting solely of, a real exploitation sink. The sinks alone
 ///   (`__class__`, `system(`, ...) have no legitimate meaning in request
 ///   input, so they keep blocking severity without a delimiter.
 /// - score 2 (informational): a bare template delimiter. `{{ user.name }}`
@@ -856,11 +856,11 @@ pub fn analyze_ssti(input: &str, location: MatchLocation) -> Vec<RuleMatch> {
 
 /// Template interiors that indicate a probing payload rather than a
 /// legitimate template variable:
-/// - compact arithmetic (`7*7`, `7*'7'`) — the classic detection probe.
+/// - compact arithmetic (`7*7`, `7*'7'`), the classic detection probe.
 ///   Spaced math (`{{ subtotal + tax }}`) is ordinary templating and does
 ///   not match; the probe must have digit-operator-operand with no spaces.
 /// - references to the host objects an attacker wants (`config`, `self`,
-///   `settings`, `lipsum`, `cycler`) — Flask/Jinja exploitation staples.
+///   `settings`, `lipsum`, `cycler`), Flask/Jinja exploitation staples.
 fn has_probe_template_interior(lower: &str) -> bool {
     let mut interiors: Vec<&str> = Vec::new();
     for (open, close) in [("{{", "}}"), ("<%=", "%>"), ("${", "}"), ("#{", "}")] {
@@ -1087,7 +1087,7 @@ mod tests {
     /// Live run 2026-10-22 (P0): every real browser User-Agent contains a
     /// `"; "` inside its platform comment. The bare-metacharacter tier used
     /// to score 3 for each of them, so two page views reached the anomaly
-    /// threshold — under `WAF_ENFORCE=true` the product blocked its own
+    /// threshold, under `WAF_ENFORCE=true` the product blocked its own
     /// users and its own stylesheet. Real UAs must be clean.
     #[test]
     fn browser_user_agents_are_not_command_injection() {
@@ -1269,7 +1269,7 @@ mod tests {
             "'$invoice_id' substring must not fire 944100, got {:?}",
             r.iter().map(|m| m.rule_id).collect::<Vec<_>>()
         );
-        // "$order_id" contains "$or" — also must not match.
+        // "$order_id" contains "$or", also must not match.
         let r2 = analyze_nosql_injection("{\"order\": \"$order_id\"}", MatchLocation::Body);
         assert!(
             !r2.iter().any(|m| m.rule_id == 944100),
@@ -1318,7 +1318,7 @@ mod tests {
     #[test]
     fn test_ssrf_uncompressed_ipv6_loopback_detected() {
         // These spellings of ::1 matched NO string pattern before the
-        // parse-based check — the finding's exact bypass vectors.
+        // parse-based check, the finding's exact bypass vectors.
         for url in [
             "http://[0:0:0:0:0:0:0:1]/admin",
             "http://[0000:0000:0000:0000:0000:0000:0000:0001]:8080/x",

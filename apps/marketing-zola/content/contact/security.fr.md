@@ -13,16 +13,16 @@ ApexMail fournit de la documentation de sécurité aux prospects et clients Ente
 
 ## Ce que nous fournissons
 
-- **SIG / CAIQ / HECVAT** — Réponses standardisées d'évaluation de sécurité pour les clients Enterprise qualifiés.
-- **Résumé de test d'intrusion** — Un résumé des constats et des mesures de correction sera disponible après la réalisation du premier test d'intrusion externe de l'application.
-- **Revue d'architecture de sécurité** — Présentation détaillée des contrôles de sécurité d'ApexMail, de l'architecture de chiffrement, de la journalisation d'audit et des modèles d'isolation de déploiement.
-- **Diagrammes de flux de données** — Documentation visuelle du traitement des données, des lieux de stockage et des relations entre sous-traitants.
+- **SIG / CAIQ / HECVAT**, Réponses standardisées d'évaluation de sécurité pour les clients Enterprise qualifiés.
+- **Résumé de test d'intrusion**, Un résumé des constats et des mesures de correction sera disponible après la réalisation du premier test d'intrusion externe de l'application.
+- **Revue d'architecture de sécurité**, Présentation détaillée des contrôles de sécurité d'ApexMail, de l'architecture de chiffrement, de la journalisation d'audit et des modèles d'isolation de déploiement.
+- **Diagrammes de flux de données**, Documentation visuelle du traitement des données, des lieux de stockage et des relations entre sous-traitants.
 
 ## Formulaire de demande de questionnaire de sécurité
 
 <div id="enquiry-submitted" class="apex-notice apex-notice--ok" role="status">
   <b>Reçue</b>
-  <p>Merci — votre demande a bien été reçue. Notre équipe l'examine et répond sous 2 jours ouvrés.</p>
+  <p>Merci, votre demande a bien été reçue. Notre équipe l'examine et répond sous 2 jours ouvrés.</p>
 </div>
 <div id="enquiry-error" class="apex-notice apex-notice--fail" role="alert">
   <b>Non acceptée</b>

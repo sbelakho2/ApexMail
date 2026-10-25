@@ -2,7 +2,7 @@
 //!
 //! These tests validate the public API of the SSO module across both SAML and OIDC
 //! flows. Every test provisions a canonical test database (soft-skipping only
-//! when TEST_DATABASE_URL is unset), so the workspace suite runs them — they
+//! when TEST_DATABASE_URL is unset), so the workspace suite runs them, they
 //! used to be `#[ignore]`d and CI never executed them. Pure unit tests (PKCE,
 //! token generation, serde round-trips) run unconditionally.
 //!
@@ -307,7 +307,7 @@ fn integration_oidc_state_data_construct() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// Integration scenario tests (require database — run with --ignored)
+// Integration scenario tests (require database, run with --ignored)
 // ═══════════════════════════════════════════════════════════════════════════════
 
 /// Helper to create an SSOService on a CANONICAL, freshly provisioned test
@@ -321,13 +321,13 @@ fn integration_oidc_state_data_construct() {
 /// `tenant_id` column in this schema uses. The fixtures used to build
 /// `format!("test_saml_{uuid_simple}")` (42 characters), so every SSO
 /// configuration insert failed with "value too long for type character
-/// varying(26)" — invisible because the tests were `#[ignore]`d and CI never
+/// varying(26)", invisible because the tests were `#[ignore]`d and CI never
 /// ran them.
 /// A REAL self-signed X.509 certificate (base64 DER), generated for these
 /// tests only and embedded so the SAML validator can reach its SIGNATURE
 /// check. The previous fixtures used placeholder strings ("MIID...test-cert"),
 /// which the validator rejected as "certificate is too short" before any
-/// signature logic ran — the tests were `#[ignore]`d, so nobody noticed.
+/// signature logic ran, the tests were `#[ignore]`d, so nobody noticed.
 /// The matching private key is deliberately NOT in the repository: signing a
 /// valid assertion requires an IdP, which is what the signed unit tests in
 /// `sso.rs` simulate.
@@ -533,7 +533,7 @@ async fn integration_full_oidc_login_flow() {
     // Full OIDC login flow:
     // 1. Configure OIDC for a tenant against an in-process mock IdP
     // 2. Initiate OIDC login (the authorize URL comes from DISCOVERY's —
-    //    deliberately nonstandard — authorization_endpoint, audit P3-10)
+    //    deliberately nonstandard, authorization_endpoint, audit P3-10)
     // 3. Validate OIDC state
     // 4. Handle OIDC callback (create session)
     // 5. Validate session token
@@ -697,7 +697,7 @@ async fn spawn_mock_oidc_discovery() -> String {
 async fn integration_session_expiry() {
     // A session that has outlived its duration must stop validating. The test
     // used `session_duration_hours: Some(0)` and a 100ms sleep with a
-    // "may or may not be expired" assertion — the schema rejects 0
+    // "may or may not be expired" assertion, the schema rejects 0
     // (`CHECK (session_duration_hours > 0)`) and the assertion could not
     // fail, so it proved nothing. It now configures the minimum legal
     // duration, then moves the stored expiry into the past: elapsed time is

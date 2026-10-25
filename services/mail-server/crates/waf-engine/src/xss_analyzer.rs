@@ -105,7 +105,7 @@ fn detect_script_tags(input: &str) -> bool {
 /// previously slipped past a short hardcoded list.
 ///
 /// `pub(crate)` so the fast-path gate can prove (property test, audit SM5
-/// F1) that every handler the analyzer recognizes opens the gate — the gate
+/// F1) that every handler the analyzer recognizes opens the gate, the gate
 /// must never lag this vocabulary again.
 pub(crate) const EVENT_HANDLER_NAMES: &[&str] = &[
     // Classic mouse/keyboard

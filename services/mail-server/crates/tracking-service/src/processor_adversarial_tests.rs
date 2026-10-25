@@ -457,7 +457,7 @@ async fn flush_moves_events_to_postgres_and_clears_the_wal() {
     assert!(other >= 0);
 
     // Malformed WAL entries are dead-lettered (durable), never wedging the
-    // queue — the old LTRIM silently dropped them.
+    // queue, the old LTRIM silently dropped them.
     {
         let mut conn = redis.get().await.unwrap();
         let _: Result<(), _> = redis::cmd("RPUSH")
@@ -532,7 +532,7 @@ async fn flush_produces_analytics_queue_rows_and_replay_is_not_double_enqueued()
     assert_eq!(row.event_type, "opened");
     assert!(
         row.message_id.is_none(),
-        "VARCHAR(26) cannot hold a UUID — NULL, never a truncated id"
+        "VARCHAR(26) cannot hold a UUID, NULL, never a truncated id"
     );
     assert_eq!(row.recipient.as_deref(), Some("anq@example.com"));
     assert_eq!(
@@ -867,7 +867,7 @@ fn test_log_subscriber() {
 /// A scripted TCP stand-in for Redis: every connection is answered for its
 /// first `replies_per_conn` commands with `+OK`, then the socket is closed
 /// mid-conversation. Connection CREATION therefore succeeds (redis-rs's
-/// handshake is answered), while subsequent commands fail — the deterministic
+/// handshake is answered), while subsequent commands fail, the deterministic
 /// "server died between two commands" shape, with no wall-clock games.
 /// One reply is always reserved for redis-rs's connection handshake.
 struct ClosingRedis {
@@ -961,7 +961,7 @@ impl ClosingRedis {
                                     }
                                 }
                                 if handshake_left == 0 && replies_left == 0 && complete > 0 {
-                                    // Every budgeted command answered — close
+                                    // Every budgeted command answered, close
                                     // mid-conversation so the client's next
                                     // reply read fails.
                                     return;
@@ -1036,7 +1036,7 @@ async fn seed_wal(redis: &RedisPool, entries: &[String]) {
 /// A live ClickHouse client for the OLAP ingest path (workspace test server).
 /// Honors the workspace's CLICKHOUSE_TEST_USER / CLICKHOUSE_TEST_PASSWORD
 /// convention (the compose server requires the apexmail app user; only the
-/// container's loopback-only `default` user is passwordless — which a host
+/// container's loopback-only `default` user is passwordless, which a host
 /// test can never use).
 fn live_clickhouse() -> clickhouse::Client {
     // Compose default port (CLICKHOUSE_HTTP_PORT); hosts that remapped the
@@ -1052,7 +1052,7 @@ fn live_clickhouse() -> clickhouse::Client {
         .with_database("apexmail")
 }
 
-/// A TCP listener that accepts HTTP connections and never responds — the
+/// A TCP listener that accepts HTTP connections and never responds, the
 /// deterministic "black-holed ClickHouse" for the insert-timeout arm.
 fn stalled_http_server() -> String {
     use std::net::TcpListener;
@@ -1077,7 +1077,7 @@ fn stalled_http_server() -> String {
 }
 
 /// `flush` early-returns Ok when the Redis pool itself cannot answer, and
-/// when the atomic drain (LRANGE) errors — a lost WAL read must never be
+/// when the atomic drain (LRANGE) errors, a lost WAL read must never be
 /// reported as a failure that would re-enqueue blind.
 #[tokio::test]
 async fn flush_early_returns_are_ok_when_redis_cannot_answer() {
@@ -1111,7 +1111,7 @@ async fn flush_early_returns_are_ok_when_redis_cannot_answer() {
     );
 
     // (3) Connection creation succeeds (handshake answered) but the first
-    //     real command fails — LLEN errors after `get()` succeeded.
+    //     real command fails, LLEN errors after `get()` succeeded.
     let closing = ClosingRedis::start(0);
     let proc = processor(
         sqlx::postgres::PgPoolOptions::new()
@@ -1124,7 +1124,7 @@ async fn flush_early_returns_are_ok_when_redis_cannot_answer() {
 }
 
 /// A healthy flush persists events, updates message stats (UUID message ids
-/// only), and ingests into the live ClickHouse — the full success path.
+/// only), and ingests into the live ClickHouse, the full success path.
 #[tokio::test]
 async fn flush_success_persists_updates_stats_and_ingests_clickhouse() {
     let _guard = SERIAL.lock().await;
@@ -1327,9 +1327,9 @@ async fn clickhouse_timeout_is_bounded_and_non_fatal() {
 
 /// P0 WAL-ACK FIX (was `reenqueue_events_error_arms_are_swallowed_and_reported`
 /// against the old LRANGE+LTRIM drain): the failure path is now
-/// `requeue_after_failure` — an atomic requeue-to-pending + lease-release Lua.
+/// `requeue_after_failure`, an atomic requeue-to-pending + lease-release Lua.
 /// Its error arms are swallowed (a dead pool leaves the batch LEASED in
-/// `processing` — reclaimed later, never lost), poison entries are
+/// `processing`, reclaimed later, never lost), poison entries are
 /// dead-lettered to the durable DLQ instead of dropped, and a Redis-side
 /// script failure (wrong-type key) is reported without panicking.
 #[tokio::test]
@@ -1366,7 +1366,7 @@ async fn requeue_after_failure_error_arms_are_swallowed_and_dead_letters_poison(
     let envelope = build_wal_envelope(
         &serde_json::to_string(&wal_event("tn", "msg", EventType::Opened)).unwrap(),
     );
-    // Genuinely poison: bump to the retry ceiling — bump_envelope_retries
+    // Genuinely poison: bump to the retry ceiling, bump_envelope_retries
     // returns None once retries >= MAX_EVENT_RETRIES, and the envelope AT the
     // ceiling is the poison shape requeue_after_failure must dead-letter
     // (three bumps left it under the ceiling, and re-queueing it is correct).
@@ -1618,7 +1618,7 @@ async fn suppression_retry_drain_survives_hostile_states() {
     }
 }
 
-/// `clear_dedup` (dedup rollback) must never panic on a dead pool — and its
+/// `clear_dedup` (dedup rollback) must never panic on a dead pool, and its
 /// DEL failure is logged when the pool answers but the command fails.
 #[tokio::test]
 async fn clear_dedup_rollback_swallows_redis_failures() {
@@ -1781,7 +1781,7 @@ async fn suppression_insert_and_retry_enqueue_both_failing_is_a_hard_error() {
 }
 
 /// WAL envelope parsing: an unknown version and a corrupt legacy payload are
-/// poison — P0 FIX: dead-lettered to the durable DLQ (with the
+/// poison, P0 FIX: dead-lettered to the durable DLQ (with the
 /// `unparsable_envelope` reason), never a panic and never a wedge.
 #[tokio::test]
 async fn wal_parser_rejects_unknown_versions_and_corrupt_legacy_entries() {
@@ -1830,12 +1830,12 @@ async fn wal_parser_rejects_unknown_versions_and_corrupt_legacy_entries() {
 //   W2 kill AFTER the claim, BEFORE the PG commit → orphaned lease in
 //      `processing`, reclaimed (re-drained FIRST) by the next flush
 //   W3 kill AFTER the PG commit, BEFORE the ACK → replay absorbed by the
-//      `ON CONFLICT (id) DO NOTHING` idempotency — exactly-once rows
+//      `ON CONFLICT (id) DO NOTHING` idempotency, exactly-once rows
 //   W4 reclaim RACING a live flush / TWO flushers → no loss, no double rows
 //   W5 MAX_FLUSH_BATCH still caps one drain (semantics preserved)
 // ═════════════════════════════════════════════════════════════════════════════
 
-/// W1 — kill before the claim:the accepted event is durable in `pending`
+/// W1, kill before the claim:the accepted event is durable in `pending`
 /// (where enqueue put it); a fresh processor's flush commits it. Nothing
 /// was ever deleted from the queue before the commit.
 #[tokio::test]
@@ -1876,7 +1876,7 @@ async fn crash_window_w1_kill_before_claim_loses_nothing() {
     clear_wal(&redis).await;
 }
 
-/// W2 — kill after the claim (pending → processing) but BEFORE the PG
+/// W2, kill after the claim (pending → processing) but BEFORE the PG
 /// commit:the batch is orphaned in `processing`. The next flush reclaims
 /// leftover leases back to the HEAD of `pending` FIRST (no starvation) and
 /// commits them; zero accepted events are lost. Even with FRESH traffic
@@ -1927,7 +1927,7 @@ async fn crash_window_w2_orphaned_lease_is_reclaimed_before_new_work() {
     .await
     .expect("fresh event enqueued");
 
-    // "Restart": the reclaim runs FIRST — the orphaned batch is drained
+    // "Restart": the reclaim runs FIRST, the orphaned batch is drained
     // before (in front of) the fresh event.
     proc.flush().await.expect("flush reclaims and commits");
 
@@ -1948,9 +1948,9 @@ async fn crash_window_w2_orphaned_lease_is_reclaimed_before_new_work() {
     clear_wal(&redis).await;
 }
 
-/// W3 — kill after the PostgreSQL COMMIT but before the ACK:the event is in
+/// W3, kill after the PostgreSQL COMMIT but before the ACK:the event is in
 /// BOTH Postgres and `processing`. The reclaim replays it into the
-/// `ON CONFLICT (id) DO NOTHING` insert — the idempotency that makes
+/// `ON CONFLICT (id) DO NOTHING` insert, the idempotency that makes
 /// at-least-once delivery exactly-once on rows. Nothing lost, nothing
 /// duplicated.
 #[tokio::test]
@@ -2012,9 +2012,9 @@ async fn crash_window_w3_committed_but_not_acked_replays_idempotently() {
     clear_wal(&redis).await;
 }
 
-/// W4 — reclaim RACING a live flush / TWO flushers over the same queue.
+/// W4, reclaim RACING a live flush / TWO flushers over the same queue.
 /// Flushers A and B run concurrently over N enqueued events (their
-/// claim/reclaim scripts can interleave in any order — including B
+/// claim/reclaim scripts can interleave in any order, including B
 /// reclaiming a batch A holds a lease on and double-committing it). The
 /// invariant asserted: every accepted event lands in Postgres EXACTLY once
 /// (idempotent insert), both queues converge to empty, nothing is lost.
@@ -2077,8 +2077,8 @@ async fn crash_window_w4_two_flushers_and_reclaim_race_lose_or_double_nothing() 
     clear_wal(&redis).await;
 }
 
-/// W5 — MAX_FLUSH_BATCH semantics preserved:one flush claims at most the
-/// cap (500, or max_buffer_size when larger — the expression is unchanged
+/// W5, MAX_FLUSH_BATCH semantics preserved:one flush claims at most the
+/// cap (500, or max_buffer_size when larger, the expression is unchanged
 /// from the pre-fix protocol), and the remainder stays durable in `pending`
 /// for the next tick.
 #[tokio::test]
@@ -2160,7 +2160,7 @@ async fn crash_window_w5_flush_batch_cap_bounds_one_claim() {
 
 /// A permanently-failing batch (PG down on every retry) ends up in the DLQ
 /// EXACTLY once, with every envelope field populated and the FNV-1a
-/// checksum matching the preserved payload — and the poison never wedges
+/// checksum matching the preserved payload, and the poison never wedges
 /// the queue: a subsequent good event drains normally behind it.
 #[tokio::test]
 async fn permanently_failing_batch_dead_letters_exactly_once_without_wedging() {
@@ -2266,7 +2266,7 @@ fn fnv1a64_known_answer_vectors() {
 use crate::routes::test_support::ScriptedRedis;
 
 /// A Redis that answers the handshake and then rejects EVERY real command
-/// with `-ERR` — the "server answers but says no" fault.
+/// with `-ERR`, the "server answers but says no" fault.
 fn err_redis() -> ScriptedRedis {
     ScriptedRedis::start(Vec::new(), b"-ERR injected fault\r\n")
 }
@@ -2279,7 +2279,7 @@ fn lazy_dead_db() -> PgPool {
         .expect("lazy pool")
 }
 
-/// `ack_committed_batch` — all three structural arms: the empty-claim guard,
+/// `ack_committed_batch`, all three structural arms: the empty-claim guard,
 /// the answering-but-failing Redis (release script error), and the dead pool.
 #[tokio::test]
 async fn ack_arms_empty_claim_script_failure_and_dead_pool() {
@@ -2308,7 +2308,7 @@ async fn ack_arms_empty_claim_script_failure_and_dead_pool() {
         .await;
 }
 
-/// `dead_letter_entries` — the RPUSH-pipeline failure, the post-push lease
+/// `dead_letter_entries`, the RPUSH-pipeline failure, the post-push lease
 /// release failure, and the dead-pool arm. Order matters in the contract:
 /// the DLQ copy lands FIRST, so a failure after it leaves the entry leased
 /// (at-least-once), never lost.
@@ -2375,7 +2375,7 @@ async fn dead_letter_entries_failure_arms_are_swallowed() {
         .await;
 }
 
-/// `drain_all` — both LLEN failure arms (answered-then-erroring server) and
+/// `drain_all`, both LLEN failure arms (answered-then-erroring server) and
 /// the pathological round bound where every flush "succeeds" but a lease can
 /// never be released (unparsable lease + failing DLQ push).
 #[tokio::test]
@@ -2400,7 +2400,7 @@ async fn drain_all_llen_arms_and_round_bound() {
     b.drain_all().await;
 
     // (3) Round bound: an unparsable lease whose DLQ push always fails makes
-    //     every flush return Ok while `processing` never drains — the loop
+    //     every flush return Ok while `processing` never drains, the loop
     //     must give up at the round bound leaving the entry durable.
     clear_wal(&redis).await;
     clear_processing(&redis).await;
@@ -2539,7 +2539,7 @@ async fn suppression_publish_failure_is_logged_not_panicking() {
 
 /// The suppression-retry drain: every error arm of the
 /// reclaim → LLEN → claim pipeline, the poison drop, the success fan-out,
-/// and the release failure — each forced deterministically.
+/// and the release failure, each forced deterministically.
 #[tokio::test]
 async fn suppression_retry_drain_pipeline_error_arms() {
     test_log_subscriber();
@@ -2552,7 +2552,7 @@ async fn suppression_retry_drain_pipeline_error_arms() {
     let lazy_db = lazy_dead_db();
     let proc = processor(lazy_db.clone(), redis.clone());
     let good = build_suppression_retry_entry("tn_drain_arms", "drainarms@example.com", None);
-    // Poison MUST use the wire (camelCase) field names — a snake_case record
+    // Poison MUST use the wire (camelCase) field names, a snake_case record
     // is an UNPARSEABLE entry, a different arm entirely.
     let poison =
         r#"{"tenantId":"tn_drain_arms","email":"poisonarms@example.com","retries":10}"#.to_string();
@@ -2662,7 +2662,7 @@ async fn suppression_retry_drain_pipeline_error_arms() {
 
     // (7) Failure against the dead database: the good entry is re-queued
     //     with a bumped counter; the poison (budget exhausted) is dropped
-    //     with the CRITICAL log — never silently.
+    //     with the CRITICAL log, never silently.
     {
         let mut conn = redis.get().await.unwrap();
         let _: Result<(), _> = redis::cmd("DEL")
@@ -2730,7 +2730,7 @@ async fn suppression_lease_release_failure_is_swallowed() {
 }
 
 /// Counter pipelines and dedup rollbacks must survive a Redis that rejects
-/// every command (fire-and-forget paths stay fire-and-forget) — and a Redis
+/// every command (fire-and-forget paths stay fire-and-forget), and a Redis
 /// that cannot even hand out a connection.
 #[tokio::test]
 async fn counters_and_dedup_rollback_survive_err_redis() {
@@ -2750,7 +2750,7 @@ async fn counters_and_dedup_rollback_survive_err_redis() {
 }
 
 /// A LEGACY bare-event WAL entry (no versioned envelope) still parses and
-/// flushes through the modern pipeline — the backward-compatibility arm.
+/// flushes through the modern pipeline, the backward-compatibility arm.
 #[tokio::test]
 async fn legacy_bare_wal_entries_still_flush() {
     let _guard = SERIAL.lock().await;
@@ -2779,7 +2779,7 @@ async fn legacy_bare_wal_entries_still_flush() {
         timestamp: Utc::now(),
         metadata: None,
     };
-    // Deliberately NOT wrapped in build_wal_envelope — the pre-envelope shape.
+    // Deliberately NOT wrapped in build_wal_envelope, the pre-envelope shape.
     let bare = serde_json::to_string(&event).unwrap();
     seed_wal(&redis, &[bare]).await;
 
@@ -2798,7 +2798,7 @@ async fn legacy_bare_wal_entries_still_flush() {
     clear_wal(&redis).await;
 }
 
-/// `dedup_key` scopes by link id when one is present — a click on link A
+/// `dedup_key` scopes by link id when one is present, a click on link A
 /// never dedupes a click on link B of the same message.
 #[test]
 fn dedup_key_with_link_id_is_distinct_and_deterministic() {
@@ -2838,7 +2838,7 @@ fn dead_letter_entry_shape_contract() {
 // ── P3: pipelined SSE fan-out ────────────────────────────────────────────────
 
 /// P3 item 5: every event still reaches a real subscriber as its OWN frame,
-/// in order — the batching is a pipelined round trip, not a batched payload.
+/// in order, the batching is a pipelined round trip, not a batched payload.
 /// A real Redis subscriber (the same `get_async_pubsub` the SSE route uses)
 /// is attached to `events:{tenant}` before the publish, exactly like the
 /// production consumer.
@@ -3093,7 +3093,7 @@ async fn queue_row_shapes(db: &PgPool, table: &str) -> Vec<QueueRowShape> {
     .expect("queue rows")
 }
 
-/// P3 item 6 — equivalence: 3 events × 2 webhooks produce EXACTLY the rows the
+/// P3 item 6, equivalence: 3 events × 2 webhooks produce EXACTLY the rows the
 /// pre-fix per-(event×webhook) insert path produced (deterministic ids,
 /// event names, payload shape, status/attempt), and the redundant second
 /// subscription query is gone. `ON CONFLICT DO NOTHING` still holds: running

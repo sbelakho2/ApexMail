@@ -352,7 +352,7 @@ pub fn validate_error_response(response: &ApiError) -> Result<(), Vec<String>> {
     let catalog = ErrorCatalog::all();
     if catalog.find_by_type(&response.error.error_type).is_none() {
         errors.push(format!(
-            "Unknown error type '{}' — must be one of the documented catalog",
+            "Unknown error type '{}', must be one of the documented catalog",
             response.error.error_type
         ));
     }

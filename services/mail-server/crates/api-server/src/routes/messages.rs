@@ -72,14 +72,14 @@ const TENANT_MESSAGE_CIRCUIT_OPEN_SECONDS: i64 = 300;
 const MAX_SUBJECT_CHARS: usize = 998;
 
 /// Maximum serialized size of caller metadata accepted by the send
-/// endpoints (F44 — bounded object-shaped customer metadata).
+/// endpoints (F44, bounded object-shaped customer metadata).
 const MAX_METADATA_BYTES: usize = 16 * 1024;
 
 /// Maximum number of keys in the caller metadata object (F44).
 const MAX_METADATA_KEYS: usize = 64;
 
 /// Metadata keys owned by the server's queue machinery. A caller who sets
-/// any of them could otherwise forge operational queue state — most
+/// any of them could otherwise forge operational queue state, most
 /// dangerously `pending_recipients`, which the worker trusts over the
 /// validated envelope recipients (F45).
 const RESERVED_METADATA_KEYS: [&str; 4] = [
@@ -97,7 +97,7 @@ const RESERVED_METADATA_KEYS: [&str; 4] = [
 /// dispatcher writes; see `worker-processors`' `email::sales`). Sales sending
 /// is isolated from customer mail by that classification, so a caller-forged
 /// marker would push customer mail onto (or hold it behind) the sales
-/// transport — the markers are server-owned.
+/// transport, the markers are server-owned.
 const RESERVED_SALES_PROVENANCE_KEYS: [&str; 5] = [
     "sales_tenant_id",
     "sales_sender_identity_id",
@@ -108,7 +108,7 @@ const RESERVED_SALES_PROVENANCE_KEYS: [&str; 5] = [
 
 /// The `metadata.source` VALUE the sales dispatcher writes. The key itself
 /// (`source`) is ordinary customer metadata, so only this exact value is
-/// rejected — mirroring `worker-processors`' `SALES_METADATA_SOURCE`.
+/// rejected, mirroring `worker-processors`' `SALES_METADATA_SOURCE`.
 const RESERVED_SALES_SOURCE_VALUE: &str = "sales-autopilot";
 
 /// Header names the caller cannot set through the free-form `headers`
@@ -117,7 +117,7 @@ const RESERVED_SALES_SOURCE_VALUE: &str = "sales-autopilot";
 /// the worker's PROTECTED_HEADERS set plus the dedicated `reply_to` field.
 ///
 /// F74: the ENTIRE `X-ApexMail-*` namespace is additionally reserved
-/// case-insensitively (see `validate_send_options`) — the three historical
+/// case-insensitively (see `validate_send_options`), the three historical
 /// exact spellings blocked here previously left the legacy aliases
 /// (`X-ApexMail-MessageId`, `X-ApexMail-TenantId`) settable by callers,
 /// and those aliases were then trusted by SES bounce/complaint handling as
@@ -161,7 +161,7 @@ const MAX_ATTACHMENTS: usize = 50;
 /// Documented request-body ceiling for the send endpoints (F48): the 25 MiB
 /// decoded aggregate attachment contract plus ~33% base64 overhead plus the
 /// JSON envelope. Enforced by `deploy/nginx/nginx.conf client_max_body_size`
-/// and the API body limit in `app.rs` (both 40 MiB — one documented maximum,
+/// and the API body limit in `app.rs` (both 40 MiB, one documented maximum,
 /// mirrored in packages/contract/send-contract.json). The per-attachment and
 /// aggregate decoded limits above are enforced here, at the validation layer.
 pub(crate) const MAX_SEND_BODY_BYTES: usize = 40 * 1024 * 1024;
@@ -174,7 +174,7 @@ const QUEUE_PRIORITY_DEFAULT: i32 = 5;
 
 /// Documented named priority levels and the queue integers they map to (F48
 /// shared contract, packages/contract/send-contract.json). The wire accepts
-/// integers 1–10 AND these named strings — SDKs serialize exactly the same
+/// integers 1–10 AND these named strings, SDKs serialize exactly the same
 /// two forms, so a named level never yields a 422.
 const NAMED_PRIORITY_LEVELS: [(&str, i32); 3] = [("high", 7), ("normal", 5), ("low", 3)];
 
@@ -187,12 +187,12 @@ const MAX_DISPLAY_NAME_CHARS: usize = 320;
 #[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct SendMessageRequest {
-    /// Sender mailbox — a bare addr-spec (`sender@example.com`) or an
+    /// Sender mailbox, a bare addr-spec (`sender@example.com`) or an
     /// RFC 5322 display form (`Sender Name <sender@example.com>`). The
     /// extracted addr-spec is what validation, the envelope and persistence
     /// use; the display name is preserved for MIME rendering (F48).
     pub from: String,
-    /// Recipient mailboxes — same bare/display-name forms as `from` (F48).
+    /// Recipient mailboxes, same bare/display-name forms as `from` (F48).
     pub to: Vec<String>,
     #[serde(default)]
     pub cc: Option<Vec<String>>,
@@ -214,7 +214,7 @@ pub struct SendMessageRequest {
     pub scheduled_at: Option<DateTime<Utc>>,
     // ── F48: the persistence/queue/transport stack supports these
     // end-to-end, so they are accepted and honoured.
-    /// Optional Reply-To mailbox — bare or display-name form, like `from`.
+    /// Optional Reply-To mailbox, bare or display-name form, like `from`.
     /// Stored on the message + queue rows and set on the outgoing MIME.
     #[serde(default)]
     pub reply_to: Option<String>,
@@ -225,7 +225,7 @@ pub struct SendMessageRequest {
     /// Attachments: `{filename, content (base64), contentType}`.
     #[serde(default)]
     pub attachments: Option<Vec<SendAttachment>>,
-    /// Queue priority — an integer 1–10 (default 5) or one of the documented
+    /// Queue priority, an integer 1–10 (default 5) or one of the documented
     /// named levels `"high"`/`"normal"`/`"low"`, mapped to 7/5/3 exactly like
     /// the SDKs (F48 shared contract). Anything else is a deserialization
     /// error naming the field.
@@ -288,14 +288,14 @@ pub struct ListMessagesQuery {
     pub limit: i64,
     #[serde(default)]
     pub offset: i64,
-    /// Cursor for cursor-based pagination — hex-encoded `created_at` + row id
+    /// Cursor for cursor-based pagination, hex-encoded `created_at` + row id
     /// pair of the last item from the previous page. When provided, overrides
     /// `offset` (only valid with the default `created_at` sort).
     #[serde(default)]
     pub cursor: Option<String>,
     #[serde(default)]
     pub status: Option<String>,
-    /// Sort column — validated against [`ALLOWED_SORT_COLUMNS`] allowlist.
+    /// Sort column, validated against [`ALLOWED_SORT_COLUMNS`] allowlist.
     /// Defaults to `created_at`; an explicit unknown column is rejected with 400.
     #[serde(default = "default_sort_column")]
     pub sort_by: String,
@@ -320,7 +320,7 @@ const KEYSET_CURSOR_SEP: char = '\n';
 ///
 /// The timestamp MUST be RFC 3339: `DateTime`'s `Display` renders a space
 /// and a `UTC` suffix ("2026-01-01 00:00:00 UTC"), which
-/// [`decode_keyset_cursor`]'s `parse_from_rfc3339` rejects — every
+/// [`decode_keyset_cursor`]'s `parse_from_rfc3339` rejects, every
 /// cursor-follow request used to fail with 400 on a cursor this function
 /// had just minted.
 fn encode_keyset_cursor(created_at: &DateTime<Utc>, id: &str) -> String {
@@ -332,10 +332,10 @@ fn encode_keyset_cursor(created_at: &DateTime<Utc>, id: &str) -> String {
 
 /// Decode and validate a `(created_at, id)` keyset cursor. Malformed
 /// encodings, unparsable timestamps, or ids that cannot name a row are
-/// client errors (400) — they used to surface as database 500s.
+/// client errors (400), they used to surface as database 500s.
 /// The row id is decoded as a UUID because messages.id is a UUID column and
 /// the cursor tuple comparison binds it against that column
-/// (`id < $k::uuid`) — a well-formed-but-non-UUID id used to pass this
+/// (`id < $k::uuid`), a well-formed-but-non-UUID id used to pass this
 /// shape check and blow up as a cast error at the database.
 fn decode_keyset_cursor(encoded: &str) -> Result<(DateTime<Utc>, String), ApiError> {
     let Some(decoded) = decode_cursor(encoded) else {
@@ -413,9 +413,9 @@ struct PersistedMessage {
 enum CancelDeliveryResult {
     Cancelled(DateTime<Utc>),
     NotFound,
-    /// Terminal parent state — e.g. already cancelled.
+    /// Terminal parent state, e.g. already cancelled.
     NotCancellable,
-    /// F24: the irreversible dispatch boundary was crossed — at least one
+    /// F24: the irreversible dispatch boundary was crossed, at least one
     /// recipient row has been claimed by a worker (or already delivered),
     /// so cancellation is explicitly TOO LATE rather than silently racing
     /// the worker.
@@ -434,10 +434,10 @@ enum CancelDeliveryResult {
 ///    the queue rows first here keeps both sides on one lock order.
 /// 2. Lock the parent `messages` row and re-read its status.
 /// 3. Decide under the locks: any queue row that is not `pending` (and not
-///    already `cancelled`) means dispatch has started — TooLate.
+///    already `cancelled`) means dispatch has started, TooLate.
 /// 4. Verify AFFECTED COUNTS on both updates: if the number of rows flipped
 ///    to `cancelled` differs from the pending count observed under the
-///    lock, the decision was raced — TooLate, transaction rolled back by
+///    lock, the decision was raced, TooLate, transaction rolled back by
 ///    the caller.
 ///
 /// The irreversible dispatch boundary is the worker's CLAIM: once a queue
@@ -450,7 +450,7 @@ async fn cancel_message_and_queue(
     message_id: &str,
 ) -> Result<CancelDeliveryResult, sqlx::Error> {
     // 1. Lock every delivery row of the message (queue rows before the
-    //    parent — same order as the worker).
+    //    parent, same order as the worker).
     let queue_rows: Vec<String> = sqlx::query_scalar(
         "SELECT status FROM email_queue
          WHERE message_id = $1::uuid AND tenant_id = $2
@@ -492,7 +492,7 @@ async fn cancel_message_and_queue(
         return Ok(CancelDeliveryResult::TooLate);
     }
     // A parent already in `processing` whose rows were all re-released to
-    // `pending` is still claimable — but conservatively treat a processing
+    // `pending` is still claimable, but conservatively treat a processing
     // parent with zero pending rows as too late (nothing left to cancel).
     if pending == 0 {
         return Ok(CancelDeliveryResult::TooLate);
@@ -514,7 +514,7 @@ async fn cancel_message_and_queue(
             message_id,
             expected = pending,
             affected = cancelled_rows.rows_affected(),
-            "cancellation raced a worker claim — treating as too late"
+            "cancellation raced a worker claim, treating as too late"
         );
         return Ok(CancelDeliveryResult::TooLate);
     }
@@ -545,7 +545,7 @@ fn message_status(body: &SendMessageRequest) -> &'static str {
 
 fn delivery_recipients(body: &SendMessageRequest) -> Vec<String> {
     // Bare addr-specs of to + cc + bcc (F48): parsing cannot fail on a body
-    // that passed validation — malformed mailboxes are rejected there with a
+    // that passed validation, malformed mailboxes are rejected there with a
     // field-naming 422, so the empty fallback is unreachable in practice.
     match parse_send_addresses(body) {
         Ok(parsed) => parsed_delivery_recipients(&parsed),
@@ -569,7 +569,7 @@ fn sender_domain(from: &str) -> Option<String> {
 /// Deserialize the `priority` field of [`SendMessageRequest`] per the F48
 /// shared contract (`packages/contract/send-contract.json`): an integer
 /// 1–10 passes through, and the documented named levels `"high"`/`"normal"`
-/// /`"low"` map to 7/5/3 — exactly the forms the five SDKs serialize. Any
+/// /`"low"` map to 7/5/3, exactly the forms the five SDKs serialize. Any
 /// other value is an error naming the field, never a silent default.
 fn deserialize_priority<'de, D>(deserializer: D) -> Result<Option<i32>, D::Error>
 where
@@ -591,10 +591,10 @@ where
                 Ok(Some(int as i32))
             }
             Some(int) => Err(D::Error::custom(format!(
-                "{contract} — received the out-of-range integer {int}"
+                "{contract}, received the out-of-range integer {int}"
             ))),
             None => Err(D::Error::custom(format!(
-                "{contract} — received the non-integer number {value}"
+                "{contract}, received the non-integer number {value}"
             ))),
         },
         serde_json::Value::String(level) => {
@@ -605,12 +605,12 @@ where
             {
                 Some((_, queue_level)) => Ok(Some(*queue_level)),
                 None => Err(D::Error::custom(format!(
-                    "{contract} — received '{level}' (named levels are case-insensitive; \
+                    "{contract}, received '{level}' (named levels are case-insensitive; \
                      plain integers must be JSON numbers, not strings)"
                 ))),
             }
         }
-        other => Err(D::Error::custom(format!("{contract} — received {other}"))),
+        other => Err(D::Error::custom(format!("{contract}, received {other}"))),
     }
 }
 
@@ -630,7 +630,7 @@ pub(crate) struct ParsedMailbox {
 /// form `Name <addr@example.com>` (optionally a quoted name,
 /// `"Name" <addr@example.com>`) or the bare form `addr@example.com`.
 ///
-/// The extracted addr-spec is what gets validated — the display name never
+/// The extracted addr-spec is what gets validated, the display name never
 /// participates in email validation. Control characters (header injection),
 /// empty inputs, unclosed/multiple mailboxes and over-long display names are
 /// rejected with an error naming the problem.
@@ -754,7 +754,7 @@ fn parse_send_addresses(body: &SendMessageRequest) -> Result<ParsedSendAddresses
     }
 }
 
-/// Envelope recipients — the bare addr-specs of to + cc + bcc (F48). Each one
+/// Envelope recipients, the bare addr-specs of to + cc + bcc (F48). Each one
 /// becomes its own `email_queue` row / suppression lookup / quota unit, so it
 /// must never carry a display name.
 fn parsed_delivery_recipients(parsed: &ParsedSendAddresses) -> Vec<String> {
@@ -794,7 +794,7 @@ fn unprocessable_send_options(details: Vec<String>) -> Response {
 ///
 /// * `None` / JSON `null` → `None` (missing).
 /// * Anything but a bounded JSON object → 422 (a scalar/array poisons the
-///   worker's `jsonb_set` queue-state merges — SQLSTATE 22023 — and could
+///   worker's `jsonb_set` queue-state merges, SQLSTATE 22023, and could
 ///   not carry server-written operational keys anyway).
 /// * Server-reserved operational keys (`pending_recipients`, `lease_token`,
 ///   ...) → 422: those fields are exclusively server-written (F45); a
@@ -902,7 +902,7 @@ fn validate_send_options(body: &SendMessageRequest) -> Vec<String> {
     }
 
     if let Some(reply_to) = body.reply_to.as_deref() {
-        // F48: accept bare AND "Name <addr>" display forms — validation
+        // F48: accept bare AND "Name <addr>" display forms, validation
         // targets the extracted addr-spec, display names ride along for the
         // MIME rendering hooks.
         if !reply_to.trim().is_empty() {
@@ -935,7 +935,7 @@ fn validate_send_options(body: &SendMessageRequest) -> Vec<String> {
                         continue;
                     }
                     // F74: the whole internal namespace is reserved,
-                    // case-insensitively — every spelling, not just the
+                    // case-insensitively, every spelling, not just the
                     // three historical ones.
                     if apexmail_lib::email_headers::is_reserved_internal_header(name) {
                         errors.push(format!(
@@ -973,7 +973,7 @@ fn validate_send_options(body: &SendMessageRequest) -> Vec<String> {
         }
     }
 
-    // F55: the category is SERVER-OWNED — validated and normalized through
+    // F55: the category is SERVER-OWNED, validated and normalized through
     // the SAME shared helper the SMTP submission admission uses, never
     // persisted raw.
     if let Some(category) = body.category.as_deref() {
@@ -1078,7 +1078,7 @@ fn unprocessable_template_send(details: Vec<String>) -> Response {
 
 /// Renderer configuration for the send path. The sandbox/cache bounds mirror
 /// the template-renderer service defaults (`template-renderer::config`);
-/// `db.url` is unused — the renderer is handed the api-server's own pool.
+/// `db.url` is unused, the renderer is handed the api-server's own pool.
 fn send_template_renderer_config() -> RendererConfig {
     RendererConfig {
         db: RendererDatabaseConfig {
@@ -1130,12 +1130,12 @@ enum TemplateSendRefusal {
 /// the canonical `templates` table, render subject/html/text through the
 /// shared [`TemplateRenderer`], and return the fields the template supplies.
 ///
-/// * `Ok(None)` — the request carries no template (the transactional path is
+/// * `Ok(None)`, the request carries no template (the transactional path is
 ///   untouched).
-/// * `Err(NotFound)` — unknown OR cross-tenant template id: both are
+/// * `Err(NotFound)`, unknown OR cross-tenant template id: both are
 ///   indistinguishable by construction (the load is scoped by tenant) and
 ///   answer 404, exactly like `GET /v1/templates/:id`.
-/// * `Err(Refused)` — every merge variable the template references MUST be
+/// * `Err(Refused)`, every merge variable the template references MUST be
 ///   supplied: the renderer reports each missing field, and the send path
 ///   refuses the whole request naming every missing variable instead of
 ///   shipping a partial render. Renderer failures name their cause too.
@@ -1290,7 +1290,7 @@ fn render_preloaded_template_send(
     })
 }
 
-/// Resolve one body's template from a batch preload — no database access.
+/// Resolve one body's template from a batch preload, no database access.
 fn resolve_preloaded_template_send(
     renderer: &TemplateRenderer,
     templates: &std::collections::HashMap<String, Option<PreloadedTemplate>>,
@@ -1328,7 +1328,7 @@ async fn resolve_template_send(
     };
 
     // One template load for this single body, then the SAME preloaded render
-    // path the batch uses — one implementation, no drift.
+    // path the batch uses, one implementation, no drift.
     let templates = preload_batch_templates(db, tenant_id, std::slice::from_ref(body))
         .await
         .map_err(|error| TemplateSendRefusal::Internal(format!("template store error: {error}")))?;
@@ -1370,7 +1370,7 @@ fn effective_template_body(
 }
 
 /// Invariants the FINAL (template- or override-supplied) subject/body must
-/// satisfy — the same ones [`validate_send_with_domain_cache`] enforces for
+/// satisfy, the same ones [`validate_send_with_domain_cache`] enforces for
 /// explicitly sent content.
 fn validate_rendered_send_content(body: &SendMessageRequest) -> Vec<String> {
     let mut errors = Vec::new();
@@ -1411,7 +1411,7 @@ fn invalid_category_message(raw: &str) -> String {
     )
 }
 
-/// F48: one parsed mailbox in the queue row's MIME header map — the structured
+/// F48: one parsed mailbox in the queue row's MIME header map, the structured
 /// form downstream MIME rendering hooks read to emit proper RFC 5322 mailbox
 /// lists (`{email, name}` with `name` omitted when absent).
 fn mailbox_json(mailbox: &ParsedMailbox) -> serde_json::Value {
@@ -1425,12 +1425,12 @@ fn mailbox_json(mailbox: &ParsedMailbox) -> serde_json::Value {
 /// original To/Cc header values are stored SEPARATELY from the envelope
 /// destination (`"to"`/`to_addresses`), so each per-recipient copy can show
 /// the full visible recipient list while delivering to exactly one envelope
-/// recipient. Bcc is intentionally absent — it exists only in the delivery
+/// recipient. Bcc is intentionally absent, it exists only in the delivery
 /// data (the per-recipient queue rows), never in a visible header. Custom
 /// caller headers ride along under `custom`, and `reply_to` gets its own
 /// key (F48).
 ///
-/// F48: display names are preserved twice — verbatim in the legacy joined
+/// F48: display names are preserved twice, verbatim in the legacy joined
 /// `"to"`/`"cc"`/`"reply_to"` strings (exactly what the caller sent) AND as
 /// structured `*_mailboxes` arrays (`{name, email}`), which are the MIME
 /// rendering hook for display-name-aware construction. The worker's
@@ -1507,7 +1507,7 @@ enum LedgerReplay {
     /// The key was used with a different method/route/principal/payload —
     /// reject with 409 (F19).
     Conflict(&'static str),
-    /// A completed record exists — replay its stored response (F20). The
+    /// A completed record exists, replay its stored response (F20). The
     /// body is carried RAW (as persisted); [`replay_ledger_response`] owns
     /// parsing/versioning and rejects corrupt bodies explicitly.
     Complete {
@@ -1623,7 +1623,7 @@ const LEDGER_RESPONSE_SCHEMA_VERSION: i64 = 2;
 
 /// F20: build the versioned persisted body for a send's final response.
 /// The complete HTTP envelope (`ApiResponse::success(..)`) is serialized
-/// exactly once here — the same serialization is both persisted in the
+/// exactly once here, the same serialization is both persisted in the
 /// ledger and returned to the first caller, so a replay is byte-identical.
 fn ledger_response_body<T: Serialize>(payload: &T) -> Result<String, serde_json::Error> {
     let stored = serde_json::json!({
@@ -1660,11 +1660,11 @@ async fn ledger_preflight(
 /// own transaction, so the ledger row, the message row, and every queue row
 /// commit together.
 ///
-/// * `Ok(true)` — this request created (and owns) the record.
-/// * `Ok(false)` — a completed record already exists; the caller must
+/// * `Ok(true)`, this request created (and owns) the record.
+/// * `Ok(false)`, a completed record already exists; the caller must
 ///   return the stored response instead of executing.
-/// * `Err(LedgerReplay::Conflict(_))` — conflicting reuse.
-/// * `Err(LedgerReplay::InFlight)` — a live creator still owns the key.
+/// * `Err(LedgerReplay::Conflict(_))`, conflicting reuse.
+/// * `Err(LedgerReplay::InFlight)`, a live creator still owns the key.
 async fn open_ledger_in_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     tenant_id: &str,
@@ -1699,7 +1699,7 @@ async fn open_ledger_in_tx(
 
     // A record exists: read and classify it. A concurrent creator that
     // completes the row right after this read makes the classification
-    // stale (`InFlight`), which only costs the retry a 409-and-retry — the
+    // stale (`InFlight`), which only costs the retry a 409-and-retry, the
     // takeover below is the only WRITE and is a guarded conditional UPDATE.
     let row: Option<LedgerRow> = fetch_ledger_row(&mut **tx, tenant_id, key)
         .await
@@ -1740,7 +1740,7 @@ async fn open_ledger_in_tx(
 }
 
 /// F20: why a ledger completion failed. Both variants are propagated by the
-/// callers — a send whose response cannot be durably recorded must roll back
+/// callers, a send whose response cannot be durably recorded must roll back
 /// its message/queue writes, never return success.
 #[derive(Debug)]
 enum CompleteLedgerError {
@@ -1751,7 +1751,7 @@ enum CompleteLedgerError {
         reason = "the sqlx source is carried for diagnostics and logged via Debug at the call sites"
     )]
     Db(sqlx::Error),
-    /// Zero owner-fenced rows were completed — this request no longer owns
+    /// Zero owner-fenced rows were completed, this request no longer owns
     /// the record (lease taken over). The caller rolls back and fails; the
     /// current owner's record remains the authority.
     NotOwner,
@@ -1762,7 +1762,7 @@ enum CompleteLedgerError {
 /// message/queue writes, so response and effects are atomic (F20).
 ///
 /// Returns `Ok(())` only when EXACTLY ONE owner-fenced row was completed.
-/// SQL failures and ownership loss are `Err` — callers must roll back the
+/// SQL failures and ownership loss are `Err`, callers must roll back the
 /// message/queue writes and compensate the reserved quota so no
 /// accepted-but-unrecorded message or orphan quota survives.
 async fn complete_ledger_in_tx(
@@ -1799,7 +1799,7 @@ async fn complete_ledger_in_tx(
 }
 
 /// F20: exactly ONE owner-fenced row must complete. Zero (or anything else)
-/// means this request no longer owns the record — an ownership error the
+/// means this request no longer owns the record, an ownership error the
 /// caller propagates with a rollback.
 fn completion_outcome(rows_affected: u64) -> Result<(), CompleteLedgerError> {
     if rows_affected == 1 {
@@ -1840,7 +1840,7 @@ async fn resolve_sender_domain_id(
 }
 
 /// Collect the unique sender domains of a batch's bodies (F48: from the
-/// parsed bare addr-spec — unparsable mailboxes contribute nothing here and
+/// parsed bare addr-spec, unparsable mailboxes contribute nothing here and
 /// are rejected per-item later by validation).
 fn batch_sender_domains(bodies: &[SendMessageRequest]) -> Vec<String> {
     let mut unique: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -1856,15 +1856,15 @@ fn batch_sender_domains(bodies: &[SendMessageRequest]) -> Vec<String> {
 }
 
 /// Resolve verified domain IDs for a set of unique sender domain names with
-/// one query (instead of one query per message — the previous code performed
+/// one query (instead of one query per message, the previous code performed
 /// an N+1 lookup inside `insert_message_and_queue` for each item).
 ///
 /// The returned map contains an entry for every requested name: `Some(id)`
 /// when the tenant owns a transport-ready verified domain, `None` otherwise.
 ///
 /// The executor may be the pool or an open transaction. The batch's
-/// VALIDATION pass runs it on the pool — an autocommit read's `FOR SHARE`
-/// row locks last only for the statement — while the batch's insert phase
+/// VALIDATION pass runs it on the pool, an autocommit read's `FOR SHARE`
+/// row locks last only for the statement, while the batch's insert phase
 /// re-runs it INSIDE the write transaction so the locks actually protect the
 /// inserts (perf finding 2; see `commit_admitted_batch`).
 async fn resolve_batch_domain_ids<'e, E>(
@@ -1931,7 +1931,7 @@ async fn suppressed_recipients(
 /// Probe suppression ONCE for the union of a batch's delivery recipients.
 ///
 /// The per-item validation path called [`suppressed_recipients`] for every
-/// item — for a batch that mostly addressed distinct recipients this was N
+/// item, for a batch that mostly addressed distinct recipients this was N
 /// identical-round-trip queries. The union result is mapped back per item in
 /// `validate_send_with_domain_cache`, preserving the exact per-item
 /// `"recipient is suppressed: <email>"` refusals.
@@ -1986,7 +1986,7 @@ async fn insert_message_and_queue(
     // headers) live in the queue row's `headers` JSONB, separate from the
     // envelope destination columns. F48: attachments + priority ride on the
     // same insert, and the ENVELOPE fields (`from_email`, `to_addresses`)
-    // carry only the parsed bare addr-specs — display names live in the
+    // carry only the parsed bare addr-specs, display names live in the
     // header map's structured `*_mailboxes` arrays.
     let mime_headers = mime_headers_for(body, parsed).unwrap_or(serde_json::json!({}));
     let queue_attachments = queue_attachments_of(body);
@@ -2004,7 +2004,7 @@ async fn insert_message_and_queue(
     // conflict (standard SQL NULL-distinct semantics), so batch sends and any
     // request without an idempotency key insert normally.
     //
-    // F45: `metadata` is now the sanitized CUSTOMER object only — server
+    // F45: `metadata` is now the sanitized CUSTOMER object only, server
     // operational state (pending_recipients / lease_token / ...) is written
     // exclusively by the worker into its own metadata namespace and is never
     // seeded from caller input.
@@ -2038,12 +2038,12 @@ async fn insert_message_and_queue(
     .bind(idempotency_key)
     .bind(reply_to)
     // messages.headers keeps the same server-written MIME header map so the
-    // audit row records what recipients actually saw (F26) — including the
+    // audit row records what recipients actually saw (F26), including the
     // structured display-name mailbox arrays (F48).
     .bind(&mime_headers)
     .bind(&queue_attachments)
     // F55: the validated server-owned category (migration 187), supplied by
-    // the admission service — never a schema default.
+    // the admission service, never a schema default.
     .bind(message_category)
     .execute(&mut **tx)
     .await?;
@@ -2054,7 +2054,7 @@ async fn insert_message_and_queue(
     }
 
     // Batched email_queue inserts (previously one INSERT per delivery
-    // recipient — up to MAX_RECIPIENTS sequential round-trips per message).
+    // recipient, up to MAX_RECIPIENTS sequential round-trips per message).
     // 17 bind parameters per row × 500 rows stays far below Postgres's
     // 65,535-parameter statement limit.
     const EMAIL_QUEUE_CHUNK_SIZE: usize = 500;
@@ -2071,7 +2071,7 @@ async fn insert_message_and_queue(
             if i > 0 {
                 query.push_str(", ");
             }
-            // Parameter layout per row — "from"/"to" reuse the same values
+            // Parameter layout per row, "from"/"to" reuse the same values
             // as from_address/to_addresses, and created_at doubles as
             // updated_at, exactly like the single-row form.
             let (i_id, i_msg, i_ten, i_dom, i_from, i_rcpt) = (
@@ -2145,7 +2145,7 @@ async fn insert_message_and_queue(
 /// THE canonical send handler. `POST /v1/messages` is the only route that
 /// dispatches to it directly, but the provider compatibility surface
 /// (`routes::compat`) reuses this exact function for SendGrid/Mailgun/
-/// Postmark/Resend payloads it has mapped into a [`SendMessageRequest`] — so
+/// Postmark/Resend payloads it has mapped into a [`SendMessageRequest`], so
 /// every compat send runs the same validation, sender-domain/DKIM gate,
 /// suppression + consent enforcement, entitlements/quota admission, durable
 /// idempotency ledger and `messages`/`email_queue` insert as a canonical
@@ -2159,7 +2159,7 @@ pub(crate) async fn send_message(
     require_scopes(&auth, &["messages:send"])?;
 
     // F44/F45/F48: contract validation BEFORE any quota reservation or
-    // persistence — metadata shape, reserved operational keys, and malformed
+    // persistence, metadata shape, reserved operational keys, and malformed
     // `template_data` shapes are rejected with 422 here, never silently
     // discarded. Template sends are a supported contract (see
     // `resolve_template_send` below).
@@ -2174,7 +2174,7 @@ pub(crate) async fn send_message(
 
     validate_send(&body, &state.db, &auth.tenant_id).await?;
 
-    // F48: structured mailbox parse — validation above accepted these forms,
+    // F48: structured mailbox parse, validation above accepted these forms,
     // so this cannot fail; the guard keeps the invariant honest anyway.
     let parsed = match parse_send_addresses(&body) {
         Ok(parsed) => parsed,
@@ -2213,7 +2213,7 @@ pub(crate) async fn send_message(
                 response_body,
             }) => {
                 // The original response was durably stored even though the
-                // caller never consumed it — replay it (F20).
+                // caller never consumed it, replay it (F20).
                 return replay_ledger_response(
                     response_status,
                     response_body.as_deref().unwrap_or(""),
@@ -2235,7 +2235,7 @@ pub(crate) async fn send_message(
     // of a stored send must replay even if the template was changed or
     // removed since) and BEFORE the transaction/quota (a refusal queues
     // nothing and consumes no quota). Requests without a template borrow
-    // their body unchanged — the transactional path stays byte-identical.
+    // their body unchanged, the transactional path stays byte-identical.
     let rendered = match resolve_template_send(&state.db, &auth.tenant_id, &body).await {
         Ok(rendered) => rendered,
         Err(TemplateSendRefusal::NotFound(template_id)) => {
@@ -2262,7 +2262,7 @@ pub(crate) async fn send_message(
     // Perf finding 2 (2026-10-18): the admission/quota reservation runs on
     // the shared admission backend (Redis + its own short Postgres
     // transaction on a SECOND pool connection), so it MUST complete before
-    // the write transaction opens — with the tx open it pinned a second
+    // the write transaction opens, with the tx open it pinned a second
     // connection and left the send tx idle in transaction across the whole
     // admission round trip (pool-exhaustion/deadlock amplifier on the
     // partitioned hot table). The reservation is idempotent (F22 derived
@@ -2272,7 +2272,7 @@ pub(crate) async fn send_message(
     // Admission-time quota gate (extracted into the shared
     // `SendAdmissionService` so the SMTP submission path reserves the same
     // EmailsSent quota through the same code): meter one unit per delivery
-    // recipient (to + cc + bcc), not one per message — each recipient
+    // recipient (to + cc + bcc), not one per message, each recipient
     // becomes its own email_queue row that is delivered (and billed)
     // separately. The Lua check-and-increment in record_with_quota_check is
     // atomic for the whole quantity, so an insufficient quota rejects the
@@ -2280,7 +2280,7 @@ pub(crate) async fn send_message(
     // partially consuming quota (F1).
     //
     // F22: the usage event id is DERIVED from (tenant, idempotency key), so
-    // a concurrent duplicate send records the SAME metering event — the
+    // a concurrent duplicate send records the SAME metering event, the
     // billing layer de-duplicates on it and the quota is reserved exactly
     // once. The reservation carries the inserted/duplicate outcome so only
     // a real insert is ever compensated.
@@ -2326,7 +2326,7 @@ pub(crate) async fn send_message(
             Ok(true) => {}
             Ok(false) => {
                 // A completed record appeared between preflight and the
-                // locked insert — replay it instead of double-sending. Every
+                // locked insert, replay it instead of double-sending. Every
                 // exit releases the pre-transaction reservation (F22: the
                 // concurrent winner's own event carries the quota when this
                 // admission was its duplicate).
@@ -2386,7 +2386,7 @@ pub(crate) async fn send_message(
     //
     // KEPT INSIDE the write transaction (perf finding 2 carve-out): this
     // read takes a `FOR SHARE` row lock that must be held through the
-    // message/queue inserts to close the check-then-enqueue race — a domain
+    // message/queue inserts to close the check-then-enqueue race, a domain
     // disabled or deleted after validation must fail (or null) here under
     // the lock, never hand the worker an unsigned send. It is a single fast
     // query on the transaction's own connection; the cross-connection
@@ -2411,7 +2411,7 @@ pub(crate) async fn send_message(
         }
     };
 
-    // Idempotency key for the send — stored in the dedicated column so the
+    // Idempotency key for the send, stored in the dedicated column so the
     // UNIQUE(tenant_id, idempotency_key) index is enforced inside the insert
     // (the ledger pre-check above is only a fast path; it cannot close the
     // concurrent-duplicate race window on its own).
@@ -2492,7 +2492,7 @@ pub(crate) async fn send_message(
     // F20: construct and serialize the COMPLETE final HTTP envelope ONCE.
     // The same serialized envelope is persisted in the ledger (inside this
     // transaction) and returned to the first caller, so a retry replays the
-    // exact same contract — single send and batch alike — independent of
+    // exact same contract, single send and batch alike, independent of
     // Redis and of client response consumption.
     let stored_body = match ledger_response_body(&response) {
         Ok(stored_body) => stored_body,
@@ -2505,7 +2505,7 @@ pub(crate) async fn send_message(
         }
     };
 
-    // F20: completion is REQUIRED — exactly one owner-fenced row must
+    // F20: completion is REQUIRED, exactly one owner-fenced row must
     // complete, or the message/queue writes roll back and the reserved
     // quota is compensated. A failure here must never leave an
     // accepted-but-unrecorded message or an orphan quota reservation.
@@ -2527,7 +2527,7 @@ pub(crate) async fn send_message(
                 error = ?error,
                 tenant_id = %auth.tenant_id,
                 idempotency_key = key,
-                "idempotency ledger completion failed — send rolled back"
+                "idempotency ledger completion failed, send rolled back"
             );
             return Err(ApiError::Internal("database error".into()));
         }
@@ -2560,7 +2560,7 @@ pub(crate) async fn send_message(
 
 /// Customer-visible audit trail (docs/api/endpoints/audit.md: "account,
 /// sending, and configuration activity"): record each ACCEPTED message in
-/// the tenant audit trail. Best-effort and post-commit — the acceptance
+/// the tenant audit trail. Best-effort and post-commit, the acceptance
 /// already happened, and a failed audit insert must never fail a send; the
 /// miss is logged loudly instead.
 async fn audit_message_accepted(
@@ -2600,15 +2600,15 @@ async fn audit_message_accepted(
 ///
 /// The persisted body is versioned ([`LEDGER_RESPONSE_SCHEMA_VERSION`]):
 ///
-/// * v2 — `{"v":2,"body":<envelope>}`: the complete final HTTP envelope as
+/// * v2, `{"v":2,"body":<envelope>}`: the complete final HTTP envelope as
 ///   serialized for the first response; replayed verbatim so status, body,
 ///   shape and IDs match the first response independent of Redis.
-/// * v1 (legacy unwrapped rows) — a bare `MessageResponse` /
+/// * v1 (legacy unwrapped rows), a bare `MessageResponse` /
 ///   `BatchSendResponse`: wrapped into the same `ApiResponse {data, error}`
 ///   envelope at replay time, preserving SDK compatibility for rows written
 ///   before versioning.
 ///
-/// A corrupt, empty or unknown-version body is an EXPLICIT error — a
+/// A corrupt, empty or unknown-version body is an EXPLICIT error, a
 /// synthesized success must never answer a retry.
 fn replay_ledger_response(status: i64, body: &str) -> Result<Response, ApiError> {
     let status =
@@ -2618,7 +2618,7 @@ fn replay_ledger_response(status: i64, body: &str) -> Result<Response, ApiError>
         tracing::error!(
             stored_status = status.as_u16(),
             detail,
-            "corrupt persisted idempotency response — refusing to synthesize a success"
+            "corrupt persisted idempotency response, refusing to synthesize a success"
         );
         ApiError::Internal(
             "stored idempotent response is corrupt; contact support with the idempotency key"
@@ -2656,7 +2656,7 @@ fn replay_ledger_response(status: i64, body: &str) -> Result<Response, ApiError>
     Err(corrupt("unknown stored response schema version"))
 }
 
-/// THE canonical batch send handler — reused by the Postmark `/email/batch`
+/// THE canonical batch send handler, reused by the Postmark `/email/batch`
 /// and Resend `/emails/batch` compatibility routes exactly like
 /// [`send_message`] is by their single-send routes (same per-item validation,
 /// quota admission, ledger and queue inserts).
@@ -2684,7 +2684,7 @@ pub(crate) async fn send_batch(
     // ── F20: durable batch idempotency ledger ──────────────────────────
     //
     // Batch results used to live ONLY in the HTTP response (and the Redis
-    // accelerator): losing the response — or a Redis failure — made the
+    // accelerator): losing the response, or a Redis failure, made the
     // retry re-send the whole batch. The ledger record is committed in the
     // SAME transaction as every accepted message + queue row and stores the
     // full per-item results, so a retry replays them verbatim.
@@ -2729,17 +2729,17 @@ pub(crate) async fn send_batch(
         }
     }
 
-    // ── Phase 1 — admission, NO write transaction open (perf finding 2) ──
+    // ── Phase 1, admission, NO write transaction open (perf finding 2) ──
     //
     // Every read (templates, suppression union, sender domains) and every
     // per-item admission (validation, consent, quota reservation) runs on
     // the pool/Redis BEFORE the write transaction opens. Under the previous
     // shape each concurrent batch pinned 2+ pool connections and held its tx
-    // idle in transaction across up to 1+100 admission round trips — a
+    // idle in transaction across up to 1+100 admission round trips, a
     // pool-exhaustion/deadlock amplifier on the partitioned hot table.
     let (admitted, results) = admit_batch_items(&state, &auth, batch_key.as_deref(), &body).await?;
 
-    // ── Phase 2 — ONE short write transaction: ledger + inserts ─────────
+    // ── Phase 2, ONE short write transaction: ledger + inserts ─────────
     // Covers ONLY the idempotency-ledger row, the sender-domain `FOR SHARE`
     // re-resolution and the per-item message + email_queue inserts. Every
     // failure path compensates all live reservations and rolls the ledger
@@ -2758,8 +2758,8 @@ pub(crate) async fn send_batch(
 
 /// Everything the insert transaction needs for one batch item that survived
 /// admission. Collected while NO write transaction is open (perf finding 2):
-/// the admission's quota reservation runs on the pool/Redis — a second
-/// connection — and must never run with the batch's write tx pinned.
+/// the admission's quota reservation runs on the pool/Redis, a second
+/// connection, and must never run with the batch's write tx pinned.
 struct AdmittedBatchItem<'a> {
     index: usize,
     parsed: ParsedSendAddresses,
@@ -2772,7 +2772,7 @@ struct AdmittedBatchItem<'a> {
 /// every per-item admission runs BEFORE the write transaction opens.
 ///
 /// * loads every DISTINCT template once and probes suppression ONCE over the
-///   union of the batch's recipients — pure reads on the pool (perf P3);
+///   union of the batch's recipients, pure reads on the pool (perf P3);
 /// * resolves the batch's sender domains on the pool for VALIDATION only
 ///   (an autocommit read's `FOR SHARE` lock lasts for its statement alone);
 ///   the lock that actually protects the inserts is re-taken inside the
@@ -2780,12 +2780,12 @@ struct AdmittedBatchItem<'a> {
 /// * validates, parses, renders and reserves quota per item, filling one
 ///   result slot per batch item with the exact rejection reasons and
 ///   statuses of the pre-restructure path (a rejected item never touches
-///   quota — F23).
+///   quota, F23).
 ///
 /// Returns the admitted items in batch order plus one result slot per item
 /// (`None` = awaiting the insert phase). A quota-infrastructure failure
 /// compensates every reservation collected so far and aborts the batch with
-/// the admission error — no ledger record was opened yet, so nothing else
+/// the admission error, no ledger record was opened yet, so nothing else
 /// needs unwinding.
 async fn admit_batch_items<'a>(
     state: &AppState,
@@ -2806,7 +2806,7 @@ async fn admit_batch_items<'a>(
     let suppressed_recipients =
         preload_batch_suppressed_recipients(&state.db, &auth.tenant_id, &body.messages).await?;
 
-    // Validation-only domain map (pool read — see the phase-2 re-resolution
+    // Validation-only domain map (pool read, see the phase-2 re-resolution
     // in `commit_admitted_batch` for the lock that protects the inserts).
     let domain_ids = resolve_batch_domain_ids(
         &state.db,
@@ -2825,7 +2825,7 @@ async fn admit_batch_items<'a>(
 
     for (i, msg) in body.messages.iter().enumerate() {
         // F23: forbidden/invalid values are validated BEFORE this item's
-        // quota reservation — a rejected item never touches quota.
+        // quota reservation, a rejected item never touches quota.
         macro_rules! reject_item {
             ($error:expr) => {{
                 results[i] = Some(BatchResult {
@@ -2873,7 +2873,7 @@ async fn admit_batch_items<'a>(
         }
 
         // F48: structured mailbox parse (validation above accepted these
-        // forms, so failure is unreachable — the guard keeps it honest).
+        // forms, so failure is unreachable, the guard keeps it honest).
         let parsed = match parse_send_addresses(msg) {
             Ok(parsed) => parsed,
             Err(errors) => {
@@ -2883,7 +2883,7 @@ async fn admit_batch_items<'a>(
         };
 
         // Template sends: resolve from the batch preload BEFORE this item's
-        // quota reservation — a refused template rejects just this item and
+        // quota reservation, a refused template rejects just this item and
         // never touches quota. Items without a template borrow their request
         // body unchanged, so their path (and stored bytes) is identical.
         let rendered = match resolve_preloaded_template_send(&renderer, &preloaded_templates, msg) {
@@ -2915,12 +2915,12 @@ async fn admit_batch_items<'a>(
 
         // Per-recipient metering, same as single sends: the reservation covers
         // every delivery recipient of this batch item in one atomic quantity
-        // (F1). Insufficient quota rejects just this item — the reservation is
+        // (F1). Insufficient quota rejects just this item, the reservation is
         // all-or-nothing, so no partial quota is consumed.
         //
         // F22: the usage event id is derived from (tenant, batch key, item
         // index), so a concurrent duplicate batch can never reserve item
-        // quota twice — the billing layer de-duplicates on the event id.
+        // quota twice, the billing layer de-duplicates on the event id.
         let quota_reservation = match reserve_email_quota(
             state,
             &auth.tenant_id,
@@ -2940,7 +2940,7 @@ async fn admit_batch_items<'a>(
             Err(err) => {
                 // Quota infrastructure failure aborts the whole batch. No
                 // write transaction is open yet (this IS the admission
-                // phase — perf finding 2), so there is no ledger record to
+                // phase, perf finding 2), so there is no ledger record to
                 // roll back; the reservations collected so far live OUTSIDE
                 // any transaction and must be released explicitly —
                 // otherwise they leak and permanently consume the tenant's
@@ -2972,7 +2972,7 @@ async fn admit_batch_items<'a>(
 /// [`admit_batch_items`]; nothing here crosses to a second connection, so the
 /// transaction lasts exactly its own statements and is never `idle in
 /// transaction` across an admission round trip. Every failure path
-/// compensates ALL live reservations (F22 machinery — idempotent per usage
+/// compensates ALL live reservations (F22 machinery, idempotent per usage
 /// event id; duplicate admissions own no metering state to compensate) and
 /// rolls the in-transaction ledger record back, so a retry executes cleanly.
 ///
@@ -2989,7 +2989,7 @@ async fn commit_admitted_batch(
     admitted: Vec<AdmittedBatchItem<'_>>,
     mut results: Vec<Option<BatchResult>>,
 ) -> Result<Response, ApiError> {
-    // Nothing survived admission: no transaction, no ledger record — the
+    // Nothing survived admission: no transaction, no ledger record, the
     // caller's per-item rejections stand and a retry executes cleanly. (The
     // pre-restructure path opened a transaction, opened the ledger inside it
     // and rolled the whole thing back; the observable outcome is identical.)
@@ -3008,7 +3008,7 @@ async fn commit_admitted_batch(
         }
     };
 
-    // F21: open the ledger record inside this transaction — the batch's
+    // F21: open the ledger record inside this transaction, the batch's
     // queue rows and its stored response commit (or roll back) together.
     // Reservations PRE-DATE the transaction (perf finding 2), so every early
     // exit below compensates them all: this request queued nothing, and only
@@ -3098,7 +3098,7 @@ async fn commit_admitted_batch(
     // admitted items' domains. The phase-1 map (resolved on the pool for
     // validation) holds its locks only for that statement; this
     // in-transaction resolution is the one that actually protects the
-    // inserts — a domain disabled or deleted after admission blocks (FOR
+    // inserts, a domain disabled or deleted after admission blocks (FOR
     // SHARE) until this transaction ends instead of queueing unsigned mail.
     let mut unique_domains: std::collections::HashSet<String> = std::collections::HashSet::new();
     for item in &admitted {
@@ -3127,7 +3127,7 @@ async fn commit_admitted_batch(
         // The phase-1 validation map and this in-transaction resolution can
         // only disagree across the disable-between-phases race: a domain
         // that validated ready but no longer resolves here was disabled or
-        // deleted after admission — reject the item exactly like validation
+        // deleted after admission, reject the item exactly like validation
         // would have, instead of queueing unsigned mail with a NULL domain.
         let domain_id = match sender_domain(&item.parsed.from.addr_spec) {
             Some(domain) => match domain_ids.get(&domain) {
@@ -3149,13 +3149,13 @@ async fn commit_admitted_batch(
                 // the same NULL-domain insert the pre-restructure path used.
                 None => None,
             },
-            // No domain in the parsed addr-spec — nothing to protect; the
+            // No domain in the parsed addr-spec, nothing to protect; the
             // pre-restructure path inserted the same NULL-domain row.
             None => None,
         };
 
         // F23: per-item SAVEPOINT. Previously one failed item INSERT
-        // aborted the whole Postgres transaction — every later item then
+        // aborted the whole Postgres transaction, every later item then
         // failed with InFailedSqlTransaction and the commit lied about the
         // items it had "accepted". Each item's mutations now roll back to
         // their own savepoint, the transaction stays usable, and the
@@ -3202,7 +3202,7 @@ async fn commit_admitted_batch(
             Ok(None) => {
                 // Nothing was inserted: release the reserved quota (no message
                 // will be delivered) and report the item as a duplicate.
-                // F22: a duplicate billing event owns no quota — only a real
+                // F22: a duplicate billing event owns no quota, only a real
                 // insert is compensated.
                 compensate_reservation(state, &auth.tenant_id, &item.reservation).await;
                 tracing::warn!(
@@ -3241,16 +3241,16 @@ async fn commit_admitted_batch(
     let response = finalize_batch_response(results);
 
     // F20: store the full per-item results in the ledger BEFORE the commit,
-    // so they are durable the instant the batch itself is — independent of
+    // so they are durable the instant the batch itself is, independent of
     // whether the caller ever consumes the HTTP response. The persisted body
     // is the COMPLETE final HTTP envelope (`ApiResponse::success(..)`),
     // serialized once, so a replay returns the same shape as the first
     // response. Completion failures roll the whole batch back with idempotent
-    // quota compensation — no accepted-but-unrecorded items survive.
+    // quota compensation, no accepted-but-unrecorded items survive.
     if accepted > 0 {
         if let Some(key) = batch_key {
             // Rollback + idempotent quota compensation for every earlier
-            // item reservation — shared by both failure arms below.
+            // item reservation, shared by both failure arms below.
             let stored_body = match ledger_response_body(&response) {
                 Ok(stored_body) => stored_body,
                 Err(error) => {
@@ -3282,7 +3282,7 @@ async fn commit_admitted_batch(
                     error = ?error,
                     tenant_id = %auth.tenant_id,
                     idempotency_key = key,
-                    "idempotency ledger completion failed — batch rolled back"
+                    "idempotency ledger completion failed, batch rolled back"
                 );
                 return Err(ApiError::Internal("database error".into()));
             }
@@ -3356,7 +3356,7 @@ async fn commit_admitted_batch(
 /// Assemble the batch response from the per-item result slots: every item
 /// contributes exactly one slot (admission refusals in phase 1, insert
 /// outcomes in phase 2), so the accepted/rejected counts derive directly
-/// from them — identical to the pre-restructure counters.
+/// from them, identical to the pre-restructure counters.
 fn finalize_batch_response(results: Vec<Option<BatchResult>>) -> BatchSendResponse {
     let results: Vec<BatchResult> = results
         .into_iter()
@@ -3384,7 +3384,7 @@ async fn list_messages(
     // Validate sort column against allowlist to prevent SQL injection (HC-003)
     let sort_column = validate_sort_column(&params.sort_by)?;
     // Cursor pagination is only well-defined for the default `created_at`
-    // ordering — the cursor encodes a created_at timestamp, so honouring it
+    // ordering, the cursor encodes a created_at timestamp, so honouring it
     // under another sort column would page incorrectly (and let callers mix
     // cursors across sorts). Reject the combination instead.
     if params.cursor.is_some() && sort_column != "created_at" {
@@ -3395,7 +3395,7 @@ async fn list_messages(
     let limit = clamp_limit(params.limit, 100);
 
     // Cursor-based pagination: the cursor is a hex-encoded
-    // `created_at\nid` pair. Both halves are validated BEFORE binding — a
+    // `created_at\nid` pair. Both halves are validated BEFORE binding, a
     // decoded-but-bogus cursor used to reach the `::timestamp` cast and
     // surface as a database 500 instead of a client 400. The `id`
     // tie-break makes the ordering total so rows sharing a `created_at`
@@ -3477,7 +3477,7 @@ async fn list_messages(
     let more = has_more(&mut details, limit as usize);
 
     // Compute the next cursor from the last row. The (created_at, id) pair is
-    // only a valid cursor for created_at ordering — other sort columns emit
+    // only a valid cursor for created_at ordering, other sort columns emit
     // no cursor and clients fall back to offset paging.
     let next_cursor = if sort_column == "created_at" {
         details.last().and_then(|r| {
@@ -3573,7 +3573,7 @@ async fn cancel_message(
                 "message cannot be cancelled (already cancelled or in a terminal state)".into(),
             ));
         }
-        // F24: the irreversible dispatch boundary — a worker already
+        // F24: the irreversible dispatch boundary, a worker already
         // claimed (or delivered) at least one recipient copy. Rejected
         // with an explicit too-late result instead of racing the claim.
         CancelDeliveryResult::TooLate => {
@@ -3649,7 +3649,7 @@ async fn validate_send_with_domain_cache(
 ) -> Result<(), ApiError> {
     let mut errors = Vec::new();
 
-    // F48: structured mailbox parse FIRST — every subsequent check (email
+    // F48: structured mailbox parse FIRST, every subsequent check (email
     // validity, domain ownership, suppression, envelope construction) runs
     // on the extracted bare addr-specs. Bare AND "Name <addr>" forms are
     // accepted; malformed mailboxes are rejected naming the field.
@@ -3688,7 +3688,7 @@ async fn validate_send_with_domain_cache(
     if body.subject.contains('\r') || body.subject.contains('\n') {
         errors.push("subject must not contain line breaks".into());
     }
-    // RFC 5321 caps a header line at 998 characters — an over-long subject
+    // RFC 5321 caps a header line at 998 characters, an over-long subject
     // would be folded or rejected downstream by the MTA.
     if body.subject.chars().count() > MAX_SUBJECT_CHARS {
         errors.push(format!(
@@ -3776,7 +3776,7 @@ type QuotaReservation = SendAdmission;
 
 /// Exact error contract of the send endpoints' quota refusal, preserved
 /// verbatim from the inlined reservation logic.
-const QUOTA_EXCEEDED_MESSAGE: &str = "email quota exceeded: the plan volume and its overage allowance are exhausted — upgrade the plan or contact sales for a higher ceiling";
+const QUOTA_EXCEEDED_MESSAGE: &str = "email quota exceeded: the plan volume and its overage allowance are exhausted, upgrade the plan or contact sales for a higher ceiling";
 /// Exact error contract for a metering-infrastructure outage, preserved
 /// verbatim from the inlined reservation logic.
 const METERING_UNAVAILABLE_MESSAGE: &str = "billing quota enforcement is temporarily unavailable";
@@ -3816,7 +3816,7 @@ fn map_send_admission_error(error: SendAdmissionError) -> ApiError {
         }
         // F4: a marketing-class send to a recipient without an active
         // consent record is a validation refusal with the enforcer's named
-        // reason (e.g. "no marketing consent on file — recipient must opt
+        // reason (e.g. "no marketing consent on file, recipient must opt
         // in"), never a silent admit.
         SendAdmissionError::ConsentRefused { email, reason } => {
             ApiError::Validation(vec![format!(
@@ -3855,7 +3855,7 @@ async fn reserve_email_quota(
     let service = send_admission_service(state);
 
     // F4: the REST admission carries a QUANTITY (to + cc + bcc), so the
-    // recipient list cannot ride the admission request — run the SAME
+    // recipient list cannot ride the admission request, run the SAME
     // consent gate explicitly, before any quota is reserved. Transactional/
     // service categories are preference-exempt; a marketing-class send to a
     // recipient without an active consent record is refused with the
@@ -3879,10 +3879,10 @@ async fn reserve_email_quota(
         .map_err(map_send_admission_error)
 }
 
-/// F22: compensate a reservation — idempotently, and ONLY the loser.
+/// F22: compensate a reservation, idempotently, and ONLY the loser.
 ///
 /// * a `duplicate` reservation owns no metering state (the concurrent
-///   winner's event carries the quota) — compensating it would delete the
+///   winner's event carries the quota), compensating it would delete the
 ///   winner's usage record, so it is skipped;
 /// * a real insert is rolled back exactly once by the billing layer's
 ///   event-id keyed `rollback_usage_record`.
@@ -4093,8 +4093,8 @@ mod tests {
 
     /// A second pool over the same canonical database allowing EXACTLY ONE
     /// connection (statements logged, like [`logging_pool`]). Any second
-    /// concurrent checkout — e.g. an admission round trip running while a
-    /// write transaction is pinned — blocks until the pool's acquire timeout
+    /// concurrent checkout, e.g. an admission round trip running while a
+    /// write transaction is pinned, blocks until the pool's acquire timeout
     /// and fails, so a handler that completes on this pool provably never
     /// overlaps its write transaction with another connection (perf finding
     /// 2's regression guard).
@@ -4113,14 +4113,14 @@ mod tests {
             .expect("single-connection pool over the canonical test database")
     }
 
-    /// Parsed mailboxes for a test request body — bodies here always use
+    /// Parsed mailboxes for a test request body, bodies here always use
     /// valid addresses, so parsing is infallible in practice.
     fn test_parsed_addresses(body: &SendMessageRequest) -> ParsedSendAddresses {
         parse_send_addresses(body).expect("test bodies carry valid mailboxes")
     }
 
     /// The F48 shared contract fixture (packages/contract/send-contract.json)
-    /// — the SAME file every SDK serialization suite asserts against, so the
+    ///, the SAME file every SDK serialization suite asserts against, so the
     /// API and the SDKs cannot drift apart on priority or mailbox forms.
     fn shared_contract() -> serde_json::Value {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -4148,7 +4148,7 @@ mod tests {
 
     async fn insert_verified_domain(pool: &PgPool, tenant_id: &str, domain: &str) -> String {
         // Canonical domains.id is UUID (migration lineage): bind a real UUID
-        // — the send path binds domain_id strings that Postgres casts via
+        //, the send path binds domain_id strings that Postgres casts via
         // `::uuid`, and a String bind against the uuid column is a 42804.
         let id = Uuid::new_v4();
         sqlx::query(
@@ -4166,7 +4166,7 @@ mod tests {
     }
 
     /// A per-test unique sender domain: canonical `domains` carries a GLOBAL
-    /// unique index on name (a domain is claimable by one tenant — the API's
+    /// unique index on name (a domain is claimable by one tenant, the API's
     /// "already claimed" 409), and these tests share one database, so two
     /// parallel fixtures inserting `example.com` would collide on it.
     fn unique_sender_domain() -> String {
@@ -4855,7 +4855,7 @@ Bcc: victim@example.com"@example.com"#
         );
     }
 
-    /// F45: reserved operational keys are exclusively server-written — a
+    /// F45: reserved operational keys are exclusively server-written, a
     /// caller-supplied pending_recipients could override the validated
     /// recipient set.
     #[test]
@@ -5053,7 +5053,7 @@ Bcc: victim@example.com"@example.com"#
         assert!(validate_send_options(&body)
             .iter()
             .any(|e| e.contains("control characters")));
-        // F48: display-name reply_to forms are accepted — validation targets
+        // F48: display-name reply_to forms are accepted, validation targets
         // the extracted bare addr-spec.
         let mut body = options_request();
         body.reply_to = Some("Replies <reply@example.com>".into());
@@ -5205,7 +5205,7 @@ Bcc: victim@example.com"@example.com"#
         }
     }
 
-    /// The named-level mapping itself is pinned by the shared fixture — the
+    /// The named-level mapping itself is pinned by the shared fixture, the
     /// API, all five SDKs and this table must agree on high/normal/low.
     #[test]
     fn named_priority_mapping_matches_the_shared_contract() {
@@ -5231,7 +5231,7 @@ Bcc: victim@example.com"@example.com"#
     }
 
     /// Mailbox parsing must accept bare AND "Name <addr>" forms and always
-    /// validate the extracted bare addr-spec — pinned case-by-case by the
+    /// validate the extracted bare addr-spec, pinned case-by-case by the
     /// shared fixture.
     #[test]
     fn mailbox_parsing_matches_the_shared_contract() {
@@ -5367,7 +5367,7 @@ Bcc: victim@example.com"@example.com"#
             "per-attachment overage must name the decoded-size maximum: {errors:?}"
         );
 
-        // Aggregate: 3 × 9 MiB = 27 MiB > 25 MiB aggregate — rejected with
+        // Aggregate: 3 × 9 MiB = 27 MiB > 25 MiB aggregate, rejected with
         // the aggregate error naming the total, while each item is in range.
         let chunk = engine.encode(vec![0u8; 9 * 1024 * 1024]);
         let mut body = options_request();
@@ -5457,7 +5457,7 @@ Bcc: victim@example.com"@example.com"#
             usage_event_id("ten_1", Some("bk"), Some(3)),
             usage_event_id("ten_1", Some("bk"), Some(4))
         );
-        // Without a key there is no replay identity — random events.
+        // Without a key there is no replay identity, random events.
         assert_ne!(
             usage_event_id("ten_1", None, None),
             usage_event_id("ten_1", None, None)
@@ -5567,7 +5567,7 @@ Bcc: victim@example.com"@example.com"#
     }
 
     /// Legacy unwrapped rows (bare MessageResponse/BatchSendResponse) are
-    /// versioned up at replay time into the same envelope shape — SDKs see
+    /// versioned up at replay time into the same envelope shape, SDKs see
     /// one contract regardless of which deployment wrote the row.
     #[test]
     fn ledger_replay_wraps_legacy_unwrapped_rows() {
@@ -5586,7 +5586,7 @@ Bcc: victim@example.com"@example.com"#
         assert_eq!(replayed.status(), StatusCode::OK);
     }
 
-    /// Corrupt persisted bodies are rejected explicitly — never a
+    /// Corrupt persisted bodies are rejected explicitly, never a
     /// synthesized success.
     #[test]
     fn ledger_replay_rejects_corrupt_bodies() {
@@ -5696,7 +5696,7 @@ Bcc: victim@example.com"@example.com"#
     #[test]
     fn category_is_normalized_and_invalid_values_rejected() {
         // Normalization is the SHARED admission helper
-        // (`billing_service::send_admission::normalize_category`) — the same
+        // (`billing_service::send_admission::normalize_category`), the same
         // one the SMTP submission path calls.
         let mut body = options_request();
         body.category = Some("  MARKETING ".into());
@@ -5857,7 +5857,7 @@ Bcc: victim@example.com"@example.com"#
         .expect("fresh insert");
         create_tx.commit().await.expect("commit create");
 
-        // Simulate the worker CLAIMING the first recipient copy — the
+        // Simulate the worker CLAIMING the first recipient copy, the
         // irreversible dispatch boundary (F24).
         sqlx::query("UPDATE email_queue SET status = 'processing' WHERE message_id = $1::uuid AND \"to\" = 'to@example.com'")
             .bind(&persisted.id)
@@ -5982,7 +5982,7 @@ Bcc: victim@example.com"@example.com"#
         .expect("insert 0")
         .expect("persisted 0");
 
-        // Item 1: its statement FAILS (invalid uuid bind) — without a
+        // Item 1: its statement FAILS (invalid uuid bind), without a
         // savepoint this would abort the whole transaction and every later
         // item would fail with InFailedSqlTransaction (the F23 lie).
         sqlx::query("SAVEPOINT batch_item")
@@ -6000,7 +6000,7 @@ Bcc: victim@example.com"@example.com"#
             .await
             .expect("rollback to savepoint");
 
-        // Item 2: still succeeds — the transaction survived item 1's failure.
+        // Item 2: still succeeds, the transaction survived item 1's failure.
         sqlx::query("SAVEPOINT batch_item")
             .execute(&mut *tx)
             .await
@@ -6087,7 +6087,7 @@ Bcc: victim@example.com"@example.com"#
         }
     }
 
-    // ── F48 (DB): named mailboxes — bare envelope, preserved display names ──
+    // ── F48 (DB): named mailboxes, bare envelope, preserved display names ──
 
     #[tokio::test]
     async fn named_mailboxes_enqueue_bare_envelope_and_display_headers() {
@@ -6103,7 +6103,7 @@ Bcc: victim@example.com"@example.com"#
         let unique_domain = unique_sender_domain();
         let domain_id = insert_verified_domain(&pool, &tenant_id, &unique_domain).await;
 
-        // Every mailbox field uses a display form — exactly what the SDKs
+        // Every mailbox field uses a display form, exactly what the SDKs
         // serialize for named addresses.
         let mut body = options_request();
         body.from = format!("Ada Lovelace <ada@{unique_domain}>");
@@ -6465,7 +6465,7 @@ Bcc: victim@example.com"@example.com"#
             );
         }
         // Wrong-TYPE row ids: messages.id is a UUID column and the keyset
-        // predicate casts the bound value to uuid — a well-shaped but
+        // predicate casts the bound value to uuid, a well-shaped but
         // non-UUID id (SQL metacharacters included) must be refused at the
         // boundary, not surfaced as a database cast error (500).
         for bad_id in [
@@ -6577,7 +6577,7 @@ Bcc: victim@example.com"@example.com"#
             serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()
         }
 
-        // Empty body is an explicit error — never a synthesized success.
+        // Empty body is an explicit error, never a synthesized success.
         assert!(matches!(
             replay_ledger_response(202, "   "),
             Err(ApiError::Internal(message)) if message.contains("corrupt")
@@ -6826,7 +6826,7 @@ Bcc: victim@example.com"@example.com"#
         })
     }
 
-    /// Seed a canonical `templates` row — the SAME table (and tenant scope)
+    /// Seed a canonical `templates` row, the SAME table (and tenant scope)
     /// the template renderer and the templates routes read. ids are
     /// VARCHAR(26), exactly like the production writer mints them.
     async fn seed_send_template(
@@ -7162,8 +7162,8 @@ Bcc: victim@example.com"@example.com"#
     // pipeline, and the RENDERED content flows through the existing send
     // path (consent, quota, idempotency, queue).
 
-    /// Render + send persists the rendered subject/html/text — never the raw
-    /// template bytes — on both the message row and every queue row; an
+    /// Render + send persists the rendered subject/html/text, never the raw
+    /// template bytes, on both the message row and every queue row; an
     /// idempotent retry replays the same response; explicit request fields
     /// override the rendered values (the docs' precedence rule).
     #[tokio::test]
@@ -7307,7 +7307,7 @@ Bcc: victim@example.com"@example.com"#
         let from = format!("sender@{}", fixture.domain);
 
         // A template owned by ANOTHER tenant is indistinguishable from a
-        // missing one (tenant-scoped load) — both 404, nothing queued.
+        // missing one (tenant-scoped load), both 404, nothing queued.
         let foreign = seed_send_template(
             &fixture.pool,
             &fixture.other_tenant,
@@ -7344,13 +7344,13 @@ Bcc: victim@example.com"@example.com"#
         );
 
         // A template with a merge variable the caller did not supply is a
-        // NAMED 422 refusal — every missing variable is listed, nothing is
+        // NAMED 422 refusal, every missing variable is listed, nothing is
         // rendered partially and nothing is queued.
         let template_id = seed_send_template(
             &fixture.pool,
             &fixture.tenant,
             "Welcome {{ name }}",
-            "<p>Hi {{ name }} — see {{ link }}</p>",
+            "<p>Hi {{ name }}, see {{ link }}</p>",
             None,
         )
         .await;
@@ -7470,7 +7470,7 @@ Bcc: victim@example.com"@example.com"#
             "the rejected item must name the template contract: {body}"
         );
 
-        // Exactly the accepted item is queued — with rendered content.
+        // Exactly the accepted item is queued, with rendered content.
         let (messages, queued) = tenant_message_counts(&fixture.pool, &fixture.tenant).await;
         assert_eq!((messages, queued), (1, 1), "body: {body}");
         let (subject, html): (String, Option<String>) =
@@ -7899,7 +7899,7 @@ Bcc: victim@example.com"@example.com"#
         }
 
         // A wrong-TYPE cursor (valid encoding, non-UUID id half) is a 400
-        // — it used to pass the shape check and surface as a database
+        //, it used to pass the shape check and surface as a database
         // cast error (500) from the `id < $k::uuid` predicate.
         for bad_id in ["not-a-uuid", "x'; DROP TABLE messages; --"] {
             let cursor = encode_cursor(&format!("2026-01-01T00:00:00Z\n{bad_id}"));
@@ -8163,7 +8163,7 @@ Bcc: victim@example.com"@example.com"#
     }
 
     /// P3: a batch where every item shares ONE template must load that
-    /// template once and probe suppression once — not once per item — while
+    /// template once and probe suppression once, not once per item, while
     /// producing byte-identical per-item results to the single-item path.
     #[tokio::test]
     async fn batch_send_preloads_distinct_templates_and_suppressions_once() {
@@ -8582,7 +8582,7 @@ Bcc: victim@example.com"@example.com"#
         );
         // The statement trigger fails every write from the second on, so
         // item 0 lands and the following items are each rejected in their
-        // OWN savepoint — the shared transaction survives every one of them.
+        // OWN savepoint, the shared transaction survives every one of them.
         assert_eq!(
             accepted, 1,
             "item 0 landed: accepted={accepted} rejected={rejected}"
@@ -8828,7 +8828,7 @@ Bcc: victim@example.com"@example.com"#
 
         // The production flow cannot interleave statements inside one
         // transaction; prove the arm by removing the row between the two
-        // production statements of open_ledger_in_tx is impossible — so
+        // production statements of open_ledger_in_tx is impossible, so
         // drive the exact production statements manually: insert conflicts
         // (DO NOTHING), row re-read misses after a delete, plain insert
         // retries and wins.
@@ -9265,7 +9265,7 @@ Bcc: victim@example.com"@example.com"#
     // the ledger replayable; and the single-send path kept its exact
     // status/error contract.
 
-    /// Durable `emails_sent` metering rows for a tenant — the Postgres half
+    /// Durable `emails_sent` metering rows for a tenant, the Postgres half
     /// of a quota reservation. A compensated reservation deletes its row
     /// (and its `usage_operations` claim, in the same transaction), so a
     /// zero count after a forced failure is direct proof every reservation
@@ -9318,9 +9318,9 @@ Bcc: victim@example.com"@example.com"#
     }
 
     /// Perf finding 2's regression guard, by construction AND at runtime:
-    /// the batch path is two phases — [`admit_batch_items`] (every read and
+    /// the batch path is two phases, [`admit_batch_items`] (every read and
     /// per-item admission on the pool/Redis) feeds [`commit_admitted_batch`]
-    /// (ONE write transaction over the ledger + inserts) — and admission
+    /// (ONE write transaction over the ledger + inserts), and admission
     /// results feed the inserts. The whole flow runs on a pool allowing
     /// EXACTLY ONE connection: any admission round trip attempted while the
     /// write transaction pinned the only connection (the pre-restructure
@@ -9426,7 +9426,7 @@ Bcc: victim@example.com"@example.com"#
         assert_eq!(ledger_status, "complete");
 
         // The production entry point under the same single connection: a
-        // full send_batch (both phases internally) also completes — the
+        // full send_batch (both phases internally) also completes, the
         // pre-restructure shape could not, because its per-item admission
         // needed a second connection while its transaction pinned the only
         // one.
@@ -9452,7 +9452,7 @@ Bcc: victim@example.com"@example.com"#
     /// completion UPDATE fails mid-transaction) rolls the batch back and
     /// compensates EVERY item's reservation: the tenant's quota is fully
     /// released (zero `emails_sent` metering rows, zero usage-operation
-    /// claims), nothing is queued, and the ledger is replayable — the retry
+    /// claims), nothing is queued, and the ledger is replayable, the retry
     /// with the SAME key executes cleanly and re-reserves exactly once per
     /// accepted item.
     #[tokio::test]
@@ -9472,7 +9472,7 @@ Bcc: victim@example.com"@example.com"#
         ];
 
         // Fire 1 = the ledger OPEN insert (succeeds), fire 2 = the
-        // completion UPDATE (fails) — the whole write transaction rolls back.
+        // completion UPDATE (fails), the whole write transaction rolls back.
         crate::routes::fault::arm_write_fault(
             &fixture.pool,
             "idempotency_records",
@@ -9560,7 +9560,7 @@ Bcc: victim@example.com"@example.com"#
     /// fails mid-transaction compensates its reservation, leaves no ledger
     /// record behind, and the retry with the SAME key performs a clean fresh
     /// insert (replay-after-failure). A LIVE in-flight record still conflicts
-    /// — including on the batch route, before any admission runs.
+    ///, including on the batch route, before any admission runs.
     #[tokio::test]
     async fn send_retry_after_failure_replays_and_in_flight_still_conflicts() {
         let Some(fixture) = cov_fixture("msg_retry_idem").await else {
@@ -9625,7 +9625,7 @@ Bcc: victim@example.com"@example.com"#
             1
         );
 
-        // A live in-flight record on the BATCH route still 409s — and the
+        // A live in-flight record on the BATCH route still 409s, and the
         // refusal happens at preflight, before any admission or reservation.
         let batch = BatchSendRequest {
             messages: vec![cov_send_body(&fixture.domain, "in flight batch")],
@@ -9667,8 +9667,8 @@ Bcc: victim@example.com"@example.com"#
         );
     }
 
-    /// Single-send parity (perf finding 2): the reordered path — reservation
-    /// BEFORE the write transaction — answers with exactly the
+    /// Single-send parity (perf finding 2): the reordered path, reservation
+    /// BEFORE the write transaction, answers with exactly the
     /// pre-restructure statuses and error strings on every refusal arm,
     /// reserves nothing for a refused send (F23) and exactly the
     /// delivery-recipient quantity for an accepted one.
@@ -9700,7 +9700,7 @@ Bcc: victim@example.com"@example.com"#
             (1, 1)
         );
 
-        // 404 template — refused before any reservation (F23).
+        // 404 template, refused before any reservation (F23).
         let templated: SendMessageRequest = serde_json::from_value(serde_json::json!({
             "from": format!("sender@{}", fixture.domain),
             "to": ["to@example.com"],
@@ -9760,7 +9760,7 @@ Bcc: victim@example.com"@example.com"#
             1
         );
 
-        // 400 unverified sender domain — the exact pre-restructure wording.
+        // 400 unverified sender domain, the exact pre-restructure wording.
         let error = send_message(
             State(fixture.state.clone()),
             cov_auth(&fixture),
@@ -9779,7 +9779,7 @@ Bcc: victim@example.com"@example.com"#
             1
         );
 
-        // 422 consent gate — a marketing send without a consent record is a
+        // 422 consent gate, a marketing send without a consent record is a
         // named validation refusal (F4), still pre-transaction.
         let no_consent: SendMessageRequest = serde_json::from_value(serde_json::json!({
             "from": format!("sender@{}", fixture.domain),
@@ -9806,7 +9806,7 @@ Bcc: victim@example.com"@example.com"#
             1
         );
 
-        // 403 quota exceeded — the EXACT documented contract message.
+        // 403 quota exceeded, the EXACT documented contract message.
         seed_tight_email_plan(&fixture.pool, &fixture.tenant, 1).await;
         let error = send_message(
             State(fixture.state.clone()),
@@ -9827,7 +9827,7 @@ Bcc: victim@example.com"@example.com"#
             "the quota-refused reservation left nothing behind"
         );
 
-        // 503 open tenant circuit — refused before any admission.
+        // 503 open tenant circuit, refused before any admission.
         let redis_url = std::env::var("TEST_REDIS_URL")
             .ok()
             .filter(|value| !value.trim().is_empty())

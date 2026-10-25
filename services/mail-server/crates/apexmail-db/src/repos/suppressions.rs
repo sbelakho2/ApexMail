@@ -71,7 +71,7 @@ impl SuppressionsRepo {
     /// Remove an email from the suppression list.
     ///
     /// `id` is the VARCHAR(26) short id stored by [`create`]/[`bulk_create`]
-    /// (migration 075/088) — binding it as text matches the column type.
+    /// (migration 075/088), binding it as text matches the column type.
     pub async fn delete(pool: &PgPool, tenant_id: &str, id: &str) -> Result<bool, sqlx::Error> {
         let result = sqlx::query("DELETE FROM suppressions WHERE id = $1 AND tenant_id = $2")
             .bind(id)

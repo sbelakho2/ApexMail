@@ -1,4 +1,4 @@
-//! ApexMail database migrator — the deployment-time migration gate.
+//! ApexMail database migrator, the deployment-time migration gate.
 //!
 //! Every production deploy path (`.github/workflows/deploy-hetzner.yml` and
 //! `deploy/scripts/deploy.sh`) runs the `migrator` binary as a one-shot
@@ -28,7 +28,7 @@ use anyhow::{Context, Result};
 ///
 /// The path is resolved relative to this crate's manifest directory
 /// (`services/mail-server/crates/migrator`) at BUILD time, so the binary
-/// carries the migrations that match its own build — no runtime mounting of
+/// carries the migrations that match its own build, no runtime mounting of
 /// SQL files, no drift between the image and the repo.
 pub static MIGRATIONS: sqlx::migrate::Migrator = sqlx::migrate!("./../../migrations");
 
@@ -37,7 +37,7 @@ pub static MIGRATIONS: sqlx::migrate::Migrator = sqlx::migrate!("./../../migrati
 ///
 /// `to_regclass(...)` returns a ROW with a NULL column (not zero rows) when
 /// the relation does not exist, so the scalar must decode as `Option<String>`
-/// — a plain `String` fails with "unexpected null" on a completely fresh
+///, a plain `String` fails with "unexpected null" on a completely fresh
 /// database (pipeline finding F2).
 pub async fn applied_count(pool: &sqlx::PgPool) -> Result<i64> {
     let table: Option<Option<String>> =
@@ -55,7 +55,7 @@ pub async fn applied_count(pool: &sqlx::PgPool) -> Result<i64> {
 }
 
 /// Apply every pending canonical migration to `pool`, then extend the
-/// partition runway — the exact sequence the deploy-gate binary performs on
+/// partition runway, the exact sequence the deploy-gate binary performs on
 /// every production deploy. Idempotent: re-running against an up-to-date
 /// database is a no-op that still succeeds.
 pub async fn apply_migrations(pool: &sqlx::PgPool) -> Result<()> {
@@ -100,7 +100,7 @@ pub async fn apply_migrations(pool: &sqlx::PgPool) -> Result<()> {
                 .context("failed to extend the partition runway")?;
             println!("migrator: partition runway extended");
         }
-        None => println!("migrator: create_future_partitions absent — runway not extended"),
+        None => println!("migrator: create_future_partitions absent, runway not extended"),
     }
 
     Ok(())
@@ -114,19 +114,19 @@ pub async fn apply_migrations(pool: &sqlx::PgPool) -> Result<()> {
 /// two lineages disagree on identifier and column shapes (users.id
 /// VARCHAR(26) vs UUID, domains.verified vs is_verified, api_keys.key_prefix
 /// vs prefix, idempotency_keys vs idempotency_records, …), which made
-/// DB-backed tests pass against a schema production never runs — and fail
+/// DB-backed tests pass against a schema production never runs, and fail
 /// against the canonical one. Everything in this module routes through
 /// [`MIGRATIONS`]/[`apply_migrations`] so a test database is byte-for-byte
 /// what a deploy produces.
 ///
 /// Provisioning contract (audit F01, remediated):
 ///
-/// * `Ok(Some(pool))` — the database carries the complete pinned canonical
+/// * `Ok(Some(pool))`, the database carries the complete pinned canonical
 ///   migration ledger (verified per clone before the pool is returned);
-/// * `Ok(None)` — the suite is EXPLICITLY UNCONFIGURED (no / blank
+/// * `Ok(None)`, the suite is EXPLICITLY UNCONFIGURED (no / blank
 ///   `TEST_DATABASE_URL`, blank base URL). This is the only situation that
 ///   yields `None`;
-/// * `Err(ProvisionError)` — the infrastructure was configured but failed
+/// * `Err(ProvisionError)`, the infrastructure was configured but failed
 ///   (unreachable server, denied clone, migration apply failure, foreign
 ///   lineage, incomplete clone ledger). Callers MUST fail the test, not
 ///   soft-skip: a configured-database failure that reads as "skipped" is a
@@ -144,7 +144,7 @@ pub mod test_support {
     /// suite soft-skips (`Ok(None)` → the caller's `let … else { return }`).
     /// Release CI (Woodpecker) sets `APEXMAIL_RELEASE_TEST_MODE=1` and
     /// provides Postgres/Redis/ClickHouse, so a missing variable there means
-    /// a broken fixture — the guard PANICS naming the variable instead of
+    /// a broken fixture, the guard PANICS naming the variable instead of
     /// letting a REQUIRES-INFRASTRUCTURE test degrade into a green no-op.
     ///
     /// Call this at every soft-skip decision point, BEFORE the
@@ -160,7 +160,7 @@ pub mod test_support {
         }
         if std::env::var("APEXMAIL_RELEASE_TEST_MODE").as_deref() == Ok("1") {
             panic!(
-                "APEXMAIL_RELEASE_TEST_MODE: required variable {env_var} is missing — \
+                "APEXMAIL_RELEASE_TEST_MODE: required variable {env_var} is missing, \
                  release CI must not skip infrastructure tests"
             );
         }
@@ -198,7 +198,7 @@ pub mod test_support {
             format!(
                 "canonical test-database provisioning failed at stage '{}': {} \
                  (TEST_DATABASE_URL is configured, so this is an infrastructure \
-                 failure — fix the server, do not skip the test)",
+                 failure, fix the server, do not skip the test)",
                 self.stage, self.detail
             )
         }
@@ -213,7 +213,7 @@ pub mod test_support {
     impl std::error::Error for ProvisionError {}
 
     /// Apply the canonical production chain to an existing pool via
-    /// [`super::apply_migrations`] — the same initializer the deploy-gate
+    /// [`super::apply_migrations`], the same initializer the deploy-gate
     /// binary runs (migration apply + partition runway extension).
     /// Idempotent; safe to call concurrently behind a Postgres advisory lock.
     pub async fn apply_canonical_migrations(pool: &PgPool) -> anyhow::Result<()> {
@@ -222,11 +222,11 @@ pub mod test_support {
 
     /// Does `_sqlx_migrations` agree with the embedded canonical chain?
     ///
-    /// * `None` — could not determine (probe failed; e.g. transient
+    /// * `None`, could not determine (probe failed; e.g. transient
     ///   connection exhaustion). Callers must NOT treat this as unhealthy.
-    /// * `Some(true)` — applied set is empty or a strict prefix of the
+    /// * `Some(true)`, applied set is empty or a strict prefix of the
     ///   canonical chain (pending migrations can be applied incrementally).
-    /// * `Some(false)` — the database carries a FOREIGN migration lineage
+    /// * `Some(false)`, the database carries a FOREIGN migration lineage
     ///   (different versions/checksums, e.g. the archived `tools/migrations`
     ///   tree, or a newer build's chain). `Migrator::run` would abort with a
     ///   version/checksum mismatch; the only sound move is recreate.
@@ -239,7 +239,7 @@ pub mod test_support {
         .await
         .ok()?;
         if !migrations_table {
-            // Fresh database — nothing applied yet; canonical by definition.
+            // Fresh database, nothing applied yet; canonical by definition.
             return Some(true);
         }
 
@@ -351,7 +351,7 @@ pub mod test_support {
     /// fresh clone queues behind every other clone's filesystem copy under a
     /// full-suite parallel run, and 5s occasionally expired mid-copy with no
     /// server-side error at all (`clone-connect: pool timed out`, 2026-10-11)
-    /// — a pure I/O-queue artifact, not a provisioning fault. The retry loop
+    ///, a pure I/O-queue artifact, not a provisioning fault. The retry loop
     /// still fails closed on a genuinely absent database (an immediate
     /// server refusal, unaffected by this bound).
     async fn connect_clone_with_recreate(
@@ -448,7 +448,7 @@ pub mod test_support {
     /// Different migration revisions get DISTINCT template names (audit F01):
     /// the name encodes the chain's length, newest version, and an FNV-1a
     /// digest of every (version, checksum) pair, so a template cloned from an
-    /// older/newer build's chain is never silently reused — the fresh build
+    /// older/newer build's chain is never silently reused, the fresh build
     /// provisions and verifies its own template.
     /// Attempt count for the template-clone retry ladder. The wide default
     /// absorbs a full workspace's clone queue; tests that MEASURE the window
@@ -501,7 +501,7 @@ pub mod test_support {
         )
     }
 
-    // "AXPM-TPL" — cluster-wide exclusive lock guarding template
+    // "AXPM-TPL", cluster-wide exclusive lock guarding template
     // creation/top-up. Per-test clones run WITHOUT the lock (they must
     // not serialize); a clone racing a top-up retries below.
     const TEMPLATE_LOCK_KEY: i64 = 0x4158_504D_5450_4C21;
@@ -518,7 +518,7 @@ pub mod test_support {
     static TEMPLATE_READY: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
 
     /// Create-or-top-up the chain's template database under the cluster
-    /// advisory lock, then VERIFY it. Returns Err on any failure — there is
+    /// advisory lock, then VERIFY it. Returns Err on any failure, there is
     /// deliberately no direct-apply fallback branch any more: the fallback
     /// was documented but never invoked, and a configured failure must
     /// fail the test (audit F01), not limp through a second slow path.
@@ -526,7 +526,7 @@ pub mod test_support {
     /// server behind `base_url` (NO test database is created). The CI test
     /// stage calls this BEFORE the parallel suite so no test pays the
     /// cold-template build (hundreds of migrations, minutes) inside the
-    /// advisory-lock window — fresh ephemeral Postgres instances made every
+    /// advisory-lock window, fresh ephemeral Postgres instances made every
     /// suite run pay it, and the queued provisioners timed out
     /// (`template-exists-check: pool timed out`, deploy 2026-10-11).
     pub async fn prepare_canonical_template(base_url: &str) -> Result<(), String> {
@@ -642,7 +642,7 @@ pub mod test_support {
 
         let healthy = if template_exists {
             // Connect, verify/complete the lineage, disconnect (a connected
-            // template blocks clones — keep this window short and exclusive
+            // template blocks clones, keep this window short and exclusive
             // to the advisory lock).
             let template_pool = connect_template().await?;
             let lineage = canonical_lineage(&template_pool).await;
@@ -710,7 +710,7 @@ pub mod test_support {
     /// including backends owned by other roles, which requires superuser or
     /// `pg_signal_backend`. A non-superuser test role therefore fails with
     /// "must be a member of the role whose process is being terminated"
-    /// whenever a session has not finished closing — which made provisioning
+    /// whenever a session has not finished closing, which made provisioning
     /// fail intermittently (observed as a rotating handful of DB-backed tests
     /// failing under repeat runs).
     ///
@@ -816,7 +816,7 @@ pub mod test_support {
             "drop-database",
             format!(
                 "drop {db_name}: {error}. The plain drop could not release it either (last \
-                 error: {}). A session owned by a role other than `{}` is still connected — \
+                 error: {}). A session owned by a role other than `{}` is still connected, \
                  terminate it, or grant the test role membership in pg_signal_backend.",
                 last.map(|e| e.to_string()).unwrap_or_else(|| "none".into()),
                 "the test role",
@@ -835,7 +835,7 @@ pub mod test_support {
     /// is therefore applied exactly ONCE into a per-revision template
     /// (under a cluster advisory lock, published only after migrations +
     /// lineage verification complete), and each test database is a
-    /// `CREATE DATABASE ... TEMPLATE` clone — a fast filesystem copy with
+    /// `CREATE DATABASE ... TEMPLATE` clone, a fast filesystem copy with
     /// no DDL storm.
     ///
     /// The clone's migration ledger is VERIFIED before the pool is
@@ -884,7 +884,7 @@ pub mod test_support {
         drop_database(&admin, db_name).await?;
         let template_db = canonical_template_db();
         let mut last_error: Option<sqlx::Error> = None;
-        // Backoff ladder: 250ms for the first 24 attempts, then 1s — under
+        // Backoff ladder: 250ms for the first 24 attempts, then 1s, under
         // a full workspace parallel run the template can be held by another
         // process's top-up or clone for well over a flat 12-second window.
         let attempts = clone_retry_attempts();
@@ -905,7 +905,7 @@ pub mod test_support {
                         || text.contains("accessed by other users");
                     // A killed drop can leave the catalog row behind for an
                     // instant: the duplicate-key CREATE failure is the same
-                    // transient class — drop again and retry.
+                    // transient class, drop again and retry.
                     let stale_catalog_row = text.contains("pg_database_datname_index");
                     if stale_catalog_row {
                         drop_database(&admin, db_name).await?;
@@ -988,7 +988,7 @@ pub mod test_support {
     /// provisions `<base>_<db_suffix>` (drop + create + canonical migrate).
     ///
     /// `Ok(None)` ONLY when `TEST_DATABASE_URL` is unset/blank (the suite
-    /// is explicitly unconfigured — callers soft-skip). A configured server
+    /// is explicitly unconfigured, callers soft-skip). A configured server
     /// that cannot provision the database is `Err(ProvisionError)`: panic
     /// and fail the test (audit F01).
     /// Compose a per-test database name that CANNOT exceed Postgres's
@@ -1102,13 +1102,13 @@ pub mod test_support {
     /// SHARED canonical database named `db_name` is created/reused via
     /// [`shared_canonical_db`], with the audit-F01 contract already applied —
     ///
-    /// * `None` — `TEST_DATABASE_URL` is unset/blank (the suite is explicitly
+    /// * `None`, `TEST_DATABASE_URL` is unset/blank (the suite is explicitly
     ///   unconfigured; the caller soft-skips),
-    /// * `Some(pool)` — the shared database is ready (the pool is a
+    /// * `Some(pool)`, the shared database is ready (the pool is a
     ///   short-lived administrative pool for a verification pass; close it
     ///   and hand out per-test pools via [`database_url_for`] +
     ///   [`connect_pool`]),
-    /// * a configured provisioning failure PANICS with the F01 message — it
+    /// * a configured provisioning failure PANICS with the F01 message, it
     ///   must fail the suite, never read as a green skip.
     ///
     /// The caller owns the process-local `tokio::sync::OnceCell` gating (see
@@ -1170,11 +1170,11 @@ pub mod test_support {
 
     /// The owner + hostile role pairing a hostile-permission test needs.
     ///
-    /// * [`HostileDb::owner`] — the `TEST_DATABASE_URL` identity. Seeding,
+    /// * [`HostileDb::owner`], the `TEST_DATABASE_URL` identity. Seeding,
     ///   DDL fault injection (DROP/ALTER/DROP COLUMN) and the REVOKE
     ///   statements run here: they need table ownership, which the unmanaged
     ///   role must never have.
-    /// * [`HostileDb::hostile`] — every connection runs AS
+    /// * [`HostileDb::hostile`], every connection runs AS
     ///   [`HostileDb::role`] (via `SET ROLE` on the derived URL, or a direct
     ///   connection when `TEST_HOSTILE_DATABASE_URL` is set). The machinery
     ///   under test runs here so a revoked privilege genuinely bites.
@@ -1183,7 +1183,7 @@ pub mod test_support {
         pub hostile: PgPool,
         /// The role every [`HostileDb::hostile`] connection resolves as
         /// (`SELECT current_user` was verified to equal this before the
-        /// handle was returned — a provisioning mistake cannot silently
+        /// handle was returned, a provisioning mistake cannot silently
         /// re-create the superuser no-op this helper exists to fix).
         pub role: String,
     }
@@ -1197,7 +1197,7 @@ pub mod test_support {
         (!user.is_empty()).then(|| user.to_string())
     }
 
-    /// Create [`HOSTILE_TEST_ROLE`] if absent — a plain LOGIN role with NONE
+    /// Create [`HOSTILE_TEST_ROLE`] if absent, a plain LOGIN role with NONE
     /// of SUPERUSER/CREATEDB/CREATEROLE/REPLICATION. Serialized by a cluster
     /// advisory lock so parallel nextest processes provisioning the role on
     /// the same server cannot race the existence check. Must be called on a
@@ -1205,8 +1205,8 @@ pub mod test_support {
     ///
     /// The lock is taken in its OWN statement before the conditional CREATE:
     /// inside one DO block the EXISTS probe would read the statement's
-    /// statement-start snapshot — i.e. BEFORE the lock (and the sibling's
-    /// just-committed role) became visible — and two processes could then
+    /// statement-start snapshot, i.e. BEFORE the lock (and the sibling's
+    /// just-committed role) became visible, and two processes could then
     /// both attempt the CREATE, the loser dying on
     /// `pg_authid_rolname_index`. An existing role is success either way.
     async fn ensure_hostile_role(pool: &PgPool) -> Result<(), ProvisionError> {
@@ -1291,13 +1291,13 @@ pub mod test_support {
     ///
     /// Role resolution, in order:
     ///
-    /// 1. `TEST_HOSTILE_DATABASE_URL` — connect directly as the URL's role
+    /// 1. `TEST_HOSTILE_DATABASE_URL`, connect directly as the URL's role
     ///    (credentials from the operator's environment; the db segment is
     ///    rewritten to this test's fresh database);
-    /// 2. the `TEST_DATABASE_URL` connection IS a superuser — provision
+    /// 2. the `TEST_DATABASE_URL` connection IS a superuser, provision
     ///    [`HOSTILE_TEST_ROLE`] (idempotent) and derive the hostile pool
     ///    from the same connect options, every connection `SET ROLE`d;
-    /// 3. otherwise — no hostile role is provisionable. The soft-skip
+    /// 3. otherwise, no hostile role is provisionable. The soft-skip
     ///    contract decides: under `APEXMAIL_RELEASE_TEST_MODE=1` this PANICS
     ///    naming [`HOSTILE_DATABASE_URL_VAR`]; a developer-local run
     ///    soft-skips (`Ok(None)`), exactly like an unset fixture variable.
@@ -1387,7 +1387,7 @@ pub mod test_support {
             assert_soft_skip_allowed(HOSTILE_DATABASE_URL_VAR);
             eprintln!(
                 "skipping {test_name}: the TEST_DATABASE_URL role is not a superuser, so \
-                 {HOSTILE_TEST_ROLE} cannot be provisioned — set {HOSTILE_DATABASE_URL_VAR} \
+                 {HOSTILE_TEST_ROLE} cannot be provisioned, set {HOSTILE_DATABASE_URL_VAR} \
                  to run hostile-permission tests"
             );
             return Ok(None);
@@ -1454,7 +1454,7 @@ pub mod test_support {
     /// The identity gate: the hostile pool MUST resolve `current_user` as
     /// the unprivileged role before any test touches it. A pool that fails
     /// to connect, or connects with the wrong identity (e.g. the role was
-    /// dropped, or SET ROLE did not take), is a configured failure — the
+    /// dropped, or SET ROLE did not take), is a configured failure, the
     /// superuser no-op this helper exists to eliminate must never come back
     /// silently.
     async fn verify_hostile_identity(
@@ -1481,7 +1481,7 @@ pub mod test_support {
                 "hostile-identity",
                 format!(
                     "the hostile pool connects as {current:?}, not as the unprivileged role \
-                     {role:?} — a superuser identity would make every REVOKE a silent no-op"
+                     {role:?}, a superuser identity would make every REVOKE a silent no-op"
                 ),
             ));
         }
@@ -1493,7 +1493,7 @@ pub mod test_support {
     /// Suites whose tests intentionally share ONE database (sales-autopilot's
     /// `apexmail_sales_test`, provisioned once per suite under a
     /// `#[cfg(test)]` process-local OnceCell) run many nextest PROCESSES in
-    /// parallel — each process would otherwise DROP+CREATE the same name,
+    /// parallel, each process would otherwise DROP+CREATE the same name,
     /// racing into `pg_database_datname_index` duplicates and FORCE-dropping a
     /// database a sibling is actively using. This variant takes a Postgres
     /// advisory lock keyed on the database name and reuses an existing
@@ -1563,7 +1563,7 @@ pub mod test_support {
                     .max_connections(4)
                     // Test-facing pool: tests hold connections for their whole
                     // body, and under a full-suite parallel run connection
-                    // handshakes queue behind clone-copy I/O — the deploy host
+                    // handshakes queue behind clone-copy I/O, the deploy host
                     // showed starvation windows beyond a minute (2026-10-11),
                     // so a 5s acquire turned infrastructure queueing into
                     // `pool acquire: PoolTimedOut` test failures.
@@ -1628,12 +1628,12 @@ pub mod test_support {
     // Several suites need a PRIVATE Redis they can kill mid-test (fault
     // injection) or poison without racing siblings. The dev machine has a
     // `redis-server` binary on PATH; the deploy host and CI runners ship
-    // Redis as a CONTAINER IMAGE only — hardcoded `redis-server` spawns
+    // Redis as a CONTAINER IMAGE only, hardcoded `redis-server` spawns
     // therefore failed (or silently skipped) the deploy-host suite
     // (2026-10-11). Prefer the binary, fall back to a throwaway
     // `redis:7-alpine` container (the same image and flags as
     // `ci_ephem_redis`). There is deliberately no third path: neither
-    // available is a HARD failure — a test that cannot run must fail, not
+    // available is a HARD failure, a test that cannot run must fail, not
     // skip (audit CI-2).
 
     /// A private, throwaway Redis on an ephemeral loopback port, killed on
@@ -1721,7 +1721,7 @@ pub mod test_support {
     }
 
     /// Wait for the child's "Ready to accept connections" banner. `None`
-    /// when the child exited first (e.g. it lost the port race) — the caller
+    /// when the child exited first (e.g. it lost the port race), the caller
     /// retries; a differently-shaped failure panics.
     fn wait_for_redis_banner(
         mut child: std::process::Child,
@@ -1755,7 +1755,7 @@ pub mod test_support {
     /// `ci_ephem_redis` uses. The host port is DOCKER-ASSIGNED
     /// (`127.0.0.1::6379`) and read back via `docker port`: reserving the
     /// port first and binding it moments later lost races between parallel
-    /// tests — the loser's `docker run` died with "port is already
+    /// tests, the loser's `docker run` died with "port is already
     /// allocated" (deploy 2026-10-11).
     fn spawn_container_redis() -> IsolatedRedisServer {
         let name = format!(
@@ -1810,7 +1810,7 @@ pub mod test_support {
         // from a port-forward proxy whose container is already gone, which
         // surfaced as a mid-test "connection driver unexpectedly terminated".
         // Bounded retry: `docker exec` itself queues behind the whole host's
-        // container load, so one slow exec is not a dead server — a genuinely
+        // container load, so one slow exec is not a dead server, a genuinely
         // broken proxy still fails every attempt and the container is
         // removed (deploy 2026-10-13: a single slow exec flaked this check).
         let mut answered = false;
@@ -1923,7 +1923,7 @@ pub mod test_support {
         }
 
         /// The database ROLE the provisioning code connects as (parsed from
-        /// the base URL userinfo — not the database name).
+        /// the base URL userinfo, not the database name).
         fn test_role(server_part: &str) -> String {
             let (_scheme, rest) = server_part.split_once("://").expect("scheme");
             let userinfo = rest.split('@').next().unwrap_or(rest);
@@ -1992,11 +1992,11 @@ pub mod test_support {
         }
 
         /// Build a runtime Migrator over a temp directory holding the
-        /// canonical migration files with `version <= upto` — the real chain,
+        /// canonical migration files with `version <= upto`, the real chain,
         /// truncated, without touching the frozen source tree.
         async fn subset_migrator(upto: i64) -> sqlx::migrate::Migrator {
             let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../migrations");
-            // nosemgrep: rust.lang.security.temp-dir.temp-dir — test fixture under a unique pid/uuid path — no predictable-name temp collision
+            // nosemgrep: rust.lang.security.temp-dir.temp-dir, test fixture under a unique pid/uuid path, no predictable-name temp collision
             let dir = std::env::temp_dir().join(format!(
                 "apexmail_migrator_subset_{upto}_{}",
                 std::process::id()
@@ -2224,7 +2224,7 @@ pub mod test_support {
             assert_eq!(canonical_lineage(&pool).await, Some(true));
 
             // Foreign checksum at the first row: foreign lineage (no restore
-            // needed — the probe is dropped right after).
+            // needed, the probe is dropped right after).
             sqlx::query(
                 "UPDATE _sqlx_migrations SET checksum = '\\x00'::bytea \
                          WHERE version = (SELECT min(version) FROM _sqlx_migrations)",
@@ -2544,7 +2544,7 @@ pub mod test_support {
         /// to prove privilege-dependent failure paths with dedicated probe
         /// roles instead of touching shared role settings.
         // PROBE_PASSWORD (2026-10-20): the roles these tests create must be
-        // created WITH a password and connected WITH that password — a
+        // created WITH a password and connected WITH that password, a
         // passwordless connect only works on trust-auth servers (the dev
         // Mac) and fails 28P01 on scram-only services (the postgres:16-alpine
         // CI service). One fixed probe password keeps every host shape equal.
@@ -3162,7 +3162,7 @@ pub mod test_support {
         ///
         /// A full UUID never fit the VARCHAR(26) columns, so the orphan arm
         /// is reachable only on a deployment whose columns were widened
-        /// mid-upgrade — the probe reproduces exactly that shape.
+        /// mid-upgrade, the probe reproduces exactly that shape.
         #[tokio::test]
         async fn migration_229_quarantines_legacy_user_ids_and_skips_orphans() {
             let _template_guard = template_clone_guard().await;
@@ -3362,7 +3362,7 @@ mod tests {
     /// silently take its skip branch (observed as uncovered lines 962-980).
     static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-    /// A blank base URL is the ONLY non-error way to get `Ok(None)` — an
+    /// A blank base URL is the ONLY non-error way to get `Ok(None)`, an
     /// explicitly unconfigured suite (audit F01).
     #[tokio::test]
     async fn blank_base_url_is_none_not_an_error() {

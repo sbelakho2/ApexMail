@@ -190,7 +190,7 @@ async fn audit_template(
 
 /// The canonical template create handler. `pub(crate)` because the provider
 /// importer (`routes::provider_import::templates`) calls THIS function per
-/// imported template — one writer, one validator, one v1 snapshot, one audit
+/// imported template, one writer, one validator, one v1 snapshot, one audit
 /// path; an import can never diverge from `POST /v1/templates`.
 pub(crate) async fn create_template(
     State(state): State<AppState>,
@@ -208,7 +208,7 @@ pub(crate) async fn create_template(
         body.text_body.as_deref(),
     )?;
 
-    // templates.id is VARCHAR(26) — generate a 26-char text id (not a UUID,
+    // templates.id is VARCHAR(26), generate a 26-char text id (not a UUID,
     // whose 36-char hyphenated form overflows the column).
     let id = apexmail_lib::id::generate_id("", 26);
     let now = Utc::now();
@@ -275,10 +275,10 @@ async fn list_templates(
     require_scopes(&auth, &["templates:read"])?;
 
     // SM3 (audit F8): `cursor` used to be accepted here as a raw integer
-    // OFFSET — contradicting the crate's documented opaque-keyset contract.
+    // OFFSET, contradicting the crate's documented opaque-keyset contract.
     // The mislabeled param is gone; pagination is the honestly-named
     // `offset`. (This list returns a plain array, so a true keyset migration
-    // needs the CursorPage envelope — a breaking client contract — and is
+    // needs the CursorPage envelope, a breaking client contract, and is
     // deliberately out of this pass.)
     let offset = params.offset.clamp(0, 100_000);
     let rows = sqlx::query_as::<_, TemplateRow>(
@@ -826,7 +826,7 @@ mod tests {
 
     /// Render-contract pin (docs/api/endpoints/templates.md "Template Syntax
     /// and Security"): variable VALUES are HTML-entity-escaped in the render
-    /// output — an XSS payload can never survive substitution — while a
+    /// output, an XSS payload can never survive substitution, while a
     /// placeholder with no supplied variable stays verbatim.
     #[test]
     fn test_substitute_escapes_values_and_keeps_missing_placeholders_verbatim() {
@@ -839,10 +839,10 @@ mod tests {
             "sig".into(),
             serde_json::Value::String("\"><img src=x onerror=alert(1)>".into()),
         );
-        let result = substitute("<p>Hello {{name}} — {{sig}} / {{missing}}</p>", &vars);
+        let result = substitute("<p>Hello {{name}}, {{sig}} / {{missing}}</p>", &vars);
         assert_eq!(
             result,
-            "<p>Hello &lt;script&gt;alert(1)&lt;/script&gt; — &quot;&gt;&lt;img src=x onerror=alert(1)&gt; / {{missing}}</p>"
+            "<p>Hello &lt;script&gt;alert(1)&lt;/script&gt;, &quot;&gt;&lt;img src=x onerror=alert(1)&gt; / {{missing}}</p>"
         );
 
         // Non-string values are serialized then escaped with the same rules.
@@ -988,10 +988,10 @@ mod tests {
         let tenant = "ten_tpl_rollback_001";
         let id = apexmail_lib::id::generate_id("", 26);
 
-        // Save #1 — create (v1 content).
+        // Save #1, create (v1 content).
         assert!(insert_template_v1(&pool, tenant, &id, "Welcome v1", "<p>v1</p>").await);
 
-        // Save #2 — update to v2 (mirrors update_template's DB path).
+        // Save #2, update to v2 (mirrors update_template's DB path).
         let mut tx = pool.begin().await.unwrap();
         sqlx::query(
             "UPDATE templates SET subject=$1, html_body=$2, version=2, updated_at=NOW()
@@ -1031,7 +1031,7 @@ mod tests {
             ("Welcome v2", "<p>v2</p>", 2)
         );
 
-        // Rollback to v1 — must restore the v1 snapshot.
+        // Rollback to v1, must restore the v1 snapshot.
         assert!(
             restore_template_version(&pool, tenant, &id, 1)
                 .await
@@ -1240,7 +1240,7 @@ mod adversarial_tests {
         assert_eq!(snap_count, 1);
 
         // Template names are NOT unique in the canonical schema
-        // (idx_templates_tenant_name is a plain index) — a same-name create
+        // (idx_templates_tenant_name is a plain index), a same-name create
         // succeeds and is a distinct resource; that is the current contract.
         let (dup_status, Json(duplicate)) = create_template(
             State(state.clone()),

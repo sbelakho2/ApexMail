@@ -271,7 +271,7 @@ pub(crate) fn tokenize_sql(input: &str) -> Vec<SqlToken> {
                 tokens.push(SqlToken::StringLiteral(s));
                 i += 1;
             } else {
-                // Unterminated quote — likely an injection breaking out of a string
+                // Unterminated quote, likely an injection breaking out of a string
                 // Emit the quote as unknown and re-parse from after the quote
                 tokens.push(SqlToken::Unknown(quote));
                 i = start; // resume tokenizing after the opening quote
@@ -406,7 +406,7 @@ pub(crate) fn tokenize_sql(input: &str) -> Vec<SqlToken> {
     tokens
 }
 
-/// Every word `match_keyword` recognizes — the analyzer's own keyword
+/// Every word `match_keyword` recognizes, the analyzer's own keyword
 /// vocabulary. `pub(crate)` so the fast-path gate property test (audit
 /// SM5 F1) can iterate it and prove the SQLi gate opens for each; the
 /// `test_keyword_vocabulary_is_recognized` test keeps this table and
@@ -543,7 +543,7 @@ fn detect_tautology(tokens: &[SqlToken]) -> Option<u32> {
                 }
             }
             // String = String (any value):injected literal-to-literal comparison.
-            // 'a'='a', 'x'='y', 'admin'='admin' — all indicate injection; legitimate
+            // 'a'='a', 'x'='y', 'admin'='admin', all indicate injection; legitimate
             // queries compare a column against a literal, never literal against literal.
             (
                 SqlToken::StringLiteral(_),
@@ -618,7 +618,7 @@ fn detect_tautology(tokens: &[SqlToken]) -> Option<u32> {
     // Identifier("z") + StringLiteral(">") + Identifier("a")
     // because the lexer wraps the comparison operator between adjacent quote pairs.
     // A string literal whose ENTIRE content is a comparison operator is a unique
-    // indicator of an injected string-comparison tautology — never valid SQL.
+    // indicator of an injected string-comparison tautology, never valid SQL.
     for token in &significant {
         if let SqlToken::StringLiteral(s) = token {
             if matches!(s.as_str(), ">" | "<" | ">=" | "<=" | "!=" | "<>") {
@@ -631,7 +631,7 @@ fn detect_tautology(tokens: &[SqlToken]) -> Option<u32> {
 }
 
 /// Whether the token stream contains a boolean connector keyword
-/// (AND / OR / XOR / NOT) — used to upgrade always-true comparisons that
+/// (AND / OR / XOR / NOT), used to upgrade always-true comparisons that
 /// are actively chained in boolean-blind injections.
 fn has_boolean_connector(tokens: &[SqlToken]) -> bool {
     tokens.iter().any(|t| {
@@ -983,9 +983,9 @@ fn is_suspicious_followup(token: &SqlToken) -> bool {
 /// ("I can't load the file #42") yet used to fire this blocking (score 5)
 /// rule on any note or ticket body. They now require the SQL call/qualified
 /// form:
-/// - `load_file(` / `load(` — function-call form,
-/// - `load data` — the `LOAD DATA INFILE` statement,
-/// - `into outfile` / `into dumpfile` — the export pair.
+/// - `load_file(` / `load(`, function-call form,
+/// - `load data`, the `LOAD DATA INFILE` statement,
+/// - `into outfile` / `into dumpfile`, the export pair.
 /// INFORMATION_SCHEMA access is a bare-identifier keyword and needs no
 /// extra context (the tokenizer only produces it for `information_schema`).
 fn detect_dangerous_functions(tokens: &[SqlToken]) -> bool {
@@ -1000,7 +1000,7 @@ fn detect_dangerous_functions(tokens: &[SqlToken]) -> bool {
             SqlToken::Keyword(SqlKeyword::Load) => {
                 match significant.get(i + 1) {
                     Some(SqlToken::OpenParen) => return true,
-                    // LOAD DATA INFILE '...' — statement form. "data" is not
+                    // LOAD DATA INFILE '...', statement form. "data" is not
                     // a reserved word, so it lexes as an identifier.
                     Some(SqlToken::Identifier(word)) if word.eq_ignore_ascii_case("data") => {
                         return true;
@@ -1123,7 +1123,7 @@ mod tests {
 
     #[test]
     fn test_keyword_vocabulary_is_recognized() {
-        // Every entry in SQL_KEYWORD_WORDS must map to a keyword token — the
+        // Every entry in SQL_KEYWORD_WORDS must map to a keyword token, the
         // fast-path gate property test relies on this table being complete.
         for word in SQL_KEYWORD_WORDS {
             assert!(
@@ -1296,7 +1296,7 @@ mod tests {
 
     #[test]
     fn test_boolean_blind_comparison_upgraded_to_blocking() {
-        // `1 and 2>1` — no quote/keyword pattern; comparison + connector
+        // `1 and 2>1`, no quote/keyword pattern; comparison + connector
         // must reach blocking severity.
         let results = analyze_sqli("1 and 2>1", MatchLocation::QueryParam("id".into()));
         let taut = results

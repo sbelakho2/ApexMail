@@ -22,7 +22,7 @@
 //! 5. a sender-health penalty signal (`sales_outcomes` complaint row, plus a
 //!    best-effort `sales_sender_health.complaints` increment when the sending
 //!    identity can be resolved);
-//! 6. for out-of-office: reschedule rather than cancel — queued work is
+//! 6. for out-of-office: reschedule rather than cancel, queued work is
 //!    pushed to at least the stated return date + 1 day (or the default wait).
 //!
 //! If the product later adds the `sales-autopilot` dependency, this function
@@ -66,7 +66,7 @@ pub const CLAIM_STALENESS: &str = "10 minutes";
 /// `processed_at IS NULL`: the ai-service email agent writes drafts into the
 /// SAME rows and stamps `processed_at` when it does (STORE_DRAFT_SQL). With
 /// the old `processed_at IS NULL` predicate the two consumers stole each
-/// other's rows — whichever finished first made the other skip its job — so
+/// other's rows, whichever finished first made the other skip its job, so
 /// a row ended up with EITHER a classification OR a draft, never both (live
 /// mailbot dogfood 2026-10-06). Each consumer now keys on its OWN output:
 /// the worker classifies until `classification` is set, the agent drafts
@@ -121,7 +121,7 @@ fn claim_staleness_interval() -> String {
     format!("interval '{CLAIM_STALENESS}'")
 }
 
-/// Completion write (F2): clears the claim fully — `processing_at = NULL`
+/// Completion write (F2): clears the claim fully, `processing_at = NULL`
 /// next to `processing = false`, mirroring the analytics processor's
 /// `reset_processing`.
 ///
@@ -161,8 +161,8 @@ const RESET_CLAIM_SQL: &str = r#"
 /// order wins first (the `From:` address is the sender), then unsuppressed
 /// over suppressed, then highest confidence and newest.
 ///
-/// The former transitional fallback — `inbound_messages.lead_id` →
-/// `sales_leads.contact_id` — was DELETED (audit item 17). Its removal
+/// The former transitional fallback, `inbound_messages.lead_id` →
+/// `sales_leads.contact_id`, was DELETED (audit item 17). Its removal
 /// condition was "no `sales_leads` row resolves a reply the canonical lookup
 /// would not": every path in this workspace that inserts into
 /// `inbound_messages` (mta migration 088 shape, ai_drafts, the reply
@@ -285,7 +285,7 @@ pub struct ReplyHandler {
     config: ReplyHandlerConfig,
     /// F67: durable reply-analytics handoff (canonical reply_events model,
     /// migration 159). Committed with inbound acceptance in
-    /// process_message_inner — an analytics failure fails the message so the
+    /// process_message_inner, an analytics failure fails the message so the
     /// claim resets and the handoff retries idempotently.
     reply_analytics: analytics::reply_tracking::ReplyTrackingService,
     /// The semantic classifier (HTTP AI service, or the never-guessing static
@@ -296,7 +296,7 @@ pub struct ReplyHandler {
     shutdown_notify: Arc<Notify>,
     /// SM10 F4: data-plane STONITH gate. With `APEXMAIL_HA_FENCING=true`
     /// the claim loop refuses to claim (or complete) replies while this
-    /// node's `ha:fenced:{node}` key stands — or while the fence authority
+    /// node's `ha:fenced:{node}` key stands, or while the fence authority
     /// cannot be read (fail closed). Default off: zero behavior change.
     fence_gate: crate::fence::FenceGate,
 }
@@ -337,7 +337,7 @@ impl ReplyHandler {
     /// `inbound_messages.processing_at` (used by the timestamped claim in
     /// [`FETCH_MESSAGES_SQL`]) is schema-owned: migration 203 creates the
     /// column and its partial stale-claim index. The worker runs DML only —
-    /// no runtime schema reconciliation — so a deployment that skipped a
+    /// no runtime schema reconciliation, so a deployment that skipped a
     /// migration fails its first query loudly instead of silently repairing
     /// the schema with privileges the service role does not need.
     pub async fn start(self: Arc<Self>) -> ProcessorResult<()> {
@@ -414,11 +414,11 @@ impl ReplyHandler {
     }
 
     /// Process one claimed batch CONCURRENTLY, bounded by `available`
-    /// (SM10 F17) — exactly like the webhook processor.
+    /// (SM10 F17), exactly like the webhook processor.
     ///
     /// The old sequential `for` loop ran every classification and AI call
-    /// one after another — effective concurrency 1 no matter what
-    /// WORKER_CONCURRENCY said — so one slow AI reply stalled every
+    /// one after another, effective concurrency 1 no matter what
+    /// WORKER_CONCURRENCY said, so one slow AI reply stalled every
     /// subsequent message in the batch. Each task owns its error handling:
     /// a failure logs and releases its own claim without touching its peers.
     async fn process_batch(&self, messages: Vec<InboundMessage>, available: usize) {
@@ -447,7 +447,7 @@ impl ReplyHandler {
     ///
     /// F2:the claim is TIMESTAMPED (`processing_at = NOW()`), and rows
     /// whose claim is older than [`CLAIM_STALENESS`] are reclaimed —
-    /// mirroring the analytics processor's stale-claim pattern — so a
+    /// mirroring the analytics processor's stale-claim pattern, so a
     /// crashed worker can no longer strand a reply in `processing = true`
     /// forever.
     async fn fetch_messages(&self, limit: usize) -> ProcessorResult<Vec<InboundMessage>> {
@@ -847,12 +847,12 @@ impl ReplyHandler {
                 action = ?outcome.result.suggested_action.action,
                 confidence = decision.confidence,
                 auto_suppress = self.config.auto_suppress,
-                "Reply action blocked by policy — would auto-execute but config disallows it"
+                "Reply action blocked by policy, would auto-execute but config disallows it"
             );
         }
 
         // F67: commit the durable reply-analytics handoff WITH inbound
-        // acceptance — before the row is marked processed. A failure here
+        // acceptance, before the row is marked processed. A failure here
         // fails the whole message (claim reset → retry), and the handoff is
         // idempotent through restarts (tenant-qualified message identity),
         // so a retry after a crash between the two writes collapses to one
@@ -890,7 +890,7 @@ impl ReplyHandler {
         // the intake writes the SAME canonical tables the compliance
         // automation's API intake writes, and its outbox flush / verification
         // / processing stages take over from there. A failure here NEVER
-        // fails the message — the outcome, including the failure reason, is
+        // fails the message, the outcome, including the failure reason, is
         // recorded on the row for the reviewer.
         let mut suggested_action = serde_json::to_value(&outcome.result.suggested_action)?;
         if let Some(request_type) = super::dsr::detect(&input.subject, &input.body) {
@@ -922,9 +922,9 @@ impl ReplyHandler {
             .await?;
 
         // Audit item 17: the former `sales_leads.status` write here is gone.
-        // The reply's visible outcome is already canonical — `lock_enrollment`
+        // The reply's visible outcome is already canonical, `lock_enrollment`
         // set `sales_enrollments.state` / `has_human_reply` and (for
-        // suppression) the contact point — and the CP read derives status
+        // suppression) the contact point, and the CP read derives status
         // from exactly those fields. Any `sales_leads.status` write would be
         // pure divergence: no read path renders that column any more.
 
@@ -958,7 +958,7 @@ impl ReplyHandler {
                 // Add to suppressions (needs a tenant; rows from unknown
                 // tenants are skipped so the NOT NULL FK is never violated).
                 let Some(ref tenant_id) = msg.tenant_id else {
-                    warn!(msg_id = %msg.id, "Suppress action skipped — inbound message has no tenant_id");
+                    warn!(msg_id = %msg.id, "Suppress action skipped, inbound message has no tenant_id");
                     return Ok(Some("skipped_no_tenant".to_string()));
                 };
                 let reason = classification
@@ -990,7 +990,7 @@ impl ReplyHandler {
             }
             super::types::ActionType::Unsubscribe => {
                 let Some(ref tenant_id) = msg.tenant_id else {
-                    warn!(msg_id = %msg.id, "Unsubscribe action skipped — inbound message has no tenant_id");
+                    warn!(msg_id = %msg.id, "Unsubscribe action skipped, inbound message has no tenant_id");
                     return Ok(Some("skipped_no_tenant".to_string()));
                 };
                 // Add to suppressions with unsubscribe reason
@@ -1016,8 +1016,8 @@ impl ReplyHandler {
                 // The `sales_leads.status` / `priority` write that used to
                 // live here was removed in audit item 17: the columns are
                 // write-only (no reader in the workspace), and the reply's
-                // canonical record — the enrollment lock and the persisted
-                // classification — already carries the flag.
+                // canonical record, the enrollment lock and the persisted
+                // classification, already carries the flag.
                 Ok(Some("flagged_for_sales".to_string()))
             }
             super::types::ActionType::Escalate => {
@@ -1190,8 +1190,8 @@ pub struct ClassificationRecord {
 ///
 /// `sales_reply_classifications` has no unique constraint on
 /// `inbound_message_id` (it is an append-only audit ledger), so idempotency
-/// is enforced here: an exact repeat — same tenant, inbound message,
-/// classifier and disposition — returns the existing row instead of
+/// is enforced here: an exact repeat, same tenant, inbound message,
+/// classifier and disposition, returns the existing row instead of
 /// inserting a second one. A *different* disposition for the same message is
 /// a legitimate new audit row (reclassification); an operator correction is
 /// recorded through [`record_operator_correction`] and always inserts.
@@ -1255,9 +1255,9 @@ pub async fn persist_classification(
 /// Record the result of an operator (or downstream process) acting on a
 /// classification as a first-class row.
 ///
-/// * `actual_action == suggested_action` — the suggestion was confirmed; the
+/// * `actual_action == suggested_action`, the suggestion was confirmed; the
 ///   existing row's `actual_action` is stamped and no row is added.
-/// * different — a NEW row is inserted with `classifier = 'operator'`,
+/// * different, a NEW row is inserted with `classifier = 'operator'`,
 ///   `operator_correction = "suggested '<x>', actual '<y>'"`, carrying the
 ///   original disposition/model/evidence. Corrections are therefore
 ///   training/evaluation examples (the partial index on
@@ -1500,7 +1500,7 @@ mod tests {
                 && RESOLVE_ENROLLMENT_SQL.contains("cp.normalized_value = t.v")
                 && RESOLVE_ENROLLMENT_SQL.contains("ORDER BY t.ord"),
             "the email link must match any candidate address (from_email or DSN recipient) in \
-             candidate order — via the P1 UNNEST-equality join on the stored canonical \
+             candidate order, via the P1 UNNEST-equality join on the stored canonical \
              normalized_value, not a lower()-wrapped ANY probe"
         );
         assert!(
@@ -1526,7 +1526,7 @@ mod tests {
     /// The reply handler must not write the legacy `sales_leads` columns at
     /// all (item 17). This is a source scan so a reintroduced write fails
     /// loudly without needing a database. Only the production half of the
-    /// file is scanned — the tests below legitimately seed/delete bridge rows.
+    /// file is scanned, the tests below legitimately seed/delete bridge rows.
     #[test]
     fn reply_handler_writes_no_legacy_sales_leads_state() {
         let source = include_str!("processor.rs");
@@ -1634,7 +1634,7 @@ mod tests {
                  headers, message_id_header, received_at)
             VALUES
                 ('inb_f67_1', 'tenant_f67', 'replier@example.com', 'sales@apex.example',
-                 'Re: proposal', 'Thanks, this looks great — one question: when can we start?',
+                 'Re: proposal', 'Thanks, this looks great, one question: when can we start?',
                  '{"message-id": "<repl-1@example.com>", "in-reply-to": "<orig-1@apex.example>",
                    "auto-submitted": "auto-generated"}'::jsonb,
                  '<repl-1@example.com>', NOW() - INTERVAL '1 minute')
@@ -1727,7 +1727,7 @@ mod tests {
             in_reply_to: Some("<orig-1@apex.example>"),
             from_email: "replier@example.com",
             subject: "Re: proposal",
-            body: "Thanks, this looks great — one question: when can we start?",
+            body: "Thanks, this looks great, one question: when can we start?",
             headers,
             received_at: chrono::Utc::now(),
         };
@@ -1775,7 +1775,7 @@ mod tests {
     /// returns the sender's canonical contact A, (2) the bridge row is
     /// deleted and resolution still succeeds, (3) the inbound message's
     /// legacy `lead_id` is rewritten to a nonexistent lead and resolution
-    /// STILL returns A — proving the deleted fallback is not load-bearing
+    /// STILL returns A, proving the deleted fallback is not load-bearing
     /// even in its last reachable shape.
     ///
     /// DB-backed via the canonical migrator fixture (soft-skips without
@@ -1882,7 +1882,7 @@ mod tests {
             .await
             .expect("seed enrollment");
         }
-        // Contact B — not the sender's canonical contact A — carries the lead
+        // Contact B, not the sender's canonical contact A, carries the lead
         // id mapping: canonical-first resolution must ignore it. (Since
         // migration 223 the mapping lives on the contact; `sales_leads` is a
         // derived view.)
@@ -1978,7 +1978,7 @@ mod tests {
     ///   TERMINAL (`completed`) one even when the terminal row is much newer;
     /// * the match is the exact UNNEST-equality join on the stored canonical
     ///   `normalized_value` (the `(tenant_id, channel, normalized_value)`
-    ///   unique index): a row stored non-canonically is NOT the link — the
+    ///   unique index): a row stored non-canonically is NOT the link, the
     ///   canonical writers (`lower($4)` / `to_ascii_lowercase()`) are what
     ///   make `normalized_value` the join key.
     #[tokio::test]
@@ -2176,7 +2176,7 @@ mod tests {
         assert_eq!(resolved.enrollment_id, enrollment_b);
 
         // The exact join is canonical-only: a mixed-case stored
-        // `normalized_value` is not the link (and cannot be — the canonical
+        // `normalized_value` is not the link (and cannot be, the canonical
         // writers store lowercase).
         msg.from_email = mixed_case_email.clone();
         let unresolved = handler.resolve_enrollment(&msg).await.expect("resolve");
@@ -2652,7 +2652,7 @@ mod tests {
     /// Dogfood R-cluster (2026-10-04): inbound_messages is SHARED with the
     /// MTA delivery ledger, whose rows carry mail_from/raw_message and a
     /// NULL from_email. The claim loop used to claim those rows and die
-    /// decoding `fromEmail: unexpected null` — tripping the email
+    /// decoding `fromEmail: unexpected null`, tripping the email
     /// processor's circuit breaker every tick and starving every queued
     /// send. The claim must take only reply-shaped rows and leave ledger
     /// rows untouched (never claimed, never marked processed).
@@ -2718,7 +2718,7 @@ mod tests {
 
     /// Live dogfood 2026-10-07: a reply-shaped row with `from_email` set but
     /// `to_email` NULL (the shared MTA ledger writes empty To: mirrors for
-    /// some accepted mail — live row `inb_uivisualapprove01`) made the WHOLE
+    /// some accepted mail, live row `inb_uivisualapprove01`) made the WHOLE
     /// claim batch fail to decode (`toEmail: unexpected null`). The claim
     /// statement had already applied its UPDATE, so every claimed peer was
     /// left `processing = true` and unprocessed until the staleness window,
@@ -2811,7 +2811,7 @@ mod tests {
             .await
             .expect("processing the reply");
 
-        // The queued send — however it was keyed — is no longer claimable.
+        // The queued send, however it was keyed, is no longer claimable.
         for action_id in [fixture.action_step_id, fixture.action_enrollment_id] {
             assert_eq!(
                 action_state(&pool, action_id).await,
@@ -3277,7 +3277,7 @@ mod tests {
     /// Live: a row the AI draft agent already answered still owes its
     /// canonical classification. The agent stamps `processed_at` when it
     /// drafts, so a worker claim keyed on `processed_at IS NULL` skipped
-    /// every agent-won row — live dogfood 2026-10-06 showed rows with EITHER
+    /// every agent-won row, live dogfood 2026-10-06 showed rows with EITHER
     /// a draft OR a classification, never both, and the review page rendered
     /// "not classified" for half its queue. The worker must claim by
     /// `classification IS NULL` and MERGE its suggested_action so the
@@ -3360,7 +3360,7 @@ mod tests {
     }
 
     /// F-5 live: a data-subject request delivered as email must reach the
-    /// GDPR automation's canonical intake — a `data_subject_requests` row with
+    /// GDPR automation's canonical intake, a `data_subject_requests` row with
     /// the statutory receipt clock and a pending verification outbox row the
     /// compliance service's flush sends. A replayed request must collapse onto
     /// the open request (never a second statutory row), and one customer-service
@@ -4004,7 +4004,7 @@ mod tests {
         let handler = std::sync::Arc::new(ReplyHandler::new(pool.clone(), loop_config()));
         handler.is_running.store(true, Ordering::SeqCst);
         // Spawn FIRST so the loop genuinely runs its iterations, then signal
-        // shutdown while it is parked (or polling) — a spawn-after-shutdown
+        // shutdown while it is parked (or polling), a spawn-after-shutdown
         // ordering would exit at the gate without executing any arm.
         let h = handler.clone();
         let handle = tokio::spawn(async move { h.poll_loop().await });
@@ -4135,7 +4135,7 @@ mod tests {
     /// ~150 ms must overlap inside one `process_batch` call. The old
     /// sequential `for` loop capped in-flight classifications at 1 and made
     /// one slow AI reply stall the whole batch. Every message is attempted
-    /// even though each ultimately fails downstream (dead pool — failure
+    /// even though each ultimately fails downstream (dead pool, failure
     /// independence), and the active-job counter drains back to zero.
     #[tokio::test] // real time: measures overlapping classifier latencies
     async fn process_batch_classifies_messages_concurrently_and_independently() {
@@ -4159,7 +4159,7 @@ mod tests {
         );
         assert!(
             probe.peak_in_flight.load(Ordering::SeqCst) >= 2,
-            "classifications must overlap — a sequential batch peaks at 1 in flight"
+            "classifications must overlap, a sequential batch peaks at 1 in flight"
         );
         assert_eq!(
             handler.active_jobs.load(Ordering::SeqCst),
@@ -4355,8 +4355,8 @@ mod orchestration_and_actions {
 
     /// A message whose reply-analytics handoff cannot persist (the
     /// canonical `reply_events.recipient` is VARCHAR(255); the mutated
-    /// envelope sender is longer) must FAIL the whole message — never be
-    /// marked processed — and `reset_claim` must hand it straight back to
+    /// envelope sender is longer) must FAIL the whole message, never be
+    /// marked processed, and `reset_claim` must hand it straight back to
     /// the next poll.
     #[tokio::test]
     async fn analytics_handoff_failure_fails_the_message_and_releases_the_claim(
@@ -4400,7 +4400,7 @@ mod orchestration_and_actions {
 
         // Claim the message, then corrupt the in-memory envelope identity
         // past the analytics column's bound: only the handoff INSERT can
-        // fail — every earlier surface (classification, lock, persist) is
+        // fail, every earlier surface (classification, lock, persist) is
         // intact.
         let mut msg = handler
             .fetch_messages(10)
@@ -4637,7 +4637,7 @@ mod orchestration_and_actions {
     #[test]
     fn reply_candidates_are_canonical_bounded_and_deduped() {
         let mut msg = neutral_message(Some("t"), "PROSPECT@Example.com");
-        // 20 header entries with duplicates and garbage — only 16 pass.
+        // 20 header entries with duplicates and garbage, only 16 pass.
         let many: Vec<String> = (0..20).map(|i| format!("r{i}@x.test")).collect();
         let mut joined = many.join(", ");
         joined.push_str(", , not an address, PROSPECT@example.com");

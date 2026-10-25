@@ -10,7 +10,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_rustls::rustls::pki_types::{CertificateDer, ServerName};
 use tokio_rustls::TlsConnector;
 
-// nosemgrep: generic.secrets.security.detected-private-key.detected-private-key — inline test-only key material for the local IMAP TLS suite
+// nosemgrep: generic.secrets.security.detected-private-key.detected-private-key, inline test-only key material for the local IMAP TLS suite
 pub(crate) const CERT: &str = r#"-----BEGIN CERTIFICATE-----
 MIIDSTCCAjGgAwIBAgIUVwhxJa9wz86lWTzyVQVC9bHNeXUwDQYJKoZIhvcNAQEL
 BQAwFDESMBAGA1UEAwwJbG9jYWxob3N0MB4XDTI2MDgwOTE5MjIxMVoXDTM2MDgw
@@ -31,7 +31,7 @@ YzD9bl7yCpnvXHy4p7G0SYXAYkK8DG5FcS/ECTJw/gjMEDsIPLqPHNsC2uaq+C0R
 fwY+YpZkXTmxfHPbSn0EKcbKj1lHFsvSm9ckfUjEJV5vcIk5+TewmU4cEzQloK9v
 MpuYqjOkD826HkH+KCOEK4qVsx1p1MM0ASjES0E=
 -----END CERTIFICATE-----"#;
-// nosemgrep: generic.secrets.security.detected-private-key.detected-private-key — inline test-only key material for the local IMAP TLS suite
+// nosemgrep: generic.secrets.security.detected-private-key.detected-private-key, inline test-only key material for the local IMAP TLS suite
 pub(crate) const KEY: &str = r#"-----BEGIN PRIVATE KEY-----
 MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQDqqGeESTeTNPwo
 7NRxeFNuyjGdjHvNfBbxQ8VDhuyF7LwSVuTf5wkFvCySeEch5uInxlxo6p3MmT7m
@@ -62,7 +62,7 @@ KihCoEUsqFfVk4/gsIHZAN0=
 -----END PRIVATE KEY-----"#;
 
 /// The test binary never runs `main`, so the process-level ring
-/// CryptoProvider that `main` installs is absent here — install it once for
+/// CryptoProvider that `main` installs is absent here, install it once for
 /// every test that builds a rustls config (same provider as production).
 fn ensure_crypto_provider() {
     static INSTALL: std::sync::Once = std::sync::Once::new();
@@ -80,7 +80,7 @@ fn tokenless_interceptor() -> InternalServiceAuthInterceptor {
 /// Write a file next to the other fixtures (temp dir under std::env::temp_dir)
 /// and return its path. Each call gets a unique name.
 fn temp_fixture(name: &str, contents: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!("apexmail_imap_conn_tests_{}", std::process::id())); // nosemgrep: rust.lang.security.temp-dir.temp-dir — test fixture under a unique pid/uuid path — no predictable-name temp collision
+    let dir = std::env::temp_dir().join(format!("apexmail_imap_conn_tests_{}", std::process::id())); // nosemgrep: rust.lang.security.temp-dir.temp-dir, test fixture under a unique pid/uuid path, no predictable-name temp collision
     std::fs::create_dir_all(&dir).expect("create temp fixture dir");
     let path = dir.join(format!(
         "{name}_{}",
@@ -567,7 +567,7 @@ async fn pre_starttls_loop_greets_with_starttls_and_logindisabled() {
 
 /// Dogfood-2 live finding: a command declaring a literal over the per-command
 /// budget (`LOGIN user {35651584}` with `MAX_LITERAL_SIZE` 32 MiB) closed the
-/// socket with ZERO response bytes — an untyped EOF, while the module contract
+/// socket with ZERO response bytes, an untyped EOF, while the module contract
 /// promises "abandoned or stalling sockets die with a BYE". The refusal must
 /// carry `* BYE` before the close so a client can tell a policy refusal from a
 /// transport failure.
@@ -681,7 +681,7 @@ async fn pre_starttls_login_is_refused_with_privacy_required() {
 }
 
 /// IMAP_ALLOW_INSECURE_AUTH=true: a successful plaintext LOGIN continues the
-/// session inside `serve` — CAPABILITY after auth must answer normally.
+/// session inside `serve`, CAPABILITY after auth must answer normally.
 #[tokio::test]
 async fn pre_starttls_insecure_auth_login_continues_the_session() {
     let mock = MockMailstore::new();

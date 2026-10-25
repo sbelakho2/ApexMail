@@ -1,23 +1,23 @@
-//! Control-plane job controls — the operator surface for the canonical
+//! Control-plane job controls, the operator surface for the canonical
 //! `queue_jobs` store (`queue-provider`'s schema).
 //!
 //! Dogfood 2026-10-08 F13: `/jobs` and `/infrastructure/queues` carried no
-//! retry/purge/drain controls and no endpoint backed them — an operator
+//! retry/purge/drain controls and no endpoint backed them, an operator
 //! could see a dead-letter pile but not act on it. This module implements the
 //! two controls that match the queue's OWN semantics:
 //!
-//! * **retry** — a `dead_letter` (or terminal `failed`) job is re-queued:
+//! * **retry**, a `dead_letter` (or terminal `failed`) job is re-queued:
 //!   status `pending`, attempts reset to 0, schedule/error/lease cleared.
 //!   ONLY terminal states are retryable; a `pending` job is already
 //!   scheduled, a `completed` job is history, and a `processing` job is
-//!   owned by a worker's lease — resetting it would race the owner whose
+//!   owned by a worker's lease, resetting it would race the owner whose
 //!   completion paths are lease-fenced (`queue-provider` migration 103).
 //!
-//! * **cancel** — a `pending` job (nothing has claimed it) is deleted, the
+//! * **cancel**, a `pending` job (nothing has claimed it) is deleted, the
 //!   same row-level delete `PostgresQueueProvider::purge` performs for
 //!   terminal rows. `processing` jobs are refused (in flight), `completed`
 //!   jobs are refused (history), and `dead_letter` jobs are refused with a
-//!   pointer to retry/purge — cancellation is not a substitute for either.
+//!   pointer to retry/purge, cancellation is not a substitute for either.
 //!
 //! Both mutations are actor-attributed in `audit_logs`
 //! (`control_plane.job.retried` / `control_plane.job.cancelled`), matching
@@ -196,7 +196,7 @@ pub(crate) async fn retry_job(state: &AppState, id: Uuid) -> Result<JobRow, ApiE
     })
 }
 
-/// Delete an unclaimed (`pending`) job — the row-level analogue of the
+/// Delete an unclaimed (`pending`) job, the row-level analogue of the
 /// queue provider's terminal-row purge. Refuses in-flight and terminal jobs
 /// by name (the UPDATE..WHERE status guard is the concurrency fence).
 pub(crate) async fn cancel_job(state: &AppState, id: Uuid) -> Result<JobRow, ApiError> {
@@ -222,7 +222,7 @@ pub(crate) async fn cancel_job(state: &AppState, id: Uuid) -> Result<JobRow, Api
     })
 }
 
-/// [`retry_job`] plus its actor-attributed audit entry — the shared core of
+/// [`retry_job`] plus its actor-attributed audit entry, the shared core of
 /// the JSON endpoint and the zero-JS CP form handler.
 pub(crate) async fn retry_job_audited(
     state: &AppState,

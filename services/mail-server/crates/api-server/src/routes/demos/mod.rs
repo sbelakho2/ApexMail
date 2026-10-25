@@ -2,7 +2,7 @@
 //!
 //! The demo is a SCRIPTED, server-driven walkthrough of the real product:
 //! create a session from a named script, advance it step by step, and each
-//! step executes REAL machinery in-process — a rendered console page, the API
+//! step executes REAL machinery in-process, a rendered console page, the API
 //! sandbox's real dispatch, the email grader, the pricing calculator, or a
 //! verifier-gated chat narration. Nothing is faked and nothing is claimed
 //! that the platform cannot do: the script's narrations are grounded in the
@@ -13,7 +13,7 @@
 //! * the viewer token is returned ONCE and stored hashed, so a database read
 //!   cannot mint a viewer link;
 //! * expiry is mandatory and enforced on read;
-//! * step execution is idempotent by `(session_id, idx)` — a replayed advance
+//! * step execution is idempotent by `(session_id, idx)`, a replayed advance
 //!   returns the stored result instead of running the step again.
 
 use axum::extract::{Path, State};
@@ -32,7 +32,7 @@ pub mod script;
 /// How long a demo link stays valid. Long enough for a prospect to open it
 /// after a call, short enough that a leaked link is not a standing door.
 const DEMO_TTL_HOURS: i64 = 48;
-/// Bounded step result payload — a rendered page excerpt, not a whole site.
+/// Bounded step result payload, a rendered page excerpt, not a whole site.
 const MAX_STORED_RESULT_BYTES: usize = 16 * 1024;
 
 pub fn router() -> Router<AppState> {
@@ -80,8 +80,8 @@ pub(crate) static ADVANCE_RENDEZVOUS: std::sync::OnceLock<(
 /// Execute at most ONE unexecuted step for `id`, safely under concurrency.
 ///
 /// Concurrency contract (dogfood 2026-10-06 P1): the previous code claimed
-/// idempotence in a comment — "`FOR UPDATE` (inside a transaction) makes two
-/// concurrent advances serialise onto one step" — but opened no transaction
+/// idempotence in a comment, "`FOR UPDATE` (inside a transaction) makes two
+/// concurrent advances serialise onto one step", but opened no transaction
 /// and issued no `FOR UPDATE`, so two simultaneous advances both executed the
 /// same REAL step (a sandbox send, a domain registration, …). This is the
 /// claim the comment described:
@@ -89,13 +89,13 @@ pub(crate) static ADVANCE_RENDEZVOUS: std::sync::OnceLock<(
 /// 1. snapshot how many steps are already executed, then take the per-session
 ///    `pg_advisory_xact_lock` for the WHOLE select+execute+store;
 /// 2. if an advance completed while we waited on the lock, that concurrent
-///    advance already consumed this click burst — this call is the loser and
+///    advance already consumed this click burst, this call is the loser and
 ///    executes NOTHING (a user clicking "Run next step" only once after the
 ///    burst still advances normally: its snapshot is taken after the burst);
 /// 3. otherwise select the next unexecuted step `FOR UPDATE`, run the real
 ///    machinery, store the result and the terminal state in the SAME
 ///    transaction, so the step row is never observable half-run and the lock
-///    releases at commit (a crash rolls everything back — no stuck state).
+///    releases at commit (a crash rolls everything back, no stuck state).
 ///
 /// Returns the executed step's `idx`, or `None` when there was no unexecuted
 /// step or a concurrent advance owned this burst.
@@ -132,7 +132,7 @@ async fn advance_one_step(state: &AppState, id: &str) -> Result<Option<i32>, sql
     if executed_after != executed_before {
         tracing::info!(
             session_id = %id,
-            "a concurrent demo advance completed while this one waited — no step executed"
+            "a concurrent demo advance completed while this one waited, no step executed"
         );
         return Ok(None);
     }
@@ -195,7 +195,7 @@ fn token_hash(token: &str) -> String {
 ///
 /// Extracted from [`new_token`] so the failure branch is testable without a
 /// broken OS RNG. The old code "failed closed" to 64 zeros and relied on the
-/// database to refuse the duplicate hash — there is no unique constraint
+/// database to refuse the duplicate hash, there is no unique constraint
 /// that a zero hash collides with, so a predictable publicly derivable
 /// token was minted and returned as a working viewer credential (dogfood
 /// 2026-10-06 P3). An RNG failure is now an ERROR: no session is created.
@@ -255,7 +255,7 @@ pub struct DemoStepOut {
 /// The oversized payload is REPLACED by a small envelope, never extended:
 /// the previous implementation inserted the excerpt INTO the oversized
 /// object, so the stored row kept every original byte AND grew by 16 KiB
-/// (dogfood 2026-10-06 P3 — the stated bound did not exist). The excerpt
+/// (dogfood 2026-10-06 P3, the stated bound did not exist). The excerpt
 /// alone is capped at half the budget, so the envelope's total JSON size
 /// stays under `MAX_STORED_RESULT_BYTES` even for multi-byte text.
 fn bound_result(value: serde_json::Value) -> serde_json::Value {
@@ -323,7 +323,7 @@ pub async fn create_session(
             "tenant_id": tenant_id,
             // The step params are written as an OBJECT: `run_step` reads them
             // with `.get("path")`-style lookups, and the script declares them
-            // as pairs — serializing the pairs directly produced an ARRAY, so
+            // as pairs, serializing the pairs directly produced an ARRAY, so
             // every parameterised step silently ran its defaults (dogfood
             // 2026-10-06: three explorer steps all hit GET /v1/domains, the
             // calculator priced Free/3,000 instead of the script's 600k, the
@@ -490,7 +490,7 @@ pub async fn view_session(
 }
 
 /// Advance the demo by one step: run the next unexecuted step and store its
-/// result. Idempotent — a replayed advance returns the stored result.
+/// result. Idempotent, a replayed advance returns the stored result.
 pub async fn advance_step(
     State(state): State<AppState>,
     _auth: AuthUser,
@@ -516,7 +516,7 @@ pub async fn advance_step(
         ]));
     }
     if session_state == "completed" {
-        // Nothing left to run — the caller re-reads for the replay.
+        // Nothing left to run, the caller re-reads for the replay.
         return read_session(State(state), _auth, Path(id)).await;
     }
 
@@ -533,7 +533,7 @@ pub async fn advance_step(
 /// step ONCE by counting real executions of ITS session (a double execution
 /// of the same row is invisible in the table). A process-global counter
 /// collided with the other demos tests advancing their own sessions under
-/// plain `cargo test` parallelism — the per-session key keeps the test
+/// plain `cargo test` parallelism, the per-session key keeps the test
 /// isolated under both `cargo test` and nextest.
 #[cfg(test)]
 pub(crate) static STEP_EXECUTIONS: std::sync::Mutex<
@@ -637,7 +637,7 @@ async fn run_step(state: &AppState, kind: &str, input: &serde_json::Value) -> se
                 .and_then(|v| v.as_str())
                 .unwrap_or("system");
             // Dogfood F-O1 (P3): the capability flag governs the ASSISTANT,
-            // not one wire format — the presenter must not narrate a workspace
+            // not one wire format, the presenter must not narrate a workspace
             // whose `ai_chat` an administrator switched off. Same flag, same
             // named refusal the JSON route returns, surfaced as the step's own
             // error shape (the presenter panel renders it).
@@ -693,7 +693,7 @@ mod tests {
         crate::test_db::canonical_pool(test_name).await
     }
 
-    /// Seed (or reuse) a system user with the given role — the owner gate
+    /// Seed (or reuse) a system user with the given role, the owner gate
     /// re-reads the LIVE role, so the row is what admits the caller.
     async fn seed_owner(db: &sqlx::PgPool) -> String {
         let id = uuid::Uuid::new_v4();
@@ -734,7 +734,7 @@ mod tests {
     }
 
     /// Dogfood F-O1 (P3): the presenter must not narrate a workspace whose
-    /// `ai_chat` capability is switched off — the flag governs the ASSISTANT,
+    /// `ai_chat` capability is switched off, the flag governs the ASSISTANT,
     /// not one wire format. The refusal is the same named reason the JSON
     /// route returns, surfaced in the step's own error shape.
     #[tokio::test]
@@ -786,7 +786,7 @@ mod tests {
         );
 
         // With the flag gone the step no longer refuses ON THE FLAG (the
-        // unconfigured model in this test env may still fail — that is a
+        // unconfigured model in this test env may still fail, that is a
         // different status and must not be the named flag refusal).
         sqlx::query("DELETE FROM feature_flag_overrides WHERE tenant_id = $1")
             .bind(&tenant)
@@ -882,7 +882,7 @@ mod tests {
 
     /// Dogfood 2026-10-06 P3: the RNG-failure branch used to return 64 zeros
     /// as a working viewer credential. It is now an error and NO token is
-    /// produced — the caller refuses instead of minting a public secret.
+    /// produced, the caller refuses instead of minting a public secret.
     #[test]
     fn token_generation_failure_is_an_error_not_an_all_zero_secret() {
         let error = token_from_fill(Err(std::io::Error::other("os rng unavailable")), [0u8; 32])
@@ -905,7 +905,7 @@ mod tests {
     }
 
     /// Dogfood 2026-10-06 P3: an oversized result must be REPLACED by a
-    /// bounded envelope — the old code appended the excerpt to the oversized
+    /// bounded envelope, the old code appended the excerpt to the oversized
     /// object, so the stored row kept every original byte and grew.
     #[test]
     fn bound_result_replaces_an_oversized_result_with_a_bounded_envelope() {

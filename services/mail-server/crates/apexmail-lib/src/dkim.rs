@@ -316,7 +316,7 @@ mod tests {
         }
     }
 
-    /// E: new DKIM-key writes NEVER fall back to plaintext storage — a
+    /// E: new DKIM-key writes NEVER fall back to plaintext storage, a
     /// missing key is a typed error. Legacy plaintext rows remain readable
     /// (documented migration path in `decrypt_dkim_private_key`).
     #[test]

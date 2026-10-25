@@ -1,4 +1,4 @@
-//! Secret management — AES-256-GCM encrypted secret storage with access control,
+//! Secret management, AES-256-GCM encrypted secret storage with access control,
 //! version history, auto-rotation, and type-specific secret generation.
 //!
 //! Encryption:AES-256-GCM with a 32-byte key derived via SHA-256 of the master
@@ -170,7 +170,7 @@ impl SecretManager {
         }
     }
 
-    /// Update secret metadata (not the value — use rotate for that).
+    /// Update secret metadata (not the value, use rotate for that).
     pub async fn update_secret(
         &self,
         secret_id: &str,
@@ -874,7 +874,7 @@ impl SecretManager {
 //
 // M-07: The KDF salt (SECRETS_KDF_SALT) is intentionally loaded via a regular
 // environment variable rather than a secret store, because salts are not
-// confidential — they serve to prevent precomputation attacks on the master key.
+// confidential, they serve to prevent precomputation attacks on the master key.
 // The master encryption key itself must still be injected via a secure channel
 // (e.g., AWS Secrets Manager, Vault, or Kubernetes Secrets mounted as env vars).
 // In production, ensure SECRETS_KDF_SALT is set to a unique, randomly generated

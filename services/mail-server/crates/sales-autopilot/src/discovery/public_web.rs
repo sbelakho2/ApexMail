@@ -7,12 +7,12 @@
 //! * **The operator names the URLs.** `SALES_SCRAPE_PUBLIC_URLS` is a
 //!   comma-separated allowlist; the source is not registered at all when it
 //!   is unset, so no page is ever fetched by default. There is no crawl, no
-//!   link following, no URL discovery — only the listed URLs are requested.
+//!   link following, no URL discovery, only the listed URLs are requested.
 //! * **One shared hardened client.** Every request goes through
 //!   [`ScrapeClient`]: robots.txt (fail closed), per-host politeness, bounded
 //!   retries, size/content-type caps, same-host redirects only, and
 //!   deterministic challenge classification. A challenge page is a typed
-//!   [`DiscoveryError::Blocked`] — never a data row and never an "empty
+//!   [`DiscoveryError::Blocked`], never a data row and never an "empty
 //!   result".
 //! * **A blocked pass stores nothing.** If any listed URL is blocked, the
 //!   whole pass fails with the evidence: no candidate from that pass is
@@ -86,7 +86,7 @@ impl PublicWebSource {
     }
 
     /// Build from `SALES_SCRAPE_PUBLIC_URLS`. `None` means the operator has
-    /// not enabled the source (it must then not be registered at all — the
+    /// not enabled the source (it must then not be registered at all, the
     /// absence of an allowlist is not "scrape everything").
     pub fn from_env(
         db: PgPool,
@@ -208,7 +208,7 @@ impl DiscoverySource for PublicWebSource {
                 }
                 Err(error) => {
                     // A blocked fetch keeps its structured evidence, and
-                    // nothing from this pass is returned — so a blocked page
+                    // nothing from this pass is returned, so a blocked page
                     // can never become a candidate or an empty page. The
                     // host's transport-level health (backoff window) is
                     // persisted here, where the client that saw the block

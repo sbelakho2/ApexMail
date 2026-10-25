@@ -3,7 +3,7 @@
 //! Canonical shape (audit F07): `contacts.id` is UUID (migration 068),
 //! `contacts.tags` is NOT NULL `'[]'::jsonb` (migration 150), and
 //! `contacts.metadata` is object-or-NULL JSONB (migration 171). Ids are
-//! `uuid::Uuid` end to end — parsed at the API boundary, bound as UUIDs,
+//! `uuid::Uuid` end to end, parsed at the API boundary, bound as UUIDs,
 //! stringified only in response DTOs. A `None` tag argument means "use the
 //! canonical empty array" on create and "keep the stored value" on update,
 //! so the NOT NULL column can never be violated through this repo.
@@ -14,7 +14,7 @@ use uuid::Uuid;
 
 use crate::types::Contact;
 
-/// Column list every reader in this repo selects — one canonical projection
+/// Column list every reader in this repo selects, one canonical projection
 /// including tags (coalesced to '[]' for pre-150 databases) and metadata.
 const CONTACT_COLUMNS: &str =
     "id, tenant_id, email, name, COALESCE(tags, '[]'::jsonb) AS tags, metadata, status, created_at, updated_at";
@@ -134,7 +134,7 @@ impl ContactsRepo {
                 .await
             }
             _ => {
-                // First page — no cursor
+                // First page, no cursor
                 sqlx::query_as::<_, Contact>(&format!(
                     "SELECT {CONTACT_COLUMNS} \
                      FROM contacts WHERE tenant_id = $1 \
@@ -151,7 +151,7 @@ impl ContactsRepo {
     /// Update a contact.
     ///
     /// `None` tags/metadata keep the stored values (the canonical columns
-    /// are NOT NULL tags / object-or-NULL metadata — a SQL NULL write would
+    /// are NOT NULL tags / object-or-NULL metadata, a SQL NULL write would
     /// violate the contract, so absent means unchanged).
     pub async fn update(
         pool: &PgPool,
@@ -202,7 +202,7 @@ impl ContactsRepo {
         }
 
         // 4 bind params per row would exceed Postgres' 65,535-parameter
-        // statement limit above ~16,383 rows — insert in chunks instead of
+        // statement limit above ~16,383 rows, insert in chunks instead of
         // failing (or being unusable) on large imports.
         const PARAMS_PER_ROW: usize = 4;
         const MAX_BINDS: usize = 65_535;

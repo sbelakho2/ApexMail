@@ -51,7 +51,7 @@ fn test_pattern_match_throughput() {
 fn test_regex_compilation_reuse() {
     // Verify that the Aho-Corasick automaton is built once and reused,
     // not recompiled per call. We measure the cost of a second batch
-    // versus the first batch — they should be similar (no recompilation).
+    // versus the first batch, they should be similar (no recompilation).
     let matcher = build_bot_detector();
     let ua = "Mozilla/5.0 (compatible; Googlebot/2.1)";
 
@@ -82,7 +82,7 @@ fn test_regex_compilation_reuse() {
     );
 
     // If regex were recompiled, second batch would not be faster or similar.
-    // Allow up to 3x variance for timing jitter — the point is both are fast.
+    // Allow up to 3x variance for timing jitter, the point is both are fast.
     assert!(
         elapsed2 < elapsed1 * 3,
         "Second batch ({:?}) should not be significantly slower than first ({:?})",

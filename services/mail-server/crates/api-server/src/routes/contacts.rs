@@ -24,7 +24,7 @@ pub fn router() -> Router<AppState> {
             "/:id",
             get(get_contact).put(update_contact).delete(delete_contact),
         )
-        // Engagement Trust Score — the endpoint documented in
+        // Engagement Trust Score, the endpoint documented in
         // docs/security/advanced-analytics.md ("Engagement Trust Score"),
         // served by the analytics crate's `engagement_trust` engine.
         .route("/:id/trust-score", get(get_contact_trust_score))
@@ -52,7 +52,7 @@ const KEYSET_CURSOR_SEP: char = '\n';
 ///
 /// The timestamp MUST be rendered with `to_rfc3339()`: `DateTime`'s `Display`
 /// emits "2026-01-01 00:00:00 UTC", which [`decode_keyset_cursor`]'s
-/// `parse_from_rfc3339` rejects — a cursor this function minted used to fail
+/// `parse_from_rfc3339` rejects, a cursor this function minted used to fail
 /// its very next request with 400.
 fn encode_keyset_cursor(created_at: &DateTime<Utc>, id: &Uuid) -> String {
     encode_cursor(&format!(
@@ -139,7 +139,7 @@ fn validate_metadata(metadata: &Option<serde_json::Value>) -> Result<(), ApiErro
     Ok(())
 }
 
-/// Column bound for `contacts.name` — VARCHAR(512) (migration 071). Enforced
+/// Column bound for `contacts.name`, VARCHAR(512) (migration 071). Enforced
 /// at the boundary so an oversized name is a controlled 422: unbounded, it
 /// tripped the database limit and surfaced as a 500 on create/update and as
 /// a failed chunk ("database error" 500) on bulk import.
@@ -197,7 +197,7 @@ pub struct ContactResponse {
     pub email: String,
     pub name: Option<String>,
     /// Tags in their ONE canonical representation (migration 150): a JSON
-    /// array of bounded strings. Never null — reads coalesce a missing or
+    /// array of bounded strings. Never null, reads coalesce a missing or
     /// unmigrated value to `[]`.
     pub tags: serde_json::Value,
     pub metadata: Option<serde_json::Value>,
@@ -213,7 +213,7 @@ pub struct ListContactsQuery {
     pub limit: i64,
     #[serde(default)]
     pub offset: i64,
-    /// Cursor for cursor-based pagination — hex-encoded `created_at` + row id
+    /// Cursor for cursor-based pagination, hex-encoded `created_at` + row id
     /// pair of the last item from the previous page. When provided, overrides
     /// `offset`.
     #[serde(default)]
@@ -315,7 +315,7 @@ async fn list_contacts(
     let limit = clamp_limit(params.limit, 200);
 
     // Cursor-based pagination: decode and validate the hex-encoded
-    // `created_at\nid` pair BEFORE binding — a bogus cursor used to reach
+    // `created_at\nid` pair BEFORE binding, a bogus cursor used to reach
     // the `::timestamp` cast and surface as a database 500 instead of a
     // client 400.
     let cursor_value = match params.cursor.as_deref() {
@@ -371,7 +371,7 @@ async fn list_contacts(
 
     // Compute the next cursor from the last row's (created_at, id) pair.
     // The DTO's id string is a canonical UUID text form (from ContactRow.id),
-    // so the parse cannot fail — but skip the cursor instead of panicking
+    // so the parse cannot fail, but skip the cursor instead of panicking
     // if it ever does.
     let next_cursor = details.last().and_then(|r| {
         chrono::DateTime::parse_from_rfc3339(&r.created_at)
@@ -445,12 +445,12 @@ struct TrustScoreComponents {
     credibility: u8,
     reliability: u8,
     intimacy: u8,
-    /// Self-orientation as a ratio, 0.0 (best) ..= 1.0 (worst) — the
+    /// Self-orientation as a ratio, 0.0 (best) ..= 1.0 (worst), the
     /// documented example shape (`"selfOrientation": 0.3`).
     self_orientation: f64,
 }
 
-/// `GET /v1/contacts/:id/trust-score` — compute the contact's Engagement
+/// `GET /v1/contacts/:id/trust-score`, compute the contact's Engagement
 /// Trust Score from the tenant's real engagement stream.
 ///
 /// The engine (`analytics::engagement_trust`) is tenant-scoped: the same
@@ -526,7 +526,7 @@ async fn update_contact(
     let metadata = body.metadata.or(existing.metadata);
     let status = body.status.unwrap_or(existing.status);
 
-    // Status is stored verbatim — an unknown value would silently disappear
+    // Status is stored verbatim, an unknown value would silently disappear
     // from every status-filtered view (counts, segments, sends).
     const VALID_CONTACT_STATUSES: &[&str] = &[
         "active",
@@ -588,7 +588,7 @@ async fn delete_contact(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// Rows per chunked multi-row upsert in [`bulk_import`] — mirrors the CSV
+/// Rows per chunked multi-row upsert in [`bulk_import`], mirrors the CSV
 /// import path's [`IMPORT_CHUNK_SIZE`] (one round-trip per 500 rows instead
 /// of one per row, comfortably under the 65,535 bind-parameter limit).
 const BULK_IMPORT_CHUNK_SIZE: usize = 500;
@@ -643,7 +643,7 @@ async fn bulk_import(
     }
 
     // Chunked set-based upsert inside ONE transaction (previously one query
-    // per contact — 10,000 sequential round-trips for a max-size import).
+    // per contact, 10,000 sequential round-trips for a max-size import).
     // `xmax = 0` means a fresh insert; non-zero means the conflict path
     // updated an existing row.
     //
@@ -653,7 +653,7 @@ async fn bulk_import(
     // preserve existing tags and a name-only import CLEARED them. Now:
     //   * a NEW contact with omitted tags receives the canonical '[]';
     //   * an EXISTING contact keeps its tags unless the row explicitly
-    //     supplied a list (which fully replaces it — `[]` clears).
+    //     supplied a list (which fully replaces it, `[]` clears).
     // The tenant is bound ONCE ($2) for every row of the chunk, keeping the
     // tenant predicate identical to every other contacts statement.
     let mut created = 0usize;
@@ -706,7 +706,7 @@ async fn bulk_import(
                     tracing::error!(
                         error = %error,
                         tenant_id = %auth.tenant_id,
-                        "bulk import chunk failed — transaction rolled back"
+                        "bulk import chunk failed, transaction rolled back"
                     );
                     return Err(ApiError::Internal("database error".into()));
                 }
@@ -738,11 +738,11 @@ async fn bulk_import(
 /// whether tags were EXPLICITLY supplied. Named constant so tests can pin
 /// the exact semantics.
 ///
-/// The tenant predicate is `$7` — bound once, identical for every row of
+/// The tenant predicate is `$7`, bound once, identical for every row of
 /// the chunk and equal to the predicate every other contacts statement
 /// uses. `xmax::text::bigint = 0` distinguishes fresh inserts from
 /// conflict-path updates. Arrays arrive via `unnest`, so a 500-row chunk
-/// uses seven bind parameters total — far under Postgres'
+/// uses seven bind parameters total, far under Postgres'
 /// 65,535-statement-parameter limit (the previous per-row VALUES ladder
 /// scaled with 6×rows).
 const BULK_IMPORT_UPSERT_SQL: &str = r#"
@@ -770,7 +770,7 @@ const BULK_IMPORT_UPSERT_SQL: &str = r#"
         ON CONFLICT (tenant_id, email) DO UPDATE SET
             name = COALESCE(EXCLUDED.name, c.name),
             -- F88: re-join the staged row by the conflict key (the tenant
-            -- half is fixed by the conflict target) — replace tags ONLY
+            -- half is fixed by the conflict target), replace tags ONLY
             -- when the caller explicitly supplied a list (an explicit []
             -- clears; an omitted field preserves the stored array).
             tags = COALESCE(
@@ -795,7 +795,7 @@ struct ContactRow {
     id: Uuid,
     email: String,
     name: Option<String>,
-    /// Always a JSON array — every SELECT for this row type coalesces a
+    /// Always a JSON array, every SELECT for this row type coalesces a
     /// missing/NULL tags value to '[]' (canonical shape, migration 150).
     tags: serde_json::Value,
     metadata: Option<serde_json::Value>,
@@ -986,7 +986,7 @@ const BULK_TAG_REMOVE_SQL: &str = r#"
         updated_at = NOW()
     WHERE tenant_id = $1 AND id = ANY($2)"#;
 
-/// Name of the shape constraint added by migration 150 — used to map a
+/// Name of the shape constraint added by migration 150, used to map a
 /// check violation (SQLSTATE 23514) to a 422 instead of a 500.
 const CONTACTS_TAGS_SHAPE_CHECK: &str = "contacts_tags_shape_check";
 
@@ -1066,7 +1066,7 @@ async fn bulk_resolve_duplicates(
     Ok(Json(BulkActionResult { affected }))
 }
 
-/// Maximum rows accepted by the CSV/XLSX import (audit J) — matches
+/// Maximum rows accepted by the CSV/XLSX import (audit J), matches
 /// `bulk_import`'s MAX_BULK_CONTACTS so the file path cannot bypass the
 /// JSON path's cap.
 const MAX_IMPORT_ROWS: usize = 10_000;
@@ -1108,7 +1108,7 @@ pub(crate) struct ValidImportRow {
     pub name: Option<String>,
 }
 
-/// One bounded per-row note: `(row_number, message)` — callers render the
+/// One bounded per-row note: `(row_number, message)`, callers render the
 /// "Row N: …" form (the route's wire text) or a [`crate::routes::provider_import::RowNote`].
 #[derive(Debug, Clone)]
 pub(crate) struct ImportRowNote {
@@ -1240,7 +1240,7 @@ pub(crate) async fn upsert_import_rows(
             Ok(_) => outcome.imported += chunk.len() as i64,
             Err(e) => {
                 // Audit J: never return the raw sqlx error string (it can
-                // leak schema details and query fragments) — log the detail,
+                // leak schema details and query fragments), log the detail,
                 // report a generic per-row message.
                 tracing::error!(error = %e, tenant_id = %tenant_id, "contact import chunk failed");
                 outcome.failed += chunk.len() as i64;
@@ -1270,7 +1270,7 @@ pub(crate) struct ContactImportOutcome {
     pub error_count: usize,
 }
 
-/// Validate + upsert mapped contact rows — the ONE implementation behind
+/// Validate + upsert mapped contact rows, the ONE implementation behind
 /// `POST /v1/contacts/import` and the provider importer's presets (audit J
 /// contract: validate everything up front so DB failures cannot leave a
 /// half-imported batch of validated rows behind; one multi-row upsert per
@@ -1336,7 +1336,7 @@ async fn import_contacts(
         parse_csv_rows(&body)?
     };
 
-    // Audit J: cap the row count like bulk_import does — an unbounded file
+    // Audit J: cap the row count like bulk_import does, an unbounded file
     // import could otherwise tie up a connection with unbounded work.
     if rows.len() > MAX_IMPORT_ROWS {
         return Err(ApiError::Validation(vec![format!(
@@ -1406,7 +1406,7 @@ fn parse_xlsx_rows(data: &[u8]) -> Result<Vec<(String, Option<String>)>, ApiErro
         .worksheet_range(&sheet_name)
         .map_err(|e| ApiError::BadRequest(format!("XLSX sheet error: {e}")))?;
 
-    // Audit J: decompression-bomb guard — the sheet's total cell count is
+    // Audit J: decompression-bomb guard, the sheet's total cell count is
     // bounded BEFORE materialising rows, so a tiny malicious xlsx encoding a
     // huge sparse sheet cannot exhaust memory/CPU.
     let (row_count, col_count) = range.get_size();
@@ -1503,7 +1503,7 @@ mod tests_extra {
         // Exactly 512 multi-byte characters pass (char_length semantics).
         let at_bound = "ä".repeat(MAX_CONTACT_NAME_LEN);
         assert!(validate_name(&Some(at_bound)).is_ok());
-        // 513 characters are rejected — a 10k-char name must be a 422,
+        // 513 characters are rejected, a 10k-char name must be a 422,
         // never the VARCHAR(512) database error surfacing as a 500.
         let over = "x".repeat(MAX_CONTACT_NAME_LEN + 1);
         assert!(validate_name(&Some(over)).is_err());
@@ -1516,18 +1516,18 @@ mod tests_extra {
 //
 // Two layers:
 //
-// 1. `contact_migration_tests` — validate the REAL migration files
+// 1. `contact_migration_tests`, validate the REAL migration files
 //    (150 → 170 → 171, verbatim include_str!) against the two historical
 //    contacts shapes (068 tags-less, 075 nullable+metadata), including the
 //    F70 reconciliation policy and the documented pending-upgrade preflight.
 //    These deliberately hand-create LEGACY shapes; they cannot use the
 //    canonical fixture.
 //
-// 2. `canonical_crud_tests` — handler-level CRUD (create → list → get →
+// 2. `canonical_crud_tests`, handler-level CRUD (create → list → get →
 //    update → import → delete, two tenants, invalid-UUID 400s, metadata
 //    contract, F88 tags-presence semantics) against a FRESH CANONICAL
 //    database provisioned through the shared migrator fixture
-//    (`crate::test_db::canonical_pool` — audit F01), so a green test means
+//    (`crate::test_db::canonical_pool`, audit F01), so a green test means
 //    the statements work against the schema a deploy produces. No
 //    hand-written DDL that could hide metadata/UUID drift.
 //
@@ -1540,7 +1540,7 @@ mod contact_migration_tests {
     use sqlx::postgres::PgPoolOptions;
     use std::time::Duration;
 
-    /// Migrations verbatim — these tests validate the real files, not a
+    /// Migrations verbatim, these tests validate the real files, not a
     /// restatement of them.
     const MIGRATION_150: &str =
         include_str!("../../../../migrations/150_contacts_tags_canonical.sql");
@@ -1614,7 +1614,7 @@ mod contact_migration_tests {
             .map(|r| r.rows_affected())
     }
 
-    /// The 068 shape has NO tags column at all — the shape that made every
+    /// The 068 shape has NO tags column at all, the shape that made every
     /// `UPDATE contacts SET tags` fail with "column does not exist".
     /// Migrations 150 → 170 → 171 must add the canonical tags column,
     /// enforce its (repaired) bounds, and add the metadata column.
@@ -1739,7 +1739,7 @@ mod contact_migration_tests {
                 assert_eq!(result.is_ok(), expect_ok, "tag of {len} chars");
             }
 
-            // F07/migration 171: metadata is object-or-NULL — a scalar is
+            // F07/migration 171: metadata is object-or-NULL, a scalar is
             // rejected by the CHECK, an object round-trips.
             let scalar_metadata = sqlx::query(
             "INSERT INTO contacts (id, tenant_id, email, metadata) VALUES ($1, $2, 'h@x.ee', $3)",
@@ -1766,10 +1766,10 @@ mod contact_migration_tests {
     async fn bulk_tag_add_remove_round_trip_and_tenant_isolation() {
         if let Some(pool) = isolated_pool("roundtrip").await {
             // The 075/SCHEMA shape: contacts.tags exists but is nullable with
-            // no shape constraint — migrations 150 + 170 must normalise it and
+            // no shape constraint, migrations 150 + 170 must normalise it and
             // repair the validator. (The full apexmail-db SCHEMA cannot be
-            // applied to a fresh database — its campaigns/templates FK is
-            // uuid-to-varchar — so the subset is spelled out here.)
+            // applied to a fresh database, its campaigns/templates FK is
+            // uuid-to-varchar, so the subset is spelled out here.)
             sqlx::raw_sql(
                 "CREATE TABLE contacts (
                 id         UUID PRIMARY KEY,
@@ -1908,7 +1908,7 @@ mod contact_migration_tests {
 
     /// F70: values the BUGGY 150 validator accepted (nonstring elements,
     /// duplicates) are reconciled by migration 170 per the documented
-    /// policy — nonstring scalars → their trimmed string form, objects and
+    /// policy, nonstring scalars → their trimmed string form, objects and
     /// whitespace-only values dropped, dedupe before the count cap.
     #[tokio::test]
     async fn migration_170_reconciles_values_the_buggy_validator_accepted() {
@@ -2087,7 +2087,7 @@ mod contact_migration_tests {
 
     /// F07/migration 171 legacy backfill: on the 075 shape (which HAS an
     /// unconstrained metadata column), object values survive verbatim and
-    /// every nonobject value is reconciled to NULL — the deliberate policy
+    /// every nonobject value is reconciled to NULL, the deliberate policy
     /// documented in the migration header.
     #[tokio::test]
     async fn migration_171_backfills_legacy_metadata_conservatively() {
@@ -2163,7 +2163,7 @@ mod contact_migration_tests {
 // ─── F07/F88 canonical CRUD tests ──────────────────────────────
 //
 // Handler-level CRUD against a FRESH CANONICAL database provisioned
-// through the shared migrator fixture (audit F01) — no hand-written DDL
+// through the shared migrator fixture (audit F01), no hand-written DDL
 // that could invent columns production lacks. Covers the finding's
 // acceptance case: fresh migrations → create → list → get → update →
 // import (bulk + CSV) → delete, with populated metadata/tags, a second
@@ -2582,7 +2582,7 @@ mod canonical_crud_tests {
         }
     }
 
-    /// The documented `?tag=` list filter must actually restrict rows — it
+    /// The documented `?tag=` list filter must actually restrict rows, it
     /// used to be deserialized and silently ignored, so `?tag=anything`
     /// returned every contact. Covers the filter alone and combined with the
     /// keyset cursor, and confirms other tenants' like-tagged rows never leak.
@@ -2623,7 +2623,7 @@ mod canonical_crud_tests {
             )
             .await
             .expect("create untagged contact");
-            // Same tag in tenant B — must stay invisible to tenant A.
+            // Same tag in tenant B, must stay invisible to tenant A.
             let _ = create(
                 &state,
                 tenant_b,
@@ -2664,7 +2664,7 @@ mod canonical_crud_tests {
             // Unfiltered: all three tenant-A contacts.
             assert_eq!(list(&state, tenant_a, None, None).await.len(), 3);
 
-            // Tagged: exactly the vip contact — never the other rows, never
+            // Tagged: exactly the vip contact, never the other rows, never
             // tenant B's same-tagged row.
             let vip_rows = list(&state, tenant_a, Some("vip".into()), None).await;
             assert_eq!(vip_rows.len(), 1, "tag filter must restrict rows");
@@ -2849,7 +2849,7 @@ mod bulk_import_coverage_tests {
     }
 
     /// Tagging a contact past the per-contact limit trips the database
-    /// CHECK — the handler maps that to 422, never a 500.
+    /// CHECK, the handler maps that to 422, never a 500.
     #[tokio::test]
     async fn bulk_tag_over_the_limit_maps_the_check_violation_to_422() {
         let Some(pool) = crate::test_db::canonical_pool("contacts_tag_limit").await else {
@@ -2906,7 +2906,7 @@ mod bulk_import_coverage_tests {
             payload.bytes().map(|b| format!("{b:02x}")).collect()
         }
 
-        // Malformed cursors are 400s — one test per decoder arm.
+        // Malformed cursors are 400s, one test per decoder arm.
         let bad_cursors = [
             ("zz".to_string(), "malformed encoding"), // not hex
             (
@@ -3145,7 +3145,7 @@ mod bulk_import_coverage_tests {
         assert_eq!(status, axum::http::StatusCode::BAD_REQUEST, "{body}");
         assert!(body.to_string().contains("XLSX parse error"), "{body}");
 
-        // Oversize XLSX is refused before parsing (magic bytes only — the
+        // Oversize XLSX is refused before parsing (magic bytes only, the
         // first four bytes of the buffer are the ZIP signature).
         let mut big = vec![b'P'; MAX_XLSX_BODY_BYTES + 1];
         big[..4].copy_from_slice(b"PK\x03\x04");
@@ -3178,7 +3178,7 @@ mod pagination_adversarial_tests {
     use axum::http::StatusCode;
 
     /// Seed `n` contacts of `tenant` in ONE statement so all rows share a
-    /// single `created_at` value — the bulk-insert shape where a timestamp
+    /// single `created_at` value, the bulk-insert shape where a timestamp
     /// cursor alone skips or duplicates rows and only the (created_at, id)
     /// tie-break is total.
     async fn seed_contact_cohort(pool: &sqlx::PgPool, tenant: &str, n: i64, tag: &str) {
@@ -3197,7 +3197,7 @@ mod pagination_adversarial_tests {
     }
 
     /// The tenant's full listing order per the SAME ORDER BY the endpoint
-    /// uses — the ground truth every walk must reproduce exactly.
+    /// uses, the ground truth every walk must reproduce exactly.
     async fn expected_order(pool: &sqlx::PgPool, tenant: &str) -> Vec<String> {
         sqlx::query_scalar(
             "SELECT id::text FROM contacts WHERE tenant_id = $1 ORDER BY created_at DESC, id DESC",
@@ -3253,8 +3253,8 @@ mod pagination_adversarial_tests {
     }
 
     /// Page through the cohort one row at a time via cursor and via offset:
-    /// the two walks must produce the SAME ids in the SAME order — zero
-    /// skips, zero duplicates — with every row sharing one `created_at`.
+    /// the two walks must produce the SAME ids in the SAME order, zero
+    /// skips, zero duplicates, with every row sharing one `created_at`.
     #[tokio::test]
     async fn cursor_sweep_matches_offset_sweep_row_for_row() {
         let Some(pool) = crate::test_db::canonical_pool("contacts_cursor_sweep").await else {
@@ -3387,7 +3387,7 @@ mod pagination_adversarial_tests {
         let ts = Utc::now();
         let id = Uuid::new_v4();
         let minted = encode_keyset_cursor(&ts, &id);
-        // The payload must be RFC 3339 — not Display's "00:00:00 UTC" form.
+        // The payload must be RFC 3339, not Display's "00:00:00 UTC" form.
         let decoded = decode_cursor(&minted).expect("hex round trip");
         let (payload_ts, payload_id) = decoded
             .split_once(KEYSET_CURSOR_SEP)
@@ -3407,7 +3407,7 @@ mod pagination_adversarial_tests {
 
 /// Wave G: the documented `GET /v1/contacts/:id/trust-score` endpoint must be
 /// served by the real `analytics::engagement_trust` engine over the canonical
-/// `events` stream — and must stay tenant-scoped.
+/// `events` stream, and must stay tenant-scoped.
 #[cfg(test)]
 mod trust_score_tests {
     use super::*;

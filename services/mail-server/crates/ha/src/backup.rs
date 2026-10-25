@@ -1,4 +1,4 @@
-//! Backup & restore service — full, incremental, WAL backups with gzip compression
+//! Backup & restore service, full, incremental, WAL backups with gzip compression
 //! and AES-256-GCM encryption. Cursor-based table streaming. Post-restore verification.
 //!
 //! Encryption is now properly implemented using AES-256-GCM.
@@ -220,8 +220,8 @@ impl BackupService {
     /// failing mid-backup when encrypt_backup is called.
     ///
     /// In production configurations a missing `BACKUP_ENCRYPTION_KEY` is a
-    /// hard error (fail closed):without it backups — and their local
-    /// staging copies — are written in plaintext.
+    /// hard error (fail closed):without it backups, and their local
+    /// staging copies, are written in plaintext.
     pub fn new(pool: PgPool, config: Arc<Config>) -> Result<Self, String> {
         // Fail closed in production when no encryption key is configured.
         if config.environment == "production"
@@ -232,7 +232,7 @@ impl BackupService {
                 .is_none_or(|key| key.is_empty())
         {
             return Err(
-                "BACKUP_ENCRYPTION_KEY is required in production — refusing to start \
+                "BACKUP_ENCRYPTION_KEY is required in production, refusing to start \
                  with plaintext backups (set a 32-byte key)"
                     .into(),
             );
@@ -468,7 +468,7 @@ impl BackupService {
             .await
             .map_err(|e| format!("Declare cursor {table}: {e}"))?;
 
-        // The cursor and batch size are fixed for the whole loop — build the
+        // The cursor and batch size are fixed for the whole loop, build the
         // FETCH statement once, not once per batch.
         let fetch = format!(
             "FETCH FORWARD {BATCH_SIZE} FROM {cursor}",
@@ -560,7 +560,7 @@ impl BackupService {
                 restored_tables: backup.tables_included.unwrap_or_default(),
                 duration_ms: 0,
                 verification: None,
-                message: Some("Validation only — backup exists and is valid".into()),
+                message: Some("Validation only, backup exists and is valid".into()),
             });
         }
 
@@ -620,7 +620,7 @@ impl BackupService {
     /// Upload backup data to storage.
     ///
     /// Staging hygiene (F8):the `/tmp` staging copy is only written when it
-    /// is actually needed — as a fallback when the remote upload fails, or
+    /// is actually needed, as a fallback when the remote upload fails, or
     /// when no remote is configured (dev local-fallback mode). After a
     /// successful upload any stale staging copy is removed so retention
     /// gaps cannot accumulate plaintext-ish leftovers.
@@ -646,7 +646,7 @@ impl BackupService {
                     .map_err(|e| format!("S3 upload failed: {e}"))?;
 
                 if !response.status().is_success() {
-                    // Upload failed — write the staging copy as a recovery
+                    // Upload failed, write the staging copy as a recovery
                     // fallback so the payload is not lost, then surface the
                     // error to the caller.
                     tokio::fs::create_dir_all(local_dir)
@@ -669,7 +669,7 @@ impl BackupService {
                 Ok(())
             } else {
                 // No remote configured:the local staging copy IS the storage
-                // (dev/test fallback) — it is needed.
+                // (dev/test fallback), it is needed.
                 tokio::fs::create_dir_all(local_dir)
                     .await
                     .map_err(|e| format!("Create local backup directory: {e}"))?;
@@ -814,12 +814,12 @@ impl BackupService {
     fn quote_ident(name: &str) -> String {
         // Double-quote the identifier per PostgreSQL convention.
         // Since is_valid_identifier only allows [a-zA-Z_][a-zA-Z0-9_]*,
-        // there are no embedded quotes to escape — but we replace them
+        // there are no embedded quotes to escape, but we replace them
         // defensively anyway.
         format!("\"{}\"", name.replace('"', "\"\""))
     }
 
-    /// Restore a single table from its JSONL row section (no markers — the
+    /// Restore a single table from its JSONL row section (no markers, the
     /// archive is indexed once by [`index_backup_sections`]).
     async fn restore_table(&self, table: &str, data: &[u8]) -> Result<(), String> {
         // Sanitize table name (prevent SQL injection)
@@ -933,7 +933,7 @@ impl BackupService {
     /// verifying the current database and claiming success. WAL replay up to
     /// `target_time` requires external tooling (a WAL archive plus
     /// `restore_command`/recovery configuration) which this crate does not
-    /// bundle — that step is reported as unsupported, and because a base
+    /// bundle, that step is reported as unsupported, and because a base
     /// restore alone is not a PITR to the requested timestamp, `success` is
     /// `false` with an explicit message rather than a false success.
     pub async fn pitr(&self, target_time: chrono::DateTime<Utc>) -> Result<RestoreResult, String> {
@@ -967,7 +967,7 @@ impl BackupService {
                 duration_ms: (Utc::now() - started).num_milliseconds().max(0),
                 verification: None,
                 message: Some(format!(
-                    "PITR to {target_time} NOT completed — unsupported/failed step: {detail}"
+                    "PITR to {target_time} NOT completed, unsupported/failed step: {detail}"
                 )),
             }
         };
@@ -1012,7 +1012,7 @@ impl BackupService {
 
         // WAL replay to the exact target time requires external WAL archive
         // tooling (recovery_target_time / restore_command) that this crate
-        // does not provide — reported honestly, and it keeps `success`
+        // does not provide, reported honestly, and it keeps `success`
         // false because a base restore is not a PITR.
         let duration_ms = (Utc::now() - started).num_milliseconds().max(0);
         let base_ok = verification.checksum_match && verification.constraint_valid;
@@ -1023,7 +1023,7 @@ impl BackupService {
             duration_ms,
             verification: Some(verification),
             message: Some(format!(
-                "PITR to {target_time} incomplete — base backup {} restored (checks passed: \
+                "PITR to {target_time} incomplete, base backup {} restored (checks passed: \
                  {base_ok}), but WAL replay to the target time is unsupported here (requires \
                  external WAL archive tooling)",
                 backup.id
@@ -1062,7 +1062,7 @@ impl BackupService {
 
         // Every check below is scoped to the RESTORED tables: database-wide
         // counts (the previous form) mixed pre-existing, unrelated objects
-        // into the verdict — this canonical schema always carries NOT VALID
+        // into the verdict, this canonical schema always carries NOT VALID
         // constraints and never-scanned indexes on other tables, so a
         // perfectly restored table was reported as a failed restore.
         let restored_tables: Vec<String> = tables
@@ -1071,7 +1071,7 @@ impl BackupService {
             .cloned()
             .collect();
 
-        // Check 1:index health — a restored table whose index is INVALID
+        // Check 1:index health, a restored table whose index is INVALID
         // (indisvalid = false, e.g. an interrupted CREATE INDEX CONCURRENTLY)
         // means index usage cannot be trusted. Freshly-reset idx_scan counters
         // are expected after a restore and are not evidence of breakage.
@@ -1091,7 +1091,7 @@ impl BackupService {
         .map(|invalid_indexes| invalid_indexes == 0)
         .unwrap_or(false);
 
-        // Check 2:constraint validity — real validity is "no constraint on a
+        // Check 2:constraint validity, real validity is "no constraint on a
         // restored table is marked NOT VALID" (pg_constraint.convalidated).
         let constraint_ok: bool = sqlx::query_scalar::<_, i64>(
             "SELECT COUNT(*) FROM pg_constraint con
@@ -1109,7 +1109,7 @@ impl BackupService {
         .map(|invalid_count| invalid_count == 0)
         .unwrap_or(false);
 
-        // Check 3:sequence validity — scoped to the RESTORED tables' own
+        // Check 3:sequence validity, scoped to the RESTORED tables' own
         // sequences. A table's serial/identity column is bound to its
         // sequence by a `pg_depend` ownership entry; the sequence is
         // orphaned when that ownership/owning column is gone. The previous
@@ -1202,7 +1202,7 @@ impl BackupService {
         // LIMIT must be bound as an integer: binding the clamped value as a
         // string makes PostgreSQL infer `text` for the placeholder, and a
         // text-typed LIMIT is a hard error ("argument of LIMIT must be type
-        // bigint, not type text") — the previous code failed on every call.
+        // bigint, not type text"), the previous code failed on every call.
         let clamped_limit = limit.clamp(1, 1000);
         let limit_param = filters.len() + 1;
         sql.push_str(&format!(" ORDER BY started_at DESC LIMIT ${limit_param}"));
@@ -1260,7 +1260,7 @@ impl BackupService {
                     .send()
                     .await
                     .map_err(|e| format!("S3 delete failed: {e}"))?;
-                // 404 is success — the object is already gone.
+                // 404 is success, the object is already gone.
                 if !response.status().is_success() && response.status().as_u16() != 404 {
                     return Err(format!("S3 delete returned status: {}", response.status()));
                 }
@@ -1278,7 +1278,7 @@ impl BackupService {
     /// Remove expired backups beyond the retention period.
     ///
     /// F8:expired backups are also removed from the storage backend (via
-    /// [`Self::delete_from_storage`]) — previously only the catalog rows
+    /// [`Self::delete_from_storage`]), previously only the catalog rows
     /// were deleted and the stored objects (plus `/tmp` staging copies)
     /// accumulated forever.
     pub async fn enforce_retention(&self) -> Result<u64, String> {
@@ -1294,7 +1294,7 @@ impl BackupService {
         .await
         .map_err(|e| format!("List expired backups: {e}"))?;
 
-        // Best-effort object removal — a failure is logged and the catalog
+        // Best-effort object removal, a failure is logged and the catalog
         // delete still proceeds (the row is already past retention).
         for (id, location) in &expired {
             if let Some(location) = location {
@@ -1387,7 +1387,7 @@ mod tests {
 
     #[test]
     fn test_valid_table_name() {
-        // Just validates the check passes — doesn't hit DB
+        // Just validates the check passes, doesn't hit DB
         let name = "public_users_table";
         assert!(name
             .chars()
@@ -1629,7 +1629,7 @@ mod tests {
         test_runtime().block_on(async {
             let svc = BackupService::new(test_pool(), test_config())
                 .expect("test config should have valid encryption key");
-            let path = std::env::temp_dir().join(format!("apex-backup-{}", Uuid::new_v4())); // nosemgrep: rust.lang.security.temp-dir.temp-dir — test fixture under a unique pid/uuid path — no predictable-name temp collision
+            let path = std::env::temp_dir().join(format!("apex-backup-{}", Uuid::new_v4())); // nosemgrep: rust.lang.security.temp-dir.temp-dir, test fixture under a unique pid/uuid path, no predictable-name temp collision
             tokio::fs::write(&path, b"payload")
                 .await
                 .expect("write temp backup file");
@@ -1655,7 +1655,7 @@ mod tests {
             let svc = BackupService::new(test_pool(), test_config())
                 .expect("test config should have valid encryption key");
             // The lazy fake pool cannot run the backup-selection query: the
-            // result is an Err — never a RestoreResult with success=true.
+            // result is an Err, never a RestoreResult with success=true.
             let res = svc.pitr(Utc::now()).await;
             assert!(
                 res.is_err(),

@@ -38,7 +38,7 @@ first registry release; the drop you receive contains the same
 `packages/sdk-<language>` directory layout with per-language build
 instructions. Pin to the supplied commit if you vendor.
 
-Each SDK directory contains language-specific build and test instructions in its own README. The SDK API surface is still changing ahead of the first release — pin to a specific commit if you vendor.
+Each SDK directory contains language-specific build and test instructions in its own README. The SDK API surface is still changing ahead of the first release, pin to a specific commit if you vendor.
 
 ## Intended Usage (Pre-release)
 

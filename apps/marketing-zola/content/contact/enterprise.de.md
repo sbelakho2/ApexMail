@@ -19,7 +19,7 @@ Nach dem Absenden des Formulars prüft unser Enterprise-Team Ihre Anforderungen 
 
 <div id="enquiry-submitted" class="apex-notice apex-notice--ok" role="status">
   <b>Übermittelt</b>
-  <p>Vielen Dank — Ihre Eingabe wurde übermittelt. Unser Team prüft die Anfrage und antwortet innerhalb von 2 Werktagen.</p>
+  <p>Vielen Dank, Ihre Eingabe wurde übermittelt. Unser Team prüft die Anfrage und antwortet innerhalb von 2 Werktagen.</p>
 </div>
 <div id="enquiry-error" class="apex-notice apex-notice--fail" role="alert">
   <b>Nicht angenommen</b>
@@ -62,15 +62,15 @@ Nach dem Absenden des Formulars prüft unser Enterprise-Team Ihre Anforderungen 
     <div class="space-y-3 mt-3">
       <label class="apex-check">
         <input type="radio" name="deployment_model" value="shared" checked />
-        <span><strong>Shared Cloud</strong> — Multi-Tenant-EU-Infrastruktur</span>
+        <span><strong>Shared Cloud</strong>, Multi-Tenant-EU-Infrastruktur</span>
       </label>
       <label class="apex-check">
         <input type="radio" name="deployment_model" value="dedicated" />
-        <span><strong>Dedicated Tenant</strong> — isolierte Single-Tenant-Infrastruktur, vorbehaltlich Architektur- und Vertragsprüfung</span>
+        <span><strong>Dedicated Tenant</strong>, isolierte Single-Tenant-Infrastruktur, vorbehaltlich Architektur- und Vertragsprüfung</span>
       </label>
       <label class="apex-check">
         <input type="radio" name="deployment_model" value="byoc" />
-        <span><strong>BYOC / Private Bereitstellung</strong> — verwaltete Bereitstellung in Ihrem Cloud-Konto, vorbehaltlich Architektur- und Vertragsprüfung</span>
+        <span><strong>BYOC / Private Bereitstellung</strong>, verwaltete Bereitstellung in Ihrem Cloud-Konto, vorbehaltlich Architektur- und Vertragsprüfung</span>
       </label>
     </div>
   </fieldset>

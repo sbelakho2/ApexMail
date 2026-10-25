@@ -2,7 +2,7 @@
 //!
 //! Properties proven here:
 //! - The pixel ALWAYS answers the exact transparent GIF with locked-down
-//!   headers, regardless of token validity — and the response never carries
+//!   headers, regardless of token validity, and the response never carries
 //!   any recipient-derived bytes (PII-free by construction).
 //! - Hostile / oversized / garbage tracking ids are refused before any
 //!   decryption, and record nothing.
@@ -176,7 +176,7 @@ async fn pixel_records_human_opens_once_and_hostile_or_bot_hits_never() {
     }
     assert!(recorded, "human open must be recorded");
 
-    // (2) The same open replayed is deduped (24h SETNX) — no second entry.
+    // (2) The same open replayed is deduped (24h SETNX), no second entry.
     let token = tracking_token(&tenant, &message, "human@example.com");
     let _ = handle_pixel(
         State(state.clone()),
@@ -316,7 +316,7 @@ async fn open_recorder_concurrency_bound_drops_excess_opens() {
         Path(token),
     )
     .await;
-    // The response is unaffected — recording is best-effort by design.
+    // The response is unaffected, recording is best-effort by design.
     assert_eq!(body_bytes(resp).await, TRANSPARENT_GIF);
     settle().await;
     settle().await;
@@ -486,7 +486,7 @@ async fn invalid_pixel_token_warns_with_a_truncated_prefix_and_still_serves() {
 }
 
 /// SM2-F4: 19 ASCII bytes + a two-byte `é` places byte 20 INSIDE the
-/// character — the exact input that panicked the invalid-token `warn!`'s
+/// character, the exact input that panicked the invalid-token `warn!`'s
 /// `id_prefix = &id[..id.len().min(20)]` field ("byte index 20 is not a
 /// char boundary"), killing the connection task per request. With a
 /// subscriber installed the field actually evaluates; the handler must

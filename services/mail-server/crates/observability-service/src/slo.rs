@@ -19,7 +19,7 @@ pub struct SloComplianceResult {
     pub name: String,
     pub compliant: bool,
     /// Current success percentage (0.0–100.0). `None` when no traffic was
-    /// observed — compliance is unknown, not 100 %, and serializes as `null`.
+    /// observed, compliance is unknown, not 100 %, and serializes as `null`.
     pub current_pct: Option<f64>,
     /// Target percentage (0.0–100.0).
     pub target_pct: f64,

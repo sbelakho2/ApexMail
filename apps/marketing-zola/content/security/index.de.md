@@ -68,7 +68,7 @@ Die Systemintegrität wird durch automatisierte, wiederkehrende Prüfungen im ge
 | **Integrität der Bereitstellungsartefakte** | Container-Images werden per Digest verifiziert, nicht signiert: Jede Pipeline-Ausführung zeichnet ein Release-Manifest auf (SHA-256-Digests je Image, `SHA256SUMS.images`) und erzeugt eine digest-gepinnte Compose-Override-Datei; die Bereitstellung verweigert den Start jedes Images, dessen Digest nicht zum Manifest passt. | Jede Bereitstellung | Release-Manifest + Digest-Verifizierung vor dem Rollout in der Deploy-Stufe |
 | **Audit-Log-Integrität** | Audit-Log-Tabellen tragen eine Hash-Kette: Der SHA-256-Digest jeder Zeile ist mit ihrem Vorgänger verkettet. | Kontinuierlich (je Schreibvorgang) | Audit-Log-Hash-Kette |
 | **Bereitstellungsprotokolle** | Jede Pipeline-Ausführung zeichnet ein Manifest (Stufe, Status, Exit-Code, Dauer) sowie Stufen-Protokolle auf. Dies sind Betriebsprotokolle, kein manipulationssicheres, kundenseitiges Protokoll. | Jede Bereitstellung | CI-Run-Manifeste (`ci/runs/<ts>/manifest.json`) |
-| **Backup-Verifizierung** | Jedes Backup wird automatisch entschlüsselt und strukturell validiert (`pg_restore --list`), bevor die Klartext-Kopie gelöscht wird — ein nicht lesbares Backup gilt nie als gut. Vollständige Wiederherstellungsübungen sind manuell und folgen der dokumentierten vierteljährlichen Kadenz. | Je Backup (automatische Validierung); vierteljährlich (manuelle Übungen) | Wiederherstellbarkeitsprüfung beim Backup; DR-Übungsprotokolle |
+| **Backup-Verifizierung** | Jedes Backup wird automatisch entschlüsselt und strukturell validiert (`pg_restore --list`), bevor die Klartext-Kopie gelöscht wird, ein nicht lesbares Backup gilt nie als gut. Vollständige Wiederherstellungsübungen sind manuell und folgen der dokumentierten vierteljährlichen Kadenz. | Je Backup (automatische Validierung); vierteljährlich (manuelle Übungen) | Wiederherstellbarkeitsprüfung beim Backup; DR-Übungsprotokolle |
 | **Laufzeit-Resilienz** | Dienste laufen mit Healthchecks und automatischem Neustart; ein fehlgeschlagener Content-Probe nach dem Deploy löst automatisches Rollback auf die vorherigen Image-Pins aus. | Kontinuierlich | Container-Healthchecks; Verify-Stufe + Rollback |
 
 ## Infrastruktursicherheit
@@ -85,13 +85,13 @@ Die Systemintegrität wird durch automatisierte, wiederkehrende Prüfungen im ge
 
 - Automatisiertes Dependency-Scanning in der CI/CD-Pipeline.
 - Automatisiertes Infrastruktur-Schwachstellen-Scanning (wöchentlich).
-- Jährlicher Drittanbieter-Penetrationstest (geplant — derzeit in Beschaffung; Ergebnisse werden nach dem ersten Test und der Behebung veröffentlicht).
+- Jährlicher Drittanbieter-Penetrationstest (geplant, derzeit in Beschaffung; Ergebnisse werden nach dem ersten Test und der Behebung veröffentlicht).
 - Responsible-Disclosure-Programm: [security@apexmail.ee](mailto:security@apexmail.ee)
 - Ziele für die Schwachstellenbehebung nach Schweregrad:
   - **Kritisch:** Sofortige Eindämmung erforderlich; dauerhafte Behebung innerhalb von 7 Tagen.
   - **Hoch:** Ziel innerhalb von 30 Tagen.
   - **Mittel:** Ziel innerhalb von 90 Tagen.
-  - **Niedrig:** Risikobasiert — Behandlung in regelmäßigen Wartungszyklen.
+  - **Niedrig:** Risikobasiert, Behandlung in regelmäßigen Wartungszyklen.
   - **Aktiv ausgenutzt:** Notfallprozess unabhängig vom Schweregrad.
 
 ## Incident Response

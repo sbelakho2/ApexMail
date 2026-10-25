@@ -95,7 +95,7 @@ fn default_sidecar_tls_enabled() -> bool {
 /// SM9 #6: the DEV-ONLY escape hatch for gateway tenant assertion. When
 /// `AI_EMBEDDINGS_TRUST_BODY_TENANT=true`, `/vectors` and `/search` accept
 /// the request-body `tenant_id` WITHOUT the gateway-asserted
-/// `x-apexmail-tenant-id` header — for local runs with no gateway in front
+/// `x-apexmail-tenant-id` header, for local runs with no gateway in front
 /// of the service. Default `false` (the header is REQUIRED); a production
 /// deployment must never set it.
 pub fn trust_body_tenant_from_env() -> bool {

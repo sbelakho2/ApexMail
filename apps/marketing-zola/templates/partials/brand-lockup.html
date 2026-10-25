@@ -1,11 +1,11 @@
 {# ── ApexMail Brand Lockup ────────────────────────────────────────────── #}
 {#                                                                        #}
-{# The ApexMail wordmark — "Apex" in the brand accent, "Mail" in the      #}
-{# foreground — used in the header and footer.                            #}
+{# The ApexMail wordmark, "Apex" in the brand accent, "Mail" in the      #}
+{# foreground, used in the header and footer.                            #}
 {#                                                                        #}
 {# Brand note (2026-09-05 restoration): ApexMail's identity is the A-mark  #}
 {# favicon (browser tabs, static/icon.svg) plus this wordmark. The bird    #}
-{# mark is NOT an ApexMail asset — it belongs to the CAPTCHA product and   #}
+{# mark is NOT an ApexMail asset, it belongs to the CAPTCHA product and   #}
 {# must never appear in this build (enforced at commit time).            #}
 {#                                                                        #}
 {# Variable:                                                              #}
@@ -15,10 +15,10 @@
 {% set mark_size = mark_size | default(value=32) %}
 
 <a href="{{ lp }}/" class="flex items-center apex-link" aria-label="{% if i18n_data and i18n_data[l] and i18n_data[l]["a11y"] and i18n_data[l]["a11y"]["home_link"] %}{{ i18n_data[l]["a11y"]["home_link"] }}{% else %}ApexMail home{% endif %}">
-  {# Wordmark — "Apex" in the brand accent, "Mail" in the foreground.     #}
+  {# Wordmark, "Apex" in the brand accent, "Mail" in the foreground.     #}
   {# The text-surface-950 on "Mail" is auto-inverted in dark mode by the  #}
   {# html.dark { --surface-950: ... } override in input.css (the project's  #}
-  {# documented dark-mode mechanism — no Tailwind dark: variant needed).   #}
+  {# documented dark-mode mechanism, no Tailwind dark: variant needed).   #}
   {# overflow="visible": the viewBox is sized for Inter at font-size 20; a
      fallback face or enlarged text can be a few percent wider, and an SVG
      clips to its viewport by default. Visible overflow keeps the wordmark

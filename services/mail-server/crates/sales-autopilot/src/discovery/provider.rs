@@ -207,7 +207,7 @@ pub fn candidate_allowed_by_jurisdiction(
 }
 
 // ---------------------------------------------------------------------------
-// FixtureSource — explicitly labelled test source
+// FixtureSource, explicitly labelled test source
 // ---------------------------------------------------------------------------
 
 /// A deterministic in-memory source for tests and local development.

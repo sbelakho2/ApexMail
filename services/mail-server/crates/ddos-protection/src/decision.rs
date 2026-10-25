@@ -104,14 +104,14 @@ pub struct PowChallenge {
 ///
 /// SECURITY (fix I): the cookie value is HMAC-SHA256 signed with a
 /// server-side secret. Verification recomputes the signature and rejects
-/// any value that was not issued by this server — previously the value was
+/// any value that was not issued by this server, previously the value was
 /// a plain string compared for equality, so any client that ever observed
 /// a valid value (or guessed it) could forge a passed challenge.
 #[derive(Debug, Clone)]
 pub struct CookieChallenge {
     /// Cookie name
     pub name: String,
-    /// Cookie value — `"<challenge_id>:<expires_at>.<hmac_hex>"`
+    /// Cookie value, `"<challenge_id>:<expires_at>.<hmac_hex>"`
     pub value: String,
     /// Challenge expiration (Unix timestamp)
     pub expires_at: u64,
@@ -293,7 +293,7 @@ mod tests {
     }
 
     // NOTE: `cookie_challenge_uses_exact_constant_time_value_match` was
-    // replaced — it asserted the pre-fix plain-comparison behavior that let
+    // replaced, it asserted the pre-fix plain-comparison behavior that let
     // any client that observed a valid value forge a passed challenge.
 
     #[test]

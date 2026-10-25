@@ -19,7 +19,7 @@ use crate::config::AiConfig;
 use crate::types::{AiError, EvalMetrics, JobStatus, TrainingJob};
 
 /// Cap on retained training-job records in the in-memory index. On insert,
-/// the oldest TERMINAL jobs (completed/failed/cancelled — never running)
+/// the oldest TERMINAL jobs (completed/failed/cancelled, never running)
 /// are evicted beyond this cap; the per-job snapshots under the checkpoint
 /// path keep the full history.
 const MAX_RETAINED_JOBS: usize = 500;
@@ -351,7 +351,7 @@ mod tests {
     fn job_index_is_capped_and_running_jobs_are_never_evicted() {
         // Regression: finished jobs were never removed from the in-memory
         // map, so it grew for the process's lifetime.
-        let dir = std::env::temp_dir().join(format!("ai-train-{}", uuid::Uuid::new_v4())); // nosemgrep: rust.lang.security.temp-dir.temp-dir — test fixture under a unique pid/uuid path — no predictable-name temp collision
+        let dir = std::env::temp_dir().join(format!("ai-train-{}", uuid::Uuid::new_v4())); // nosemgrep: rust.lang.security.temp-dir.temp-dir, test fixture under a unique pid/uuid path, no predictable-name temp collision
         std::fs::create_dir_all(&dir).unwrap();
         let config = AiConfig {
             checkpoint_path: dir.display().to_string(),
@@ -395,7 +395,7 @@ mod tests {
     impl ScratchDir {
         fn new(label: &str) -> Self {
             let dir = {
-                // nosemgrep: rust.lang.security.temp-dir.temp-dir — test fixture under a unique pid/uuid path — no predictable-name temp collision
+                // nosemgrep: rust.lang.security.temp-dir.temp-dir, test fixture under a unique pid/uuid path, no predictable-name temp collision
                 std::env::temp_dir().join(format!("ai-train-{label}-{}", uuid::Uuid::new_v4()))
             };
             std::fs::create_dir_all(&dir).unwrap();
@@ -419,7 +419,7 @@ mod tests {
     /// Write an executable POSIX-shell runner script and return its path.
     fn write_runner(label: &str, body: &str) -> PathBuf {
         let path =
-            std::env::temp_dir().join(format!("ai-runner-{label}-{}.sh", uuid::Uuid::new_v4())); // nosemgrep: rust.lang.security.temp-dir.temp-dir — test fixture under a unique pid/uuid path — no predictable-name temp collision
+            std::env::temp_dir().join(format!("ai-runner-{label}-{}.sh", uuid::Uuid::new_v4())); // nosemgrep: rust.lang.security.temp-dir.temp-dir, test fixture under a unique pid/uuid path, no predictable-name temp collision
         std::fs::write(&path, format!("#!/bin/sh\n{body}")).unwrap();
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -494,7 +494,7 @@ mod tests {
     }
 
     /// A runner that exits successfully WITHOUT writing its evaluation
-    /// artifact must land the job in Failed — the API never pretends a
+    /// artifact must land the job in Failed, the API never pretends a
     /// training run completed.
     #[tokio::test]
     async fn runner_without_metrics_artifact_fails_the_job() {
@@ -560,7 +560,7 @@ exit 0"#,
         std::fs::remove_file(&runner).ok();
     }
 
-    /// A runner that exits nonzero fails the job with the exit status — the
+    /// A runner that exits nonzero fails the job with the exit status, the
     /// child outcome is tracked, never assumed.
     #[tokio::test]
     async fn failing_runner_exit_code_is_tracked() {
@@ -613,7 +613,7 @@ exit 0"#,
     }
 
     /// A metrics artifact that is not JSON at all fails the job with the
-    /// artifact error — never a silent completion.
+    /// artifact error, never a silent completion.
     #[tokio::test]
     async fn metrics_artifact_with_invalid_json_fails_the_job() {
         let scratch = ScratchDir::new("bad-json-metrics");
@@ -681,7 +681,7 @@ exit 0"#,
     }
 
     /// A spawn failure (existing file, not executable) fails the job record
-    /// and surfaces a TrainingError — it must not strand a Queued job.
+    /// and surfaces a TrainingError, it must not strand a Queued job.
     #[tokio::test]
     async fn unexecutable_runner_reports_spawn_failure_and_fails_the_job() {
         let scratch = ScratchDir::new("spawn-fail");
@@ -744,7 +744,7 @@ exit 0"#,
     #[test]
     fn unwritable_checkpoint_dir_is_a_checkpoint_error() {
         // A FILE where the checkpoint directory must be created.
-        let file = std::env::temp_dir().join(format!("ai-train-file-{}", uuid::Uuid::new_v4())); // nosemgrep: rust.lang.security.temp-dir.temp-dir — test fixture under a unique pid/uuid path — no predictable-name temp collision
+        let file = std::env::temp_dir().join(format!("ai-train-file-{}", uuid::Uuid::new_v4())); // nosemgrep: rust.lang.security.temp-dir.temp-dir, test fixture under a unique pid/uuid path, no predictable-name temp collision
         std::fs::write(&file, b"not a directory").unwrap();
         let config = AiConfig {
             checkpoint_path: file.display().to_string(),

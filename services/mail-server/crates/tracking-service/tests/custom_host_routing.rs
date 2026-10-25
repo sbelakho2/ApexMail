@@ -2,10 +2,10 @@
 //!
 //! A verified custom tracking domain (e.g. `email.customer.test`) must serve
 //! click/open/unsubscribe links for its owning tenant, and every other host
-//! must be refused with the NAMED reason — never a silent bounce, and never
+//! must be refused with the NAMED reason, never a silent bounce, and never
 //! a link served for the wrong workspace. Resolution is an explicit
-//! verified-row lookup (NO cache), so deleting the tracking domain — or the
-//! parent sending domain it hangs off — stops serving on the next request.
+//! verified-row lookup (NO cache), so deleting the tracking domain, or the
+//! parent sending domain it hangs off, stops serving on the next request.
 //!
 //! DB-backed: soft-skips when `TEST_DATABASE_URL` is unset (workspace
 //! convention). Redis is deliberately a dead pool: the refusal path must not
@@ -245,7 +245,7 @@ async fn verified_custom_host_serves_click_for_the_owning_tenant() {
     assert_eq!(response.header("location"), "https://customer.test/landing");
 }
 
-/// An unknown host is refused by name — 400, no Location, never a bounce.
+/// An unknown host is refused by name, 400, no Location, never a bounce.
 #[tokio::test]
 async fn unknown_host_is_refused_with_the_named_reason_and_no_redirect() {
     let Some(pool) = canonical_pool("ch_unknown").await else {
@@ -331,7 +331,7 @@ async fn foreign_token_on_a_custom_host_is_refused() {
 }
 
 /// Deleting the tracking-domain row stops serving on the next request (the
-/// resolution is an explicit verified-row lookup — no stale allow-cache).
+/// resolution is an explicit verified-row lookup, no stale allow-cache).
 #[tokio::test]
 async fn deleting_the_tracking_domain_stops_serving() {
     let Some(pool) = canonical_pool("ch_delete").await else {
@@ -358,7 +358,7 @@ async fn deleting_the_tracking_domain_stops_serving() {
     );
 }
 
-/// Deleting the PARENT sending domain also stops serving — the item-11
+/// Deleting the PARENT sending domain also stops serving, the item-11
 /// owned-domain relation is re-checked on every request.
 #[tokio::test]
 async fn deleting_the_parent_domain_stops_serving_too() {

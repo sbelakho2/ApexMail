@@ -1,4 +1,4 @@
-//! Test Mode — deterministic outcomes for isolated email testing.
+//! Test Mode, deterministic outcomes for isolated email testing.
 //!
 //! Test mode intercepts messages addressed to `@test.apexmail.ee` addresses,
 //! produces realistic message records, webhook events, and SMTP-style codes
@@ -86,7 +86,7 @@ fn test_addresses() -> Vec<TestAddress> {
             outcome: "suppressed".into(),
             smtp_code: "250".into(),
             smtp_enhanced_code: "2.0.0".into(),
-            description: "Simulates a recipient already on the suppression list — message is accepted but not delivered.".into(),
+            description: "Simulates a recipient already on the suppression list, message is accepted but not delivered.".into(),
             event_sequence: vec!["queued".into(), "suppressed".into()],
             webhook_events: vec!["suppressed".into()],
             suppressed: true,

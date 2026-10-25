@@ -3,7 +3,7 @@
 //! Every test provisions its OWN canonical database through
 //! `migrator::test_support::fresh_canonical_pool` (the workspace convention).
 //!
-//! A sweep is a GLOBAL operation: it claims every unposted source row — with
+//! A sweep is a GLOBAL operation: it claims every unposted source row, with
 //! no tenant/entity filter for payroll (the adapter posts to the default
 //! entity) and none for expenses or bank lines. The sweep-level counters
 //! (`claimed`, `posted`, `unpostable`, `skipped_incomplete`) therefore
@@ -217,7 +217,7 @@ async fn payroll_sweep_posts_once_and_waits_for_incomplete_records() {
         0
     );
 
-    // Completing the input makes the sweep post it — no other wiring.
+    // Completing the input makes the sweep post it, no other wiring.
     sqlx::query("UPDATE payroll_records SET funded_pension_rate = 0.02 WHERE id = $1")
         .bind(incomplete)
         .execute(&pool)
@@ -565,7 +565,7 @@ fn policy_trait_accepts_closures_and_named_types() {
 // ---------------------------------------------------------------------------
 
 /// A policy that fails, and a record the adapter refuses, are both counted as
-/// `failed` and rolled back — the rows stay unposted and are retried. A
+/// `failed` and rolled back, the rows stay unposted and are retried. A
 /// posting into a CLOSED fiscal period fails closed and is reported, never
 /// silently re-dated (audit SM7 F1). An UNPROVISIONED ledger, by contrast, is
 /// no longer a failure at all: the posting path auto-provisions the default
@@ -645,7 +645,7 @@ async fn sweep_failures_are_counted_rolled_back_and_retried() {
     assert_eq!(report.failed, 2);
 
     // Expenses: with the optional store present and NO default legal entity,
-    // the sweep does NOT report a failure any more — the posting path
+    // the sweep does NOT report a failure any more, the posting path
     // auto-provisions the default entity + chart + covering open period and
     // posts (audit SM7 F1: an unprovisioned ledger must never again mean
     // every posting is skipped/failed forever).
@@ -713,7 +713,7 @@ async fn sweep_failures_are_counted_rolled_back_and_retried() {
     let _ = covering;
 
     // Bank, fail-closed (audit SM7 F1): the entity/account exist and a CLOSED
-    // period covers the line's date — provisioning must NOT backdate into
+    // period covers the line's date, provisioning must NOT backdate into
     // closed books, so the posting fails NoOpenPeriod and is reported.
     let mut conn = pool.acquire().await.expect("conn");
     let entity = chart::create_legal_entity(
@@ -782,7 +782,7 @@ async fn sweep_failures_are_counted_rolled_back_and_retried() {
     assert_eq!(report.posted, 0);
 
     // Bank, provisioned (audit SM7 F1): a line whose date NOTHING covers is
-    // posted — the covering open month is auto-provisioned first.
+    // posted, the covering open month is auto-provisioned first.
     sqlx::query(
         "INSERT INTO bank_statement_lines (bank_account_id, external_id, statement_date, amount_cents, currency, reference) \
          VALUES ($1, 'NOPERIOD-2', DATE '2031-07-15', 1100, 'EUR', 'R')",

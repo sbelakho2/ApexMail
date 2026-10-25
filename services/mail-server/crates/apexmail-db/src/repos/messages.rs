@@ -136,7 +136,7 @@ impl MessagesRepo {
                 .await
             }
             (_, _, Some(s)) => {
-                // First page with status filter — no cursor
+                // First page with status filter, no cursor
                 sqlx::query_as::<_, Message>(
                     "SELECT id, tenant_id, from_email, to_emails, cc_emails, bcc_emails, subject, html_body, text_body, \
                      status, tags, metadata, scheduled_at, sent_at, created_at \
@@ -164,7 +164,7 @@ impl MessagesRepo {
                 .await
             }
             _ => {
-                // First page without status filter — no cursor
+                // First page without status filter, no cursor
                 sqlx::query_as::<_, Message>(
                     "SELECT id, tenant_id, from_email, to_emails, cc_emails, bcc_emails, subject, html_body, text_body, \
                      status, tags, metadata, scheduled_at, sent_at, created_at \

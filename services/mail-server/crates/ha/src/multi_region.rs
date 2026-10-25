@@ -1,4 +1,4 @@
-//! Multi-region service — routing modes, region management, geo routing rules, traffic distribution.
+//! Multi-region service, routing modes, region management, geo routing rules, traffic distribution.
 
 use chrono::Utc;
 use rand::Rng;

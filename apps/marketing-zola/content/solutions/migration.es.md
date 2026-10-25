@@ -26,20 +26,20 @@ La migración de proveedor de email es una operación de alto riesgo. Una caída
 
 ## Solución de ApexMail
 
-- **Calentamiento de IP gestionado** — Calendario automatizado de calentamiento para IP dedicadas, con limitación y supervisión de reputación.
-- **Guía de transición de dominios** — Configuración de DNS paso a paso para SPF, DKIM, DMARC y return-path personalizado.
-- **Importación de plantillas** — Mapeo de sus plantillas existentes al formato de ApexMail conservando variables y estructura.
-- **Compatibilidad de webhooks** — Tipos de eventos estandarizados con documentación de mapeo de payloads.
-- **Validación con envío en paralelo** — Enrute un porcentaje configurable del tráfico a través de ApexMail mientras mantiene su proveedor actual.
+- **Calentamiento de IP gestionado**, Calendario automatizado de calentamiento para IP dedicadas, con limitación y supervisión de reputación.
+- **Guía de transición de dominios**, Configuración de DNS paso a paso para SPF, DKIM, DMARC y return-path personalizado.
+- **Importación de plantillas**, Mapeo de sus plantillas existentes al formato de ApexMail conservando variables y estructura.
+- **Compatibilidad de webhooks**, Tipos de eventos estandarizados con documentación de mapeo de payloads.
+- **Validación con envío en paralelo**, Enrute un porcentaje configurable del tráfico a través de ApexMail mientras mantiene su proveedor actual.
 
 ## Guías de migración por proveedor
 
 Cuatro proveedores tienen una guía dedicada: punto de acceso de compatibilidad, cambio de autenticación, correspondencia campo por campo con los elementos rechazados por nombre, lista de comprobación DNS, nombres de eventos webhook que hay que volver a suscribir, y un plan de corte en seis pasos con reversión.
 
-- [Migrar desde SendGrid](/es/migrate/sendgrid/) — `POST /v3/mail/send` servido con su clave de ApexMail en la ranura bearer de Authorization.
-- [Migrar desde Mailgun](/es/migrate/mailgun/) — `POST /v3/{domain}/messages` servido con la ranura de autenticación básica; `messages.mime` responde un 501 nombrado.
-- [Migrar desde Postmark](/es/migrate/postmark/) — `POST /email` y `POST /email/batch` servidos con el encabezado `X-Postmark-Server-Token`.
-- [Migrar desde Resend](/es/migrate/resend/) — `POST /emails` y `POST /emails/batch` servidos con la ranura bearer de Authorization que ya envía.
+- [Migrar desde SendGrid](/es/migrate/sendgrid/), `POST /v3/mail/send` servido con su clave de ApexMail en la ranura bearer de Authorization.
+- [Migrar desde Mailgun](/es/migrate/mailgun/), `POST /v3/{domain}/messages` servido con la ranura de autenticación básica; `messages.mime` responde un 501 nombrado.
+- [Migrar desde Postmark](/es/migrate/postmark/), `POST /email` y `POST /email/batch` servidos con el encabezado `X-Postmark-Server-Token`.
+- [Migrar desde Resend](/es/migrate/resend/), `POST /emails` y `POST /emails/batch` servidos con la ranura bearer de Authorization que ya envía.
 
 ## Implementación técnica
 
@@ -58,7 +58,7 @@ Avance por estas fases en orden; cada una tiene un criterio de entrada, criterio
 
 | Fase | Criterio de entrada | Criterios de aceptación | Desencadenante de reversión |
 |---|---|---|---|
-| 1. Preparación | Cuenta creada; dominio de envío añadido; plantillas inventariadas | Registros DNS emitidos y revisados; mapeo de plantillas documentado | Ninguno — aún no hay tráfico de producción |
+| 1. Preparación | Cuenta creada; dominio de envío añadido; plantillas inventariadas | Registros DNS emitidos y revisados; mapeo de plantillas documentado | Ninguno, aún no hay tráfico de producción |
 | 2. Validación en paralelo | DKIM y SPF de ApexMail conviven con el proveedor actual; DMARC en `p=none` | Los mensajes de prueba se entregan con autenticación válida; eventos de webhook recibidos y verificados por firma | Fallos de autenticación o desajustes de firma de webhook que persisten tras la corrección |
 | 3. Desplazar una parte del tráfico | Validación en paralelo completada; métricas de entrega medibles por proveedor | Las métricas de entrega igualan al proveedor anterior dentro de la tolerancia acordada en la ventana de observación | La tasa de rebote o de quejas supera los umbrales de la Política de uso aceptable (2 % rebote / 0,1 % quejas) |
 | 4. Corte definitivo | Aceptación sostenida en la proporción acordada | 100 % del tráfico por ApexMail; registros del proveedor anterior eliminados solo tras la ventana de retención | Degradación de entrega que no se recupera tras el presupuesto de reintentos y los ajustes de calentamiento |

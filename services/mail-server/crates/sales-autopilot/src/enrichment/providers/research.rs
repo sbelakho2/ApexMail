@@ -2,7 +2,7 @@
 //!
 //! The last step of the waterfall: cheap, first-party heuristics derived from
 //! data ApexMail already holds (the domain TLD, the caller's email). It never
-//! makes a network call and it labels everything with low confidence — it
+//! makes a network call and it labels everything with low confidence, it
 //! exists so a cold start still produces *some* provenance-carrying fields
 //! instead of silently degrading to nothing.
 

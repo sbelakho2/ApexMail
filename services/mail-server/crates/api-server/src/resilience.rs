@@ -1,4 +1,4 @@
-//! Graceful degradation patterns — Circuit Breaker and Bulkhead.
+//! Graceful degradation patterns, Circuit Breaker and Bulkhead.
 //!
 //! Protects upstream dependency calls (database, Redis, ClickHouse) from cascading
 //! failures by failing fast when a dependency is unhealthy (circuit breaker) and
@@ -39,21 +39,21 @@ impl Default for CircuitBreakerConfig {
 /// Current state of a [`CircuitBreaker`].
 #[derive(Debug, Clone, Copy)]
 pub enum CircuitState {
-    /// Normal operation — requests are passed through.
+    /// Normal operation, requests are passed through.
     Closed,
-    /// Failing fast — requests are rejected immediately.
+    /// Failing fast, requests are rejected immediately.
     Open {
         /// Timestamp when the circuit was opened.
         opened_at: Instant,
     },
-    /// Probing — a limited number of requests are allowed to test recovery.
+    /// Probing, a limited number of requests are allowed to test recovery.
     HalfOpen,
 }
 
 /// Error returned when a circuit breaker rejects a call.
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum CircuitBreakerError<E: std::fmt::Display + std::fmt::Debug> {
-    /// The circuit is open — the dependency is considered unhealthy.
+    /// The circuit is open, the dependency is considered unhealthy.
     #[error("circuit breaker is open for {name}")]
     CircuitOpen {
         /// Human-readable name for the protected dependency.
@@ -117,7 +117,7 @@ impl CircuitBreaker {
         let state = self.inner.state.read().await;
         match *state {
             CircuitState::Closed => {
-                // Success in closed state — reset failure count
+                // Success in closed state, reset failure count
                 self.inner.failure_count.store(0, Ordering::Release);
             }
             CircuitState::HalfOpen => {
@@ -129,7 +129,7 @@ impl CircuitBreaker {
                 }
             }
             CircuitState::Open { .. } => {
-                // Should not happen — call() gates on state before executing.
+                // Should not happen, call() gates on state before executing.
             }
         }
     }
@@ -151,7 +151,7 @@ impl CircuitBreaker {
                 self.transition_to_open().await;
             }
             CircuitState::Open { .. } => {
-                // Already open — nothing to do
+                // Already open, nothing to do
             }
         }
     }
@@ -170,7 +170,7 @@ impl CircuitBreaker {
         self.inner.half_open_probes.store(0, Ordering::Release);
         warn!(
             name = self.inner.name,
-            "circuit breaker opened — dependency considered unhealthy"
+            "circuit breaker opened, dependency considered unhealthy"
         );
     }
 
@@ -185,7 +185,7 @@ impl CircuitBreaker {
         self.inner.half_open_probes.store(0, Ordering::Release);
         warn!(
             name = self.inner.name,
-            "circuit breaker half-open — allowing probe requests"
+            "circuit breaker half-open, allowing probe requests"
         );
     }
 
@@ -200,7 +200,7 @@ impl CircuitBreaker {
         self.inner.half_open_probes.store(0, Ordering::Release);
         warn!(
             name = self.inner.name,
-            "circuit breaker closed — dependency recovered"
+            "circuit breaker closed, dependency recovered"
         );
     }
 
@@ -210,7 +210,7 @@ impl CircuitBreaker {
     /// [`CircuitBreakerError::CircuitOpen`].
     ///
     /// If the circuit is **HalfOpen**, only `half_open_max_requests` concurrent
-    /// probes are allowed — excess calls are rejected.
+    /// probes are allowed, excess calls are rejected.
     ///
     /// If the circuit is **Closed**, the closure is executed and success/failure
     /// is recorded accordingly.
@@ -240,7 +240,7 @@ impl CircuitBreaker {
                         name: self.inner.name,
                     });
                 }
-                // Permit acquired — will release after call completes
+                // Permit acquired, will release after call completes
             }
             CircuitState::Closed => {
                 // Proceed normally
@@ -555,7 +555,7 @@ mod tests {
         // Wait for open_duration
         tokio::time::sleep(Duration::from_millis(100)).await;
 
-        // First call transitions to half-open — make it fail
+        // First call transitions to half-open, make it fail
         let result: Result<i32, CircuitBreakerError<std::io::Error>> = cb
             .call(|| async { Err::<i32, _>(std::io::Error::other("fail")) })
             .await;
@@ -577,12 +577,12 @@ mod tests {
         let handle = tokio::spawn(async move {
             // This should time out because all permits are taken
             let result = tokio::time::timeout(Duration::from_millis(200), bulkhead.acquire()).await;
-            // Expect outer timeout (Err(_)) — the inner acquire could not
+            // Expect outer timeout (Err(_)), the inner acquire could not
             // proceed because both permits remain held for 500ms.
             assert!(result.is_err(), "expected timeout, got {result:?}");
         });
 
-        // Hold both permits for 500ms — well past the 200ms timeout
+        // Hold both permits for 500ms, well past the 200ms timeout
         tokio::time::sleep(Duration::from_millis(500)).await;
 
         // Now release the permits (the spawned task already timed out)

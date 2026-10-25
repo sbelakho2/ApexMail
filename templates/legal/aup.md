@@ -22,8 +22,8 @@ Email sent for promotional, advertising, or informational bulk purposes (newslet
 |---|---|
 | Consent | Explicit opt-in consent required before sending. Pre-checked boxes are not valid consent. Double opt-in recommended. |
 | Lawful basis | Sender must identify, document, and maintain the lawful basis for processing (e.g., consent under GDPR Article 6(1)(a), legitimate interest where legally valid). Sender bears sole responsibility for ensuring a valid lawful basis exists for each marketing communication. |
-| Unsubscribe | Required — functional unsubscribe link in every email. Requests must be processed immediately or within 24 hours. One-click unsubscribe (RFC 8058) is mandatory. |
-| List-Unsubscribe | Required — List-Unsubscribe header (mailto + URL) per RFC 8058 one-click. |
+| Unsubscribe | Required, functional unsubscribe link in every email. Requests must be processed immediately or within 24 hours. One-click unsubscribe (RFC 8058) is mandatory. |
+| List-Unsubscribe | Required, List-Unsubscribe header (mailto + URL) per RFC 8058 one-click. |
 | Consent records | Must be maintained (timestamp, IP, source, consent wording). |
 | Sender identification | `From` name and address must accurately identify the sender. Physical mailing address required for commercial email. |
 | Purchased lists | **Prohibited.** Sending to email addresses purchased, rented, or obtained from third-party list providers is forbidden. |
@@ -38,7 +38,7 @@ Email triggered by a user action or system event that the recipient expects to r
 
 | Requirement | Detail |
 |---|---|
-| Consent | Not required — implied by user action (e.g., placing an order, requesting password reset). Must be directly necessary for the service provided. |
+| Consent | Not required, implied by user action (e.g., placing an order, requesting password reset). Must be directly necessary for the service provided. |
 | Unsubscribe | Not required for service-necessary transactional email (e.g., password reset, account security notice). Recommended for non-security transactional email (e.g., welcome messages). If provided, must be honored. |
 | List-Unsubscribe | Recommended but not required. |
 | Sender identity | `From` name and address must accurately identify the sender. Deceptive or misleading sender identities are prohibited. |
@@ -53,8 +53,8 @@ Email sent to comply with a legal obligation (privacy policy updates, terms of s
 
 | Requirement | Detail |
 |---|---|
-| Consent | Not required — sent as a legal obligation. |
-| Unsubscribe | Not applicable — recipients cannot opt out of legally mandated communications. |
+| Consent | Not required, sent as a legal obligation. |
+| Unsubscribe | Not applicable, recipients cannot opt out of legally mandated communications. |
 | Content restriction | Must be limited to the legally required information. Must not contain marketing or promotional content. |
 | Frequency | Limited to what is legally necessary. |
 
@@ -64,8 +64,8 @@ Email sent for account security purposes (MFA/2FA codes, login alerts, password 
 
 | Requirement | Detail |
 |---|---|
-| Consent | Not required — sent as a security measure. |
-| Unsubscribe | Not applicable — recipients cannot opt out of security messages. |
+| Consent | Not required, sent as a security measure. |
+| Unsubscribe | Not applicable, recipients cannot opt out of security messages. |
 | Content restriction | Must be limited to security-relevant information. Must not contain marketing or promotional content. Must not link to promotional materials. |
 | Delivery priority | Security messages should be sent with highest delivery priority and must not be batched or delayed. |
 

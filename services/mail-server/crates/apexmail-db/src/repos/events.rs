@@ -130,7 +130,7 @@ impl EventsRepo {
                 .await
             }
             _ => {
-                // First page — no cursor
+                // First page, no cursor
                 sqlx::query_as::<_, Event>(
                     "SELECT id, tenant_id, message_id, event_type, recipient, metadata, timestamp \
                      FROM events WHERE tenant_id = $1 \

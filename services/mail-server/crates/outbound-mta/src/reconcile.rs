@@ -2,7 +2,7 @@
 //!
 //! `outbound_relay_ledger` (recipient-facing SMTP state) and
 //! `sales_delivery_acceptances` (the worker's exactly-once protocol) are
-//! deliberately separate tables — but a send accepted by the DAEMON (a
+//! deliberately separate tables, but a send accepted by the DAEMON (a
 //! durable retry that succeeded while the worker wasn't looking) must not
 //! wait for the worker to happen to retry before the application learns SMTP
 //! already accepted it.
@@ -28,7 +28,7 @@ pub struct ReconciledAcceptance {
 /// Project relay-accepted send units onto `reserved` acceptance rows.
 ///
 /// Returns the reconciled units (possibly empty). A ledger/acceptance store
-/// error is returned to the caller — the reconciler never masks an outage.
+/// error is returned to the caller, the reconciler never masks an outage.
 pub async fn reconcile_acceptances(db: &PgPool) -> Result<Vec<ReconciledAcceptance>, String> {
     /// One projected `reserved` acceptance row: (send_unit, tenant_id,
     /// transport_message_id, requested_source_ip, reserved_at).

@@ -1,6 +1,6 @@
 +++
 title = "Terms of Service"
-description = "ApexMail Terms of Service — the agreement governing your use of our platform."
+description = "ApexMail Terms of Service, the agreement governing your use of our platform."
 template = "prose.html"
 
 [extra]

@@ -69,7 +69,7 @@ ApexMail maintains the following remediation targets for vulnerabilities identif
 - **Critical:** Immediate containment; target permanent remediation within 7 days.
 - **High:** Target within 30 days.
 - **Medium:** Target within 90 days.
-- **Low:** Risk-based — addressed in regular maintenance cycles.
+- **Low:** Risk-based, addressed in regular maintenance cycles.
 - **Actively exploited:** Emergency process regardless of severity.
 
 ### 4.3 Review
@@ -191,8 +191,8 @@ Each party's liability under this DPA is subject to the liability provisions of 
 
 ## 14. Annexes
 
-- **Annex 1**: Technical and Organizational Measures (TOMs) — see [Security Measures](../compliance/security-measures.md).
-- **Annex 2**: Subprocessors — see [Subprocessors](../compliance/subprocessors.md).
+- **Annex 1**: Technical and Organizational Measures (TOMs), see [Security Measures](../compliance/security-measures.md).
+- **Annex 2**: Subprocessors, see [Subprocessors](../compliance/subprocessors.md).
 - **Annex 3**: SCC Module 2 (incorporated by reference, Commission Implementing Decision (EU) 2021/914).
 
 ## 15. Contact

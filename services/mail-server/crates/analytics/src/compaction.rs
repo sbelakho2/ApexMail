@@ -1,14 +1,14 @@
 //! Compaction worker – hot→cold migration, batch deletes, checksums.
 //!
 //! DURABILITY CONTRACT (migration 231, findings A/B/C): the durable ledger
-//! row in `analytics_compaction_batches` — not the filesystem — is the
+//! row in `analytics_compaction_batches`, not the filesystem, is the
 //! source of truth for what cold storage must contain. Objects under the
 //! storage root are a materialization of committed rows. The protocol per
 //! batch is:
 //!
 //!   1. write the JSONL object + manifest to unique temp files in the target
 //!      directory → fsync each file → atomic rename onto the final
-//!      UUID-named path (`events_<uuid>.jsonl`, never wall-clock names — two
+//!      UUID-named path (`events_<uuid>.jsonl`, never wall-clock names, two
 //!      batches in the same millisecond used to collide and `fs::write`
 //!      truncation destroyed the first one);
 //!   2. INSERT the batch row + one covered-id row per event in ONE
@@ -16,12 +16,12 @@
 //!   3. ONLY THEN delete the migrated rows from `events`.
 //!
 //! Crash windows, honestly documented: a crash in (1→2) leaves an orphan
-//! object (harmless — the hot rows still exist, the rerun re-writes and
+//! object (harmless, the hot rows still exist, the rerun re-writes and
 //! commits them; at worst a cold duplicate for one crashed batch that ages
 //! out with the month directory). A crash in (2→3) leaves duplicate
 //! coverage that the rerun resolves from the LEDGER (indexed per-batch
-//! membership probe — work ∝ batch, never ∝ history) without re-writing.
-//! The storage root itself must be a durable mount — see
+//! membership probe, work ∝ batch, never ∝ history) without re-writing.
+//! The storage root itself must be a durable mount, see
 //! [`crate::config::warn_if_cold_storage_not_durable`] and the crate README.
 
 use chrono::{DateTime, Datelike, Duration, Utc};
@@ -111,7 +111,7 @@ impl CompactionWorker {
             // migration batch (the early return used to skip it).
             if self.config.cold_retention_days > 0 {
                 self.cleanup_cold_storage().await?;
-                // coverage: justified — llvm-cov closing-brace region
+                // coverage: justified, llvm-cov closing-brace region
                 // artifact: this arm executed six times in the measured run
                 // (the call above carries 6 hits) and the block cannot be
                 // exited except through the brace.
@@ -133,7 +133,7 @@ impl CompactionWorker {
                 // canonical PostgreSQL events table. They are derived from
                 // VALIDATED metadata only: jsonb_typeof(...) = 'string'
                 // guards the extraction so a number/object/null metadata
-                // value yields NULL instead of its JSON text encoding — no
+                // value yields NULL instead of its JSON text encoding, no
                 // invented values, no 42703.
                 let rows = tokio::time::timeout(
                     std::time::Duration::from_secs(30),
@@ -155,14 +155,14 @@ impl CompactionWorker {
                 )
                 .await
                 .map_err(|_| {
-                    // coverage: justified — the 30 s bound fires only when
+                    // coverage: justified, the 30 s bound fires only when
                     // PostgreSQL stalls mid-query AFTER the un-timeout'd
                     // tenant-distinct query above already answered. No
                     // deterministic injection point exists: an ACCESS
                     // EXCLUSIVE table lock would stall the first query too
                     // (the worker would hang outside the guard), and the
                     // SELECT itself cannot be stalled externally. The arm is
-                    // a bounded-failure conversion — plain `?` propagation.
+                    // a bounded-failure conversion, plain `?` propagation.
                     anyhow::anyhow!(
                         "Timed out fetching compaction batch for tenant {}",
                         tenant_id
@@ -175,13 +175,13 @@ impl CompactionWorker {
 
                 // FINDING B:ids already committed by a previous (possibly
                 // crashed) run are resolved from the LEDGER with one indexed
-                // probe over THIS batch's ids — work ∝ batch, never ∝
+                // probe over THIS batch's ids, work ∝ batch, never ∝
                 // history. (The old load_manifested_ids() recursively scanned
                 // every year/month manifest per tenant on every run.)
                 let row_ids: Vec<String> = rows.iter().map(|r| r.id.clone()).collect();
                 let manifested = load_committed_event_ids(&self.pool, tenant_id, &row_ids).await;
 
-                // F13:split the batch — ids already committed (a previous run
+                // F13:split the batch, ids already committed (a previous run
                 // wrote the cold copy and committed the ledger row but died
                 // before the DELETE) skip the JSONL write; they still get
                 // deleted below to finish the interrupted migration.
@@ -192,7 +192,7 @@ impl CompactionWorker {
                     // FINDING A commit protocol:write objects → COMMIT the
                     // ledger row → only then DELETE. A crash between the
                     // object write and the ledger commit leaves an orphan
-                    // file (harmless — the rerun re-writes those ids under a
+                    // file (harmless, the rerun re-writes those ids under a
                     // fresh UUID and commits; at worst a cold duplicate for
                     // one batch, aging out with its month directory). A crash
                     // after the commit but before the delete is resolved by
@@ -227,7 +227,7 @@ impl CompactionWorker {
 
                 // Delete migrated rows (both fresh writes and ids whose
                 // committed ledger row already existed from an interrupted
-                // run) — the commit point above has been reached, so this
+                // run), the commit point above has been reached, so this
                 // delete can never lose data.
                 sqlx::query("DELETE FROM events WHERE id = ANY($1)")
                     .bind(&row_ids)
@@ -250,9 +250,9 @@ impl CompactionWorker {
         // Cold retention cleanup
         if self.config.cold_retention_days > 0 {
             self.cleanup_cold_storage().await?;
-            // coverage: justified — llvm-cov closing-brace region artifact:
+            // coverage: justified, llvm-cov closing-brace region artifact:
             // this arm executed five times in the measured run (the call
-            // above carries 5 hits — both the prune and migrate tests) and
+            // above carries 5 hits, both the prune and migrate tests) and
             // the block cannot be exited except through the brace.
         }
 
@@ -269,7 +269,7 @@ impl CompactionWorker {
     /// manifest to cold storage under a UUIDv4 identity.
     ///
     /// FINDING A:object names are `events_<uuid>.jsonl`, NOT
-    /// `events_{millis}.jsonl` — wall-clock names collided when two batches
+    /// `events_{millis}.jsonl`, wall-clock names collided when two batches
     /// landed in the same millisecond and `std::fs::write` truncation made
     /// the collision a silent overwrite (data loss). A UUIDv4 name is unique
     /// per batch by construction. Manifests stay on disk next to the object
@@ -278,7 +278,7 @@ impl CompactionWorker {
     /// #182:file IO runs on the blocking pool.
     ///
     /// GDPR:the cold copy stores the MASKED client IP (IPv4 → /24, IPv6 →
-    /// /48 — see [`crate::ip_mask`]); the 730-day cold tier must not retain
+    /// /48, see [`crate::ip_mask`]); the 730-day cold tier must not retain
     /// a full address.
     ///
     /// Returns `(bytes_written, batch_bytes_for_checksum, object_key,
@@ -358,7 +358,7 @@ impl CompactionWorker {
                 for entry in entries.flatten() {
                     if entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
                         cleanup_tenant_dir_sync(&entry.path(), &cutoff_year_month)?;
-                        // coverage: justified — llvm-cov closing-brace region
+                        // coverage: justified, llvm-cov closing-brace region
                         // artifact: the body executed eleven times in the
                         // measured run (all lines above carry 11 hits) and
                         // the block cannot be exited except through the
@@ -420,7 +420,7 @@ impl CompactionWorker {
 
 // ── Commit protocol (FINDING A / migration 231) ──────────────────────────────
 
-/// A committed cold batch — one row of `analytics_compaction_batches`.
+/// A committed cold batch, one row of `analytics_compaction_batches`.
 /// THE commit point of the protocol; recovery/verification reads these rows,
 /// never "whatever files exist" (finding C).
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -444,7 +444,7 @@ pub struct CommittedBatch {
 /// FINDING A:the previous `events_{unix_millis}.jsonl` derived identity from
 /// the wall clock, so two batches in the same millisecond shared a name and
 /// the second `std::fs::write` truncated the first. A UUIDv4 name has a
-/// collision probability of ~2^-122 per pair — identity is per-batch, not
+/// collision probability of ~2^-122 per pair, identity is per-batch, not
 /// per-moment.
 fn cold_batch_file_names(batch_id: Uuid) -> (String, String) {
     (
@@ -471,7 +471,7 @@ fn split_pending<'a>(
 
 /// Write the JSONL object + manifest durably into `dir` (blocking core).
 ///
-/// Sequence per file:unique temp name (create_new — concurrent writers never
+/// Sequence per file:unique temp name (create_new, concurrent writers never
 /// clobber each other's temp) → write → `sync_all` (the bytes must survive a
 /// crash BEFORE the rename) → existence check on the final path → atomic
 /// `rename` → best-effort directory fsync.
@@ -479,14 +479,14 @@ fn split_pending<'a>(
 /// The final-name guarantee, honestly:the UUIDv4 identity makes a collision
 /// negligible (~2^-122 per pair); the explicit existence check before the
 /// rename converts any theoretical collision into a loud error instead of a
-/// silent clobber, but check-then-rename is not atomic — the residual race is
+/// silent clobber, but check-then-rename is not atomic, the residual race is
 /// exactly as probable as a UUIDv4 collision. `rename` itself IS atomic, so
 /// readers never observe a partial object.
 ///
 /// Directory fsync:std has no portable directory-fsync; opening the
 /// directory and `sync_all`-ing it works on Linux and is best-effort on
 /// macOS (it cannot match F_FULLFSYNC there). This is why the durable ledger
-/// row — not the file — is the commit point (finding C).
+/// row, not the file, is the commit point (finding C).
 fn write_cold_objects_sync(
     dir: &std::path::Path,
     file: &str,
@@ -512,7 +512,7 @@ fn write_object_atomically_sync(
     let write = || -> anyhow::Result<()> {
         use std::io::Write;
         // create_new:an existing temp is a previous crashed attempt under the
-        // SAME batch id — the rename below can never have happened for it
+        // SAME batch id, the rename below can never have happened for it
         // (temp → final is the last step), so failing loudly is correct and
         // never loses an already-committed object.
         let mut f = std::fs::OpenOptions::new()
@@ -524,7 +524,7 @@ fn write_object_atomically_sync(
         drop(f);
         if final_path.exists() {
             anyhow::bail!(
-                "cold object {} already exists — refusing to clobber (FINDING A)",
+                "cold object {} already exists, refusing to clobber (FINDING A)",
                 final_path.display()
             );
         }
@@ -535,15 +535,15 @@ fn write_object_atomically_sync(
     match write() {
         Ok(()) => {
             // Best-effort durability of the rename itself. std cannot do a
-            // guaranteed dir fsync portably — documented limit; the ledger
+            // guaranteed dir fsync portably, documented limit; the ledger
             // row is the commit point, so an unreached rename after a crash
             // simply leaves an orphan/pending object, never lost data.
             if let Ok(d) = std::fs::File::open(dir) {
                 if let Err(e) = d.sync_all() {
-                    // coverage: justified — platform-dependent failure arm:
+                    // coverage: justified, platform-dependent failure arm:
                     // on macOS and Linux, sync_all on a successfully OPENED
                     // directory fd does not fail deterministically (verified
-                    // empirically — fsync succeeds even after unlink). This
+                    // empirically, fsync succeeds even after unlink). This
                     // is exactly the documented non-portable path above; the
                     // ledger row, not this fsync, is the commit point.
                     debug!("directory fsync not effective on this platform: {e}");
@@ -560,7 +560,7 @@ fn write_object_atomically_sync(
 
 /// THE COMMIT POINT:insert the batch row + one covered-id row per event in
 /// ONE transaction. Runs AFTER the objects are on disk and BEFORE the hot
-/// DELETE — see the module docs for the crash windows. Public because
+/// DELETE, see the module docs for the crash windows. Public because
 /// recovery/verification tooling re-commits nothing but must be able to
 /// replay the exact protocol (and the canonical DB tests simulate the
 /// commit-before-delete crash window with it).
@@ -654,7 +654,7 @@ pub async fn load_committed_batches(
     .await?)
 }
 
-// ── Batch manifests (materialization only — the ledger is authoritative) ────
+// ── Batch manifests (materialization only, the ledger is authoritative) ────
 
 /// Per-batch manifest recording WHICH event ids were written to WHICH cold
 /// file. Written durably alongside the JSONL object. FINDING B:recovery no
@@ -701,7 +701,7 @@ fn cleanup_tenant_dir_sync(tenant_dir: &std::path::Path, cutoff_ym: &str) -> any
                     let month_name = month_entry.file_name().to_string_lossy().to_string();
                     let ym = format!("{year_name}/{month_name}");
                     if ym.as_str() < cutoff_ym {
-                        // coverage: justified — llvm-cov region-counter
+                        // coverage: justified, llvm-cov region-counter
                         // artifact: the removal arm EXECUTES (run_prunes_
                         // cold_storage_even_when_migration_is_empty proves
                         // the aged directory was removed by this very arm)
@@ -715,7 +715,7 @@ fn cleanup_tenant_dir_sync(tenant_dir: &std::path::Path, cutoff_ym: &str) -> any
                     }
                 }
             }
-            // coverage: justified — llvm-cov closing-brace region artifacts:
+            // coverage: justified, llvm-cov closing-brace region artifacts:
             // these loop braces executed on the proven removal path (the
             // prune test's aged directory was removed by exactly this code)
             // and the regions cannot be exited except through them.
@@ -838,14 +838,14 @@ mod tests {
         assert!(a_manifest.contains(&a.to_string()), "{a_manifest}");
     }
 
-    /// FINDING A:durable object write — temp file → fsync → atomic rename.
+    /// FINDING A:durable object write, temp file → fsync → atomic rename.
     /// Two batches materialized into the SAME directory must both survive
     /// intact (no truncation/overwrite), temp files must be gone, and a
     /// second write under an identity whose object already exists must fail
     /// loudly instead of clobbering (the honest no-clobber guarantee).
     #[test]
     fn write_cold_objects_atomic_no_clobber_no_truncation() {
-        // nosemgrep: rust.lang.security.temp-dir.temp-dir — test fixture under a unique pid/uuid path — no predictable-name temp collision
+        // nosemgrep: rust.lang.security.temp-dir.temp-dir, test fixture under a unique pid/uuid path, no predictable-name temp collision
         let root = std::env::temp_dir().join(format!(
             "apexmail_compact_write_{}_{}",
             std::process::id(),
@@ -898,7 +898,7 @@ mod tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
-    /// FINDING B:the pending split — ids with a committed ledger row skip
+    /// FINDING B:the pending split, ids with a committed ledger row skip
     /// the cold re-write but stay in the delete set (they finish the
     /// interrupted migration).
     #[test]
@@ -988,7 +988,7 @@ mod gap_tests {
     }
 
     fn storage_root(tag: &str) -> String {
-        // nosemgrep: rust.lang.security.temp-dir.temp-dir — test fixture under a unique pid/uuid path — no predictable-name temp collision
+        // nosemgrep: rust.lang.security.temp-dir.temp-dir, test fixture under a unique pid/uuid path, no predictable-name temp collision
         let dir = std::env::temp_dir().join(format!(
             "apexmail_compaction_gap_{}_{}_{tag}",
             std::process::id(),
@@ -1009,7 +1009,7 @@ mod gap_tests {
     #[tokio::test]
     async fn run_skips_without_touching_the_db_when_the_lock_is_held() {
         let Some(redis) = private_redis(12) else {
-            // coverage: justified — soft-skip guard: reachable only when the
+            // coverage: justified, soft-skip guard: reachable only when the
             // TEST_* env vars are unset (a run in which the whole DB/Redis
             // suite skips); a coverage run has them configured.
             eprintln!("skipping: set TEST_REDIS_URL");
@@ -1064,7 +1064,7 @@ mod gap_tests {
         let (Some(redis), Some(pool)) =
             (private_redis(13), canonical_pool("compaction_empty").await)
         else {
-            // coverage: justified — soft-skip guard: reachable only when the
+            // coverage: justified, soft-skip guard: reachable only when the
             // TEST_* env vars are unset (a run in which the whole DB/Redis
             // suite skips); a coverage run has them configured.
             eprintln!("skipping: set TEST_REDIS_URL + TEST_DATABASE_URL");
@@ -1093,14 +1093,14 @@ mod gap_tests {
 
     /// The full commit protocol:old events are written to cold storage,
     /// committed to the LEDGER (batch + covered ids), and only then deleted
-    /// from `events` — after which the retention pass still runs.
+    /// from `events`, after which the retention pass still runs.
     #[tokio::test]
     async fn run_migrates_commits_and_deletes_old_events() {
         let (Some(redis), Some(pool)) = (
             private_redis(14),
             canonical_pool("compaction_migrate").await,
         ) else {
-            // coverage: justified — soft-skip guard: reachable only when the
+            // coverage: justified, soft-skip guard: reachable only when the
             // TEST_* env vars are unset (a run in which the whole DB/Redis
             // suite skips); a coverage run has them configured.
             eprintln!("skipping: set TEST_REDIS_URL + TEST_DATABASE_URL");
@@ -1222,13 +1222,13 @@ mod gap_tests {
         );
     }
 
-    /// `release_lock` without a prior acquisition is a silent no-op — the
+    /// `release_lock` without a prior acquisition is a silent no-op, the
     /// owner slot is empty, so nothing is deleted (a loser never evicts a
     /// winner's lock).
     #[tokio::test]
     async fn release_lock_without_ownership_is_a_noop() {
         let Some(redis) = private_redis(15) else {
-            // coverage: justified — soft-skip guard: reachable only when the
+            // coverage: justified, soft-skip guard: reachable only when the
             // TEST_* env vars are unset (a run in which the whole DB/Redis
             // suite skips); a coverage run has them configured.
             eprintln!("skipping: set TEST_REDIS_URL");

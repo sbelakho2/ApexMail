@@ -39,7 +39,7 @@ A qualified buyer can request the current DPA, subprocessor information, securit
 
 ## EU Sovereignty
 
-Enterprise Cloud includes EU-only routing: every send leaves through ApexMail's own EU MTAs, with a fail-closed hold instead of a third-party fallback, and every accepted message carries an Ed25519-signed routing receipt. The full argument — EU company, EU data centres, the routing mode and the receipts, each linked to its evidence — is on the [EU sovereignty page](/eu-sovereign/).
+Enterprise Cloud includes EU-only routing: every send leaves through ApexMail's own EU MTAs, with a fail-closed hold instead of a third-party fallback, and every accepted message carries an Ed25519-signed routing receipt. The full argument, EU company, EU data centres, the routing mode and the receipts, each linked to its evidence, is on the [EU sovereignty page](/eu-sovereign/).
 
 ## Billing Lifecycle
 

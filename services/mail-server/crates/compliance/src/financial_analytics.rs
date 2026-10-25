@@ -3,7 +3,7 @@
 //! Provides Estonian-accounting-standards (RTJ) oriented revenue reporting,
 //! VAT (KM) analysis for EMTA, EU intra-community tracking, AR aging, and
 //! per-country revenue breakdown. Every figure comes from real database
-//! queries against the CANONICAL invoice model — no invented splits, no
+//! queries against the CANONICAL invoice model, no invented splits, no
 //! cross-currency sums, no silent fallbacks (F80).
 //!
 //! F80/F81 rules implemented here:
@@ -11,7 +11,7 @@
 //!     `issued_at`/`due_at` (never `amount_cents`/`issue_date`);
 //!   * exact `[month_start, next_month_start)` calendar windows;
 //!   * per-currency totals: nominal USD/GBP amounts are NEVER summed into a
-//!     EUR total — without a persisted conversion source/rate/date there is
+//!     EUR total, without a persisted conversion source/rate/date there is
 //!     no reporting-currency figure at all;
 //!   * revenue categories come from the actual `line_items` JSONB, not
 //!     fixed percentages; a missing or non-reconciling snapshot is uniformly
@@ -24,9 +24,9 @@
 //!   * query errors are propagated; unavailable data is visible.
 //!
 //! Compliance references:
-//!   - RTJ 2 (Raamatupidamise Toimkonna Juhend nr 2) — revenue recognition
-//!   - Käibemaksuseadus (KMS) § 10, § 15 — VAT obligations
-//!   - Äriseadustik (ÄS) § 334 — annual report requirements
+//!   - RTJ 2 (Raamatupidamise Toimkonna Juhend nr 2), revenue recognition
+//!   - Käibemaksuseadus (KMS) § 10, § 15, VAT obligations
+//!   - Äriseadustik (ÄS) § 334, annual report requirements
 
 use chrono::{DateTime, Datelike, NaiveDate, NaiveTime, Utc};
 use serde::Serialize;
@@ -97,14 +97,14 @@ pub struct RevenueRecognition {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum VatClassification {
-    /// Domestic (EE) supply — Estonian output VAT due.
+    /// Domestic (EE) supply, Estonian output VAT due.
     Domestic,
-    /// Intra-EU B2B supply with a valid customer VAT number — reverse
+    /// Intra-EU B2B supply with a valid customer VAT number, reverse
     /// charge, no EE output VAT (KMS §14).
     ReverseCharge,
-    /// Export outside the EU — zero-rated, no EE output VAT.
+    /// Export outside the EU, zero-rated, no EE output VAT.
     ZeroRatedExport,
-    /// EU customer WITHOUT a valid VAT number — Estonian VAT must be
+    /// EU customer WITHOUT a valid VAT number, Estonian VAT must be
     /// charged (KMS §14 (5)).
     EuVatDue,
 }
@@ -113,7 +113,7 @@ pub enum VatClassification {
 #[serde(rename_all = "camelCase")]
 pub struct VatAnalytics {
     /// Date-effective standard rate applied to the report period end
-    /// (documented 2025-07 boundary — see tax_policy).
+    /// (documented 2025-07 boundary, see tax_policy).
     pub vat_rate: f64,
     /// Domestic output VAT from actual invoice tax snapshots (EUR only).
     pub domestic_taxable_subtotal_eur: f64,
@@ -123,7 +123,7 @@ pub struct VatAnalytics {
     pub non_eu_export_subtotal_eur: f64,
     /// Deductible input VAT from actual eligible records. No input-tax
     /// store exists in the canonical chain, so this is 0.0 with
-    /// `input_tax_source: false` — an invented percentage is not reported.
+    /// `input_tax_source: false`, an invented percentage is not reported.
     pub vat_deductible_eur: f64,
     pub input_tax_source: bool,
     pub net_vat_payable_eur: f64,
@@ -177,7 +177,7 @@ pub struct PlanRevenue {
     pub percentage: f64,
 }
 
-/// Monthly stream per calendar month, per category — EUR only (other
+/// Monthly stream per calendar month, per category, EUR only (other
 /// currencies are reported by currency, never silently converted).
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -243,7 +243,7 @@ fn cents_to_units(cents: i64) -> f64 {
     cents as f64 / 100.0
 }
 
-/// F80: canonical amount resolver — legacy invoices may carry only one of
+/// F80: canonical amount resolver, legacy invoices may carry only one of
 /// total/amount/subtotal(+vat). Prefer the final `total`, then the legacy
 /// `amount`, then reconstruct from subtotal + VAT.
 fn invoice_amount_cents(inv: &InvoiceRow) -> i64 {
@@ -270,7 +270,7 @@ fn months_between(start: NaiveDate, end: NaiveDate) -> i64 {
     (years * 12 + end.month() as i32 - start.month() as i32) as i64
 }
 
-/// F80: EXACT calendar-month window start — the first instant of the month
+/// F80: EXACT calendar-month window start, the first instant of the month
 /// containing `timestamp`.
 fn month_start(timestamp: DateTime<Utc>) -> DateTime<Utc> {
     timestamp
@@ -281,7 +281,7 @@ fn month_start(timestamp: DateTime<Utc>) -> DateTime<Utc> {
         .and_utc()
 }
 
-/// F80: EXACT `[month_start, next_month_start)` boundary — chrono
+/// F80: EXACT `[month_start, next_month_start)` boundary, chrono
 /// month arithmetic on the FIRST of the month (never 30/31/32-day day
 /// arithmetic, which repeated or skipped months).
 fn next_month_start(month_start_ts: DateTime<Utc>) -> DateTime<Utc> {
@@ -327,9 +327,9 @@ struct InvoiceCategorySplit {
 ///
 /// The split comes from the invoice's actual `line_items` JSONB only when the
 /// snapshot exists AND its line amounts reconcile exactly with the headline
-/// net subtotal. Whenever that is not the case — no snapshot at all (a legacy
+/// net subtotal. Whenever that is not the case, no snapshot at all (a legacy
 /// or hand-written invoice), an empty array, or line items that do not add up
-/// — the entire net is unallocated and reported as ONE-TIME revenue. A
+///, the entire net is unallocated and reported as ONE-TIME revenue. A
 /// snapshot-less invoice is therefore never counted in the total of one
 /// surface while silently vanishing from the categories of the other: both
 /// legally reported surfaces call this function, so their arithmetic is
@@ -424,7 +424,7 @@ fn classify_vat(inv: &InvoiceRow) -> VatClassification {
 /// One exact calendar-month revenue stream (EUR) for the window
 /// `[month_start_ts, next_month_start)`.
 ///
-/// Categorization rule (monthly view): identical to the period view — this
+/// Categorization rule (monthly view): identical to the period view, this
 /// function calls [`categorize_invoice_net`], the single shared rule, so an
 /// invoice without a `line_items` snapshot is one-time (unallocated) revenue
 /// in BOTH surfaces and the monthly total (subscription + usage + one_time)
@@ -465,10 +465,10 @@ fn monthly_revenue_stream(
 }
 
 /// Generate a full Estonian OÜ financial compliance analytics report from
-/// the canonical model. Errors propagate — unavailable data is visible.
+/// the canonical model. Errors propagate, unavailable data is visible.
 ///
 /// Categorization rule (period view): the `subscription`/`usage`/`one_time`
-/// split of each currency is assigned by `categorize_invoice_net` — an
+/// split of each currency is assigned by `categorize_invoice_net`, an
 /// invoice whose `line_items` snapshot is missing or does not reconcile with
 /// its net subtotal is one-time (unallocated) revenue, never silently
 /// uncategorized while still counted in the total. The monthly stream
@@ -482,7 +482,7 @@ pub async fn generate_financial_compliance_report(
     let num_months = period_months.clamp(1, 24);
 
     // F80: the period starts at the first instant of the month
-    // `period_months - 1` months back — exact calendar arithmetic.
+    // `period_months - 1` months back, exact calendar arithmetic.
     use chrono::Months;
     let period_start = month_start(now)
         .checked_sub_months(Months::new((num_months - 1) as u32))
@@ -520,7 +520,7 @@ pub async fn generate_financial_compliance_report(
         }
 
         // F80: categorize ACTUAL line items through the single rule shared
-        // with the monthly stream — a snapshot-less or non-reconciling
+        // with the monthly stream, a snapshot-less or non-reconciling
         // invoice's net is one-time (unallocated) revenue here too.
         let split = categorize_invoice_net(inv);
         entry.subscription += cents_to_units(split.subscription_cents);
@@ -590,7 +590,7 @@ pub async fn generate_financial_compliance_report(
         }
         let classification = classify_vat(inv);
         let subtotal = cents_to_units(invoice_subtotal_cents(inv));
-        // Output VAT comes from the invoice's own tax snapshot — never a
+        // Output VAT comes from the invoice's own tax snapshot, never a
         // rate multiplied over a mixed-currency total.
         let output_vat = cents_to_units(inv.vat_total.unwrap_or(0));
 
@@ -631,7 +631,7 @@ pub async fn generate_financial_compliance_report(
     }
 
     // Input VAT: from actual eligible input-tax records only. No such store
-    // exists in the canonical chain — reported as 0 with the source flag
+    // exists in the canonical chain, reported as 0 with the source flag
     // instead of an invented deductible percentage.
     vat_analytics.input_tax_source = false;
     vat_analytics.net_vat_payable_eur =
@@ -874,7 +874,7 @@ mod tests {
         assert_eq!(feb.to_rfc3339(), "2026-02-01T00:00:00+00:00");
 
         // Leap-year February: [2024-02-01, 2024-03-01) covers exactly 29
-        // days — day-count arithmetic (30/31/32 days) skipped or repeated
+        // days, day-count arithmetic (30/31/32 days) skipped or repeated
         // this month.
         let feb24 = month_start(
             DateTime::parse_from_rfc3339("2024-02-10T00:00:00Z")
@@ -1399,7 +1399,7 @@ mod db_tests {
         close(eur.subscription, 100.0);
         close(eur.usage, 25.0);
         // one-time: setup 5.00 + the 90.00 non-reconciling invoice + the
-        // snapshot-less invoices (200 + 50 + 30 + 40 + 80 + 20) — the same
+        // snapshot-less invoices (200 + 50 + 30 + 40 + 80 + 20), the same
         // shared rule the monthly stream applies.
         close(
             eur.one_time,
@@ -1510,9 +1510,9 @@ mod db_tests {
 
     /// The period revenue-recognition view and the monthly stream are both
     /// legally reported surfaces: they must categorize a snapshot-less
-    /// invoice identically. This pins the chosen rule — no `line_items`
+    /// invoice identically. This pins the chosen rule, no `line_items`
     /// snapshot (like a non-reconciling one) is one-time/unallocated revenue
-    /// in BOTH views — and asserts the two functions agree line by line and
+    /// in BOTH views, and asserts the two functions agree line by line and
     /// on the total.
     #[tokio::test]
     async fn period_and_monthly_views_agree_for_snapshot_less_invoices() {

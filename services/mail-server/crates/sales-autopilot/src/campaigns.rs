@@ -1,5 +1,5 @@
 //! Legacy campaign compatibility planner (the CP-facing `sales_campaigns`
-//! model) — and NOTHING else.
+//! model), and NOTHING else.
 //!
 //! `sales_campaigns` / `sales_campaign_recipients` are kept as a read
 //! compatibility ledger for the control plane. They are **not** a send
@@ -16,7 +16,7 @@
 //! becomes `active` once at least one contact can actually be sent to.
 //! Failures stay resumable in `starting`; a batch that accepted zero contacts
 //! parks in `verification_pending` instead of activating. The policy is
-//! resolved by the canonical store per contact — never as one batch-level
+//! resolved by the canonical store per contact, never as one batch-level
 //! `autonomy_policy_id`.
 
 use chrono::Utc;
@@ -67,10 +67,10 @@ pub struct RecipientFunnel {
     pub suppressed_local: i64,
     pub suppressed_platform: i64,
     /// Unsent and unsuppressed, but blocked by the per-recipient weekly
-    /// frequency cap (fix I-2 CAN-SPAM) — becomes due when the cap window
+    /// frequency cap (fix I-2 CAN-SPAM), becomes due when the cap window
     /// passes.
     pub frequency_capped: i64,
-    /// Unsent, unsuppressed, within the cap — due right now.
+    /// Unsent, unsuppressed, within the cap, due right now.
     pub due: i64,
 }
 
@@ -107,18 +107,18 @@ pub const LEGACY_RECIPIENT_SOURCE: &str = "legacy_campaign";
 /// (`draft`/`active`/`paused`/`completed`); the start operation is layered over
 /// it so a failed or partially-completed start is never misreported as active:
 ///
-/// * [`CampaignStartPhase::Starting`] — persisted as
+/// * [`CampaignStartPhase::Starting`], persisted as
 ///   `sales_campaigns.start_state = 'starting'` with a durable
 ///   `start_operation_id`. Enrollment materialization is in flight; the
 ///   campaign is NOT active. A failure or crash leaves this state in place and
 ///   the next call resumes the same operation id.
-/// * [`CampaignStartPhase::VerificationPending`] — persisted as
+/// * [`CampaignStartPhase::VerificationPending`], persisted as
 ///   `start_state = 'verification_pending'`. Enrollment completed but zero
 ///   contacts were accepted, so the campaign is NOT active: an "active"
 ///   campaign whose every recipient was rejected advertises sends that can
 ///   never happen. The operator-readable reason is in
 ///   `sales_campaigns.last_error` and in the start response.
-/// * [`CampaignStartPhase::Active`] — terminal success: `status = 'active'`,
+/// * [`CampaignStartPhase::Active`], terminal success: `status = 'active'`,
 ///   `start_state IS NULL`; the operation id is retained for audit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CampaignStartPhase {
@@ -265,7 +265,7 @@ impl CampaignManager {
         .map_err(|e| SalesError::Database(e.to_string()))?;
 
         // F85: create the campaign's initial optimization arm through the
-        // production campaign workflow — the canonical campaign_arms store
+        // production campaign workflow, the canonical campaign_arms store
         // (migration 197) is populated by its producer, never by ad-hoc
         // writes. ensure_arms is idempotent; the lazy redis pool is only
         // touched by selection/cache paths, not by arm creation.
@@ -290,7 +290,7 @@ impl CampaignManager {
 
     /// List all campaigns for a tenant.
     ///
-    /// Returns `Err` on database failure — previously errors were logged and
+    /// Returns `Err` on database failure, previously errors were logged and
     /// silently converted into an empty list, which callers could not
     /// distinguish from "no campaigns".
     pub async fn list_campaigns(
@@ -335,7 +335,7 @@ impl CampaignManager {
     ///    contact + email contact point per recipient, and canonical
     ///    enrollments through [`crate::enrollments::start_outreach`]. Every
     ///    write is idempotent, so a retry duplicates nothing. A failure here
-    ///    propagates with the campaign still `'starting'` — NOT active — and
+    ///    propagates with the campaign still `'starting'`, NOT active, and
     ///    the next call resumes the SAME operation id.
     /// 3. **Finalization** ([`Self::activate_campaign_operation`] /
     ///    [`Self::park_campaign_verification_pending`]): under the tenant lock,
@@ -375,7 +375,7 @@ impl CampaignManager {
     ///
     /// `None` when the campaign has no recipients (nothing to enroll). The
     /// response reports exactly how many recipients were accepted and the
-    /// rejection-reason keys for those that were not — enrollment rejections
+    /// rejection-reason keys for those that were not, enrollment rejections
     /// (suppression, legal policy, unverified contact, already enrolled) are
     /// never silently converted into a direct send.
     pub async fn start_campaign_with_outreach(
@@ -405,7 +405,7 @@ impl CampaignManager {
 
         // 2. Normalized, de-duplicated legacy recipient list. Every address
         //    becomes a canonical contact whose gates the enrollment machinery
-        //    evaluates. Empty means nothing to enroll — zero accepted, handled
+        //    evaluates. Empty means nothing to enroll, zero accepted, handled
         //    at finalization.
         let emails = self.campaign_recipient_emails(tenant_id, id).await?;
 
@@ -448,7 +448,7 @@ impl CampaignManager {
                 campaign_id = %id,
                 operation_id = %admission.operation_id,
                 recipients = emails.len(),
-                "campaign start accepted zero contacts — campaign parked in \
+                "campaign start accepted zero contacts, campaign parked in \
                  verification_pending and is NOT active"
             );
             return Ok((
@@ -482,7 +482,7 @@ impl CampaignManager {
                         tenant_id = %tenant_id,
                         campaign_id = %id,
                         rejection_reasons = ?outcome.rejection_reasons,
-                        "campaign start: some recipients could not be enrolled — \
+                        "campaign start: some recipients could not be enrolled, \
                          they are NOT sent to directly"
                     );
                 }
@@ -524,7 +524,7 @@ impl CampaignManager {
         .await
         .map_err(|_| {
             SalesError::Database(
-                "campaign start admission timed out — another start for this tenant is \
+                "campaign start admission timed out, another start for this tenant is \
                  holding the tenant lock"
                     .into(),
             )
@@ -599,7 +599,7 @@ impl CampaignManager {
         if !resuming {
             // Count ACTIVE campaigns plus in-flight 'starting' reservations
             // (this campaign is excluded: it holds no slot yet). Create-time
-            // counting alone is bypassable — drafts are unlimited — so the
+            // counting alone is bypassable, drafts are unlimited, so the
             // authoritative check is here, under the tenant lock.
             let reserved: i64 = sqlx::query_scalar(
                 "SELECT COUNT(*) FROM sales_campaigns \
@@ -714,7 +714,7 @@ impl CampaignManager {
             None => "the campaign has no recipients".to_string(),
         };
         let message = format!(
-            "start operation {operation_id} accepted 0 of {recipients} recipients — campaign \
+            "start operation {operation_id} accepted 0 of {recipients} recipients, campaign \
              not activated (verification_pending); rejections: {rejection_detail}"
         );
 
@@ -848,7 +848,7 @@ impl CampaignManager {
     }
 
     /// Enroll every materialized campaign recipient through the ONE canonical
-    /// entry point, [`crate::enrollments::start_outreach`] — the same gates
+    /// entry point, [`crate::enrollments::start_outreach`], the same gates
     /// `/enrollments` uses (existence, email, suppression, legal policy,
     /// verification, duplicate enrollment). Chunked to the outreach command's
     /// per-call bound; the aggregate response reports the exact per-reason
@@ -933,7 +933,7 @@ impl CampaignManager {
     ///   `account_id` stays NULL (a legacy contact migrates without inventing
     ///   a company).
     /// * A newly created point is `verification = 'unknown'` with a low,
-    ///   documented confidence — a legacy campaign recipient carries no
+    ///   documented confidence, a legacy campaign recipient carries no
     ///   verification provenance and is NEVER claimed `valid`.
     async fn find_or_create_contact_for_email(
         &self,
@@ -1111,7 +1111,7 @@ impl CampaignManager {
 
     /// Due-legacy-recipient rows for the dry-run preview: not yet sent, not
     /// suppressed, within the frequency cap, enriched with the CRM lead
-    /// profile. Read-only reporting for the CP — this never feeds a send path.
+    /// profile. Read-only reporting for the CP, this never feeds a send path.
     async fn due_recipient_rows(
         &self,
         tenant_id: &str,
@@ -1170,7 +1170,7 @@ impl CampaignManager {
     /// Pause an active campaign, recording WHY it was paused in
     /// `sales_campaigns.last_error` (e.g. "email quota exhausted"). Used by
     /// the dispatch paths so a stalled campaign is never a silent partial
-    /// send — operators see the paused state plus the reason.
+    /// send, operators see the paused state plus the reason.
     pub async fn pause_with_error(
         &self,
         campaign_id: Uuid,
@@ -1209,7 +1209,7 @@ impl CampaignManager {
     ///   platform tracking service; this folds them back into the campaign
     ///   columns.
     /// * `sent` is reconciled to DELIVERED truth (audit F): the dispatcher
-    ///   increments it at enqueue time (an intent count — a queued row can
+    ///   increments it at enqueue time (an intent count, a queued row can
     ///   still bounce or dead-letter), so this rewrite counts the worker's
     ///   `events` rows of type 'sent' joined through the send ledger's
     ///   `message_id`. When NO sent events exist yet (worker lag, or rows
@@ -1224,7 +1224,7 @@ impl CampaignManager {
         Ok(())
     }
 
-    /// Recipient funnel counts for a campaign — one query, FILTERed
+    /// Recipient funnel counts for a campaign, one query, FILTERed
     /// aggregates (shared by [`Self::dry_run`] reporting and the scheduler's
     /// completion gate).
     pub async fn recipient_funnel_counts(
@@ -1292,7 +1292,7 @@ impl CampaignManager {
     /// enqueueing anything or stamping the send ledger. Operator safety net
     /// and test seam.
     ///
-    /// `prod` is the production dispatcher when wired — it provides sender
+    /// `prod` is the production dispatcher when wired, it provides sender
     /// config and real unsubscribe links for the preview. Without it the
     /// report still contains the recipient funnel counts.
     pub async fn dry_run(
@@ -1314,7 +1314,7 @@ impl CampaignManager {
             .and_then(|r| r.into_campaign().ok())
             .ok_or(SalesError::CampaignNotFound(campaign_id))?;
 
-        // Recipient funnel counts (shared query — see
+        // Recipient funnel counts (shared query, see
         // `recipient_funnel_counts`, also used by the scheduler's completion
         // gate).
         let funnel = self.recipient_funnel_counts(tenant_id, campaign_id).await?;
@@ -1342,7 +1342,7 @@ impl CampaignManager {
                 .unwrap_or(false);
                 if !domain_ok {
                     warnings.push(format!(
-                        "sender domain of '{}' is not verified/DKIM-ready for this tenant — start would refuse",
+                        "sender domain of '{}' is not verified/DKIM-ready for this tenant, start would refuse",
                         p.config().from_email
                     ));
                 }
@@ -1354,7 +1354,7 @@ impl CampaignManager {
             }
             None => {
                 warnings.push(
-                    "production dispatcher not configured — sender readiness and message previews skipped"
+                    "production dispatcher not configured, sender readiness and message previews skipped"
                         .into(),
                 );
                 None
@@ -1517,7 +1517,7 @@ impl CampaignManager {
     }
 
     /// Return stats for a campaign (sent / opened / clicked / recipients).
-    /// Requires `tenant_id` to enforce tenant isolation — returns
+    /// Requires `tenant_id` to enforce tenant isolation, returns
     /// `CampaignNotFound` if the campaign does not belong to this tenant.
     pub async fn get_stats(
         &self,
@@ -1583,7 +1583,7 @@ impl CampaignManager {
 
         // Validate EVERY address before writing ANY row. The per-email insert
         // loop previously committed valid prefixes and THEN returned
-        // InvalidInput for a later bad address — the caller was told the
+        // InvalidInput for a later bad address, the caller was told the
         // request failed while the recipient list had silently grown. The
         // refusal must be all-or-nothing.
         let mut normalized_emails = Vec::with_capacity(emails.len());
@@ -1644,7 +1644,7 @@ fn email_domain(normalized_email: &str) -> Option<String> {
 }
 
 /// A CAN-SPAM unsubscribe link for dry-run previews, signed exactly like the
-/// dispatcher signs it for real sends. Reporting only — never enqueued here.
+/// dispatcher signs it for real sends. Reporting only, never enqueued here.
 fn legacy_unsubscribe_link(
     config: &crate::config::DispatchConfig,
     tenant_id: &str,
@@ -1662,7 +1662,7 @@ fn legacy_unsubscribe_link(
 ///
 /// Checks: total length < 320, no whitespace, exactly one `@`, a non-empty
 /// local part, and a domain part containing at least one `.` that is not at
-/// the start or end. Deliberately minimal — full RFC 5321/5322 validation is
+/// the start or end. Deliberately minimal, full RFC 5321/5322 validation is
 /// out of scope for this service.
 fn is_valid_recipient_email(email: &str) -> bool {
     if email.len() >= 320 || email.chars().any(char::is_whitespace) {
@@ -2167,7 +2167,7 @@ mod tests {
 
     /// Live DB (canonical schema): starting a campaign twice materializes
     /// exactly ONE compatibility sequence and enrolls exactly ONCE, and the
-    /// enqueue goes through the durable `sales_actions` queue — never into
+    /// enqueue goes through the durable `sales_actions` queue, never into
     /// `email_queue` directly.
     #[tokio::test]
     async fn campaign_start_materializes_one_sequence_and_never_duplicates_enrollment() {
@@ -2423,7 +2423,7 @@ mod tests {
         );
         let outcome = report.outreach.expect("recipients exist");
         // The created point is `unknown`, so the canonical verification gate
-        // rejects the enrollment — it is NEVER silently treated as valid.
+        // rejects the enrollment, it is NEVER silently treated as valid.
         assert_eq!(outcome.accepted, 0);
         assert_eq!(outcome.rejected, 1);
         assert_eq!(
@@ -2499,7 +2499,7 @@ mod tests {
     /// policy. A recipient whose jurisdiction has no approved policy is not a
     /// batch refusal: the canonical store resolves that contact to the
     /// fail-closed `ApprovalRequired` verdict (policy id NULL) and the
-    /// enrollment proceeds on that verdict — the send path still gates it. The
+    /// enrollment proceeds on that verdict, the send path still gates it. The
     /// campaign must NOT be rejected as `stale_policy` for a policy id the
     /// batch resolver invented.
     #[tokio::test]
@@ -2872,7 +2872,7 @@ mod tests {
 
     /// The reconciliation must derive `sent` from the worker's 'sent' events
     /// joined via the ledger message_id, and fall back to the stored
-    /// (enqueue-time) counter when no events exist — never blanket-zero it.
+    /// (enqueue-time) counter when no events exist, never blanket-zero it.
     #[test]
     fn reconcile_sql_counts_sent_events_with_enqueue_fallback() {
         let sql = RECONCILE_CAMPAIGN_STATS_SQL;
@@ -2928,7 +2928,7 @@ mod tests {
             .await
             .unwrap();
 
-        // Path 2 first: NO events yet — reconcile keeps the enqueue count.
+        // Path 2 first: NO events yet, reconcile keeps the enqueue count.
         manager.reconcile_campaign_stats(campaign.id).await.unwrap();
         let sent: i64 = sqlx::query_scalar("SELECT sent FROM sales_campaigns WHERE id = $1")
             .bind(campaign.id)
@@ -2962,7 +2962,7 @@ mod tests {
             .unwrap();
         }
 
-        // Path 1: events exist — sent is rewritten to the events count.
+        // Path 1: events exist, sent is rewritten to the events count.
         manager.reconcile_campaign_stats(campaign.id).await.unwrap();
         let sent: i64 = sqlx::query_scalar("SELECT sent FROM sales_campaigns WHERE id = $1")
             .bind(campaign.id)
@@ -3183,7 +3183,7 @@ mod tests {
     }
 
     /// One INSERT for the whole recipient batch (pre-fix: one INSERT per
-    /// address — an N+1 write path for arbitrarily long lists).
+    /// address, an N+1 write path for arbitrarily long lists).
     #[tokio::test]
     async fn add_recipients_writes_the_batch_with_one_statement() {
         let Some(pool) = canonical_test_pool("campaigns::tests::add_recipients_batch").await else {
@@ -3635,7 +3635,7 @@ mod coverage_wave_campaigns {
     }
 
     /// The dry run with a WIRED dispatcher: sender readiness, template
-    /// resolution and personalized CAN-SPAM previews are reported — and an
+    /// resolution and personalized CAN-SPAM previews are reported, and an
     /// unverified sender domain or a missing template becomes an explicit
     /// warning, never a silent skip.
     #[tokio::test]
@@ -3880,7 +3880,7 @@ mod coverage_wave_campaigns {
 
     /// Recipient-list hygiene: a whitespace-only address is SKIPPED (not an
     /// error, not a row), a syntactically invalid address is refused with the
-    /// address named, and the refusal is all-or-nothing — a rejected batch
+    /// address named, and the refusal is all-or-nothing, a rejected batch
     /// persists nothing.
     #[tokio::test]
     async fn add_recipients_skips_blank_and_refuses_invalid_all_or_nothing() {
@@ -3907,7 +3907,7 @@ mod coverage_wave_campaigns {
         let stats = mgr.get_stats(&tenant, campaign.id).await.unwrap();
         assert_eq!(stats["recipients"], 1);
 
-        // An invalid address is refused WITH the address named — and the
+        // An invalid address is refused WITH the address named, and the
         // refusal is all-or-nothing: the valid address in the same batch
         // must NOT have been persisted behind a 400.
         let error = mgr

@@ -34,7 +34,7 @@ const SOLVED_ALLOW_TTL_SECS: u64 = 600;
 const MAX_OUTSTANDING_CHALLENGES: usize = 100_000;
 
 /// Server-side record of an issued PoW challenge. Verification consults
-/// THESE values — the client's copy of the parameters is untrusted input.
+/// THESE values, the client's copy of the parameters is untrusted input.
 #[derive(Debug, Clone)]
 struct IssuedPowRecord {
     /// Challenge data (prefix) the client must hash.
@@ -744,7 +744,7 @@ impl ChallengeManager {
     }
 
     /// Issue a challenge whose expiry is STRICTLY in the past (test seam for
-    /// the registry expiry path — `issue_server_pow_with_ttl(_, 0)` cannot
+    /// the registry expiry path, `issue_server_pow_with_ttl(_, 0)` cannot
     /// guarantee the second boundary has ticked over before verification).
     #[cfg(test)]
     fn issue_expired_server_pow(&self) -> crate::decision::PowChallenge {
@@ -796,7 +796,7 @@ impl ChallengeManager {
     ///
     /// Only `challenge_id` is taken from the client. The data, difficulty
     /// and expiry used for verification are the values stored when the
-    /// challenge was ISSUED — a client that "relaxes" the difficulty or
+    /// challenge was ISSUED, a client that "relaxes" the difficulty or
     /// extends the expiry in its own copy of the challenge gains nothing.
     /// A valid solution marks the challenge solved in the registry for a
     /// short redemption allow-TTL.
@@ -898,7 +898,7 @@ impl ChallengeManager {
     }
 
     /// Whether a solved challenge is still inside its redemption allow-TTL
-    /// (audit F3c) — used to let a redeemed client through while its
+    /// (audit F3c), used to let a redeemed client through while its
     /// reputation recovers.
     pub fn pow_solved_allow_active(&self, challenge_id: &str) -> bool {
         let now = current_timestamp();
@@ -1026,7 +1026,7 @@ fn current_timestamp() -> u64 {
 }
 
 /// Rough expected solve time (ms) for a difficulty, assuming ~1M sha256/s
-/// on client hardware (advisory only — shown to the client).
+/// on client hardware (advisory only, shown to the client).
 fn expected_solve_time_ms(difficulty: u8) -> u32 {
     let hashes = 1u64
         .checked_shl(difficulty.min(31) as u32)

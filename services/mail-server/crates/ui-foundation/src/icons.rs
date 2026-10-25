@@ -48,7 +48,7 @@ pub fn glyph_markup(name: &str) -> Option<&'static str> {
 /// (default 2), round caps/joins, sized by `width`/`height` in CSS pixels,
 /// and `aria-hidden` (the accessible name belongs to the surrounding
 /// control). `class_name` is the caller's hook and is HTML-escaped at this
-/// boundary — a hostile value cannot break out of the attribute.
+/// boundary, a hostile value cannot break out of the attribute.
 pub fn render_icon(name: &str, options: IconRenderOptions<'_>) -> Option<String> {
     let markup = glyph_markup(name)?;
     let class_name = options

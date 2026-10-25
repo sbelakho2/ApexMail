@@ -29,7 +29,7 @@ pub async fn require_service_token<S: HasServiceToken + Send + Sync + 'static>(
 ) -> Result<Response, StatusCode> {
     let expected = state.service_token();
     if expected.is_empty() {
-        // No token configured — deny all for safety
+        // No token configured, deny all for safety
         return Err(StatusCode::UNAUTHORIZED);
     }
 

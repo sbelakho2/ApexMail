@@ -4,8 +4,8 @@
 //! The TSD generator was rewired to read `v_accounting_payroll_taxes` (posted
 //! entries only) through `accounting_core::derive::payroll_taxes_for_period`
 //! instead of recomputing amounts from the operational payroll inputs. These
-//! tests drive the real path — `payroll_records` → the ledger sweep → the
-//! posted ledger → the declaration — against the canonical migration chain,
+//! tests drive the real path, `payroll_records` → the ledger sweep → the
+//! posted ledger → the declaration, against the canonical migration chain,
 //! and prove the failure modes are reported rather than papered over:
 //!
 //! * amounts come from the books (`posting`, not recomputation);
@@ -60,7 +60,7 @@ fn sha256_hex(value: &str) -> String {
 ///
 /// `is_default` is set: the payroll sweep posts a `payroll_records` row to the
 /// DEFAULT entity (migration 199's payroll model has no entity column), so a
-/// realistic single-entity deployment — the one a TSD describes — has the
+/// realistic single-entity deployment, the one a TSD describes, has the
 /// default entity carrying the books.
 async fn seed_entity(pool: &PgPool, registry_code: &str) -> Uuid {
     let mut conn = pool.acquire().await.expect("pool acquire");
@@ -241,7 +241,7 @@ struct PayrollAccounts {
     pension: Uuid,
 }
 
-/// Insert a `payroll_postings` row referencing a posted entry — the shape an
+/// Insert a `payroll_postings` row referencing a posted entry, the shape an
 /// admin/import path would create, without going through the sweep policy.
 #[allow(clippy::too_many_arguments)]
 async fn insert_posting(
@@ -314,7 +314,7 @@ fn month_bounds_handles_short_months_leap_years_and_rejects_nonsense() {
         Err(TsdSourceError::InvalidPeriod { .. })
     ));
     // December of a year whose successor is not representable must not
-    // overflow — it is an invalid period, not a panic.
+    // overflow, it is an invalid period, not a panic.
     assert!(matches!(
         month_bounds(i32::MAX, 12),
         Err(TsdSourceError::InvalidPeriod { .. })

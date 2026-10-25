@@ -15,9 +15,9 @@ Las cookies son pequeños archivos de texto que se almacenan en su dispositivo c
 
 ### Sitio de marketing (apexmail.ee)
 
-El sitio de marketing no entrega **ningún script** — su Content-Security-Policy bloquea por completo la ejecución de scripts — por lo que no incrusta **ningún script de analítica, ningún píxel de seguimiento y ninguna cookie publicitaria**. La única cookie asociada a este sitio es:
+El sitio de marketing no entrega **ningún script**, su Content-Security-Policy bloquea por completo la ejecución de scripts, por lo que no incrusta **ningún script de analítica, ningún píxel de seguimiento y ninguna cookie publicitaria**. La única cookie asociada a este sitio es:
 
-- **`apexmail_consent` (preferencia de consentimiento):** Registra su elección en el banner de cookies. La establece nuestro endpoint de API con `Domain=.apexmail.ee` y una validez de un año. No contiene identificadores personales — solo su preferencia de banner — y su único efecto funcional en este sitio es ocultar el banner en visitas futuras.
+- **`apexmail_consent` (preferencia de consentimiento):** Registra su elección en el banner de cookies. La establece nuestro endpoint de API con `Domain=.apexmail.ee` y una validez de un año. No contiene identificadores personales, solo su preferencia de banner, y su único efecto funcional en este sitio es ocultar el banner en visitas futuras.
 
 Aunque no se ejecuta ninguna analítica del lado del cliente en este sitio, nuestros servidores web conservan registros de acceso estándar (incluidas direcciones IP) con fines de seguridad y operativos. Los registros de acceso están cubiertos por nuestra [Política de privacidad](/es/privacy/).
 
@@ -42,7 +42,7 @@ Cuando visita por primera vez el sitio de marketing, un banner de cookies sin Ja
 
 - **Aceptar todas:** Registra una preferencia «todas» y oculta el banner. Como el sitio no ejecuta scripts de analítica, esto no activa nada más allá del registro de la preferencia.
 - **Solo necesarias:** Registra una preferencia «solo necesarias» y oculta el banner.
-- **Descartar:** Mismo efecto que Solo necesarias — registra una preferencia «solo necesarias».
+- **Descartar:** Mismo efecto que Solo necesarias, registra una preferencia «solo necesarias».
 
 Su elección registrada controla únicamente el banner en este sitio. Puede cambiar su preferencia en cualquier momento borrando las cookies de su navegador y recargando la página.
 

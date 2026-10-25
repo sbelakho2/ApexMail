@@ -1,4 +1,4 @@
-//! Segments API — named saved audiences.
+//! Segments API, named saved audiences.
 //!
 //! A segment is a reusable audience definition: subscriber lists plus
 //! tag/status match rules (`{"tags_all": [...], "tags_any": [...],

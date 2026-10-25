@@ -3,9 +3,9 @@
 //! Platform-wide analytics computed from database queries across all tenants.
 //! All values come from real PostgreSQL queries with zero hardcoded data.
 //!
-//! - `GET /v1/admin/cross-tenant/health` — platform-wide health score with bottom 5 tenants
-//! - `GET /v1/admin/cross-tenant/plans` — plan distribution, revenue, velocity, lifetime
-//! - `GET /v1/admin/cross-tenant/growth` — aggregate growth metrics across all tenants
+//! - `GET /v1/admin/cross-tenant/health`, platform-wide health score with bottom 5 tenants
+//! - `GET /v1/admin/cross-tenant/plans`, plan distribution, revenue, velocity, lifetime
+//! - `GET /v1/admin/cross-tenant/growth`, aggregate growth metrics across all tenants
 
 use std::collections::HashMap;
 
@@ -291,7 +291,7 @@ async fn get_cross_tenant_plans(
     }
 
     // Subscriptions are read from mollie_subscriptions (the table billing
-    // webhooks write), joined via tenants.plan to plans pricing — mirroring
+    // webhooks write), joined via tenants.plan to plans pricing, mirroring
     // billing-service's get_mrr_report pattern with proper yearly rounding.
     let subscriptions = if has_subs && has_plans {
         let has_billing_interval =

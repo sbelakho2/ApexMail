@@ -1,4 +1,4 @@
-//! Cross-crate contract tests for the reply classifier — the worker
+//! Cross-crate contract tests for the reply classifier, the worker
 //! (`worker-processors::reply_handler::ai`) and the AI service
 //! (`ai_service::reply_classify`) are separate trust domains that must agree
 //! on the wire, byte for byte. Each side has its own unit tests; THIS file is
@@ -18,7 +18,7 @@ fn taxonomy_matches_the_worker_disposition_enum() {
     let service: Vec<&str> = ai_service::reply_classify::TAXONOMY.to_vec();
     assert_eq!(
         service, worker,
-        "ai-service TAXONOMY drifted from ReplyDisposition::ALL — the service would \
+        "ai-service TAXONOMY drifted from ReplyDisposition::ALL, the service would \
          validate requests against a taxonomy the worker cannot parse"
     );
 }
@@ -91,7 +91,7 @@ fn objection_class_field_is_forward_compatible() {
 }
 
 /// Every canonical disposition the service may return is one the worker can
-/// parse — and the service's own validation refuses anything else.
+/// parse, and the service's own validation refuses anything else.
 #[test]
 fn every_service_disposition_round_trips_through_the_worker() {
     for disposition in ai_service::reply_classify::TAXONOMY {

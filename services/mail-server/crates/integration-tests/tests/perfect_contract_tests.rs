@@ -1,7 +1,7 @@
 //! Whole-repo “perfect” contract: UX workflows, persona journeys, and
 //! adversarial boundary invariants.
 //!
-//! These tests encode what a complete, honest product must do — not merely
+//! These tests encode what a complete, honest product must do, not merely
 //! what a unit currently returns. They are intentionally cross-surface:
 //! the same expectation is checked against every path a user (or attacker)
 //! can reach.
@@ -13,7 +13,7 @@
 //!   4. Forms preserve typed state and associate errors with controls.
 //!   5. Tenant / role / scope / CSRF boundaries hold under hostile input.
 //!   6. Idempotent retries never double-charge or double-send.
-//!   7. Failures are loud and recoverable — never silent zeros.
+//!   7. Failures are loud and recoverable, never silent zeros.
 //!
 //! DO NOT mark a workflow “covered” because a page renders. Cover the
 //! combination: entry → action → confirmation → result → recovery.
@@ -191,7 +191,7 @@ fn live_data_pages_keep_creation_actions() {
     );
 }
 
-/// Perfect UX: state language is distinct — completed-without-results,
+/// Perfect UX: state language is distinct, completed-without-results,
 /// failed, and waiting are three different recovery stories.
 #[test]
 fn lifecycle_states_are_distinct_and_actionable() {

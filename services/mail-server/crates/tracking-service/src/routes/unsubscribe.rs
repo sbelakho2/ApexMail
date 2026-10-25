@@ -1,17 +1,17 @@
 //! Unsubscribe and preferences-center handlers.
 //!
-//! Unsubscribe endpoints://! POST `{unsub_path}/:token` — RFC 8058 one-click (List-Unsubscribe-Post)
-//! GET `{unsub_path}/:token` — Manual:renders the confirmation form (F39:side-effect free)
-//! POST `{unsub_path}/:token/confirm` — Manual confirmation form submit (F39:the
+//! Unsubscribe endpoints://! POST `{unsub_path}/:token`, RFC 8058 one-click (List-Unsubscribe-Post)
+//! GET `{unsub_path}/:token`, Manual:renders the confirmation form (F39:side-effect free)
+//! POST `{unsub_path}/:token/confirm`, Manual confirmation form submit (F39:the
 //!        only browser-driven path that changes consent; plain HTML form, no JS)
 //!
-//! Preferences endpoints://! GET `{prefs_path}/:token` — Show preferences form
-//! POST `{prefs_path}/:token` — Save preferences
+//! Preferences endpoints://! GET `{prefs_path}/:token`, Show preferences form
+//! POST `{prefs_path}/:token`, Save preferences
 //!
 //! F13:unsubscribe attribution comes from the token when it is a v2
 //! (message-attributed) token; legacy tokens resolve the latest message
 //! addressed to the recipient via the canonical to/cc/bcc JSON arrays, and
-//! anything still unresolved is recorded as `"unknown"` — never invented.
+//! anything still unresolved is recorded as `"unknown"`, never invented.
 //!
 //! F37:every token is checked for the base64url ASCII alphabet BEFORE any
 //! processing or logging, so hostile multi-byte input can neither panic the
@@ -51,12 +51,12 @@ use crate::token_shape::is_valid_token_shape;
 /// Does the tenant a decoded token points at still exist?
 ///
 /// A token's `tenant_id` travels inside the encrypted envelope, so it can
-/// reference a tenant that has since been deleted — or an arbitrary id minted
+/// reference a tenant that has since been deleted, or an arbitrary id minted
 /// by whoever holds the tracking secret. Letting such a request reach
 /// `record_unsubscribe` / the preferences INSERTs fails on the
 /// `suppressions_tenant_id_fkey` / `subscription_preferences_tenant_id_fkey`
 /// foreign keys: the MUA gets a 500 and (worse) a pending-retry entry is
-/// enqueued that can never succeed — a permanent poison loop in
+/// enqueued that can never succeed, a permanent poison loop in
 /// `apexmail:suppressions:pending`.
 ///
 /// `None` means the database could not answer (transient outage): callers
@@ -71,12 +71,12 @@ async fn tenant_exists(state: &AppState, tenant_id: &str) -> Option<bool> {
         .map(|row| row.is_some())
 }
 
-/// F37:log a rejected token WITHOUT any raw token material — length and
+/// F37:log a rejected token WITHOUT any raw token material, length and
 /// charset classification only. (Slicing at a fixed byte offset is exactly
 /// how multi-byte input used to panic; even on ASCII, fragments of a
 /// bearer-style token do not belong in logs.)
 fn log_invalid_token_shape(handler: &str, token: &str) {
-    // coverage: justified — llvm-cov region-counter artifact: the field-arg
+    // coverage: justified, llvm-cov region-counter artifact: the field-arg
     // lines below execute (log_invalid_token_shape is called by the F37
     // hostile-token tests AND by a direct test with a debug subscriber; the
     // macro's check region shows hits) but the argument regions are never
@@ -105,7 +105,7 @@ pub async fn handle_unsub_post(
         Err(refusal) => return refusal,
     };
 
-    // F37:structure first — a malformed (e.g. multi-byte) token is rejected
+    // F37:structure first, a malformed (e.g. multi-byte) token is rejected
     // before it can reach any byte-slicing or verification code.
     if !is_valid_token_shape(&token) {
         log_invalid_token_shape("unsub_post", &token);
@@ -156,7 +156,7 @@ pub async fn handle_unsub_post(
     };
 
     // F13:attribute to the token's message (v2 tokens), else resolve via
-    // the canonical recipient arrays, else "unknown" — never invent.
+    // the canonical recipient arrays, else "unknown", never invent.
     let message_id = resolve_message_id(&state, &data).await;
 
     // Capability wave 2: the token must belong to the custom host's
@@ -190,18 +190,18 @@ pub async fn handle_unsub_post(
     // F1:the key is only CHECKED here and SET after a successful record.
     // Setting it before the recording meant a record_unsubscribe failure
     // (5xx) was followed by the MUA's RFC 8058 auto-retry hitting the dedup
-    // key and receiving 200-without-recording — a silently lost
+    // key and receiving 200-without-recording, a silently lost
     // unsubscribe. The record-then-mark window allows a concurrent
     // duplicate through; that is acceptable because the compliance-critical
     // suppression writes are idempotent upserts (ON CONFLICT (tenant,email)
-    // / (tenant,email,category) DO UPDATE — see
+    // / (tenant,email,category) DO UPDATE, see
     // `EventProcessor::add_to_suppression_list`).
     //
     // F38:a key that survived a resubscribe is reconciled against the
-    // durable suppression row — the short-circuit answers success ONLY when
+    // durable suppression row, the short-circuit answers success ONLY when
     // the requested (suppressed) consent state is actually persisted.
     if is_unsub_duplicate(&state, &data.tenant_id, &data.recipient).await {
-        info!("One-click unsubscribe duplicate within 24h window — skipping");
+        info!("One-click unsubscribe duplicate within 24h window, skipping");
         return axum::http::Response::builder()
             .status(200)
             .header("content-type", "application/json")
@@ -230,7 +230,7 @@ pub async fn handle_unsub_post(
             .unwrap_or_default();
     }
 
-    // Recorded successfully — NOW claim the dedup slot so retries within the
+    // Recorded successfully, NOW claim the dedup slot so retries within the
     // 24 h window short-circuit above. Best-effort:a Redis failure here only
     // means a duplicate may be re-recorded (idempotent upserts), never a
     // lost one.
@@ -299,7 +299,7 @@ pub async fn handle_unsub_get(
     // F39:this handler is now purely a read:it renders the confirmation
     // form whose submit button POSTs to `{unsub_path}/{token}/confirm`.
     // Consent changes only happen on POST (see `handle_unsub_confirm_post`)
-    // — a prefetching MUA or a link scanner can no longer unsubscribe
+    //, a prefetching MUA or a link scanner can no longer unsubscribe
     // anyone by fetching a URL.
     Html(render_confirmation_page(
         &token,
@@ -385,7 +385,7 @@ pub async fn handle_unsub_confirm_post(
     // earlier unsubscribe + resubscribe) answer FALSE, so the final choice
     // is always persisted.
     if is_unsub_duplicate(&state, &data.tenant_id, &data.recipient).await {
-        info!("Unsubscribe confirm duplicate within 24h window — skipping");
+        info!("Unsubscribe confirm duplicate within 24h window, skipping");
         return Html(render_success_page(&data.recipient)).into_response();
     }
 
@@ -408,7 +408,7 @@ pub async fn handle_unsub_confirm_post(
         return Html(render_error_page("Something went wrong. Please try again.")).into_response();
     }
 
-    // Recorded successfully — claim the dedup slot (best-effort, F1).
+    // Recorded successfully, claim the dedup slot (best-effort, F1).
     mark_unsub_dedup(&state, &data.tenant_id, &data.recipient).await;
 
     queue_unsub_webhook_async(&state, &data.tenant_id, &data.recipient, "link-click");
@@ -421,7 +421,7 @@ pub async fn handle_unsub_confirm_post(
 #[derive(Deserialize)]
 pub struct PrefsQuery {
     /// Batch-2:`?saved=1` (set by the POST /p/:token success redirect) is no
-    /// longer dead — it renders the visible `.alert-success` confirmation
+    /// longer dead, it renders the visible `.alert-success` confirmation
     /// banner on the returned page.
     saved: Option<String>,
 }
@@ -513,7 +513,7 @@ pub async fn handle_prefs_get(
 
     let globally_unsubscribed = sup_res.is_some();
 
-    // Batch-2:a successful save redirects here with ?saved=1 — the page must
+    // Batch-2:a successful save redirects here with ?saved=1, the page must
     // SHOW that the save worked (visible .alert-success banner), not land
     // back on a silently identical form.
     let just_saved = q.saved.as_deref() == Some("1");
@@ -546,10 +546,10 @@ pub struct PrefsForm {
     categories: std::collections::HashMap<String, String>,
 }
 
-/// Batch-2: `POST /p/:token` is a browser form surface — every failure arm
+/// Batch-2: `POST /p/:token` is a browser form surface, every failure arm
 /// renders the branded HTML error page (never raw JSON) with the original
 /// status code preserved. (The RFC 8058 one-click POST /u/:token keeps its
-/// JSON contract — that is a mail-client surface, not a browser.)
+/// JSON contract, that is a mail-client surface, not a browser.)
 fn prefs_error_page(status: StatusCode, message: &str) -> Response {
     (status, Html(render_error_page(message))).into_response()
 }
@@ -569,7 +569,7 @@ pub async fn handle_prefs_post(
     // F37:shape check before any processing.
     if !is_valid_token_shape(&token) {
         log_invalid_token_shape("prefs_post", &token);
-        // Batch-2:HTML error page (was raw JSON 400) — browser form surface.
+        // Batch-2:HTML error page (was raw JSON 400), browser form surface.
         return prefs_error_page(
             StatusCode::BAD_REQUEST,
             "Invalid or expired preferences link.",
@@ -579,7 +579,7 @@ pub async fn handle_prefs_post(
     let data = match state.codec.verify_preferences_token(&token) {
         Some(d) => d,
         None => {
-            // Batch-2:HTML error page (was raw JSON 400) — browser form surface.
+            // Batch-2:HTML error page (was raw JSON 400), browser form surface.
             return prefs_error_page(
                 StatusCode::BAD_REQUEST,
                 "Invalid or expired preferences link.",
@@ -612,7 +612,7 @@ pub async fn handle_prefs_post(
 
     // Global unsubscribe
     if form.unsubscribe_all.as_deref() == Some("true") {
-        // F54:suppressions.id is VARCHAR(26) — canonical 26-char entity id,
+        // F54:suppressions.id is VARCHAR(26), canonical 26-char entity id,
         // same generator the api-server uses (`generate_id("sup", 22)`).
         let sup_id = new_suppression_id();
         if let Err(e) = sqlx::query(r#"
@@ -623,7 +623,7 @@ pub async fn handle_prefs_post(
         .bind(&sup_id).bind(&data.tenant_id).bind(&email)
         .execute(&state.db).await {
             tracing::error!(error = %e, tenant_id = %data.tenant_id, email = %mail_common::pii::redact_email(&email), "CRITICAL: Failed to insert suppression record for unsubscribe");
-            // Batch-2:HTML error page (was raw JSON 500) — browser form surface.
+            // Batch-2:HTML error page (was raw JSON 500), browser form surface.
             return prefs_error_page(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Failed to save your unsubscribe preference. Please try again.",
@@ -658,14 +658,14 @@ pub async fn handle_prefs_post(
         .await
         {
             tracing::error!(error = %e, tenant_id = %data.tenant_id, email = %mail_common::pii::redact_email(&email), "Failed to delete suppression record for resubscribe");
-            // Batch-2:HTML error page (was raw JSON 500) — browser form surface.
+            // Batch-2:HTML error page (was raw JSON 500), browser form surface.
             return prefs_error_page(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Failed to save your resubscribe preference. Please try again.",
             );
         }
 
-        // F38:the durable consent state changed back to "subscribed" — the
+        // F38:the durable consent state changed back to "subscribed", the
         // 24 h unsubscribe dedup key MUST NOT survive this transition, or
         // the next unsubscribe would short-circuit as a "duplicate" while
         // no suppression row exists (unsub → resubscribe → unsub lost the
@@ -693,7 +693,7 @@ pub async fn handle_prefs_post(
 
     if !cats.is_empty() {
         // F9:category names must be the tenant's own active email_categories,
-        // and the accepted quantity is capped — otherwise a token holder
+        // and the accepted quantity is capped, otherwise a token holder
         // could write arbitrary junk rows into subscription_preferences in
         // unbounded volume.
         let valid_rows = sqlx::query_as::<_, (String,)>(
@@ -706,7 +706,7 @@ pub async fn handle_prefs_post(
             Ok(rows) => rows.into_iter().map(|(name,)| name).collect(),
             Err(e) => {
                 tracing::error!(error = %e, tenant_id = %data.tenant_id, "Failed to load email categories for validation");
-                // Batch-2:HTML error page (was raw JSON 500) — browser form surface.
+                // Batch-2:HTML error page (was raw JSON 500), browser form surface.
                 return prefs_error_page(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "Failed to save preferences. Please try again.",
@@ -717,7 +717,7 @@ pub async fn handle_prefs_post(
         if let Err(msg) = validate_category_preferences(&cats, &valid, MAX_CATEGORY_PREFERENCES) {
             warn!(tenant_id = %data.tenant_id, reason = %msg, "Rejected category preference update");
             // Batch-2:HTML error page (was raw JSON 400; the rejection reason
-            // is HTML-escaped by the template) — browser form surface.
+            // is HTML-escaped by the template), browser form surface.
             return prefs_error_page(StatusCode::BAD_REQUEST, &msg);
         }
 
@@ -725,14 +725,14 @@ pub async fn handle_prefs_post(
         let mut tx = match state.db.begin().await {
             Ok(tx) => tx,
             Err(e) => {
-                // coverage: justified — requires a pool that answers the
+                // coverage: justified, requires a pool that answers the
                 // email-categories query (the preceding statement on the SAME
                 // pool) and then fails `begin`: a protocol-aware PostgreSQL
                 // fault injector. Any whole-pool failure (dead DB) is caught
                 // by the categories-error arm immediately above, which IS
                 // covered.
                 error!(error = %e, "Failed to begin transaction for preferences");
-                // Batch-2:HTML error page (was raw JSON 500) — browser form surface.
+                // Batch-2:HTML error page (was raw JSON 500), browser form surface.
                 return prefs_error_page(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "Failed to save preferences. Please try again.",
@@ -741,7 +741,7 @@ pub async fn handle_prefs_post(
         };
 
         // Batch UPSERT all category preferences in a single statement
-        // F54:subscription_preferences.id is VARCHAR(26) — canonical 26-char
+        // F54:subscription_preferences.id is VARCHAR(26), canonical 26-char
         // entity ids (generate_id("prf", 22)), NOT the 36-char UUID form.
         let mut builder = sqlx::QueryBuilder::<sqlx::Postgres>::new(
             "INSERT INTO subscription_preferences (id, tenant_id, email, category, subscribed, updated_at) "
@@ -761,7 +761,7 @@ pub async fn handle_prefs_post(
         if let Err(e) = builder.build().execute(&mut *tx).await {
             error!(error = %e, "Failed to batch update subscription preferences");
             // tx will be rolled back on drop
-            // Batch-2:HTML error page (was raw JSON 500) — browser form surface.
+            // Batch-2:HTML error page (was raw JSON 500), browser form surface.
             return prefs_error_page(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Failed to save preferences. Please try again.",
@@ -770,14 +770,14 @@ pub async fn handle_prefs_post(
 
         if let Err(e) = tx.commit().await {
             tracing::error!(error = %e, tenant_id = %data.tenant_id, email = %mail_common::pii::redact_email(&email), "CRITICAL: Failed to commit subscription preference transaction \u{2014} changes rolled back");
-            // Batch-2:HTML error page (was raw JSON 500) — browser form surface.
+            // Batch-2:HTML error page (was raw JSON 500), browser form surface.
             return prefs_error_page(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Failed to save preferences. Please try again.",
             );
         }
 
-        // F55:the committed preference change alters send eligibility — fan
+        // F55:the committed preference change alters send eligibility, fan
         // out per category so subscribers can invalidate precisely.
         for (cat, subscribed) in &cats {
             state
@@ -799,14 +799,14 @@ fn unsub_dedup_key(tenant_id: &str, recipient: &str) -> String {
 }
 
 /// Check (GET) whether an unsubscribe for (tenant, recipient) was already
-/// recorded within the 24 h window. Fails OPEN on Redis errors — losing
+/// recorded within the 24 h window. Fails OPEN on Redis errors, losing
 /// dedup is preferable to losing an unsubscribe (compliance-critical); the
 /// duplicate record is absorbed by the idempotent suppression upsert.
 ///
 /// F38:a present key alone is NOT trusted as "already unsubscribed": the
 /// durable consent state may have changed since (preferences-center
 /// resubscribe deletes the suppression row). The key only short-circuits
-/// when the requested state — recipient suppressed — is actually persisted
+/// when the requested state, recipient suppressed, is actually persisted
 /// in `suppressions`. A key left stale by a resubscribe is cleared and the
 /// request re-records, so unsub → resubscribe → unsub always ends
 /// suppressed.
@@ -820,12 +820,12 @@ async fn is_unsub_duplicate(state: &AppState, tenant_id: &str, recipient: &str) 
         {
             Ok(v) => v.is_some(),
             Err(e) => {
-                warn!(error = %e, "Unsubscribe dedup check failed — recording anyway");
+                warn!(error = %e, "Unsubscribe dedup check failed, recording anyway");
                 return false;
             }
         },
         Err(e) => {
-            warn!(error = %e, "Unsubscribe dedup Redis pool error — recording anyway");
+            warn!(error = %e, "Unsubscribe dedup Redis pool error, recording anyway");
             return false;
         }
     };
@@ -833,8 +833,8 @@ async fn is_unsub_duplicate(state: &AppState, tenant_id: &str, recipient: &str) 
         return false;
     }
 
-    // Key present — reconcile against the durable consent state (F38).
-    // NOTE:select the email (VARCHAR → String), not a bare `1` — PG types
+    // Key present, reconcile against the durable consent state (F38).
+    // NOTE:select the email (VARCHAR → String), not a bare `1`, PG types
     // the literal as INT4 and decoding it as i64 is a ColumnDecode error.
     let email_lc = recipient.to_lowercase();
     match sqlx::query_as::<_, (String,)>(
@@ -849,15 +849,15 @@ async fn is_unsub_duplicate(state: &AppState, tenant_id: &str, recipient: &str) 
         Ok(None) => {
             // Stale key (suppression was removed by a resubscribe): clear it
             // so the state and the dedup marker converge, and record again.
-            warn!("Unsubscribe dedup key stale (recipient resubscribed since) — clearing and recording again");
+            warn!("Unsubscribe dedup key stale (recipient resubscribed since), clearing and recording again");
             clear_unsub_dedup(state, tenant_id, recipient).await;
             false
         }
         // Fail OPEN (record anyway): the suppression write is an idempotent
-        // upsert, so the worst case is a duplicate event — never a lost
+        // upsert, so the worst case is a duplicate event, never a lost
         // consent state.
         Err(e) => {
-            warn!(error = %e, "Suppression state check failed — recording anyway");
+            warn!(error = %e, "Suppression state check failed, recording anyway");
             false
         }
     }
@@ -865,7 +865,7 @@ async fn is_unsub_duplicate(state: &AppState, tenant_id: &str, recipient: &str) 
 
 /// Claim the 24 h dedup slot (SET NX EX) AFTER the unsubscribe has been
 /// successfully recorded (F1). The value names the consent state the key
-/// advertises ("suppressed") — see the reconciliation in
+/// advertises ("suppressed"), see the reconciliation in
 /// [`is_unsub_duplicate`]. Best-effort:on Redis failure the worst case
 /// is a duplicate record (idempotent upserts), never a lost unsubscribe.
 async fn mark_unsub_dedup(state: &AppState, tenant_id: &str, recipient: &str) {
@@ -881,23 +881,23 @@ async fn mark_unsub_dedup(state: &AppState, tenant_id: &str, recipient: &str) {
                 .query_async::<Option<String>>(&mut *conn)
                 .await
             {
-                // coverage: justified — llvm-cov region-counter artifact: the
+                // coverage: justified, llvm-cov region-counter artifact: the
                 // arm runs (mark_unsub_dedup_failure_is_swallowed forces the
                 // SET to fail with WRONGTYPE; the `if let Err` check region
                 // shows hits) but the one-line macro's region is never
                 // counted.
-                warn!(error = %e, "Unsubscribe dedup mark failed — duplicates may re-record");
+                warn!(error = %e, "Unsubscribe dedup mark failed, duplicates may re-record");
             }
         }
         Err(e) => {
-            warn!(error = %e, "Unsubscribe dedup Redis pool error — duplicates may re-record");
+            warn!(error = %e, "Unsubscribe dedup Redis pool error, duplicates may re-record");
         }
     }
 }
 
 /// F38:drop the dedup slot after a successful RESUBSCRIBE so the next
 /// unsubscribe is not swallowed as a "duplicate" while the recipient is no
-/// longer suppressed. Best-effort — [`is_unsub_duplicate`] reconciles
+/// longer suppressed. Best-effort, [`is_unsub_duplicate`] reconciles
 /// against the durable suppression row, so a failed DEL cannot lose consent.
 async fn clear_unsub_dedup(state: &AppState, tenant_id: &str, recipient: &str) {
     let key = unsub_dedup_key(tenant_id, recipient);
@@ -908,11 +908,11 @@ async fn clear_unsub_dedup(state: &AppState, tenant_id: &str, recipient: &str) {
                 .query_async::<()>(&mut *conn)
                 .await
             {
-                warn!(error = %e, "Unsubscribe dedup clear failed — duplicate check will reconcile against Postgres");
+                warn!(error = %e, "Unsubscribe dedup clear failed, duplicate check will reconcile against Postgres");
             }
         }
         Err(e) => {
-            warn!(error = %e, "Unsubscribe dedup clear Redis pool error — duplicate check will reconcile against Postgres");
+            warn!(error = %e, "Unsubscribe dedup clear Redis pool error, duplicate check will reconcile against Postgres");
         }
     }
 }
@@ -920,7 +920,7 @@ async fn clear_unsub_dedup(state: &AppState, tenant_id: &str, recipient: &str) {
 // ── Message attribution (F13) ─────────────────────────────────────────────────
 
 /// Literal attribution recorded when the originating message cannot be
-/// determined — never an invented id (which would silently corrupt
+/// determined, never an invented id (which would silently corrupt
 /// per-message unsubscribe counts and webhook payloads).
 pub const UNKNOWN_MESSAGE_ID: &str = "unknown";
 
@@ -930,7 +930,7 @@ const MAX_EVENT_MESSAGE_ID_LEN: usize = 64;
 /// F13:resolve the attribution message id for an unsubscribe request.
 ///
 /// 1. v2 tokens carry the originating message id inside the authenticated
-///    envelope — used directly (after a width sanity check).
+///    envelope, used directly (after a width sanity check).
 /// 2. Legacy tokens: latest tenant-scoped message whose CANONICAL recipient
 ///    arrays (`to_emails` / `cc_emails` / `bcc_emails` JSON) contain the
 ///    recipient, with `messages.id::text` decoded as text (the column is a
@@ -942,7 +942,7 @@ async fn resolve_message_id(state: &AppState, data: &crate::codec::UnsubscribeDa
         if !mid.is_empty() && mid.len() <= MAX_EVENT_MESSAGE_ID_LEN {
             return mid.to_owned();
         }
-        warn!("v2 unsubscribe token carried an unusable message id — falling back to recipient resolution");
+        warn!("v2 unsubscribe token carried an unusable message id, falling back to recipient resolution");
     }
 
     let email_lc = data.recipient.to_lowercase();
@@ -1055,7 +1055,7 @@ async fn queue_unsub_webhook(
 }
 
 /// F54:26-char entity ids for the VARCHAR(26) PK columns written by these
-/// routes — the platform's canonical generator (`apexmail_lib::id::generate_id`),
+/// routes, the platform's canonical generator (`apexmail_lib::id::generate_id`),
 /// identical to the api-server's `next_suppression_id()`. The legacy
 /// `new_id("sup")`/`new_id("prf")` produced 36-char ids that overflowed the
 /// columns (SQLSTATE 22001) and failed every insert.
@@ -1067,7 +1067,7 @@ fn new_preference_id() -> String {
     apexmail_lib::id::generate_id("prf", 22)
 }
 
-/// 36-char prefixed UUID id — only for VARCHAR(64)+ columns
+/// 36-char prefixed UUID id, only for VARCHAR(64)+ columns
 /// (`webhook_queue.id` is VARCHAR(64), `events.id` VARCHAR(64)).
 fn new_id(prefix: &str) -> String {
     format!("{prefix}_{}", Uuid::new_v4().simple())
@@ -1127,7 +1127,7 @@ mod tests {
     // ── Fault-window arms (dedup/webhook best-effort paths) ───────────
 
     /// F37:the rejected-token log carries length + charset classification
-    /// only — never raw token material — for BOTH ascii and multi-byte
+    /// only, never raw token material, for BOTH ascii and multi-byte
     /// hostile shapes.
     #[test]
     fn invalid_token_shape_logs_length_and_charset_only() {
@@ -1144,7 +1144,7 @@ mod tests {
     async fn mark_unsub_dedup_failure_is_swallowed() {
         test_log_subscriber();
         let Some((state, redis, _db)) = test_support::live_redis_pg_or_skip(&[]).await else {
-            // coverage: justified — soft-skip guard: reachable only when the
+            // coverage: justified, soft-skip guard: reachable only when the
             // TEST_* env vars are unset (a run in which every DB-backed test
             // skips); a coverage run has them configured.
             return;
@@ -1161,7 +1161,7 @@ mod tests {
                 .arg("stale-list")
                 .query_async(&mut *conn)
                 .await;
-            // coverage: justified — llvm-cov closing-brace region artifact:
+            // coverage: justified, llvm-cov closing-brace region artifact:
             // the if-let body above demonstrably executed (its statements
             // carry hits) and the block cannot be exited except through the
             // brace.
@@ -1181,7 +1181,7 @@ mod tests {
     async fn clear_unsub_dedup_failure_is_swallowed() {
         test_log_subscriber();
         let Some((state, _redis, _db)) = test_support::live_redis_pg_or_skip(&[]).await else {
-            // coverage: justified — soft-skip guard: reachable only when the
+            // coverage: justified, soft-skip guard: reachable only when the
             // TEST_* env vars are unset (a run in which every DB-backed test
             // skips); a coverage run has them configured.
             return;
@@ -1196,7 +1196,7 @@ mod tests {
     }
 
     /// The fire-and-forget webhook queueing must swallow (and log) a
-    /// database failure — never panic the spawned task.
+    /// database failure, never panic the spawned task.
     #[tokio::test]
     async fn queue_unsub_webhook_failure_is_swallowed() {
         test_log_subscriber();
@@ -1281,7 +1281,7 @@ mod tests {
     fn token_shape_validator_rejects_multibyte_and_hostile_input() {
         // Multi-byte Unicode: a 4-byte emoji at the exact byte offset (20)
         // that the old logging code sliced at. Slicing `&token[..20]` on
-        // this string PANICS — the validator must reject it first.
+        // this string PANICS, the validator must reject it first.
         let mut hostile = String::new();
         for _ in 0..5 {
             hostile.push('😀'); // 4 bytes each
@@ -1383,7 +1383,7 @@ mod tests {
         // ── F39:GET is side-effect free; confirmation is a POST form ──
 
         /// GET /u/:token renders a confirmation FORM (POST to
-        /// /u/:token/confirm) — not a GET link — and ?confirm=1 no longer
+        /// /u/:token/confirm), not a GET link, and ?confirm=1 no longer
         /// mutates anything (it renders the same form).
         #[tokio::test]
         async fn unsub_get_renders_post_form_and_never_mutates() {
@@ -1532,7 +1532,7 @@ mod tests {
             }
 
             /// A Redis pool that cannot answer yields no WAL events (and
-            /// never panics) — the reader is diagnostics-only.
+            /// never panics), the reader is diagnostics-only.
             #[tokio::test]
             async fn wal_event_reader_tolerates_a_dead_pool() {
                 let dead = deadpool_redis::Config::from_url("redis://127.0.0.1:1")
@@ -1565,7 +1565,7 @@ mod tests {
                         .query_async(&mut *conn)
                         .await;
                 }
-                // coverage: justified — llvm-cov closing-brace region
+                // coverage: justified, llvm-cov closing-brace region
                 // artifact: the if-let body (the DEL above) carries hits on
                 // every cleanup() call; the block cannot be exited except
                 // through the brace.
@@ -1574,14 +1574,14 @@ mod tests {
             /// F13:legacy tokens resolve attribution against the canonical
             /// recipient arrays (to/cc/bcc JSON, tenant-scoped, id::text);
             /// v2 tokens use the embedded message id; nothing resolves to
-            /// an INVENTED id ("msg_…") — the fallback is exactly
+            /// an INVENTED id ("msg_…"), the fallback is exactly
             /// "unknown".
             #[tokio::test]
             async fn unsubscribe_attribution_legacy_v2_and_unknown() {
                 let _wal_serial = crate::routes::test_support::redis_wal_serial().await;
                 let Some((state, redis, db)) = test_support::live_redis_pg_or_skip(&[]).await
                 else {
-                    // coverage: justified — soft-skip guard: reachable only
+                    // coverage: justified, soft-skip guard: reachable only
                     // when TEST_REDIS_URL/TEST_DATABASE_URL are unset, i.e.
                     // in a run where every DB-backed test skips; a coverage
                     // run by definition has them configured.
@@ -1600,7 +1600,7 @@ mod tests {
                 let bcc_new = Uuid::new_v4().to_string();
 
                 // (1) Legacy token: newest message with the recipient in a
-                // canonical recipient array — the newest match is the BCC
+                // canonical recipient array, the newest match is the BCC
                 // message, so to/cc/bcc are all consulted.
                 seed_message(&db, &tenant, &to_old, &[RECIPIENT], &[], &[]).await;
                 tokio::time::sleep(Duration::from_millis(30)).await;
@@ -1684,7 +1684,7 @@ mod tests {
                 let _wal_serial = crate::routes::test_support::redis_wal_serial().await;
                 let Some((state, redis, db)) = test_support::live_redis_pg_or_skip(&[]).await
                 else {
-                    // coverage: justified — soft-skip guard: reachable only
+                    // coverage: justified, soft-skip guard: reachable only
                     // when TEST_REDIS_URL/TEST_DATABASE_URL are unset, i.e.
                     // in a run where every DB-backed test skips; a coverage
                     // run by definition has them configured.
@@ -1776,7 +1776,7 @@ mod tests {
                 let _wal_serial = crate::routes::test_support::redis_wal_serial().await;
                 let Some((state, redis, db)) = test_support::live_redis_pg_or_skip(&[]).await
                 else {
-                    // coverage: justified — soft-skip guard: reachable only
+                    // coverage: justified, soft-skip guard: reachable only
                     // when TEST_REDIS_URL/TEST_DATABASE_URL are unset, i.e.
                     // in a run where every DB-backed test skips; a coverage
                     // run by definition has them configured.
@@ -1813,7 +1813,7 @@ mod tests {
                 let _wal_serial = crate::routes::test_support::redis_wal_serial().await;
                 let Some((state, redis, db)) = test_support::live_redis_pg_or_skip(&[]).await
                 else {
-                    // coverage: justified — soft-skip guard: reachable only
+                    // coverage: justified, soft-skip guard: reachable only
                     // when TEST_REDIS_URL/TEST_DATABASE_URL are unset, i.e.
                     // in a run where every DB-backed test skips; a coverage
                     // run by definition has them configured.
@@ -1825,7 +1825,7 @@ mod tests {
 
                 let token = legacy_token(&tenant, RECIPIENT);
 
-                // GET — even with the legacy ?confirm=1 flag — records nothing.
+                // GET, even with the legacy ?confirm=1 flag, records nothing.
                 let resp = server.get(&format!("/u/{token}")).await;
                 assert!(resp.text().contains("Confirm Unsubscribe"));
                 let resp = server
@@ -1919,7 +1919,7 @@ mod tests {
 //
 // [ASPIRATIONAL] contracts that pin the batch-2 fixes for the preferences
 // center: every BROWSER-facing response (success, failure, redirect target)
-// must be rendered HTML, never raw JSON — mail-client POST endpoints keep
+// must be rendered HTML, never raw JSON, mail-client POST endpoints keep
 // their RFC 8058 JSON contract (they are not browser surfaces).
 #[cfg(test)]
 mod batch1_page_contracts {
@@ -1959,7 +1959,7 @@ mod batch1_page_contracts {
             .post("/p/aaaaaaaaaa")
             .form(&[("unsubscribe_all", "true")])
             .await;
-        // coverage: justified — lazy assert-format argument: `resp.text()`
+        // coverage: justified, lazy assert-format argument: `resp.text()`
         // is evaluated only when the assertion FAILS; a green suite by
         // definition never formats it.
         assert_eq!(
@@ -1973,13 +1973,13 @@ mod batch1_page_contracts {
             .get("content-type")
             .map(|value| value.to_str().unwrap_or_default().to_string())
             .unwrap_or_default();
-        // coverage: justified — lazy assert-format argument: `resp.text()`
+        // coverage: justified, lazy assert-format argument: `resp.text()`
         // is evaluated only when the assertion FAILS; a green suite by
         // definition never formats it.
         assert!(
             content_type.starts_with("text/html"),
             "BATCH-2 FIX TARGET: a preferences-save FAILURE rendered content-type \
-             {content_type:?} (body: {}) — browser-facing failures must render the \
+             {content_type:?} (body: {}), browser-facing failures must render the \
              HTML error page (text/html), not raw JSON",
             resp.text()
         );
@@ -2002,7 +2002,7 @@ mod batch1_page_contracts {
     #[tokio::test]
     async fn contract_tracking_preference_save_success_renders_a_visible_confirmation() {
         let Some((state, _redis, db)) = test_support::live_redis_pg_or_skip(&[]).await else {
-            // coverage: justified — soft-skip guard: reachable only when the
+            // coverage: justified, soft-skip guard: reachable only when the
             // TEST_* env vars are unset (a run in which every DB-backed test
             // skips); a coverage run has them configured.
             return;
@@ -2013,7 +2013,7 @@ mod batch1_page_contracts {
             .collect::<String>();
         let server = server(&state).await;
 
-        // The suppression insert carries a tenants FK — seed the tenant.
+        // The suppression insert carries a tenants FK, seed the tenant.
         sqlx::query("INSERT INTO tenants (id, name) VALUES ($1, $1) ON CONFLICT (id) DO NOTHING")
             .bind(&tenant)
             .execute(&db)
@@ -2029,7 +2029,7 @@ mod batch1_page_contracts {
             .post(&format!("/p/{token}"))
             .form(&[("unsubscribe_all", "true")])
             .await;
-        // coverage: justified — lazy assert-format argument: `resp.text()`
+        // coverage: justified, lazy assert-format argument: `resp.text()`
         // is evaluated only when the assertion FAILS; a green suite by
         // definition never formats it.
         assert_eq!(

@@ -1,26 +1,26 @@
 //! The per-tenant outbound delivery routing mode (`tenants.settings.routingMode`).
 //!
-//! The mode is a tenant FACT stored in the tenant settings JSON — the same
+//! The mode is a tenant FACT stored in the tenant settings JSON, the same
 //! object `billingCurrency` lives in (`api-server::routes::billing`
 //! `resolve_tenant_billing_currency` reads it the same way). The typed reader
 //! is shared by the API surface that writes it and the worker that must
 //! ENFORCE it on the send path, so the two can never disagree about what a
 //! stored value means.
 //!
-//! * [`RoutingMode::Global`] — the default when the key is absent. The send
+//! * [`RoutingMode::Global`], the default when the key is absent. The send
 //!   path keeps its historical behaviour: a selected dedicated IP rides
 //!   ApexMail's own relay MTA, everything else rides the shared pool.
-//! * [`RoutingMode::EuOnly`] — EU-only routing. Every send MUST leave through
+//! * [`RoutingMode::EuOnly`], EU-only routing. Every send MUST leave through
 //!   ApexMail's OWN relay MTA; the shared third-party transport (AWS SES) is
 //!   forbidden. When no own-MTA route is available the worker HOLDS the
-//!   message with a named reason — it never fails over to the third-party
+//!   message with a named reason, it never fails over to the third-party
 //!   transport (the plan's headline invariant: "EU-only mail fails closed").
 //!
 //! # Fail-closed resolution
 //!
 //! [`RoutingMode::from_settings_json`] resolves the stored value honestly:
 //!
-//! * key ABSENT (or explicit JSON `null`) → [`RoutingMode::Global`] — the
+//! * key ABSENT (or explicit JSON `null`) → [`RoutingMode::Global`], the
 //!   documented default that preserves every existing tenant's routing;
 //! * a recognized value (`global`, `eu_only`, case-insensitive after trim) →
 //!   that mode;
@@ -89,7 +89,7 @@ impl RoutingMode {
     }
 
     /// Parse a canonical value (trimmed, ASCII-case-insensitive). `None` for
-    /// anything unrecognized — callers decide how to fail (the send path
+    /// anything unrecognized, callers decide how to fail (the send path
     /// fails closed; the API rejects with 400).
     pub fn parse(raw: &str) -> Option<Self> {
         let normalized = raw.trim().to_ascii_lowercase();
@@ -145,14 +145,14 @@ pub struct ResolvedRoutingMode {
     /// The mode to act on (fail closed).
     pub mode: RoutingMode,
     /// The raw stored value when it was not a recognized mode (or was not a
-    /// string at all) — present so the caller can log/hold with the exact
+    /// string at all), present so the caller can log/hold with the exact
     /// offending value.
     pub unrecognized: Option<String>,
 }
 
 /// Whether the purchased self-serve EU-only add-on is recorded in the tenant
 /// settings. Strict: only a JSON `true` counts (a string `"true"`, a number,
-/// or an absent key all deny — the gate must not be spoofable by a loosely
+/// or an absent key all deny, the gate must not be spoofable by a loosely
 /// typed value).
 pub fn eu_only_addon_enabled(settings: &serde_json::Value) -> bool {
     settings

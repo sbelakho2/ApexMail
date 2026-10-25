@@ -26,8 +26,8 @@
 //! * `attachments[].path` (remote URL fetching is not offered; send the
 //!   base64 `content` instead);
 //! * `template`, `topic_id`, `audience_id`, `broadcast_id` (no canonical
-//!   equivalent — audiences/broadcasts are ApexMail campaigns/lists);
-//! * natural-language `scheduled_at` ("in 1 min") — an ISO 8601 timestamp is
+//!   equivalent, audiences/broadcasts are ApexMail campaigns/lists);
+//! * natural-language `scheduled_at` ("in 1 min"), an ISO 8601 timestamp is
 //!   required;
 //! * batch arrays longer than Resend's documented 100 ceiling.
 
@@ -322,7 +322,7 @@ fn map_email(
         if root.get(field).is_some_and(|value| !value.is_null()) {
             issues.push(unsupported(
                 field,
-                "audiences, topics, broadcasts and Resend templates have no canonical equivalent on this surface — use the ApexMail /v1 API for templates and lists",
+                "audiences, topics, broadcasts and Resend templates have no canonical equivalent on this surface, use the ApexMail /v1 API for templates and lists",
             ));
         }
     }
@@ -390,7 +390,7 @@ fn map_attachments(root: &Map<String, Value>, issues: &mut MappingIssues) -> Vec
                 if attachment.get("path").is_some_and(|value| !value.is_null()) {
                     issues.push(unsupported(
                         &format!("attachments[{index}].path"),
-                        "remote attachment URLs are not fetched — send the file as base64 `content`",
+                        "remote attachment URLs are not fetched, send the file as base64 `content`",
                     ));
                 }
                 let filename = map_required_str(attachment, "filename", issues);

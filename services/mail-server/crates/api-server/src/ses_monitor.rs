@@ -4,16 +4,16 @@
 //! had no writer since `ops-service/src/ses_monitoring.rs` was deleted. This
 //! module restores the genuinely supported half of that contract:
 //!
-//! * `GetAccount` (aws-sdk-sesv2) — sending limits, utilization, sending
+//! * `GetAccount` (aws-sdk-sesv2), sending limits, utilization, sending
 //!   enabled, enforcement status and production access, persisted to
 //!   `ses_account_metrics` every tick;
-//! * `BatchGetMetricData` (VDM namespace) — the account's `SEND`,
+//! * `BatchGetMetricData` (VDM namespace), the account's `SEND`,
 //!   `PERMANENT_BOUNCE` and `COMPLAINT` counts for the last closed UTC day.
 //!   The bounce/complaint RATES are derived from those counts and compared
 //!   with `SES_BOUNCE_RATE_{WARN,CRITICAL}_PCT` /
 //!   `SES_COMPLAINT_RATE_{WARN,CRITICAL}_PCT`. On a state transition a
 //!   tenant-less `system_alerts` row is inserted (the live alert table).
-//! * `GetDomainStatisticsReport` (VDM) — per verified domain, the inbox/spam
+//! * `GetDomainStatisticsReport` (VDM), per verified domain, the inbox/spam
 //!   raw counts and read rate for the last closed day, upserted into
 //!   `ses_domain_stats` (`UNIQUE(domain, start_date, end_date)`).
 //!
@@ -29,7 +29,7 @@
 //!
 //! [`spawn`] is called from the api-server binary only when the deployment
 //! selects the SES transport (`EMAIL_TRANSPORT_TYPE` unset/`ses`). Ticks are
-//! hourly with a bounded random jitter; tests never start the loop — they
+//! hourly with a bounded random jitter; tests never start the loop, they
 //! call [`run_once`] or the persistence/threshold helpers explicitly.
 
 use std::collections::HashMap;

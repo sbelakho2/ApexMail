@@ -3,8 +3,8 @@
 //! These accept form-encoded POSTs from the marketing site's contact forms
 //! (sales, enterprise, security). Each submission writes the canonical sales
 //! model (`sales_accounts` → `sales_contacts` → `sales_contact_points`) and
-//! the compatibility `sales_leads` row — carrying both canonical ids — in one
-//! transaction. No authentication required — they are public lead-capture
+//! the compatibility `sales_leads` row, carrying both canonical ids, in one
+//! transaction. No authentication required, they are public lead-capture
 //! endpoints protected by rate limiting at the middleware layer.
 
 use axum::{
@@ -55,38 +55,38 @@ pub struct ContactForm {
     // (content/contact/{sales,enterprise,security}*.md). These were
     // previously absent from this struct, so serde silently dropped
     // them and the stored lead lost the whole typed enquiry.
-    /// sales — deployment_preference radio (shared/dedicated/byoc/not_sure).
+    /// sales, deployment_preference radio (shared/dedicated/byoc/not_sure).
     #[serde(default)]
     pub deployment_preference: Option<String>,
-    /// sales — compliance_needs checkbox group (posts repeated keys).
+    /// sales, compliance_needs checkbox group (posts repeated keys).
     #[serde(default)]
     pub compliance_needs: Vec<String>,
-    /// sales — target_timeline select.
+    /// sales, target_timeline select.
     #[serde(default)]
     pub target_timeline: Option<String>,
-    /// sales — security_review_needs select.
+    /// sales, security_review_needs select.
     #[serde(default)]
     pub security_review_needs: Option<String>,
-    /// sales — additional_context textarea.
+    /// sales, additional_context textarea.
     #[serde(default)]
     pub additional_context: Option<String>,
-    /// enterprise — requirements textarea.
+    /// enterprise, requirements textarea.
     #[serde(default)]
     pub requirements: Option<String>,
-    /// enterprise — deployment_model radio (shared/dedicated/byoc).
+    /// enterprise, deployment_model radio (shared/dedicated/byoc).
     #[serde(default)]
     pub deployment_model: Option<String>,
-    /// security — context textarea.
+    /// security, context textarea.
     #[serde(default)]
     pub context: Option<String>,
-    /// security — document_type select.
+    /// security, document_type select.
     #[serde(default)]
     pub document_type: Option<String>,
-    /// security — nda_status select.
+    /// security, nda_status select.
     #[serde(default)]
     pub nda_status: Option<String>,
     /// Locale of the page the form was posted from (hidden input on the
-    /// translated contact pages) — drives the language of the page the
+    /// translated contact pages), drives the language of the page the
     /// PRG redirect returns to, so a German user sees the German banner.
     #[serde(default)]
     pub page_language: Option<String>,
@@ -183,7 +183,7 @@ fn note_line(label: &str, value: Option<&str>) -> Option<String> {
 }
 
 /// Compose the free-text `notes` payload stored on the lead. Every field
-/// the marketing forms post lands here — the typed enquiry (deployment
+/// the marketing forms post lands here, the typed enquiry (deployment
 /// model, compliance needs, timeline, security review, textareas) used to
 /// be dropped before `ContactForm` learned about it.
 fn lead_notes(form: &ContactForm) -> String {
@@ -234,7 +234,7 @@ fn lead_notes(form: &ContactForm) -> String {
 /// The forms POST cross-origin to `api.apexmail.ee`, so the PRG
 /// redirect must be absolute: a relative `Location` would resolve
 /// against the API origin, which serves only marketing *assets*
-/// (css/fonts/images), no `/contact/{form}` HTML — the browser would
+/// (css/fonts/images), no `/contact/{form}` HTML, the browser would
 /// land on the branded 404 and never see the success banner. The first
 /// configured marketing host wins; the fallback matches the config
 /// default (`apexmail.ee,www.apexmail.ee`).
@@ -254,7 +254,7 @@ fn marketing_origin(config: &Config) -> String {
 /// Locale prefix for the marketing page the PRG redirect returns to.
 ///
 /// The value is posted by the form, so it is matched against the three
-/// translated trees by exact string comparison — the prefix is never
+/// translated trees by exact string comparison, the prefix is never
 /// concatenated from raw input and can therefore not smuggle extra
 /// path segments (`../../evil`, `\`, embedded slashes) into the
 /// redirect. The default language stays unprefixed, and unknown values
@@ -268,7 +268,7 @@ fn locale_prefix(posted: Option<&str>) -> &'static str {
     }
 }
 
-/// PRG response for the no-JS browser forms — never a JSON body.
+/// PRG response for the no-JS browser forms, never a JSON body.
 ///
 /// Success redirects to the form page on the marketing site with
 /// `?submitted=true` plus the `#enquiry-submitted` anchor: the static
@@ -306,7 +306,7 @@ fn contact_respond(
 }
 
 /// Canonical write path for a marketing-form lead: account, contact,
-/// contact point, then the compatibility `sales_leads` row — all in ONE
+/// contact point, then the compatibility `sales_leads` row, all in ONE
 /// transaction.
 ///
 /// * The domain is normalized (trim, lowercase, strip a leading `www.`) to
@@ -321,7 +321,7 @@ fn contact_respond(
 ///   verification step ran, so claiming `valid` would fabricate provenance.
 ///   `confidence` is correspondingly low (0.3: a self-supplied business
 ///   address is weak reachability evidence, nothing more). An existing point
-///   is never downgraded — the upsert only refreshes `updated_at`.
+///   is never downgraded, the upsert only refreshes `updated_at`.
 /// * A failure in any canonical write rolls the whole transaction back; there
 ///   is no bare-lead fallback, so no lead row can be created with a NULL
 ///   canonical link while the canonical rows are writable.
@@ -496,7 +496,7 @@ pub(crate) async fn store_lead_with_kind(
         .map_err(store_lead_failure)?;
 
     // 1. Canonical account keyed by the normalized domain. Never clobbers an
-    // existing account's data — a repeat submission only touches updated_at.
+    // existing account's data, a repeat submission only touches updated_at.
     let account_id: uuid::Uuid = sqlx::query_scalar(
         "INSERT INTO sales_accounts
              (id, tenant_id, company, domain, lifecycle, created_at, updated_at)
@@ -701,7 +701,7 @@ mod tests {
 
     /// Post a form body through the real `axum::RawForm` extractor (the
     /// same one the handlers use) and echo the resulting `ContactForm`
-    /// back as its Debug representation — the cheapest honest way to
+    /// back as its Debug representation, the cheapest honest way to
     /// assert what the marketing forms' field names actually survive.
     async fn echo_contact_form(body: &'static str) -> String {
         async fn echo(RawForm(raw): RawForm) -> String {
@@ -788,7 +788,7 @@ mod tests {
 
     /// Item 1a: a no-JS browser form must never receive a JSON error
     /// body. Validation failures are PRG redirects back to the form with
-    /// an error query param (nothing else preserved — no echoed input).
+    /// an error query param (nothing else preserved, no echoed input).
     #[tokio::test]
     async fn invalid_submissions_redirect_back_with_an_error_query_param() {
         use axum::body::Body;
@@ -891,7 +891,7 @@ mod tests {
     }
 
     /// Item 2: the forms POST cross-origin to api.apexmail.ee, so a
-    /// relative Location resolves against the API origin — which serves
+    /// relative Location resolves against the API origin, which serves
     /// only marketing *assets*, no /contact/{form} HTML (the fallback is
     /// the branded 404). The PRG redirect must therefore be absolute and
     /// target the marketing host where the banners actually live.
@@ -966,8 +966,8 @@ mod tests {
             Some("https://apexmail.ee/contact/enterprise?error=validation#enquiry-error")
         );
 
-        // Internal failures redirect too — a JSON 500 helps nobody on a
-        // no-JS form — but with the distinct `unavailable` flag.
+        // Internal failures redirect too, a JSON 500 helps nobody on a
+        // no-JS form, but with the distinct `unavailable` flag.
         let down = contact_respond(
             &config,
             &en,
@@ -1002,7 +1002,7 @@ mod tests {
         );
 
         // Anything that is not exactly de/fr/es gets the unprefixed
-        // canonical page — no path segments from user input.
+        // canonical page, no path segments from user input.
         for hostile in ["../../evil", "de/../..", "\\", "de\\evil", "en", "xx", ""] {
             let form = ContactForm {
                 page_language: Some(hostile.into()),
@@ -1219,7 +1219,7 @@ mod tests {
     }
 
     /// SalesCloser plan §5.4: the lead and its first-response request commit
-    /// together — a lead can never exist without the promise to answer it,
+    /// together, a lead can never exist without the promise to answer it,
     /// and a double-submitted form collapses onto one request.
     #[tokio::test]
     async fn lead_write_enqueues_the_first_response_request_in_the_same_transaction() {

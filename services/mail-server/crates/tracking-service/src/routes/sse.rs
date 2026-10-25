@@ -18,7 +18,7 @@
 //! 6. On disconnect, the Redis subscription is dropped automatically.
 //!
 //! Security:
-//! - Token is validated with RS256 (asymmetric JWT — SEC-119).
+//! - Token is validated with RS256 (asymmetric JWT, SEC-119).
 //! - Token must have `stream` scope.
 //! - Maximum connection duration:1 hour (server-side timeout).
 //! - Rate-limited to 5 concurrent SSE connections per tenant.
@@ -71,7 +71,7 @@ struct StreamClaims {
     /// Scopes (must include "stream" or "*")
     #[serde(default)]
     pub scopes: Vec<String>,
-    /// Expiration (unix timestamp) — read by jsonwebtoken's `validate_exp`
+    /// Expiration (unix timestamp), read by jsonwebtoken's `validate_exp`
     /// during verification, not directly by this crate.
     #[expect(
         dead_code,
@@ -97,12 +97,12 @@ fn extract_bearer_token(headers: &HeaderMap) -> Option<String> {
 }
 
 /// Maximum concurrent SSE connections per tenant (Redis counter, and the
-/// in-process fallback when Redis is unreachable — F12).
+/// in-process fallback when Redis is unreachable, F12).
 const MAX_CONNS_PER_TENANT: u64 = 5;
 
 /// F12:in-process per-tenant connection counts, used ONLY when the Redis
 /// counter is unreachable. Keeps the cap bounded during a Redis outage
-/// (streams still connect — the event bus itself degrades separately)
+/// (streams still connect, the event bus itself degrades separately)
 /// instead of the old fail-open behaviour where one Redis blip removed the
 /// cap entirely for every tenant.
 static LOCAL_CONN_COUNTS: LazyLock<Mutex<HashMap<String, u64>>> =
@@ -111,7 +111,7 @@ static LOCAL_CONN_COUNTS: LazyLock<Mutex<HashMap<String, u64>>> =
 /// Increment the local fallback counter for a tenant; returns the NEW count
 /// (the caller rejects when it exceeds [`MAX_CONNS_PER_TENANT`]).
 fn local_conn_inc(tenant_id: &str) -> u64 {
-    // A panicked holder cannot leave the cap unenforced — recover the guard.
+    // A panicked holder cannot leave the cap unenforced, recover the guard.
     let mut counts = LOCAL_CONN_COUNTS
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -214,7 +214,7 @@ pub async fn handle_stream(
     let channel = format!("events:{}", tenant_id);
     let redis_url = state.config.redis.url.clone();
 
-    // The guard is created HERE — the moment the slot is held — and moved
+    // The guard is created HERE, the moment the slot is held, and moved
     // into the stream. Creating it inside the (lazily polled) generator let
     // a response whose body was dropped before the first poll leak the slot
     // until the counter key's TTL expired, silently shrinking the tenant's
@@ -242,7 +242,7 @@ pub async fn handle_stream(
 /// Create the SSE event stream backed by a Redis Pub/Sub subscription.
 /// This spawns a dedicated Redis connection (separate from the pool) for the
 /// Pub/Sub subscription, since subscribed connections cannot issue other
-/// commands — pub/sub connections are protocol-bound to subscription mode
+/// commands, pub/sub connections are protocol-bound to subscription mode
 /// and therefore cannot be borrowed from/returned to the deadpool pool the
 /// crate uses for regular commands.
 fn make_event_stream(
@@ -257,7 +257,7 @@ fn make_event_stream(
     // ── Connection-count guard ───────────────────────────────────
     // Takes ownership of the slot for the lifetime of the stream (the guard
     // was created when the slot was acquired, so even a stream whose body
-    // is dropped before the first poll releases exactly once — via Drop);
+    // is dropped before the first poll releases exactly once, via Drop);
     // releases on drop (client disconnect, timeout, error or normal end).
             let _guard = conn_guard;
 
@@ -365,7 +365,7 @@ fn make_event_stream(
                                         .event(event_name)
                                         .data(payload));
                                 } else {
-    // Raw payload without valid JSON — send as-is
+    // Raw payload without valid JSON, send as-is
                                     yield Ok(Event::default()
                                         .event("event")
                                         .data(payload));
@@ -399,7 +399,7 @@ async fn decrement_conn_count(pool: &deadpool_redis::Pool, key: &str) {
 }
 
 /// A claimed per-tenant connection slot (F12). Released exactly once by
-/// [`ConnCountGuard`] — against the Redis counter when it was acquired
+/// [`ConnCountGuard`], against the Redis counter when it was acquired
 /// there, or against the in-process fallback otherwise.
 enum ConnSlot {
     Redis {
@@ -424,7 +424,7 @@ impl ConnSlot {
     fn release_on_drop(self) {
         match self {
             ConnSlot::Redis { pool, key } => {
-                // Drop is synchronous — fire the async decrement on the current
+                // Drop is synchronous, fire the async decrement on the current
                 // runtime. Outside a runtime (e.g. dropped during shutdown) there is
                 // nothing we can do; the counter key's TTL is the backstop.
                 if let Ok(handle) = tokio::runtime::Handle::try_current() {
@@ -442,11 +442,11 @@ impl ConnSlot {
 
 /// Claim a connection slot for a new SSE stream (F12).
 ///
-/// `Ok(slot)` — proceed; the guard releases it on stream end.
-/// `Err(())` — the tenant is at [`MAX_CONNS_PER_TENANT`] (reject with 429).
+/// `Ok(slot)`, proceed; the guard releases it on stream end.
+/// `Err(())`, the tenant is at [`MAX_CONNS_PER_TENANT`] (reject with 429).
 ///
 /// Redis INCR/EXPIRE is the primary counter. On ANY Redis error the
-/// in-process fallback counter is used instead — streams stay available
+/// in-process fallback counter is used instead, streams stay available
 /// during a Redis outage while the per-tenant cap stays bounded.
 async fn acquire_conn_slot(
     state: &AppState,
@@ -456,7 +456,7 @@ async fn acquire_conn_slot(
     let mut conn = match state.redis.get().await {
         Ok(c) => c,
         Err(e) => {
-            warn!(error = %e, "SSE Redis pool error — using in-process connection cap fallback");
+            warn!(error = %e, "SSE Redis pool error, using in-process connection cap fallback");
             return acquire_local_conn_slot(tenant_id);
         }
     };
@@ -468,7 +468,7 @@ async fn acquire_conn_slot(
     {
         Ok(c) => c,
         Err(e) => {
-            warn!(error = %e, "SSE Redis INCR failed — using in-process connection cap fallback");
+            warn!(error = %e, "SSE Redis INCR failed, using in-process connection cap fallback");
             return acquire_local_conn_slot(tenant_id);
         }
     };
@@ -519,7 +519,7 @@ fn acquire_local_conn_slot(tenant_id: &str) -> Result<ConnSlot, ()> {
 ///
 /// The old implementation decremented after the streaming loop, which never
 /// ran when the client disconnected mid-stream (axum drops the `Sse` body
-/// without polling the generator to completion) — the Redis counter leaked
+/// without polling the generator to completion), the Redis counter leaked
 /// until the key's TTL expired and the tenant hit `TOO_MANY_CONNECTIONS`.
 /// Dropping the guard covers *every* exit path: client disconnect, 1-hour
 /// timeout, Redis errors and normal end-of-stream.
@@ -696,7 +696,7 @@ mod tests {
 
     /// Decrementing a window that still has occupants keeps the entry (the
     /// tenant is still connected), and decrementing an unknown tenant is a
-    /// no-op — neither may panic nor resurrect a removed entry.
+    /// no-op, neither may panic nor resurrect a removed entry.
     #[test]
     fn local_conn_dec_survives_partial_windows_and_absent_tenants() {
         let tenant = format!("tenant_dec_partial_{}", std::process::id());
@@ -718,7 +718,7 @@ mod tests {
                 .contains_key(&tenant),
             "the window must be removed once empty"
         );
-        // Unknown tenant: no entry to touch — must be a no-op.
+        // Unknown tenant: no entry to touch, must be a no-op.
         local_conn_dec(&format!("tenant_never_seen_{}", std::process::id()));
     }
 
@@ -740,7 +740,7 @@ mod tests {
             "the async release must free the local slot immediately"
         );
 
-        // Redis slot: release must reach the DECR (a dead pool is fine — the
+        // Redis slot: release must reach the DECR (a dead pool is fine, the
         // decrement swallows its own error; the arm still runs).
         let redis_slot = ConnSlot::Redis {
             pool: dead_redis_pool_for_sse(),
@@ -756,7 +756,7 @@ mod tests {
     }
 
     /// A guard dropped WITHOUT a runtime (e.g. a stream body moved to a plain
-    /// thread) must still release synchronously — the warn path for the
+    /// thread) must still release synchronously, the warn path for the
     /// async-only Redis decrement included.
     #[test]
     fn guard_drop_outside_a_runtime_releases_synchronously() {
@@ -834,7 +834,7 @@ mod tests {
         }
         // Bind BEFORE the `if let`: the scrutinee's MutexGuard temporary
         // lives until the end of the whole if-let statement (edition 2021),
-        // and `local_conn_dec` locks the same mutex — holding the guard
+        // and `local_conn_dec` locks the same mutex, holding the guard
         // across the loop deadlocked the test thread whenever the fallback
         // counter actually held slots (i.e. every live-Redis run).
         let held = LOCAL_CONN_COUNTS
@@ -849,7 +849,7 @@ mod tests {
         }
     }
 
-    /// A deadpool wired to a port with no Redis — for release paths whose
+    /// A deadpool wired to a port with no Redis, for release paths whose
     /// decrement errors are swallowed.
     fn dead_redis_pool_for_sse() -> deadpool_redis::Pool {
         deadpool_redis::Config::from_url("redis://127.0.0.1:1")

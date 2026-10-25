@@ -21,7 +21,7 @@ pub enum ProcurementDocument {
     CertificationStatus,
     StandardVendorQuestionnaire,
     /// A DRAFT document: written, not approved, not offered to customers. It
-    /// is listed so the package's pending work is visible and honest — never
+    /// is listed so the package's pending work is visible and honest, never
     /// as an available artifact.
     UsDpaAddendum,
 }
@@ -69,7 +69,7 @@ impl ProcurementDocument {
             Self::InsuranceDetails => "Insurance Details",
             Self::CertificationStatus => "Certification Status",
             Self::StandardVendorQuestionnaire => "Standard Vendor Questionnaire",
-            Self::UsDpaAddendum => "US DPA Addendum (draft — awaiting owner approval)",
+            Self::UsDpaAddendum => "US DPA Addendum (draft, awaiting owner approval)",
         }
     }
 
@@ -183,7 +183,7 @@ impl DocumentVisibility {
             Self::Public => "Publicly available",
             Self::Qualified => "Available to qualified prospects",
             Self::NDA => "Available under NDA only",
-            Self::Draft => "Draft — awaiting owner approval; not offered",
+            Self::Draft => "Draft, awaiting owner approval; not offered",
         }
     }
 }
@@ -318,7 +318,7 @@ mod tests {
     fn test_draft_visibility_label_is_honest() {
         assert_eq!(
             DocumentVisibility::Draft.label(),
-            "Draft — awaiting owner approval; not offered"
+            "Draft, awaiting owner approval; not offered"
         );
     }
 

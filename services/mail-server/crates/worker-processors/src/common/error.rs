@@ -70,7 +70,7 @@ pub enum ProcessorError {
 
     /// AWS SES send failure carrying the retry disposition decided at the
     /// transport SOURCE, where the typed SDK error (modeled exception code /
-    /// HTTP status) is still available — mirroring the `Smtp { code }`
+    /// HTTP status) is still available, mirroring the `Smtp { code }`
     /// pattern so the processor never has to substring-match a flattened
     /// `Transport("SES send failed: …")` string.
     ///
@@ -83,7 +83,7 @@ pub enum ProcessorError {
     ///   exist / malformed recipient) may suppress the recipient
     ///   tenant-wide. Account/configuration states (sending paused,
     ///   suspended, missing resource) can permanent-fail a message without
-    ///   saying anything about the validity of the mailbox — suppressing on
+    ///   saying anything about the validity of the mailbox, suppressing on
     ///   those silences valid recipients for the whole tenant.
     /// * Throttle-class errors keep the distinct
     ///   [`ProcessorError::RateLimited`] variant.
@@ -102,7 +102,7 @@ pub enum ProcessorError {
     /// source-IP binding the route reserved: the report was missing, or the
     /// requested/actual IP disagreed with the route.
     ///
-    /// This is a HARD failure for this message — the relay already completed
+    /// This is a HARD failure for this message, the relay already completed
     /// the external effect (post-DATA acceptance), so retrying would risk a
     /// duplicate; and it is deliberately NOT address-proving, so the
     /// recipient is never suppressed. The processor releases the warmup
@@ -114,8 +114,8 @@ pub enum ProcessorError {
     /// retry/DSN ladder (an inline transient failure was scheduled for retry,
     /// the row is already queued, or another attempt holds its lease).
     ///
-    /// The processor must DEFER the queue row — no attempt consumed, never
-    /// dead-lettered — and observe the relay's terminal state on a later
+    /// The processor must DEFER the queue row, no attempt consumed, never
+    /// dead-lettered, and observe the relay's terminal state on a later
     /// claim. Treating this as a worker failure used to split the two
     /// ledgers: the queue row died `failed` while the relay still held the
     /// message and could deliver it (dogfood finding 2026-10-06 P1).
@@ -127,7 +127,7 @@ pub enum ProcessorError {
     /// Determined before any API/SMTP effect, deterministically per send
     /// unit. The processor must requeue the queue row (bounded retry delay,
     /// no attempt consumed, never dead-lettered) and let a later claim
-    /// re-evaluate the throttle — it must never be treated as a bounce or
+    /// re-evaluate the throttle, it must never be treated as a bounce or
     /// permanent failure.
     #[error("provider throttled: {0}")]
     Throttled(String),

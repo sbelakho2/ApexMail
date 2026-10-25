@@ -3,8 +3,8 @@
 //! The assistant never answers from model memory alone: product questions are
 //! grounded in passages retrieved from `ai_docs_chunks` (indexed from the
 //! docs/ tree at reindex time) plus the canonical facts block
-//! ([`crate::knowledge`]). Retrieval is hybrid lexical — ts_rank full-text
-//! fused with trigram similarity — which needs no model runtime; the
+//! ([`crate::knowledge`]). Retrieval is hybrid lexical, ts_rank full-text
+//! fused with trigram similarity, which needs no model runtime; the
 //! `embedding` column is provisioned for vector fusion once an embeddings
 //! endpoint is configured.
 
@@ -32,7 +32,7 @@ pub struct RetrievedChunk {
 /// The point of the tri-state is honesty: a BROKEN docs index must be
 /// distinguishable from a genuinely EMPTY result. The previous behavior —
 /// `search` warning into `Vec::new()` and `current_version` swallowing its
-/// query failure into `""` — let a broken database pose as "no evidence",
+/// query failure into `""`, let a broken database pose as "no evidence",
 /// so the assistant answered canonical-facts-only while looking grounded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -44,7 +44,7 @@ pub enum RetrievalState {
     #[default]
     Empty,
     /// The retrieval subsystem FAILED (broken database, failed query). This
-    /// is NOT evidence of absence — callers must treat passage-backed
+    /// is NOT evidence of absence, callers must treat passage-backed
     /// answers as unverifiable and surface the degradation (Fix #17/#18).
     Unavailable,
 }
@@ -59,14 +59,14 @@ pub struct RetrievalOutcome {
 /// The current indexed corpus version, with its degradation state
 /// (Fix #17): `None` + [`RetrievalState::Empty`] means nothing is indexed,
 /// while `None` + [`RetrievalState::Unavailable`] means the lookup itself
-/// failed — never masquerade one as the other.
+/// failed, never masquerade one as the other.
 #[derive(Debug, Clone)]
 pub struct CurrentVersionOutcome {
     pub version: Option<String>,
     pub state: RetrievalState,
 }
 
-/// Version of the indexed corpus — content hash of the docs tree. Changes
+/// Version of the indexed corpus, content hash of the docs tree. Changes
 /// only when the docs change, which (a) keys cache invalidation and (b) is
 /// stamped on every chat row for auditability.
 pub fn docs_version(dir: &Path) -> String {
@@ -102,7 +102,7 @@ fn collect_markdown(dir: &Path) -> Vec<PathBuf> {
     out
 }
 
-/// Max chars per chunk — large enough for a section, small enough to pack
+/// Max chars per chunk, large enough for a section, small enough to pack
 /// several passages into the prompt without crowding out the rules.
 const CHUNK_CHARS: usize = 1_600;
 const CHUNK_OVERLAP: usize = 200;
@@ -260,7 +260,7 @@ async fn flush_reindex_batch(
 /// Hybrid lexical search: ts_rank full-text fused with trigram similarity
 /// (RRF). Every query is parameterized; the scope is fixed to public docs.
 ///
-/// Fix #17: a failed query returns [`RetrievalState::Unavailable`] — never a
+/// Fix #17: a failed query returns [`RetrievalState::Unavailable`], never a
 /// plain empty vec, which is reserved for a successful "nothing matched".
 pub async fn search(pool: &PgPool, query: &str, docs_version: &str) -> RetrievalOutcome {
     let q = query.trim();
@@ -326,7 +326,7 @@ pub async fn search(pool: &PgPool, query: &str, docs_version: &str) -> Retrieval
             tracing::warn!(
                 error = %e,
                 state = "unavailable",
-                "docs search failed — retrieval is UNAVAILABLE, which is not evidence of absence (Fix #17)"
+                "docs search failed, retrieval is UNAVAILABLE, which is not evidence of absence (Fix #17)"
             );
             RetrievalOutcome {
                 passages: Vec::new(),
@@ -356,7 +356,7 @@ pub async fn current_version(pool: &PgPool) -> CurrentVersionOutcome {
             tracing::warn!(
                 error = %e,
                 state = "unavailable",
-                "docs version lookup failed — retrieval is UNAVAILABLE (Fix #17)"
+                "docs version lookup failed, retrieval is UNAVAILABLE (Fix #17)"
             );
             CurrentVersionOutcome {
                 version: None,
@@ -392,7 +392,7 @@ mod tests {
 
     #[test]
     fn titles_and_locales_extract() {
-        let dir = std::env::temp_dir(); // nosemgrep: rust.lang.security.temp-dir.temp-dir — test fixture under a unique pid/uuid path — no predictable-name temp collision
+        let dir = std::env::temp_dir(); // nosemgrep: rust.lang.security.temp-dir.temp-dir, test fixture under a unique pid/uuid path, no predictable-name temp collision
         assert_eq!(
             title_of("# Pricing Guide\nbody", &dir.join("pricing.md")),
             "Pricing Guide"
@@ -405,7 +405,7 @@ mod tests {
 
     #[test]
     fn docs_version_is_stable_and_sensitive() {
-        let tmp = std::env::temp_dir().join("ai_docs_version_test"); // nosemgrep: rust.lang.security.temp-dir.temp-dir — test fixture under a unique pid/uuid path — no predictable-name temp collision
+        let tmp = std::env::temp_dir().join("ai_docs_version_test"); // nosemgrep: rust.lang.security.temp-dir.temp-dir, test fixture under a unique pid/uuid path, no predictable-name temp collision
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(tmp.join("sub")).unwrap();
         std::fs::write(tmp.join("a.md"), "# A\nhello").unwrap();
@@ -434,7 +434,7 @@ mod tests {
     #[test]
     fn collect_markdown_skips_missing_dirs_and_foreign_extensions() {
         assert!(collect_markdown(Path::new("/nonexistent/ai-docs")).is_empty());
-        let dir = std::env::temp_dir().join(format!("ai-md-{}", uuid::Uuid::new_v4())); // nosemgrep: rust.lang.security.temp-dir.temp-dir — test fixture under a unique pid/uuid path — no predictable-name temp collision
+        let dir = std::env::temp_dir().join(format!("ai-md-{}", uuid::Uuid::new_v4())); // nosemgrep: rust.lang.security.temp-dir.temp-dir, test fixture under a unique pid/uuid path, no predictable-name temp collision
         std::fs::create_dir_all(dir.join("nested")).unwrap();
         std::fs::write(dir.join("a.md"), b"x").unwrap();
         std::fs::write(dir.join("b.MD"), b"x").unwrap(); // case-sensitive: not markdown
@@ -501,7 +501,7 @@ mod tests {
         }
     }
 
-    /// A broken docs database is UNAVAILABLE (Fix #17) — a distinct state
+    /// A broken docs database is UNAVAILABLE (Fix #17), a distinct state
     /// from a successful-but-empty search, never masquerading as "no
     /// evidence". The search never panics on query failure.
     #[tokio::test]
@@ -511,7 +511,7 @@ mod tests {
             .acquire_timeout(std::time::Duration::from_secs(1))
             .connect_lazy("postgresql://apexmail:not-a-real-password@127.0.0.1:1/no-such-db")
             .unwrap();
-        // Fix #17: updated from the old `Vec::new()` swallow — the outcome
+        // Fix #17: updated from the old `Vec::new()` swallow, the outcome
         // must name the degradation instead of posing as "no evidence".
         let outcome = search(&pool, "warmup guidance", "someversion").await;
         assert_eq!(
@@ -558,12 +558,12 @@ mod tests {
     #[tokio::test]
     async fn reindex_search_and_tenant_scoping_are_version_and_scope_exact() {
         let Some(_lock) = crate::test_support::serial_lock("docs-index-serial").await else {
-            // coverage: justified — soft-skip arm: only taken when the shared
+            // coverage: justified, soft-skip arm: only taken when the shared
             // test database is not configured; this run has it configured.
             return; // no test database configured
         };
         let Some(pool) = crate::test_support::shared_pool().await else {
-            // coverage: justified — soft-skip arm: only taken when the shared
+            // coverage: justified, soft-skip arm: only taken when the shared
             // test database is not configured; this run has it configured.
             return;
         };
@@ -573,7 +573,7 @@ mod tests {
             .await
             .unwrap();
 
-        let dir = std::env::temp_dir().join(format!("ai-reindex-{}", uuid::Uuid::new_v4())); // nosemgrep: rust.lang.security.temp-dir.temp-dir — test fixture under a unique pid/uuid path — no predictable-name temp collision
+        let dir = std::env::temp_dir().join(format!("ai-reindex-{}", uuid::Uuid::new_v4())); // nosemgrep: rust.lang.security.temp-dir.temp-dir, test fixture under a unique pid/uuid path, no predictable-name temp collision
         std::fs::create_dir_all(dir.join("sub")).unwrap();
         std::fs::write(
             dir.join("pricing.md"),
@@ -641,7 +641,7 @@ mod tests {
             .unwrap();
         assert!(still_there >= 3, "table must survive a hostile query");
 
-        // Unknown version: a successful query with no hits — Empty, and
+        // Unknown version: a successful query with no hits, Empty, and
         // crucially NOT Unavailable (Fix #17).
         let unknown = search(&pool, "warmup guidance", "0000000000000000").await;
         assert_eq!(unknown.state, RetrievalState::Empty);
@@ -661,7 +661,7 @@ mod tests {
         assert!(
             !scoped.iter().any(|c| c.path == "secret.md"),
             "search is fixed to the public scope, got {:?}",
-            // coverage: justified — the closure only runs when the assertion
+            // coverage: justified, the closure only runs when the assertion
             // FAILS (lazy format argument); a passing test never evaluates it.
             scoped.iter().map(|c| &c.path).collect::<Vec<_>>()
         );
@@ -804,7 +804,7 @@ mod tests {
             .await
             .unwrap();
 
-        let dir = std::env::temp_dir().join(format!("ai-reindex-batch-{}", uuid::Uuid::new_v4())); // nosemgrep: rust.lang.security.temp-dir.temp-dir — test fixture under a unique pid/uuid path — no predictable-name temp collision
+        let dir = std::env::temp_dir().join(format!("ai-reindex-batch-{}", uuid::Uuid::new_v4())); // nosemgrep: rust.lang.security.temp-dir.temp-dir, test fixture under a unique pid/uuid path, no predictable-name temp collision
         std::fs::create_dir_all(&dir).unwrap();
         for index in 0..25 {
             std::fs::write(
@@ -843,17 +843,17 @@ mod tests {
     }
 
     /// Fix #17, version side: an indexed-but-empty table reports `Empty`
-    /// (evidence of absence) with NO version — never `Unavailable` and never
+    /// (evidence of absence) with NO version, never `Unavailable` and never
     /// a fabricated version string.
     #[tokio::test]
     async fn empty_index_reports_empty_not_unavailable() {
         let Some(_lock) = crate::test_support::serial_lock("docs-index-serial").await else {
-            // coverage: justified — soft-skip arm: only taken when the shared
+            // coverage: justified, soft-skip arm: only taken when the shared
             // test database is not configured; this run has it configured.
             return; // no test database configured
         };
         let Some(pool) = crate::test_support::shared_pool().await else {
-            // coverage: justified — soft-skip arm: only taken when the shared
+            // coverage: justified, soft-skip arm: only taken when the shared
             // test database is not configured; this run has it configured.
             return;
         };
@@ -870,7 +870,7 @@ mod tests {
         );
         assert_eq!(
             version.version, None,
-            "an empty index has no docs version — never a silent \"\""
+            "an empty index has no docs version, never a silent \"\""
         );
     }
 }

@@ -1,11 +1,11 @@
 //! Open-tracking pixel endpoints.
 //!
-//! GET `{pixel_path}/:tracking_id` — canonical pixel URL (path param).
-//! GET `/o.gif` — alternative via `?t=` query param.
+//! GET `{pixel_path}/:tracking_id`, canonical pixel URL (path param).
+//! GET `/o.gif`, alternative via `?t=` query param.
 //!
 //! Both endpoints ALWAYS return the transparent GIF (even for invalid tokens)
 //! so that email clients display images correctly. Event recording is
-//! fire-and-forget in a detached Tokio task — never blocks the response.
+//! fire-and-forget in a detached Tokio task, never blocks the response.
 
 use std::net::SocketAddr;
 use std::sync::LazyLock;
@@ -36,7 +36,7 @@ const MAX_CONCURRENT_OPEN_RECORDERS: usize = 64;
 static OPEN_RECORDER_SEMAPHORE: LazyLock<Semaphore> =
     LazyLock::new(|| Semaphore::new(MAX_CONCURRENT_OPEN_RECORDERS));
 
-/// Pre-built response headers for the pixel — computed once; cloned per request.
+/// Pre-built response headers for the pixel, computed once; cloned per request.
 /// Shared pixel response headers.
 fn pixel_response() -> Response {
     let len = TRANSPARENT_GIF.len().to_string();
@@ -128,7 +128,7 @@ async fn record_open(
 
     let ip = extract_client_ip(headers, addr.ip(), state);
 
-    // E-190:Bot check — skip recording for known scanner/proxy UAs.
+    // E-190:Bot check, skip recording for known scanner/proxy UAs.
     let is_bot = state.bot_detector.is_bot(user_agent.as_deref(), Some(&ip));
     if is_bot {
         info!("E-190: Bot detected on open pixel, skipping recording");
@@ -158,7 +158,7 @@ async fn record_open(
     tokio::spawn(async move {
         // Bound concurrent recorders: a burst of pixels must not spawn an
         // unbounded fleet of tasks each holding pool resources. Excess opens
-        // are dropped (counted) — recording is best-effort.
+        // are dropped (counted), recording is best-effort.
         let permit = match OPEN_RECORDER_SEMAPHORE.try_acquire() {
             Ok(permit) => permit,
             Err(_) => {

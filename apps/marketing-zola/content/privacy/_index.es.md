@@ -18,7 +18,7 @@ Bel Consulting OÜ (nombre comercial ApexMail) («nosotros») se compromete a pr
 
 ## 2. Datos que recopilamos
 
-- **Visitantes del sitio web (sitio de marketing):** dirección IP, tipo de navegador y user agent, información del dispositivo, páginas visitadas, URL de referencia y marcas de tiempo — recopilados automáticamente de los registros de acceso del servidor. El sitio de marketing no ejecuta scripts de analítica ni incrusta píxeles de seguimiento ni cookies publicitarias.
+- **Visitantes del sitio web (sitio de marketing):** dirección IP, tipo de navegador y user agent, información del dispositivo, páginas visitadas, URL de referencia y marcas de tiempo, recopilados automáticamente de los registros de acceso del servidor. El sitio de marketing no ejecuta scripts de analítica ni incrusta píxeles de seguimiento ni cookies publicitarias.
 - **Prospectos:** nombre, correo electrónico, nombre de la empresa, número de teléfono (si se proporciona) e historial de comunicaciones, proporcionados mediante formularios de contacto o correo electrónico.
 - **Datos de cuenta:** nombre, correo electrónico, empresa, dirección de facturación, número de IVA, tokens del método de pago (los datos de tarjeta los procesa Mollie y nunca llegan a nuestros servidores), metadatos de claves API, marcas de tiempo de inicio de sesión, direcciones IP y entradas del registro de auditoría.
 - **Datos de uso:** llamadas a la API, volúmenes de envío de correo, eventos de entrega y eventos de interacción (aperturas y clics) de los mensajes que envía.
@@ -38,10 +38,10 @@ La configuración proporcionada apunta a regiones del EEE para los datos princip
 
 | Categoría de datos | Ubicación principal | Copia de seguridad / Réplica | Procesamiento |
 |---|---|---|---|
-| Infraestructura de correo principal (mensajes, metadatos de entrega, datos de cuenta) | Centro de datos de la UE — Finlandia | Centro de datos de la UE — Finlandia (sitio secundario) | EEE — sin transferencia a terceros países |
+| Infraestructura de correo principal (mensajes, metadatos de entrega, datos de cuenta) | Centro de datos de la UE, Finlandia | Centro de datos de la UE, Finlandia (sitio secundario) | EEE, sin transferencia a terceros países |
 | Tokens de autenticación OAuth | Google LLC / GitHub, Inc. (entidades estadounidenses, CCT) | Gestionado por el proveedor | EE. UU. (CCT) |
-| Datos de pago y facturación | Mollie B.V. (Países Bajos, UE) | Gestionado por el proveedor dentro de la UE | EEE — sin transferencia a terceros países (redes de tarjetas según el DPA de Mollie) |
-| Tickets de soporte | Centro de datos de la UE — Finlandia | Centro de datos de la UE — Finlandia (sitio secundario) | EEE — sin transferencia a terceros países |
+| Datos de pago y facturación | Mollie B.V. (Países Bajos, UE) | Gestionado por el proveedor dentro de la UE | EEE, sin transferencia a terceros países (redes de tarjetas según el DPA de Mollie) |
+| Tickets de soporte | Centro de datos de la UE, Finlandia | Centro de datos de la UE, Finlandia (sitio secundario) | EEE, sin transferencia a terceros países |
 
 No transferimos datos personales fuera del EEE sin garantías adecuadas (Cláusulas Contractuales Tipo o una decisión de adecuación en virtud del Artículo 45).
 
@@ -69,16 +69,16 @@ Consulte nuestra [Política de conservación de datos](/es/compliance/#data-rete
 
 Bajo el RGPD, tiene los siguientes derechos:
 
-- **Derecho de acceso** (Art. 15) — obtener confirmación de si tratamos sus datos y acceder a ellos.
-- **Derecho de rectificación** (Art. 16) — solicitar la corrección de datos inexactos.
-- **Derecho de supresión** (Art. 17) — solicitar la eliminación de sus datos («derecho al olvido»).
-- **Derecho a la limitación del tratamiento** (Art. 18) — restringir el tratamiento bajo ciertas condiciones.
-- **Derecho a la portabilidad de los datos** (Art. 20) — recibir sus datos en un formato estructurado y legible por máquina.
-- **Derecho de oposición** (Art. 21) — oponerse al tratamiento basado en intereses legítimos.
+- **Derecho de acceso** (Art. 15), obtener confirmación de si tratamos sus datos y acceder a ellos.
+- **Derecho de rectificación** (Art. 16), solicitar la corrección de datos inexactos.
+- **Derecho de supresión** (Art. 17), solicitar la eliminación de sus datos («derecho al olvido»).
+- **Derecho a la limitación del tratamiento** (Art. 18), restringir el tratamiento bajo ciertas condiciones.
+- **Derecho a la portabilidad de los datos** (Art. 20), recibir sus datos en un formato estructurado y legible por máquina.
+- **Derecho de oposición** (Art. 21), oponerse al tratamiento basado en intereses legítimos.
 
 Para ejercer estos derechos, contáctenos en **privacy@apexmail.ee**. Responderemos en un plazo de 30 días.
 
-Residentes de California: consulte nuestro aviso [Do Not Sell My Personal Information](/privacy/do-not-sell/) (en inglés) — ApexMail no vende información personal.
+Residentes de California: consulte nuestro aviso [Do Not Sell My Personal Information](/privacy/do-not-sell/) (en inglés), ApexMail no vende información personal.
 
 ## 7. Reclamaciones
 

@@ -57,7 +57,7 @@ fn test_hmac_throughput() {
 #[test]
 fn test_id_generation_throughput() {
     // 50 000 iterations: ID generation is OS-entropy-bound (~40k ops/s in
-    // debug ≈ 1.2 s wall clock) — 100k iterations bought nothing but CI
+    // debug ≈ 1.2 s wall clock), 100k iterations bought nothing but CI
     // minutes.
     let iterations = 50_000;
 

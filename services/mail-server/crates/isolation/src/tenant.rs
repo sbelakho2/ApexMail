@@ -110,7 +110,7 @@ fn sanitize_identifier(id: &str) -> String {
         })
         .collect();
     if s.len() > 63 {
-        // Truncate on a char boundary — identifiers keep Unicode
+        // Truncate on a char boundary, identifiers keep Unicode
         // alphanumerics (e.g. Cyrillic), and slicing at byte 63 could split
         // a multi-byte character and panic.
         let end = s.floor_char_boundary(63);
@@ -128,7 +128,7 @@ fn validated_identifier(name: &str) -> anyhow::Result<String> {
 }
 
 /// Map a usage metric name to its JSONB key inside `iso_workspaces.usage`.
-/// Only exact matches of known fields are returned — the value is used as a
+/// Only exact matches of known fields are returned, the value is used as a
 /// bound parameter (never interpolated) inside the atomic increment UPDATE.
 fn usage_field(metric: &str) -> Option<&'static str> {
     match metric {
@@ -545,7 +545,7 @@ impl TenantService {
     ) -> anyhow::Result<()> {
         // Check member count. The target user is excluded: the INSERT below is
         // an upsert, so re-adding an EXISTING member (e.g. a role change) must
-        // not be blocked by the cap — otherwise a full workspace could never
+        // not be blocked by the cap, otherwise a full workspace could never
         // change any member's role.
         let count: (i64,) = sqlx::query_as(
             "SELECT COUNT(*) FROM iso_workspace_members WHERE workspace_id=$1 AND user_id <> $2",
@@ -809,7 +809,7 @@ mod tests {
     #[test]
     fn test_sanitize_identifier_multibyte_truncates_on_char_boundary() {
         // F13 regression:identifiers keep Unicode alphanumerics, so byte
-        // 63 can land mid-character — `s[..63]` panicked there. Truncation
+        // 63 can land mid-character, `s[..63]` panicked there. Truncation
         // must back off to a char boundary.
         let multibyte = "д".repeat(40); // 40 × 2-byte chars = 80 bytes
         assert!(multibyte.len() > 63);
@@ -917,7 +917,7 @@ mod tests {
                 usage_field(metric).unwrap_or_else(|| panic!("missing usage field for {metric}"));
             assert_eq!(field, metric);
         }
-        // Reject unknown metrics — they must never reach SQL.
+        // Reject unknown metrics, they must never reach SQL.
         assert!(usage_field("emails_per_month").is_none());
         assert!(usage_field("workspace_id = $1").is_none());
         assert!(usage_field("").is_none());

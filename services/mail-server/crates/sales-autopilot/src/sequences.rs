@@ -4,8 +4,8 @@
 //! step execution points at the exact version it ran, which is what makes
 //! replay and attribution exact.
 //!
-//! The unit of send is a *logical step execution* — `(enrollment, sequence
-//! version, step, attempt kind, variant)` — not `(campaign, recipient)`. Under
+//! The unit of send is a *logical step execution*, `(enrollment, sequence
+//! version, step, attempt kind, variant)`, not `(campaign, recipient)`. Under
 //! the old campaign key a second legitimate email to the same recipient
 //! inside one sequence was an inherent idempotency collision; see
 //! [`sales_step_idempotency_key`].
@@ -113,7 +113,7 @@ impl StepRow {
     ///
     /// The database CHECK constraints already reject both, but a hand-edited
     /// row (constraint dropped, table patched out of band) must not be able to
-    /// smuggle an unknown kind — or a non-sales sender pool — into the worker.
+    /// smuggle an unknown kind, or a non-sales sender pool, into the worker.
     fn into_step(self) -> Result<SequenceStep, SalesError> {
         if !STEP_KINDS.contains(&self.kind.as_str()) {
             return Err(SalesError::InvalidInput(format!(
@@ -209,7 +209,7 @@ pub async fn load_active_version(
     let steps = load_steps(db, &version.tenant_id, version.id).await?;
     if steps.is_empty() {
         return Err(SalesError::ServiceUnavailable(format!(
-            "sequence {sequence_id} active version {} has no steps — nothing to schedule",
+            "sequence {sequence_id} active version {} has no steps, nothing to schedule",
             version.version
         )));
     }
@@ -225,7 +225,7 @@ pub async fn load_active_version(
 }
 
 /// Load a specific version by id (scoped to tenant). Unlike
-/// [`load_active_version`] this does not require approval/active status — it
+/// [`load_active_version`] this does not require approval/active status, it
 /// exists for preview and authoring. Unknown ids are reported as
 /// [`SalesError::InvalidInput`].
 pub async fn load_version(
@@ -340,7 +340,7 @@ fn fnv1a_64(bytes: &[u8]) -> u64 {
 ///
 /// Format: `sa:{enrollment_id}:{sequence_version_id}:{step_id}:{attempt_kind}:{variant}`
 ///
-/// The unit is a logical sequence step execution — NOT (campaign, recipient),
+/// The unit is a logical sequence step execution, NOT (campaign, recipient),
 /// which made a second legitimate email to one recipient in one campaign an
 /// inherent collision. Every step in a sequence therefore has its own key,
 /// and a retry of the same step/attempt/variant maps back to the same key.

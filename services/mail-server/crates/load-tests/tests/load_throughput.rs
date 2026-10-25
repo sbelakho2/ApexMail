@@ -1,4 +1,4 @@
-//! High-throughput tests — measure sustained operations per second.
+//! High-throughput tests, measure sustained operations per second.
 
 use std::time::{Duration, Instant};
 
@@ -30,7 +30,7 @@ fn run_for<F: FnMut()>(duration: Duration, mut op: F) -> u64 {
 }
 
 // ---------------------------------------------------------------------------
-// 1. Sustained ID generation — >10 000/sec
+// 1. Sustained ID generation, >10 000/sec
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -48,7 +48,7 @@ fn test_sustained_id_generation() {
 }
 
 // ---------------------------------------------------------------------------
-// 2. Sustained validation — >50 000/sec
+// 2. Sustained validation, >50 000/sec
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -67,7 +67,7 @@ fn test_sustained_validation() {
 }
 
 // ---------------------------------------------------------------------------
-// 3. Sustained deterministic subject scoring — >5 000/sec
+// 3. Sustained deterministic subject scoring, >5 000/sec
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -86,7 +86,7 @@ fn test_sustained_subject_scoring() {
 }
 
 // ---------------------------------------------------------------------------
-// 4. Sustained pattern matching — >10 000/sec
+// 4. Sustained pattern matching, >10 000/sec
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -114,7 +114,7 @@ fn test_sustained_pattern_matching() {
 }
 
 // ---------------------------------------------------------------------------
-// 5. Sustained billing calculations — >50 000/sec
+// 5. Sustained billing calculations, >50 000/sec
 // ---------------------------------------------------------------------------
 
 #[test]

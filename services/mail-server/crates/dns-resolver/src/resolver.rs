@@ -65,7 +65,7 @@ impl CachedDnsResolver {
         if let Some(CachedResult::Records(recs)) = self.cache.get(&cache_key) {
             // Replay structurally: the cached form is "<u16 priority> <exchange>"
             // (see mx_cache_action). The priority token MUST validate as u16 and
-            // the remainder — spaces included — is the exchange; a malformed
+            // the remainder, spaces included, is the exchange; a malformed
             // entry is dropped with a log instead of silently defaulting its
             // priority to 10, which used to reorder failover.
             let mut records = Vec::with_capacity(recs.len());
@@ -101,7 +101,7 @@ impl CachedDnsResolver {
                 self.cache.insert_with_ttl(&cache_key, cached, ttl);
             }
             // E-1:transient lookup errors (timeout, SERVFAIL, network) are
-            // NEVER negative-cached — a cached failure turned a blip into a
+            // NEVER negative-cached, a cached failure turned a blip into a
             // full negative-TTL window in which deliverability checks said
             // "no records". Propagate the error so the caller can retry;
             // only definitive NXDOMAIN/NoRecords results are cached.
@@ -114,7 +114,7 @@ impl CachedDnsResolver {
     ///
     /// A domain with multiple SPF records surfaces as
     /// [`DnsError::MultipleSpfRecords`] (RFC 7208 §4.5 permerror) and is
-    /// cached as neither positive nor negative — the caller re-queries until
+    /// cached as neither positive nor negative, the caller re-queries until
     /// the misconfiguration is fixed.
     pub async fn spf(&self, domain: &str) -> Result<Option<SpfRecord>, DnsError> {
         let cache_key = format!("spf:{domain}");
@@ -325,7 +325,7 @@ mod tests {
 
     #[tokio::test]
     async fn can_receive_email_transient_failure_is_err_and_uncached() {
-        // A SERVFAIL/timeout must NOT be swallowed into Ok(false) — the old
+        // A SERVFAIL/timeout must NOT be swallowed into Ok(false), the old
         // behaviour cached "false" under the POSITIVE TTL, turning one
         // resolver blip into a full TTL window of "undeliverable" verdicts
         // (the deliverability check said no records existed).

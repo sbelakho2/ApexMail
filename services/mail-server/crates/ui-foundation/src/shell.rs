@@ -86,7 +86,7 @@ fn shell_icon(name: &str, class_name: &str) -> String {
 // trap for anyone wiring the "foundation" CSP in good faith (audit SM11 F5).
 // The one CSP source of truth is the api-server:
 //   services/mail-server/crates/api-server/src/app.rs
-// (`browser_csp_header_with_sources` — serves `script-src 'none'` on every
+// (`browser_csp_header_with_sources`, serves `script-src 'none'` on every
 // web/control-plane surface). Marketing-site CSP copies live in
 // apps/marketing-zola/static/_headers + nginx.conf (+ the deploy/nginx edge
 // vhost), kept in lockstep.
@@ -104,8 +104,8 @@ pub fn shell_source_catalog() -> [(&'static str, &'static str); 7] {
 }
 
 /// Session identity rendered in the shell header. `None` renders NO plan
-/// label and omits the identity block — a caller without session data must
-/// never fabricate one (the old hardcoded "Free Plan — 30K / mo" label was
+/// label and omits the identity block, a caller without session data must
+/// never fabricate one (the old hardcoded "Free Plan, 30K / mo" label was
 /// shown to paying customers on every console page; dogfood 2026-10-06). An
 /// empty `plan_label` inside `Some` likewise renders no label.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -150,7 +150,7 @@ impl<'a> Branding<'a> {
 
     /// The `<style>` block for the document `<head>`: validated color
     /// variables plus the sanitized custom CSS. `None` when the tenant
-    /// configured neither — an entitled tenant with no styling must not emit
+    /// configured neither, an entitled tenant with no styling must not emit
     /// an empty style element.
     pub fn style_element(&self) -> Option<String> {
         let mut css = String::new();
@@ -290,7 +290,7 @@ impl<'a> ShellHeader<'a> {
         let display_name = html_escape(user.map_or("ApexMail User", |u| u.display_name));
         let email = html_escape(user.map_or("", |u| u.email));
         // No session (or an unresolved plan) renders NO plan label: the real
-        // plan comes from the session, and a fabricated "Free Plan — 30K / mo"
+        // plan comes from the session, and a fabricated "Free Plan, 30K / mo"
         // on every authenticated page was the defect (dogfood 2026-10-06).
         let plan_label = user.map(|u| html_escape(u.plan_label)).unwrap_or_default();
         // The plan label is secondary: below `lg` the header keeps the
@@ -472,7 +472,7 @@ impl<'a> WebDashboardShell<'a> {
             mobile_sidebar = mobile_sidebar,
             ml_val = if self.sidebar_collapsed { "20" } else { "64" },
             // The impersonation banner is a fixed overlay (~2.1rem tall):
-            // push the whole column — including the sticky header — below
+            // push the whole column, including the sticky header, below
             // it so the page title is not clipped (design report item 25).
             impersonation_offset = if self.impersonation_banner.is_some() {
                 " style=\"padding-top: 2.1rem\""
@@ -508,7 +508,7 @@ pub struct ControlPlaneShell<'a> {
     pub csrf_token: &'a str,
     /// Session identity for the CP header (operator display name, email, and
     /// the tenant's REAL plan label). `None` renders NO plan label and no
-    /// identity block — a render without session data must never fabricate
+    /// identity block, a render without session data must never fabricate
     /// one (dogfood 2026-10-08 F10: the CP render pipeline loaded
     /// `session_identity` but the layout consumed only the role placeholder,
     /// so CP pages showed no plan label while the web console did).
@@ -535,7 +535,7 @@ impl<'a> ControlPlaneShell<'a> {
 
         // Session identity in the CP header (F10): the real plan label and
         // the operator's name/email, resolved server-side and never
-        // fabricated. With no session both blocks render empty — the wrapper
+        // fabricated. With no session both blocks render empty, the wrapper
         // stays so the header layout is identical across renders.
         let plan_label = self
             .user_context
@@ -566,7 +566,7 @@ impl<'a> ControlPlaneShell<'a> {
         // discoverable on narrow screens"): below `sm` both the plan label
         // and the identity block were hidden, so the operator's header showed
         // the page title only. The compact line carries the SESSION-derived
-        // plan label (when resolved) and display name — never a fabricated
+        // plan label (when resolved) and display name, never a fabricated
         // one; with no session it renders nothing.
         let compact_identity_block = match self.user_context.as_ref() {
             Some(user) => {
@@ -589,7 +589,7 @@ impl<'a> ControlPlaneShell<'a> {
         // `<details>` is a plain `md:hidden` disclosure, the summary is the
         // fixed trigger, and the panel's dimensions/background/scrolling come
         // from `.apex-mobile-nav[open] .apex-mobile-nav-panel` in the
-        // stylesheet — never from always-on utilities, so the CLOSED drawer
+        // stylesheet, never from always-on utilities, so the CLOSED drawer
         // occupies only the summary control and cannot intercept page content
         // (review §3 P1-3 / §4.8; the old `fixed inset-y-0 left-0 z-50` details
         // plus a `h-screen w-full` panel sized the closed drawer as a 320px ×
@@ -760,7 +760,7 @@ fn render_sidebar_content(
             let active_class = " aria-current=\"page\"";
 
             // CONCENTRIC (mark DNA): the active cell is solid + an outer
-            // ring — the spiral's two arms (apex-nav-cell in globals.css).
+            // ring, the spiral's two arms (apex-nav-cell in globals.css).
             let classes = if is_active {
                 "apex-nav-cell is-active"
             } else {
@@ -790,7 +790,7 @@ fn render_web_sidebar(
     branding: Option<&Branding<'_>>,
 ) -> String {
     // Task-oriented IA (design report item 4): every routed page is
-    // reachable from the nav — Reports, Inbox Placement, Events, and
+    // reachable from the nav, Reports, Inbox Placement, Events, and
     // Dedicated IPs were previously rendered-but-unreachable orphans.
     let overview_items = [("Dashboard", "/dashboard", "home")];
     let send_items = [
@@ -811,7 +811,7 @@ fn render_web_sidebar(
         ("Webhooks", "/settings/webhooks", "zap"),
         ("Dedicated IPs", "/settings/dedicated-ips", "server"),
         // Deferred-feature 4: the suppression list joins the Configure group
-        // (read-only — compliance flows own the writes).
+        // (read-only, compliance flows own the writes).
         ("Suppressions", "/settings/suppressions", "ban"),
     ];
     let account_items = [
@@ -906,7 +906,7 @@ pub fn apply_control_plane_role(html: &str, role: &str) -> String {
 /// [`ControlPlaneShell`] has no banner slot of its own; the banner (which is
 /// `position: fixed`) is inserted as the first child of the shell root and
 /// the scroll column is pushed down by its rendered height (~2.1rem) so the
-/// sticky header is not clipped — the same offset the web shell applies
+/// sticky header is not clipped, the same offset the web shell applies
 /// natively. Used by the SSR request path whenever the request carries a
 /// verified impersonation cookie (dogfood 2026-10-06: the banner component
 /// existed but no request path ever rendered it, so an operator had no UI
@@ -967,7 +967,7 @@ fn offset_cp_scroll_column(html: &str) -> String {
 
 fn render_cp_sidebar(current_path: &str, csrf_token: &str) -> String {
     // Task-oriented regroup (design report structural #20): Operate /
-    // Customers / Governance. Alerts — the most operational page — joins
+    // Customers / Governance. Alerts, the most operational page, joins
     // the nav instead of living two clicks deep.
     let operate_items = [
         ("Overview", "/dashboard", "home"),
@@ -1056,7 +1056,7 @@ mod tests {
     }
 
     /// Review §5.1 shell.rs: exactly ONE nav cell is active, and it is the
-    /// most specific match — `/settings/api-keys` may not light up
+    /// most specific match, `/settings/api-keys` may not light up
     /// `/settings` as well, `/campaigns-archive` may not light up
     /// `/campaigns`, and the `/cp` aliases resolve to the same cell as their
     /// bare paths.
@@ -1115,8 +1115,8 @@ mod tests {
         assert!(!header.contains("admin@apexmail.ee"));
 
         // Without a session NO plan label renders (the old hardcoded
-        // "Free Plan — 30K / mo" showed a fabricated plan to every
-        // authenticated page — dogfood 2026-10-06) and no identity block is
+        // "Free Plan, 30K / mo" showed a fabricated plan to every
+        // authenticated page, dogfood 2026-10-06) and no identity block is
         // emitted.
         let anon = ShellHeader {
             user_context: None,
@@ -1231,7 +1231,7 @@ mod tests {
         .render_html();
         assert!(banner.contains("action=\"/web/auth/impersonate/end\""));
         assert!(banner.contains("method=\"POST\""));
-        // Native form submission only — the JS-era data-api-form/data-redirect
+        // Native form submission only, the JS-era data-api-form/data-redirect
         // bridge attributes are gone (the handler is a PRG form POST).
         assert!(!banner.contains("data-api-form"));
         assert!(!banner.contains("data-redirect"));
@@ -1262,7 +1262,7 @@ mod tests {
         .render_html();
 
         // Minimal header (reference design): search affordance via a button
-        // with the mod+k shortcut, theme toggle, avatar — no combobox input,
+        // with the mod+k shortcut, theme toggle, avatar, no combobox input,
         // no unread badge. The notification count is surfaced via the toast
         // surface, not the header.
         assert!(header.contains("role=\"search\""));
@@ -1359,7 +1359,7 @@ mod tests {
     #[test]
     fn header_search_query_escapes_xss() {
         // The minimal header (reference design) no longer renders the search
-        // query in an <input value="..."> — search is a button affordance, so
+        // query in an <input value="...">, search is a button affordance, so
         // the query value is never emitted and cannot be an XSS vector. Verify
         // the payload does not appear anywhere in the header output.
         let xss_payload = "<img src=x onerror=\"alert('xss')\">";
@@ -1639,7 +1639,7 @@ mod tests {
 
     /// F10 (live dogfood 2026-10-08): the render pipeline loaded
     /// `session_identity` for the CP surface but the layout consumed only
-    /// the role placeholder — every CP page dropped the tenant's real plan
+    /// the role placeholder, every CP page dropped the tenant's real plan
     /// label (the web console rendered it). The CP shell must now carry the
     /// identity and label from the session, escaped like every other input.
     #[test]
@@ -1655,7 +1655,7 @@ mod tests {
                 user_context: Some(UserContext {
                     display_name: "CP Dogfood",
                     email: "cp-dogfood@dogfood.test",
-                    plan_label: "Scale Plan — 2M / mo",
+                    plan_label: "Scale Plan, 2M / mo",
                 }),
                 impersonation_banner: None,
             },
@@ -1665,7 +1665,7 @@ mod tests {
             "the CP header must carry the plan-label slot"
         );
         assert!(
-            html.contains("Scale Plan — 2M / mo"),
+            html.contains("Scale Plan, 2M / mo"),
             "the real plan label must render"
         );
         assert!(
@@ -1698,7 +1698,7 @@ mod tests {
     }
 
     /// The no-session render must claim NEITHER a plan label nor an identity
-    /// — the pre-F10 behavior of rendering nothing is preserved for
+    ///, the pre-F10 behavior of rendering nothing is preserved for
     /// anonymous/route-inventory renders.
     #[test]
     fn control_plane_shell_without_session_renders_no_plan_label_or_identity() {
@@ -1715,7 +1715,7 @@ mod tests {
     }
 
     /// Item 13 (CP #1, validity extension): the full shell (root layout +
-    /// app shell) must produce balanced structural tags — the previous
+    /// app shell) must produce balanced structural tags, the previous
     /// validity test wrapped only inner page HTML and could not catch
     /// shell-level defects like the unclosed `<header`.
     #[test]
@@ -1750,7 +1750,7 @@ mod tests {
     }
 
     /// Item 2: the web sidebar's task-oriented regroup un-orphans Reports,
-    /// Inbox Placement, Events, and Dedicated IPs — every routed page is
+    /// Inbox Placement, Events, and Dedicated IPs, every routed page is
     /// one click from the nav.
     #[test]
     fn web_sidebar_regroup_reaches_every_routed_page() {
@@ -1839,7 +1839,7 @@ mod tests {
         assert!(escaped.contains("&quot;&gt;&lt;script&gt;"));
     }
 
-    /// Item 25: the impersonation banner is a fixed overlay — the shell
+    /// Item 25: the impersonation banner is a fixed overlay, the shell
     /// must push the header column below it instead of letting the banner
     /// clip the page title.
     #[test]
@@ -1887,7 +1887,7 @@ mod deferred_shell_tests {
     }
 
     /// System contract: every shell wordmark is the marketing two-tone
-    /// lockup — brand red "Apex" + near-black "Mail".
+    /// lockup, brand red "Apex" + near-black "Mail".
     #[test]
     fn shell_wordmarks_are_two_tone_brand_and_ink() {
         let web = WebDashboardShell {
@@ -2039,8 +2039,8 @@ mod deferred_shell_tests {
 
         let child = "<main id=\"app-main\"></main>";
         assert_eq!(
-            crate::leptos_views::web_root_layout(child, "Dashboard — ApexMail"),
-            crate::leptos_views::web_root_layout_with_branding(child, "Dashboard — ApexMail", None),
+            crate::leptos_views::web_root_layout(child, "Dashboard | ApexMail"),
+            crate::leptos_views::web_root_layout_with_branding(child, "Dashboard | ApexMail", None),
         );
     }
 
@@ -2087,11 +2087,11 @@ mod deferred_shell_tests {
                 "/dashboard",
                 Some("Acme Corp")
             ),
-            "Dashboard — Acme Corp"
+            "Dashboard | Acme Corp"
         );
         assert_eq!(
             crate::axum_router::route_document_title_with_branding("web", "/dashboard", None),
-            "Dashboard — ApexMail"
+            "Dashboard | ApexMail"
         );
         assert_eq!(
             crate::axum_router::route_document_title_with_branding(
@@ -2099,7 +2099,7 @@ mod deferred_shell_tests {
                 "/dashboard",
                 Some("   ")
             ),
-            "Dashboard — ApexMail"
+            "Dashboard | ApexMail"
         );
     }
 }

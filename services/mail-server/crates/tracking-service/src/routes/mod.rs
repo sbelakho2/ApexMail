@@ -1,7 +1,7 @@
-//! Axum router factory — assembles all sub-routers and layers middleware.
+//! Axum router factory, assembles all sub-routers and layers middleware.
 //!
-//! Middleware stack (outer → inner)://! 1. `tower_http::trace::TraceLayer` — structured request/response logging
-//! 2. `tower_http::timeout::TimeoutLayer` — 30 s request timeout
+//! Middleware stack (outer → inner)://! 1. `tower_http::trace::TraceLayer`, structured request/response logging
+//! 2. `tower_http::timeout::TimeoutLayer`, 30 s request timeout
 //! 3. Compression (gzip)
 //! 4. Per-IP rate limiter (Redis sliding-window, only when enabled in config)
 //! 5. Request body limit on POST endpoints (10 KB)
@@ -34,7 +34,7 @@ use tracing::warn;
 
 use crate::state::AppState;
 
-/// 1×1 transparent GIF (hard-coded bytes — no allocation per request).
+/// 1×1 transparent GIF (hard-coded bytes, no allocation per request).
 pub const TRANSPARENT_GIF: &[u8] = &[
     0x47, 0x49, 0x46, 0x38, 0x39, 0x61, // GIF89a
     0x01, 0x00, 0x01, 0x00, 0x80, 0x00, 0x00, 0xff, 0xff, 0xff, 0x00, 0x00, 0x00, 0x21, 0xf9, 0x04,
@@ -72,7 +72,7 @@ pub fn build_router(state: AppState) -> Router {
             get(unsubscribe::handle_unsub_get),
         )
         // F39:browser-facing manual confirmation form submit (plain HTML
-        // form POST — no JS). Deliberately separate from the RFC 8058
+        // form POST, no JS). Deliberately separate from the RFC 8058
         // one-click route so the `List-Unsubscribe=One-Click` body contract
         // stays untouched, and GET /u/:token stays side-effect free.
         .route(
@@ -102,9 +102,9 @@ pub fn build_router(state: AppState) -> Router {
         .layer(TraceLayer::new_for_http())
         .layer(CompressionLayer::new())
         .layer(TimeoutLayer::new(std::time::Duration::from_secs(30)))
-        .layer(DefaultBodyLimit::max(64 * 1024)); // 64 KB — tracking payloads are tiny
+        .layer(DefaultBodyLimit::max(64 * 1024)); // 64 KB, tracking payloads are tiny
 
-    // Rate-limit middleware (Redis sliding window) — wraps entire router
+    // Rate-limit middleware (Redis sliding window), wraps entire router
     if cfg.rate_limit.enabled {
         app.layer(middleware::from_fn_with_state(state, rate_limit_middleware))
     } else {
@@ -119,7 +119,7 @@ pub fn build_router(state: AppState) -> Router {
 /// Algorithm:
 /// 1. Get socket IP from `ConnectInfo<SocketAddr>` (normalised).
 /// 2. If NO trusted proxies are configured, forwarded headers are pure
-///    client-supplied input — return the socket IP unconditionally.
+///    client-supplied input, return the socket IP unconditionally.
 /// 3. If trusted proxies ARE configured and the socket IP is NOT one of
 ///    them, the peer is the client itself → return the socket IP (any XFF
 ///    it sent is spoofable).
@@ -144,7 +144,7 @@ pub fn extract_client_ip(
     let socket_ip = normalise_ip(socket_ip);
 
     // With no trusted proxies configured there is nobody who could have
-    // legitimately appended a forwarded header — honouring XFF here would
+    // legitimately appended a forwarded header, honouring XFF here would
     // let any direct client spoof an arbitrary source IP.
     if trusted.is_empty() {
         return socket_ip.to_string();
@@ -154,7 +154,7 @@ pub fn extract_client_ip(
         return socket_ip.to_string();
     }
 
-    // Connecting address is a trusted proxy — read the forwarded header
+    // Connecting address is a trusted proxy, read the forwarded header
     // right-to-left, trusting only entries our infrastructure appended.
     if let Some(xff) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
         for part in xff.split(',').map(str::trim).rev() {
@@ -168,12 +168,12 @@ pub fn extract_client_ip(
                 return ip.to_string();
             }
         }
-        // Every XFF entry is itself a trusted proxy — fall through.
+        // Every XFF entry is itself a trusted proxy, fall through.
     }
 
     // #188:Validate X-Real-IP as a valid IP address before trusting it.
     // Only reachable when the peer is a trusted proxy. The value is passed
-    // through the same IPv4-mapped-IPv6 normalisation as the XFF path — a
+    // through the same IPv4-mapped-IPv6 normalisation as the XFF path, a
     // proxy behind a dual-stack frontend reports `::ffff:a.b.c.d`, and
     // returning it verbatim split one client across two rate-limit/stats
     // identities (`::ffff:203.0.113.9` vs `203.0.113.9`).
@@ -182,7 +182,7 @@ pub fn extract_client_ip(
         if let Ok(parsed) = trimmed.parse::<std::net::IpAddr>() {
             return normalise_ip(parsed).to_string();
         }
-        // Invalid IP in header — fall through to socket IP
+        // Invalid IP in header, fall through to socket IP
     }
 
     socket_ip.to_string()
@@ -206,7 +206,7 @@ fn is_in_trusted(ip: std::net::IpAddr, ranges: &[ipnetwork::IpNetwork]) -> bool 
 /// G.1: emergency in-process quota applied while Redis (the primary limiter)
 /// is unreachable. Bounded fail-open: instead of unlimited pass-through, each
 /// IP gets at most `EMERGENCY_LOCAL_LIMIT` requests per minute counted in
-/// process memory. Conservative by design — well below the configured
+/// process memory. Conservative by design, well below the configured
 /// ceiling in normal operation.
 const EMERGENCY_LOCAL_LIMIT: u32 = 120;
 
@@ -290,9 +290,9 @@ async fn rate_limit_middleware(
     match result {
         Ok(count) if count > cfg.max_per_minute as u64 => rate_limited_response(&ip, count, req),
         Err(e) => {
-            // G.1: bounded fail-open — Redis errors no longer mean unlimited
+            // G.1: bounded fail-open, Redis errors no longer mean unlimited
             // traffic; a conservative local per-IP quota still applies.
-            tracing::error!(error = %e, "Rate limit Redis error — applying local emergency quota");
+            tracing::error!(error = %e, "Rate limit Redis error, applying local emergency quota");
             if local_fallback_allows(&ip, cfg.max_per_minute, now_min) {
                 next.run(req).await
             } else {
@@ -485,8 +485,8 @@ pub(crate) mod test_support {
     ///
     /// Every live-test pool in this crate goes through this: the WAL /
     /// suppression-retry keys are raw (not key-prefixed), so the crate owns
-    /// a dedicated logical database — 8, the DB `redis_wal_serial` has
-    /// always documented — instead of the shared, uncoordinated DB 0 that
+    /// a dedicated logical database, 8, the DB `redis_wal_serial` has
+    /// always documented, instead of the shared, uncoordinated DB 0 that
     /// every other crate's suite defaults to.
     pub(crate) fn redis_url_in_db(base: &str, db: u32) -> Option<String> {
         match url::Url::parse(base) {
@@ -512,7 +512,7 @@ pub(crate) mod test_support {
     /// vec, so a Redis hiccup under a full-workspace run was
     /// indistinguishable from "the event was never recorded" and failed the
     /// assertion spuriously. A successful (possibly empty) read returns
-    /// immediately — emptiness assertions stay fast, and a genuinely dead
+    /// immediately, emptiness assertions stay fast, and a genuinely dead
     /// Redis still yields an empty vec after the bound instead of hanging.
     pub(crate) async fn wal_entries_containing(
         pool: &deadpool_redis::Pool,
@@ -649,7 +649,7 @@ pub(crate) mod test_support {
             .expect("dead redis pool")
     }
 
-    /// State wired to a dead Redis port — for tests that never touch Redis.
+    /// State wired to a dead Redis port, for tests that never touch Redis.
     pub(crate) fn offline_state(trusted_proxies: &[&str]) -> AppState {
         state_with(
             trusted_proxies,
@@ -734,7 +734,7 @@ pub(crate) mod test_support {
     /// drains entries that a concurrently running click/pixel handler test
     /// is about to assert on (observed as intermittent `got: []` under
     /// parallel `cargo nextest`). The guard is a SESSION-level Postgres
-    /// advisory lock on a dedicated connection — `cargo nextest` runs every
+    /// advisory lock on a dedicated connection, `cargo nextest` runs every
     /// test as its own process, so a process-local mutex is not enough.
     /// Acquired for the test's lifetime; released when the pool drops.
     /// `None` when no test database is configured (callers soft-skip
@@ -768,7 +768,7 @@ pub(crate) mod test_support {
     }
 
     /// State wired to the live test Redis (`TEST_REDIS_URL`, workspace
-    /// convention, pinned to the crate's dedicated logical DB 8 — see
+    /// convention, pinned to the crate's dedicated logical DB 8, see
     /// [`redis_url_in_db`]). Returns `None` (soft-skip) when unset or
     /// unreachable.
     #[allow(clippy::type_complexity)]
@@ -855,7 +855,7 @@ mod tests {
     }
 
     /// A direct client (peer not a trusted proxy) must never have its
-    /// client-supplied XFF honoured — otherwise the source IP is spoofable.
+    /// client-supplied XFF honoured, otherwise the source IP is spoofable.
     #[tokio::test]
     async fn direct_client_with_spoofed_xff_uses_peer_ip() {
         let state = test_support::offline_state(&["10.0.0.0/8"]);
@@ -868,7 +868,7 @@ mod tests {
     }
 
     /// With NO trusted proxies configured there is no infrastructure that
-    /// could have appended XFF/X-Real-IP — every forwarded header is
+    /// could have appended XFF/X-Real-IP, every forwarded header is
     /// client-supplied and must be ignored in favour of the socket peer.
     #[tokio::test]
     async fn no_trusted_proxies_configured_ignores_forwarded_headers_entirely() {
@@ -936,7 +936,7 @@ mod tests {
         assert_eq!(local_fallback_limit(0), 1, "never zero (fail-closed-ish)");
     }
 
-    /// G.1: when Redis is down, an IP is still capped — the emergency quota
+    /// G.1: when Redis is down, an IP is still capped, the emergency quota
     /// bounds the fail-open window instead of allowing unlimited traffic.
     #[test]
     fn local_fallback_allows_only_up_to_the_emergency_quota() {
@@ -996,7 +996,7 @@ mod tests {
     }
 
     /// The XFF walk stops at the first UNTRUSTED entry (each entry to the
-    /// left is client input) — that first untrusted entry is the client.
+    /// left is client input), that first untrusted entry is the client.
     #[tokio::test]
     async fn xff_walk_stops_at_the_first_untrusted_hop() {
         let state = test_support::offline_state(&["10.0.0.0/8"]);

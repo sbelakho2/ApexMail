@@ -54,7 +54,7 @@ async fn schema_ready_on_canonical_chain() {
 }
 
 /// Create a two-arm campaign, ingest outcomes once under replay, restart,
-/// and obtain a report whose counters match those outcomes — exactly.
+/// and obtain a report whose counters match those outcomes, exactly.
 #[tokio::test]
 async fn outcomes_ingest_once_under_replay_and_survive_restart() {
     let Some(pool) = canonical_pool("replay").await else {

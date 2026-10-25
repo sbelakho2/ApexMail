@@ -1,9 +1,9 @@
 //! Authentication extractors for Axum.
 //!
 //! Supports three authentication methods:
-//! 1. **API Key** — `X-API-Key` header, SHA-256 hashed, DB lookup (Redis-cached 60 s).
-//! 2. **JWT Bearer** — `Authorization: Bearer <token>`, RS256, extracts claims.
-//! 3. **Session Cookie** — `am_session` cookie, RS256, with CSRF checks on unsafe methods.
+//! 1. **API Key**, `X-API-Key` header, SHA-256 hashed, DB lookup (Redis-cached 60 s).
+//! 2. **JWT Bearer**, `Authorization: Bearer <token>`, RS256, extracts claims.
+//! 3. **Session Cookie**, `am_session` cookie, RS256, with CSRF checks on unsafe methods.
 
 use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
@@ -206,7 +206,7 @@ const FORM_CSRF_BRIDGE_MAX_BODY: usize = 64 * 1024;
 /// The zero-JavaScript web/control-plane surfaces render every authenticated
 /// POST form with a signed `_csrf` hidden field (the ui form-hygiene gate
 /// pins exactly that), but native form submissions CANNOT set the
-/// `X-CSRF-Token` header `validate_session_csrf` demands — so every
+/// `X-CSRF-Token` header `validate_session_csrf` demands, so every
 /// session-cookie form POST to `/web/*` was rejected 403 before reaching the
 /// handler's own `check_csrf`, breaking the entire authenticated form
 /// surface (impersonate/suspend buttons, contacts, campaigns, logout …).
@@ -273,13 +273,13 @@ fn is_control_plane_static_key_request(path: &str, on_control_plane_host: bool) 
 /// Does this path segment carry a tenant id, or is it a static route word?
 ///
 /// Tenant ids in this platform are minted as `ten_<…>` or `t<uuid-simple>`
-/// (26 characters, `tenants.id VARCHAR(26)` — see `auth.rs`'s signup insert and
+/// (26 characters, `tenants.id VARCHAR(26)`, see `auth.rs`'s signup insert and
 /// the canonical fixtures). A path segment after `tenant(s)` is only an id when
 /// it has that shape: the billing plans surface uses `tenant` as a SCOPE WORD
 /// (`/v1/billing/plans/tenant/features|limits|current`), and reading its next
 /// segment as an id made the API-key tenant binding compare the key's tenant
 /// against the literal word `features`, so every real key got a 403 on those
-/// routes. Binding enforcement must be driven by real ids only — an
+/// routes. Binding enforcement must be driven by real ids only, an
 /// over-broad parser breaks working routes, which is exactly what this
 /// predicate prevents.
 fn looks_like_tenant_id(segment: &str) -> bool {
@@ -293,8 +293,8 @@ fn looks_like_tenant_id(segment: &str) -> bool {
         return false;
     }
     // A real id either carries the documented `ten_` prefix (integrations and
-    // fixtures) or is a minted nanoid — `apexmail_lib::id::generate_id("", 26)`
-    // — which always contains a digit in practice. Static route words
+    // fixtures) or is a minted nanoid, `apexmail_lib::id::generate_id("", 26)`
+    //, which always contains a digit in practice. Static route words
     // (`features`, `limits`, `invoices`, `data`) have neither.
     segment.starts_with("ten_") || segment.chars().any(|c| c.is_ascii_digit())
 }
@@ -337,7 +337,7 @@ async fn verify_tenant_membership(
         // user_id is UUID (migration 229) and the bound value is the JWT
         // subject's UUID string: without the cast the comparison is
         // uuid = text (no such operator), and before 229 the column was
-        // VARCHAR(26), where a UUID string could never be stored — a real
+        // VARCHAR(26), where a UUID string could never be stored, a real
         // membership could never match.
         "SELECT COUNT(*) FROM user_tenant_membership WHERE user_id = $1::uuid AND tenant_id = $2",
     )
@@ -385,7 +385,7 @@ impl FromRequestParts<AppState> for AuthUser {
     ) -> Result<Self, Self::Rejection> {
         // Reuse an identity the `require_auth` layer ALREADY authenticated
         // for this request. Without this, a handler's `AuthUser` extractor
-        // re-ran the whole credential flow — and inside a nested router
+        // re-ran the whole credential flow, and inside a nested router
         // axum has STRIPPED the mount prefix from `parts.uri.path()`, so
         // every path-dependent policy in the re-run saw a relative path:
         // the F18 billing-recovery allowlist (all four entries are nested
@@ -440,7 +440,7 @@ impl FromRequestParts<AppState> for AuthUser {
 /// API-key authentication for the provider compatibility surface
 /// (`routes::compat`): SendGrid/Mailgun/Postmark/Resend clients carry the
 /// ApexMail key in the provider's own header, and this is the ONE place that
-/// turns such a credential into an [`AuthUser`] — by calling the canonical
+/// turns such a credential into an [`AuthUser`], by calling the canonical
 /// `authenticate_api_key` with the same hashing, cache, expiry, tenant
 /// binding and tenant-status gates the `X-API-Key` mechanism rides. The
 /// tenant resolution is therefore identical to `/v1` by construction, not by
@@ -552,7 +552,7 @@ async fn authenticate_api_key(
                     //
                     // Fetch all active keys for this scope and verify individually
                     // (expensive, but only happens when the key is not found via
-                    // the fast HMAC path — typically once per key creation).
+                    // the fast HMAC path, typically once per key creation).
                     return authenticate_api_key_argon2_fallback(
                         key,
                         request_method,
@@ -605,7 +605,7 @@ async fn authenticate_api_key(
         ));
         tracing::info!(
             api_key_id = %row.id,
-            "Legacy API key authenticated — spawning background re-hash to Argon2id"
+            "Legacy API key authenticated, spawning background re-hash to Argon2id"
         );
     }
 
@@ -628,7 +628,7 @@ async fn authenticate_api_key(
 /// semaphore (mirroring `ARGON2_VERIFY_SEMAPHORE` in routes/auth.rs). Unlike
 /// the captcha path we use `try_acquire`: when permits are exhausted the
 /// fallback is skipped and the caller gets a normal "invalid API key"
-/// failure — this path is a best-effort bridge for legacy keys, never worth
+/// failure, this path is a best-effort bridge for legacy keys, never worth
 /// queueing requests behind.
 static API_KEY_ARGON2_FALLBACK_SEMAPHORE: OnceLock<Arc<Semaphore>> = OnceLock::new();
 const API_KEY_ARGON2_FALLBACK_MAX_CONCURRENT: usize = 2;
@@ -636,11 +636,11 @@ const API_KEY_ARGON2_FALLBACK_MAX_CONCURRENT: usize = 2;
 ///
 /// Each candidate costs a memory-hard Argon2id verification (~50 ms), so an
 /// unbounded scan lets ONE unauthenticated request pin a core for seconds (two
-/// with both semaphore permits) — a cheap CPU-exhaustion lever.
+/// with both semaphore permits), a cheap CPU-exhaustion lever.
 ///
 /// The scan is restricted to `$argon2id$` rows (`key_hash LIKE
 /// '$argon2id$%'`): only those can consume the budget, so newer HMAC/SHA-256
-/// keys — the overwhelming majority — never push a legacy key out of reach.
+/// keys, the overwhelming majority, never push a legacy key out of reach.
 /// A legacy key older than the newest [`API_KEY_ARGON2_FALLBACK_SCAN_LIMIT`]
 /// Argon2 rows is refused consistently (deterministic `created_at DESC`
 /// order); the remedy is re-issuing that key, which is the same remedy the
@@ -886,7 +886,7 @@ async fn lookup_cached_api_key(key_hash: &str, state: &AppState) -> Result<AuthU
                 Err(e) => {
                     tracing::warn!(
                         error = %e, cache_key,
-                        "corrupted or legacy API key cache entry — evicting"
+                        "corrupted or legacy API key cache entry, evicting"
                     );
                     evict_api_key_cache_entry(state, &cache_key).await;
                     return Err(());
@@ -899,7 +899,7 @@ async fn lookup_cached_api_key(key_hash: &str, state: &AppState) -> Result<AuthU
                 .expires_at
                 .is_some_and(|expires_at| expires_at < Utc::now())
             {
-                tracing::info!(cache_key, "cached API key has expired — evicting entry");
+                tracing::info!(cache_key, "cached API key has expired, evicting entry");
                 evict_api_key_cache_entry(state, &cache_key).await;
                 return Err(());
             }
@@ -916,7 +916,7 @@ async fn lookup_cached_api_key(key_hash: &str, state: &AppState) -> Result<AuthU
                     cache_key,
                     tenant_id = %user.tenant_id,
                     user_id = ?user.user_id,
-                    "cached API key AuthUser has empty required field(s) — evicting"
+                    "cached API key AuthUser has empty required field(s), evicting"
                 );
                 evict_api_key_cache_entry(state, &cache_key).await;
                 return Err(());
@@ -935,7 +935,7 @@ async fn evict_api_key_cache_entry(state: &AppState, cache_key: &str) {
 }
 
 /// Cache entry: the identity plus the key's expiry so a cached HIT can
-/// re-check it (the 10s TTL outlives keys expiring any second — an entry
+/// re-check it (the 10s TTL outlives keys expiring any second, an entry
 /// written just before expiry must not keep authenticating forever).
 #[derive(serde::Serialize, serde::Deserialize)]
 struct CachedApiKey {
@@ -980,8 +980,8 @@ pub(crate) fn session_revocation_key(tenant_id: &str, user_id: &str) -> String {
 /// Redis prefix for PER-SESSION revocation markers, keyed by the session's
 /// JWT id (`jti`). The user-wide marker above kills every session of a user
 /// at once (login rotation, logout, `revoke_all`); the per-session marker
-/// kills exactly one session — targeted `POST /v1/auth/sessions/revoke
-/// {session_id}` and "revoke all OTHER sessions" on password change — so
+/// kills exactly one session, targeted `POST /v1/auth/sessions/revoke
+/// {session_id}` and "revoke all OTHER sessions" on password change, so
 /// the operator's own session survives.
 const SESSION_REVOKED_PREFIX: &str = "apexmail:session_revoked:";
 
@@ -1048,7 +1048,7 @@ fn parse_cached_user_status(value: &str) -> Option<CachedUserStatus> {
         return Some(CachedUserStatus::Missing);
     }
     // "status|role". A value without the role segment is a legacy
-    // status-only entry — treat it as a miss so the authoritative row is
+    // status-only entry, treat it as a miss so the authoritative row is
     // re-read (an unknown role must never silently narrow or widen
     // scopes).
     let (status, role) = value.split_once('|')?;
@@ -1070,7 +1070,7 @@ async fn lookup_cached_user_status(
     let cached: Option<String> = conn.get(&cache_key).await.map_err(|e| {
         tracing::warn!(error = %e, tenant_id, user_id, "redis GET error in user status cache lookup");
     })?;
-    // None (miss) for legacy entries — see parse_cached_user_status.
+    // None (miss) for legacy entries, see parse_cached_user_status.
     Ok(cached.as_deref().and_then(parse_cached_user_status))
 }
 
@@ -1174,7 +1174,7 @@ fn tenant_status_cache_key(tenant_id: &str) -> String {
 }
 
 /// THE tenant-policy decision (audit F18): which `tenants.status` values
-/// permit authenticated traffic. Only `active` does — a `pending` tenant
+/// permit authenticated traffic. Only `active` does, a `pending` tenant
 /// has not completed verification, and a `suspended` tenant is under an
 /// administrative, abuse, or billing hold. Every enforcement point (API
 /// key auth, JWT auth, and API key minting in `routes::auth`) consults
@@ -1211,7 +1211,7 @@ pub(crate) async fn invalidate_tenant_status_cache(tenant_id: &str, state: &AppS
 /// Unknown tenants and DB errors fail CLOSED.
 ///
 /// F18 (recovery access): authentication is separated from operation
-/// authorization — a SUSPENDED tenant keeps authenticated access to the
+/// authorization, a SUSPENDED tenant keeps authenticated access to the
 /// narrow billing-recovery allowlist ([`is_billing_recovery_request`]) so
 /// the customer can view invoices, update payment methods and enter the
 /// billing portal to clear the suspension. Everything else (send, keys,
@@ -1246,7 +1246,7 @@ pub(crate) async fn enforce_tenant_not_restricted(
     }
 
     // SM3 (audit F1): a PENDING-DELETION tenant authenticates to exactly ONE
-    // operation — cancelling its own deletion. `POST /v1/account/deletion`
+    // operation, cancelling its own deletion. `POST /v1/account/deletion`
     // promises "30 days to cancel this request"; without this narrow
     // admission (and the matching user-status carve-out in
     // `authenticate_jwt`) the response is fiction: the tenant is locked out
@@ -1266,22 +1266,22 @@ pub(crate) async fn enforce_tenant_not_restricted(
 
     tracing::warn!(tenant_id = %tenant_id, tenant_status = %status, "authentication refused for restricted tenant");
     Err(ApiError::Unauthorized(format!(
-        "workspace is {status} — access is restricted"
+        "workspace is {status}, access is restricted"
     )))
 }
 
 /// F18: the narrow billing-recovery allowlist. Each entry is an exact HTTP
 /// method plus a path PREFIX matched against the request path:
 ///
-/// * view invoices (list/detail/PDF/XML exports) — `GET /v1/billing/invoices…`
+/// * view invoices (list/detail/PDF/XML exports), `GET /v1/billing/invoices…`
 /// * reach the billing settings page (Mollie has no hosted portal; the
 ///   console page links to checkout for payment-method changes) —
 ///   `POST /v1/billing/portal`
-/// * pay/reactivate through checkout — `POST /v1/billing/checkout`
-/// * view the current subscription — `GET /v1/billing/subscription`
+/// * pay/reactivate through checkout, `POST /v1/billing/checkout`
+/// * view the current subscription, `GET /v1/billing/subscription`
 ///
 /// Deliberately NOT included: message sending, API-key minting, domain and
-/// DNS mutations, contact operations — those stay blocked while suspended.
+/// DNS mutations, contact operations, those stay blocked while suspended.
 const BILLING_RECOVERY_ALLOWLIST: [(&Method, &str); 4] = [
     (&http::Method::GET, "/v1/billing/invoices"),
     (&http::Method::POST, "/v1/billing/portal"),
@@ -1305,7 +1305,7 @@ pub(crate) fn is_billing_recovery_request(method: &http::Method, path: &str) -> 
 }
 
 /// SM3 (audit F1): the single route a `pending_deletion` tenant (and its
-/// disabled users) may still reach — cancelling the scheduled deletion.
+/// disabled users) may still reach, cancelling the scheduled deletion.
 /// Exact method + path match: there is deliberately no prefix family, so no
 /// other route can ever ride the recovery window.
 pub(crate) fn is_deletion_cancellation_request(method: &http::Method, path: &str) -> bool {
@@ -1321,7 +1321,7 @@ async fn tenant_status_for_auth(state: &AppState, tenant_id: &str) -> Result<Str
                     return Err(ApiError::Unauthorized("workspace no longer exists".into()));
                 }
                 Some(status) => return Ok(status),
-                None => {} // cache miss — fall through to the DB row
+                None => {} // cache miss, fall through to the DB row
             }
         }
     }
@@ -1352,7 +1352,7 @@ async fn tenant_status_for_auth(state: &AppState, tenant_id: &str) -> Result<Str
 /// `POST /v1/stream/token` for the tracking-service SSE endpoint) must
 /// never be accepted as (or refreshed into) a full API session.
 /// Tokens without a `typ` claim are pre-discrimination session tokens and
-/// stay valid — hard-requiring the claim would invalidate every live session.
+/// stay valid, hard-requiring the claim would invalidate every live session.
 pub(crate) fn claims_typ_is_session(typ: Option<&str>) -> bool {
     typ.is_none_or(|token_type| token_type == "session")
 }
@@ -1383,7 +1383,7 @@ pub(crate) async fn authenticate_jwt(
     // Token-type discrimination: a stream token (typ = "stream", issued by
     // POST /v1/stream/token for the tracking-service SSE endpoint) must never
     // authenticate a regular API session. Tokens without a `typ` claim are
-    // pre-discrimination session tokens and stay valid — hard-requiring the
+    // pre-discrimination session tokens and stay valid, hard-requiring the
     // claim would invalidate every live session.
     if !claims_typ_is_session(claims.typ.as_deref()) {
         tracing::warn!(
@@ -1438,7 +1438,7 @@ pub(crate) async fn authenticate_jwt(
 
     // SM3 (audit F1): account deletion disables EVERY user of the tenant.
     // The 30-day cancellation promise is only keepable if the disabled user
-    // can still authenticate to the one cancellation route — so a `disabled`
+    // can still authenticate to the one cancellation route, so a `disabled`
     // user is admitted for exactly `POST /v1/account/deletion/cancel`. The
     // paired tenant gate (`enforce_tenant_not_restricted`) admits that route
     // only for `pending_deletion` tenants, and the handler re-verifies the
@@ -1453,7 +1453,7 @@ pub(crate) async fn authenticate_jwt(
         )));
     }
 
-    // Tenant policy (F18): the USER being active is not enough — a session
+    // Tenant policy (F18): the USER being active is not enough, a session
     // under a restricted tenant must stop authenticating across the API and
     // SSR surfaces alike. This is the same centralized gate the API key path
     // enforces; the billing-recovery allowlist keeps the narrowly defined
@@ -1506,7 +1506,7 @@ pub(crate) async fn authenticate_jwt(
     let max_session_deadline = iat_dt + chrono::Duration::days(MAX_SESSION_TTL_DAYS);
     if Utc::now() > max_session_deadline {
         return Err(ApiError::Unauthorized(
-            "session has exceeded maximum lifetime — please log in again".into(),
+            "session has exceeded maximum lifetime, please log in again".into(),
         ));
     }
 
@@ -1651,7 +1651,7 @@ pub async fn require_system_tenant(state: &AppState, auth: &AuthUser) -> Result<
 /// Browser surfaces (`/web/*` paths) get the web stack's PRG treatment on
 /// rejection (audit F1): a signed flash cookie + 303 to the login page, the
 /// same way `web_form_rejection_middleware` and the CP login gate render
-/// errors — never a raw JSON 403 dump to a browser.
+/// errors, never a raw JSON 403 dump to a browser.
 pub async fn require_system_tenant_middleware(
     axum::extract::State(state): axum::extract::State<AppState>,
     req: axum::extract::Request,
@@ -1731,12 +1731,12 @@ pub async fn enforce_tenant_header_binding(
                             return Err(ApiError::Forbidden("tenant access denied".into()));
                         }
                     } else {
-                        // API key auth without user_id — cannot verify cross-tenant
+                        // API key auth without user_id, cannot verify cross-tenant
                         tracing::warn!(
                             api_key_id = ?auth_user.api_key_id,
                             auth_tenant_id = %auth_user.tenant_id,
                             claimed_tenant_id = %claimed_tenant_id,
-                            "X-Tenant-ID header with API key without user_id — rejected"
+                            "X-Tenant-ID header with API key without user_id, rejected"
                         );
                         return Err(ApiError::Forbidden("tenant access denied".into()));
                     }
@@ -1845,7 +1845,7 @@ mod tests {
         use axum::http::Method;
 
         // SM3 (audit F1): a pending_deletion workspace authenticates to
-        // EXACTLY ONE route — the cancellation of its own deletion.
+        // EXACTLY ONE route, the cancellation of its own deletion.
         assert!(is_deletion_cancellation_request(
             &Method::POST,
             "/v1/account/deletion/cancel"
@@ -2388,7 +2388,7 @@ mod tests {
     /// predicate that guards eviction).
     #[test]
     fn test_lookup_cached_api_key_evicts_empty_tenant_id() {
-        // Construct an AuthUser with empty tenant_id — this simulates
+        // Construct an AuthUser with empty tenant_id, this simulates
         // what would happen if a cache entry had been corrupted.
         let user = AuthUser {
             tenant_id: String::new(),
@@ -2449,7 +2449,7 @@ mod tests {
         );
     }
 
-    /// Tests the `CachedUserStatus` parsing — the `__missing__` sentinel
+    /// Tests the `CachedUserStatus` parsing, the `__missing__` sentinel
     /// is used to cache the fact that a user was not found in the DB,
     /// preventing repeated lookups for deleted users.
     #[test]
@@ -2504,7 +2504,7 @@ mod tests {
     /// Tests that the fire-and-forget cache operations (cache_api_key,
     /// cache_user_status, invalidate_api_key_cache, etc.) gracefully
     /// handle Redis connection failures by using `if let Ok(...)` patterns.
-    /// This test verifies the pattern is safe — it should never panic
+    /// This test verifies the pattern is safe, it should never panic
     /// or block when Redis is unavailable.
     #[test]
     fn test_cache_operations_pattern_safe_on_redis_failure() {
@@ -2519,12 +2519,12 @@ mod tests {
         // 3. cache_api_key is fire-and-forget after DB lookup
         //
         // This test verifies the Err(()) return type matches the expected
-        // pattern — the caller uses `if let Ok(cached) = lookup_...` to
+        // pattern, the caller uses `if let Ok(cached) = lookup_...` to
         // handle both cache miss and Redis failure identically.
         let err: Result<AuthUser, ()> = Err(());
         assert!(
             err.is_err(),
-            "lookup_cached_api_key returns Err(()) on Redis failure — caller falls through to DB"
+            "lookup_cached_api_key returns Err(()) on Redis failure, caller falls through to DB"
         );
     }
 
@@ -2548,7 +2548,7 @@ mod tests {
         assert!(issued_before_or_at_revocation(0, Some(0)));
         assert!(!issued_before_or_at_revocation(1, Some(0)));
 
-        // Very large timestamps (future dates) — no overflow
+        // Very large timestamps (future dates), no overflow
         let far_future: i64 = 1_000_000_000_000;
         assert!(issued_before_or_at_revocation(far_future, Some(far_future)));
         assert!(!issued_before_or_at_revocation(
@@ -2938,7 +2938,7 @@ mod tests {
 
     /// An expired API key must stay rejected even when a cache entry from
     /// BEFORE its expiry still exists (10s TTL vs. keys expiring any
-    /// second) — the cached hit path used to skip the expiry check
+    /// second), the cached hit path used to skip the expiry check
     /// entirely.
     #[tokio::test]
     async fn cached_api_key_hit_still_rejects_expired_keys() {
@@ -3431,7 +3431,7 @@ mod adversarial_tests {
             Err(ApiError::Unauthorized(_))
         ));
 
-        // Malformed bearer token against a REAL RSA keypair — a decode
+        // Malformed bearer token against a REAL RSA keypair, a decode
         // failure is an auth failure (401), never a 500. The placeholder
         // keys in `test_config()` cannot decode anything and would fail
         // closed to a configuration 500, which is a different (startup)
@@ -3937,7 +3937,7 @@ mod adversarial_tests {
         }
 
         /// Legacy SHA-256 and Argon2id API keys authenticate through their
-        /// fallback paths and are upgraded to the fast HMAC lookup — and an
+        /// fallback paths and are upgraded to the fast HMAC lookup, and an
         /// expired Argon2 key stays refused on the fallback scan.
         #[tokio::test]
         async fn legacy_and_argon2_api_keys_authenticate_and_upgrade() {
@@ -4018,7 +4018,7 @@ mod adversarial_tests {
             assert_eq!(status, axum::http::StatusCode::UNAUTHORIZED);
         }
 
-        /// A valid `$argon2id$` hash with minimal cost — format detection and
+        /// A valid `$argon2id$` hash with minimal cost, format detection and
         /// verification behave exactly as for a production hash, but seeding
         /// dozens of them does not turn the test into a CPU benchmark.
         fn cheap_argon2id_hash(raw: &str) -> String {
@@ -4035,7 +4035,7 @@ mod adversarial_tests {
         /// The Argon2id fallback scan is capped at
         /// `API_KEY_ARGON2_FALLBACK_SCAN_LIMIT` Argon2id ROWS, deterministically
         /// ordered newest-first. Two properties are pinned:
-        ///   * only `$argon2id$` rows consume the budget — a flood of newer
+        ///   * only `$argon2id$` rows consume the budget, a flood of newer
         ///     HMAC/SHA-256 keys cannot push a legacy key out of reach;
         ///   * a legacy Argon2 key older than the cap is refused on EVERY
         ///     attempt (no nondeterministic acceptance, no partial write).
@@ -4232,7 +4232,7 @@ mod adversarial_tests {
             ));
 
             // The same key OFF the control-plane host is refused even on the
-            // admin path — the secret never becomes a general API key.
+            // admin path, the secret never becomes a general API key.
             assert!(matches!(
                 authenticate_api_key(
                     "cp-static-key-wave-d",

@@ -1,9 +1,9 @@
-//! GATE B — chrome consistency.
+//! GATE B, chrome consistency.
 //!
 //! Every page of a surface group must share the same page chrome: the same
 //! primary navigation, the same footer, and the same document language. A
 //! page whose chrome drifts from its group is either a copy-paste divergence
-//! or a leftover from another surface — both are release blockers for the
+//! or a leftover from another surface, both are release blockers for the
 //! zero-JS console.
 //!
 //! Known audit divergences that cannot be asserted YET are encoded as
@@ -22,15 +22,15 @@ use crate::routing;
 ///
 /// `path` is either the exact manifest path or `"*"` for every path of the
 /// surface (used while a divergence is corpus-wide). Exempt paths still have
-/// to render successfully — an exemption never excuses a broken route.
+/// to render successfully, an exemption never excuses a broken route.
 ///
 /// Batch 2 emptied this list: the nested web `<main>` landmark was collapsed
 /// into the inner views' single `<main id="app-main">` and control-plane
-/// titles now follow the "Page — ApexMail" pattern per route. The mechanism
+/// titles now follow the "Page | ApexMail" pattern per route. The mechanism
 /// stays so a future, narrowly-scoped divergence has a documented home.
 const CHROME_EXEMPT: &[(&str, &str, &str)] = &[];
 
-/// The allowlist must stay a short, deliberate worklist — more than 12
+/// The allowlist must stay a short, deliberate worklist, more than 12
 /// entries means batch 2 is losing the fight.
 const CHROME_EXEMPT_CAP: usize = 12;
 
@@ -126,7 +126,7 @@ fn assert_group_chrome_is_uniform(surface: &str, group: ChromeGroup, routes: &[S
     );
 }
 
-/// Every STATE of every document keeps the surface's shared chrome — the
+/// Every STATE of every document keeps the surface's shared chrome, the
 /// stateful PRG variants (verify/reset result pages, the MFA challenge, the
 /// destructive confirmation), the populated bot-state fixtures, and the CP
 /// `/cp…` alias routes. A state-only document that drops the single main
@@ -156,7 +156,7 @@ fn stateful_result_and_populated_documents_keep_the_shared_chrome() {
 
 /// The `/cp…` alias routes render the CONTROL-PLANE shell (not the web
 /// shell): each alias the control-plane manifest carries must render with
-/// the CP chrome — exactly one main landmark and the CP document language.
+/// the CP chrome, exactly one main landmark and the CP document language.
 #[test]
 fn cp_alias_routes_render_the_control_plane_shell() {
     let mut checked = 0usize;
@@ -180,7 +180,7 @@ fn cp_alias_routes_render_the_control_plane_shell() {
     }
     assert!(
         checked > 0,
-        "no /cp alias route was found in the control-plane manifest — the alias sweep would be vacuous",
+        "no /cp alias route was found in the control-plane manifest, the alias sweep would be vacuous",
     );
 }
 
@@ -223,7 +223,7 @@ fn every_control_plane_page_shares_an_identical_chrome() {
 
 /// Exactly ONE `<main>` landmark per rendered document (audit finding: web
 /// documents used to nest the root layout's `<main id="app-main">` inside
-/// the dashboard/auth shell's own — batch 2 removed the root layout's
+/// the dashboard/auth shell's own, batch 2 removed the root layout's
 /// landmark, so both surfaces must pass outright).
 #[test]
 fn every_page_has_exactly_one_main_landmark() {
@@ -243,13 +243,13 @@ fn every_page_has_exactly_one_main_landmark() {
     }
 }
 
-/// Control-plane document titles follow the "Page — ApexMail" pattern
+/// Control-plane document titles follow the "Page | ApexMail" pattern
 /// (audit finding: every CP page used to render the same hardcoded
-/// "ApexMail Control Plane" title — batch 2 threads the route context title
+/// "ApexMail Control Plane" title, batch 2 threads the route context title
 /// through the render path, so the exemption is gone).
 #[test]
 fn titles_follow_the_page_dash_site_pattern() {
-    let suffix = " — ApexMail";
+    let suffix = " | ApexMail";
     for route in routing::surface_routes("control-plane") {
         let html = render_with_secret("control-plane", route.path);
         if chrome_exempt("control-plane", route.path, "page-dash-site-title") {
@@ -259,7 +259,7 @@ fn titles_follow_the_page_dash_site_pattern() {
             .unwrap_or_else(|| panic!("[control-plane] {} has no <title>", route.path));
         assert!(
             !title.contains('<') && title.len() > suffix.len() && title.ends_with(suffix),
-            "[control-plane] {} title {title:?} must match \"Page — ApexMail\"",
+            "[control-plane] {} title {title:?} must match \"Page | ApexMail\"",
             route.path,
         );
     }
@@ -272,7 +272,7 @@ fn titles_follow_the_page_dash_site_pattern() {
 fn chrome_exempt_list_is_empty_or_justified() {
     assert!(
         CHROME_EXEMPT.len() <= CHROME_EXEMPT_CAP,
-        "CHROME_EXEMPT has {} entries (cap {CHROME_EXEMPT_CAP}) — fix the divergences instead of allowlisting them",
+        "CHROME_EXEMPT has {} entries (cap {CHROME_EXEMPT_CAP}), fix the divergences instead of allowlisting them",
         CHROME_EXEMPT.len(),
     );
     for (surface, path, divergence) in CHROME_EXEMPT {
@@ -306,7 +306,7 @@ fn chrome_exempt_list_is_empty_or_justified() {
                     "single-main-landmark" => opening_tags(&html, "main").len() != 1,
                     "page-dash-site-title" => {
                         let title = title_of(&html).unwrap_or("");
-                        let suffix = " — ApexMail";
+                        let suffix = " | ApexMail";
                         !(title.len() > suffix.len() && title.ends_with(suffix))
                     }
                     other => panic!("unknown divergence tag {other:?}"),
@@ -315,7 +315,7 @@ fn chrome_exempt_list_is_empty_or_justified() {
         }
         assert!(
             divergence_present(surface, path, divergence),
-            "exemption (\"{surface}\", \"{path}\", \"{divergence}\") is dead — every covered document already satisfies the assertion. Delete the entry.",
+            "exemption (\"{surface}\", \"{path}\", \"{divergence}\") is dead, every covered document already satisfies the assertion. Delete the entry.",
         );
     }
     println!(

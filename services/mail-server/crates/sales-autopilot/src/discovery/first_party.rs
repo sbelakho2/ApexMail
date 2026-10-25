@@ -1,7 +1,7 @@
 //! First-party discovery source.
 //!
 //! Surfaces companies ApexMail already knows about for the tenant
-//! (`sales_accounts`) as discovery candidates — the "our own activity" source.
+//! (`sales_accounts`) as discovery candidates, the "our own activity" source.
 //! No external call, no scraping. The tenant is fixed at construction because
 //! [`DiscoverySource::discover`] receives only the query.
 

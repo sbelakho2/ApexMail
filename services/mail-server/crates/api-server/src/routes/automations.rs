@@ -41,7 +41,7 @@ use crate::state::AppState;
 ///
 /// Automations are CUSTOMER-configured, trigger-driven lifecycle messages
 /// (welcome series, onboarding, re-engagement): commercial mail. The category
-/// is `marketing` — declared EXPLICITLY rather than defaulted — and is NOT
+/// is `marketing`, declared EXPLICITLY rather than defaulted, and is NOT
 /// preference-exempt, exactly like the sales campaign path. Global
 /// suppression still applies to it (admission checks the canonical
 /// suppression list for every category). The ONLY transactional automation
@@ -69,7 +69,7 @@ pub fn router() -> Router<AppState> {
 // The list cursor encodes the `(created_at, id)` pair of the last row of the
 // previous page (automations.id is UUID, migration 075). The previous
 // implementation returned a numeric OFFSET as "nextCursor" while calling it
-// a cursor — rows were skipped or duplicated whenever rows shared a
+// a cursor, rows were skipped or duplicated whenever rows shared a
 // created_at value, and the "cursor" restarted the scan on every page.
 
 /// Separator between the RFC3339 timestamp and the row id inside the
@@ -130,7 +130,7 @@ fn map_automation_write_error(error: sqlx::Error) -> ApiError {
 }
 
 /// `automations.name` is VARCHAR(255) (live schema). Without this guard a
-/// longer name surfaces as a raw database "value too long" error — a 500.
+/// longer name surfaces as a raw database "value too long" error, a 500.
 /// Reject it at the handler with the same VALIDATION_ERROR shape the sibling
 /// CRUD routes (campaigns, lists) use.
 const MAX_AUTOMATION_NAME_LEN: usize = 255;
@@ -188,14 +188,14 @@ pub struct ListAutomationsQuery {
     pub limit: i64,
     #[serde(default)]
     pub offset: i64,
-    /// Cursor for cursor-based pagination — hex-encoded `created_at` + row id
+    /// Cursor for cursor-based pagination, hex-encoded `created_at` + row id
     /// pair of the last item from the previous page. When provided, overrides
     /// `offset`.
     #[serde(default)]
     pub cursor: Option<String>,
     /// Documented status filter (`GET /v1/automations?status=enabled`).
     /// `automations.status` is VARCHAR(20) (live schema), so longer values
-    /// can never match a row — reject them up front instead of silently
+    /// can never match a row, reject them up front instead of silently
     /// returning an empty page.
     #[serde(default)]
     pub status: Option<String>,
@@ -264,7 +264,7 @@ async fn list_automations(
     let limit = clamp_limit(params.limit, 100);
 
     // Documented status filter: `automations.status` is VARCHAR(20), so a
-    // longer value can never match — a 4xx up front beats a silently empty
+    // longer value can never match, a 4xx up front beats a silently empty
     // page that reads as "no automations".
     if let Some(status) = params.status.as_deref() {
         if status.is_empty() || status.len() > 20 {
@@ -328,7 +328,7 @@ async fn list_automations(
     let mut details: Vec<AutomationResponse> = rows.into_iter().map(Into::into).collect();
     let has_more = has_more(&mut details, limit as usize);
 
-    // Next (created_at, id) keyset cursor — a genuine cursor, not an offset.
+    // Next (created_at, id) keyset cursor, a genuine cursor, not an offset.
     let next_cursor = details.last().and_then(|r| {
         chrono::DateTime::parse_from_rfc3339(&r.created_at)
             .ok()
@@ -527,7 +527,7 @@ mod tests {
 
     /// Audit implementation-order item 3: the automation send category is
     /// declared explicitly and validated by the SAME shared helper the
-    /// admission gate uses — it is never the `message_category` schema
+    /// admission gate uses, it is never the `message_category` schema
     /// default. Contact-lifecycle automations are commercial mail: the
     /// category is `marketing` and gets NO opt-out exemption (the executor's
     /// only transactional automation sends are `message.received` replies,
@@ -964,7 +964,7 @@ mod adversarial_tests {
         .expect("empty filtered list");
         assert_eq!(empty["meta"]["total"], 0);
         assert_eq!(empty["data"].as_array().unwrap().len(), 0);
-        // Longer than the VARCHAR(20) column can never match — rejected.
+        // Longer than the VARCHAR(20) column can never match, rejected.
         assert!(matches!(
             list_automations(
                 State(state.clone()),

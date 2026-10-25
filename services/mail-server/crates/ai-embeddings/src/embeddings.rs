@@ -50,7 +50,7 @@ impl EmbeddingService {
             }
         } else {
             warn!(
-                "sidecar TLS is DISABLED — inference traffic to {} is unencrypted. \
+                "sidecar TLS is DISABLED, inference traffic to {} is unencrypted. \
                  This should only be used for internal/testing deployments on trusted networks.",
                 config.url
             );
@@ -134,7 +134,7 @@ impl EmbeddingService {
 /// chunk i's vector) would corrupt tenant data with no error anywhere. A
 /// NaN/±Inf component makes the L2 norm NaN, so `l2_normalize` returns the
 /// vector with its NaNs intact (all comparisons against NaN are false) and
-/// downstream cosine/ranking math is poisoned — such a batch is rejected
+/// downstream cosine/ranking math is poisoned, such a batch is rejected
 /// fail-closed. A norm that OVERFLOWS to ±Inf (finite-but-huge components)
 /// would instead silently normalize into the zero vector; it is rejected the
 /// same way.
@@ -151,7 +151,7 @@ fn finalize_batch(
 
     if embeddings.len() != expected_len {
         return Err(EmbeddingError::InferenceError(format!(
-            "inference server returned {} embeddings for {} inputs — \
+            "inference server returned {} embeddings for {} inputs, \
              refusing the misaligned batch",
             embeddings.len(),
             expected_len
@@ -179,7 +179,7 @@ fn finalize_batch(
             if !norm.is_finite() {
                 return Err(EmbeddingError::InferenceError(
                     "inference server returned a vector whose L2 norm is \
-                     non-finite (component overflow to NaN/Inf) — rejecting \
+                     non-finite (component overflow to NaN/Inf), rejecting \
                      the batch"
                         .into(),
                 ));
@@ -198,7 +198,7 @@ fn finalize_batch(
         if let Some(bad) = v.iter().position(|x| !x.is_finite()) {
             return Err(EmbeddingError::InferenceError(format!(
                 "inference server returned a non-finite vector component \
-                 (NaN/Inf) at position {bad} — rejecting the batch"
+                 (NaN/Inf) at position {bad}, rejecting the batch"
             )));
         }
     }
@@ -588,7 +588,7 @@ PmScTyfBMj4Ej4fcpQ==\n\
 
     /// SM9 #5: ±Inf components are rejected over the wire. (Valid JSON
     /// cannot carry a `NaN` literal, but a float overflow such as 1e40
-    /// deserializes to an infinite f32 — the same failure a hostile or
+    /// deserializes to an infinite f32, the same failure a hostile or
     /// misbehaving sidecar produces.)
     #[tokio::test]
     async fn embed_batch_rejects_non_finite_vectors_over_the_wire() {
@@ -629,7 +629,7 @@ PmScTyfBMj4Ej4fcpQ==\n\
 
     /// SM9 #5 (verifier-repair): finite-but-huge components OVERFLOW the L2
     /// norm to +Inf, and `l2_normalize` then divides every component into
-    /// 0.0 — without the norm gate the batch would be silently accepted as
+    /// 0.0, without the norm gate the batch would be silently accepted as
     /// an all-zero embedding and /embed would answer 200 with corrupt data.
     #[test]
     fn finalize_batch_rejects_a_norm_that_overflows() {

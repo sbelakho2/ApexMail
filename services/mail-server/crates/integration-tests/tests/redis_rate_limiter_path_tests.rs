@@ -2,12 +2,12 @@
 //!
 //! The HTTP route harnesses deliberately point Redis at an unreachable port
 //! so every sales/api route test exercises the rate limiter's IN-MEMORY
-//! FALLBACK — the Redis path production actually uses was never driven from
+//! FALLBACK, the Redis path production actually uses was never driven from
 //! this crate. This suite drives BOTH paths of the real
 //! `apexmail_rate_limiter::RedisLimiter`:
 //!
 //! - `fallback_*` tests run UNCONDITIONALLY against `RedisLimiter::
-//!   fallback_only` — the tenant-scoped in-memory fallback (the audit-F5
+//!   fallback_only`, the tenant-scoped in-memory fallback (the audit-F5
 //!   fix boundary: a Redis outage must not collapse per-tenant isolation).
 //! - `redis_*` tests run against a REAL Redis when `TEST_REDIS_URL` is set
 //!   (the same workspace convention `schema_contract_tests.rs` uses for
@@ -47,7 +47,7 @@ async fn test_redis_url(test_name: &str) -> Option<String> {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Fallback-path tests (hermetic — no Redis required)
+// Fallback-path tests (hermetic, no Redis required)
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// THE F5 BOUNDARY: when Redis is unreachable, the fallback must stay
@@ -77,7 +77,7 @@ async fn fallback_tenant_scope_boundary_noisy_tenant_cannot_exhaust_others() {
         "tenant-noisy must be denied once ITS OWN bucket is drained"
     );
 
-    // Tenant B is unaffected — the shared-bucket regression denies this.
+    // Tenant B is unaffected, the shared-bucket regression denies this.
     assert!(
         limiter
             .check_n_for_tenant(Some("tenant-b"), 2)
@@ -117,7 +117,7 @@ async fn fallback_share_division_bounds_each_tenant_budget() {
 }
 
 /// RS-054/K2: `peek` when Redis is absent must FAIL OPEN (allow) without
-/// consuming fallback budget — a monitoring read must never over-throttle.
+/// consuming fallback budget, a monitoring read must never over-throttle.
 #[tokio::test]
 async fn fallback_peek_fails_open_and_does_not_consume_budget() {
     let config = RateLimitConfig::new(10).with_burst(2);
@@ -151,7 +151,7 @@ async fn fallback_peek_fails_open_and_does_not_consume_budget() {
 
 /// Connects to the configured test Redis. `test_redis_url` already applied
 /// the soft-skip contract (unset → explicit skip line + `None`); a URL that
-/// IS set but unreachable is infrastructure breakage — PANIC with a clear
+/// IS set but unreachable is infrastructure breakage, PANIC with a clear
 /// message (never a soft skip), matching how the DB-backed suites treat a
 /// configured-but-broken TEST_DATABASE_URL.
 async fn connected_limiter(
@@ -163,7 +163,7 @@ async fn connected_limiter(
     match RedisLimiter::connect(config, url).await {
         Some(limiter) => limiter.with_prefix(prefix),
         None => panic!(
-            "{test_name}: TEST_REDIS_URL is configured but Redis at it is unreachable — \
+            "{test_name}: TEST_REDIS_URL is configured but Redis at it is unreachable, \
              start the test Redis or fix the URL (connect returned None)"
         ),
     }
@@ -198,7 +198,7 @@ async fn redis_path_enforces_token_bucket_burst_and_reset() {
     let fourth = limiter.check().await;
     assert!(
         fourth.is_denied(),
-        "the 4th check must be denied — the Redis bucket is exhausted"
+        "the 4th check must be denied, the Redis bucket is exhausted"
     );
     // Peek is a read-only reflection of the shared state (fix K2).
     assert!(
@@ -272,7 +272,7 @@ async fn redis_path_tenant_keys_are_independent() {
 }
 
 /// Shared-state semantics: a NEW limiter instance (pod restart, another
-/// replica) must observe the SAME Redis bucket — state lives in Redis, not
+/// replica) must observe the SAME Redis bucket, state lives in Redis, not
 /// in the process.
 #[tokio::test]
 async fn redis_path_state_survives_new_limiter_instances() {
@@ -312,7 +312,7 @@ async fn redis_path_state_survives_new_limiter_instances() {
 }
 
 /// Fix #3 boundary: concurrent checks clone the multiplexed
-/// ConnectionManager and rely on the Lua script for atomicity — 20 racing
+/// ConnectionManager and rely on the Lua script for atomicity, 20 racing
 /// tenant checks must all be admitted (burst per fresh tenant) without
 /// serializing on any connection-level lock.
 #[tokio::test]

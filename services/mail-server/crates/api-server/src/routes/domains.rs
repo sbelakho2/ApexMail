@@ -55,7 +55,7 @@ static SES_CLIENTS: LazyLock<std::sync::Mutex<std::collections::HashMap<String, 
 
 /// Return the process-wide SES client for `region`, constructing it at most
 /// once. Concurrent first callers may both build a client; the loser's entry
-/// is simply replaced — clients are interchangeable and lazily connected, so
+/// is simply replaced, clients are interchangeable and lazily connected, so
 /// this is harmless and avoids holding a std lock across an await.
 async fn shared_ses_client(region: &str) -> SharedSesClient {
     // Lock-poisoning recovery: a panic in some other critical section while
@@ -246,7 +246,7 @@ fn domain_name_conflict(error: &sqlx::Error) -> bool {
 
 /// Validate a domain id from a URL path before it reaches any
 /// `$1::uuid` bind. A malformed id can never match a stored row, so it is
-/// reported as a plain 404 — binding it raw would surface a PostgreSQL
+/// reported as a plain 404, binding it raw would surface a PostgreSQL
 /// `invalid input syntax for type uuid` (22P02) as a 500.
 fn validated_domain_id(id: &str) -> Result<Uuid, ApiError> {
     Uuid::parse_str(id.trim()).map_err(|_| ApiError::NotFound("domain not found".into()))
@@ -342,7 +342,7 @@ async fn create_domain(
     // the laxer path.
     if domain_name.starts_with('[') {
         return Err(ApiError::Validation(vec![format!(
-            "invalid domain name: {} — a sending domain must be a DNS name, not an address literal",
+            "invalid domain name: {}, a sending domain must be a DNS name, not an address literal",
             domain_name
         )]));
     }
@@ -454,10 +454,10 @@ async fn list_domains(
     require_scopes(&auth, &["domains:read"])?;
 
     // SM3 (audit F8): `cursor` used to be accepted here as a raw integer
-    // OFFSET — contradicting the crate's documented opaque-keyset contract.
+    // OFFSET, contradicting the crate's documented opaque-keyset contract.
     // The mislabeled param is gone; pagination is the honestly-named
     // `offset`. (This list returns a plain array, so a true keyset migration
-    // needs the CursorPage envelope — a breaking client contract — and is
+    // needs the CursorPage envelope, a breaking client contract, and is
     // deliberately out of this pass.)
     let offset = params.offset.clamp(0, 100_000);
     let rows = sqlx::query_as::<_, DomainRow>(
@@ -503,16 +503,16 @@ async fn delete_domain(
 
     // M-5(3): the SES DeleteEmailIdentity HTTPS round-trip used to run while
     // the domain row lock, the tenant advisory lock, and the SES-identity
-    // advisory lock were all held — a multi-second external-IO window that
+    // advisory lock were all held, a multi-second external-IO window that
     // serialised every domain mutation for the tenant. Mirroring the verify
     // flow's re-phasing, the delete is now two phases:
     //
-    // 1. short locked tx — collect (name, ses_verified) under the same locks
+    // 1. short locked tx, collect (name, ses_verified) under the same locks
     //    a re-create would take, delete the row, commit;
     // 2. best-effort SES delete AFTER the commit, with no locks held. A
     //    failure is logged (and surfaces in metrics) but does not fail the
     //    request: the local row is already gone, and a stale SES identity is
-    //    harmless — verification reconfigures pending identities if the name
+    //    harmless, verification reconfigures pending identities if the name
     //    ever returns.
     let mut tx = state.db.begin().await?;
     lock_tenant_domain_mutations(&mut tx, &auth.tenant_id).await?;
@@ -544,7 +544,7 @@ async fn delete_domain(
 
     tx.commit().await?;
 
-    // Phase 2 — SES cleanup with no database locks held. If SES actually
+    // Phase 2, SES cleanup with no database locks held. If SES actually
     // accepted this identity for sending, remove it now that the local row is
     // released for a future create/verify cycle. Pending legacy identities
     // are safely reconfigured by verification if the name returns.
@@ -553,7 +553,7 @@ async fn delete_domain(
             error!(
                 domain = %domain_name,
                 error = %error,
-                "SES identity cleanup after domain delete failed — the local row is deleted; the stale SES identity is harmless and will be reconfigured if the domain returns"
+                "SES identity cleanup after domain delete failed, the local row is deleted; the stale SES identity is harmless and will be reconfigured if the domain returns"
             );
         }
     }
@@ -576,15 +576,15 @@ async fn verify_domain(
 ///
 /// M-5(2): this used to hold the domain row lock, the tenant advisory lock,
 /// and the SES-identity advisory lock across every DNS lookup and every SES
-/// HTTPS round-trip — a multi-second external-IO window that serialised all
+/// HTTPS round-trip, a multi-second external-IO window that serialised all
 /// domain mutations for the tenant (and platform-wide for a shared domain
 /// name). The flow is now phased so external IO happens with NO database
 /// locks held:
 ///
-/// 1. short locked tx — read the row, take the advisory locks, provision or
+/// 1. short locked tx, read the row, take the advisory locks, provision or
 ///    repair DKIM material (DB-only work), commit;
 /// 2. DNS lookups and the SES HTTPS calls against that material, lock-free;
-/// 3. short locked tx — re-read the row under the SAME locks, verify the DKIM
+/// 3. short locked tx, re-read the row under the SAME locks, verify the DKIM
 ///    material the observations were made against is still current, and only
 ///    then persist the verification outcome.
 ///
@@ -626,10 +626,10 @@ pub(crate) async fn verify_domain_for_tenant_with_dns<D: VerificationDns>(
     dns: &D,
 ) -> Result<Json<VerifyResponse>, ApiError> {
     for _attempt in 0..2 {
-        // Phase 1 — locked, DB-only: locks + DKIM material provisioning.
+        // Phase 1, locked, DB-only: locks + DKIM material provisioning.
         let (row, dkim_material) = lock_and_provision_dkim(state, tenant_id, id).await?;
 
-        // Phase 2 — external IO with no database locks held. The transport
+        // Phase 2, external IO with no database locks held. The transport
         // mode is resolved ONCE here so every observation in one round shares
         // the same contract.
         let observations = observe_dns_and_ses(
@@ -641,7 +641,7 @@ pub(crate) async fn verify_domain_for_tenant_with_dns<D: VerificationDns>(
         )
         .await?;
 
-        // Phase 3 — locked, DB-only: re-check currency under the same locks
+        // Phase 3, locked, DB-only: re-check currency under the same locks
         // and persist. `None` means the DKIM material rotated concurrently;
         // the loop retries once with fresh material.
         if let Some(response) = persist_verification(
@@ -669,13 +669,13 @@ pub(crate) async fn verify_domain_for_tenant_with_dns<D: VerificationDns>(
     }
 
     // Both attempts observed a concurrent DKIM rotation: never persist
-    // observations made against stale keys — return the row's current state.
+    // observations made against stale keys, return the row's current state.
     current_verification_state(state, tenant_id, id).await
 }
 
 /// Phase 1 of verification: take the tenant + SES-identity advisory locks and
 /// the domain row lock, then ensure the row has complete, coherent per-domain
-/// DKIM material. This transaction performs database work only — it must
+/// DKIM material. This transaction performs database work only, it must
 /// never wait on DNS or SES, so the locks are released immediately.
 async fn lock_and_provision_dkim(
     state: &AppState,
@@ -911,7 +911,7 @@ fn dkim_material_is_current(
 }
 
 /// Phase 3 of verification: under the same locks as phase 1, re-read the row
-/// and persist the observed outcome — but only if the DKIM material is
+/// and persist the observed outcome, but only if the DKIM material is
 /// unchanged since the observations were made. Returns `None` when the
 /// material rotated concurrently (caller retries or returns current state).
 async fn persist_verification(
@@ -941,7 +941,7 @@ async fn persist_verification(
         row.dkim_public_key.as_deref(),
         dkim_material,
     ) {
-        // Stale observations — do NOT write them. Rolling back releases the
+        // Stale observations, do NOT write them. Rolling back releases the
         // locks so the retry (or the concurrent writer) can proceed.
         tx.rollback().await?;
         warn!(
@@ -1359,7 +1359,7 @@ async fn configure_ses_domain_identity(
             } else {
                 tracing::error!(domain = %domain, error = %msg, "SES CreateEmailIdentity failed");
                 return Err(ApiError::ServiceUnavailable(
-                    "email identity creation failed — please retry or contact support".into(),
+                    "email identity creation failed, please retry or contact support".into(),
                 ));
             }
         }
@@ -1785,7 +1785,7 @@ async fn get_auth_status(
 /// Each variant exposes a canonical `expected` record and a copy-pasteable
 /// `fix_hint`. Centralising these strings here means the in-app dashboard,
 /// the chatbot, the troubleshooting docs, and the API response stay in
-/// lockstep — the chatbot answers SPF questions by quoting the same string
+/// lockstep, the chatbot answers SPF questions by quoting the same string
 /// the API returns, so customers never see two different "fixes" for one
 /// misconfiguration.
 #[derive(Debug, Clone, Copy)]
@@ -2481,7 +2481,7 @@ mod adversarial_handler_tests {
         );
 
         // SM3 (audit F8): the mislabeled integer `cursor` is GONE from the
-        // contract — the unknown query field is refused loudly
+        // contract, the unknown query field is refused loudly
         // (deny_unknown_fields), never silently honoured as an offset. The
         // honest `offset` parameter paginates.
         let response = app
@@ -3406,7 +3406,7 @@ mod adversarial_handler_tests {
     /// The cap must come from the override-aware entitlement snapshot.
     #[tokio::test]
     // The DKIM env guard serializes a PROCESS-GLOBAL env var whose
-    // mutation must span the awaited code under test — the documented
+    // mutation must span the awaited code under test, the documented
     // clippy::await_holding_lock allowance (metering_monitor precedent).
     #[allow(clippy::await_holding_lock)]
     async fn create_domain_uses_the_override_aware_capacity() {
@@ -3453,7 +3453,7 @@ mod adversarial_handler_tests {
         .execute(&pool)
         .await
         .expect("seed plan override");
-        // One domain already exists — the free base plan's cap of 1 would
+        // One domain already exists, the free base plan's cap of 1 would
         // refuse the next create if the base plan were read directly.
         let suffix = uuid::Uuid::new_v4().simple().to_string();
         let first = format!("first-{suffix}.example.test");
@@ -3528,7 +3528,7 @@ mod conflict_coverage_tests {
     #[test]
     fn duplicate_claims_and_missing_domains_answer_cleanly() {
         // Domain creation provisions DKIM material, which needs the
-        // process-global encryption key env var — hold the shared mutex
+        // process-global encryption key env var, hold the shared mutex
         // and drive the async body on a local runtime (web.rs convention).
         let _dkim_guard = crate::test_db::DKIM_ENV_MUTEX
             .lock()

@@ -50,7 +50,7 @@ pub struct AppState {
     pub trust: TrustPortalService,
     /// Internal breach-report workflow (GDPR 72h / HIPAA 60-day deadlines).
     pub breach: BreachNotifier,
-    /// H-6: retention sweep — registry-driven purges + retention_report rows.
+    /// H-6: retention sweep, registry-driven purges + retention_report rows.
     pub retention_sweeper: crate::retention_sweep::RetentionSweeper,
     pub config: ComplianceConfig,
     pub db: PgPool,
@@ -179,7 +179,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         // A-group / B6: the public claims registry + DORA/NIS2 evidence pack.
         .merge(crate::admin_routes::public_claims_router())
         // Wave G: the statutory filing operator surface (package build /
-        // verify, human tasks, TSD preview, annual-report acts) — the real
+        // verify, human tasks, TSD preview, annual-report acts), the real
         // callers of the filing builders that previously had only tests.
         .merge(crate::statutory_routes::router())
         .with_state(state)
@@ -192,7 +192,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
 // ── Auth middleware (per-request via Bearer token) ─────────────────────────
 
 /// RS-064: Timing-safe comparison for auth tokens.
-/// Does NOT leak length through timing — always iterates over both strings fully.
+/// Does NOT leak length through timing, always iterates over both strings fully.
 fn constant_time_eq(a: &str, b: &str) -> bool {
     let len_matches = a.len() == b.len();
     let mut result: u8 = 0;
@@ -249,7 +249,7 @@ fn extract_caller_id(headers: &HeaderMap, _config: &ComplianceConfig) -> String 
 // ── P1-SECURITY: required tenant identity (mirrors the ai-service fix) ──────
 //
 // The service Bearer token authenticates the upstream caller but carries NO
-// tenant identity — one shared token fronts many callers. Every route that
+// tenant identity, one shared token fronts many callers. Every route that
 // serves tenant-scoped data must therefore resolve the tenant EXPLICITLY from
 // the request and FAIL CLOSED when it is absent: a missing selector is a 401,
 // never an all-tenant aggregate or a default bucket (`"default"`, `"global"`,
@@ -272,7 +272,7 @@ fn bounded_tenant(raw: Option<&str>) -> Result<Option<String>, ()> {
 }
 
 /// Read the tenant selector from the `tenant_id` query parameter or the
-/// `X-Tenant-Id` header (query wins — it is the more specific assertion).
+/// `X-Tenant-Id` header (query wins, it is the more specific assertion).
 /// When BOTH are supplied they must agree exactly: a disagreement is a
 /// cross-tenant attempt and is rejected with 403 + a warn log.
 pub(crate) fn required_tenant_identity(
@@ -340,12 +340,12 @@ pub(crate) fn created_json<T: Serialize>(data: T) -> (StatusCode, Json<serde_jso
 
 // ── Health endpoints ──────────────────────────────────────────────────────
 
-/// GET /health — simple liveness check.
+/// GET /health, simple liveness check.
 async fn health_check() -> impl IntoResponse {
     Json(serde_json::json!({ "status": "ok" }))
 }
 
-/// GET /health/ready — readiness check (DB connectivity).
+/// GET /health/ready, readiness check (DB connectivity).
 async fn health_ready(
     State(state): State<Arc<AppState>>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
@@ -358,7 +358,7 @@ async fn health_ready(
 
 // ── Risk scoring endpoints ────────────────────────────────────────────────
 
-/// POST /risk/assess/{tenant_id} — assess risk for a tenant.
+/// POST /risk/assess/{tenant_id}, assess risk for a tenant.
 async fn risk_assess(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -377,7 +377,7 @@ async fn risk_assess(
     }
 }
 
-/// GET /risk/profile/{tenant_id} — get tenant risk profile.
+/// GET /risk/profile/{tenant_id}, get tenant risk profile.
 async fn risk_profile(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -397,7 +397,7 @@ async fn risk_profile(
     }
 }
 
-/// POST /risk/limits/{tenant_id} — update tenant sending limits.
+/// POST /risk/limits/{tenant_id}, update tenant sending limits.
 async fn risk_update_limits(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -419,7 +419,7 @@ async fn risk_update_limits(
     }
 }
 
-/// POST /risk/resolve/{tenant_id} — resolve a risk flag.
+/// POST /risk/resolve/{tenant_id}, resolve a risk flag.
 async fn risk_resolve_flag(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -453,7 +453,7 @@ async fn risk_resolve_flag(
     }
 }
 
-/// GET /risk/critical — list all critical-risk tenants.
+/// GET /risk/critical, list all critical-risk tenants.
 async fn risk_critical_tenants(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -471,7 +471,7 @@ async fn risk_critical_tenants(
     }
 }
 
-/// GET /risk/stats — get risk scoring statistics.
+/// GET /risk/stats, get risk scoring statistics.
 async fn risk_stats(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -491,7 +491,7 @@ async fn risk_stats(
 
 // ── Content scanning endpoints ────────────────────────────────────────────
 
-/// POST /scan — full multi-layer content scan.
+/// POST /scan, full multi-layer content scan.
 async fn scan_content(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -517,11 +517,11 @@ async fn scan_content(
 const MAX_RESOURCE_ID_LEN: usize = 128;
 
 /// Audit F5: bind the body's ACTUAL `resource_id`. `AuditLogger::log`'s
-/// third parameter is the resource id — the endpoint used to pass the
+/// third parameter is the resource id, the endpoint used to pass the
 /// TENANT id there (the body's resource_id was never even parsed), so every
 /// ingested entry recorded `resource_id == tenant_id` and downstream
 /// `resource_id = $1` queries (e.g. the SAR export's subject match) could
-/// never work. `None` when the body omits it — a missing resource id is
+/// never work. `None` when the body omits it, a missing resource id is
 /// never silently replaced by the tenant id.
 fn bounded_resource_id(raw: Option<&str>) -> Result<Option<String>, ()> {
     match raw.map(str::trim).filter(|s| !s.is_empty()) {
@@ -542,7 +542,7 @@ fn claimed_actor_label(raw: Option<&str>) -> Option<String> {
         .map(|claimed| format!("claimed_user_id:{claimed}"))
 }
 
-/// POST /audit — create an audit log entry.
+/// POST /audit, create an audit log entry.
 async fn audit_create(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -573,7 +573,7 @@ async fn audit_create(
     let resource = parse_audit_resource(resource_str)
         .ok_or_else(|| err_json(StatusCode::BAD_REQUEST, "Invalid resource"))?;
 
-    // Audit F5: the body's real resource_id, parsed and bound — never the
+    // Audit F5: the body's real resource_id, parsed and bound, never the
     // tenant id. An overlong value is a 400, not a silent truncation.
     let resource_id = bounded_resource_id(entry.get("resource_id").and_then(|v| v.as_str()))
         .map_err(|_| {
@@ -600,7 +600,7 @@ async fn audit_create(
     };
 
     let ctx = LogContext {
-        // The validated, trimmed tenant from above — never the raw body value
+        // The validated, trimmed tenant from above, never the raw body value
         // (a padded value must not mint a differently-keyed chain).
         tenant_id: Some(tenant_id.to_string()),
         // Audit F5: client-asserted actor/session ids are stored with the
@@ -640,11 +640,11 @@ async fn audit_create(
     }
 }
 
-/// POST /audit/query — query audit log entries.
+/// POST /audit/query, query audit log entries.
 ///
 /// P1-SECURITY: the tenant filter is REQUIRED. `AuditLogQuery.tenant_id` is
 /// `Option<String>` and a `None` filter matched EVERY tenant's audit trail
-/// (user ids, IP addresses, action details) — the absent-filter → aggregate-
+/// (user ids, IP addresses, action details), the absent-filter → aggregate-
 /// all shape. The route refuses a missing/blank tenant instead of widening
 /// the query.
 async fn audit_query(
@@ -674,12 +674,12 @@ async fn audit_query(
     }
 }
 
-/// GET /audit/{id} — get a single audit log entry.
+/// GET /audit/{id}, get a single audit log entry.
 ///
 /// P1-SECURITY: the fetch is tenant-SCOPED. The entry id alone used to serve
 /// any tenant's entry to any token holder (by-ID reads crossed tenants); the
 /// caller must now assert the tenant (`?tenant_id=` or `X-Tenant-Id`) and an
-/// entry attributed to another tenant — or to no tenant — is a 404 that does
+/// entry attributed to another tenant, or to no tenant, is a 404 that does
 /// not reveal its existence.
 async fn audit_get_entry(
     State(state): State<Arc<AppState>>,
@@ -712,7 +712,7 @@ async fn audit_get_entry(
     }
 }
 
-/// POST /audit/verify — verify chain integrity.
+/// POST /audit/verify, verify chain integrity.
 async fn audit_verify_chain(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -739,7 +739,7 @@ async fn audit_verify_chain(
     }
 }
 
-/// POST /audit/export — export audit logs.
+/// POST /audit/export, export audit logs.
 async fn audit_export(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -778,7 +778,7 @@ async fn audit_export(
     }
 }
 
-/// GET /audit/stats — get audit statistics.
+/// GET /audit/stats, get audit statistics.
 ///
 /// P1-SECURITY: tenant-scoped. `get_stats(None)` aggregated action/resource/
 /// outcome counts across ALL tenants for any token holder; the tenant is now
@@ -807,7 +807,7 @@ async fn audit_stats(
 /// Map a secret-store failure to an honest status code.
 ///
 /// An authorisation refusal is 403, a missing secret/version is 404, an
-/// expiry is 410 and a name collision is 409 — only genuine store faults are
+/// expiry is 410 and a name collision is 409, only genuine store faults are
 /// 500. The response never echoes the store's internal message.
 fn secret_store_error(e: &str) -> (StatusCode, Json<serde_json::Value>) {
     let lower = e.to_ascii_lowercase();
@@ -835,7 +835,7 @@ fn secret_store_error(e: &str) -> (StatusCode, Json<serde_json::Value>) {
     err_json(code, message)
 }
 
-/// POST /secrets — create a new secret.
+/// POST /secrets, create a new secret.
 async fn secret_create(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -857,10 +857,10 @@ async fn secret_create(
     }
 }
 
-/// GET /secrets — list all secrets (requires tenant_id query param).
+/// GET /secrets, list all secrets (requires tenant_id query param).
 ///
 /// P1-SECURITY: the tenant parameter is REQUIRED. It used to default to the
-/// literal tenant `"default"` when omitted — a missing-selector fallback that
+/// literal tenant `"default"` when omitted, a missing-selector fallback that
 /// silently served one tenant's secret metadata to a caller that named no
 /// tenant at all (the AI-audit bug shape). A missing/blank parameter is now a
 /// 400 and nothing is listed.
@@ -894,7 +894,7 @@ async fn secret_list(
     }
 }
 
-/// GET /secrets/{id} — get a secret by ID.
+/// GET /secrets/{id}, get a secret by ID.
 async fn secret_get(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -912,7 +912,7 @@ async fn secret_get(
     }
 }
 
-/// PUT /secrets/{id} — update a secret.
+/// PUT /secrets/{id}, update a secret.
 async fn secret_update(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -934,7 +934,7 @@ async fn secret_update(
     }
 }
 
-/// DELETE /secrets/{id} — delete a secret.
+/// DELETE /secrets/{id}, delete a secret.
 async fn secret_delete(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -951,7 +951,7 @@ async fn secret_delete(
     }
 }
 
-/// POST /secrets/{id}/rotate — rotate a secret.
+/// POST /secrets/{id}/rotate, rotate a secret.
 async fn secret_rotate(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -968,7 +968,7 @@ async fn secret_rotate(
     }
 }
 
-/// POST /secrets/{id}/access — grant access to a secret.
+/// POST /secrets/{id}/access, grant access to a secret.
 async fn secret_grant_access(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -1004,7 +1004,7 @@ async fn secret_grant_access(
     }
 }
 
-/// GET /secrets/{id}/versions — get version history.
+/// GET /secrets/{id}/versions, get version history.
 async fn secret_versions(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -1021,7 +1021,7 @@ async fn secret_versions(
     }
 }
 
-/// POST /secrets/{id}/rollback/{version} — rollback to a previous version.
+/// POST /secrets/{id}/rollback/{version}, rollback to a previous version.
 async fn secret_rollback(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -1044,7 +1044,7 @@ async fn secret_rollback(
 
 // ── GDPR endpoints ────────────────────────────────────────────────────────
 
-/// POST /gdpr/submit — submit a data-subject request.
+/// POST /gdpr/submit, submit a data-subject request.
 ///
 /// SEC-15: Enforces DSAR rate limits before processing the submission:
 /// - Per-user: 1 request per 24 hours (by email)
@@ -1105,9 +1105,9 @@ async fn gdpr_submit_request(
                 })),
             ));
         }
-        // D: no variant may be swallowed — an exceeded limit of ANY kind
+        // D: no variant may be swallowed, an exceeded limit of ANY kind
         // rejects the submission.
-        // coverage: justified — check_submission only peeks User/Tenant kinds
+        // coverage: justified, check_submission only peeks User/Tenant kinds
         // (dsar_rate_limit.rs), so it can never yield VerificationRateLimited;
         // this arm exists to keep the match exhaustive (fail-closed).
         DsarRateLimitStatus::VerificationRateLimited { retry_after } => {
@@ -1132,11 +1132,11 @@ async fn gdpr_submit_request(
             // the HTTP response. This crate has no mailer: the token was
             // written to dsr_verification_outbox in the same transaction as
             // the request, and api-server / worker own the actual sending
-            // (documented handoff — see the crate README). token_delivered
+            // (documented handoff, see the crate README). token_delivered
             // stays false because THIS service has not delivered anything.
             tracing::info!(
                 request_id = %request.id,
-                // coverage: justified — the `%field` display closure below is
+                // coverage: justified, the `%field` display closure below is
                 // evaluated only when a tracing subscriber accepts the event;
                 // the test suite installs no global subscriber, so this lazy
                 // arm cannot fire deterministically. The macro skeleton around
@@ -1144,7 +1144,7 @@ async fn gdpr_submit_request(
                 email = %mail_common::pii::redact_email(email),
                 token_delivered = false,
                 delivery = "outbox_handoff",
-                "GDPR verification token queued in dsr_verification_outbox — mail delivery owned by api-server/worker"
+                "GDPR verification token queued in dsr_verification_outbox, mail delivery owned by api-server/worker"
             );
             // L1: consume submission quota only on success.
             state
@@ -1179,7 +1179,7 @@ async fn gdpr_submit_request(
     }
 }
 
-/// POST /gdpr/verify/{request_id} — verify a data-subject request.
+/// POST /gdpr/verify/{request_id}, verify a data-subject request.
 ///
 /// SEC-15: Enforces DSAR verification rate limit:
 /// - Per-token: 5 verification attempts per hour
@@ -1220,7 +1220,7 @@ async fn gdpr_verify_request(
         // D: previously `_ => {}` swallowed these variants, so an exceeded
         // key reported as UserRateLimited let verification attempts through
         // indefinitely (token brute-force). Any exceeded limit now rejects.
-        // coverage: justified — check_verification only emits the
+        // coverage: justified, check_verification only emits the
         // Verification kind, so User/Tenant cannot reach this handler; the
         // arm keeps the match exhaustive (fail-closed).
         DsarRateLimitStatus::UserRateLimited { retry_after }
@@ -1248,14 +1248,14 @@ async fn gdpr_verify_request(
     }
 }
 
-/// POST /gdpr/record-consent — record a consent record.
+/// POST /gdpr/record-consent, record a consent record.
 async fn gdpr_record_consent(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Json(body): Json<serde_json::Value>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
     verify_bearer(&headers, &state.config).map_err(|(c, m)| err_json(c, m))?;
-    // I-4: a missing CONSENT_SIGNING_KEY must not brick the service — only
+    // I-4: a missing CONSENT_SIGNING_KEY must not brick the service, only
     // this route fails (503), because consent recording without the ability
     // to sign the proof certificate is non-compliant.
     if state.config.gdpr.consent_signing_key.trim().is_empty() {
@@ -1311,7 +1311,7 @@ async fn gdpr_record_consent(
     }
 }
 
-/// POST /gdpr/consents — get consent records for a subscriber.
+/// POST /gdpr/consents, get consent records for a subscriber.
 async fn gdpr_get_consents(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -1342,7 +1342,7 @@ async fn gdpr_get_consents(
     }
 }
 
-/// POST /gdpr/consent-certificate — generate a consent certificate.
+/// POST /gdpr/consent-certificate, generate a consent certificate.
 async fn gdpr_get_consent_certificate(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -1365,14 +1365,14 @@ async fn gdpr_get_consent_certificate(
     }
 }
 
-/// GET /gdpr/stats — get GDPR statistics.
+/// GET /gdpr/stats, get GDPR statistics.
 ///
 /// I-1: the tenant is threaded from the request (`?tenant_id=` query param or
 /// the X-Tenant-Id header).
 ///
 /// P1-SECURITY: the tenant is now REQUIRED. This route is internal-token
 /// protected, so the old absent-selector fallback aggregated GDPR request
-/// statistics across ALL tenants for any token holder — the absent-filter →
+/// statistics across ALL tenants for any token holder, the absent-filter →
 /// aggregate-all shape from the AI audit. Missing both selectors is a 401;
 /// supplying both with different values is a cross-tenant attempt (403,
 /// logged).
@@ -1396,7 +1396,7 @@ async fn gdpr_stats(
     }
 }
 
-/// GET /gdpr/exports/{id} — download a stored GDPR access export.
+/// GET /gdpr/exports/{id}, download a stored GDPR access export.
 ///
 /// G: the export_url now points at this crate's own route (config
 /// `export_base_url`), so exports are actually downloadable. Token-gated via
@@ -1406,7 +1406,7 @@ async fn gdpr_stats(
 /// P1-SECURITY: the download is tenant-SCOPED. The export row carries the
 /// subject's full personal-data export, and the id alone used to serve it to
 /// any token holder; the caller must now assert the tenant (`?tenant_id=` or
-/// `X-Tenant-Id`) and the SQL only matches a row of THAT tenant — another
+/// `X-Tenant-Id`) and the SQL only matches a row of THAT tenant, another
 /// tenant's export (or an unknown id) is the same 404.
 pub async fn gdpr_download_export(
     State(state): State<Arc<AppState>>,
@@ -1443,7 +1443,7 @@ pub async fn gdpr_download_export(
         return Err(err_json(StatusCode::GONE, "Export has expired"));
     }
 
-    // coverage: justified — `data` is a `serde_json::Value` read back from a
+    // coverage: justified, `data` is a `serde_json::Value` read back from a
     // Postgres JSON column; pretty-printing a Value is infallible by
     // construction, so this closure cannot execute.
     let body = serde_json::to_string_pretty(&data).map_err(|e| {
@@ -1473,7 +1473,7 @@ pub async fn gdpr_download_export(
 
 // ── Breach notification endpoints (internal workflow) ─────────────────────
 
-/// POST /breaches — record a new breach report and open the notification
+/// POST /breaches, record a new breach report and open the notification
 /// workflow. The report tracks the GDPR 72-hour and HIPAA 60-day deadlines
 /// from discovery and stores a signed notification document.
 async fn breach_report(
@@ -1500,7 +1500,7 @@ async fn breach_report(
     }
 }
 
-/// GET /breaches/{tenant_id} — list breach reports for a tenant.
+/// GET /breaches/{tenant_id}, list breach reports for a tenant.
 async fn breach_list(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -1529,7 +1529,7 @@ pub struct BreachTriageBody {
     pub rationale: String,
 }
 
-/// POST /breaches/{id}/triage — decide notifiable / not_notifiable.
+/// POST /breaches/{id}/triage, decide notifiable / not_notifiable.
 async fn breach_triage(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -1562,7 +1562,7 @@ async fn breach_triage(
     }
 }
 
-/// POST /breaches/{id}/queue-authority-notification — generate the exact
+/// POST /breaches/{id}/queue-authority-notification, generate the exact
 /// Art. 33(3) submission package and open the mandatory human task.
 async fn breach_queue_authority_notification(
     State(state): State<Arc<AppState>>,
@@ -1599,7 +1599,7 @@ pub struct BreachSubmissionBody {
     pub submitted_by: String,
 }
 
-/// POST /breaches/{id}/record-submission — store the exact submitted
+/// POST /breaches/{id}/record-submission, store the exact submitted
 /// notification, its hash, the timestamp and the authority reference.
 async fn breach_record_submission(
     State(state): State<Arc<AppState>>,
@@ -1651,7 +1651,7 @@ pub struct BreachReceiptBody {
     pub received_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
-/// POST /breaches/{id}/record-receipt — the ONLY path to
+/// POST /breaches/{id}/record-receipt, the ONLY path to
 /// `authority_acknowledged`; requires the authority's receipt.
 async fn breach_record_receipt(
     State(state): State<Arc<AppState>>,
@@ -1688,7 +1688,7 @@ pub struct BreachSubjectNotificationBody {
     pub recipients: Vec<String>,
 }
 
-/// POST /breaches/{id}/queue-subject-notifications — durable Art. 34 outbox.
+/// POST /breaches/{id}/queue-subject-notifications, durable Art. 34 outbox.
 async fn breach_queue_subject_notifications(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -1723,7 +1723,7 @@ pub struct BreachSubjectDeliveryBody {
     pub delivery_evidence: Option<serde_json::Value>,
 }
 
-/// POST /breaches/{id}/record-subject-delivery — delivery evidence for one
+/// POST /breaches/{id}/record-subject-delivery, delivery evidence for one
 /// subject notification.
 async fn breach_record_subject_delivery(
     State(state): State<Arc<AppState>>,
@@ -1752,7 +1752,7 @@ async fn breach_record_subject_delivery(
     }
 }
 
-/// GET /breaches/{id}/tasks — open mandatory authority tasks.
+/// GET /breaches/{id}/tasks, open mandatory authority tasks.
 async fn breach_open_tasks(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -1771,7 +1771,7 @@ async fn breach_open_tasks(
     }
 }
 
-/// POST /breaches/{id}/resolve — close a breach report.
+/// POST /breaches/{id}/resolve, close a breach report.
 async fn breach_resolve(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -1783,7 +1783,7 @@ async fn breach_resolve(
         Err(e) => {
             error!("Breach resolve failed: {e}");
             // A state-machine refusal (still pending, wrong state) is a
-            // conflict the caller can act on — not an internal fault.
+            // conflict the caller can act on, not an internal fault.
             Err(err_json(
                 StatusCode::CONFLICT,
                 "Failed to resolve breach report",
@@ -1816,7 +1816,7 @@ pub struct DoiConfirmBody {
 
 // ── DOI Handlers ─────────────────────────────────────────────────────────
 
-/// POST /gdpr/initiate-doi — initiate the Double Opt-In flow.
+/// POST /gdpr/initiate-doi, initiate the Double Opt-In flow.
 ///
 /// Validates the consent type, authenticates the request, and delegates to
 /// `GdprAutomation::initiate_double_opt_in`. On success returns the raw
@@ -1862,7 +1862,7 @@ async fn gdpr_initiate_doi(
     }
 }
 
-/// POST /gdpr/confirm-doi — confirm the Double Opt-In flow with the token.
+/// POST /gdpr/confirm-doi, confirm the Double Opt-In flow with the token.
 ///
 /// Validates the consent type, authenticates the request, and delegates to
 /// `GdprAutomation::confirm_double_opt_in`. On success the consent is recorded
@@ -2256,7 +2256,7 @@ mod tests {
 
     #[test]
     fn secret_store_error_maps_expiry_missing_and_unconfigured() {
-        // An expired secret is 410 Gone — a client-visible state, not a fault.
+        // An expired secret is 410 Gone, a client-visible state, not a fault.
         let (code, body) = secret_store_error("Secret has expired");
         assert_eq!(code, StatusCode::GONE);
         assert_eq!(body.0["error"], "Secret has expired");
@@ -2291,7 +2291,7 @@ mod tests {
         })
     }
 
-    /// Helper: create a fake PgPool that lazily connects — the connection will
+    /// Helper: create a fake PgPool that lazily connects, the connection will
     /// be attempted only when a real query runs.  Since `analyze_policy` uses
     /// `unwrap_or_default()` for its DB fetch, the analysis succeeds; only
     /// `persist_result` (INSERT) will fail, proving all analyzers executed.
@@ -2355,7 +2355,7 @@ mod tests {
     /// Test the spam detection layer with heavy spam triggers:
     /// "BUY NOW!!! FREE!!! CLICK HERE!!!" with excessive caps and punctuation.
     /// The scanner runs all 4 analyzers; `analyze_policy` (which hits the fake DB)
-    /// fails first with a connection error — an `Err` here proves the pipeline
+    /// fails first with a connection error, an `Err` here proves the pipeline
     /// executed up to the DB call without panicking.
     #[test]
     fn test_spam_layer_identifies_spammy_content() {
@@ -2379,7 +2379,7 @@ mod tests {
     }
 
     /// Verify clean email with unsubscribe link is NOT flagged as spam through
-    /// the full pipeline. The error is expected — the fake DB connection in
+    /// the full pipeline. The error is expected, the fake DB connection in
     /// `analyze_policy` fails before `persist_result` is reached.
     #[test]
     fn test_spam_layer_clean_content_not_spam() {
@@ -2416,7 +2416,7 @@ mod tests {
     }
 
     /// Test the phishing layer with URL shorteners (bit.ly) and suspicious
-    /// TLDs (.xyz, .top) — common phishing delivery mechanisms.
+    /// TLDs (.xyz, .top), common phishing delivery mechanisms.
     #[test]
     fn test_phishing_layer_url_shortener_and_tld() {
         let scanner = test_scanner();
@@ -2500,7 +2500,7 @@ mod tests {
         assert!(result.is_err(), "Expected DB persist error, got Ok");
     }
 
-    /// Test double-extension detection: document.pdf.exe — the scanner should
+    /// Test double-extension detection: document.pdf.exe, the scanner should
     /// flag the final .exe extension as a double-extension threat.
     #[test]
     fn test_malware_layer_double_extension() {
@@ -2608,7 +2608,7 @@ mod tests {
 
     // ── 7. Edge Case Tests ──────────────────────────────────────
 
-    /// Test with completely empty content — no subject, no body, no headers.
+    /// Test with completely empty content, no subject, no body, no headers.
     /// Verifies the scanner handles degenerate input without panicking.
     #[test]
     fn test_edge_case_empty_content() {
@@ -2629,7 +2629,7 @@ mod tests {
         assert!(result.is_err(), "Expected DB persist error, got Ok");
     }
 
-    /// Test with very long content — 10 KB of repeated characters in the body.
+    /// Test with very long content, 10 KB of repeated characters in the body.
     /// Verifies the scanner handles large inputs without OOM or regex backtracking.
     #[test]
     fn test_edge_case_very_long_content() {
@@ -2874,7 +2874,7 @@ mod tests {
     }
 
     /// Helper: create a test AppState with fake pools for all services.
-    /// The DB and Redis are fake — any actual query will fail at runtime,
+    /// The DB and Redis are fake, any actual query will fail at runtime,
     /// which allows us to verify code-path execution via expected DB errors.
     fn test_app_state() -> Arc<AppState> {
         // SecretManager::new() → derive_key() reads SECRETS_KDF_SALT from env
@@ -2959,7 +2959,7 @@ mod tests {
         };
         let rt = test_runtime();
         let response = rt.block_on(gdpr_initiate_doi(State(state), headers, Json(body)));
-        // 500 because the fake DB will fail on INSERT — this proves the
+        // 500 because the fake DB will fail on INSERT, this proves the
         // consent-type validation and token auth both passed.
         assert_eq!(result_status(response), StatusCode::INTERNAL_SERVER_ERROR);
     }
@@ -3010,7 +3010,7 @@ mod tests {
         };
         let rt = test_runtime();
         let response = rt.block_on(gdpr_confirm_doi(State(state), headers, Json(body)));
-        // 500 because the fake DB fails — proves auth + consent type
+        // 500 because the fake DB fails, proves auth + consent type
         // validation passed.
         assert_eq!(result_status(response), StatusCode::INTERNAL_SERVER_ERROR);
     }
@@ -3048,7 +3048,7 @@ mod tests {
 
     /// Test that an empty string token still passes the validation
     /// layers and reaches the DB (which returns an error). With a fake
-    /// DB the SELECT fails, so we get a 500 — proving consent-type
+    /// DB the SELECT fails, so we get a 500, proving consent-type
     /// validation accepts the token field regardless of content.
     #[test]
     fn test_confirm_doi_empty_token_reaches_db() {
@@ -3294,7 +3294,7 @@ mod tests {
     }
 
     /// D: the 6th verification attempt within the window is rejected with
-    /// 429 — the fake-DB failures on attempts 1-5 must NOT reset or bypass
+    /// 429, the fake-DB failures on attempts 1-5 must NOT reset or bypass
     /// the limit (the old `_ => {}` swallow let these through forever).
     #[test]
     fn test_verify_sixth_attempt_is_rate_limited() {
@@ -3341,7 +3341,7 @@ mod tests {
         assert_eq!(response.unwrap_err().0, StatusCode::UNAUTHORIZED);
     }
 
-    /// G: unknown export id never yields 200 — with the fake pool the DB
+    /// G: unknown export id never yields 200, with the fake pool the DB
     /// fetch fails, exercising only the wiring (the real 404 path is covered
     /// by the DB-gated integration tests).
     /// P1-SECURITY (required tenant scoping): the caller now also asserts the
@@ -3458,7 +3458,7 @@ mod tests {
         out
     }
 
-    /// F56: this crate pins axum 0.7, whose path syntax is `:name` — the
+    /// F56: this crate pins axum 0.7, whose path syntax is `:name`, the
     /// `{name}` form is axum 0.8+ and silently never matches real path
     /// segments here. Every route literal must use `:` captures (or be
     /// static), and the two files together must carry exactly the 32
@@ -3473,7 +3473,7 @@ mod tests {
         for file in ["src/routes.rs", "src/admin_routes.rs"] {
             let full = std::fs::read_to_string(format!("{manifest}/{file}"))
                 .unwrap_or_else(|e| panic!("cannot read {file}: {e}"));
-            // Scan production code only — the test module's own literals
+            // Scan production code only, the test module's own literals
             // (including this scanner's needle) must not be counted.
             let src = &full[..full.find("#[cfg(test)]").unwrap_or(full.len())];
             for (line, path) in route_path_literals(src) {
@@ -3995,7 +3995,7 @@ mod db_tests {
             json!({"action": "create", "resource": "email"}),
             json!({"action": "create", "resource": "email", "tenant_id": tenant, "outcome": "maybe"}),
             // P1-SECURITY: a blank tenant would mint an unattributed ""-keyed
-            // hash chain — refused like a missing one.
+            // hash chain, refused like a missing one.
             json!({"action": "create", "resource": "email", "tenant_id": "   "}),
         ] {
             let (code, _) = error_of(audit_create(State(state.clone()), auth(), Json(bad)).await);
@@ -4028,7 +4028,7 @@ mod db_tests {
             StatusCode::OK
         );
         // P1-SECURITY (required tenant scoping): the stats aggregate and the
-        // by-entry read are tenant-scoped — the caller asserts the tenant via
+        // by-entry read are tenant-scoped, the caller asserts the tenant via
         // ?tenant_id= (or X-Tenant-Id).
         assert_eq!(
             status(
@@ -4418,7 +4418,7 @@ mod db_tests {
         // Stats: explicit zeros for a tenant with no requests, and the tenant
         // comes from the query string or the header.
         // P1-SECURITY (required tenant scoping): with NEITHER selector the
-        // route no longer aggregates all tenants — it refuses with 401. The
+        // route no longer aggregates all tenants, it refuses with 401. The
         // same request with the X-Tenant-Id header stays a scoped OK.
         let (code, _) = error_of(gdpr_stats(State(state.clone()), auth(), query(&[])).await);
         assert_eq!(code, StatusCode::UNAUTHORIZED);
@@ -4453,7 +4453,7 @@ mod db_tests {
         assert_eq!(code, StatusCode::FORBIDDEN);
 
         // Export download: unknown id is 404 (the required tenant selector is
-        // asserted too — see P1-SECURITY above).
+        // asserted too, see P1-SECURITY above).
         assert_eq!(
             status(
                 gdpr_download_export(
@@ -5000,7 +5000,7 @@ mod db_tests {
         );
         assert_server_error(code, "secret create");
         // P1-SECURITY (required tenant scoping): a missing tenant_id is a 400
-        // before any DB access — the literal-"default" fallback is gone — so
+        // before any DB access, the literal-"default" fallback is gone, so
         // the outage is exercised with the parameter present.
         let (code, _) = error_of(secret_list(State(state.clone()), auth(), query(&[])).await);
         assert_eq!(code, StatusCode::BAD_REQUEST);
@@ -5110,7 +5110,7 @@ mod db_tests {
     }
 
     /// CORS: the router builds with a valid configured origin (exact match)
-    /// and — F-15 — fails CLOSED (deny all) on an unparseable one, without
+    /// and, F-15, fails CLOSED (deny all) on an unparseable one, without
     /// panicking either way.
     #[tokio::test]
     async fn cors_origin_configuration_arms() {
@@ -5170,7 +5170,7 @@ mod db_tests {
         );
 
         // The in-memory verification limiter (5 attempts) answers 429 once
-        // the attempt window is exhausted — even with an invalid token, the
+        // the attempt window is exhausted, even with an invalid token, the
         // attempt itself is consumed (the brute-force guard).
         let (request, _token) = state
             .gdpr
@@ -5293,7 +5293,7 @@ mod db_tests {
             .await
             .expect("tenant A's entry exists");
 
-        // 1. NO selector on a tenant-scoped aggregate is a 401 — never an
+        // 1. NO selector on a tenant-scoped aggregate is a 401, never an
         //    all-tenant aggregate (the old `get_stats(None)` /
         //    `get_request_stats(None)` behaviour).
         assert_eq!(
@@ -5493,7 +5493,7 @@ mod db_tests {
         );
 
         // A grant row without a secret row: access passes, the read reports
-        // 404 (Ok(None)) — existence is only denied-or-confirmed, never faked.
+        // 404 (Ok(None)), existence is only denied-or-confirmed, never faked.
         let ghost = test_support::short_id("sec");
         sqlx::query(
             "INSERT INTO secret_access (id, secret_id, user_id, access_type, granted_by)
@@ -5517,7 +5517,7 @@ mod db_tests {
     }
 
     /// The tenant-level DSAR quota surfaces as ITS variant (429 with the
-    /// tenant message): the subject's own limit is not exhausted — a second
+    /// tenant message): the subject's own limit is not exhausted, a second
     /// subject burned the tenant's slot, and the handler must still refuse.
     #[tokio::test]
     async fn gdpr_submit_reports_the_tenant_quota_variant() {
@@ -5570,12 +5570,12 @@ mod db_tests {
         // The D-fix contract: the Verification variant can never be produced
         // by `check_submission` (it only peeks user/tenant kinds), so the
         // submit handler's third refusal arm is a defensive exhaustive-match
-        // guard. coverage: justified — structurally unreachable by design.
+        // guard. coverage: justified, structurally unreachable by design.
     }
 
     /// PINNED (deliberate design, considered by the 2026-09 privilege-
     /// boundary audit): `/risk/stats` and `/risk/critical` are FLEET-level
-    /// operations aggregates — the platform operator legitimately needs the
+    /// operations aggregates, the platform operator legitimately needs the
     /// all-tenant view (which tenants are at critical risk) and the risk
     /// engine offers no per-tenant variant of these two. Unlike
     /// `/gdpr/stats` and `/audit/stats` they were never tenant-parameterized,
@@ -5590,7 +5590,7 @@ mod db_tests {
             return;
         };
         // Both aggregates stay authenticated (no token → 401) and reachable
-        // with it — pinned so a future silent change of that decision is
+        // with it, pinned so a future silent change of that decision is
         // visible to the next audit.
         assert_eq!(
             status(risk_stats(State(state.clone()), HeaderMap::new()).await),
@@ -5744,7 +5744,7 @@ mod db_tests {
     }
 
     /// A processed export whose download window has lapsed is served as 410
-    /// GONE — the expiry is enforced, not just recorded.
+    /// GONE, the expiry is enforced, not just recorded.
     #[tokio::test]
     async fn expired_export_download_is_gone() {
         let Some(state) = state("dlgone").await else {

@@ -1,6 +1,6 @@
 //! E-SWEEP-TRIGGER (compliance sibling): the `--sweep-once` one-shot
 //! entrypoint drives the REAL compliance-server binary against a private
-//! canonical DB clone and asserts the printed report — the ops trigger end to
+//! canonical DB clone and asserts the printed report, the ops trigger end to
 //! end (live dogfood 2026-10-08: the periodic ticks were the only DSR
 //! trigger). The sweep semantics themselves are covered by the bin's tick
 //! tests; here the ENTRYPOINT is the subject, the same pattern as the

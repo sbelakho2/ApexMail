@@ -4,7 +4,7 @@
 //! and the dry-run-writes-nothing contract.
 //!
 //! Fixtures are tiny inline files in the providers' own shapes (self-contained
-//! — no fixture directory to drift).
+//!, no fixture directory to drift).
 
 #![cfg(test)]
 
@@ -33,7 +33,7 @@ email,created,reason,status
 blocked@example.com,2026-08-05 08:00:00,550 Rejected due to a prior bounce,5.1.1
 ";
 
-/// SendGrid spam-report CSV export (email, created, ip — no reason column).
+/// SendGrid spam-report CSV export (email, created, ip, no reason column).
 const SENDGRID_SPAM_CSV: &str = "\
 email,created,ip
 spammy@example.com,2026-08-06 12:00:00,203.0.113.7
@@ -1064,7 +1064,7 @@ async fn sendgrid_templates_convert_safely_and_mark_unconvertible_ones() {
 
     // Template 2: the {{#each}} block is NOT converted (kept verbatim), the
     // triple-brace tag is converted with a named semantic warning, and the
-    // row is marked needs_review — nothing was silently mangled.
+    // row is marked needs_review, nothing was silently mangled.
     let receipt = &body["templates"][1];
     assert_eq!(receipt["needs_review"], true, "{body}");
     assert!(

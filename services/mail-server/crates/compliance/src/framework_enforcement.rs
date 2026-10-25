@@ -371,7 +371,7 @@ impl FrameworkEnforcer {
                     );
                 }
                 warnings.push(
-                    "LGPD: DPA contact: ANPD (Brazil) — https://www.gov.br/anpd/pt-br".into(),
+                    "LGPD: DPA contact: ANPD (Brazil), https://www.gov.br/anpd/pt-br".into(),
                 );
             }
             ComplianceAction::ExportDataToThirdParty => {
@@ -398,11 +398,11 @@ impl FrameworkEnforcer {
                 }
                 if _ctx.get("purpose_limited").map(String::as_str) != Some("true") {
                     warnings.push(
-                        "PDPA: purpose limitation — data used only for stated purpose".into(),
+                        "PDPA: purpose limitation, data used only for stated purpose".into(),
                     );
                 }
                 warnings.push(
-                    "PDPA: DPA contact: PDPC Singapore — https://www.pdpc.gov.sg/contact-us"
+                    "PDPA: DPA contact: PDPC Singapore, https://www.pdpc.gov.sg/contact-us"
                         .into(),
                 );
             }
@@ -413,7 +413,7 @@ impl FrameworkEnforcer {
                     );
                 }
                 warnings.push(
-                    "PDPA: notification obligation — inform individuals of purpose".into(),
+                    "PDPA: notification obligation, inform individuals of purpose".into(),
                 );
             }
             _ => {}
@@ -430,7 +430,7 @@ impl FrameworkEnforcer {
             ComplianceAction::ProcessHealthData => {
                 if _ctx.get("prior_authorization").map(String::as_str) != Some("true") {
                     blocks.push(
-                        "POPIA: Section 27 — prior authorization required for processing special personal information"
+                        "POPIA: Section 27, prior authorization required for processing special personal information"
                             .into(),
                     );
                 }
@@ -443,7 +443,7 @@ impl FrameworkEnforcer {
                     );
                 }
                 warnings.push(
-                    "POPIA: DPA contact: SA Information Regulator — https://inforegulator.org.za/contact/"
+                    "POPIA: DPA contact: SA Information Regulator, https://inforegulator.org.za/contact/"
                         .into(),
                 );
             }

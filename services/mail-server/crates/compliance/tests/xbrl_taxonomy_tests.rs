@@ -3,7 +3,7 @@
 //!
 //! The fixture under `tests/fixtures/ee_annual_report/` is a real
 //! entry-point schema with imports, an include, a presentation linkbase, a
-//! label linkbase and a calculation linkbase — not a stub. Nothing here
+//! label linkbase and a calculation linkbase, not a stub. Nothing here
 //! claims to be the official Estonian e-aruande taksonoomia (the target
 //! namespace is `apexmail.test`); the point is that the loader, the emitter
 //! and the validator depend on a taxonomy rather than on invented names.
@@ -295,7 +295,7 @@ fn emitted_instance_reparses_and_every_fact_validates() {
     );
 
     // Every emitted fact resolves through the taxonomy or the extension
-    // schema — nothing is invented.
+    // schema, nothing is invented.
     for fact in &output.document.facts {
         assert!(
             config.taxonomy.concept(&fact.concept).is_some()

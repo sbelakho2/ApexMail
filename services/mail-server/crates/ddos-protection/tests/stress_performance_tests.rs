@@ -371,7 +371,7 @@ async fn stress_protector_evaluation_throughput() {
     // Throughput is measured as the BEST of three batches, not one. A single
     // batch measures the scheduler as much as the code: under `cargo nextest`
     // (the CI runner) every crate's tests run concurrently, so one batch can
-    // be descheduled for most of its wall time — observed as 2,984 ops/sec on
+    // be descheduled for most of its wall time, observed as 2,984 ops/sec on
     // an otherwise-capable host. The best batch reports what the host CAN do,
     // which is what a throughput floor is about; a real regression (an order
     // of magnitude, not 2x) still fails.
@@ -457,7 +457,7 @@ fn stress_connection_tracker_contention() {
                 ]);
 
                 let _ = tracker.register_connection(ip);
-                // Don't unregister — just measure registration throughput
+                // Don't unregister, just measure registration throughput
             }
         }));
     }

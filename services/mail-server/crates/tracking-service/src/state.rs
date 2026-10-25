@@ -15,7 +15,7 @@ use crate::config::Config;
 use crate::processor::EventProcessor;
 
 /// The single source-of-truth for shared resources passed to axum extractors.
-/// Cloning is O(1) — every field is either `Arc<T>` or `Clone + Copy`.
+/// Cloning is O(1), every field is either `Arc<T>` or `Clone + Copy`.
 #[derive(Clone)]
 pub struct AppState {
     /// AES-128-GCM codec for encoding / decoding tracking tokens.
@@ -40,13 +40,13 @@ pub struct AppState {
     /// Key :`"{tenant_id}:{domain}"`
     /// Value:`true` if the domain is allowed for that tenant,
     /// `false` otherwise.
-    /// TTL = 60 s, max = 10 000 entries — matches `routes.ts` DOMAIN_CACHE_TTL_MS.
+    /// TTL = 60 s, max = 10 000 entries, matches `routes.ts` DOMAIN_CACHE_TTL_MS.
     pub domain_cache: Arc<Cache<String, bool>>,
 
     /// Per-tenant webhook-ID cache for unsubscribe event dispatching.
     /// Key :`"{tenant_id}"`
     /// Value:list of enabled webhook IDs for `recipient.unsubscribed`.
-    /// TTL = 60 s, max = 5 000 entries — matches `routes.ts` WEBHOOK_CACHE_TTL_MS.
+    /// TTL = 60 s, max = 5 000 entries, matches `routes.ts` WEBHOOK_CACHE_TTL_MS.
     pub webhook_cache: Arc<Cache<String, Vec<String>>>,
 }
 

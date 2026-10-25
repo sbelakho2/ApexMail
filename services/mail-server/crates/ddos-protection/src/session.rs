@@ -14,13 +14,13 @@ use crate::RequestContext;
 /// Hard cap on a session's timestamped recent-request deque.
 ///
 /// The deque is pruned by window on every read, but a client flooding at
-/// thousands of requests/second pushes one entry per request — without a cap
+/// thousands of requests/second pushes one entry per request, without a cap
 /// it would grow to `rate × window` entries before anything expires. 512
 /// entries is far more than the largest window this crate asks about
 /// (10 s × 50 rps), and the oldest samples are dropped past it.
 const MAX_RECENT_REQUEST_TIMES: usize = 512;
 
-/// Suffixes of a page's own sub-resources — the stylesheet, script, font or
+/// Suffixes of a page's own sub-resources, the stylesheet, script, font or
 /// image a document loads alongside its HTML.
 ///
 /// These are NOT independent client behaviour: a browser fetches them because
@@ -95,7 +95,7 @@ pub struct Session {
     /// needs. `request_count / age` cannot supply it: a cumulative average
     /// over the whole session is monotonically non-decreasing for any client
     /// that keeps making requests, so feeding it to a Z-score detector made
-    /// "under attack" a mathematical certainty — see
+    /// "under attack" a mathematical certainty, see
     /// [`Session::rate_per_sec`].
     pub recent_request_times: VecDeque<Instant>,
 }
@@ -179,7 +179,7 @@ impl Session {
     /// own history eventually crosses any threshold. Live run 2026-10-22:
     /// that declared a browser "under attack" after ~12 requests of ordinary
     /// console browsing, collapsed the threshold to half the baseline rate,
-    /// and 429'd every subsequent request — including the page's own
+    /// and 429'd every subsequent request, including the page's own
     /// `/assets/globals.css`, which the browser then refused as a stylesheet
     /// (wrong MIME type), leaving the console blank and unstyled.
     ///
@@ -396,7 +396,7 @@ impl SessionTracker {
     ///
     /// Evicts a 10% batch of the least-recently-active sessions down to the
     /// target size. Eviction no longer requires sessions to be idle for 60s
-    /// — an active flood at capacity previously removed nothing and let the
+    ///, an active flood at capacity previously removed nothing and let the
     /// table grow without bound between cleanup ticks.
     fn enforce_capacity(&self) {
         if self.max_sessions == 0 || self.sessions.len() < self.max_sessions {
@@ -438,7 +438,7 @@ pub struct SessionInfo {
     /// Session age in seconds
     pub age_secs: u64,
     /// Requests per second over the trailing
-    /// [`RATE_OBSERVATION_WINDOW_SECS`] window — the instantaneous rate the
+    /// [`RATE_OBSERVATION_WINDOW_SECS`] window, the instantaneous rate the
     /// adaptive limiter consumes.
     pub recent_rate_per_sec: f64,
 }

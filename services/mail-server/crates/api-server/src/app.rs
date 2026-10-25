@@ -1,4 +1,4 @@
-//! Application builder — assembles all middleware and routes into an Axum `Router`.
+//! Application builder, assembles all middleware and routes into an Axum `Router`.
 
 use axum::error_handling::HandleErrorLayer;
 use axum::extract::FromRequestParts;
@@ -56,7 +56,7 @@ async fn handle_backpressure_error(error: BoxError) -> Response {
             Json(serde_json::json!({
                 "error": {
                     "code": "SERVICE_TIMEOUT",
-                    "message": "the request timed out — please retry in a moment"
+                    "message": "the request timed out, please retry in a moment"
                 }
             })),
         )
@@ -69,7 +69,7 @@ async fn handle_backpressure_error(error: BoxError) -> Response {
         Json(serde_json::json!({
             "error": {
                 "code": "SERVICE_OVERLOADED",
-                "message": "the service is busy — please retry in a moment"
+                "message": "the service is busy, please retry in a moment"
             }
         })),
     )
@@ -445,7 +445,7 @@ pub fn build_app(state: AppState) -> Router {
         // No-JS cookie consent endpoint (marketing banner links here).
         // Same public rate-limit stack = the light per-IP bucketing.
         .merge(routes::web::consent_router())
-        // Mollie webhook ingest — previously mounted ONLY by the
+        // Mollie webhook ingest, previously mounted ONLY by the
         // billing-service binary, which has no container in any deployed
         // topology, so provider deliveries 404'd and cycle close never saw
         // them (dogfood finding A, 2026-10-05). The route is unauthenticated
@@ -460,7 +460,7 @@ pub fn build_app(state: AppState) -> Router {
         .merge(routes::web::detail_router())
         // B3 public receipt verification: the Ed25519 key + the stateless
         // verify endpoint. Unauthenticated BY DESIGN (a proof only its issuer
-        // can check is not a proof) — the public rate-limit stack below is
+        // can check is not a proof), the public rate-limit stack below is
         // the only guard, and the handler never touches the database.
         .nest(
             "/v1/routing/receipts",
@@ -509,9 +509,9 @@ pub fn build_app(state: AppState) -> Router {
         .nest_service("/js", ServeDir::new(format!("{marketing_public}/js")))
         // Root-level assets the built pages reference directly. Without these
         // arms the api-server-served marketing host 404s:
-        //   * /giallo.css — loaded by the 14 code-heavy pages (docs, quickstart,
+        //   * /giallo.css, loaded by the 14 code-heavy pages (docs, quickstart,
         //     architecture), so a missing route stripped syntax highlighting;
-        //   * /specs/openapi.yaml — the downloadable API contract linked from
+        //   * /specs/openapi.yaml, the downloadable API contract linked from
         //     /docs/api/openapi/.
         // The marketing container's nginx served both from disk, which is how
         // the gap stayed invisible (same defect class as the versioned-
@@ -541,7 +541,7 @@ pub fn build_app(state: AppState) -> Router {
             "/sitemap.xml",
             ServeFile::new(format!("{marketing_public}/sitemap.xml")),
         )
-        // Thunderbird / Apple Mail autoconfig — served at the well-known path so
+        // Thunderbird / Apple Mail autoconfig, served at the well-known path so
         // clients auto-discover IMAPS (993) + SMTP submission (587) on mail.apexmail.ee
         // without requiring a separate autoconfig.apexmail.ee DNS record.
         .nest_service(
@@ -556,7 +556,7 @@ pub fn build_app(state: AppState) -> Router {
         )
         // RFC 9116 vulnerability-disclosure file. The Zola build ships
         // `/.well-known/security.txt` in the marketing public dir, and the
-        // standalone nginx marketing host always served it — but the SSR
+        // standalone nginx marketing host always served it, but the SSR
         // router's asset list omitted the path, so `https://apexmail.ee/
         // .well-known/security.txt` (the Canonical: value inside the file
         // itself, and the brief's required probe) 404'd on every host routed
@@ -623,7 +623,7 @@ pub fn build_app(state: AppState) -> Router {
     // ── Control-plane (`/v1/admin/*`) routes ─────────────────
     // The wildcard scope "*" is granted to every tenant's admin/owner so they
     // can manage their OWN tenant's resources on customer routes. That scope
-    // must NOT grant control-plane access — otherwise any tenant administrator
+    // must NOT grant control-plane access, otherwise any tenant administrator
     // could operate the entire platform. `require_system_tenant_middleware`
     // rejects any caller whose `tenant_id` is not `system`. It is layered on
     // this dedicated router, which is then merged into `authenticated`, so for
@@ -656,7 +656,7 @@ pub fn build_app(state: AppState) -> Router {
             routes::admin::deliverability::router(),
         )
         .nest("/v1/admin/content", routes::admin::content::router())
-        // P0: ApexMail's sales brain is OWNER-ONLY — a system admin or a
+        // P0: ApexMail's sales brain is OWNER-ONLY, a system admin or a
         // machine credential is not the owner. The gate is structural (a
         // layer around the whole router), not a per-handler check.
         //
@@ -724,7 +724,7 @@ pub fn build_app(state: AppState) -> Router {
         .nest("/v1/admin/vat", routes::admin::vat::router())
         // US sales-tax nexus administration (plan WP C2): the rate-file view
         // plus the operator registration surface. Registration is the ONLY
-        // thing that makes sales tax compute on new invoices — the sweep
+        // thing that makes sales tax compute on new invoices, the sweep
         // tracks thresholds and alerts, and never charges.
         // The operator's billing control tower: money, entitlement, collections,
         // incidents, webhook health and settlements in one surface.
@@ -743,13 +743,13 @@ pub fn build_app(state: AppState) -> Router {
             "/v1/admin/billing/abuse",
             routes::admin::billing_abuse::router(),
         )
-        // Bank statement ingestion — writes bank_statement_lines, the source
+        // Bank statement ingestion, writes bank_statement_lines, the source
         // the compliance cron's sweep posts (compliance::ledger_sweep).
         .nest("/v1/admin/accounting", routes::bank_statements::router())
         // SM3 (audit F3): the financially destructive billing-admin routes
         // (wallet credits, plan overrides, forced subscription status,
         // invoice creation) ride the SAME control-plane stack as
-        // /v1/admin/* — system-tenant gate + MFA'd CP session policy —
+        // /v1/admin/*, system-tenant gate + MFA'd CP session policy —
         // instead of the plain authenticated router. The CP gate's
         // machine-credential carve-out (system-tenant API keys, audited as
         // `cp_machine_key`) keeps programmatic callers alive.
@@ -798,7 +798,7 @@ pub fn build_app(state: AppState) -> Router {
         })
         .nest("/v1/messages", routes::messages::router())
         // Time-travel debugging: the state-replay timeline over the
-        // append-only delivery sources (separate file, same prefix — the
+        // append-only delivery sources (separate file, same prefix, the
         // route tables merge; `/:id/timeline` is distinct from the base
         // router's `/` and `/:id`).
         .nest("/v1/messages", routes::message_timeline::router())
@@ -863,14 +863,14 @@ pub fn build_app(state: AppState) -> Router {
         //
         //   ddos → require_auth → rate_limit → tenant_binding → idempotency → handler
         //
-        //   * ddos first   — cheap load-shedding before expensive auth work.
-        //   * require_auth before rate_limit/idempotency — both of those read
+        //   * ddos first  , cheap load-shedding before expensive auth work.
+        //   * require_auth before rate_limit/idempotency, both of those read
         //     `AuthUser` (tenant_id) from request extensions and MUST run only
         //     after auth populates it. Running them before auth (the previous
         //     order) caused every authenticated request to be rate-bucketed as
         //     "anonymous" and allowed cross-tenant `Idempotency-Key` response
         //     leaks.
-        //   * tenant_binding after require_auth — it validates the optional
+        //   * tenant_binding after require_auth, it validates the optional
         //     X-Tenant-ID header against the authenticated identity (and DB
         //     membership on mismatch), so it needs `AuthUser` populated. It
         //     no-ops when the header is absent.
@@ -913,11 +913,11 @@ pub fn build_app(state: AppState) -> Router {
     // `POST /email/batch`) and Resend (`POST /emails`,
     // `POST /emails/batch`). A PURE mapping layer onto the canonical send
     // path (routes::compat delegates to routes::messages::send_message /
-    // send_batch — same validation, DKIM/sender-domain gate, suppression and
+    // send_batch, same validation, DKIM/sender-domain gate, suppression and
     // consent enforcement, entitlements/quota admission, ledger and queue
     // inserts). Mounted OUTSIDE the canonical authenticated stack because the
     // credential arrives in the PROVIDER's header (Bearer/Basic/
-    // X-Postmark-Server-Token) and every refusal — including an auth refusal —
+    // X-Postmark-Server-Token) and every refusal, including an auth refusal —
     // must come back in the provider's own error shape; the compat router
     // installs its own provider-shaped auth middleware followed by the SAME
     // per-tenant rate limiter, and its own outermost DDoS layer (the same
@@ -947,18 +947,18 @@ pub fn build_app(state: AppState) -> Router {
         .layer(axum::middleware::from_fn(
             versioning::api_versioning_middleware,
         ))
-        // SM10 F4: data-plane STONITH — with APEXMAIL_HA_FENCING=true a
+        // SM10 F4: data-plane STONITH, with APEXMAIL_HA_FENCING=true a
         // fenced node (or one that cannot prove otherwise) answers every
         // mutating request with 503 before any route or auth work runs.
         // Default off: the middleware is a pass-through with no Redis I/O.
         .layer(axum::middleware::from_fn(fence::fence_middleware))
         .layer(overload_protection)
-        // Prometheus request metrics — placed after the router so MatchedPath is
+        // Prometheus request metrics, placed after the router so MatchedPath is
         // available from extensions, but before compression/timeout so the
         // recorded duration is accurate end-to-end.
         .layer(axum::middleware::from_fn(metrics::metrics_middleware))
         .layer(CompressionLayer::new())
-        // F48: one documented request-body maximum — 40 MiB — sized for the
+        // F48: one documented request-body maximum, 40 MiB, sized for the
         // advertised 25 MiB decoded aggregate attachment contract plus ~33%
         // base64 overhead plus the JSON envelope (deploy/nginx/nginx.conf
         // client_max_body_size and packages/contract/send-contract.json
@@ -1010,7 +1010,7 @@ static HDR_XSS_PROTECTION: HeaderValue = HeaderValue::from_static("0");
 static HDR_REFERRER_POLICY: HeaderValue =
     HeaderValue::from_static("strict-origin-when-cross-origin");
 /// F65: `no-referrer` for surfaces whose URL embeds a one-time secret (the
-/// email-verification exchange) — the strictest policy; nothing about the
+/// email-verification exchange), the strictest policy; nothing about the
 /// request URL may leak onward.
 static NO_REFERRER: HeaderValue = HeaderValue::from_static("no-referrer");
 static HDR_CACHE_CONTROL: HeaderValue =
@@ -1037,7 +1037,7 @@ async fn security_headers(
     headers.insert("X-Content-Type-Options", HDR_CONTENT_TYPE_OPTIONS.clone());
     headers.insert("X-XSS-Protection", HDR_XSS_PROTECTION.clone());
     // F65: a handler may pin a STRICTER per-surface Referrer-Policy (e.g.
-    // `no-referrer` on the token-bearing verification exchange) — respect
+    // `no-referrer` on the token-bearing verification exchange), respect
     // a pre-set value instead of overwriting it, exactly like
     // X-Frame-Options/CSP above.
     if !headers.contains_key("Referrer-Policy") {
@@ -1076,7 +1076,7 @@ async fn security_headers(
 /// Everything the api-server serves is either a private console page (never
 /// cacheable: `no-store`) or one of the marketing site's static assets.
 /// The static assets live at content-hashed or build-stamped URLs and MUST
-/// be cacheable — forcing `no-store` onto them made every page load
+/// be cacheable, forcing `no-store` onto them made every page load
 /// re-download every stylesheet, font, and image. Two tiers:
 ///
 /// - immutable build artifacts (`/css`, `/js`, `/fonts`, `/images`):
@@ -1085,7 +1085,7 @@ async fn security_headers(
 ///   (`/manifest.json`, `/sitemap.xml`, `/robots.txt`, icons, autoconfig):
 ///   `public, max-age=3600` (revalidated hourly);
 /// - the SSR console's `/assets/globals.css`: `no-cache, must-revalidate`,
-///   because its URL carries no content hash — an hour-long blind cache
+///   because its URL carries no content hash, an hour-long blind cache
 ///   kept serving the PREVIOUS stylesheet in open tabs after every deploy
 ///   (dogfood 2026-10-06: a redesigned page rendered with the old CSS). The
 ///   handler also emits an ETag and answers `If-None-Match` with a 304, so
@@ -1130,7 +1130,7 @@ fn browser_csp_header() -> HeaderValue {
 /// The auth pages that carry the KiwiCaptcha widget: (surface, path,
 /// scope). The scope must exist in the issuance allowlist in
 /// `routes::kiwicaptcha.rs` and in the `verify_kiwi_token` /
-/// `verify_kiwi_form_token` call of the matching form POST handler — the
+/// `verify_kiwi_form_token` call of the matching form POST handler, the
 /// three must stay in lockstep or the challenge a page mints can never
 /// satisfy its own form.
 ///
@@ -1174,7 +1174,7 @@ fn kiwi_query_param(uri: &Uri, key: &str) -> Option<String> {
 /// resolving the query variants:
 ///
 /// - `/login?mfa=1&email=…` (console) and the CP twin render the MFA
-///   challenge form — step two of the same login — so their widget mints a
+///   challenge form, step two of the same login, so their widget mints a
 ///   NEW `mfa-verify` challenge. The 6-digit second factor is guessable
 ///   within the per-USER lockout by a distributed attacker pacing under it
 ///   across many accounts, so the challenge form pays its own proof-of-work
@@ -1226,7 +1226,7 @@ fn kiwi_resend_scope_for_status(status: Option<&str>) -> Option<&'static str> {
 ///   Content Security policy directive because 'unsafe-eval' is not an
 ///   allowed source
 ///
-/// — leaving only the widget's JavaScript fallback and logging a CSP
+///, leaving only the widget's JavaScript fallback and logging a CSP
 /// violation on every auth page (live run 2026-10-22). The keyword permits
 /// WebAssembly compilation and NOTHING else: `eval()`, `new Function()` and
 /// inline script without the nonce all stay blocked, so this is strictly
@@ -1251,7 +1251,7 @@ fn auth_csp_header(nonce: &str) -> HeaderValue {
 /// ONE sanctioned exception to the zero-JS strip pass: the render output
 /// itself still contains no scripts (test-pinned in ui-foundation), and
 /// the only executable blocks are the KiwiCaptcha widget scripts injected
-/// here by this server — so the defensive strip is skipped for exactly
+/// here by this server, so the defensive strip is skipped for exactly
 /// this path and the nonce CSP is the control instead.
 fn auth_html_response(html: String, nonce: &str) -> Response {
     let mut response = Html(html).into_response();
@@ -1310,7 +1310,7 @@ fn inject_kiwi_widget(mut html: String, scope: &str, nonce: &str) -> String {
 ///
 /// Scope resolution (including the `mfa=1` and `status=error` variants)
 /// lives in [`kiwi_render_scope`]; the MFA step-two variant used to be
-/// excluded because step one consumed a captcha — it now carries its own
+/// excluded because step one consumed a captcha, it now carries its own
 /// `mfa-verify` challenge (see that function's rationale).
 fn kiwi_widget_for_render(surface: &str, uri: &Uri, kiwi_enabled: bool) -> Option<&'static str> {
     if !kiwi_enabled {
@@ -1352,7 +1352,7 @@ fn browser_html_response(html: String) -> Response {
 /// Browser HTML response for campaign/template PREVIEWS (audit F5): the
 /// previewed body is user-authored email HTML whose inline `style=`
 /// attributes and remote images are the point of the preview, so the page
-/// CSP allows inline styles and https/data images — while keeping the
+/// CSP allows inline styles and https/data images, while keeping the
 /// zero-JS posture (`script-src 'none'`, scripts stripped) and denying
 /// everything else `default-src 'none'` leaves.
 pub(crate) fn preview_html_response(html: String) -> Response {
@@ -1378,8 +1378,8 @@ fn html_response_with_csp(html: String, csp: HeaderValue) -> Response {
 /// GET/POST /consent with Domain=.apexmail.ee) is present, flip the
 /// banner's marker attribute to "recorded" so the stylesheet collapses
 /// it. This mirrors the marketing container's nginx sub_filter variant
-/// (map on $cookie_apexmail_consent) — same cookie, same attribute,
-/// same CSS rule — so the banner behaves identically on both serving
+/// (map on $cookie_apexmail_consent), same cookie, same attribute,
+/// same CSS rule, so the banner behaves identically on both serving
 /// paths. Non-marketing documents simply do not contain the marker and
 /// pass through unchanged.
 fn apply_recorded_consent_state(html: String, headers: &HeaderMap) -> String {
@@ -1520,7 +1520,7 @@ async fn content_type_check(
 
 /// `%00` in the RAW (still percent-encoded) URI: `uri().path()` is not
 /// decoded, so a real NUL byte only ever reaches the extractors through this
-/// encoding — and Postgres text parameters reject NUL, so every id-param
+/// encoding, and Postgres text parameters reject NUL, so every id-param
 /// route would answer 500 instead of a controlled 4xx (adversarial
 /// integration suite: `crafted_path_ids_never_500_or_leak`,
 /// `GET /v1/templates/%00`). Rejecting the encoded form here covers every
@@ -1570,9 +1570,9 @@ async fn null_byte_check(
 
 // ─── Error-envelope normalization ──────────────────────────────
 
-/// Framework-generated rejections answer bare text or an empty body — a 405
+/// Framework-generated rejections answer bare text or an empty body, a 405
 /// with no body, a body-extractor 400/415/422 whose content type is not
-/// JSON — while every product error uses the `{"error":{code,message}}`
+/// JSON, while every product error uses the `{"error":{code,message}}`
 /// envelope. Normalize them at ONE boundary so clients (and the error
 /// taxonomy checks) always see a named refusal (adversarial dogfood:
 /// `p.errors.taxonomy` saw code=''/message='' on 405/400/422).
@@ -1596,7 +1596,7 @@ async fn normalize_error_envelope(
         .to_ascii_lowercase();
     if content_type.contains("json") || content_type.starts_with("text/html") {
         // Already a structured error body (application/json,
-        // application/scim+json — SCIM has its own mandated error schema —
+        // application/scim+json, SCIM has its own mandated error schema —
         // or any +json type), or an SSR render: leave both untouched.
         return resp;
     }
@@ -1690,7 +1690,7 @@ async fn browser_verify_email_page(
     .await
 }
 
-/// `GET /verify-email/{token}` — path-param variant of the branded
+/// `GET /verify-email/{token}`, path-param variant of the branded
 /// verify-email page. Only the token moves into the path; an optional
 /// `?email=` still rides the query for display context.
 async fn browser_verify_email_page_by_path(
@@ -1731,7 +1731,7 @@ async fn render_browser_verify_email(
     }
 
     // F65: once a token has been EXCHANGED on this URL, the response is a
-    // 303 to the token-free page — the verification secret must not linger
+    // 303 to the token-free page, the verification secret must not linger
     // in the browser's address bar, history, or onward Referer headers.
     // The redirect target renders the outcome via status/message params.
     let mut token_consumed = false;
@@ -1784,7 +1784,7 @@ async fn render_browser_verify_email(
     // This page is served by its OWN handler (not the generic render path),
     // so it owes the same render-pipeline inputs every other browser GET
     // gets: the double-submit CSRF token (the `status=error` variant hosts
-    // the resend-verification POST form — without an embedded `_csrf` the
+    // the resend-verification POST form, without an embedded `_csrf` the
     // affordance was rendered but every submission was refused "session
     // expired"), and the PRG flash cookie decode (the handlers redirect back
     // here with the captcha/rate-limit refusal, which must actually render).
@@ -1956,7 +1956,7 @@ async fn render_ui_response_with_state(
     // verification as the admin APIs (dedicated CP cookie, role/MFA claims
     // re-checked live, idle/absolute session policy, IP allowlist, CP
     // access logging). Reading the operator console must never be weaker
-    // than acting on it. Browser failures redirect to login — never a JSON
+    // than acting on it. Browser failures redirect to login, never a JSON
     // 401.
     let mut cp_verification: Option<cp_auth::CpSessionVerification> = None;
     let mut cp_role: Option<String> = None;
@@ -1997,14 +1997,14 @@ async fn render_ui_response_with_state(
             Ok(cp_auth::CpAuthOutcome::MachineCredential) => {}
             Err(error) => {
                 // F1b: an MFA denial is named as such instead of a bare
-                // login bounce (which loops — signing in again re-mints
+                // login bounce (which loops, signing in again re-mints
                 // the same MFA-less session): GETs are sent onward to
                 // /cp/security to enable it. Every other denial keeps the
                 // login redirect.
                 //
                 // DOGFOOD FINDING (2026-10-06): the enrollment page itself
                 // used to receive the 403 interstitial whose only link points
-                // BACK at /cp/security — an operator without MFA could never
+                // BACK at /cp/security, an operator without MFA could never
                 // enroll, because the enrollment page is the one page that
                 // requires the MFA it exists to enable. The security pages
                 // now fall through and RENDER for a verified, MFA-less CP
@@ -2055,7 +2055,7 @@ async fn render_ui_response_with_state(
 
         // /alerts/rules is a REAL management surface: the CP render path
         // loads the evaluated usage-alert store (usage_alert_configs) and
-        // renders the rules page. No 501 short-circuit — the page's RBAC
+        // renders the rules page. No 501 short-circuit, the page's RBAC
         // comes from the CP gate above, and its mutations post to
         // /web/admin/alert-rules* (system-tenant + CP-session gated).
     }
@@ -2100,7 +2100,7 @@ async fn render_ui_response_with_state(
         _ => None,
     };
     // Dogfood 2026-10-06: the console shells never received the session's
-    // real identity (every page showed the fabricated "Free Plan — 30K / mo")
+    // real identity (every page showed the fabricated "Free Plan, 30K / mo")
     // and never rendered the impersonation banner (the only in-UI way to end
     // an impersonation session). Both ride along on the route data.
     //
@@ -2155,7 +2155,7 @@ async fn render_ui_response_with_state(
         &state.config,
     );
     // Fix 1: a successful GET slides the CP idle window exactly like the
-    // API gate does — an operator browsing the console must not be timed
+    // API gate does, an operator browsing the console must not be timed
     // out because only mutations refreshed the activity cookie.
     if let Some(verification) = &cp_verification {
         if let Ok(value) = cp_auth::refreshed_cp_cookie(state, verification).parse() {
@@ -2206,7 +2206,7 @@ fn is_cp_public_path(path: &str) -> bool {
 }
 
 /// Resolve the browser request's `AuthUser` (session cookie/API key), if
-/// authenticated — the data loader needs the tenant id and user id.
+/// authenticated, the data loader needs the tenant id and user id.
 async fn browser_auth_user(
     state: &AppState,
     headers: &HeaderMap,
@@ -2230,8 +2230,8 @@ async fn browser_auth_user(
 /// email plus the tenant's REAL plan, resolved from the billing catalog.
 ///
 /// Never fabricated (dogfood 2026-10-06: every authenticated page showed a
-/// hardcoded "Free Plan — 30K / mo"): a lookup failure, a missing user row,
-/// or a plan with no active catalog row yields `None` pieces — the shell
+/// hardcoded "Free Plan, 30K / mo"): a lookup failure, a missing user row,
+/// or a plan with no active catalog row yields `None` pieces, the shell
 /// then renders no plan label. Storage errors are logged and degrade to no
 /// label; they never invent one and never fail the render.
 async fn load_shell_session_identity(
@@ -2276,7 +2276,7 @@ async fn load_shell_session_identity(
                 Ok(Some((display_name, email_limit))) => {
                     Some(format_plan_label(&display_name, email_limit))
                 }
-                // An unknown/inactive plan has no catalog display name — no
+                // An unknown/inactive plan has no catalog display name, no
                 // label is better than a fabricated one.
                 Ok(None) => None,
                 Err(error) => {
@@ -2318,11 +2318,11 @@ impl From<crate::routes::system_sender::TenantBranding>
 /// The WEB console's white-label branding for this request.
 ///
 /// Resolution is entitlement-first, using the billing authority
-/// (`get_entitlement_snapshot` — override-aware plan precedence and tenant
+/// (`get_entitlement_snapshot`, override-aware plan precedence and tenant
 /// feature flags) rather than a naive plan join: branding applies only when
 /// the resolved plan grants `white_label`. The config row is then read in ONE
 /// query. Every failure is logged and degrades to `None` (stock ApexMail
-/// chrome) — branding must never fail a page.
+/// chrome), branding must never fail a page.
 async fn load_web_branding(
     state: &AppState,
     tenant_id: &str,
@@ -2344,11 +2344,11 @@ async fn load_web_branding(
     }
 }
 
-/// "Pro Plan — 150K / mo" (unlimited plans carry no numeric limit).
+/// "Pro Plan, 150K / mo" (unlimited plans carry no numeric limit).
 fn format_plan_label(display_name: &str, email_limit: i64) -> String {
     if email_limit > 0 {
         format!(
-            "{} Plan — {} / mo",
+            "{} Plan, {} / mo",
             display_name,
             format_email_limit(email_limit)
         )
@@ -2388,7 +2388,7 @@ fn ui_route_requires_auth(surface: &str, path: &str) -> bool {
     // would let new (or forgotten) operator/placement routes render for
     // anonymous users. The same holds for the web console's dynamic detail
     // and editor routes (`/lists/{id}`, `/templates/{id}/edit`) that the
-    // fallback renders directly but the manifest does not enumerate — an
+    // fallback renders directly but the manifest does not enumerate, an
     // anonymous GET there previously fell through to the static demo page
     // (audit F3) instead of the documented 303 `/login?next=…` contract.
     match surface {
@@ -2506,7 +2506,7 @@ async fn fallback_handler(
 
     // Serve static assets that the SSR pages reference
     if method == axum::http::Method::GET {
-        // Favicon and apple-icon requests — return empty 204 to avoid JSON NOT_FOUND
+        // Favicon and apple-icon requests, return empty 204 to avoid JSON NOT_FOUND
         if path.starts_with("/favicon")
             || path.starts_with("/apple-icon")
             || path.starts_with("/android-icon")
@@ -2577,7 +2577,7 @@ fn branded_not_found(config: &Config, host: Option<&str>) -> Response {
     let inner = match surface {
         "control-plane" => ui_foundation::leptos_views::control_plane_not_found_page(),
         // F1b: the marketing 404 renders the real not-found view inside the
-        // marketing shell — the homepage hero previously masqueraded as the
+        // marketing shell, the homepage hero previously masqueraded as the
         // 404 body, telling visitors the page they asked for exists.
         "marketing" | "marketing-zola" => ui_foundation::leptos_views::marketing_not_found_page(),
         _ => ui_foundation::leptos_views::web_not_found_page(),
@@ -2589,7 +2589,7 @@ fn branded_not_found(config: &Config, host: Option<&str>) -> Response {
         inner
     } else {
         format!(
-            "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Page Not Found — ApexMail</title><link rel=\"stylesheet\" href=\"/assets/globals.css\"></head><body class=\"\">{}</body></html>",
+            "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Page Not Found | ApexMail</title><link rel=\"stylesheet\" href=\"/assets/globals.css\"></head><body class=\"\">{}</body></html>",
             inner,
         )
     };
@@ -2628,7 +2628,7 @@ pub(crate) mod test_support {
 
     /// A real AppState over a caller-provided pool (per-test fixture DBs),
     /// with Redis from TEST_REDIS_URL when reachable and a dead-port pool
-    /// otherwise — handlers that hard-require Redis gate themselves in
+    /// otherwise, handlers that hard-require Redis gate themselves in
     /// their tests. Shared by handler-level tests across route modules.
     pub(crate) async fn test_state_over(db: sqlx::PgPool) -> AppState {
         test_state_over_with_config(db, test_config()).await
@@ -2644,7 +2644,7 @@ pub(crate) mod test_support {
         test_state_over_with_config_and_redis(db, config, &redis_url).await
     }
 
-    /// [`test_state_over_with_config`] with an EXPLICIT Redis URL — lets
+    /// [`test_state_over_with_config`] with an EXPLICIT Redis URL, lets
     /// adversarial tests pin a dead endpoint (fail-open/closed paths) or the
     /// configured test Redis without mutating the process-global env.
     pub(crate) async fn test_state_over_with_config_and_redis(
@@ -2873,7 +2873,7 @@ pub(crate) mod test_support {
                 }
             }
 
-            /// Machine-operator env: a `system`-tenant wildcard API key — the
+            /// Machine-operator env: a `system`-tenant wildcard API key, the
             /// credential that passes `require_auth`, the system-tenant gate
             /// AND the CP-session gate (machine identity) on every
             /// `/v1/admin/*` route.
@@ -3007,7 +3007,7 @@ pub(crate) mod test_support {
             /// JWT (typ "session") signed with the state's private key, and
             /// authenticates requests with `Authorization: Bearer`.
             /// Returns `(env, tenant_id, user_id)`; `None` (soft-skip) when
-            /// Redis is unreachable — the session path consults it for
+            /// Redis is unreachable, the session path consults it for
             /// blacklist/revocation state.
             pub(crate) async fn session(
                 pool: sqlx::PgPool,
@@ -3251,7 +3251,7 @@ mod tests {
     use crate::ses_provider::SesIpProvider;
     use crate::state::AppStateInner;
 
-    /// CSRF secret used by `test_config()` — must match the value in that function.
+    /// CSRF secret used by `test_config()`, must match the value in that function.
     const TEST_CSRF_SECRET: &str = "test-csrf-secret-1234567890abcd";
 
     /// Generate a valid CSRF token for integration tests using the test secret.
@@ -3288,7 +3288,7 @@ mod tests {
         test_app_with_ddos(ddos_protector).await
     }
 
-    /// Same fixture as [`test_app`] with a caller-supplied config — for
+    /// Same fixture as [`test_app`] with a caller-supplied config, for
     /// behavior branches that depend on a config flag (e.g. captcha
     /// enforcement, which decides whether auth pages carry the widget).
     async fn test_app_with_config(config: Config) -> Router {
@@ -3437,7 +3437,7 @@ mod tests {
             .connect_lazy(&database_url)
             .expect("failed to create lazy test database pool");
 
-        // F6: never default to the ambient 6379 — a brew Redis there must
+        // F6: never default to the ambient 6379, a brew Redis there must
         // not be probed by tests that did not opt in via TEST_REDIS_URL.
         // Port 1 is the same deterministic dead-end the CI pipeline pins.
         let redis_url =
@@ -3678,7 +3678,7 @@ mod tests {
     ///
     /// Live run 2026-10-22: `/health/live` answered 429 to every poll at a
     /// liveness cadence, so an orchestrator would have read a healthy
-    /// instance as unhealthy and restarted it — forever, because a restart
+    /// instance as unhealthy and restarted it, forever, because a restart
     /// does not change the client's rate.
     #[tokio::test]
     async fn probe_routes_stay_answerable_under_a_constrained_ddos_protector() {
@@ -3894,7 +3894,7 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
 
-        // Auth pages are the sanctioned nonce exception — but ONLY when the
+        // Auth pages are the sanctioned nonce exception, but ONLY when the
         // captcha is enforced. The default test config has kiwi_enabled =
         // false, so the login page must render the plain, script-free
         // document: no widget, no challenge fetch, no 503 rendered as a
@@ -3936,7 +3936,7 @@ mod tests {
 
     /// Captcha ENFORCED: the auth page carries the KiwiCaptcha widget under
     /// the nonce CSP, and the only script bytes are the widget's own two
-    /// nonce'd tags — the render output itself stays script-free.
+    /// nonce'd tags, the render output itself stays script-free.
     #[tokio::test]
     async fn enforced_captcha_auth_pages_carry_the_widget_under_nonce_csp() {
         let mut config = test_config();
@@ -3972,7 +3972,7 @@ mod tests {
         );
         // The KiwiCaptcha widget ships a WebAssembly module, and a CSP
         // without `'wasm-unsafe-eval'` makes the browser refuse to compile
-        // it — leaving only the JS fallback and logging a violation on every
+        // it, leaving only the JS fallback and logging a violation on every
         // auth page (live run 2026-10-22). The keyword permits WASM
         // compilation ONLY; `'unsafe-eval'` would additionally permit
         // eval()/new Function() and must never appear.
@@ -3998,7 +3998,7 @@ mod tests {
         // inline asset set (wasm solver, driver, risk/execution module,
         // telemetry module) are the only nonce'd script tags. (A raw
         // "<script" substring count would also hit literal "<script"
-        // strings inside the JS payloads — inert string data.)
+        // strings inside the JS payloads, inert string data.)
         assert_eq!(
             body.matches("<script nonce=").count(),
             4,
@@ -4008,7 +4008,7 @@ mod tests {
         // K2 wave: the MFA step-two variants (console AND control plane) now
         // carry the widget too, bound to the new `mfa-verify` scope. The
         // console challenge page renders TWO gated forms (authenticator +
-        // recovery-code), so it carries two widget instances — but the
+        // recovery-code), so it carries two widget instances, but the
         // shared asset block is emitted only by the FIRST (the driver
         // initializes later widgets off the first copy's registry).
         for (host, uri) in [
@@ -4149,7 +4149,7 @@ mod tests {
     }
 
     /// F1b: the marketing surface's 404 renders the real not-found view
-    /// inside the marketing shell (nav + footer) — the homepage hero used
+    /// inside the marketing shell (nav + footer), the homepage hero used
     /// to masquerade as the 404 body, telling visitors the page they asked
     /// for exists.
     #[tokio::test]
@@ -4184,7 +4184,7 @@ mod tests {
     }
 
     /// Dogfood 2026-10-06 (P1): the public demo viewer on the MARKETING host
-    /// always said "demo link is not valid" — for every token, valid or not —
+    /// always said "demo link is not valid", for every token, valid or not —
     /// because this render path loaded route data only for `web` and
     /// `control-plane`, leaving the `marketing` branch of `load_page_data`
     /// (the only caller of `load_demo_viewer`) unreachable. A valid token must
@@ -4258,7 +4258,7 @@ mod tests {
 
     /// F65: once a verification token has been exchanged on
     /// `/verify-email/{token}`, the browser is redirected to a CLEAN URL —
-    /// the token must not linger in the address bar/history — and the
+    /// the token must not linger in the address bar/history, and the
     /// exchange response carries the strictest referrer policy. The
     /// unknown-token outcome exercises the same redirect contract.
     /// Soft-skips without TEST_DATABASE_URL: with an unreachable pool the
@@ -4431,7 +4431,7 @@ mod tests {
         assert!(set_cookie.contains("HttpOnly"));
 
         // Open redirect: off-family return_to falls back to the site home (consent is
-        // still recorded — the redirect target is what must be safe).
+        // still recorded, the redirect target is what must be safe).
         let response = app
             .clone()
             .oneshot(
@@ -4670,7 +4670,7 @@ mod tests {
         ));
         // Audit F3: the fallback-rendered dynamic console routes (list
         // detail/edit, template editor) are authenticated pages the
-        // manifest does not enumerate — anonymous GETs previously fell
+        // manifest does not enumerate, anonymous GETs previously fell
         // through to the static demo data instead of the 303 login
         // contract.
         assert!(ui_route_requires_auth("web", "/lists/l_vip"));
@@ -4689,7 +4689,7 @@ mod tests {
     async fn anonymous_dynamic_console_pages_redirect_to_login() {
         // Audit F3 (end to end): every fallback-rendered authenticated web
         // page bounces anonymous visitors with the documented 303
-        // `/login?next=…` — never the static demo page.
+        // `/login?next=…`, never the static demo page.
         let app = test_app().await;
         for path in ["/lists/l_vip", "/lists/l_vip/edit", "/templates/t_1/edit"] {
             let response = app
@@ -4945,7 +4945,7 @@ mod tests {
         // Packaging invariant for the static export root artifacts: readable
         // by the non-root runtime user. A root-owned 0600 file copied into
         // the image is unreadable by uid 10001 and silently 404s.
-        // (Resolved like bin/server.rs does at runtime — the env var is
+        // (Resolved like bin/server.rs does at runtime, the env var is
         // ui-foundation's build-time include root, not set for this crate.)
         let public_dir = {
             let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -5271,7 +5271,7 @@ mod tests {
         // Path-param twin (F5/CWE-598): the token rides the path, not the
         // query string. An over-length token is rejected by
         // `verify_email_token` BEFORE any database access, so asserting its
-        // outcome proves the path token reaches the verifier — without
+        // outcome proves the path token reaches the verifier, without
         // needing an external database. F65: after the exchange (success OR
         // error) the browser is redirected OFF the token-bearing URL; the
         // outcome page renders from the clean target's query params. An
@@ -5588,7 +5588,7 @@ mod tests {
     /// hand-written data-detail handlers and the SSR fallbacks) must still
     /// carry the browser policy: without `style-src` the browser blocks
     /// globals.css and the page renders completely unstyled (dogfood
-    /// 2026-10-08 — the message-timeline page computed body font "Times" and
+    /// 2026-10-08, the message-timeline page computed body font "Times" and
     /// its unstyled table overflowed 349 px at 320 px). This pins the
     /// middleware's content-type dispatch on the no-auth 404 fallback.
     #[tokio::test]
@@ -5736,7 +5736,7 @@ mod tests {
     #[tokio::test]
     async fn web_admin_form_routes_reject_customer_sessions() {
         // P0 security fix: /web/admin/* used to sit on the plain
-        // authenticated router — any customer session could create tenants
+        // authenticated router, any customer session could create tenants
         // and operators. The branch now rides require_system_tenant_middleware
         // exactly like /v1/admin/*: a customer-tenant AuthUser (even with
         // the wildcard scope every tenant admin holds) is rejected.
@@ -5747,7 +5747,7 @@ mod tests {
             // Dogfood 2026-10-06 (P0): these four routes were declared in the
             // UNGATED authenticated router, so any customer session could
             // queue platform email (draft approve) and execute real demo
-            // steps. They now ride this gate — pinned here.
+            // steps. They now ride this gate, pinned here.
             .route("/web/admin/demos", post(|| async { "created" }))
             .route("/web/admin/demos/:id/advance", post(|| async { "ran" }))
             .route(
@@ -5764,7 +5764,7 @@ mod tests {
             ));
 
         // Browser surface (audit F1): a customer session posting a CP form
-        // gets the web stack's PRG treatment — 303 to /login with a signed
+        // gets the web stack's PRG treatment, 303 to /login with a signed
         // flash cookie, never a raw JSON 403 dump.
         let mut request = Request::post("/web/admin/tenants")
             .body(Body::empty())
@@ -5870,7 +5870,7 @@ mod tests {
         // …and the SEEDED system tenant id (audit F1): a slug-aware
         // membership lookup must admit the operator the CP login actually
         // mints. The lookup needs a reachable database (with the seeded
-        // tenants row) — without one the gate must fail CLOSED (reject),
+        // tenants row), without one the gate must fail CLOSED (reject),
         // never silently admit an unresolvable tenant.
         if test_db_reachable(&state.db).await {
             sqlx::query(
@@ -6025,7 +6025,7 @@ mod tests {
     #[tokio::test]
     async fn reset_password_validates_before_flashing_anything() {
         // The handler used to be a no-op that flashed success. Validation
-        // failures now flash errors — without touching the database.
+        // failures now flash errors, without touching the database.
         let app = test_app().await;
         let csrf = test_csrf_token();
 
@@ -6099,7 +6099,7 @@ mod tests {
         // migration 052 declares `UUID PRIMARY KEY DEFAULT gen_random_uuid()`
         // (migrations/052_add_missing_foundation_tables.sql:56). The raw
         // `TEST_DATABASE_URL` database can be a legacy lineage whose
-        // `users.id` is VARCHAR(26) — the UUID bind then fails with 22001,
+        // `users.id` is VARCHAR(26), the UUID bind then fails with 22001,
         // which is why this test only ever passed where no database was
         // reachable. Soft-skips without TEST_DATABASE_URL (workspace
         // convention); a configured-but-broken database PANICS in test_db.
@@ -6116,7 +6116,7 @@ mod tests {
         );
         let tenant_id = apexmail_lib::id::generate_id("", 26);
         // users.id is a UUID column in both the migration chain and the
-        // canonical apexmail-db SCHEMA — a 26-char text id fails with
+        // canonical apexmail-db SCHEMA, a 26-char text id fails with
         // "column id is of type uuid but expression is of type text"
         // (ci/README.md §9 F4). tenants.id is VARCHAR(26), so the text
         // tenant id is correct.
@@ -6215,7 +6215,7 @@ mod tests {
             .await
             .unwrap();
         // The reset flow stores an ARGON2ID hash (apexmail_lib::hash_password),
-        // not bcrypt — bcrypt::verify on it is InvalidHash, not false.
+        // not bcrypt, bcrypt::verify on it is InvalidHash, not false.
         assert!(
             matches!(
                 apexmail_lib::verify_password("NewValid123!Pass", &stored),
@@ -6268,8 +6268,8 @@ mod tests {
         .await
         .expect("seed tenant");
         // 25 campaigns: 20 named "Alpha Row N" (draft) + 5 "Beta Row N"
-        // (completed — the live status CHECK has no 'sent').
-        // campaigns.id is a UUID column (both schema lineages) — the text
+        // (completed, the live status CHECK has no 'sent').
+        // campaigns.id is a UUID column (both schema lineages), the text
         // nanoid ids previously failed the bind (ci/README.md §9 F4);
         // campaigns.tenant_id is VARCHAR, matching the text tenant id.
         for index in 0..20 {
@@ -6413,13 +6413,13 @@ mod tests {
         // the TOP level, outside the `authenticated` stack, so `require_auth`
         // never executed for `/v1/admin/*`. With no AuthUser in the request
         // extensions, `require_system_tenant_middleware` 401'd EVERY admin
-        // request — including fully valid ones — with "authentication
+        // request, including fully valid ones, with "authentication
         // required for control-plane access".
         //
         // Now the admin router is merged into `authenticated` BEFORE the
         // layer stack, so a bad bearer token on an admin route is rejected
         // by `require_auth` itself (token decode failure, or a 503 when the
-        // token-blacklist Redis is unavailable in unit tests) — proving the
+        // token-blacklist Redis is unavailable in unit tests), proving the
         // auth middleware, which populates AuthUser, runs before the gate.
         let app = test_app().await;
 
@@ -6440,7 +6440,7 @@ mod tests {
         assert!(
             !(status == StatusCode::UNAUTHORIZED && body.contains("control-plane")),
             "admin request must be rejected by require_auth (which populates \
-             AuthUser), not by the system-tenant gate — got {status} with body: {body}"
+             AuthUser), not by the system-tenant gate, got {status} with body: {body}"
         );
     }
 
@@ -6471,7 +6471,7 @@ mod tests {
             .create_pool(Some(deadpool_redis::Runtime::Tokio1))
             .ok()?;
         // TEST_REDIS_URL is configured at this point, so an unusable Redis is
-        // an infrastructure failure — the same contract the canonical pool
+        // an infrastructure failure, the same contract the canonical pool
         // states for TEST_DATABASE_URL. A silent `None` here made every test
         // on this fixture "pass" vacuously when the URL carried a password
         // the local server does not use (observed 2026-10-07 while proving
@@ -6480,7 +6480,7 @@ mod tests {
             Ok(conn) => conn,
             Err(error) => panic!(
                 "failed to acquire a Redis connection ({error}); TEST_REDIS_URL is \
-                 configured, so this is an infrastructure failure — fix the server, do \
+                 configured, so this is an infrastructure failure, fix the server, do \
                  not skip the test"
             ),
         };
@@ -6488,7 +6488,7 @@ mod tests {
         if let Err(error) = ping {
             panic!(
                 "Redis PING failed ({error}); TEST_REDIS_URL is configured, so this is an \
-                 infrastructure failure — fix the server, do not skip the test"
+                 infrastructure failure, fix the server, do not skip the test"
             );
         }
 
@@ -6592,7 +6592,7 @@ mod tests {
     }
 
     /// Dogfood 2026-10-06 (P1/P2, UI): the authenticated console used to
-    /// render a fabricated "Free Plan — 30K / mo" on every page (the
+    /// render a fabricated "Free Plan, 30K / mo" on every page (the
     /// `_with_user_context` layout path was never called) and never rendered
     /// the impersonation banner (the component had no request-path caller),
     /// so an operator had no in-UI way to end an impersonation session.
@@ -6600,7 +6600,7 @@ mod tests {
     /// This drives the REAL request path (`render_ui_response_with_state`)
     /// with a session cookie + a verified impersonation cookie and asserts
     /// the real identity/plan and the banner (with its Terminate form)
-    /// render — and that removing the impersonation cookie removes the
+    /// render, and that removing the impersonation cookie removes the
     /// banner.
     #[tokio::test]
     async fn console_renders_the_real_plan_and_the_impersonation_banner() {
@@ -6672,7 +6672,7 @@ mod tests {
             "the session's real display name and email must render in the header"
         );
         assert!(
-            body.contains("Business Plan — 2M / mo"),
+            body.contains("Business Plan, 2M / mo"),
             "the tenant's real catalog plan (scale → Business, 2M emails/mo) must render"
         );
         assert!(
@@ -6700,7 +6700,7 @@ mod tests {
             .expect("dashboard must render without impersonation");
         let body = response_body_string(response).await;
         assert!(!body.contains("Impersonation Active"));
-        assert!(body.contains("Business Plan — 2M / mo"));
+        assert!(body.contains("Business Plan, 2M / mo"));
         assert!(body.contains("Ada Operator"));
 
         sqlx::query("DELETE FROM users WHERE id = $1")
@@ -6716,7 +6716,7 @@ mod tests {
     }
     ///
     /// The tenant id is the SEEDED system tenant (`system_internal_tenant01`,
-    /// migration 072) — not the literal `system` sentinel — so every gate on
+    /// migration 072), not the literal `system` sentinel, so every gate on
     /// this fixture exercises the slug-aware membership check (audit F1)
     /// the CP login uses. A tenants row with slug `system` backs the
     /// membership.
@@ -6778,7 +6778,7 @@ mod tests {
         let now = chrono::Utc::now().timestamp();
         let claims = crate::middleware::cp_auth::CpSessionClaims {
             sub: user_id.to_string(),
-            // The seeded system tenant row's id — cp_auth re-checks the user
+            // The seeded system tenant row's id, cp_auth re-checks the user
             // against users.tenant_id, so the literal `system` sentinel
             // (static API keys only) would 401 as "user no longer exists".
             tenant_id: "system_internal_tenant01".into(),
@@ -6853,7 +6853,7 @@ mod tests {
 
     /// CRITICAL gate regression: an operator WITHOUT MFA must not be able to
     /// drive control-plane routes with the plain am_session the CP login
-    /// form mints — the session gate (role + MFA enforcement) must reject
+    /// form mints, the session gate (role + MFA enforcement) must reject
     /// them even though the tenant is `system`.
     #[tokio::test]
     async fn cp_gate_blocks_non_mfa_operator_sessions_from_admin_routes() {
@@ -6984,12 +6984,12 @@ mod tests {
         };
         let (user_id, email, _password) = cp_gate_seed_operator(&db, true).await;
         // The MFA operator is mid-flow (their password step redirects to
-        // the TOTP challenge), so sign the am_session directly — the same
+        // the TOTP challenge), so sign the am_session directly, the same
         // claims shape session_cookie_for_user produces.
         let now = chrono::Utc::now().timestamp();
         let claims = crate::middleware::auth::JwtClaims {
             sub: user_id.clone(),
-            // The seeded system tenant id (slug-aware gate, audit F1) — the
+            // The seeded system tenant id (slug-aware gate, audit F1), the
             // literal `system` sentinel is only for static API keys.
             tenant_id: "system_internal_tenant01".into(),
             scopes: vec!["*".into()],
@@ -7164,10 +7164,10 @@ mod tests {
     }
 
     /// F1b: an MFA denial on a CP PAGE render is named guidance, not a
-    /// bare login bounce (which loops — signing in again re-mints the same
+    /// bare login bounce (which loops, signing in again re-mints the same
     /// MFA-less session): other CP pages 303 onward to /cp/security, while
     /// /cp/security itself (which must not redirect to itself) RENDERS the
-    /// enrollment page — it is the one page whose job is to enable the MFA
+    /// enrollment page, it is the one page whose job is to enable the MFA
     /// it requires (dogfood finding 2026-10-06).
     #[tokio::test]
     async fn cp_render_mfa_denial_redirects_to_security_page() {
@@ -7359,13 +7359,13 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let body = response_body_string(response).await;
         assert!(
-            body.contains("No alert rules yet — create one"),
+            body.contains("No alert rules yet, create one"),
             "the honest empty state must render: {body}"
         );
     }
 
     /// The CP create form persists into the evaluated store AND lands on the
-    /// audit trail — the operator surface is not a decorative form.
+    /// audit trail, the operator surface is not a decorative form.
     #[tokio::test]
     async fn cp_alert_rules_form_creates_persists_and_audits() {
         let Some((app, db, config, _redis)) = cp_gate_app("cp_alert_rules_form").await else {
@@ -7520,7 +7520,7 @@ mod tests {
     }
 
     /// A cursor that decodes to something OTHER than a timestamp must be
-    /// a 400 — the messages list used to bind the decoded string into a
+    /// a 400, the messages list used to bind the decoded string into a
     /// `::timestamp` cast and surface the database's parse failure as a
     /// 500.
     #[tokio::test]
@@ -7625,7 +7625,7 @@ mod tests {
     async fn mollie_webhook_ingest_mounts_and_fetch_verifies() {
         // Dogfood finding A (2026-10-05): /webhooks/mollie was mounted only
         // by the billing-service binary, which has no container in any
-        // deployed topology — every provider delivery 404'd. The route is
+        // deployed topology, every provider delivery 404'd. The route is
         // now ALWAYS mounted. There is no signature to reject: with a key the
         // handler authenticates by fetching the object, so an unreachable
         // provider is a RETRYABLE 503 (Mollie replays), never a 404 and never
@@ -7682,7 +7682,7 @@ mod tests {
             "an id outside Mollie's `tr_…`/`re_…` namespace is refused before any fetch"
         );
 
-        // Unconfigured key: still mounted, retryable 503 — never 404.
+        // Unconfigured key: still mounted, retryable 503, never 404.
         drop(_env);
         let _unconfigured = MollieEnv::set(&[("MOLLIE_API_KEY", None)]);
         let app_unconfigured = test_app().await;
@@ -7847,7 +7847,7 @@ mod tests {
             "the logo must replace the wordmark: {html}"
         );
         assert!(
-            html.contains("<title>Dashboard — Acme Corp</title>"),
+            html.contains("<title>Dashboard, Acme Corp</title>"),
             "the title suffix must be the company name: {html}"
         );
         assert!(
@@ -8617,7 +8617,7 @@ mod adversarial_helper_tests {
     /// placement entitlement is refused by name (403), and the purchase
     /// record (an active `placement` contract) flips the gate so the request
     /// reaches the engine (which then refuses for its own fixture reasons —
-    /// no seed accounts — not for entitlement).
+    /// no seed accounts, not for entitlement).
     #[tokio::test]
     async fn placement_routes_refuse_an_unentitled_tenant_by_name() {
         let Some(pool) = crate::test_db::canonical_pool("placement_entitlement_route").await else {
@@ -9160,7 +9160,7 @@ mod adversarial_helper_tests {
 /// fetching it with `MOLLIE_API_KEY` (no session/API-key applies to provider
 /// callbacks) and is idempotent per content-addressed event id, so replays and
 /// Mollie's at-least-once redelivery are safe. A deployment without
-/// `MOLLIE_API_KEY` gets a retryable 503 from the handler — never a 404
+/// `MOLLIE_API_KEY` gets a retryable 503 from the handler, never a 404
 /// (which would silently drop provider events and make the route's existence
 /// unverifiable).
 fn mollie_webhook_router(state: &AppState) -> Router<AppState> {

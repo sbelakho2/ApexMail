@@ -27,7 +27,7 @@ fn corpus(name: &str) -> serde_json::Value {
 }
 
 /// Every disposition the classification corpus asserts is canonical, and the
-/// corpus covers every canonical disposition — byte-for-byte with `TAXONOMY`.
+/// corpus covers every canonical disposition, byte-for-byte with `TAXONOMY`.
 #[test]
 fn reply_corpus_covers_the_canonical_taxonomy() {
     let corpus = corpus("reply-classification-goldens.json");
@@ -60,7 +60,7 @@ fn reply_corpus_covers_the_canonical_taxonomy() {
     let missing: Vec<&String> = canonical.difference(&asserted).collect();
     assert!(
         missing.is_empty(),
-        "corpus has no case for dispositions {missing:?} — coverage is incomplete"
+        "corpus has no case for dispositions {missing:?}, coverage is incomplete"
     );
     assert_eq!(canonical.len(), 11, "the taxonomy is the canonical eleven");
 }

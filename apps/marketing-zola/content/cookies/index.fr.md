@@ -1,6 +1,6 @@
 +++
 title = "Politique de cookies"
-description = "Politique de cookies d'ApexMail — comment nous utilisons les cookies et technologies similaires."
+description = "Politique de cookies d'ApexMail, comment nous utilisons les cookies et technologies similaires."
 template = "prose.html"
 
 [extra]
@@ -15,9 +15,9 @@ Les cookies sont de petits fichiers texte stockés sur votre appareil lorsque vo
 
 ### Site marketing (apexmail.ee)
 
-Le site marketing ne diffuse **aucun script** — sa Content-Security-Policy bloque totalement l'exécution de scripts — et n'intègre donc **aucun script d'analyse, aucun pixel de suivi et aucun cookie publicitaire**. Le seul cookie associé à ce site est :
+Le site marketing ne diffuse **aucun script**, sa Content-Security-Policy bloque totalement l'exécution de scripts, et n'intègre donc **aucun script d'analyse, aucun pixel de suivi et aucun cookie publicitaire**. Le seul cookie associé à ce site est :
 
-- **`apexmail_consent` (préférence de consentement) :** Enregistre votre choix dans la bannière de cookies. Il est défini par notre point d'accès API avec `Domain=.apexmail.ee` et une durée de validité d'un an. Il ne contient aucun identifiant personnel — uniquement votre préférence de bannière — et son seul effet fonctionnel sur ce site est de masquer la bannière lors de vos prochaines visites.
+- **`apexmail_consent` (préférence de consentement) :** Enregistre votre choix dans la bannière de cookies. Il est défini par notre point d'accès API avec `Domain=.apexmail.ee` et une durée de validité d'un an. Il ne contient aucun identifiant personnel, uniquement votre préférence de bannière, et son seul effet fonctionnel sur ce site est de masquer la bannière lors de vos prochaines visites.
 
 Aucune analyse côté client ne s'exécute sur ce site ; nos serveurs web conservent toutefois des journaux d'accès standard (y compris les adresses IP) à des fins de sécurité et d'exploitation. Les journaux d'accès sont couverts par notre [Politique de confidentialité](/fr/privacy/).
 
@@ -42,7 +42,7 @@ Lors de votre première visite sur le site marketing, une bannière de cookies s
 
 - **Tout accepter :** Enregistre une préférence « tout » et masque la bannière. Le site n'exécutant aucun script d'analyse, cela n'active rien d'autre que l'enregistrement de la préférence.
 - **Essentiels uniquement :** Enregistre une préférence « essentiels uniquement » et masque la bannière.
-- **Ignorer :** Même effet que Essentiels uniquement — enregistre une préférence « essentiels uniquement ».
+- **Ignorer :** Même effet que Essentiels uniquement, enregistre une préférence « essentiels uniquement ».
 
 Votre choix enregistré ne contrôle que la bannière sur ce site. Vous pouvez modifier votre préférence à tout moment en effaçant les cookies de votre navigateur et en rechargeant la page.
 

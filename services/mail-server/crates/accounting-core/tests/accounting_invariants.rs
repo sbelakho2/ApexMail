@@ -4,10 +4,10 @@
 //! `migrator::test_support` (the workspace convention). Tests in this binary
 //! share ONE canonical database (`shared_canonical_db`) and isolate
 //! themselves by working on their own legal entity with a per-run unique
-//! registry code — the full migration chain is ~5 GB per clone, so
+//! registry code, the full migration chain is ~5 GB per clone, so
 //! per-test clones would exhaust the disk. Set `TEST_DATABASE_URL` to run
 //! them; without it each test skips, and a configured-but-broken
-//! provisioning is a hard failure — never a silent skip.
+//! provisioning is a hard failure, never a silent skip.
 //!
 //! Covered invariants (the finding's mandatory list):
 //!  1. unbalanced journal cannot be posted (API check + deferred trigger),
@@ -85,7 +85,7 @@ async fn seed(pool: &PgPool, tag: &str, make_default: bool) -> Seed {
     let entity = if make_default {
         // Serialize probe+create on the cluster advisory lock: the plain
         // probe raced a sibling caller into the uq_legal_entities_default
-        // partial index (23505, deploy 2026-10-11) — the second caller now
+        // partial index (23505, deploy 2026-10-11), the second caller now
         // waits, then sees the committed row.
         let mut tx = pool.begin().await.expect("seed tx");
         sqlx::query("SELECT pg_advisory_xact_lock($1)")
@@ -261,7 +261,7 @@ async fn unbalanced_journal_cannot_be_posted() {
     );
 
     // (b) The DEFERRED CONSTRAINT TRIGGER refuses even a raw-SQL writer at
-    // commit time — the structural backstop. A raw writer must post via the
+    // commit time, the structural backstop. A raw writer must post via the
     // draft → lines → posted sequence (lines cannot be added to a posted
     // entry), exactly like the API.
     let mut tx = pool.begin().await.expect("tx");
@@ -1336,7 +1336,7 @@ async fn adapters_post_idempotently_and_feed_derivation() {
 // ---------------------------------------------------------------------------
 
 /// A rejected posting must leave the ledger byte-identical: no entry, no
-/// line, no draft — and a divergent replay of an accepted key must be
+/// line, no draft, and a divergent replay of an accepted key must be
 /// refused rather than silently attach different lines.
 #[tokio::test]
 async fn rejected_and_divergent_postings_change_nothing() {
@@ -1742,7 +1742,7 @@ async fn period_boundaries_are_exact_and_close_lock_transitions_once() {
         .expect("draft delete");
 
     // Closing February is refused while it still holds posted entries? No:
-    // posted entries are exactly what a close is FOR — it must succeed and
+    // posted entries are exactly what a close is FOR, it must succeed and
     // report the balanced totals.
     let closed = periods::close_period(&pool, leap_feb, "tester")
         .await

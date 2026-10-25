@@ -1,4 +1,4 @@
-//! # STIX/TAXII Client — Structured Threat Intelligence eXchange
+//! # STIX/TAXII Client, Structured Threat Intelligence eXchange
 //!
 //! Implements STIX 2.1 indicator parsing and a TAXII 2.1 client for
 //! ingesting threat intelligence from standard feeds.
@@ -28,7 +28,7 @@ use std::collections::HashMap;
 // STIX 2.1 Domain Model
 // ---------------------------------------------------------------------------
 
-/// A STIX 2.1 Bundle — top-level container for STIX objects.
+/// A STIX 2.1 Bundle, top-level container for STIX objects.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StixBundle {
     /// Must be `"bundle"`
@@ -46,7 +46,7 @@ pub struct StixBundle {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum StixObject {
-    /// Indicator — contains a STIX pattern describing observables.
+    /// Indicator, contains a STIX pattern describing observables.
     #[serde(rename = "indicator")]
     Indicator(StixIndicator),
     /// Malware family descriptor.
@@ -58,7 +58,7 @@ pub enum StixObject {
     /// Relationship link between two SDOs.
     #[serde(rename = "relationship")]
     Relationship(StixRelationship),
-    /// Catch-all for unrecognised types — stored as raw JSON map.
+    /// Catch-all for unrecognised types, stored as raw JSON map.
     #[serde(other)]
     Unknown,
 }
@@ -357,7 +357,7 @@ pub struct TaxiiCollections {
     pub collections: Vec<TaxiiCollection>,
 }
 
-/// TAXII 2.1 Envelope — container for objects returned from a collection.
+/// TAXII 2.1 Envelope, container for objects returned from a collection.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaxiiEnvelope {
     /// Whether more objects are available (pagination)

@@ -1,4 +1,4 @@
-//! Verified sales knowledge base — re-exported from the shared crate.
+//! Verified sales knowledge base, re-exported from the shared crate.
 //!
 //! The implementation moved to `crates/sales-knowledge` (plan §5.5) so the
 //! ai-service mailbot/classifier validate claims against the SAME code as the

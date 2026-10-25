@@ -47,7 +47,7 @@ const DERIVED_USAGE_SWEEP_INITIAL_DELAY: Duration = Duration::from_secs(90 * 60)
 
 /// Operational override for the periodic-task intervals above. When set,
 /// EVERY loop ticks on this many milliseconds instead of its production
-/// cadence — so integration tests (and ops smoke-checks) can drive the real
+/// cadence, so integration tests (and ops smoke-checks) can drive the real
 /// spawned loops in milliseconds. Unset keeps the production intervals.
 fn task_interval(default: Duration) -> Duration {
     std::env::var("PERIODIC_TASK_INTERVAL_MS")
@@ -68,7 +68,7 @@ static DEDICATED_IP_TABLE_MISSING_LOGGED: AtomicBool = AtomicBool::new(false);
 /// for midnight or running the undeployed billing-service binary by hand.
 /// This is the on-demand entrypoint; `bin/server.rs` exposes it as the
 /// one-shot `--sweep-overage-only` CLI (the `--reconcile-plans-only` ops
-/// pattern), and the nightly loop calls the SAME function — one code path,
+/// pattern), and the nightly loop calls the SAME function, one code path,
 /// one behavior.
 pub async fn sweep_overage_once(
     state: &AppState,
@@ -97,7 +97,7 @@ pub async fn sweep_overage_once(
         warn!(
             failed_periods = result.failed_periods,
             oldest_unresolved_age_secs = ?result.oldest_unresolved_age_secs,
-            "period overage sweep finished with isolated period failures — recorded with backoff"
+            "period overage sweep finished with isolated period failures, recorded with backoff"
         );
     }
     Ok(result)
@@ -108,7 +108,7 @@ pub async fn sweep_overage_once(
 /// function the one-shot
 /// `--sweep-product-lines-only` CLI trigger runs, so an operator can close a
 /// contract month on demand and the two paths can never drift. Idempotent
-/// per (tenant, line, month) — a replay adopts the existing invoice.
+/// per (tenant, line, month), a replay adopts the existing invoice.
 pub async fn sweep_product_lines_once(
     state: &AppState,
 ) -> Result<crate::product_lines::ProductLineSweepResult, String> {
@@ -295,7 +295,7 @@ pub fn start_periodic_jobs(state: std::sync::Arc<AppState>) {
         loop {
             interval.tick().await;
 
-            // Monitored drain — records histograms, counters, and
+            // Monitored drain, records histograms, counters, and
             // triggers consecutive-error alert if threshold is exceeded.
             let _ = crate::metering_monitor::monitored_drain_pending_events(
                 metering_state.as_ref(),
@@ -303,7 +303,7 @@ pub fn start_periodic_jobs(state: std::sync::Arc<AppState>) {
             )
             .await;
 
-            // Stale-event check — updates pending-event gauge and
+            // Stale-event check, updates pending-event gauge and
             // warns if events remain undrained past the age limit.
             crate::metering_monitor::check_stale_pending_events(metering_state.as_ref()).await;
         }
@@ -312,7 +312,7 @@ pub fn start_periodic_jobs(state: std::sync::Arc<AppState>) {
     // F8 (audit): the expired-wallet-reservation sweep was REMOVED here. No
     // production code path ever wrote a `wallet_reservations` row (only test
     // fixtures did) and nothing ever incremented `wallets.reserved`, so the
-    // loop could never release anything — it ran every 30 minutes against a
+    // loop could never release anything, it ran every 30 minutes against a
     // table that is structurally always empty for a claim ("funds are held
     // until capture") the product does not implement. The live wallet flow
     // is direct debit/top-up through `wallet_transactions` (see
@@ -421,7 +421,7 @@ pub fn start_periodic_jobs(state: std::sync::Arc<AppState>) {
 
             // End-of-period overage + PAYG invoicing (idempotent per
             // tenant+period; paid subscriptions may send into an overage
-            // allowance — see usage::record_with_quota_check and the
+            // allowance, see usage::record_with_quota_check and the
             // overage module). Every created invoice is COLLECTED: wallet
             // first, then Mollie invoice item / dunning (see overage.rs).
             match sweep_overage_once(sla_state.as_ref()).await {
@@ -444,7 +444,7 @@ pub fn start_periodic_jobs(state: std::sync::Arc<AppState>) {
 
             // US sales-tax economic-nexus thresholds (plan WP C2): tracks
             // taxable US sales per state and raises ONE operator alert per
-            // crossing. Never registers, never charges — registration is an
+            // crossing. Never registers, never charges, registration is an
             // owner/accounting action (see us_tax.rs).
             match sweep_us_tax_nexus_once(sla_state.as_ref()).await {
                 Ok(_) => {}
@@ -453,7 +453,7 @@ pub fn start_periodic_jobs(state: std::sync::Arc<AppState>) {
                 }
             }
 
-            // ToS 6.4 wallet-credit expiry (12 months) — see
+            // ToS 6.4 wallet-credit expiry (12 months), see
             // expire_stale_wallet_credits.
             match expire_stale_wallet_credits(sla_state.as_ref()).await {
                 Ok(expired) if expired > 0 => {
@@ -507,7 +507,7 @@ pub fn start_periodic_jobs(state: std::sync::Arc<AppState>) {
                 }
             }
 
-            // Audit F33 — resume stranded usage-invoice collection
+            // Audit F33, resume stranded usage-invoice collection
             // operations (invoice created, collection interrupted): the
             // idempotent ladder re-runs wallet application, the finalized
             // Mollie invoice and the dunning handoff until the outbox row
@@ -526,11 +526,11 @@ pub fn start_periodic_jobs(state: std::sync::Arc<AppState>) {
                 }
             }
 
-            // Audit F66 — the hourly subscription_change_saga cleanup job was
+            // Audit F66, the hourly subscription_change_saga cleanup job was
             // removed: no migration or writer ever created that table (every
             // run failed with 42P01). Subscription-change persistence and
             // recovery are the canonical mollie_webhook_events store
-            // (migrations 127/128) plus the deadletter retry ladder — there
+            // (migrations 127/128) plus the deadletter retry ladder, there
             // is no separate saga to clean up.
         }
     });
@@ -613,7 +613,7 @@ pub fn start_periodic_jobs(state: std::sync::Arc<AppState>) {
             // F7 (audit): the third-month fallback for cash-accounting
             // (`cash_special`) VAT. `materialize_due_cash_special` used to
             // have no caller while mollie_webhooks.rs claimed "the sweep"
-            // handled it — an invoice that stayed unpaid past the third
+            // handled it, an invoice that stayed unpaid past the third
             // month never materialized its `cash_special_due` recognition
             // entry, so the KMD aggregation silently omitted that output
             // VAT. Run it BEFORE the return generation so the period being
@@ -790,7 +790,7 @@ pub fn start_periodic_jobs(state: std::sync::Arc<AppState>) {
 
             // External audit 15 Oct, H1: a subscription canceled from the
             // product keeps access until its period end, then this reconciler
-            // ends it and downgrades the tenant — the next renewal can never
+            // ends it and downgrades the tenant, the next renewal can never
             // charge a canceled subscription.
             match sweep_canceled_at_period_end(trial_state.as_ref()).await {
                 Ok(n) if n > 0 => info!(
@@ -902,7 +902,7 @@ async fn archive_paid_invoices(state: &AppState) -> Result<i64, String> {
 
     let batch_id = uuid::Uuid::new_v4();
 
-    // P3 item 7 — archive the whole batch with ONE multi-row INSERT. The
+    // P3 item 7, archive the whole batch with ONE multi-row INSERT. The
     // pre-fix loop issued one INSERT per candidate (up to 500 round trips a
     // day) and only logged individual failures; `ON CONFLICT DO NOTHING`
     // keeps the replay idempotence, and the returned duplicate count is the
@@ -1002,7 +1002,7 @@ async fn perform_month_end_closing(state: &AppState) -> Result<bool, String> {
 
     // ------------------------------------------------------------------
     // 0.  Serialize concurrent closings (Fix F5): the previous
-    //     check-then-insert ran across replicas/restarts — both passed the
+    //     check-then-insert ran across replicas/restarts, both passed the
     //     NOT-EXISTS check and double-inserted month_end_closings rows (and
     //     raced the invoice UPDATE). Take a pg advisory TRANSACTION lock
     //     keyed on the period and re-check existence INSIDE the lock; no
@@ -1213,18 +1213,18 @@ pub(crate) struct BatchedAuditEntry {
 
 /// Append a whole batch of audit entries with a BOUNDED number of statements
 /// per sweep (perf audit 2026-10-18, finding 15): ONE chain-head advance and
-/// ONE multi-row INSERT — never a transaction round trip per entry.
+/// ONE multi-row INSERT, never a transaction round trip per entry.
 ///
 /// Chain/hash semantics are IDENTICAL to N calls to [`append_audit_log`] in
 /// input order, batched the way compliance `AuditLogger::log_batch` batches:
 /// * the row hash is the canonical 7-segment SHA-256 over
-///   `tenant|user|action|resource|resource_id|details|timestamp` — the chain
+///   `tenant|user|action|resource|resource_id|details|timestamp`, the chain
 ///   link is NOT part of the row hash, so every hash can be computed before
 ///   the head is read;
 /// * ONE atomic `audit_chain_head` upsert advances the head to the LAST
 ///   entry's hash and returns the hash it replaced, which entry 0 links to;
 ///   entries 1..n chain in memory in input order (concurrent appenders
-///   serialise on the single head row exactly as before — the batch is one
+///   serialise on the single head row exactly as before, the batch is one
 ///   link on the shared chain);
 /// * timestamps stay microsecond-truncated (one per entry, in order) and the
 ///   HMAC signature still covers `previous_hash|hash`.
@@ -1254,7 +1254,7 @@ async fn append_audit_log_batch(
     }
 
     // ONE atomic head advance for the whole batch: the head becomes the LAST
-    // hash and returns the hash it replaced — the link for entry 0.
+    // hash and returns the hash it replaced, the link for entry 0.
     let head_hash = hashes.last().cloned().unwrap_or_default();
     let first_previous_hash: Option<String> = sqlx::query_scalar(
         r#"
@@ -1334,14 +1334,14 @@ async fn append_audit_log_batch(
 }
 
 /// The HMAC key for audit chain signatures: `AUDIT_SIGNING_KEY` when
-/// configured, else the documented development fallback — the same policy
+/// configured, else the documented development fallback, the same policy
 /// `routes::audit_log_signature` applies for per-row appends.
 fn audit_signing_key() -> String {
     match std::env::var("AUDIT_SIGNING_KEY") {
         Ok(key) if !key.trim().is_empty() => key,
         _ => {
             tracing::warn!(
-                "AUDIT_SIGNING_KEY is not configured — signing with the documented development fallback key"
+                "AUDIT_SIGNING_KEY is not configured, signing with the documented development fallback key"
             );
             "apexmail-audit-fallback-key".to_string()
         }
@@ -1361,7 +1361,7 @@ fn audit_signing_key() -> String {
 /// Set-based (perf audit 2026-10-18, finding 15): one transaction, ONE
 /// `WITH due … FOR UPDATE SKIP LOCKED` statement that performs the
 /// subscription transition and the tenant downgrade in bulk, then ONE
-/// multi-row audit append — 3 statements per sweep instead of ~3 per row, so
+/// multi-row audit append, 3 statements per sweep instead of ~3 per row, so
 /// a mass-cancellation event no longer holds long per-row write loops on
 /// `tenants`/`mollie_subscriptions`. Status values, timestamp columns, the
 /// `plan <> 'free'` guard and the audit payload are byte-identical to the
@@ -1468,7 +1468,7 @@ pub async fn sweep_canceled_at_period_end(state: &AppState) -> Result<u64, Strin
 ///
 /// Set-based (perf audit 2026-10-18, finding 15): one transaction, ONE
 /// statement that cancels every stale trialing subscription and downgrades
-/// its tenant, then ONE multi-row audit append — 3 statements per sweep
+/// its tenant, then ONE multi-row audit append, 3 statements per sweep
 /// instead of ~3 per stale row. Status values, timestamp columns, the
 /// `status = 'trialing'` write guard and the audit payload are byte-identical
 /// to the per-row loop this replaced.
@@ -1544,8 +1544,8 @@ async fn sweep_expired_trials(state: &AppState) -> Result<u64, String> {
 }
 
 /// Check if the previous month's KMD return is due (past the 20th)
-/// and generate it — plus every missed month since the last generated
-/// return — if not present yet (Fix I5: a service outage used to skip
+/// and generate it, plus every missed month since the last generated
+/// return, if not present yet (Fix I5: a service outage used to skip
 /// months permanently because only the immediately-previous month was
 /// ever considered).
 async fn generate_kmd_if_due(
@@ -1597,7 +1597,7 @@ fn kmd_backfill_periods(
 ) -> Vec<(i32, u32)> {
     let last = generated.iter().copied().max();
     let from = match last {
-        // Already generated at/after the target — nothing to do.
+        // Already generated at/after the target, nothing to do.
         Some(last) if last >= target => return Vec::new(),
         Some(last) => last,
         None => return vec![target],
@@ -1607,13 +1607,13 @@ fn kmd_backfill_periods(
 
 /// Attempt to file the generated KMD VAT return with the EMTA (e-MTA) API.
 ///
-/// Performs idempotency check — if the KMD return record already has a
+/// Performs idempotency check, if the KMD return record already has a
 /// `filing_reference` and `filed_at` set, the filing is skipped.
 ///
 /// Returns:
-/// * `Ok(Some(...))` — filing was attempted and acknowledged.
-/// * `Ok(None)` — already filed, skipped.
-/// * `Err(...)` — filing failed (HTTP error, parse error, DB error).
+/// * `Ok(Some(...))`, filing was attempted and acknowledged.
+/// * `Ok(None)`, already filed, skipped.
+/// * `Err(...)`, filing failed (HTTP error, parse error, DB error).
 async fn attempt_emta_filing(
     db: &sqlx::PgPool,
     emta_client: &EmtaClient,
@@ -1638,7 +1638,7 @@ async fn attempt_emta_filing(
     .map_err(|e| format!("Failed to query KMD return for EMTA filing: {e}"))?
     .ok_or_else(|| format!("KMD return {} not found in database", kmd.kmd_id))?;
 
-    // ── 2. Idempotency check — skip if already filed ──────────────
+    // ── 2. Idempotency check, skip if already filed ──────────────
     if stored.filed_at.is_some() && stored.filing_reference.is_some() {
         info!(
             kmd_id = %kmd.kmd_id,
@@ -1715,7 +1715,7 @@ pub(crate) struct MeteringDrainResult {
 
 /// Outcome of one usage-alert sweep. Public because the SAME evaluation the
 /// periodic loop runs is exposed to integration tests through
-/// [`process_usage_alerts`] — a test that re-implemented the sweep would
+/// [`process_usage_alerts`], a test that re-implemented the sweep would
 /// prove nothing about the running path.
 #[derive(Debug)]
 pub struct UsageAlertSweepResult {
@@ -1769,7 +1769,7 @@ struct UsageAlertConfigRow {
     metric_type: String,
     threshold_percent: i32,
     notification_channel: String,
-    /// info | warning | critical (migration 246 CHECK) — carried onto the
+    /// info | warning | critical (migration 246 CHECK), carried onto the
     /// fired `system_alerts` row.
     severity: String,
 }
@@ -1788,7 +1788,7 @@ struct TenantUsageAlertConfigRow {
     severity: String,
 }
 
-/// One row of the grouped plan-limits query — `usage.rs`'s
+/// One row of the grouped plan-limits query, `usage.rs`'s
 /// `TenantPlanLimitRow` widened with the tenant id (the override-aware
 /// `COALESCE(po.plan, t.plan)` resolution lives in the sweep's SQL).
 #[derive(Debug, FromRow)]
@@ -2258,14 +2258,14 @@ pub(crate) async fn drain_pending_metering_events(
             })?;
     }
 
-    // P2 — resolve EVERY event's enforced counter key from ONE batched
+    // P2, resolve EVERY event's enforced counter key from ONE batched
     // subscription-anchor SELECT plus an in-memory memo keyed by
     // (tenant, event_type, event year-month, selected cycle anchor start).
     // Pre-fix this was one `enforced_counter_key_for_event_type` SELECT per
     // event (up to 10,000 every 60s).
     let counter_keys = drain_counter_keys(state, &valid_events).await?;
 
-    // P2 — the EVALs stay one atomic script invocation PER EVENT (the guard
+    // P2, the EVALs stay one atomic script invocation PER EVENT (the guard
     // semantics are unchanged) but are pipelined in bounded chunks: one
     // network round trip per chunk instead of one per event.
     for (chunk, chunk_keys) in valid_events
@@ -2478,7 +2478,7 @@ struct RetryCandidateRow {
 }
 
 /// Whether the scheduled auto-pay job may charge tenants' saved Mollie
-/// payment methods for open invoices. Default: disabled — auto-charging is
+/// payment methods for open invoices. Default: disabled, auto-charging is
 /// financially sensitive and must be opted into explicitly via
 /// `AUTO_PAY_OPEN_INVOICES=true` (or `1`).
 fn auto_pay_open_invoices_enabled() -> bool {
@@ -2508,7 +2508,7 @@ async fn clear_dunning_retry(state: &AppState, tenant_id: &str) -> Result<(), St
 /// The earliest PENDING invoice per tenant, for a whole retry batch in ONE
 /// query (`DISTINCT ON`, deterministic on `created_at, id`). This replaces
 /// the per-dunning-row invoice SELECT (P3 fix 5). Tenant ids without an open
-/// invoice have no map entry — exactly the old `fetch_optional` → `None`.
+/// invoice have no map entry, exactly the old `fetch_optional` → `None`.
 async fn load_open_invoices_for_tenants(
     db: &PgPool,
     tenant_ids: &[String],
@@ -2547,7 +2547,7 @@ async fn process_scheduled_retries(
     // dunning retries remain visible in logs without moving money.
     if !auto_pay_open_invoices_enabled() {
         info!(
-            "AUTO_PAY_OPEN_INVOICES disabled — skipping scheduled Mollie auto-pay retries \
+            "AUTO_PAY_OPEN_INVOICES disabled, skipping scheduled Mollie auto-pay retries \
              (set AUTO_PAY_OPEN_INVOICES=true to enable)"
         );
         return Ok(RetryResult {
@@ -2583,7 +2583,7 @@ async fn process_scheduled_retries(
     let mut attempted = 0_i64;
     let mut succeeded = 0_i64;
 
-    // P3 fix 5 — resolve every candidate's open local invoice in ONE query
+    // P3 fix 5, resolve every candidate's open local invoice in ONE query
     // (earliest pending invoice per tenant). The old loop issued one invoice
     // SELECT per due dunning row, so a 50-row batch cost 50 round trips
     // before any provider work. The amount is still DERIVED per invoice
@@ -2606,7 +2606,7 @@ async fn process_scheduled_retries(
             };
 
             // The amount is DERIVED from the local invoice (total minus
-            // confirmed payments minus debt-reduction credits) — never a
+            // confirmed payments minus debt-reduction credits), never a
             // provider object, never a client input.
             let outstanding_cents =
                 crate::invoices::invoice_outstanding_cents(&state.db, invoice_id)
@@ -2679,7 +2679,7 @@ async fn process_scheduled_retries(
             if bound.rows_affected() == 0 {
                 warn!(
                     invoice_id = %invoice_id,
-                    "dunning retry charge accepted but the invoice already carries a Mollie binding — left untouched"
+                    "dunning retry charge accepted but the invoice already carries a Mollie binding, left untouched"
                 );
             }
 
@@ -2721,8 +2721,8 @@ async fn process_scheduled_retries(
 ///
 /// This is the function the periodic billing loop calls (see
 /// [`start_periodic_jobs`]); it is PUBLIC so integration tests can drive the
-/// exact running evaluation — seeding a rule through the admin API and
-/// observing the fired `system_alerts` row — instead of re-implementing the
+/// exact running evaluation, seeding a rule through the admin API and
+/// observing the fired `system_alerts` row, instead of re-implementing the
 /// sweep in test code.
 pub async fn process_usage_alerts(
     state: &AppState,
@@ -2761,7 +2761,7 @@ pub async fn process_usage_alerts(
         });
     }
 
-    // ONE grouped usage aggregate for ALL tenants with rules — never one
+    // ONE grouped usage aggregate for ALL tenants with rules, never one
     // metering SUM per tenant.
     let usage_rows: Vec<(String, String, i64)> = sqlx::query_as(
         r#"
@@ -2805,7 +2805,7 @@ pub async fn process_usage_alerts(
     let mut limits: HashMap<String, (i64, i64)> = HashMap::new();
     for row in limit_rows {
         // A tenant with several active overrides resolves to one row in the
-        // per-tenant query (fetch_optional keeps the first) — do the same.
+        // per-tenant query (fetch_optional keeps the first), do the same.
         limits
             .entry(row.tenant_id.clone())
             .or_insert_with(|| resolve_alert_plan_limits(&row));
@@ -2928,7 +2928,7 @@ pub async fn process_usage_alerts(
             };
 
             // The condition HOLDS: raise the incident on the control-plane alert
-            // rail. This is independent of channel delivery on purpose — the CP
+            // rail. This is independent of channel delivery on purpose, the CP
             // /alerts page is a first-class destination, so a rule whose webhook
             // is down or absent still fires where operators look. `delivered`
             // below keeps its exact prior semantics (channel acceptance gates the
@@ -2992,7 +2992,7 @@ pub async fn process_usage_alerts(
     })
 }
 
-/// Persist a fired usage rule into `system_alerts` — the store the control
+/// Persist a fired usage rule into `system_alerts`, the store the control
 /// plane's `/alerts` page, SSE stream, and dashboard risk counts read.
 ///
 /// Idempotent per rule: `source = 'usage_alert'` plus `fingerprint = <rule
@@ -3216,7 +3216,7 @@ async fn process_monthly_sla_credits_chunked(
         -- Override-aware plan resolution, exactly like plans.rs
         -- get_plan_for_tenant: an active admin plan override (e.g. an
         -- Enterprise override on a Scale-tier tenant row) carries the SLA
-        -- entitlement and the credit cap of the OVERRIDING plan — joining
+        -- entitlement and the credit cap of the OVERRIDING plan, joining
         -- only on t.plan silently dropped the override's SLA features.
         LEFT JOIN plan_overrides po
           ON po.tenant_id = t.id
@@ -3235,7 +3235,7 @@ async fn process_monthly_sla_credits_chunked(
 
     // P3: the invoice inputs for EVERY candidate are loaded in ONE grouped
     // query. Before this, each breaching candidate issued its own currency
-    // lookup (latest paid invoice) and amount SUM — two round trips per row.
+    // lookup (latest paid invoice) and amount SUM, two round trips per row.
     // Only candidates that can actually reach the credit insert need them.
     let invoice_tenants: Vec<String> = candidates
         .iter()
@@ -3326,7 +3326,7 @@ async fn process_monthly_sla_credits_chunked(
             continue;
         }
 
-        // Fix I6 — SLA credits are cash-equivalent: base them only on
+        // Fix I6, SLA credits are cash-equivalent: base them only on
         // invoices that were actually paid, and credit in the invoice's own
         // currency (mixed-currency totals must never be summed together).
         // Defaults: no paid invoice → EUR, zero cents → no credit.
@@ -3335,7 +3335,7 @@ async fn process_monthly_sla_credits_chunked(
             .cloned()
             .unwrap_or_else(|| ("EUR".into(), 0));
 
-        // Money invariant: integer cents, half-up rounding — no f64 in the
+        // Money invariant: integer cents, half-up rounding, no f64 in the
         // computation path (the previous `(cents as f64) * pct/100` drifted
         // for large cent values).
         let credit_amount =
@@ -3380,7 +3380,7 @@ async fn process_monthly_sla_credits_chunked(
 
     let mut credits_created = 0_i64;
     if !pending.is_empty() {
-        // Fix F5 — the old NOT-EXISTS check-then-insert could double-run
+        // Fix F5, the old NOT-EXISTS check-then-insert could double-run
         // across replicas/restarts (sla_credits has no unique constraint on
         // (tenant_id, period_month)). The batch takes the SAME per-(tenant,
         // period) advisory locks, in ONE statement and sorted order (no
@@ -3485,7 +3485,7 @@ fn feature_flag_enabled(features: &Value, keys: &[&str]) -> bool {
 
 /// `percent` of `cents`, rounded half-up, computed in integer arithmetic
 /// (i128 intermediate so cent×percent cannot overflow). Used by the SLA
-/// credit path — money computation must never route through f64.
+/// credit path, money computation must never route through f64.
 pub(crate) fn percent_of_cents_half_up(cents: i64, percent: i64) -> i64 {
     if cents <= 0 || percent <= 0 {
         return 0;
@@ -3526,7 +3526,7 @@ async fn process_pending_dedicated_ip_charges(
         return Ok(0);
     };
 
-    // Fix I7 — the FOR UPDATE SKIP LOCKED claim previously ran in
+    // Fix I7, the FOR UPDATE SKIP LOCKED claim previously ran in
     // autocommit mode, so the row locks were released immediately and two
     // maintenance ticks could double-charge the same IP. The fetch and the
     // per-row processing now share one explicit transaction; each row runs
@@ -3606,7 +3606,7 @@ async fn process_pending_dedicated_ip_cancels(
     state: &AppState,
     client: &Client,
 ) -> Result<i64, String> {
-    // Fix I7 — same explicit-transaction claim as the charge path.
+    // Fix I7, same explicit-transaction claim as the charge path.
     let mut tx = state
         .db
         .begin()
@@ -3781,7 +3781,7 @@ async fn cancel_dedicated_ip_billing(
         info!(
             ip_id = %row.id,
             provider_reference = %provider_reference,
-            "cancel: no provider-side dedicated IP object exists under Mollie — the add-on stops with its local row"
+            "cancel: no provider-side dedicated IP object exists under Mollie, the add-on stops with its local row"
         );
     }
 
@@ -3835,7 +3835,7 @@ fn dedicated_ip_price_cents() -> Option<i64> {
                 Err(_) => {
                     tracing::warn!(
                         value = %trimmed,
-                        "DEDICATED_IP_PRICE_CENTS is not an integer — falling back to the platform-catalog price"
+                        "DEDICATED_IP_PRICE_CENTS is not an integer, falling back to the platform-catalog price"
                     );
                     Some(platform_catalog::DEDICATED_IP_FIRST_CENTS)
                 }
@@ -3890,7 +3890,7 @@ async fn process_cost_margin_checks(state: &AppState) -> Result<CostMarginSweepR
 
     // ONE grouped query for the entire fleet (perf audit 2026-10-18,
     // finding 15): every ACTIVE tenant's cost/revenue summary in a single
-    // GROUP BY over `tenant_costs` — the old loop paid one full SUM per
+    // GROUP BY over `tenant_costs`, the old loop paid one full SUM per
     // tenant. The LEFT JOIN keeps zero-activity tenants in the result, so
     // `checked` and their Healthy classification match the per-tenant SUM
     // (COALESCE zeros) exactly.
@@ -3921,7 +3921,7 @@ async fn process_cost_margin_checks(state: &AppState) -> Result<CostMarginSweepR
         Ok(summaries) => summaries,
         // Degraded mode (fault-injection contract
         // `cost_margin_status_arms_alert_dedup_and_throttle`): a broken
-        // `tenant_costs` table must NOT fail the sweep — it degrades to
+        // `tenant_costs` table must NOT fail the sweep, it degrades to
         // per-tenant isolation, one warn per unreachable tenant.
         Err(error) => {
             warn!(error = %error, "grouped tenant cost summary load failed; falling back to per-tenant cost checks");
@@ -3939,7 +3939,7 @@ async fn process_cost_margin_checks(state: &AppState) -> Result<CostMarginSweepR
         // The decision logic is the per-tenant rule (see
         // `evaluate_tenant_cost_margin`); only the DB SUM is grouped away.
         // Tenants whose margin actually breaches pay the full per-tenant
-        // alert/throttle path — those are the rare rows the sweep exists
+        // alert/throttle path, those are the rare rows the sweep exists
         // for. Healthy tenants get their throttle cleared and status cached
         // through ONE pipelined Redis round trip for the whole batch
         // instead of two round trips per tenant.
@@ -3978,7 +3978,7 @@ async fn process_cost_margin_checks(state: &AppState) -> Result<CostMarginSweepR
 }
 
 /// The healthy tail of the cost-margin sweep in ONE Redis round trip: clear
-/// each tenant's (stale) cost throttle and cache its evaluated status — the
+/// each tenant's (stale) cost throttle and cache its evaluated status, the
 /// exact writes `clear_cost_throttling` + `cache_cost_margin_status` perform
 /// per tenant, pipelined. A throttle that actually existed (a recovery) still
 /// gets its per-tenant audit event, in tenant order, exactly as before.
@@ -3996,7 +3996,7 @@ async fn cache_healthy_cost_margins_batch(state: &AppState, healthy: &[(String, 
 
     let mut pipeline = redis::pipe();
     for (tenant_id, margin_percent) in healthy {
-        // Per-tenant DEL then SETEX — the exact command order the per-row
+        // Per-tenant DEL then SETEX, the exact command order the per-row
         // clear/cache used, and the order the results come back in.
         pipeline.del(cost_throttle_key(tenant_id));
         let payload = json!({
@@ -4376,7 +4376,7 @@ async fn cache_cost_margin_status(
     }
 }
 
-/// ToS 6.4 — "Credits expire after 12 months unless otherwise stated."
+/// ToS 6.4, "Credits expire after 12 months unless otherwise stated."
 /// The published policy previously had NO enforcement mechanism, so wallet
 /// balances sat forever. This sweep expires UNCONSUMED credits older than
 /// 12 months: under the FIFO convention (debits consume the oldest credit
@@ -4444,7 +4444,7 @@ async fn expire_stale_wallet_credits(state: &AppState) -> Result<u64, String> {
         )
         .bind(&tenant_id)
         .bind(expire_amount)
-        .bind("Expired credit — 12-month wallet credit policy (ToS 6.4)")
+        .bind("Expired credit, 12-month wallet credit policy (ToS 6.4)")
         .execute(&mut *tx)
         .await
         .map_err(|error| {
@@ -4453,7 +4453,7 @@ async fn expire_stale_wallet_credits(state: &AppState) -> Result<u64, String> {
         .rows_affected();
 
         if debited == 0 {
-            // Balance moved between the candidate scan and the debit — skip
+            // Balance moved between the candidate scan and the debit, skip
             // rather than force-below zero.
             let _ = tx.rollback().await;
             continue;
@@ -4502,19 +4502,19 @@ async fn expire_stale_wallet_credits(state: &AppState) -> Result<u64, String> {
     Ok(expired_count)
 }
 
-/// Fix F4/F09 — record a payment recovery and restore access according to
+/// Fix F4/F09, record a payment recovery and restore access according to
 /// the INDEPENDENT restriction model.
 ///
 /// `invoice_id` scopes the recovery to that invoice's failure history: the
 /// tenant-level reset only happens when the tenant's most recent
-/// `payment_failed` event belongs to the settled invoice — a DIFFERENT
+/// `payment_failed` event belongs to the settled invoice, a DIFFERENT
 /// invoice that is still failing keeps the tenant in dunning. The
 /// `payment_recovered` dunning event is always written (with the invoice
 /// id) so the settled invoice's history is complete either way. `None`
 /// restores the legacy unscoped blanket reset (used when no invoice
 /// context is available).
 ///
-/// Audit F09 — restrictions are represented independently
+/// Audit F09, restrictions are represented independently
 /// (billing/administrative/verification/abuse, migration 181) and this
 /// recovery clears ONLY the billing restriction. Tenant state and
 /// queued-message eligibility are then recomputed IN THE SAME TRANSACTION
@@ -4653,12 +4653,12 @@ pub(crate) async fn mark_payment_recovered(
 
     if !reset_allowed {
         // The settled invoice recovered, but the tenant's latest failure is
-        // for a different invoice that is still unpaid — keep dunning,
+        // for a different invoice that is still unpaid, keep dunning,
         // suspension and the queued-message hold exactly as they are.
         info!(
             tenant_id = %tenant_id,
             invoice_id = ?invoice_id,
-            "payment recovered for one invoice; dunning kept active — a different invoice is still failing"
+            "payment recovered for one invoice; dunning kept active, a different invoice is still failing"
         );
         return Ok(());
     }
@@ -4671,7 +4671,7 @@ pub(crate) async fn mark_payment_recovered(
             tenant_id = %tenant_id,
             invoice_id = ?invoice_id,
             dunning_reset,
-            "payment recovered; no billing restriction was active — administrative/verification/abuse holds left untouched"
+            "payment recovered; no billing restriction was active, administrative/verification/abuse holds left untouched"
         );
     }
 
@@ -4687,7 +4687,7 @@ pub(crate) async fn mark_payment_recovered(
 }
 
 /// The manual admin dunning reset (audit F09): the SAME restriction-aware
-/// rule as [`mark_payment_recovered`] — clear only the billing hold, then
+/// rule as [`mark_payment_recovered`], clear only the billing hold, then
 /// recompute tenant state and queued-message eligibility in one
 /// transaction, with the admin actor recorded on the clearance. Exposed
 /// so the api-server admin route and the billing-service recovery path
@@ -4787,7 +4787,7 @@ pub async fn admin_reset_dunning_restriction_aware(
     if billing_cleared == 0 {
         info!(
             tenant_id = tenant_id,
-            "admin dunning reset: no billing restriction was active — other holds left untouched"
+            "admin dunning reset: no billing restriction was active, other holds left untouched"
         );
     }
     if released > 0 {
@@ -4843,7 +4843,7 @@ pub async fn record_abuse_report(
     Ok(id)
 }
 
-/// Whether an OPEN abuse hold exists for the tenant — the state that must
+/// Whether an OPEN abuse hold exists for the tenant, the state that must
 /// block sending-release and reactivation regardless of billing health.
 pub async fn tenant_has_open_abuse_hold(state: &AppState, tenant_id: &str) -> Result<bool, String> {
     let open: bool = sqlx::query_scalar(
@@ -4886,7 +4886,7 @@ fn abuse_transition_allowed(from: &str, to: &str) -> bool {
 }
 
 /// Advance an abuse report through an AUTHORIZED, audited transition. The
-/// reviewer identity is recorded (`reviewed_by`/`reviewed_at`) — evidence
+/// reviewer identity is recorded (`reviewed_by`/`reviewed_at`), evidence
 /// that distinguishes a genuine resolution from the legacy blanket
 /// resolves migration 182 re-opened.
 pub async fn review_abuse_report(
@@ -4993,7 +4993,7 @@ pub async fn review_abuse_report(
 
 /// Impose an administrative restriction on a tenant (audit F09): recorded
 /// independently with actor/reason, so payment recovery and dunning resets
-/// can never clear it — only the symmetric [`clear_tenant_restriction`].
+/// can never clear it, only the symmetric [`clear_tenant_restriction`].
 pub async fn impose_tenant_restriction(
     db: &sqlx::PgPool,
     tenant_id: &str,
@@ -5022,7 +5022,7 @@ pub async fn impose_tenant_restriction(
     Ok(())
 }
 
-/// Clear one specific restriction by kind (audit F09) — the ONLY writer
+/// Clear one specific restriction by kind (audit F09), the ONLY writer
 /// that lifts administrative/verification/abuse restrictions, with the
 /// clearing actor and reason recorded.
 pub async fn clear_tenant_restriction(
@@ -5050,7 +5050,7 @@ pub async fn clear_tenant_restriction(
 }
 
 /// Resolve an abuse report (terminal) through the audited transition
-/// above — releases the abuse restriction in the same transaction.
+/// above, releases the abuse restriction in the same transaction.
 pub async fn resolve_abuse_report(
     db: &sqlx::PgPool,
     report_id: Uuid,
@@ -5063,7 +5063,7 @@ pub async fn resolve_abuse_report(
 /// One Mollie recurring charge against a STORED mandate.
 ///
 /// A repeat payment is `POST /payments` with `sequenceType: "recurring"`,
-/// the Mollie customer and the mandate — NOT a subscription object (the add-on
+/// the Mollie customer and the mandate, NOT a subscription object (the add-on
 /// is OUR row, and the mandate is shared by every add-on of the tenant).
 /// Amounts travel as decimal strings, the key as a Bearer token, and a
 /// deterministic `Idempotency-Key` makes a retried call replay instead of
@@ -5071,7 +5071,7 @@ pub async fn resolve_abuse_report(
 ///
 /// The returned [`MollieCharge`] carries the payment id. A
 /// `failed`/`canceled`/`expired` status is an `Err`; `paid` and the async
-/// states (`open`, `pending`, `authorized`) are accepted — the webhook
+/// states (`open`, `pending`, `authorized`) are accepted, the webhook
 /// settles the final outcome.
 #[allow(clippy::too_many_arguments)]
 async fn mollie_charge_stored_payment_method(
@@ -5142,7 +5142,7 @@ mod tests {
     use super::*;
 
     // ------------------------------------------------------------------
-    // Audit F09 — authorized abuse-report transitions: a CHECK of allowed
+    // Audit F09, authorized abuse-report transitions: a CHECK of allowed
     // labels alone is not transition authorization.
     // ------------------------------------------------------------------
 
@@ -5173,7 +5173,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // Fix I5 — KMD backfill covers every missed month.
+    // Fix I5, KMD backfill covers every missed month.
     // ------------------------------------------------------------------
 
     #[test]
@@ -5237,7 +5237,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // Fix I6 — SLA credit percentage ladder.
+    // Fix I6, SLA credit percentage ladder.
     // ------------------------------------------------------------------
 
     #[test]
@@ -5251,7 +5251,7 @@ mod tests {
 
     /// E-SWEEP-TRIGGER pin: the binary must expose the one-shot
     /// `--sweep-overage-only` trigger and route it through the SAME
-    /// [`sweep_overage_once`] the nightly loop calls — one code path, one
+    /// [`sweep_overage_once`] the nightly loop calls, one code path, one
     /// behavior (a second sweep implementation could drift from the
     /// scheduled one).
     #[test]
@@ -5311,7 +5311,7 @@ mod tests {
 // ---------------------------------------------------------------------------
 // Adversarial coverage tests (DB + Redis backed) for the maintenance sweeps.
 //
-// These call the PRIVATE sweep functions directly — the periodic-job
+// These call the PRIVATE sweep functions directly, the periodic-job
 // wrappers spawn loops and sleep, which is neither deterministic nor fast.
 // Every test provisions its own canonical database clone; `TEST_DATABASE_URL`
 // unset means soft-skip.
@@ -5510,7 +5510,7 @@ mod coverage_adversarial {
 
     /// Cross-process serialization for tests that touch the SHARED Redis
     /// pending-metering keyspace: a drain consumes every `meter:pending:*`
-    /// key it can see — including another test process's — so two drains
+    /// key it can see, including another test process's, so two drains
     /// racing make each other's counts wrong. A session-level advisory lock
     /// on the admin database; released when the pool drops.
     async fn metering_keys_guard(admin_url: &str) -> sqlx::PgPool {
@@ -5865,7 +5865,7 @@ mod coverage_adversarial {
         );
     });
 
-    // P3 item 7 — invoice archival was one INSERT per candidate (up to 500 a
+    // P3 item 7, invoice archival was one INSERT per candidate (up to 500 a
     // day). The whole batch is now ONE multi-row INSERT; the counter proves
     // three invoices cost one statement, not three.
     env_test!(archive_paid_invoices_is_one_statement_per_batch, |env| {
@@ -5913,7 +5913,7 @@ mod coverage_adversarial {
     // Regression guard for the batch-error path: one poisoned archive row
     // must not discard its batch-mates. The batch INSERT aborts on the
     // trigger, the per-row fallback archives the two healthy invoices and
-    // logs the failing one — the pre-fallback code returned Err and archived
+    // logs the failing one, the pre-fallback code returned Err and archived
     // ZERO.
     env_test!(archive_paid_invoices_isolates_a_poisoned_row, |env| {
         let tenant = "mtcov_archive_poison";
@@ -6460,7 +6460,7 @@ mod coverage_adversarial {
         }
     );
 
-    // P3 fix 1 — the SLA sweep must not scale its DB round trips with the
+    // P3 fix 1, the SLA sweep must not scale its DB round trips with the
     // number of breaching candidates. Before the fix each candidate cost two
     // invoice reads plus its own advisory lock + existence check + insert
     // (≈5 statements/row). The batched pass loads every candidate's invoice
@@ -6922,7 +6922,7 @@ mod coverage_adversarial {
     });
 
     // A rule whose condition does NOT hold must leave `system_alerts`
-    // alone — firing on a sweep where usage is below the threshold would
+    // alone, firing on a sweep where usage is below the threshold would
     // make the console lie about the tenant's state.
     env_test!(usage_alert_rule_below_threshold_never_fires, |env| {
         let tenant = "mtcov_rule_quiet";
@@ -7022,7 +7022,7 @@ mod coverage_adversarial {
         std::env::set_var("MOLLIE_API_KEY", "mollie-test-key-fixture");
         std::env::set_var("MOLLIE_API_BASE_URL", format!("{base}/v2"));
         std::env::set_var("MOLLIE_PROFILE_ID", "ApexMailTestECOM");
-        // The add-on price is CENTS (minor units) — never a provider price id.
+        // The add-on price is CENTS (minor units), never a provider price id.
         std::env::set_var("DEDICATED_IP_PRICE_CENTS", "500");
 
         let tenant = "mtcov_dip";
@@ -7587,7 +7587,7 @@ mod coverage_adversarial {
             .expect("drain");
         // The drain scans the WHOLE Redis keyspace for pending metering
         // events, so its global `processed_count` also moves for a sibling
-        // test's event when the suite runs in parallel — asserting on it made
+        // test's event when the suite runs in parallel, asserting on it made
         // this test order-dependent. Assert on THIS event: it left the pending
         // set, it was persisted once, and the enforced counter moved by it.
         assert!(first.processed_count >= 1, "{first:?}");
@@ -7616,7 +7616,7 @@ mod coverage_adversarial {
         drain_pending_metering_events(&env.state, 100)
             .await
             .expect("drain replay");
-        // The replay must not move THIS tenant's counter or add a row — a
+        // The replay must not move THIS tenant's counter or add a row, a
         // global `processed_count == 0` would only hold if no sibling test
         // had a pending event.
         assert_eq!(
@@ -7634,7 +7634,7 @@ mod coverage_adversarial {
         assert!(!redis_exists(env, &pending_key).await);
     });
 
-    // P2 metering recovery drain — the pre-fix loop issued ONE
+    // P2 metering recovery drain, the pre-fix loop issued ONE
     // `enforced_counter_key_for_event_type` SELECT per event and ONE Redis
     // EVAL round trip per event. The fix memoizes the key per
     // (tenant, event_type, event month) and loads every tenant's cycle
@@ -7735,7 +7735,7 @@ mod coverage_adversarial {
         }
     );
 
-    // P2 metering recovery drain — pipelined EVALs must produce exactly the
+    // P2 metering recovery drain, pipelined EVALs must produce exactly the
     // counter values the serial path produced, including for a
     // billing-cycle-anchored tenant (whose key is `c`-prefixed and differs
     // from the UTC calendar-month key).
@@ -8387,7 +8387,7 @@ mod coverage_adversarial {
         }
     );
 
-    // P3 fix 5 — one batched open-invoice lookup for the whole dunning
+    // P3 fix 5, one batched open-invoice lookup for the whole dunning
     // batch, not one SELECT per due dunning row. Three candidates with no
     // open invoice must cost exactly ONE lookup query (the pre-fix loop
     // issued three) and must still clear every retry.
@@ -8486,7 +8486,7 @@ mod coverage_adversarial {
             let client = Client::new();
             // The canonical price lives in platform-catalog (prices change
             // only at the source). A missing, blank or non-numeric override
-            // therefore falls back to the catalog price — the sweep MOVES —
+            // therefore falls back to the catalog price, the sweep MOVES —
             // while an explicit non-positive override (0 / negative) is the
             // operator's disable switch and moves nothing.
             for price in [None, Some(""), Some("   "), Some("abc")] {
@@ -8496,7 +8496,7 @@ mod coverage_adversarial {
                 }
                 // No stored token on the seeded subscription: the sweep runs
                 // at the catalog price and reports the charge as a failure
-                // (never a silent no-op) — assert it is no longer disabled.
+                // (never a silent no-op), assert it is no longer disabled.
                 let result = process_dedicated_ip_billing(&env.state, &client)
                     .await
                     .expect("dip billing");
@@ -8524,7 +8524,7 @@ mod coverage_adversarial {
             .await
             .expect("ip state");
             // The row never moves to provisioned (no charge could be made
-            // without a stored token) — but with the catalog price as the
+            // without a stored token), but with the catalog price as the
             // default the sweep is no longer a SILENT no-op: every enabled
             // attempt records its failure visibly.
             assert_eq!(billing.as_str(), "pending_charge");
@@ -8903,7 +8903,7 @@ mod coverage_adversarial {
     // Deep adversarial additions: the scheduler's startup sweeps and tick
     // loops (virtual clock), month-end closing, trial reconciliation,
     // dunning grace expiry, wallet conservation, restriction-aware recovery
-    // and the cost-margin throttle — each pinned to exactly-once semantics.
+    // and the cost-margin throttle, each pinned to exactly-once semantics.
     // ===================================================================
 
     async fn seed_tenant_plan(env: &Env, tenant: &str, plan: &str, status: &str) {
@@ -8977,7 +8977,7 @@ mod coverage_adversarial {
         // The startup sweeps run immediately; interval ticks are >= 30s away
         // and never fire within this bounded, real-time window. Under a full
         // workspace parallel run 40ms is far too short for the sweeps to
-        // reach a freshly-provisioned database — poll to a bounded deadline
+        // reach a freshly-provisioned database, poll to a bounded deadline
         // instead of sleeping a fixed instant.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         let archived = loop {
@@ -9086,7 +9086,7 @@ mod coverage_adversarial {
             .await
             .expect("closing");
         assert!(ran, "an empty period still records its closing marker");
-        // total_invoices is INTEGER (INT4) on the canonical schema — sqlx
+        // total_invoices is INTEGER (INT4) on the canonical schema, sqlx
         // does not coerce it to i64.
         let (total, status): (i32, String) = sqlx::query_as(
             "SELECT total_invoices, status FROM month_end_closings ORDER BY created_at DESC LIMIT 1",
@@ -9873,7 +9873,7 @@ mod coverage_adversarial {
 
             // SET-BASED: one CTE statement performs BOTH writes, and the
             // whole audit append costs ONE head advance + ONE multi-row
-            // INSERT — regardless of how many subscriptions are due.
+            // INSERT, regardless of how many subscriptions are due.
             assert_eq!(
                 capture.count_starting_with("WITH due AS"),
                 1,
@@ -9993,7 +9993,7 @@ mod coverage_adversarial {
             assert_eq!(future_plan, "growth");
 
             // Audit rows: one per ended subscription, exact payload fields,
-            // byte-re-derivable hashes and signed links — exactly what the
+            // byte-re-derivable hashes and signed links, exactly what the
             // per-row append produced (resource_id is the subscription's
             // internal id, as in the original loop).
             let subscriptions: Vec<(uuid::Uuid, String)> = sqlx::query_as(
@@ -10095,7 +10095,7 @@ mod coverage_adversarial {
             assert_eq!(
                 audits[second_index].4.as_deref(),
                 Some(audits[first_index].5.as_str()),
-                "entry 1 links entry 0 — in-memory chain, input order"
+                "entry 1 links entry 0, in-memory chain, input order"
             );
             assert_eq!(
                 head_seq_after,
@@ -10453,7 +10453,7 @@ mod coverage_adversarial {
         |env| {
             // Two tenants with rules (one breaching rule each) prove the
             // grouped evaluation fires the same rows the per-tenant sweep
-            // did — including the cooldown that gates the second sweep.
+            // did, including the cooldown that gates the second sweep.
             let tenant_a = "mtcov_galert_a";
             let tenant_b = "mtcov_galert_b";
             for tenant in [tenant_a, tenant_b] {
@@ -10529,7 +10529,7 @@ mod coverage_adversarial {
             capture.print("process_usage_alerts");
 
             // SET-BASED: one configs fetch, ONE grouped usage aggregate, one
-            // plan-limits fetch, one webhook-URL fetch — for BOTH tenants.
+            // plan-limits fetch, one webhook-URL fetch, for BOTH tenants.
             assert_eq!(
                 capture.count_starting_with("SELECT tenant_id, id,"),
                 1,
@@ -10817,7 +10817,7 @@ mod coverage_adversarial {
             .expect("keys");
         assert_eq!(keys_left, 0, "both pending keys are cleaned up");
 
-        // Replay: the DB conflict makes the counter guard a no-op — the event
+        // Replay: the DB conflict makes the counter guard a no-op, the event
         // is never double-counted.
         let mut conn = env.redis.get().await.expect("redis");
         let _: () = redis::cmd("SET")
@@ -10846,8 +10846,8 @@ mod coverage_adversarial {
     //
     // start_periodic_jobs spawns one interval loop per task. The production
     // cadences (minutes..hours) are overridden through
-    // PERIODIC_TASK_INTERVAL_MS, so every spawned loop really ticks — and
-    // really runs its task bodies — against a private database clone within
+    // PERIODIC_TASK_INTERVAL_MS, so every spawned loop really ticks, and
+    // really runs its task bodies, against a private database clone within
     // milliseconds, no virtual clock and no long sleeps.
 
     #[tokio::test(flavor = "current_thread")]
@@ -10894,7 +10894,7 @@ mod coverage_adversarial {
     // intervals; the arms that fire only when a tick actually PRODUCES
     // work (charged>0, released>0, resumed>0, reclaimed>0, reports>0, …)
     // stayed cold. This driver seeds real work for every loop so each
-    // result arm is reachable — and asserts the observable DB effects.
+    // result arm is reachable, and asserts the observable DB effects.
 
     #[tokio::test(flavor = "current_thread")]
     async fn periodic_job_tick_loops_produce_real_results() {
@@ -11172,7 +11172,7 @@ mod coverage_adversarial {
         assert_eq!(notified, 1, "exactly one purge notification was queued");
 
         // Scheduled auto-pay: the due retry found no open LOCAL invoice and
-        // cleared the next retry — never rescheduled blindly.
+        // cleared the next retry, never rescheduled blindly.
         poll_until!(
             deadline,
             "SELECT COUNT(*) FROM dunning_records
@@ -11230,7 +11230,7 @@ mod coverage_adversarial {
 
         // KMD: the loop generates the previous month's VAT return only ON OR
         // AFTER the 20th (the real-time gate in `generate_kmd_if_due`), so
-        // the expectation follows the same calendar — generated past the
+        // the expectation follows the same calendar, generated past the
         // due day, deliberately absent before it. (A fixed "one row must
         // appear" assertion silently failed on the 1st–19th of every month.)
         let kmd_due = Utc::now().day() >= 20;
@@ -11571,7 +11571,7 @@ mod coverage_adversarial {
 
         // Under Mollie there is no provider-side subscription-item object to
         // delete and no automatic future add-on charges: ending the add-on
-        // is a LOCAL transition for every row — stale stored references
+        // is a LOCAL transition for every row, stale stored references
         // included (they are activation payment ids now, not deletable
         // items). The old two-step failure matrix (500 rolls back, 404
         // succeeds) pinned a pre-cutover mechanic with no Mollie analog.
@@ -11972,7 +11972,7 @@ mod coverage_adversarial {
             .expect("usage");
 
             let client = Client::new();
-            // Webhook down: nothing delivered, NO cooldown set — the next pass
+            // Webhook down: nothing delivered, NO cooldown set, the next pass
             // must retry.
             let first = process_usage_alerts(&env.state, &client)
                 .await

@@ -51,7 +51,7 @@ pub struct ExportRow {
 
 /// Per-day rows for the export.
 ///
-/// Every column — sent, delivered, opened, clicked, bounced, complaints —
+/// Every column, sent, delivered, opened, clicked, bounced, complaints —
 /// comes from the ONE canonical metric definition
 /// (`send_cohort_time_series`, the exact function `GET /v1/admin/analytics`
 /// uses). Each row is a day of SEND cohorts with outcomes attached to that
@@ -237,7 +237,7 @@ mod tests {
 
     /// Adversarial proof against the canonical schema: a recipient-send
     /// opened THREE times must appear as ONE opened cohort row in the
-    /// exported CSV — the same value `GET /v1/admin/analytics` reports (both
+    /// exported CSV, the same value `GET /v1/admin/analytics` reports (both
     /// go through `send_cohort_time_series`). Gated on TEST_DATABASE_URL.
     #[tokio::test]
     async fn message_opened_three_times_counts_once_in_export_csv() {
@@ -299,7 +299,7 @@ mod tests {
         assert!(
             data_line.contains("\"1\",\"0\",\"1\",\"0\",\"0\",\"0\""),
             "CSV must show Sent=1, Delivered=0, Opened=1, Clicked=0, Bounced=0, \
-             Complaints=0 — got: {data_line}"
+             Complaints=0, got: {data_line}"
         );
         assert!(
             !data_line.contains("\"3\""),

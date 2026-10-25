@@ -23,7 +23,7 @@ pub fn router() -> Router<AppState> {
 }
 
 /// Actor-attributed feature-flag audit (P2-2): flag flips change platform
-/// behaviour — the entry must record which operator did it, not `None`.
+/// behaviour, the entry must record which operator did it, not `None`.
 async fn log_feature_audit(
     state: &AppState,
     auth: &AuthUser,
@@ -391,7 +391,7 @@ mod tests {
     }
 
     /// Fix 8 (partial failure): when a later id in the batch is missing, the
-    /// earlier update must roll back — never a partially applied batch.
+    /// earlier update must roll back, never a partially applied batch.
     #[tokio::test]
     async fn batch_update_rolls_back_on_a_missing_id() {
         let Some(pool) = crate::test_db::canonical_pool("features_batch_rollback").await else {
@@ -646,7 +646,7 @@ mod tests {
 
     /// The successful batch update path: changes are committed, the cache
     /// is invalidated only after the commit, and every non-empty change is
-    /// audited — while a no-op update (all fields omitted) is audited as
+    /// audited, while a no-op update (all fields omitted) is audited as
     /// nothing.
     #[tokio::test]
     async fn update_feature_success_commits_invalidates_and_audits() {

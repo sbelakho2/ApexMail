@@ -146,7 +146,7 @@ static ALLOWED_CSS_PROPERTIES: LazyLock<HashSet<String>> = LazyLock::new(|| {
     .collect()
 });
 
-/// Dangerous CSS pattern prefixes — case-insensitive match, full substring removed.
+/// Dangerous CSS pattern prefixes, case-insensitive match, full substring removed.
 static DANGEROUS_CSS_PATTERNS: LazyLock<[&'static str; 9]> = LazyLock::new(|| {
     [
         "expression(",       // IE CSS expressions
@@ -213,7 +213,7 @@ static CSS_DECLARATION_REGEX: LazyLock<Option<Regex>> =
 
 /// Remove CSS declarations whose property name is not in the allowlist.
 /// Parses `property: value;` declarations and keeps only those with allowed properties.
-/// Preserves selectors, braces, at-rules, and structure — only strips individual declarations.
+/// Preserves selectors, braces, at-rules, and structure, only strips individual declarations.
 fn filter_allowed_properties(css: &str) -> String {
     if css.trim().is_empty() {
         return css.to_string();

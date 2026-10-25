@@ -32,7 +32,7 @@ Navigieren Sie zu [app.apexmail.ee/signup](https://app.apexmail.ee/signup).
 
 **Fehlerfälle:**
 - **`Email already registered`**: Verwenden Sie den Passwort-Reset unter [app.apexmail.ee/reset-password](https://app.apexmail.ee/reset-password).
-- **`Password too weak`**: Verwenden Sie 15+ Zeichen (längere Passphrasen sind in Ordnung — keine Symbol- oder Ziffernmischung erforderlich). Vermeiden Sie häufige Passwörter und einfache Wiederholungs-/Sequenzmuster.
+- **`Password too weak`**: Verwenden Sie 15+ Zeichen (längere Passphrasen sind in Ordnung, keine Symbol- oder Ziffernmischung erforderlich). Vermeiden Sie häufige Passwörter und einfache Wiederholungs-/Sequenzmuster.
 
 ---
 
@@ -74,7 +74,7 @@ Navigieren Sie in der Dashboard-Seitenleiste zu **Settings → API Keys**.
 
 **Was passiert:** Ein neuer API-Schlüssel wird generiert und einmalig angezeigt.
 
-**Sicherheitshinweis:** Kopieren Sie den Schlüssel sofort. Er wird nicht erneut angezeigt. Speichern Sie ihn in einem Passwort-Manager oder einer Umgebungsvariable — niemals im Quellcode.
+**Sicherheitshinweis:** Kopieren Sie den Schlüssel sofort. Er wird nicht erneut angezeigt. Speichern Sie ihn in einem Passwort-Manager oder einer Umgebungsvariable, niemals im Quellcode.
 
 ```bash
 export APEXMAIL_API_KEY="am_live_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
@@ -120,7 +120,7 @@ Melden Sie sich in der Verwaltungskonsole Ihres DNS-Anbieters an und kopieren Si
 
 **Zeit:** ~2 Minuten
 
-Kopieren Sie den generierten DKIM-**TXT**-Datensatz aus den Domain-Einstellungen. Der Hostname ist `<selector>._domainkey.<your-domain>` und der Wert beginnt mit `v=DKIM1; k=rsa; p=`. Selector und öffentlicher Schlüssel sind domainspezifisch — der im Dashboard generierte Datensatz ist die einzige unterstützte Quelle.
+Kopieren Sie den generierten DKIM-**TXT**-Datensatz aus den Domain-Einstellungen. Der Hostname ist `<selector>._domainkey.<your-domain>` und der Wert beginnt mit `v=DKIM1; k=rsa; p=`. Selector und öffentlicher Schlüssel sind domainspezifisch, der im Dashboard generierte Datensatz ist die einzige unterstützte Quelle.
 
 **Wirkung:** Ermöglicht ApexMail, ausgehende Nachrichten kryptografisch zu signieren, damit empfangende Server die Nachrichtenintegrität und Absenderauthentizität prüfen können.
 
@@ -160,24 +160,24 @@ Wählen Sie Ihre Integrationsmethode:
 
 ### Option A: SDK (aus Quellcode bauen)
 
-> **Noch nicht auf öffentlichen Registries.** Die ApexMail-SDKs sind **noch nicht auf PyPI, pkg.go.dev, Packagist, RubyGems oder Maven Central veröffentlicht** — `pip install apexmail`, `go get github.com/apexmail/apexmail-go` und `composer require apexmail/apexmail-php` schlagen fehl, bis die erste stabile Version erscheint. Installieren Sie bis dahin aus dem Monorepo-Quellcode und pinnen Sie auf einen bestimmten Commit. **Verifizieren Sie die Quelle, die Sie mitliefern**, bevor Sie ausliefern. Siehe [SDKs](/docs/sdks/) für den standortspezifischen Status pro Sprache.
+> **Noch nicht auf öffentlichen Registries.** Die ApexMail-SDKs sind **noch nicht auf PyPI, pkg.go.dev, Packagist, RubyGems oder Maven Central veröffentlicht**, `pip install apexmail`, `go get github.com/apexmail/apexmail-go` und `composer require apexmail/apexmail-php` schlagen fehl, bis die erste stabile Version erscheint. Installieren Sie bis dahin aus dem Monorepo-Quellcode und pinnen Sie auf einen bestimmten Commit. **Verifizieren Sie die Quelle, die Sie mitliefern**, bevor Sie ausliefern. Siehe [SDKs](/docs/sdks/) für den standortspezifischen Status pro Sprache.
 
-SDK-Quellcode ist derzeit privat und für genehmigte Preview-Kunden verfügbar, während die Pakete für ihre erste öffentliche Registry-Veröffentlichung vorbereitet werden — schreiben Sie an [support@apexmail.ee](mailto:support@apexmail.ee) (oder Ihren Account-Manager), und Sie erhalten den gepinnten Quellcode-Drop für Ihre Sprache, mit Prüfsumme, unter der SDK-Lizenz. Jedes SDK-Verzeichnis enthält eigene Build- und Testanweisungen.
+SDK-Quellcode ist derzeit privat und für genehmigte Preview-Kunden verfügbar, während die Pakete für ihre erste öffentliche Registry-Veröffentlichung vorbereitet werden, schreiben Sie an [support@apexmail.ee](mailto:support@apexmail.ee) (oder Ihren Account-Manager), und Sie erhalten den gepinnten Quellcode-Drop für Ihre Sprache, mit Prüfsumme, unter der SDK-Lizenz. Jedes SDK-Verzeichnis enthält eigene Build- und Testanweisungen.
 
-**Python** (`packages/sdk-python` — vom lokalen Pfad installieren oder das Verzeichnis mitliefern):
+**Python** (`packages/sdk-python`, vom lokalen Pfad installieren oder das Verzeichnis mitliefern):
 
 ```bash
 pip install ./packages/sdk-python
 ```
 
-**Go** (`packages/sdk-go` — das Modul mit einer `replace`-Direktive auf den mitgelieferten Quellcode pinnen):
+**Go** (`packages/sdk-go`, das Modul mit einer `replace`-Direktive auf den mitgelieferten Quellcode pinnen):
 
 ```bash
 go mod edit -replace github.com/apexmail/apexmail-go=./packages/sdk-go
 go mod tidy
 ```
 
-**PHP** (`packages/sdk-php` — Composer auf das lokale Verzeichnis verweisen):
+**PHP** (`packages/sdk-php`, Composer auf das lokale Verzeichnis verweisen):
 
 ```bash
 composer config repositories.apexmail path ./packages/sdk-php
@@ -188,7 +188,7 @@ composer require apexmail/apexmail-php:@dev
 
 ### Option B: cURL (Schnelltest)
 
-Keine Installation erforderlich — verwenden Sie das Terminal:
+Keine Installation erforderlich, verwenden Sie das Terminal:
 
 ```bash
 # Verify your key works
@@ -305,7 +305,7 @@ Navigieren Sie im Dashboard zu **Settings → Webhooks**.
 **Felder:**
 - **URL:** Ihre Webhook-Empfänger-URL (z. B. `https://your-app.example.com/webhooks/apexmail`)
 - **Events:** Wählen Sie mindestens `message.delivered`, `message.bounced`, `message.complained`
-- **Secret:** Generieren Sie ein Signatur-Secret — speichern Sie es sicher
+- **Secret:** Generieren Sie ein Signatur-Secret, speichern Sie es sicher
 
 **Was passiert:** ApexMail liefert passende Ereignisse an Ihre URL mit HMAC-SHA256-Signaturen.
 
@@ -344,9 +344,9 @@ Bevor Sie in Produktion gehen:
 1. **Upgrade vom Free-Tarif**, wenn Sie 3.000 E-Mails/Monat dauerhaft (oder Ihr einmaliges Startguthaben von 30.000 E-Mails) überschreiten. Siehe [Preise](/de/pricing/).
 3. **DMARC konfigurieren** für Ihre Absenderdomain mit einer Policy von mindestens `p=none` zunächst, später `p=quarantine` oder `p=reject`.
 4. **SPF-Ausrichtung einrichten**, indem Ihre `Return-Path`-Domain mit Ihrer `From`-Domain übereinstimmt.
-5. **API-Schlüssel rotieren** — erstellen Sie produktions-spezifische Schlüssel mit minimalen Scopes und Ablaufdaten.
-6. **Monitoring einrichten** — konfigurieren Sie Alarme für Bounce-Raten über 2 % und Beschwerde-Raten über 0,1 %.
-7. **Webhook-Idempotenz testen** — prüfen Sie, dass Ihr Handler Ereignisse über das Feld `event_id` korrekt dedupliziert.
+5. **API-Schlüssel rotieren**, erstellen Sie produktions-spezifische Schlüssel mit minimalen Scopes und Ablaufdaten.
+6. **Monitoring einrichten**, konfigurieren Sie Alarme für Bounce-Raten über 2 % und Beschwerde-Raten über 0,1 %.
+7. **Webhook-Idempotenz testen**, prüfen Sie, dass Ihr Handler Ereignisse über das Feld `event_id` korrekt dedupliziert.
 8. **[API-Referenz](/docs/api/) prüfen** für Batch-Sending, Templates und erweiterte Funktionen.
 
 ### Production-Readiness-Checkliste
@@ -365,8 +365,8 @@ Bevor Sie in Produktion gehen:
 
 ## Nächste Schritte
 
-- [API-Referenz](/docs/api/) — vollständige Endpunkt-Dokumentation mit Anfrage-/Antwort-Schemas
-- [Webhooks](/docs/webhooks/) — vollständiger Ereigniskatalog, Sicherheit und Zustelldokumentation
-- [SDKs](/docs/sdks/) — SDK-Installation, Authentifizierung und Nutzungsbeispiele
-- [Analytics](/docs/analytics/) — Zustellmetriken, Bounce-Klassifizierung und Berichte
-- [API Explorer](/api-explorer/) — echte Anfragen gegen die isolierte Live-Sandbox ausführen
+- [API-Referenz](/docs/api/), vollständige Endpunkt-Dokumentation mit Anfrage-/Antwort-Schemas
+- [Webhooks](/docs/webhooks/), vollständiger Ereigniskatalog, Sicherheit und Zustelldokumentation
+- [SDKs](/docs/sdks/), SDK-Installation, Authentifizierung und Nutzungsbeispiele
+- [Analytics](/docs/analytics/), Zustellmetriken, Bounce-Klassifizierung und Berichte
+- [API Explorer](/api-explorer/), echte Anfragen gegen die isolierte Live-Sandbox ausführen

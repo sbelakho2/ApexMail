@@ -44,7 +44,7 @@ pub enum RuleCategory {
 ///
 /// Rules that are not present in the catalog default to level 1, so they
 /// are active at every configured level. This table mirrors
-/// `default_ruleset()` — `test_rule_paranoia_table_matches_catalog` keeps
+/// `default_ruleset()`, `test_rule_paranoia_table_matches_catalog` keeps
 /// the two in sync.
 pub fn rule_paranoia_level(rule_id: u32) -> u8 {
     match rule_id {

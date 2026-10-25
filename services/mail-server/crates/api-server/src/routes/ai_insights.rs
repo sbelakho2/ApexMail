@@ -66,7 +66,7 @@ pub struct ChurnPredictionResponse {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BotDetectionQuery {
-    /// Event id — `events.id` is VARCHAR(64) (migration 075), so this is a
+    /// Event id, `events.id` is VARCHAR(64) (migration 075), so this is a
     /// free-form string, never parsed as a UUID.
     #[serde(default)]
     pub event_id: Option<String>,
@@ -96,7 +96,7 @@ async fn send_time_optimization(
 
     // The requested timezone is REAL: an unknown name is a named 400 (never
     // silently treated as UTC), and the recommended UTC hour is rendered in
-    // this zone — before this, `timezone` was echoed back untouched while
+    // this zone, before this, `timezone` was echoed back untouched while
     // `local_time` printed the UTC hour (dogfood 2026-10-06 wave B).
     let tz: chrono_tz::Tz = params
         .timezone
@@ -337,7 +337,7 @@ async fn churn_prediction(
     require_scopes(&auth, &["ai:read"])?;
 
     // Audience-level churn is computed by the analytics engine's signal rules
-    // (complaint / bounce / inactivity / decay, with their weights) — the
+    // (complaint / bounce / inactivity / decay, with their weights), the
     // route must never fabricate factor strings again. Before this wiring the
     // engine was dead outside its tests and the route returned two hardcoded
     // factors plus two hardcoded recommendations.
@@ -373,7 +373,7 @@ fn is_valid_event_id(id: &str) -> bool {
 
 /// Send-time evidence for bot detection (audit F12): `messages.id` is UUID
 /// while `events.message_id` is VARCHAR(64) (migrations 056/075), so the
-/// join crosses the type boundary explicitly with `m.id::text` — comparing
+/// join crosses the type boundary explicitly with `m.id::text`, comparing
 /// them directly is a `operator does not exist: uuid = character varying`
 /// error that used to be swallowed by `.ok().flatten()`, silently disabling
 /// this signal. Tenant predicates apply on BOTH sides, and `m.sent_at` is
@@ -692,7 +692,7 @@ mod bot_detection_db_tests {
         let tenant = "test-f12-ten";
         let other_tenant = "test-f12-oten";
 
-        // Postgres TIMESTAMPTZ keeps microsecond precision — truncate the
+        // Postgres TIMESTAMPTZ keeps microsecond precision, truncate the
         // seed so the read-back comparison is exact.
         let seeded_at = chrono::Utc::now() - chrono::Duration::seconds(60);
         let submicro_nanos = i64::from(chrono::Timelike::nanosecond(&seeded_at) % 1_000);
@@ -799,7 +799,7 @@ mod bot_detection_db_tests {
         pool.close().await;
     }
 
-    /// A failed query must surface as Err — the old `.ok().flatten()`
+    /// A failed query must surface as Err, the old `.ok().flatten()`
     /// conflated database failure with "no evidence" and silently dropped
     /// the signal.
     #[tokio::test]
@@ -1115,7 +1115,7 @@ mod adversarial_tests {
         assert_eq!(first.timezone, "Europe/Tallinn");
         assert!(first.confidence > 0.5);
         assert!(first.reasoning.contains("opens analyzed"));
-        // The requested timezone is APPLIED to the answer — the previous
+        // The requested timezone is APPLIED to the answer, the previous
         // implementation echoed "09:00" as the local time. The expectation is
         // DERIVED from the zone (Tallinn is UTC+3 in summer, UTC+2 after the
         // October DST transition), so the assertion cannot rot with the

@@ -39,7 +39,7 @@ Qualifizierte Käufer können die aktuelle AVV, Unterauftragsverarbeiter-Informa
 
 ## EU-Souveränität
 
-Enterprise Cloud enthält EU-only-Routing: Jede Nachricht verlässt das System über die eigenen EU-MTAs von ApexMail, mit einem fail-closed-Anhalten statt eines Drittanbieter-Fallbacks, und jede angenommene Nachricht trägt einen Ed25519-signierten Routing-Beleg. Das vollständige Argument — EU-Unternehmen, EU-Rechenzentren, der Routing-Modus und die Belege, jeweils mit ihrer Evidenz verlinkt — steht auf der [EU-Souveränitätsseite](/de/eu-sovereign/).
+Enterprise Cloud enthält EU-only-Routing: Jede Nachricht verlässt das System über die eigenen EU-MTAs von ApexMail, mit einem fail-closed-Anhalten statt eines Drittanbieter-Fallbacks, und jede angenommene Nachricht trägt einen Ed25519-signierten Routing-Beleg. Das vollständige Argument, EU-Unternehmen, EU-Rechenzentren, der Routing-Modus und die Belege, jeweils mit ihrer Evidenz verlinkt, steht auf der [EU-Souveränitätsseite](/de/eu-sovereign/).
 
 ## Abrechnungslebenszyklus
 

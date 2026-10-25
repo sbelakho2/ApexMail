@@ -1,8 +1,8 @@
 //! Statutory obligation scheduler.
 //!
-//! Obligations are **derived from the entity's facts** — VAT registration
+//! Obligations are **derived from the entity's facts**, VAT registration
 //! date, VD reporting start, employer status, OSS registration and financial
-//! year end — never from a hard-coded "annual report = June 30" table.
+//! year end, never from a hard-coded "annual report = June 30" table.
 //!
 //! Every legal due date is routed through
 //! [`crate::statutory_calendar::statutory_due_date`], so KMD, TSD, VD, OSS
@@ -26,8 +26,8 @@
 //! # Horizon
 //!
 //! [`ObligationHorizon`] is a rolling window over effective due dates.
-//! [`ObligationHorizon::advance_month`] moves it one month forward — the
-//! scheduler's monthly tick — and re-derivation is idempotent because rows
+//! [`ObligationHorizon::advance_month`] moves it one month forward, the
+//! scheduler's monthly tick, and re-derivation is idempotent because rows
 //! are keyed by `(legal_entity_id, obligation_type, period_start)`.
 
 use chrono::{Datelike, Months, NaiveDate};
@@ -168,7 +168,7 @@ impl ObligationHorizon {
         Some(Self { start, end })
     }
 
-    /// Advance the horizon by one calendar month — the scheduler's monthly
+    /// Advance the horizon by one calendar month, the scheduler's monthly
     /// tick. The window keeps its length in days when possible.
     pub fn advance_month(&self) -> Self {
         let length = (self.end - self.start).num_days();
@@ -588,7 +588,7 @@ pub struct ObligationSyncRun {
 /// monthly tick, but before this function no production code called
 /// [`load_filing_facts`] / [`sync_obligations`] / [`mark_overdue`]: the
 /// `statutory_obligations` table was written only by tests and stayed EMPTY
-/// in the live stack (verified 2026-10-07). This is the missing caller — the
+/// in the live stack (verified 2026-10-07). This is the missing caller, the
 /// compliance server's monthly cron arm.
 ///
 /// Horizon: `today` through one year ahead. The forward window makes every
@@ -596,7 +596,7 @@ pub struct ObligationSyncRun {
 /// (up to 6 months after the financial year end) visible before they are due.
 /// Re-derivation is idempotent (upsert keyed by
 /// `(legal_entity_id, obligation_type, period_start)`, pending rows only), so
-/// running it daily is harmless — `mark_overdue` is what advances state.
+/// running it daily is harmless, `mark_overdue` is what advances state.
 pub async fn sync_all_obligations(
     db: &PgPool,
     today: NaiveDate,
@@ -790,7 +790,7 @@ mod tests {
         assert_eq!(q1.legal_due_date, d(2026, 4, 30)); // Thursday
 
         // Q4 2025 is legally due 31 January 2026 (a Saturday), so the
-        // effective deadline is Monday 2 February — the February horizon
+        // effective deadline is Monday 2 February, the February horizon
         // contains it, the January one does not (the shift moved it out).
         let february = ObligationHorizon::month(2026, 2).unwrap();
         let obligations = derive_obligations(&facts, february);

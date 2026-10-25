@@ -1,8 +1,8 @@
-//! Webhook testing — send test payloads, verify HMAC-SHA256 signatures.
+//! Webhook testing, send test payloads, verify HMAC-SHA256 signatures.
 //!
 //! Provides test-related webhook helpers.
 //!
-//! # G.4 — SSRF protection
+//! # G.4, SSRF protection
 //!
 //! Hostname-only checks can be bypassed by a DNS name that resolves to a
 //! private address (or rebinds after validation). This module mirrors the
@@ -24,13 +24,13 @@ use tracing::warn;
 
 type HmacSha256 = Hmac<Sha256>;
 
-/// Webhook tester — sends test payloads and validates signatures.
+/// Webhook tester, sends test payloads and validates signatures.
 ///
-/// # O-20.2 — Signing secret rotation
+/// # O-20.2, Signing secret rotation
 /// The tester now holds a list of active signing secrets (`signing_secrets`).
 /// The **first** secret is used for signing new payloads; **all** secrets are
 /// accepted during verification. This enables zero‑downtime key rotation:
-/// 1. Add new secret to `Vec` head — all new signatures use the new key.
+/// 1. Add new secret to `Vec` head, all new signatures use the new key.
 /// 2. Wait for in‑flight payloads signed with the old key to be verified.
 /// 3. Remove old secret from `Vec`.
 #[derive(Debug, Clone)]
@@ -45,7 +45,7 @@ impl WebhookTester {
     ///
     /// Returns an error if the list is empty.
     ///
-    /// G.4: the tester no longer holds a shared HTTP client — each send
+    /// G.4: the tester no longer holds a shared HTTP client, each send
     /// builds a client PINNED to the SSRF-validated resolved IP.
     pub fn new(signing_secrets: Vec<String>) -> Result<Self, DevExError> {
         if signing_secrets.is_empty() {
@@ -166,7 +166,7 @@ impl WebhookTester {
         };
         let port = parsed.port_or_known_default().unwrap_or(80);
 
-        // G.4: resolving guard — resolve, reject private/reserved answers,
+        // G.4: resolving guard, resolve, reject private/reserved answers,
         // and pin the connection to the validated address.
         let resolved = resolve_host(&host, port).await?;
         validate_resolved_addrs(&host, &resolved)?;
@@ -245,7 +245,7 @@ async fn resolve_host(host: &str, port: u16) -> Result<Vec<SocketAddr>, DevExErr
     .map_err(|e| DevExError::WebhookError(format!("DNS resolution task failed: {e}")))?
 }
 
-/// Reject when ANY resolved address is private/reserved — a name that
+/// Reject when ANY resolved address is private/reserved, a name that
 /// resolves to even one internal IP is treated as internal (attackers
 /// control which answer the connector picks).
 fn validate_resolved_addrs(host: &str, addrs: &[SocketAddr]) -> Result<(), DevExError> {
@@ -301,7 +301,7 @@ fn is_private_ipv6(ip: &Ipv6Addr) -> bool {
     if s[0] & 0xffc0 == 0xfe80 || s[0] & 0xfe00 == 0xfc00 || s[0] & 0xffc0 == 0xfec0 {
         return true;
     }
-    // 6to4 (2002::/16) and Teredo (2001:0::/32) embed IPv4 — inspect it.
+    // 6to4 (2002::/16) and Teredo (2001:0::/32) embed IPv4, inspect it.
     if s[0] == 0x2002 {
         let embedded = Ipv4Addr::new(
             (s[1] >> 8) as u8,
@@ -482,14 +482,14 @@ mod tests {
     }
 
     /// A hostname that RESOLVES to loopback (works offline via /etc/hosts)
-    /// must be rejected by the resolving guard — the hostname-only check
+    /// must be rejected by the resolving guard, the hostname-only check
     /// cannot catch this class.
     #[tokio::test]
     async fn loopback_resolving_hostname_is_rejected() {
         let addrs = resolve_host("localhost", 443).await.unwrap();
         assert!(!addrs.is_empty());
         let err = validate_resolved_addrs("localhost", &addrs)
-            .expect_err("localhost resolves to loopback — must be rejected");
+            .expect_err("localhost resolves to loopback, must be rejected");
         assert!(matches!(err, DevExError::Validation(_)));
     }
 

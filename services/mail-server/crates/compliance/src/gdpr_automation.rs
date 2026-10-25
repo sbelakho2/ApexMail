@@ -1,13 +1,13 @@
-//! GDPR automation — data-subject request lifecycle (access, erasure,
+//! GDPR automation, data-subject request lifecycle (access, erasure,
 //! portability, rectification, restriction, objection), consent
 //! management, double opt-in, and queue-based bulk processing.
 //!
 //! Request flow:pending_verification → verified → processing → completed/rejected/expired
 //! Verification:SHA-256 token hash ↔ stored hash.
-//! Erasure (Art.17):one canonical data map ([`erasure_stores`]) — deletes from
+//! Erasure (Art.17):one canonical data map ([`erasure_stores`]), deletes from
 //! the event/contact/consent stores, anonymizes messages/users/invoices,
 //! tombstones the account, and submits a best-effort ClickHouse purge.
-//! Access/Portability:the SAME store set ([`export_store_names`]) — the maps
+//! Access/Portability:the SAME store set ([`export_store_names`]), the maps
 //! mirror each other (audit F9).
 //! Consent:Upsert on (tenant_id, subscriber_id, consent_type). Marketing
 //! cascade:withdrawing marketing revokes analytics and profiling.
@@ -138,7 +138,7 @@ impl GdprAutomation {
     ///
     /// Both writes are loud on failure (error-level logs): the DSR status is
     /// already durably recorded, so the process must not be faked into
-    /// "failed" by a mirror/audit hiccup — but the gap must be visible.
+    /// "failed" by a mirror/audit hiccup, but the gap must be visible.
     async fn record_terminal_transition(
         &self,
         request: &DataSubjectRequest,
@@ -246,7 +246,7 @@ impl GdprAutomation {
 
     // ── Request Lifecycle ────────────────────────────────────
 
-    /// Pending verification-token deliveries, oldest first — the queue the
+    /// Pending verification-token deliveries, oldest first, the queue the
     /// crate's outbox flush job (`dsr_outbox_flush`) drains into
     /// `email_queue` under the system sender.
     pub async fn pending_verification_outbox(
@@ -365,7 +365,7 @@ impl GdprAutomation {
         // dashboard (gdpr_pending count) and admin/gdpr.rs list read the
         // `gdpr_requests` table. F13: the mirror write happens AFTER the
         // intake transaction commits, best-effort with its own error
-        // handling — a CP-side shape drift (the table is CP-owned) must not
+        // handling, a CP-side shape drift (the table is CP-owned) must not
         // fail the subject's DSR submission, which is durable on its own.
         // The id column is VARCHAR(26), so the 36-char UUID cannot be
         // reused; a prefixed 22-hex id fits exactly.
@@ -391,7 +391,7 @@ impl GdprAutomation {
             warn!(
                 request_id = %id,
                 error = %e,
-                "GDPR: CP gdpr_requests mirror write failed (best-effort) — the DSR itself is committed"
+                "GDPR: CP gdpr_requests mirror write failed (best-effort), the DSR itself is committed"
             );
         }
 
@@ -493,7 +493,7 @@ impl GdprAutomation {
             .ok_or("Request not found")?;
         let received_at = request
             .received_at
-            .ok_or("Request has no receipt timestamp — cannot compute the statutory clock")?;
+            .ok_or("Request has no receipt timestamp, cannot compute the statutory clock")?;
         validate_extension(reason, extension_notified_at, received_at)?;
         let statutory_due = request
             .statutory_due_at
@@ -525,7 +525,7 @@ impl GdprAutomation {
 
     /// Whether an open request is past its statutory deadline (extended
     /// deadline when an extension was recorded). Pure decision on the stored
-    /// clock — no configuration is consulted.
+    /// clock, no configuration is consulted.
     pub fn is_statutorily_overdue(request: &DataSubjectRequest, now: DateTime<Utc>) -> bool {
         let due = request.extension_due_at.or(request.statutory_due_at);
         match due {
@@ -563,7 +563,7 @@ impl GdprAutomation {
             .await?
             .ok_or("Request not found")?;
 
-        // F4 (legal hold): an erasure on a HELD tenant must not run — the
+        // F4 (legal hold): an erasure on a HELD tenant must not run, the
         // hold freezes the subject's records as evidence, exactly like the
         // retention sweep's absolute skip. The request defers to human
         // review (the same `pending_manual_review` parking spot the
@@ -605,7 +605,7 @@ impl GdprAutomation {
                     .await
                     .map_err(|e| format!("DB error deferring held erasure: {e}"))?;
                     // F5: the accountability trail and the CP mirror must
-                    // reflect the deferral too — the mirror otherwise stays
+                    // reflect the deferral too, the mirror otherwise stays
                     // `pending` for a request that now awaits manual review.
                     self.record_terminal_transition(
                         &request,
@@ -616,7 +616,7 @@ impl GdprAutomation {
                     .await;
                     return Ok(result);
                 }
-                Ok(Some(false)) | Ok(None) => { /* not held — proceed */ }
+                Ok(Some(false)) | Ok(None) => { /* not held, proceed */ }
             }
         }
 
@@ -634,7 +634,7 @@ impl GdprAutomation {
         match &result {
             Ok(r) => {
                 let is_rejected = r.rejection_reason.is_some();
-                // B/F: honest terminal statuses — rectification needs human
+                // B/F: honest terminal statuses, rectification needs human
                 // review, partial erasure must not claim full completion.
                 let new_status = if is_rejected {
                     "rejected"
@@ -662,7 +662,7 @@ impl GdprAutomation {
                 .map_err(|e| format!("DB error: {e}"))?;
 
                 // F5: a completed/partial/rejected DSR writes its chained
-                // audit entry and advances the control-plane mirror — an
+                // audit entry and advances the control-plane mirror, an
                 // auditor and the operator console see the same outcome the
                 // subject does.
                 self.record_terminal_transition(
@@ -690,7 +690,7 @@ impl GdprAutomation {
                 });
                 match decision.status {
                     RetryStatus::Retrying => {
-                        warn!(request_id, attempt, error = %e, "GDPR request processing failed — retrying");
+                        warn!(request_id, attempt, error = %e, "GDPR request processing failed, retrying");
                         sqlx::query(
                             "UPDATE data_subject_requests
                              SET status = 'retrying', completed_at = NULL, result = $2
@@ -704,7 +704,7 @@ impl GdprAutomation {
                         // Requeue for the next worker pass. Once the retry
                         // state is durably recorded, report Ok so the queue
                         // worker can ack the entry (Err is reserved for
-                        // "outcome not recorded" — those entries stay for
+                        // "outcome not recorded", those entries stay for
                         // the recovery sweep).
                         self.enqueue_request(request_id).await?;
                         return Ok(DataSubjectRequestResult {
@@ -721,7 +721,7 @@ impl GdprAutomation {
                         });
                     }
                     RetryStatus::Failed => {
-                        warn!(request_id, attempt, error = %e, "GDPR request processing failed — retries exhausted");
+                        warn!(request_id, attempt, error = %e, "GDPR request processing failed, retries exhausted");
                         sqlx::query(
                             "UPDATE data_subject_requests
                              SET status = 'failed', completed_at = NOW(), result = $2
@@ -785,7 +785,7 @@ impl GdprAutomation {
         let tid = &request.tenant_id;
         let mut stores: Vec<StoreExportResult> = Vec::new();
 
-        // Collect contact profile — `contacts` is the canonical subscriber
+        // Collect contact profile, `contacts` is the canonical subscriber
         // store (migration 068/075); the old `subscribers` read targeted a
         // table that exists only in test fixtures.
         self.export_table(
@@ -985,11 +985,11 @@ impl GdprAutomation {
         )
         .await?;
 
-        // Invoices — retained for statutory reasons; export an anonymized
+        // Invoices, retained for statutory reasons; export an anonymized
         // view (subject PII textually replaced with a redaction marker).
         //
         // F82: subject ownership is resolved through the CANONICAL invoice
-        // identity — the immutable billing-address snapshot's email and the
+        // identity, the immutable billing-address snapshot's email and the
         // customer/tenant identity relation (the subject being a user of the
         // invoice's tenant). There is no customer_email column.
         //
@@ -1050,7 +1050,7 @@ impl GdprAutomation {
                         break;
                     }
                 }
-                // F82: REQUIRED store — a schema error is NOT an optional-store
+                // F82: REQUIRED store, a schema error is NOT an optional-store
                 // skip. Failing keeps the request's retry work; the export is
                 // visibly incomplete rather than quietly missing invoices.
                 Err(e) => return Err(format!("DB error (invoices): {e}")),
@@ -1084,14 +1084,14 @@ impl GdprAutomation {
         stores.push(StoreExportResult::not_subject_data("webhooks"));
         stores.push(StoreExportResult::not_exportable("clickhouse_events"));
 
-        // G: explicit manifest — per-store status plus truncation flag.
+        // G: explicit manifest, per-store status plus truncation flag.
         let manifest = build_export_manifest(&stores, truncated);
         let partial = stores
             .iter()
             .any(|s| matches!(s.status, ExportStoreStatus::SkippedMissing));
         data.insert("manifest".into(), manifest);
 
-        // Store export. NOTE: `data` is JSONB — the value must be bound as a
+        // Store export. NOTE: `data` is JSONB, the value must be bound as a
         // serde_json::Value (JSONB oid). Binding the pretty-printed String
         // sends a TEXT parameter, which Postgres rejects with
         // "column data is of type jsonb but expression is of type text".
@@ -1208,7 +1208,7 @@ impl GdprAutomation {
         );
         // Art. 17 + statutory retention: the result DISCLOSES what was kept
         // because an independent legal obligation (Estonian accounting
-        // evidence, seven years) outranks an ordinary account erasure — with
+        // evidence, seven years) outranks an ordinary account erasure, with
         // the reason and the exact date it may be deleted.
         let retained =
             legal_archive::disclosure_for_subject(&self.db, &request.tenant_id, &request.email)
@@ -1286,7 +1286,7 @@ impl GdprAutomation {
                 // inconsistent about email case (some normalize on write,
                 // some do not), and an exact-match DELETE silently MISSES
                 // User@Example.com rows for a user@example.com DSR while
-                // still reporting success — the deletion certificate then
+                // still reporting success, the deletion certificate then
                 // attests PII is gone that is not.
                 "DELETE FROM {table} WHERE tenant_id = $1 AND LOWER({email_column}) = LOWER($2)"
             ))
@@ -1347,7 +1347,7 @@ impl GdprAutomation {
                 // actually addressed to the subject are rewritten. The
                 // financial record itself is RETAINED (statutory).
                 //
-                // P3 (perf): the id is selected as a UUID — no `::text` cast —
+                // P3 (perf): the id is selected as a UUID, no `::text` cast —
                 // and the rewrites go out as ONE set-based
                 // `UPDATE … FROM unnest($1::uuid[], $2::text[])` per chunk
                 // instead of one `UPDATE … WHERE id::text = $1` round trip per
@@ -1355,7 +1355,7 @@ impl GdprAutomation {
                 // instead of a primary-key lookup).
                 let email_lower = email.to_lowercase();
 
-                // F82: invoices are a REQUIRED canonical store — a schema
+                // F82: invoices are a REQUIRED canonical store, a schema
                 // error fails the erasure visibly; it is not an optional-store
                 // skip.
                 //
@@ -1490,7 +1490,7 @@ impl GdprAutomation {
                         }
                     }
 
-                    // Pass 3 (per page): archive the COMMITTED prefix — the
+                    // Pass 3 (per page): archive the COMMITTED prefix, the
                     // legal trail is written as soon as the redaction lands,
                     // so a later page's failure still leaves every earlier
                     // record redacted WITH its archive row. A rewrite failure
@@ -1518,7 +1518,7 @@ impl GdprAutomation {
                             source_record_id: invoice_id.clone(),
                             retention_class_id: class.id.clone(),
                             reason:
-                                "Statutory accounting retention (EE, seven years) — Art. 17(3)(b) \
+                                "Statutory accounting retention (EE, seven years), Art. 17(3)(b) \
                                      legal obligation"
                                     .into(),
                             statutory_expiry_at: expiry,
@@ -1569,7 +1569,7 @@ impl GdprAutomation {
                 table,
                 columns,
             } => {
-                // A-3: statutory retention — redact the subject's PII in
+                // A-3: statutory retention, redact the subject's PII in
                 // email-bearing columns instead of deleting the rows.
                 let marker = redact_marker(email);
                 let mut updated: u64 = 0;
@@ -1618,8 +1618,8 @@ impl GdprAutomation {
             }
             AnonymizeMessageContent => {
                 // F1: canonical messages store (073). Redact the subject's
-                // copy of every send they were part of — recipient arrays,
-                // subject line and bodies — while keeping the row (statutory
+                // copy of every send they were part of, recipient arrays,
+                // subject line and bodies, while keeping the row (statutory
                 // sending record; other recipients' data lives in it too).
                 let marker = redact_marker(email);
                 let marker_json =
@@ -1715,7 +1715,7 @@ impl GdprAutomation {
                 } else {
                     warn!(
                         store = store.name(),
-                        "Erasure store absent in this deployment — skipped"
+                        "Erasure store absent in this deployment, skipped"
                     );
                 }
                 StoreErasureResult {
@@ -1731,7 +1731,7 @@ impl GdprAutomation {
     /// F1: best-effort ClickHouse purge of the subject's analytics events.
     ///
     /// `ALTER TABLE events DELETE WHERE recipient = '<email>'` is an async
-    /// mutation — a 200 response means submitted, not yet applied, so the
+    /// mutation, a 200 response means submitted, not yet applied, so the
     /// certificate says `mutation_submitted`. Failures are recorded as
     /// `best_effort_failed` (the Postgres erasure must not fail because an
     /// analytics node is down), and a disabled configuration is reported as
@@ -1804,7 +1804,7 @@ impl GdprAutomation {
     ) -> Result<DataSubjectRequestResult, String> {
         // F: Rectification (Art. 16) alters data and requires human review of
         // the requested corrections. It must never be auto-completed with
-        // "0 records modified" — the request parks in pending_manual_review
+        // "0 records modified", the request parks in pending_manual_review
         // (set by process_request) until an operator applies the changes.
         info!(request_id = %request.id, "Rectification request queued for manual review");
         Ok(DataSubjectRequestResult {
@@ -1861,7 +1861,7 @@ impl GdprAutomation {
         &self,
         request: &DataSubjectRequest,
     ) -> Result<DataSubjectRequestResult, String> {
-        // Similar to restriction — suppress + withdraw consents
+        // Similar to restriction, suppress + withdraw consents
         let mut tx = self.db.begin().await.map_err(|e| format!("DB: {e}"))?;
 
         let r = sqlx::query(
@@ -1931,7 +1931,7 @@ impl GdprAutomation {
                 None
             };
 
-            // H: RETURNING id — on re-consent the upsert updates the existing
+            // H: RETURNING id, on re-consent the upsert updates the existing
             // row, so the freshly generated `id` above does NOT match any row.
             // All follow-up writes (proof document) must target the returned id.
             let id: String = sqlx::query_scalar(
@@ -1984,7 +1984,7 @@ impl GdprAutomation {
                             tenant_id = %tenant_id,
                             email = %mail_common::pii::redact_email(email),
                             cascade_type = %cascade_type,
-                            "GDPR VIOLATION: Failed to cascade consent withdrawal — manual intervention required"
+                            "GDPR VIOLATION: Failed to cascade consent withdrawal, manual intervention required"
                         );
                         return Err(format!(
                             "Failed to cascade {cascade_type} consent withdrawal: {e}"
@@ -2102,7 +2102,7 @@ impl GdprAutomation {
         };
 
         if expires_at < Utc::now() {
-            // Token expired — clean up
+            // Token expired, clean up
             sqlx::query(
                 "DELETE FROM double_opt_in_tokens
                  WHERE tenant_id = $1 AND subscriber_id = $2 AND consent_type = $3",
@@ -2120,7 +2120,7 @@ impl GdprAutomation {
             return Ok(false);
         }
 
-        // Token valid — record consent, delete token
+        // Token valid, record consent, delete token
         self.record_consent(
             tenant_id,
             subscriber_id,
@@ -2230,7 +2230,7 @@ impl GdprAutomation {
     /// Enqueue a request for background processing via Redis.
     ///
     /// F: entries carry an enqueue timestamp so a crash between pop and
-    /// process never loses a request — stuck entries in the processing list
+    /// process never loses a request, stuck entries in the processing list
     /// are requeued by [`GdprAutomation::recover_stuck_processing`].
     async fn enqueue_request(&self, request_id: &str) -> Result<(), String> {
         let mut conn = self.redis.get().await.map_err(|e| format!("Redis: {e}"))?;
@@ -2248,7 +2248,7 @@ impl GdprAutomation {
     ///
     /// F: items are atomically moved to a processing list (LMOVE, the
     /// RPOPLPUSH pattern) BEFORE processing and only removed after the
-    /// outcome is recorded — a crash mid-processing leaves the item
+    /// outcome is recorded, a crash mid-processing leaves the item
     /// recoverable instead of silently dropped.
     pub async fn process_queue_batch(
         &self,
@@ -2286,7 +2286,7 @@ impl GdprAutomation {
                     self.ack_processing_entry(&mut conn, &entry).await?;
                 }
                 Err(e) => {
-                    warn!(request_id = %request_id, error = %e, "Failed to process GDPR request — leaving entry for recovery sweep");
+                    warn!(request_id = %request_id, error = %e, "Failed to process GDPR request, leaving entry for recovery sweep");
                 }
             }
         }
@@ -2387,13 +2387,13 @@ impl GdprAutomation {
     /// keyed on their revocation time.
     ///
     /// F4 (legal hold): this job used to purge WITHOUT the hold exclusion
-    /// the retention sweep enforces on the same `gdpr_exports` table — a
+    /// the retention sweep enforces on the same `gdpr_exports` table, a
     /// held tenant's SAR exports (evidence of what was disclosed) and
     /// consent history could be destroyed by this cron. Both deletions now
     /// go through the ONE central hold authority
     /// ([`crate::legal_hold::active_holds`]): rows of held tenants (and
     /// NULL-tenant rows while any hold is active) survive, and a failed hold
-    /// lookup fails the job closed — nothing is deleted on an unknown hold
+    /// lookup fails the job closed, nothing is deleted on an unknown hold
     /// state.
     pub async fn enforce_retention(&self) -> Result<(u64, u64), String> {
         let (consent_cutoff, export_cutoff) = retention_cutoffs(
@@ -2450,14 +2450,14 @@ impl GdprAutomation {
     /// E-DSR-STATS (live dogfood 2026-10-08): the previous query bucketed
     /// `status IN ('rejected', 'failed', 'partial')` as ONE `rejected`
     /// count, so a partially-completed erasure (some stores erased, others
-    /// skipped/failed — the documented `partial` outcome) was reported to
+    /// skipped/failed, the documented `partial` outcome) was reported to
     /// the tenant as `rejected`. Every status now has its own bucket and
     /// `total` is the sum of ALL of them (expired and pending-manual-review
     /// rows used to vanish from both the buckets and the total).
     ///
     /// E-DSR-SLA: the response also carries `overdue`, computed through the
     /// canonical [`Self::is_statutorily_overdue`] predicate (extended
-    /// deadline wins; only OPEN requests count) — the SLA surface that used
+    /// deadline wins; only OPEN requests count), the SLA surface that used
     /// to be absent, leaving breaches invisible to operators.
     pub async fn get_request_stats(
         &self,
@@ -2523,7 +2523,7 @@ impl GdprAutomation {
 
     /// Count OPEN requests past their statutory deadline (the extended
     /// deadline when an extension was recorded) for the scope, using THE
-    /// canonical [`Self::is_statutorily_overdue`] decision — never a second,
+    /// canonical [`Self::is_statutorily_overdue`] decision, never a second,
     /// SQL-side re-derivation that could disagree with the stored clock.
     ///
     /// E-DSR-SLA (live dogfood 2026-10-08): `is_statutorily_overdue` had
@@ -2643,7 +2643,7 @@ fn build_consent_certificate(
     let certificate_id = Uuid::new_v4().to_string();
     let generated_at = Utc::now().to_rfc3339();
 
-    // Build canonical data for signing — keys sorted alphabetically
+    // Build canonical data for signing, keys sorted alphabetically
     let mut canonical = serde_json::Map::new();
     canonical.insert("consent_id".into(), serde_json::Value::String(id.into()));
     canonical.insert(
@@ -2684,7 +2684,7 @@ fn build_consent_certificate(
     // Compute HMAC-SHA256 signature
     if signing_key.is_empty() {
         return Err(
-            "CONSENT_SIGNING_KEY is not configured — cannot generate consent certificates. "
+            "CONSENT_SIGNING_KEY is not configured, cannot generate consent certificates. "
                 .to_string(),
         );
     }
@@ -2726,7 +2726,7 @@ fn sanitize_pii(mut value: serde_json::Value) -> serde_json::Value {
             "internal_notes",
             "api_key_hash",
             "verification_token_hash",
-            // F9: the users row is exported anonymized-readable — MFA
+            // F9: the users row is exported anonymized-readable, MFA
             // secrets and recovery hashes are credentials, not readable data.
             "mfa_secret",
             "mfa_recovery_hashes",
@@ -2741,7 +2741,7 @@ fn sanitize_pii(mut value: serde_json::Value) -> serde_json::Value {
 //
 // A: every store is scoped to the data subject (email / subject's user id).
 // The old code deleted whole-tenant rows from api_keys, sessions,
-// contact_list_members, webhooks and invoices — one subject's Art. 17
+// contact_list_members, webhooks and invoices, one subject's Art. 17
 // request destroyed unrelated users' data and statutory billing records.
 
 /// One store touched during an Art. 17 erasure.
@@ -2763,29 +2763,29 @@ pub enum ErasureStore {
         table: &'static str,
         columns: &'static [&'static str],
     },
-    /// F82: invoices — statutory records whose SUBJECT PII lives in the
+    /// F82: invoices, statutory records whose SUBJECT PII lives in the
     /// immutable `billing_address` snapshot JSON. The snapshot's email is
     /// rewritten with the redaction marker (row preserved); the financial
     /// record itself is retained. Schema errors here FAIL the erasure:
     /// invoices are a required canonical store, not an optional one.
     AnonymizeInvoiceSnapshot { name: &'static str },
     /// F1: canonical message content (migration 073). The subject's copy is
-    /// anonymized — recipients arrays, subject line and bodies are redacted
+    /// anonymized, recipients arrays, subject line and bodies are redacted
     /// while the row (a statutory sending record) survives. Deleting the row
     /// would destroy other recipients' records of the same send.
     AnonymizeMessageContent,
     /// AI assistant chat audit rows for the subject's user account
-    /// (migration 123). Conversations are not statutory records — deleted.
+    /// (migration 123). Conversations are not statutory records, deleted.
     AiChatByUserEmail,
     /// F1/F9: the subject's platform account. Art. 17 hygiene keeps a
     /// tombstone row (id + tenant linkage + `erased` status) with every
     /// PII field redacted, so audit/history references don't dangle.
     AnonymizeUserTombstone,
     /// F1: ClickHouse analytics events. Config-gated best-effort
-    /// `ALTER TABLE events DELETE WHERE recipient = ...` — reported honestly
+    /// `ALTER TABLE events DELETE WHERE recipient = ...`, reported honestly
     /// on the certificate whether configured, submitted or failed.
     ClickHouseEvents,
-    /// Store intentionally retained (with reason) — never deleted.
+    /// Store intentionally retained (with reason), never deleted.
     Retained {
         name: &'static str,
         reason: &'static str,
@@ -2810,12 +2810,12 @@ impl ErasureStore {
 
 /// The complete erasure data map, mirroring the access-export data map.
 ///
-/// F1: every store here is REAL — it exists in the canonical migration chain
+/// F1: every store here is REAL, it exists in the canonical migration chain
 /// (`contacts` 068/075, `events` 075, `messages` 073, `users` 052/064,
 /// `sessions` 069, plus the 038 compliance tables). The previous map deleted
 /// from `subscribers`/`message_events`/`tracking_events`/
 /// `engagement_events`/`subscriber_analytics`, which exist only in test
-/// fixtures — production erasures reported "deleted" while touching nothing
+/// fixtures, production erasures reported "deleted" while touching nothing
 /// and the real PII stores kept every row.
 pub fn erasure_stores() -> Vec<ErasureStore> {
     use ErasureStore::*;
@@ -2833,16 +2833,16 @@ pub fn erasure_stores() -> Vec<ErasureStore> {
             table: "contact_list_members",
             email_column: "subscriber_email",
         },
-        // Canonical event store (075) — recipient match.
+        // Canonical event store (075), recipient match.
         TableBySubjectEmail {
             name: "events",
             table: "events",
             email_column: "recipient",
         },
-        // Canonical message content (073) — anonymize, never delete.
+        // Canonical message content (073), anonymize, never delete.
         AnonymizeMessageContent,
         SessionsByUserEmail,
-        // AI assistant conversations (migration 123) — user-scoped chat
+        // AI assistant conversations (migration 123), user-scoped chat
         // history; no statutory retention, deleted with the account.
         AiChatByUserEmail,
         // The subject's account, anonymized to a tombstone. AFTER sessions:
@@ -2864,23 +2864,23 @@ pub fn erasure_stores() -> Vec<ErasureStore> {
             table: "gdpr_exports",
             email_column: "email",
         },
-        // F1: ClickHouse analytics is a real PII store — best-effort purge.
+        // F1: ClickHouse analytics is a real PII store, best-effort purge.
         ClickHouseEvents,
         // Accountability trail: subject-referencing audit entries are
         // records of processing (Art. 30) and are retained; they appear in
-        // BOTH maps (the SAR exports them, erasure retains them — F9).
+        // BOTH maps (the SAR exports them, erasure retains them, F9).
         Retained {
             name: "audit_logs",
             reason: "retained: accountability trail (Art. 30 records of processing)",
         },
-        // A-5: suppression must SURVIVE erasure — deleting it would enable
+        // A-5: suppression must SURVIVE erasure, deleting it would enable
         // re-mailing a complained address (CAN-SPAM / GDPR opt-out violation).
         // Retention is a legitimate interest (Art. 17(3)(e) / Recital 65).
         Retained {
             name: "suppression_list",
             reason: "retained: opt-out enforcement (CAN-SPAM/GDPR legitimate interest)",
         },
-        // A-3: billing records have statutory retention — anonymize, never
+        // A-3: billing records have statutory retention, anonymize, never
         // delete. F82: the subject's PII on an invoice lives in the
         // immutable billing_address SNAPSHOT (there is no customer_email
         // column; querying one failed with 42703). The snapshot's email is
@@ -2905,11 +2905,11 @@ pub enum StoreErasureStatus {
     Deleted,
     Anonymized,
     Retained(&'static str),
-    /// Table/column absent in this deployment — reported, never silently
+    /// Table/column absent in this deployment, reported, never silently
     /// counted as deleted.
     SkippedMissingTable,
     /// F1: the store is a real PII store but this deployment has no purge
-    /// path configured (e.g. ClickHouse erasure disabled) — reported on the
+    /// path configured (e.g. ClickHouse erasure disabled), reported on the
     /// certificate, never counted as deleted.
     SkippedNotConfigured,
     /// F1: best-effort store (ClickHouse mutation) failed. The Postgres
@@ -2917,7 +2917,7 @@ pub enum StoreErasureStatus {
     /// `partial`, not `failed`.
     BestEffortFailed,
     /// F1: the best-effort mutation was SUBMITTED (ClickHouse applies
-    /// `ALTER ... DELETE` asynchronously — submission is the strongest
+    /// `ALTER ... DELETE` asynchronously, submission is the strongest
     /// synchronous guarantee available).
     MutationSubmitted,
     Failed,
@@ -3031,7 +3031,7 @@ fn is_missing_table(err: &sqlx::Error) -> bool {
         .unwrap_or(false)
 }
 
-/// Postgres undefined_table (42P01) or undefined_column (42703) — the store
+/// Postgres undefined_table (42P01) or undefined_column (42703), the store
 /// (table or its expected subject-scoping column) is not present in this
 /// deployment.
 fn is_missing_store(err: &sqlx::Error) -> bool {
@@ -3169,7 +3169,7 @@ pub enum ExportStoreStatus {
     Included(usize),
     SkippedMissing,
     /// F9: in the DSR data map but carrying no personal data of the subject
-    /// (tenant-owned resources) — listed in the manifest for transparency.
+    /// (tenant-owned resources), listed in the manifest for transparency.
     NotSubjectData,
     /// F9: a real analytics store (ClickHouse) this export cannot query —
     /// declared in the manifest instead of silently omitted. The erasure
@@ -3214,14 +3214,14 @@ impl StoreExportResult {
     }
 }
 
-/// F9: the store names the SAR export reads — exactly the erasure map's
+/// F9: the store names the SAR export reads, exactly the erasure map's
 /// names. Both directions of a DSR must cover the same stores: data the
 /// platform erases on request is data it must also disclose on request.
 pub fn export_store_names() -> Vec<&'static str> {
     erasure_stores().iter().map(|s| s.name()).collect()
 }
 
-/// G: explicit export manifest — per-store inventory plus a truncation flag
+/// G: explicit export manifest, per-store inventory plus a truncation flag
 /// so a capped message history is never presented as complete.
 pub fn build_export_manifest(stores: &[StoreExportResult], truncated: bool) -> serde_json::Value {
     let store_map: serde_json::Map<String, serde_json::Value> = stores
@@ -3283,7 +3283,7 @@ pub fn decode_queue_entry(entry: &str) -> String {
 }
 
 /// An entry is stale when it is older than the cutoff, or when it carries no
-/// timestamp at all (legacy entry — assume abandoned).
+/// timestamp at all (legacy entry, assume abandoned).
 pub fn queue_entry_is_stale(entry: &str, cutoff: chrono::DateTime<Utc>) -> bool {
     match serde_json::from_str::<serde_json::Value>(entry) {
         Ok(v) => match v.get("at").and_then(|a| a.as_str()) {
@@ -3727,7 +3727,7 @@ mod tests {
     // ── A/F1: erasure plan is subject-scoped and canonical ────
 
     /// Every SQL-bearing store must key on the subject's email (or the
-    /// subject's user id) — no whole-tenant deletes — and every store must
+    /// subject's user id), no whole-tenant deletes, and every store must
     /// exist in the canonical migration chain (audit F1: the old map deleted
     /// from fixture-only tables while the real PII stores kept every row).
     #[test]
@@ -3784,7 +3784,7 @@ mod tests {
             .collect();
 
         // F1: the phantom tables (test fixtures only) must be GONE from the
-        // erasure map — deleting from them attested erasure that never
+        // erasure map, deleting from them attested erasure that never
         // happened.
         for phantom in [
             "subscribers",
@@ -3795,7 +3795,7 @@ mod tests {
         ] {
             assert!(
                 !names.contains(&phantom),
-                "{phantom} exists only in test fixtures — it must not be in the erasure map"
+                "{phantom} exists only in test fixtures, it must not be in the erasure map"
             );
         }
 
@@ -3841,7 +3841,7 @@ mod tests {
     // ── F9: SAR/erasure symmetry ───────────────────────────────
 
     /// The access export and the Art.17 erasure must cover the SAME store
-    /// set — data the platform erases on request is data it must disclose
+    /// set, data the platform erases on request is data it must disclose
     /// on request. This pins the exact list `process_access_request`
     /// collects; adding a store to one side without the other fails here.
     #[test]
@@ -3860,7 +3860,7 @@ mod tests {
             "contact_list_members",
             "invoices",
             "audit_logs",
-            // NotSubjectData / NotExportable entries — in the map,
+            // NotSubjectData / NotExportable entries, in the map,
             // transparently labelled.
             "api_keys",
             "webhooks",
@@ -3985,7 +3985,7 @@ mod tests {
         assert!(!marker.contains("user@example.com"));
     }
 
-    /// F9: the users tombstone marker must be tenant-unique — users.email is
+    /// F9: the users tombstone marker must be tenant-unique, users.email is
     /// globally UNIQUE, so the same subject erased in two tenants needs two
     /// distinct tombstone emails.
     #[test]
@@ -4557,7 +4557,7 @@ mod db_tests {
         };
         let tenant = test_support::unique_tenant();
 
-        // An OPEN (partial) request past its statutory clock — the exact
+        // An OPEN (partial) request past its statutory clock, the exact
         // live repro shape.
         sqlx::query(
             "INSERT INTO data_subject_requests
@@ -4572,7 +4572,7 @@ mod db_tests {
         .await
         .expect("overdue partial request");
 
-        // An OPEN request still inside its clock — NOT overdue.
+        // An OPEN request still inside its clock, NOT overdue.
         sqlx::query(
             "INSERT INTO data_subject_requests
                (id, tenant_id, request_type, email, verification_token_hash, verified, status,
@@ -4628,7 +4628,7 @@ mod db_tests {
         let email = "user@example.com";
         let marker = redact_marker(email);
         let cases = [
-            format!("Ünïcode ✉ {email} — fertig"),
+            format!("Ünïcode ✉ {email}, fertig"),
             format!("\u{0}NUL {email}\u{0}"),
             format!("' OR 1=1; SELECT 1; -- {email}"),
             email.to_uppercase(),
@@ -5127,7 +5127,7 @@ mod hostile_db_tests {
     }
 
     /// The DSR erasure path defers for a held tenant: the request parks in
-    /// `pending_manual_review` with zero deletions — never `completed`.
+    /// `pending_manual_review` with zero deletions, never `completed`.
     #[tokio::test]
     async fn held_tenant_erasure_defers_to_manual_review() {
         let Some(pool) = hostile_db("hold_erasure").await else {
@@ -5318,7 +5318,7 @@ mod hostile_db_tests {
         };
         let gdpr = automation_with(pool.clone(), config());
         // The dsr_statutory_clock_present CHECK allows a NULL statutory due
-        // date only when the receipt is NULL too — a legacy row.
+        // date only when the receipt is NULL too, a legacy row.
         sqlx::query(
             "INSERT INTO data_subject_requests
                (id, tenant_id, request_type, email, verification_token_hash, verified,
@@ -5332,7 +5332,7 @@ mod hostile_db_tests {
         let error = gdpr
             .extend_request("REQ-legacy", "complex accounting records", Utc::now())
             .await
-            .expect_err("no receipt — no statutory clock to extend");
+            .expect_err("no receipt, no statutory clock to extend");
         assert!(error.contains("receipt"), "{error}");
     }
 
@@ -5413,7 +5413,7 @@ mod hostile_db_tests {
     async fn required_invoice_failure_retries_then_fails_honestly() {
         // Audit 2026-10-02 #12a: the permission failure must be REAL. The
         // machinery runs AS the unprivileged hostile role, and the owner
-        // revokes invoices from THAT role — a superuser's
+        // revokes invoices from THAT role, a superuser's
         // `REVOKE ... FROM CURRENT_USER` would be a silent no-op.
         let Some(pair) = test_support::hostile_canonical_pair(
             "gdpr_hostile_invoice_required",
@@ -5454,7 +5454,7 @@ mod hostile_db_tests {
             assert!(error.contains("invoices"), "{error}");
         } else {
             // Without a broker the requeue fails after the retry state was
-            // recorded — an explicit error, never a fake success.
+            // recorded, an explicit error, never a fake success.
             assert!(first.is_err());
             let (status, _, _) = request_row(&owner, "REQ-inv").await;
             assert_eq!(status, "retrying");
@@ -5608,7 +5608,7 @@ mod hostile_db_tests {
             .fetch_one(&pool)
             .await
             .expect("count");
-        assert_eq!(count, 5, "no invoice row is deleted — only redacted");
+        assert_eq!(count, 5, "no invoice row is deleted, only redacted");
 
         // The redacted record was moved to the legally-restricted archive
         // with its statutory expiry disclosed.
@@ -5646,7 +5646,7 @@ mod hostile_db_tests {
     /// COMMITTED prefix even when a later chunk's UPDATE fails. Before this,
     /// pass 3 was gated on `failure.is_none()`, so a failure in chunk 2 left
     /// the 1,000 already-redacted invoices from chunk 1 with NO
-    /// legal-retention archive row — a redaction without its legal trail.
+    /// legal-retention archive row, a redaction without its legal trail.
     ///
     /// A sequence-driven BEFORE UPDATE trigger lets exactly the first 1,000
     /// rows through and aborts the second chunk, independent of chunk order.

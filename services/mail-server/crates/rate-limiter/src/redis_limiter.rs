@@ -80,7 +80,7 @@ pub const DEFAULT_FALLBACK_SHARES: u64 = 2;
 ///   pass instantaneously, at most `rps` are sustained per second;
 /// - `remaining` returned to the caller is the ACTUAL token count.
 ///
-/// All timestamps come from `redis.call('TIME')` — the caller's app clock
+/// All timestamps come from `redis.call('TIME')`, the caller's app clock
 /// is never used, so cross-instance clock skew cannot corrupt the bucket.
 ///
 /// Precision: tokens are stored as integer "micro-tokens" (1 token =
@@ -204,7 +204,7 @@ pub struct RedisLimiter {
     ///
     /// Audit F5: this used to be ONE un-keyed `GovernorLimiter`, so a Redis
     /// outage collapsed every tenant sharing the pod into a single
-    /// `burst/2` global bucket — one noisy tenant exhausted it and every
+    /// `burst/2` global bucket, one noisy tenant exhausted it and every
     /// other tenant's legitimate traffic was denied. It is now a
     /// `KeyedRateLimiter` (LRU + eviction tombstones) scoped by tenant in
     /// [`RedisLimiter::check_n_for_tenant`], preserving per-tenant
@@ -258,7 +258,7 @@ impl RedisLimiter {
 
     /// Connect to Redis at `url` and build a limiter (bounded 2 s connect
     /// attempt). Returns `None` when the URL is malformed or the server is
-    /// unreachable — callers proceed on the in-memory keyed fallback alone.
+    /// unreachable, callers proceed on the in-memory keyed fallback alone.
     pub async fn connect(config: &RateLimitConfig, url: &str) -> Option<Self> {
         let client = redis::Client::open(url).ok()?;
         match tokio::time::timeout(
@@ -269,11 +269,11 @@ impl RedisLimiter {
         {
             Ok(Ok(cm)) => Some(Self::new(config, cm)),
             Ok(Err(err)) => {
-                warn!(%err, "Redis rate limiter connect failed — in-memory keyed fallback only");
+                warn!(%err, "Redis rate limiter connect failed, in-memory keyed fallback only");
                 None
             }
             Err(_) => {
-                warn!("Redis rate limiter connect timed out — in-memory keyed fallback only");
+                warn!("Redis rate limiter connect timed out, in-memory keyed fallback only");
                 None
             }
         }
@@ -424,7 +424,7 @@ impl RedisLimiter {
             // Peek is read-only and should not modify state.
             None => {
                 warn!(
-                    "Redis unavailable during peek — allowing request (fail-open) to avoid over-limiting"
+                    "Redis unavailable during peek, allowing request (fail-open) to avoid over-limiting"
                 );
                 return Decision::Allowed {
                     remaining: self.max_requests,
@@ -464,7 +464,7 @@ impl RedisLimiter {
                 // Fix K2: peek must NOT consume capacity. The error path
                 // fails open (read-only, no state mutation); only the
                 // fallback MODE flag is updated.
-                debug!(%err, "Redis peek error — failing open (read-only, no state mutation)");
+                debug!(%err, "Redis peek error, failing open (read-only, no state mutation)");
                 self.enter_fallback().await;
                 Decision::Allowed {
                     remaining: self.max_requests,
@@ -520,7 +520,7 @@ impl RedisLimiter {
 
     /// Evaluate the Lua token-bucket script against Redis.
     async fn eval_script(&self, key: &str, cost: u32) -> Result<Decision, redis::RedisError> {
-        // Fix #3: clone the multiplexed ConnectionManager — no lock; the
+        // Fix #3: clone the multiplexed ConnectionManager, no lock; the
         // Lua script is the atomicity boundary.
         let mut conn = self
             .cm
@@ -530,7 +530,7 @@ impl RedisLimiter {
 
         // Fix K1: the script (and its SHA-1 hash) is pre-built at
         // construction; re-creating it per check burned CPU on the hot path.
-        // Fix #4: no caller clock is passed — the script uses redis TIME.
+        // Fix #4: no caller clock is passed, the script uses redis TIME.
         let result: Vec<i64> = self
             .script
             .key(key)
@@ -573,7 +573,7 @@ impl RedisLimiter {
 /// environment.
 ///
 /// Fix #2: when unset, the budget is divided by
-/// [`DEFAULT_FALLBACK_SHARES`] (2) — the previous default of 1 let N pods
+/// [`DEFAULT_FALLBACK_SHARES`] (2), the previous default of 1 let N pods
 /// each hold the FULL budget, admitting N× the configured limit during a
 /// Redis outage.
 fn fallback_shares_from_env() -> u64 {
@@ -587,7 +587,7 @@ fn fallback_shares_from_env() -> u64 {
 /// Divide a rate config across `shares` pods (each dimension at least 1).
 ///
 /// Both the sustained rate (`rps`) and the burst are divided so the
-/// fallback enforces `rps / shares` sustained — not the full burst rate.
+/// fallback enforces `rps / shares` sustained, not the full burst rate.
 fn divided_config(config: &RateLimitConfig, shares: u64) -> RateLimitConfig {
     if shares <= 1 {
         return config.clone();
@@ -732,7 +732,7 @@ mod tests {
             "tenant-a must be denied once its own bucket is drained"
         );
 
-        // Tenant B is unaffected — the pre-fix single GovernorLimiter would
+        // Tenant B is unaffected, the pre-fix single GovernorLimiter would
         // have denied this too (shared global bucket).
         assert!(
             limiter
@@ -747,7 +747,7 @@ mod tests {
     }
 
     /// F5: the pod-share division must still apply per tenant (not just
-    /// globally) — with shares=4 and burst 16 each tenant gets 4.
+    /// globally), with shares=4 and burst 16 each tenant gets 4.
     #[tokio::test]
     async fn fallback_share_division_applies_per_tenant() {
         let config = RateLimitConfig::new(100).with_burst(16);
@@ -815,7 +815,7 @@ mod tests {
     #[tokio::test]
     async fn test_fallback_shares_default_is_two_when_env_unset() {
         // Fix #2: with RATE_LIMIT_FALLBACK_PODS unset the fallback budget
-        // must be divided conservatively by 2 — a default of 1 meant N pods
+        // must be divided conservatively by 2, a default of 1 meant N pods
         // each held the FULL budget, admitting N× the configured limit.
         let limiter = {
             let _guard = ENV_TEST_MUTEX.lock().unwrap();
@@ -861,7 +861,7 @@ mod tests {
     }
 
     /// Fix #2: the division must apply to the SUSTAINED rate (rps), not
-    /// only the burst — otherwise the fallback still admits the full
+    /// only the burst, otherwise the fallback still admits the full
     /// configured rate per second on every pod.
     #[test]
     fn test_divided_config_divides_sustained_rate_not_just_burst() {
@@ -923,7 +923,7 @@ mod tests {
 
     /// Helper to connect to Redis for integration tests.
     async fn test_redis_connection() -> Option<redis::aio::ConnectionManager> {
-        // F6: no ambient 6379 default — the variable must name the Redis
+        // F6: no ambient 6379 default, the variable must name the Redis
         // under test explicitly; unset means skip. A CI executor that
         // provides Redis as a service exports TEST_REDIS_URL, which is the
         // same instance, so it is the documented fallback: without it the
@@ -983,7 +983,7 @@ mod tests {
         assert!(decision.is_denied(), "4th request should be denied");
 
         // Verify peek reads current state without modifying it. At
-        // rps=100 a token refills every 10ms — under runner load the gap
+        // rps=100 a token refills every 10ms, under runner load the gap
         // between the deny and the peek can exceed that, and a refilled
         // token legitimately flips the peek to allowed (machine-speed
         // race, not a state bug). Assert per elapsed: no refill due →
@@ -1083,7 +1083,7 @@ mod tests {
         // deny assertions race under suite load (deploy 2026-10-13).
         let config = RateLimitConfig::new(1).with_burst(3);
 
-        // "Pod 1" — add requests
+        // "Pod 1", add requests
         let limiter1 = RedisLimiter::with_connection(&config, cm.clone(), "test:restart:", 60);
         limiter1.reset().await.unwrap();
 
@@ -1091,12 +1091,12 @@ mod tests {
         assert!(limiter1.check().await.is_allowed());
         assert!(limiter1.check().await.is_allowed());
 
-        // "Pod 2" (new connection, same key prefix) — old state should persist
+        // "Pod 2" (new connection, same key prefix), old state should persist
         let limiter2 = RedisLimiter::with_connection(&config, cm, "test:restart:", 60);
         let decision = limiter2.check().await;
         assert!(
             decision.is_denied(),
-            "State should survive 'restart' — expected denied, got {:?}",
+            "State should survive 'restart', expected denied, got {:?}",
             decision
         );
 
@@ -1174,7 +1174,7 @@ mod tests {
         }
         // The 101st check in the same instant must fail: burst exhausted,
         // only the 10/s refill remains. EXCEPT on a host whose clock steps
-        // forward mid-test (Docker-Desktop VM drift — observed on this
+        // forward mid-test (Docker-Desktop VM drift, observed on this
         // machine): a forward jump makes elapsed*rps refill tokens
         // legitimately, and the bucket MUST admit them. So the denied
         // assertion holds only when no refill-worthy time has passed.
@@ -1202,7 +1202,7 @@ mod tests {
         // After ~1s idle, only ~rps tokens may be available (8..12
         // tolerant window), NOT the full burst again (the old sliding
         // window re-admitted all 100 here). The sleep is host-monotonic
-        // while the refill is Redis-clock — a VM clock step between the
+        // while the refill is Redis-clock, a VM clock step between the
         // two (observed on this machine) skews a single sample, so take
         // up to 3 samples and require ONE in-window. The old bug fails
         // every sample (it deterministically re-admits the full burst),
@@ -1243,7 +1243,7 @@ mod tests {
     /// never the caller's app clock. A bucket whose stored timestamp is in
     /// the future (skewed writer / manual seeding) must be clamped to now
     /// (no negative elapsed time), and a far-past timestamp must refill to
-    /// at most capacity — never beyond it.
+    /// at most capacity, never beyond it.
     #[tokio::test]
     async fn test_redis_time_skew_tolerant() {
         let mut cm = test_redis_connection()
@@ -1292,7 +1292,7 @@ mod tests {
             .arg("ut")
             .arg(0i64)
             .arg("ts")
-            .arg(1i64) // epoch+1µs — over 50 years of "elapsed"
+            .arg(1i64) // epoch+1µs, over 50 years of "elapsed"
             .query_async::<()>(&mut cm)
             .await
             .unwrap();
@@ -1311,7 +1311,7 @@ mod tests {
     }
 
     /// Integration test (fix #3): concurrent checks must not serialize or
-    /// deadlock — the ConnectionManager is multiplexed and the Lua script
+    /// deadlock, the ConnectionManager is multiplexed and the Lua script
     /// is the atomicity boundary (no connection-level mutex).
     #[tokio::test]
     async fn test_redis_concurrent_checks_share_multiplexed_connection() {

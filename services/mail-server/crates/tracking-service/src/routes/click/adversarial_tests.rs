@@ -4,14 +4,14 @@
 //! - The redirect domain authorization walks its full cache hierarchy:
 //!   moka → deployment allowlist → Redis (authoritative cached verdict) →
 //!   Postgres (owned domain row OR any subdomain of one, then JSONB wildcard
-//!   patterns) — a Redis MISS falls through to the database, a DB error
+//!   patterns), a Redis MISS falls through to the database, a DB error
 //!   refuses for one request (503) WITHOUT caching, and an authoritative
 //!   absence is cached as "0".
 //! - Hostile tokens (wrong length, garbage, tampered) are REFUSED with a
 //!   typed status and the named reason (400 malformed / 404 unknown), record
-//!   NOTHING, and never panic — never a silent bounce to the fallback.
+//!   NOTHING, and never panic, never a silent bounce to the fallback.
 //! - A refused destination host is answered 400 (`click_refused` recorded)
-//!   with the named reason — never a silent bounce to the vendor homepage;
+//!   with the named reason, never a silent bounce to the vendor homepage;
 //!   oversized / non-http redirect targets are refused the same way.
 //! - Bot clicks render the redirect but never record.
 //! - Per-link URL cache failures never break the redirect or the recording.
@@ -386,12 +386,12 @@ async fn hostile_click_tokens_are_refused_with_a_typed_status_and_record_nothing
 }
 
 /// SM2-F4: 19 ASCII bytes + a two-byte `é` places byte 20 INSIDE the
-/// character — the exact shape that panicked the `debug!`/`warn!`
+/// character, the exact shape that panicked the `debug!`/`warn!`
 /// `id_prefix = &id[..id.len().min(20)]` slices ("byte index 20 is not a
 /// char boundary") and killed the connection task per request. With a
 /// subscriber installed the log FIELD expressions actually evaluate; the
 /// handler must survive them and answer the typed malformed-token refusal
-/// (dogfood 2026-10-08 E2 — it used to silently redirect to the fallback).
+/// (dogfood 2026-10-08 E2, it used to silently redirect to the fallback).
 /// Hermetic: the invalid-shape id is refused before any Redis/DB call, so
 /// the dead pools are never contacted.
 #[tokio::test]
@@ -404,7 +404,7 @@ async fn multibyte_click_id_at_slice_boundary_never_panics() {
 
     let state = state(lazy_dead_db(), dead_redis(), "redis://127.0.0.1:1");
 
-    // 51 bytes: passes nothing — the multibyte content fails the shape
+    // 51 bytes: passes nothing, the multibyte content fails the shape
     // guard; byte 20 splits `é`, the exact input the old prefix slices
     // panicked on.
     let hostile = format!("{}é{}", "a".repeat(19), "x".repeat(30));
@@ -516,7 +516,7 @@ async fn bot_click_still_redirects_but_records_nothing() {
     let message = unique("msg");
 
     // The fallback host is pre-authorized by config, so the redirect works
-    // with a dead DB — isolating the bot check.
+    // with a dead DB, isolating the bot check.
     let token = click_token(
         &tenant,
         &message,
@@ -547,7 +547,7 @@ async fn bot_click_still_redirects_but_records_nothing() {
 async fn human_click_on_the_fallback_host_records_even_with_dead_redis() {
     let _wal_serial = crate::routes::test_support::redis_wal_serial().await;
     // The fallback host is config-authorized; Redis is dead, so the recorder
-    // fails — the redirect must STILL happen and the failure must be logged,
+    // fails, the redirect must STILL happen and the failure must be logged,
     // never swallowed as a fabricated success.
     let state = state(lazy_dead_db(), dead_redis(), "redis://127.0.0.1:1");
     let tenant = unique("tn_deadredis");
@@ -632,7 +632,7 @@ async fn redis_cached_verdicts_are_authoritative_without_db() {
 
     // Cached "0" → refused, with a DEAD database proving the DB is not
     // consulted. The refusal is explicit (400 + reason) AND recorded as a
-    // `click_refused` event — the recipient is never bounced to the vendor
+    // `click_refused` event, the recipient is never bounced to the vendor
     // homepage and the operator sees the block.
     let tenant = unique("tn_c0");
     let message = unique("msg");
@@ -875,7 +875,7 @@ async fn database_is_the_authority_on_cache_miss_and_caches_the_verdict() {
 
 /// The pinned sub-domain decision (dogfood 2026-10-06 P1): any hostname under
 /// a tenant-owned domain IS the tenant's, so `www.owned.example` and
-/// `a.b.owned.example` redirect and record normally — while a foreign host
+/// `a.b.owned.example` redirect and record normally, while a foreign host
 /// that merely ends in the same text (`evil-owned.example`) is refused.
 #[tokio::test]
 async fn subdomains_of_an_owned_domain_are_authorized() {

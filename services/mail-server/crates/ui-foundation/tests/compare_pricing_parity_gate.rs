@@ -1,10 +1,10 @@
 //! Compare-page pricing-parity gate (audit SM11 F3): the python checker
 //! `tools/check-compare-pricing-parity.py` is the enforcement for compare-page
-//! locale parity (`pricing_as_of` agreement + plan vocabulary — a retired
+//! locale parity (`pricing_as_of` agreement + plan vocabulary, a retired
 //! "Scale"/"Starter" name in an ApexMail cell must never come back). The
 //! checker only has teeth if something actually RUNS it, so `cargo test` on
 //! this crate invokes it against the working tree and fails the suite on any
-//! violation — the same gate `ci/stages` can call, now wired at the module
+//! violation, the same gate `ci/stages` can call, now wired at the module
 //! level. Pure stdlib python over repo files: hermetic (no network, no DB).
 
 use std::path::PathBuf;
@@ -29,7 +29,7 @@ fn python3_available() -> bool {
 /// The gate must pass on the tree as committed. A missing required tool is a
 /// FAILURE, not a green skip (review §14.1 `compare_pricing_parity_gate.rs`:
 /// "Missing required tooling in CI should fail, not appear as a successful
-/// skip") — a CI image without python3 used to report this gate as passing
+/// skip"), a CI image without python3 used to report this gate as passing
 /// while nothing ran. python3 is already a hard requirement of the UI gate
 /// battery (`tools/check_ui_*.py`), so failing here is consistent.
 #[test]
@@ -55,11 +55,11 @@ fn compare_pricing_parity_gate_passes_on_the_working_tree() {
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
     assert!(
         output.status.success(),
-        "compare pricing-parity gate FAILED — locale pricing_as_of/plan-vocabulary \
+        "compare pricing-parity gate FAILED, locale pricing_as_of/plan-vocabulary \
          drift is present (audit SM11 F3 regressed)\nstdout: {stdout}\nstderr: {stderr}"
     );
     assert!(
         stdout.contains("compare pricing parity OK"),
-        "gate exited 0 but did not print its OK line — treating as failure\nstdout: {stdout}"
+        "gate exited 0 but did not print its OK line, treating as failure\nstdout: {stdout}"
     );
 }

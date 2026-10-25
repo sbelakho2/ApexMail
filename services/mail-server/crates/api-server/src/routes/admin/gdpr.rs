@@ -23,7 +23,7 @@ fn build_gdpr_audit_metadata(body: &UpdateGdprRequest) -> serde_json::Value {
 }
 
 /// Audit with full actor attribution (P2-2): the operator's tenant AND user
-/// id must land in the entry — an unattributed GDPR status change is
+/// id must land in the entry, an unattributed GDPR status change is
 /// unverifiable the moment it matters legally.
 async fn log_gdpr_audit(
     state: &AppState,
@@ -95,7 +95,7 @@ async fn list_gdpr_requests(
     let limit = params.limit.clamp(1, 200);
     let offset = params.offset.max(0);
     // Slug-aware system-tenant resolution (audit F1): human operators belong
-    // to `system_internal_tenant01`, not the literal `system` sentinel — the
+    // to `system_internal_tenant01`, not the literal `system` sentinel, the
     // literal comparison silently scoped this console to an empty tenant.
     let tenant_scoped = !crate::routes::web::is_system_tenant(&state, &auth.tenant_id).await?;
 
@@ -171,7 +171,7 @@ pub struct UpdateGdprRequest {
 
 /// A completed GDPR request must point at executed work, never an
 /// operator's say-so (P1-5): an export needs a materialized artifact row
-/// (`gdpr_exports.request_id`, migration 038 — the download the data
+/// (`gdpr_exports.request_id`, migration 038, the download the data
 /// subject receives), an erasure needs a non-empty evidence note tying the
 /// completion to the compliance erasure path. Returns Ok(()) only when the
 /// request may legally transition to `completed`.
@@ -196,14 +196,14 @@ async fn ensure_completion_is_evidenced(
                 ]));
             }
             // An artifact without any operator evidence still leaves the
-            // completion unattributed — require both.
+            // completion unattributed, require both.
             if !has_evidence {
                 return Err(ApiError::Validation(vec![
                     "completing a request requires non-empty evidence".into(),
                 ]));
             }
         }
-        // Erasure and any unrecognized type: fail safe — demand evidence.
+        // Erasure and any unrecognized type: fail safe, demand evidence.
         _ => {
             if !has_evidence {
                 return Err(ApiError::Validation(vec![
@@ -260,7 +260,7 @@ async fn update_gdpr_request(
     let request = request.ok_or_else(|| ApiError::NotFound("gdpr request not found".into()))?;
 
     // P1-5: `fulfilled_at` is legal evidence of execution. It is written
-    // ONLY after the completion gates below pass — never on the operator's
+    // ONLY after the completion gates below pass, never on the operator's
     // say-so.
     if body.status == "completed" {
         ensure_completion_is_evidenced(&state, &request, body.evidence.as_deref()).await?;
@@ -308,7 +308,7 @@ mod adversarial_tests {
     use axum::extract::{Query, State};
     use serde_json::json;
 
-    /// System-tenant machine identity (literal `system` sentinel) — the
+    /// System-tenant machine identity (literal `system` sentinel), the
     /// platform-staff view of every tenant's requests.
     fn system_auth() -> AuthUser {
         AuthUser {
@@ -395,7 +395,7 @@ mod adversarial_tests {
         .await
         .expect("empty list must succeed");
 
-        assert!(rows.is_empty(), "no requests seeded — must be empty");
+        assert!(rows.is_empty(), "no requests seeded, must be empty");
         pool.close().await;
     }
 
@@ -479,7 +479,7 @@ mod adversarial_tests {
             "tenant names resolve through the join"
         );
 
-        // Tenant operator: ONLY their own tenant — no cross-tenant oracle.
+        // Tenant operator: ONLY their own tenant, no cross-tenant oracle.
         let Json(tenant_rows) = list_gdpr_requests(
             State(state.clone()),
             tenant_auth("ten_gdpr_alpha_0001"),
@@ -517,7 +517,7 @@ mod adversarial_tests {
     }
 
     /// A database without the gdpr_requests table (store missing) reports an
-    /// EMPTY list — never a 500, never a data-shaped error.
+    /// EMPTY list, never a 500, never a data-shaped error.
     #[tokio::test]
     async fn list_returns_empty_when_the_store_table_is_missing() {
         let Some(pool) = gdpr_storeless_pool("gdpr_no_table").await else {
@@ -657,7 +657,7 @@ mod adversarial_tests {
         pool.close().await;
     }
 
-    /// Cross-tenant refusal is a 404 indistinguishable from a missing id — a
+    /// Cross-tenant refusal is a 404 indistinguishable from a missing id, a
     /// tenant operator learns nothing about foreign requests.
     #[tokio::test]
     async fn update_refuses_cross_tenant_request_with_404() {
@@ -910,7 +910,7 @@ mod adversarial_tests {
         pool.close().await;
     }
 
-    /// The audit metadata builder flags blank vs present evidence — the
+    /// The audit metadata builder flags blank vs present evidence, the
     /// difference an auditor relies on.
     #[test]
     fn audit_metadata_distinguishes_blank_from_present_evidence() {

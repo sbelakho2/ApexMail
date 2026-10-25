@@ -32,7 +32,7 @@ pub struct AppState {
     pub delivery: DeliveryService,
     pub api_key: String,
     /// A. Fail-closed auth: when no API key is configured, every protected
-    /// route must return 503 (auth not configured) — never pass-through.
+    /// route must return 503 (auth not configured), never pass-through.
     /// The ONLY bypass is this explicit development opt-in flag
     /// (`EDGE_CASES_ALLOW_ANONYMOUS=true`), which is off by default and logs
     /// a loud warning at startup.
@@ -75,7 +75,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/health/ready", get(health))
         .route("/health/live", get(health))
         .with_state(state)
-        .layer(DefaultBodyLimit::max(10 * 1024 * 1024)) // 10 MB — attachment validation accepts base64
+        .layer(DefaultBodyLimit::max(10 * 1024 * 1024)) // 10 MB, attachment validation accepts base64
         .layer(TimeoutLayer::new(Duration::from_secs(30)))
         .layer(middleware::from_fn_with_state(shared, require_api_key))
 }
@@ -96,7 +96,7 @@ async fn require_api_key(
         // opted into anonymous development access.
         if !state.allow_anonymous {
             tracing::error!(
-                "auth not configured (INTERNAL_API_KEY empty) — refusing request; \
+                "auth not configured (INTERNAL_API_KEY empty), refusing request; \
                  set INTERNAL_API_KEY or, in development only, \
                  EDGE_CASES_ALLOW_ANONYMOUS=true"
             );

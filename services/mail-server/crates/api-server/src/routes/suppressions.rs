@@ -97,7 +97,7 @@ pub struct BulkSuppressResponse {
 
 const MAX_BULK_ENTRIES: usize = 10_000;
 
-/// Rows per chunked multi-row INSERT in [`bulk_suppress`] — one round-trip
+/// Rows per chunked multi-row INSERT in [`bulk_suppress`], one round-trip
 /// per 500 rows (5 bind parameters each) instead of one per row.
 const SUPPRESSION_BULK_CHUNK_SIZE: usize = 500;
 
@@ -144,7 +144,7 @@ fn prepare_bulk_entries<'a>(
             continue;
         }
         // Over-long reasons would fail inside the chunked INSERT (the column
-        // is VARCHAR(50)) — reject them up front as invalid entries.
+        // is VARCHAR(50)), reject them up front as invalid entries.
         if entry.reason.is_empty() || entry.reason.len() > MAX_REASON_LEN {
             invalid += 1;
             continue;
@@ -226,10 +226,10 @@ async fn list_suppressions(
 ) -> Result<Json<Vec<SuppressionResponse>>, ApiError> {
     require_scopes(&auth, &["suppressions:read"])?;
     // SM3 (audit F8): `cursor` used to be accepted here as a raw integer
-    // OFFSET — contradicting the crate's documented opaque-keyset contract.
+    // OFFSET, contradicting the crate's documented opaque-keyset contract.
     // The mislabeled param is gone; pagination is the honestly-named
     // `offset`. (This list returns a plain array, so a true keyset migration
-    // needs the CursorPage envelope — a breaking client contract — and is
+    // needs the CursorPage envelope, a breaking client contract, and is
     // deliberately out of this pass.)
     let offset = params.offset.clamp(0, 100_000);
     let rows = sqlx::query_as::<_, SuppressionRow>(
@@ -272,7 +272,7 @@ async fn delete_suppression(
     // unsubscribe suppression and the next campaign would mail them).
     // The `reason` column is FREE TEXT (operators write "manual", "spam trap",
     // …); only the canonical protected tokens carry policy. An unknown reason
-    // is therefore an ordinary, removable block — never a 500.
+    // is therefore an ordinary, removable block, never a 500.
     let parsed = compliance::suppressions::parse_reason(&reason)
         .unwrap_or(compliance::suppressions::SuppressionReason::Policy);
     let permission_level = if auth.scopes.iter().any(|s| s == "*" || s == "admin") {
@@ -354,7 +354,7 @@ async fn bulk_suppress(
         let existing_set: std::collections::HashSet<&str> =
             existing.iter().map(|(e,)| e.as_str()).collect();
 
-        // Chunked multi-row insert (previously one INSERT per entry — up to
+        // Chunked multi-row insert (previously one INSERT per entry, up to
         // 10,000 sequential round-trips for a max-size bulk request). Rows
         // already present are filtered first, so each chunk is a plain
         // multi-row INSERT with ON CONFLICT DO NOTHING as the race safety
@@ -682,8 +682,8 @@ mod adversarial_tests {
         assert_eq!(status, StatusCode::OK, "{body}");
         assert_eq!(body.as_array().map(Vec::len), Some(1));
         // SM3 (audit F8): the mislabeled integer `cursor` is GONE from the
-        // contract — an unknown query field is refused loudly
-        // (deny_unknown_fields) instead of silently meaning "offset" — and
+        // contract, an unknown query field is refused loudly
+        // (deny_unknown_fields) instead of silently meaning "offset", and
         // a hostile negative `offset` still clamps to 0.
         let (status, body) = env
             .get("/v1/suppressions?limit=99&offset=-4&cursor=1")

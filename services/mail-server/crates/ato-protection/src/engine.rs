@@ -1,4 +1,4 @@
-//! ATO Engine — orchestrates all ATO protection components
+//! ATO Engine, orchestrates all ATO protection components
 //!
 //! Evaluates login events against://! 1. Failed attempt lockout
 //! 2. Impossible travel detection
@@ -62,7 +62,7 @@ pub enum AtoAction {
     RequireMfa,
     /// Block the login attempt
     Block,
-    /// Require CAPTCHA or admin unlock — escalated lockout after repeated lockout events
+    /// Require CAPTCHA or admin unlock, escalated lockout after repeated lockout events
     /// This is more severe than Block and indicates repeated abuse patterns
     RequireCaptcha,
 }
@@ -123,9 +123,9 @@ pub struct SessionRiskVerdict {
 pub struct AtoEngine {
     config: AtoConfig,
     store: SessionStore,
-    /// Per-user TLS fingerprint history — detects bot stack changes
+    /// Per-user TLS fingerprint history, detects bot stack changes
     tls_histories: Arc<DashMap<String, UserTlsHistory>>,
-    /// Per-user lockout event timestamps — for escalation tracking (legacy in-memory path)
+    /// Per-user lockout event timestamps, for escalation tracking (legacy in-memory path)
     /// When a user hits the max_failed_attempts threshold, the timestamp is recorded.
     /// After lockout_escalation_threshold events within lockout_escalation_window,
     /// escalate to RequireCaptcha action.
@@ -169,7 +169,7 @@ impl AtoEngine {
                 tracing::error!(
                     redis_url = %url,
                     "redis_lockout_url is configured but redis-lockout feature is not enabled. \
-                     Falling back to in-memory lockout backend — ATO protection will NOT be \
+                     Falling back to in-memory lockout backend, ATO protection will NOT be \
                      shared across nodes. Enable the `redis-lockout` feature in Cargo.toml."
                 );
                 Arc::new(InMemoryLockoutBackend::new())
@@ -205,7 +205,7 @@ impl AtoEngine {
                 tracing::error!(
                     redis_url = %url,
                     "redis_lockout_url is configured but redis-lockout feature is not enabled. \
-                     Falling back to in-memory lockout backend — ATO protection will NOT be \
+                     Falling back to in-memory lockout backend, ATO protection will NOT be \
                      shared across nodes. Enable the `redis-lockout` feature in Cargo.toml."
                 );
                 Arc::new(InMemoryLockoutBackend::new())
@@ -316,7 +316,7 @@ impl AtoEngine {
                 }
             }
         } else {
-            // No geo coordinates available for this login — check if IP is different
+            // No geo coordinates available for this login, check if IP is different
             // from the last successful login. If so, apply a moderate penalty because
             // we cannot verify geographic feasibility.
             if let Some(history) = self.store.get_history(&event.user_id) {
@@ -326,7 +326,7 @@ impl AtoEngine {
                         factors.push(RiskFactor {
                             id: "GEO_UNKNOWN",
                             description: format!(
-                                "IP changed ({} → {}) but GeoIP data unavailable — travel speed unverifiable",
+                                "IP changed ({} → {}) but GeoIP data unavailable, travel speed unverifiable",
                                 last.ip_address, event.ip_address
                             ),
                             risk: geo_unknown_risk,
@@ -338,7 +338,7 @@ impl AtoEngine {
         }
 
         // 2. Atomically record the event, count failures (including this
-        // one), and check device novelty — all under one shard lock. The
+        // one), and check device novelty, all under one shard lock. The
         // old check-then-record sequence allowed N concurrent attempts to
         // each observe "max-1" failures and all evade the lockout.
         let (new_device, failure_count) = self
@@ -403,7 +403,7 @@ impl AtoEngine {
                 factors.push(RiskFactor {
                     id: "LOCKOUT_ESCALATED",
                     description: format!(
-                        "{} lockout events in {} hours — requires CAPTCHA/admin unlock",
+                        "{} lockout events in {} hours, requires CAPTCHA/admin unlock",
                         lockout_count,
                         self.config.lockout_escalation_window_secs / 3600
                     ),
@@ -424,7 +424,7 @@ impl AtoEngine {
             risk_score += 10.0 * self.config.weight_failures;
         } else if failure_count >= self.config.max_failed_attempts {
             // Record via pluggable backend (Redis or in-memory) BEFORE
-            // taking any local map lock — the backend performs I/O and
+            // taking any local map lock, the backend performs I/O and
             // must never run inside a DashMap shard lock.
             self.lockout_backend
                 .record_lockout(&event.user_id, self.config.lockout_escalation_window_secs);
@@ -438,7 +438,7 @@ impl AtoEngine {
             let escalation_cutoff =
                 now - chrono::Duration::seconds(self.config.lockout_escalation_window_secs as i64);
 
-            // Local count under a SHORT lock — dropped before backend I/O.
+            // Local count under a SHORT lock, dropped before backend I/O.
             let local_count = {
                 let mut entry = self
                     .lockout_events
@@ -462,7 +462,7 @@ impl AtoEngine {
                 factors.push(RiskFactor {
                     id: "LOCKOUT_ESCALATED",
                     description: format!(
-                        "{} lockout events in {} hours — requires CAPTCHA/admin unlock",
+                        "{} lockout events in {} hours, requires CAPTCHA/admin unlock",
                         lockout_count,
                         self.config.lockout_escalation_window_secs / 3600
                     ),
@@ -715,10 +715,10 @@ impl AtoEngine {
     /// because the background task must hold an independent reference to the
     /// engine after this method returns.
     /// # Eviction windows
-    /// * `ip_call_counts` — entries older than 2× interval (2 × rate-limit windows)
-    /// * `lockout_events` — entries whose newest event is older than 1 hour
-    /// * `tls_histories` — entries not seen in 24 hours
-    /// * `locked_until` — entries whose lockout expiry has passed (audit F7)
+    /// * `ip_call_counts`, entries older than 2× interval (2 × rate-limit windows)
+    /// * `lockout_events`, entries whose newest event is older than 1 hour
+    /// * `tls_histories`, entries not seen in 24 hours
+    /// * `locked_until`, entries whose lockout expiry has passed (audit F7)
     pub fn run_cleanup_loop(self: Arc<Self>, interval_secs: u64) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
             let interval = tokio::time::Duration::from_secs(interval_secs);
@@ -806,7 +806,7 @@ impl AtoEngine {
             let geo_unknown_penalty = 2.0;
             factors.push(RiskFactor {
                 id: "SESSION_GEO_UNKNOWN",
-                description: "IP changed but GeoIP lookup unavailable — cannot verify travel speed"
+                description: "IP changed but GeoIP lookup unavailable, cannot verify travel speed"
                     .into(),
                 risk: geo_unknown_penalty,
             });
@@ -814,7 +814,7 @@ impl AtoEngine {
             tracing::warn!(
                 user_id = %event.user_id,
                 session_id = %event.session_id,
-                "geo_velocity_kmh is None but IP changed — GeoIP lookup may have failed; applied {:.1} risk penalty",
+                "geo_velocity_kmh is None but IP changed, GeoIP lookup may have failed; applied {:.1} risk penalty",
                 geo_unknown_penalty
             );
         }
@@ -988,7 +988,7 @@ mod tests {
         }
         // Now a successful attempt must be denied. NOTE:the lockout now
         // fires ON the threshold-crossing attempt, so this sequence records
-        // enough lockout events to escalate — RequireCaptcha (stronger than
+        // enough lockout events to escalate, RequireCaptcha (stronger than
         // Block) is the expected outcome.
         let event = login_event("user1", "1.2.3.4", 40.7128, -74.006);
         let verdict = engine.evaluate(&event);
@@ -1027,7 +1027,7 @@ mod tests {
     #[test]
     fn test_lockout_persists_past_failure_window() {
         // Fail-first: the lockout expired together with the failure window,
-        // so once failures aged out the account was unlocked — 5 free
+        // so once failures aged out the account was unlocked, 5 free
         // guesses per window, forever. The lockout must persist for
         // lockout_duration_secs even after the failures age out.
         let config = AtoConfig {
@@ -1216,7 +1216,7 @@ mod tests {
     #[test]
     fn test_concurrent_failures_all_counted() {
         // Interleaved failures (as concurrent evaluations would produce)
-        // must all be recorded — the atomic count+record cannot lose any.
+        // must all be recorded, the atomic count+record cannot lose any.
         let engine = AtoEngine::new();
         let mut events = Vec::new();
         for _ in 0..5 {

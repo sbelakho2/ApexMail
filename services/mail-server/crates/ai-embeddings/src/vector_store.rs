@@ -97,7 +97,7 @@ impl VectorStore {
         }
         let vector = crate::embeddings::l2_normalize(vector);
 
-        // SM9 #11: eviction is batched — ONE sort-and-evict per threshold
+        // SM9 #11: eviction is batched, ONE sort-and-evict per threshold
         // crossing (see [`VectorStore::evict_lru`], whose batch always
         // lands below the threshold). The `max_vectors` hard cap below
         // still bounds memory fail-closed.
@@ -256,7 +256,7 @@ impl VectorStore {
     /// `# hmac-sha256:<hex_signature>`
     ///
     /// SM9 #11: the signature is computed by streaming every serialized line
-    /// through the HMAC core incrementally (`Mac::update`) — the old export
+    /// through the HMAC core incrementally (`Mac::update`), the old export
     /// ALSO accumulated the store's full serialized size in a shadow
     /// `Vec<u8>` alongside the writer (2-3x the store's size held in memory
     /// at snapshot scale).
@@ -292,7 +292,7 @@ impl VectorStore {
             info!(count, "NDJSON export with HMAC integrity signature");
         } else if count > 0 {
             warn!(
-                "NDJSON export without HMAC — integrity not protected (set PERSISTENCE_HMAC_KEY)"
+                "NDJSON export without HMAC, integrity not protected (set PERSISTENCE_HMAC_KEY)"
             );
         }
 
@@ -323,7 +323,7 @@ impl VectorStore {
                 continue;
             }
             if line.starts_with(HMAC_HEADER_PREFIX) {
-                // This is the HMAC signature line — store it
+                // This is the HMAC signature line, store it
                 let sig = line
                     .strip_prefix(HMAC_HEADER_PREFIX)
                     .unwrap_or("")
@@ -346,19 +346,19 @@ impl VectorStore {
             let expected_sig = maybe_signature.ok_or(EmbeddingError::IntegrityCheckFailed)?;
             let computed_sig = hex::encode(verifier.finalize().into_bytes());
             if !constant_time_eq(&computed_sig, &expected_sig) {
-                // No signature material in the log — the hex digests are
+                // No signature material in the log, the hex digests are
                 // integrity secrets-adjacent output and belong nowhere.
                 warn!(
-                    "NDJSON HMAC verification FAILED — data may be tampered or corrupted. \
+                    "NDJSON HMAC verification FAILED, data may be tampered or corrupted. \
                      Refusing to load."
                 );
                 return Err(EmbeddingError::IntegrityCheckFailed);
             }
             info!("NDJSON HMAC integrity check passed");
         } else if !lines.is_empty() && maybe_signature.is_some() {
-            // HMAC key not set but signature exists — warn the user
+            // HMAC key not set but signature exists, warn the user
             warn!(
-                "NDJSON file has HMAC signature but no key is configured — loading anyway. \
+                "NDJSON file has HMAC signature but no key is configured, loading anyway. \
                  Set PERSISTENCE_HMAC_KEY to verify integrity."
             );
         }
@@ -367,7 +367,7 @@ impl VectorStore {
         // The raw lines are the only buffer (verification must complete
         // before any deserialization, and a generic BufRead cannot be
         // rewound); the old code additionally materialized EVERY parsed
-        // `EmbeddingVector` — a second full copy of the store — before the
+        // `EmbeddingVector`, a second full copy of the store, before the
         // insert loop started. Each row is parsed, validated, normalized
         // and inserted in turn, then dropped.
         let mut imported = 0usize;
@@ -401,7 +401,7 @@ impl VectorStore {
                 warn!(
                     imported,
                     cap = self.max_vectors,
-                    "NDJSON import hit max_vectors — remaining rows dropped"
+                    "NDJSON import hit max_vectors, remaining rows dropped"
                 );
                 break;
             }
@@ -419,7 +419,7 @@ impl VectorStore {
     /// and ALWAYS at least enough entries to drop the store back BELOW the
     /// eviction threshold. A crossing therefore pays exactly one
     /// sort-and-evict, and subsequent inserts run eviction-free until the
-    /// store crosses again — a threshold configured close to `max_vectors`
+    /// store crosses again, a threshold configured close to `max_vectors`
     /// no longer re-sorts on every single insert. `max_vectors` remains the
     /// fail-closed hard cap.
     fn evict_lru(&self) {
@@ -935,7 +935,7 @@ mod tests {
         for r in &results {
             assert!(
                 (-1.0..=1.0).contains(&r.score),
-                "cosine score {} outside [-1, 1] — query was not normalized",
+                "cosine score {} outside [-1, 1], query was not normalized",
                 r.score
             );
         }

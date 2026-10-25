@@ -19,7 +19,7 @@ pub struct InboxManager {
 /// A scored classification decision (Fix #19).
 ///
 /// `category` is [`MessageCategory::NeedsReview`] whenever `confidence` is
-/// below [`crate::types::AUTOMATION_CONFIDENCE_THRESHOLD`] — the confidence
+/// below [`crate::types::AUTOMATION_CONFIDENCE_THRESHOLD`], the confidence
 /// is preserved so callers/logs can show HOW ambiguous the message was.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ClassificationDecision {
@@ -49,7 +49,7 @@ const UNSUBSCRIBE_KEYWORDS: &[Keyword] = &[
 
 /// Explicit spam vocabulary.
 const SPAM_KEYWORDS: &[Keyword] = &[("viagra", 1.0), ("lottery", 1.0)];
-/// Transactional/system sender addresses — a strong but not explicit signal.
+/// Transactional/system sender addresses, a strong but not explicit signal.
 const SPAM_SENDER_KEYWORDS: &[Keyword] = &[("noreply", 0.75)];
 
 const SUPPORT_KEYWORDS: &[Keyword] = &[
@@ -87,7 +87,7 @@ impl InboxManager {
             tracing::info!(
                 category = %decision.category,
                 confidence = decision.confidence,
-                "inbox message below automation confidence — routed to human review (Fix #19)"
+                "inbox message below automation confidence, routed to human review (Fix #19)"
             );
         }
         InboxMessage {
@@ -136,8 +136,8 @@ impl InboxManager {
     /// - the winner is the highest-scoring category, ties broken by the fixed
     ///   check order below (Unsubscribe → Spam → Support → Customer → Lead);
     /// - a winner below
-    ///   [`crate::types::AUTOMATION_CONFIDENCE_THRESHOLD`] — including the
-    ///   no-hit case — is demoted to [`MessageCategory::NeedsReview`] with
+    ///   [`crate::types::AUTOMATION_CONFIDENCE_THRESHOLD`], including the
+    ///   no-hit case, is demoted to [`MessageCategory::NeedsReview`] with
     ///   its score preserved: ambiguity must be a distinct category, so the
     ///   structural guard (no irreversible action from a non-concrete
     ///   category) holds at every consumer.
@@ -145,7 +145,7 @@ impl InboxManager {
         let s = subject.to_lowercase();
         let f = from.to_lowercase();
 
-        // Scored in a FIXED order — the tie-break is "first in this order"
+        // Scored in a FIXED order, the tie-break is "first in this order"
         // (strictly-greater comparison keeps the earlier category on ties).
         let scored: [(MessageCategory, f32); 5] = [
             (
@@ -197,7 +197,7 @@ impl InboxManager {
 
     /// List messages belonging to a given category, scoped to tenant.
     ///
-    /// Returns `Err` on database failure — previously errors were logged and
+    /// Returns `Err` on database failure, previously errors were logged and
     /// silently converted into an empty list.
     pub async fn list_by_category(
         &self,
@@ -222,7 +222,7 @@ impl InboxManager {
 
     /// List all messages regardless of category, scoped to tenant.
     ///
-    /// Returns `Err` on database failure — previously errors were logged and
+    /// Returns `Err` on database failure, previously errors were logged and
     /// silently converted into an empty list.
     pub async fn list_all(
         &self,
@@ -247,7 +247,7 @@ impl InboxManager {
     ///
     /// Returns `Err(SalesError::MessageNotFound)` when no matching message
     /// exists for this tenant, and `Err(SalesError::Database(..))` on
-    /// database failure — previously both cases collapsed into a bare
+    /// database failure, previously both cases collapsed into a bare
     /// `false` that callers could not distinguish.
     pub async fn mark_replied(&self, tenant_id: &str, id: Uuid) -> Result<(), SalesError> {
         let result = sqlx::query(
@@ -327,7 +327,7 @@ mod tests {
     }
 
     /// Fix I-5: unsubscribe/opt-out subjects must classify as Unsubscribe
-    /// (handled with priority), NOT Spam. Pure test — no database required.
+    /// (handled with priority), NOT Spam. Pure test, no database required.
     #[test]
     fn unsubscribe_subjects_classify_as_unsubscribe_not_spam() {
         for subject in [
@@ -379,13 +379,13 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // Fix #19 — confidence-scored classification: ambiguous input lands in
+    // Fix #19, confidence-scored classification: ambiguous input lands in
     // NeedsReview (no downstream automation may act on it), strong input is
     // decided, and the threshold boundary is inclusive.
     // ------------------------------------------------------------------
 
     /// An ambiguous message (no decisive keyword signal) must land in the
-    /// NeedsReview bucket — structurally NOT a concrete category — so no
+    /// NeedsReview bucket, structurally NOT a concrete category, so no
     /// consumer can drive suppression, auto-reply sends or enrollment from
     /// it. The score is preserved for the review UI/log.
     #[test]
@@ -419,7 +419,7 @@ mod tests {
     }
 
     /// Strong, specific keyword signals keep their decided categories with
-    /// automation-grade confidence — downstream consumers may act on these.
+    /// automation-grade confidence, downstream consumers may act on these.
     #[test]
     fn strong_classifications_are_concrete_with_automation_confidence() {
         let cases: [(&str, &str, MessageCategory); 6] = [
@@ -514,7 +514,7 @@ mod tests {
     #[tokio::test]
     async fn test_categorization() {
         let Some(mgr) = make_mgr("inbox::tests::test_categorization").await else {
-            // coverage: justified — soft-skip arm: only taken when the shared
+            // coverage: justified, soft-skip arm: only taken when the shared
             // test database is not configured; this run has it configured.
             return;
         };
@@ -553,7 +553,7 @@ mod tests {
     async fn test_list_by_category_and_mark_replied() {
         let Some(mgr) = make_mgr("inbox::tests::test_list_by_category_and_mark_replied").await
         else {
-            // coverage: justified — soft-skip arm: only taken when the shared
+            // coverage: justified, soft-skip arm: only taken when the shared
             // test database is not configured; this run has it configured.
             return;
         };
@@ -577,7 +577,7 @@ mod tests {
     #[tokio::test]
     async fn test_reply_rate() {
         let Some(mgr) = make_mgr("inbox::tests::test_reply_rate").await else {
-            // coverage: justified — soft-skip arm: only taken when the shared
+            // coverage: justified, soft-skip arm: only taken when the shared
             // test database is not configured; this run has it configured.
             return;
         };

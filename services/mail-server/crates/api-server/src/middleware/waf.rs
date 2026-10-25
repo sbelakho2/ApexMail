@@ -5,12 +5,12 @@
 //! middleware wires it into the public request path in **monitor mode by
 //! default**: every decision the engine would block is logged with its rule
 //! matches, and only `WAF_ENFORCE=true` turns those into 403 responses.
-//! Monitor-first is deliberate — the engine's rules are broad and the cost
+//! Monitor-first is deliberate, the engine's rules are broad and the cost
 //! of a false positive on a transactional email API is a failed customer
 //! send, so operators watch the logs and then opt into enforcement.
 //!
 //! Scope of inspection (v1): method, path, query string and headers.
-//! Request BODIES are not inspected — buffering every JSON body through the
+//! Request BODIES are not inspected, buffering every JSON body through the
 //! middleware would tax the hot path, and the API surface validates bodies
 //! structurally at the handler layer. Query-string and header attacks are
 //! the surfaces handlers do NOT re-validate, which is what the WAF adds
@@ -52,7 +52,7 @@ pub async fn waf_middleware(
             .collect();
         // The middleware runs behind the same ConnectInfo wiring as the
         // ddos middleware; without it (tests), the loopback identity is
-        // used — the WAF has no IP allowlist entries by default so this
+        // used, the WAF has no IP allowlist entries by default so this
         // only affects which bucket an allowlisted client would hit.
         let client_ip = req
             .extensions()
@@ -103,7 +103,7 @@ pub async fn waf_middleware(
     }
 }
 
-/// Bounded threat summary for logs — the matches' rule ids, never the raw
+/// Bounded threat summary for logs, the matches' rule ids, never the raw
 /// request bytes (headers can carry PII).
 fn log_threat(label: &str, threat: &ThreatInfo) {
     let rules: Vec<u32> = threat.matches.iter().map(|m| m.rule_id).take(16).collect();

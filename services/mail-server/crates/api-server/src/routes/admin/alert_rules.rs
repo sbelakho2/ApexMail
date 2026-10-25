@@ -4,7 +4,7 @@
 //! There is deliberately no second rule table: every rule created here is
 //! read by the billing-service maintenance sweep
 //! (`billing_service::maintenance::process_usage_alerts`) and fires into
-//! `system_alerts` — the store the control plane's `/alerts` page renders.
+//! `system_alerts`, the store the control plane's `/alerts` page renders.
 //! A rule that never reached the evaluator would be a claim-vs-code gap, so
 //! the metric whitelist below is exactly the set the evaluator can resolve
 //! (`emails`, `api_calls`); `storage` is rejected with the honest reason
@@ -37,7 +37,7 @@ const SEVERITIES: [&str; 3] = ["info", "warning", "critical"];
 const CHANNELS: [&str; 3] = ["email", "webhook", "both"];
 /// Metrics `resolve_usage_alert_metric` resolves against the live usage
 /// summary. The tenant-facing upsert also accepts `storage`, but the
-/// evaluator skips it — offering it on the operator surface would create
+/// evaluator skips it, offering it on the operator surface would create
 /// rules that can never fire.
 const METRICS: [&str; 2] = ["emails", "api_calls"];
 const RULE_NAME_MAX: usize = 80;
@@ -130,7 +130,7 @@ pub struct CreateRuleBody {
 /// Update the editable fields; omitted fields keep their stored value.
 /// Tenant and metric are identity (the evaluator's key and the unique
 /// `(tenant_id, metric_type, threshold_percent)` index), so they are not
-/// editable — delete and recreate to move a rule.
+/// editable, delete and recreate to move a rule.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct UpdateRuleBody {
@@ -157,7 +157,7 @@ fn default_enabled() -> bool {
 /// Validators return the caller-facing message as a plain string: the JSON
 /// handlers wrap it in [`ApiError::BadRequest`], while the CP form handlers
 /// put it straight into the field-error map. One implementation, both
-/// surfaces — validation cannot drift between the API and the page.
+/// surfaces, validation cannot drift between the API and the page.
 pub(crate) fn validate_name(name: &str) -> Result<String, String> {
     let trimmed = name.trim();
     if trimmed.is_empty() {
@@ -768,7 +768,7 @@ mod adversarial_tests {
             );
         }
         // A body missing required fields is refused by the extractor as a
-        // client error — never silently defaulted into a stored rule.
+        // client error, never silently defaulted into a stored rule.
         let (status, _) = env
             .post("/v1/admin/alerts/rules", r#"{"name":"only a name"}"#)
             .await;
@@ -909,7 +909,7 @@ mod adversarial_tests {
         assert_eq!(recorded_tenant, tenant);
 
         // A disabled rule stops firing: disable through the API, clear the
-        // cooldown, sweep again — no second incident.
+        // cooldown, sweep again, no second incident.
         let (status, disabled) = env
             .post(&format!("/v1/admin/alerts/rules/{rule_id}/disable"), "")
             .await;

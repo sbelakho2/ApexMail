@@ -289,8 +289,8 @@ mod tests {
 
 #[cfg(test)]
 mod adversarial_tests {
-    //! Malformed SNDS feeds must degrade to zeroed/skipped rows — never a
-    //! panic, never a bogus reputation signal — and the upsert must be
+    //! Malformed SNDS feeds must degrade to zeroed/skipped rows, never a
+    //! panic, never a bogus reputation signal, and the upsert must be
     //! idempotent per (ip, day).
 
     use super::*;
@@ -362,7 +362,7 @@ mod adversarial_tests {
     #[tokio::test]
     async fn fetch_surfaces_http_errors_from_the_data_endpoint() {
         // A 500 from the SNDS endpoint must be an explicit error naming the
-        // status — never an empty "no traffic" success.
+        // status, never an empty "no traffic" success.
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {

@@ -1,6 +1,6 @@
 +++
 title = "Responsible Disclosure"
-description = "ApexMail Responsible Disclosure Policy — how to report security vulnerabilities."
+description = "ApexMail Responsible Disclosure Policy, how to report security vulnerabilities."
 template = "prose.html"
 
 [extra]

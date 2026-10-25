@@ -46,11 +46,11 @@ pub use engine::{HttpRequest, ThreatInfo, WafDecision, WafEngine};
 pub enum ParanoiaLevel {
     /// Level 1:Low false positives, catches obvious attacks
     Low = 1,
-    /// Level 2:Moderate — recommended for production
+    /// Level 2:Moderate, recommended for production
     Medium = 2,
-    /// Level 3:High — may have false positives
+    /// Level 3:High, may have false positives
     High = 3,
-    /// Level 4:Paranoid — maximum security, requires tuning
+    /// Level 4:Paranoid, maximum security, requires tuning
     Paranoid = 4,
 }
 
@@ -59,7 +59,7 @@ pub enum ParanoiaLevel {
 pub enum WafVerdict {
     /// Request is clean
     Allow,
-    /// Request matched rules but below threshold — log only
+    /// Request matched rules but below threshold, log only
     Monitor {
         /// Anomaly score
         score: u32,

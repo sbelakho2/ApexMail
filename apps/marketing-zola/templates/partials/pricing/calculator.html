@@ -1,10 +1,10 @@
-{# ── ApexMail Pricing Calculator — plain apex-panel (ARK round) ──── #}
+{# ── ApexMail Pricing Calculator, plain apex-panel (ARK round) ──── #}
 {# Aligned with billing-service plan boundaries.                         #}
 {#                                                                       #}
 {# Pricing data is a validated public snapshot of the runtime catalog.    #}
 {# The static home-page island table (templates/partials/generated/      #}
 {# pricing-calculator-island.html) is a hand-curated competitor matrix,  #}
-{# NOT a duplicate of this data — see audit 2.1a for the distinction.    #}
+{# NOT a duplicate of this data, see audit 2.1a for the distinction.    #}
 
 {%- set pricing_data = load_data(path="data/pricing.json", format="json") -%}
 
@@ -90,7 +90,7 @@
           <div class="apex-field">
             <span class="apex-label">Billing cycle</span>
             {# Selected pill styling is pure CSS (:has(:checked) rules keyed on
-               the radiogroup in styles.css) — the old hardcoded "selected"
+               the radiogroup in styles.css), the old hardcoded "selected"
                classes on the Monthly label lied: switching to Annual changed
                the posted radio but never moved the visual selection. #}
             <div class="flex border overflow-hidden" role="radiogroup" aria-label="Billing cycle">
@@ -105,7 +105,7 @@
         {# ── Submit: the estimate renders on the response page ── #}
         <div class="mt-8 pt-6 border-t flex flex-col sm:flex-row items-start gap-4">
           <button type="submit" class="apex-mkt-cta--primary">Calculate</button>
-          <p class="apex-help">Press Calculate — your estimate renders instantly on the next page using the billing service's live plan tables.</p>
+          <p class="apex-help">Press Calculate, your estimate renders instantly on the next page using the billing service's live plan tables.</p>
         </div>
         </form>
       </div>
@@ -115,8 +115,8 @@
       <p>
         Plan boundaries are drawn from the active billing catalog: Free (3,000/mo), Developer (50K/mo), Pro (150K/mo), Growth (500K/mo), Business (2M/mo), Enterprise Cloud (5M/mo).
         Dedicated IPs are an add-on from €49/month (first) and €69/month (each additional) on Pro and above. Included entitlements: Growth 1 (after qualification), Business 1 (a second is assigned where traffic justifies it), Enterprise Cloud up to 3 based on architecture.
-        Inbox placement monitoring is an add-on at €99/month on any paid plan; EU-only routing is €149/month on Pro and above. Compliance (€990/month), Platform (€990/month base plus usage) and Mailboxes (€6 per seat/month, 10-seat minimum) are quoted on contract — see the contract lines above.
-        Annual subscriptions are billed at 10&times; the monthly price — {{ pricing_data.annual_savings_percent }}% less than twelve monthly payments. Enterprise requires an annual contract. All totals exclude VAT and contractual services. The next page shows the itemised estimate with the plan, included volume, overage and IP costs.
+        Inbox placement monitoring is an add-on at €99/month on any paid plan; EU-only routing is €149/month on Pro and above. Compliance (€990/month), Platform (€990/month base plus usage) and Mailboxes (€6 per seat/month, 10-seat minimum) are quoted on contract, see the contract lines above.
+        Annual subscriptions are billed at 10&times; the monthly price, {{ pricing_data.annual_savings_percent }}% less than twelve monthly payments. Enterprise requires an annual contract. All totals exclude VAT and contractual services. The next page shows the itemised estimate with the plan, included volume, overage and IP costs.
       </p>
     </div>
   </div>

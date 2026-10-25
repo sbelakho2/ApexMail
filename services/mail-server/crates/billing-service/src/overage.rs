@@ -2,7 +2,7 @@
 //! end-of-period invoicing AND collection.
 //!
 //! Published behaviour (docs/pricing.md, marketing pricing FAQ): a paid plan
-//! is NOT hard-blocked at its included volume — sending continues into an
+//! is NOT hard-blocked at its included volume, sending continues into an
 //! overage allowance and the extra volume is invoiced at the configured
 //! rate (default €0.40 per 1,000 emails) when the billing period ends.
 //! PAYG (unlimited, zero base price) tenants are invoiced for their whole
@@ -19,7 +19,7 @@
 //! period transition and by a catch-up insert at the top of the sweep. A
 //! renewal can no longer overwrite the period bounds before the sweep
 //! reads them. The sweep selects only `invoice_state = 'unbilled'` rows —
-//! completed work is excluded in SQL — and pages through them with a
+//! completed work is excluded in SQL, and pages through them with a
 //! complete keyset cursor on `(period_end, tenant_id, id)`. Unresolved
 //! periods are NOT aged out: raw-event retention (40 days) is never the
 //! expiry policy for financial work, each period carries its own
@@ -28,8 +28,8 @@
 //!
 //! # Pricing snapshots (audit F32)
 //!
-//! The complete effective pricing — email allowance, integer overage
-//! rate, currency, override context — is snapshotted onto the period at
+//! The complete effective pricing, email allowance, integer overage
+//! rate, currency, override context, is snapshotted onto the period at
 //! creation (migration 178: `pricing_snapshot`, plus the scalar
 //! `overage_rate_millicents`/`currency` columns). Pricing reads ONLY the
 //! snapshot; a later plan/override change can never reprice a past
@@ -48,14 +48,14 @@
 //! inside a SAVEPOINT, so a violation of THAT EXACT constraint (identity
 //! checked by constraint name, then tenant/kind/period/amount/currency
 //! compared) rolls back to the savepoint and the still-healthy
-//! transaction adopts the existing invoice — never a 25P02 SELECT inside
+//! transaction adopts the existing invoice, never a 25P02 SELECT inside
 //! an aborted transaction, never a second collection.
 //!
 //! # Collection flow (audits F33/F34/F35/F60)
 //!
 //! Every invoice the sweep creates gets a `collect_usage_invoice` outbox
 //! row in the same transaction (migration 138), so collection is resumable
-//! — a crash after invoice creation can never strand a draft. The ladder
+//!, a crash after invoice creation can never strand a draft. The ladder
 //! commits each step and checks every commit:
 //!
 //! 1. **Wallet first.** The tenant's wallet balance is applied to the
@@ -64,7 +64,7 @@
 //!    `invoice_payment_allocations` row (unique operation id) commit
 //!    together (audit F35). What remains is derived by the ONE shared
 //!    outstanding function (total − confirmed payments − debt-reduction
-//!    credits; audit F60) — wallet application never invents its own
+//!    credits; audit F60), wallet application never invents its own
 //!    total-minus-this-debit fallback, and an unavailable balance is a
 //!    retryable failure, never the basis of an external amount (F33).
 //! 2. **Mollie charge (recurring).** For tenants with a stored Mollie
@@ -84,7 +84,7 @@
 //!    `draft` to `pending` WITH a transactional handoff to the durable
 //!    dunning machinery: `dunning_records` (what the retry/suspension
 //!    jobs actually read) is upserted in the SAME transaction that marks
-//!    the outbox done (audit F33 — a bare `dunning_entered` event had no
+//!    the outbox done (audit F33, a bare `dunning_entered` event had no
 //!    consumer). Failures anywhere propagate: the outbox row keeps a
 //!    owner/lease fence (migration 180), records its error, backs off,
 //!    and is never marked done without confirmed settlement or the
@@ -146,7 +146,7 @@ const SWEEP_PAGE: i64 = 500;
 /// pagination is a COMPLETE keyset on `(period_end, tenant_id, id)` (the
 /// two-column cursor was not a unique row ordering), failed periods are
 /// gated by their own backoff (`next_sweep_attempt_at`), and there is NO
-/// age cutoff — unresolved financial work is retained until explicitly
+/// age cutoff, unresolved financial work is retained until explicitly
 /// reconciled, never aged out with the raw metering events. Pinned by
 /// unit tests.
 const SWEEP_UNBILLED_PERIODS_SQL: &str = r#"
@@ -176,7 +176,7 @@ pub struct OverageSweepResult {
     pub skipped_no_address: u64,
     pub skipped_no_overage: u64,
     /// Tenants whose plan name resolves to nothing (missing plans row AND
-    /// unknown to the builtin seeds) — surfaced to `needs_review`, never
+    /// unknown to the builtin seeds), surfaced to `needs_review`, never
     /// billed limit-0 (audit 1.3).
     pub skipped_unknown_plan: u64,
     /// PAYG calendar-month invoices created by the PAYG half of the sweep.
@@ -186,10 +186,10 @@ pub struct OverageSweepResult {
     /// Invoices left `pending` for the dunning flow / Mollie next cycle.
     pub pending_dunning: u64,
     /// Periods whose invoice already existed when claimed (unique index
-    /// backstop) — the existing invoice was reused, never double-collected
+    /// backstop), the existing invoice was reused, never double-collected
     /// (audit F29).
     pub conflicts_existing: u64,
-    /// Audit F31: periods whose processing failed THIS run — isolated,
+    /// Audit F31: periods whose processing failed THIS run, isolated,
     /// recorded with error/backoff state, retried later; the rest of the
     /// sweep progressed regardless.
     pub failed_periods: u64,
@@ -197,7 +197,7 @@ pub struct OverageSweepResult {
     /// (`None` when nothing is unresolved).
     pub oldest_unresolved_age_secs: Option<i64>,
     /// Audit F31: unresolved periods older than the metering retention
-    /// window whose usage read is zero — surfaced to `needs_review`
+    /// window whose usage read is zero, surfaced to `needs_review`
     /// (cannot distinguish no-usage from lost events).
     pub aged_needs_review: u64,
     /// Audit F32: periods moved to `needs_review` because their pricing
@@ -213,7 +213,7 @@ pub struct OverageSweepResult {
 /// An immutable billing-period record selected by the sweep (migration
 /// 137). `plan_name`/`email_allowance`/`overage_rate_millicents`/
 /// `currency` are the pricing snapshot taken when the period was recorded
-/// — pricing uses ONLY these, never the current plan (audit F32).
+///, pricing uses ONLY these, never the current plan (audit F32).
 #[derive(sqlx::FromRow)]
 struct BillingPeriodRow {
     id: Uuid,
@@ -247,12 +247,12 @@ pub async fn sweep_period_overage(state: &AppState) -> Result<OverageSweepResult
 }
 
 /// Effective plan for a subscription's period, status-aware (audit F32):
-/// ACTIVE subscriptions resolve the TENANT-level override-aware plan — the
+/// ACTIVE subscriptions resolve the TENANT-level override-aware plan, the
 /// same source the enforcement gate used; terminal/trialing rows resolve
 /// the SUBSCRIPTION's own plan, because the tenant is frequently already
 /// downgraded to free and pricing the old cycle at today's free limit
 /// would bill volume that was never granted. Returns (plan_name,
-/// email_limit) — the plan and its allowance in ONE row, so the rate
+/// email_limit), the plan and its allowance in ONE row, so the rate
 /// ladder can never price a different plan than the allowance came from.
 const EFFECTIVE_PERIOD_PLAN_SQL: &str = r#"
     SELECT
@@ -346,7 +346,7 @@ async fn ensure_subscription_period_records(db: &PgPool) -> Result<(), String> {
 }
 
 /// Overage half of the sweep: every ended `billing_periods` cycle in the
-/// lookback, regardless of subscription status — a lapsed paid-tier trial
+/// lookback, regardless of subscription status, a lapsed paid-tier trial
 /// or a canceled subscription accrued real overage that must still be
 /// invoiced (audit 1.3). Only never-paid free plans are skipped (free has
 /// no overage entitlement by definition; the rate ladder returns None).
@@ -375,7 +375,7 @@ async fn sweep_subscription_periods(
     if unresolved_count > 0 {
         if let Some(oldest_end) = oldest_end {
             // Fold with the needs_review age `refresh_pricing_snapshots`
-            // computed moments earlier — OVERWRITING it (the previous form)
+            // computed moments earlier, OVERWRITING it (the previous form)
             // hid an older needs_review period behind a younger unbilled
             // one, so the aging metric under-reported the real backlog.
             // "Oldest unresolved" is the MAXIMUM age across both states.
@@ -387,7 +387,7 @@ async fn sweep_subscription_periods(
         }
     }
 
-    // Audit F31: only UNBILLED periods are selected — completed work is
+    // Audit F31: only UNBILLED periods are selected, completed work is
     // excluded in SQL, the COMPLETE keyset cursor on
     // (period_end, tenant_id, id) makes pagination stable across
     // concurrent state changes AND tied cursor values, and each period's
@@ -415,7 +415,7 @@ async fn sweep_subscription_periods(
                     tenant_id = %period.tenant_id,
                     period_id = %period.id,
                     error = %error,
-                    "overage sweep: period failed — isolated; recorded for backoff retry"
+                    "overage sweep: period failed, isolated; recorded for backoff retry"
                 );
                 record_period_sweep_failure(&state.db, period.id, &error).await;
             }
@@ -507,7 +507,7 @@ pub(crate) async fn clear_period_sweep_failure(
 
 /// One-shot repair pass (audit F31): periods that already crossed the old
 /// 40-day cutoff were invisible to the sweep. `needs_review` periods are
-/// re-exposed here so operators can see recovered work — the real recovery
+/// re-exposed here so operators can see recovered work, the real recovery
 /// is that [`SWEEP_UNBILLED_PERIODS_SQL`] no longer drops old rows at all.
 async fn refresh_pricing_snapshots(state: &AppState, result: &mut OverageSweepResult) {
     let review: Option<(i64, Option<DateTime<Utc>>)> = sqlx::query_as(
@@ -526,7 +526,7 @@ async fn refresh_pricing_snapshots(state: &AppState, result: &mut OverageSweepRe
             result.pricing_needs_review += count as u64;
             if let Some(oldest) = oldest {
                 let age_secs = (Utc::now() - oldest).num_seconds().max(0);
-                // "Oldest unresolved" is the MAXIMUM age — the previous
+                // "Oldest unresolved" is the MAXIMUM age, the previous
                 // `.min()` folded toward the YOUNGEST review period, the
                 // opposite of what the metric documents.
                 result.oldest_unresolved_age_secs = match result.oldest_unresolved_age_secs {
@@ -601,7 +601,7 @@ async fn process_subscription_period(
     match current_state.as_deref() {
         Some("unbilled") => {}
         _ => {
-            // Completed concurrently (or the record vanished) — nothing to do.
+            // Completed concurrently (or the record vanished), nothing to do.
             let _ = tx.rollback().await;
             return Ok(());
         }
@@ -670,7 +670,7 @@ async fn process_subscription_period(
     };
 
     if plan_limit < 0 {
-        // Unlimited plan — no overage by definition. Terminal state, so
+        // Unlimited plan, no overage by definition. Terminal state, so
         // the sweep never revisits it (audit F31).
         mark_period_skipped(&mut tx, period.id).await?;
         tx.commit()
@@ -691,12 +691,12 @@ async fn process_subscription_period(
 
     // Audit F31: a period older than the metering retention window with a
     // ZERO usage read cannot distinguish "no usage" from "events aged
-    // out" — surface it for review instead of silently skipping.
+    // out", surface it for review instead of silently skipping.
     if period.period_end < Utc::now() - chrono::Duration::days(40) && sent == 0 {
         warn!(
             tenant_id = %period.tenant_id,
             period_start = %period.period_start.to_rfc3339(),
-            "overage sweep: aged period reads zero usage — retained for review, not dropped"
+            "overage sweep: aged period reads zero usage, retained for review, not dropped"
         );
         result.aged_needs_review += 1;
         mark_period_needs_review(
@@ -740,7 +740,7 @@ async fn process_subscription_period(
     }
 
     // A billing address is mandatory on a VAT invoice; without one the
-    // invoice cannot be issued correctly — surface loudly and retry next
+    // invoice cannot be issued correctly, surface loudly and retry next
     // sweep (the period stays `unbilled`, so nothing is double-billed once
     // the address is backfilled).
     if !tenant_has_billing_address(&period.tenant_id, &mut *tx).await? {
@@ -748,7 +748,7 @@ async fn process_subscription_period(
         warn!(
             tenant_id = %period.tenant_id,
             overage_emails,
-            "overage accrued but no billing address on file — invoice deferred"
+            "overage accrued but no billing address on file, invoice deferred"
         );
         let _ = tx.rollback().await;
         return Ok(());
@@ -824,8 +824,8 @@ async fn process_subscription_period(
     // inside a SAVEPOINT: a violation of the EXACT period-identity
     // constraint (name-checked, then tenant/period/amount/currency
     // compared) rolls back to the savepoint only, so the recovery SELECT
-    // runs in a STILL-HEALTHY transaction — never 25P02 inside an aborted
-    // one — and adopts the existing invoice without a second collection.
+    // runs in a STILL-HEALTHY transaction, never 25P02 inside an aborted
+    // one, and adopts the existing invoice without a second collection.
     sqlx::query("SAVEPOINT invoice_creation")
         .execute(&mut *tx)
         .await
@@ -859,7 +859,7 @@ async fn process_subscription_period(
 
             let Some((existing_id, existing_total, existing_currency)) = existing_id else {
                 // The constraint fired but the invoice is not visible in
-                // this transaction — record the failure and retry later
+                // this transaction, record the failure and retry later
                 // rather than adopting something unverified.
                 return Err(format!(
                     "overage sweep: period-identity constraint fired but no existing invoice \
@@ -870,7 +870,7 @@ async fn process_subscription_period(
             };
 
             // Identity check (audit F29): adopt only a genuine replay of
-            // THIS period's invoice — same currency, same amount. A
+            // THIS period's invoice, same currency, same amount. A
             // mismatch is linked (exactly one collection) but loudly
             // surfaced for reconciliation.
             if !existing_currency.eq_ignore_ascii_case(&period.currency)
@@ -883,7 +883,7 @@ async fn process_subscription_period(
                     existing_currency = %existing_currency,
                     snapshot_total = amount_cents,
                     snapshot_currency = %period.currency,
-                    "overage sweep: existing period invoice disagrees with the pricing snapshot — linked for review"
+                    "overage sweep: existing period invoice disagrees with the pricing snapshot, linked for review"
                 );
                 result.existing_invoice_mismatches += 1;
             }
@@ -905,7 +905,7 @@ async fn process_subscription_period(
             info!(
                 tenant_id = %period.tenant_id,
                 invoice_id = %existing_id,
-                "overage sweep: period already invoiced — reusing existing invoice, no second collection"
+                "overage sweep: period already invoiced, reusing existing invoice, no second collection"
             );
             return Ok(());
         }
@@ -942,7 +942,7 @@ async fn process_subscription_period(
         "overage invoice created for ended billing period"
     );
 
-    // Collection runs AFTER the claim committed — external calls must stay
+    // Collection runs AFTER the claim committed, external calls must stay
     // out of the claim transaction (audit F33). Collection failures are
     // recorded on the outbox (error, backoff, owner state) and retried;
     // the invoice itself is durably claimed above.
@@ -961,18 +961,18 @@ async fn process_subscription_period(
             tenant_id = %period.tenant_id,
             invoice_id = %invoice.id,
             error = %error,
-            "overage sweep: collection failed — outbox retains retryable state"
+            "overage sweep: collection failed, outbox retains retryable state"
         );
     }
 
     Ok(())
 }
 
-/// PAYG half of the sweep (audit 1.3 — PAYG was priced and displayed but
+/// PAYG half of the sweep (audit 1.3, PAYG was priced and displayed but
 /// never billed). PAYG tenants (unlimited email limit, zero base price,
 /// typically no Mollie subscription) are invoiced per COMPLETED calendar
-/// month — the same period the quota/reporting paths use for tenants
-/// without a subscription cycle — from the existing metering events.
+/// month, the same period the quota/reporting paths use for tenants
+/// without a subscription cycle, from the existing metering events.
 /// Usage-record pushing to Mollie Meter is deliberately NOT used; the
 /// invoice-item mechanism in [`collect_usage_invoice`] collects the cost.
 /// A month that computes to zero is skipped silently.
@@ -983,7 +983,7 @@ async fn sweep_payg_calendar_months(
     let pricing = PaygPricing::default();
     let months = recent_completed_calendar_months(Utc::now());
 
-    // Audit F31: stable keyset pagination on tenant id — the same tenants
+    // Audit F31: stable keyset pagination on tenant id, the same tenants
     // are never re-scanned past the cursor within one sweep pass.
     let mut cursor: Option<String> = None;
     loop {
@@ -1025,7 +1025,7 @@ async fn sweep_payg_calendar_months(
 }
 
 /// Claim one PAYG calendar month (period record + invoice in one
-/// transaction — same claim atomicity as the subscription half) and
+/// transaction, same claim atomicity as the subscription half) and
 /// collect the resulting invoice.
 async fn process_payg_month(
     state: &AppState,
@@ -1091,7 +1091,7 @@ async fn process_payg_month(
                 Some((id, state)) if state == "unbilled" => id,
                 _ => {
                     let _ = tx.rollback().await;
-                    return Ok(()); // completed (or gone) — skip
+                    return Ok(()); // completed (or gone), skip
                 }
             }
         }
@@ -1127,7 +1127,7 @@ async fn process_payg_month(
         tx.commit()
             .await
             .map_err(|e| format!("payg sweep: claim commit failed: {e}"))?;
-        return Ok(()); // zero-cost month — skip silently
+        return Ok(()); // zero-cost month, skip silently
     }
 
     if !tenant_has_billing_address(tenant_id, &mut *tx).await? {
@@ -1137,18 +1137,18 @@ async fn process_payg_month(
         // address-less month CEASE TO EXIST once it left that window: the
         // usage aged out and the revenue was silently forgone with no
         // `needs_review` state and no counter. Committed, the month stays
-        // visible for reconciliation — the parity the subscription half
+        // visible for reconciliation, the parity the subscription half
         // already has.
         result.skipped_no_address += 1;
         warn!(
             tenant_id = tenant_id,
-            "PAYG usage accrued but no billing address on file — month committed as \
+            "PAYG usage accrued but no billing address on file, month committed as \
              needs_review for reconciliation, never silently dropped"
         );
         mark_period_needs_review(
             &mut tx,
             period_id,
-            "no billing address on file — PAYG month retained for reconciliation",
+            "no billing address on file, PAYG month retained for reconciliation",
         )
         .await?;
         tx.commit()
@@ -1179,7 +1179,7 @@ async fn process_payg_month(
         return Ok(());
     }
     let description = format!(
-        "PAYG usage for {} — {emails_sent} emails, {api_calls} API calls",
+        "PAYG usage for {}, {emails_sent} emails, {api_calls} API calls",
         month_start.format("%Y-%m")
     );
 
@@ -1199,7 +1199,7 @@ async fn process_payg_month(
 
     // SAVEPOINT around the insert (audit F29): a period-identity unique
     // violation rolls back to the savepoint, and the adoption SELECT runs
-    // in the still-healthy claim transaction — no 25P02.
+    // in the still-healthy claim transaction, no 25P02.
     sqlx::query("SAVEPOINT invoice_creation")
         .execute(&mut *tx)
         .await
@@ -1219,7 +1219,7 @@ async fn process_payg_month(
                 .await
                 .map_err(|e| format!("payg sweep: invoice savepoint rollback failed: {e}"))?;
 
-            // Another writer already invoiced this month — adopt it, never
+            // Another writer already invoiced this month, adopt it, never
             // double-collect (audit F29).
             let existing_id: Option<Uuid> = sqlx::query_scalar(
                 "SELECT id FROM invoices WHERE tenant_id = $1 AND overage_period = $2 LIMIT 1",
@@ -1301,7 +1301,7 @@ async fn process_payg_month(
             tenant_id = tenant_id,
             invoice_id = %invoice.id,
             error = %error,
-            "payg sweep: collection failed — outbox retains retryable state"
+            "payg sweep: collection failed, outbox retains retryable state"
         );
     }
 
@@ -1327,7 +1327,7 @@ pub(crate) async fn mark_period_skipped(
 
 /// `unbilled -> needs_review` transition (audits F31/F32): a period whose
 /// pricing or usage cannot be resolved from history is surfaced for
-/// reconciliation — visible, retained, never silently priced from today's
+/// reconciliation, visible, retained, never silently priced from today's
 /// plan or dropped with aged-out metering events. Shared with
 /// `crate::product_lines`.
 pub(crate) async fn mark_period_needs_review(
@@ -1354,7 +1354,7 @@ pub(crate) async fn mark_period_needs_review(
 
 /// Persist a backfilled pricing snapshot on the period (audit F32). The
 /// guard `overage_rate_millicents IS NULL` makes the backfill a
-/// one-time freeze under the period lock — later plan/override changes can
+/// one-time freeze under the period lock, later plan/override changes can
 /// never overwrite it.
 #[allow(clippy::too_many_arguments)]
 async fn persist_pricing_snapshot(
@@ -1421,7 +1421,7 @@ fn payg_pricing_snapshot_json(pricing: &PaygPricing) -> serde_json::Value {
 
 /// `unbilled -> invoiced` transition with the usage watermark and invoice
 /// link. `metered_emails` is the metered volume the charge was computed
-/// from — `None` for a line whose price carries no email watermark (the
+/// from, `None` for a line whose price carries no email watermark (the
 /// Mailboxes seat line in `crate::product_lines`), never a fake zero.
 /// Shared with `crate::product_lines`.
 pub(crate) async fn mark_period_invoiced(
@@ -1485,7 +1485,7 @@ pub(crate) async fn enqueue_collection(
 const OVERAGE_PERIOD_UNIQUE_CONSTRAINT: &str = "uq_invoices_tenant_overage_period";
 
 /// Whether an invoice-creation error is a violation of the EXACT
-/// period-identity constraint — the (tenant_id, overage_period) backstop
+/// period-identity constraint, the (tenant_id, overage_period) backstop
 /// (audit F29). Arbitrary 23505s (invoice number sequence, external
 /// invoice id, ...) are NOT period replays and must never be reinterpreted
 /// as one; they propagate to the sweep's failure handling.
@@ -1504,7 +1504,7 @@ fn is_overage_period_unique_violation(error: &InvoiceError) -> bool {
 /// looked up by name so operator-configured limits still win; a
 /// missing/deactivated plans row falls back to the BUILTIN plan's limit by
 /// name (exactly how `usage::resolve_plan_limits` resolves quotas); an
-/// unknown plan name returns `None` after a loud warn — the caller skips
+/// unknown plan name returns `None` after a loud warn, the caller skips
 /// the tenant rather than billing everything as overage.
 async fn resolve_plan_limit_or_warn<'e, E>(
     executor: E,
@@ -1540,7 +1540,7 @@ where
             warn!(
                 tenant_id = tenant_id,
                 plan = plan_name,
-                "overage sweep: unknown plan name (no plans row, no builtin seed) — \
+                "overage sweep: unknown plan name (no plans row, no builtin seed), \
                  skipping period; refusing to bill the tenant's entire volume as overage"
             );
             Ok(None)
@@ -1549,14 +1549,14 @@ where
 }
 
 /// Existence-check SQL for the billing-address gate. Audit F28: it must
-/// select `EXISTS(...)` (bool) — the previous `SELECT 1` bound Postgres
+/// select `EXISTS(...)` (bool), the previous `SELECT 1` bound Postgres
 /// INT4 into an i64 and failed to decode. Pinned by unit test. Shared with
 /// `crate::product_lines` (same gate, same query).
 pub(crate) const ADDRESS_EXISTS_SQL: &str =
     "SELECT EXISTS(SELECT 1 FROM billing_addresses WHERE tenant_id = $1)";
 
 /// Whether the tenant has a billing address on file (mandatory on a VAT
-/// invoice). Uses SELECT EXISTS — `SELECT 1` decodes INT4 and cannot bind
+/// invoice). Uses SELECT EXISTS, `SELECT 1` decodes INT4 and cannot bind
 /// to i64 (audit F28).
 async fn tenant_has_billing_address<'e, T>(tenant_id: &str, executor: T) -> Result<bool, String>
 where
@@ -1571,7 +1571,7 @@ where
 }
 
 /// The completed calendar months whose end lies within the metering TTL
-/// window (40 days) — at most two (the previous month and, early in a
+/// window (40 days), at most two (the previous month and, early in a
 /// month, the one before it).
 pub(crate) fn recent_completed_calendar_months(
     now: DateTime<Utc>,
@@ -1601,12 +1601,12 @@ pub(crate) fn first_of_month(at: DateTime<Utc>) -> DateTime<Utc> {
 }
 
 /// The snapshotted overage rate rendered as "X.YZ CUR per 1,000 emails"
-/// (integer math — 40 millicents/email is 40 cents per 1 000 emails,
+/// (integer math, 40 millicents/email is 40 cents per 1 000 emails,
 /// i.e. "0.40"). The invoice text must quote the rate actually charged in
 /// the period's SNAPSHOT currency, never a hardcoded "€0.40" (audit F32),
 /// and the symbol must follow the currency: a legal document quoting
 /// "€0.40 USD" misquotes the money (audit SM7 F9), so the amount carries NO
-/// symbol — the ISO code next to it is the currency statement.
+/// symbol, the ISO code next to it is the currency statement.
 fn format_rate_per_thousand_emails(rate_millicents: i64, currency: &str) -> String {
     // 1 000 emails × rate millicents = rate cents = rate/100 major units.
     let cents_per_thousand = rate_millicents.max(0) as u64;
@@ -1622,7 +1622,7 @@ fn format_rate_per_thousand_emails(rate_millicents: i64, currency: &str) -> Stri
 /// docs). Resumable: every step commits durably and is idempotent, and the
 /// outbox operation written with the invoice tracks progress under an
 /// owner/lease fence (audit F33). Failures propagate as errors and leave
-/// the outbox retryable — the operation is marked done ONLY after
+/// the outbox retryable, the operation is marked done ONLY after
 /// confirmed settlement or the committed dunning handoff. Shared with
 /// `crate::product_lines` (one collection ladder, one behavior).
 pub(crate) async fn collect_usage_invoice(
@@ -1640,12 +1640,12 @@ pub(crate) async fn collect_usage_invoice(
     let Some(owner_token) = claim_collection_operation(state, invoice.id).await? else {
         info!(
             invoice_id = %invoice.id,
-            "usage invoice collection: operation not claimable (owned/done) — skipping"
+            "usage invoice collection: operation not claimable (owned/done), skipping"
         );
         return Ok(());
     };
 
-    // (a) Wallet first — in the INVOICE's currency, committed WITH its
+    // (a) Wallet first, in the INVOICE's currency, committed WITH its
     // payment allocation (audit F35). A wallet held in another currency is
     // never spent: mixing currencies would mint phantom money. The
     // remaining obligation is derived by the ONE shared outstanding
@@ -1659,7 +1659,7 @@ pub(crate) async fn collect_usage_invoice(
         }
     };
 
-    // Outstanding AFTER the wallet application — the single derivation.
+    // Outstanding AFTER the wallet application, the single derivation.
     // An UNAVAILABLE balance is a retryable failure (audit F33): never
     // initiate an external Mollie amount from a fallback total.
     let remaining_cents = match invoice_outstanding_cents(&state.db, invoice.id).await {
@@ -1690,14 +1690,14 @@ pub(crate) async fn collect_usage_invoice(
 
     // (c) Mollie-managed tenants: charge the REMAINING amount NOW as a
     // recurring `POST /payments` against the tenant's stored token (audit
-    // F34 — the old pending-item-only path never charged, so settlement
+    // F34, the old pending-item-only path never charged, so settlement
     // never matched and final usage could wait forever for a renewal that
     // never comes). The idempotency key carries the local invoice id AND
     // the frozen amount; the local ↔ provider mapping is persisted and the
     // settlement webhook reconciles through `reference =
     // invoice:{local_invoice_id}`. The HTTP call runs OUTSIDE every
     // wallet-lock transaction (audit F33). A Mollie failure is a retryable
-    // error: the outbox keeps the work and backs off — the invoice is NOT
+    // error: the outbox keeps the work and backs off, the invoice is NOT
     // pushed to done on the back of a failure.
     //
     // Audit SM7 F3: the collection amount is FROZEN on the outbox payload at
@@ -1713,7 +1713,7 @@ pub(crate) async fn collect_usage_invoice(
                     invoice_id = %invoice.id,
                     frozen,
                     live_outstanding = remaining_cents,
-                    "usage invoice collection: reusing the frozen Mollie collection amount — \
+                    "usage invoice collection: reusing the frozen Mollie collection amount, \
                      the live outstanding moved after the first attempt"
                 );
             }
@@ -1760,11 +1760,11 @@ pub(crate) async fn collect_usage_invoice(
             Ok(_) => warn!(
                 invoice_id = %invoice.id,
                 existing = ?invoice.mollie_payment_id,
-                "usage invoice collection: Mollie mapping not stored — invoice already bound to a different Mollie payment"
+                "usage invoice collection: Mollie mapping not stored, invoice already bound to a different Mollie payment"
             ),
             Err(error) => {
                 // The external operation exists; the mapping must not be
-                // lost — keep the outbox retryable (audit F34).
+                // lost, keep the outbox retryable (audit F34).
                 let error = format!("storing Mollie mapping failed: {error}");
                 record_collection_failure(state, invoice.id, &owner_token, &error).await;
                 return Err(error);
@@ -1776,7 +1776,7 @@ pub(crate) async fn collect_usage_invoice(
     // durable dunning machinery (audit F33): dunning_records (what the
     // retry/suspension jobs actually read) is upserted in the same
     // transaction that flips the invoice and completes the outbox
-    // operation. Only this committed handoff — or confirmed settlement —
+    // operation. Only this committed handoff, or confirmed settlement —
     // legitimizes marking the operation done.
     if let Err(error) = finalize_collection(state, invoice, "pending", &owner_token).await {
         record_collection_failure(state, invoice.id, &owner_token, &error).await;
@@ -1789,7 +1789,7 @@ pub(crate) async fn collect_usage_invoice(
         applied_cents,
         remaining_cents,
         mollie_payment = mollie.as_ref().map(|m| m.payment_id.clone()),
-        "usage invoice moved to pending — wallet applied, remainder handed to dunning/Mollie"
+        "usage invoice moved to pending, wallet applied, remainder handed to dunning/Mollie"
     );
 
     invalidate_wallet_balance_cache(state, &invoice.tenant_id).await;
@@ -1804,7 +1804,7 @@ const COLLECTION_LEASE_SECS: i64 = 600;
 /// first Mollie attempt (audit SM7 F3).
 const FROZEN_COLLECTION_AMOUNT_KEY: &str = "mollieCollectionCents";
 
-/// The frozen collection amount carried by an outbox payload (pure — audit
+/// The frozen collection amount carried by an outbox payload (pure, audit
 /// SM7 F3, pinned by unit tests). `Some(cents)` ONLY for a positive integer
 /// figure; anything else (absent, non-integer, non-positive) reads as "not
 /// frozen yet" and the caller freezes the live remainder instead.
@@ -1816,7 +1816,7 @@ fn frozen_collection_amount(payload: Option<&serde_json::Value>) -> Option<i64> 
 }
 
 /// The outbox payload for an invoice's collection operation (`None` when the
-/// operation row is missing — the freeze then also writes nothing).
+/// operation row is missing, the freeze then also writes nothing).
 async fn collection_outbox_payload(
     db: &sqlx::PgPool,
     invoice_id: Uuid,
@@ -1833,8 +1833,8 @@ async fn collection_outbox_payload(
 
 /// Freeze the external collection amount on the outbox payload (audit
 /// SM7 F3). The FIRST freeze wins: a concurrent collector that took over an
-/// expired lease mid-attempt cannot move the figure — and with it the Mollie
-/// idempotency keys — once another attempt has frozen it. Returns the
+/// expired lease mid-attempt cannot move the figure, and with it the Mollie
+/// idempotency keys, once another attempt has frozen it. Returns the
 /// EFFECTIVE frozen amount: the caller's proposal only when this call
 /// performed the freeze, the pre-existing frozen figure otherwise (the
 /// caller must collect under THAT amount so every attempt shares one key).
@@ -1861,11 +1861,11 @@ async fn freeze_collection_amount(
     if frozen.rows_affected() > 0 {
         return Ok(amount_cents);
     }
-    // Another attempt froze first — its figure owns the idempotency keys.
+    // Another attempt froze first, its figure owns the idempotency keys.
     let payload = collection_outbox_payload(db, invoice_id).await?;
     frozen_collection_amount(payload.as_ref()).ok_or_else(|| {
         "the frozen collection amount vanished between the conditional freeze and \
-         the read — the outbox row cannot be lost while this collector owns the \
+         the read, the outbox row cannot be lost while this collector owns the \
          operation"
             .to_string()
     })
@@ -1921,7 +1921,7 @@ const COLLECTION_MAX_ATTEMPTS: i32 = 10;
 /// the owner/lease is released, the error is stored, and a capped
 /// exponential backoff decides when the work becomes claimable again.
 /// Once the attempt cap is reached the operation dead-letters to `failed`
-/// — visible, not retried blindly.
+///, visible, not retried blindly.
 async fn record_collection_failure(
     state: &AppState,
     invoice_id: Uuid,
@@ -1970,7 +1970,7 @@ async fn record_collection_failure(
         Ok(Some(true)) => warn!(
             invoice_id = %invoice_id,
             error = error,
-            "usage invoice collection: attempts exhausted — operation dead-lettered for operator review"
+            "usage invoice collection: attempts exhausted, operation dead-lettered for operator review"
         ),
         Ok(_) => {}
         Err(record_error) => warn!(
@@ -1986,7 +1986,7 @@ async fn record_collection_failure(
 /// (unique operation id) commit TOGETHER (audit F35). Serialization:
 /// advisory lock on the invoice, so the sweep and the outbox resumer can
 /// never double-apply. What remains is derived by the ONE shared
-/// outstanding function — total − confirmed payments − debt-reduction
+/// outstanding function, total − confirmed payments − debt-reduction
 /// credits (audit F60: wallet application must not ignore credits, and
 /// must not invent its own total-minus-this-debit figure). The wallet must
 /// be held in the INVOICE's currency. Returns the cents applied by THIS
@@ -2024,14 +2024,14 @@ async fn apply_wallet_credit(state: &AppState, invoice: &Invoice) -> Result<i64,
             tenant_id = %invoice.tenant_id,
             wallet_currency = %wallet_currency,
             invoice_currency = %invoice.currency,
-            "usage invoice collection: wallet currency does not match the invoice — not spendable"
+            "usage invoice collection: wallet currency does not match the invoice, not spendable"
         );
         let _ = tx.rollback().await;
         return Ok(0);
     }
 
     // What remains is the SHARED outstanding derivation (audit F60) —
-    // total − confirmed allocations − debt-reduction credits — read under
+    // total − confirmed allocations − debt-reduction credits, read under
     // the invoice lock, so retries and concurrent ladders can never
     // over-apply. An unavailable derivation is a retryable failure, never
     // a fallback figure (audit F33).
@@ -2080,12 +2080,12 @@ async fn apply_wallet_credit(state: &AppState, invoice: &Invoice) -> Result<i64,
     .map_err(|error| format!("wallet debit failed: {error}"))?;
 
     if debit.rows_affected() == 0 {
-        // The allocation already exists (replay) — nothing to debit again.
+        // The allocation already exists (replay), nothing to debit again.
         let _ = tx.rollback().await;
         return Ok(0);
     }
 
-    // Audit F33: check EVERY commit — an ignored failure here would have
+    // Audit F33: check EVERY commit, an ignored failure here would have
     // debited nothing yet report credit applied.
     tx.commit()
         .await
@@ -2102,16 +2102,16 @@ async fn apply_wallet_credit(state: &AppState, invoice: &Invoice) -> Result<i64,
 
 /// Flip the just-created draft invoice to its collection status, mark the
 /// period collected, record the dunning entry and complete the outbox
-/// operation — one committed transaction (audit F33). Only a row still in
+/// operation, one committed transaction (audit F33). Only a row still in
 /// `draft` is status-flipped, so a concurrent manual payment can never be
 /// overwritten.
 ///
 /// The outbox operation is completed ONLY here, and ONLY fenced by the
 /// owner token that claimed it. For `pending`, the SAME transaction
-/// upserts `dunning_records` — the durable retry/suspension machinery the
+/// upserts `dunning_records`, the durable retry/suspension machinery the
 /// maintenance jobs actually read (`process_scheduled_retries` selects
 /// `next_retry_at IS NOT NULL AND status IN ('warning', 'soft_suspended')`)
-/// — so the handoff is committed together with the done-marking instead
+///, so the handoff is committed together with the done-marking instead
 /// of a `dunning_entered` event nothing consumes.
 async fn finalize_collection(
     state: &AppState,
@@ -2142,12 +2142,12 @@ async fn finalize_collection(
     .map_err(|e| format!("status update failed: {e}"))?;
 
     if invoice_update.rows_affected() == 0 {
-        // Not in draft anymore (concurrent settlement) — still safe to
+        // Not in draft anymore (concurrent settlement), still safe to
         // complete the handoff below; nothing was overwritten.
         warn!(
             invoice_id = %invoice.id,
             requested_status = status,
-            "usage invoice collection: invoice no longer draft — status left untouched"
+            "usage invoice collection: invoice no longer draft, status left untouched"
         );
     } else {
         // Statutory ledger: the invoice just left draft, so post its
@@ -2171,7 +2171,7 @@ async fn finalize_collection(
     .map_err(|e| format!("period collection transition failed: {e}"))?;
 
     if status == "pending" {
-        // Audit F33 — the durable handoff: dunning_records is what the
+        // Audit F33, the durable handoff: dunning_records is what the
         // retry jobs read. Upserted in the SAME transaction as the
         // outbox completion, with a scheduled first retry.
         sqlx::query(
@@ -2235,7 +2235,7 @@ async fn finalize_collection(
 
     if outbox_done.rows_affected() == 0 {
         return Err(format!(
-            "outbox completion matched no owned row — lease lost or stolen for invoice {}",
+            "outbox completion matched no owned row, lease lost or stolen for invoice {}",
             invoice.id
         ));
     }
@@ -2258,18 +2258,18 @@ struct MollieUsageInvoice {
 
 /// Immediate Mollie collection of a usage invoice's remaining amount
 /// (audit F34): charge the remainder NOW as a recurring payment against the
-/// tenant's stored mandate — not "on some future renewal" (which never comes
+/// tenant's stored mandate, not "on some future renewal" (which never comes
 /// for cancelled/PAYG tenants).
 ///
 /// * The amount travels as a decimal string (Mollie's wire format), built
-///   from the frozen cents amount by [`Money`] — exact, never rounded.
+///   from the frozen cents amount by [`Money`], exact, never rounded.
 /// * The metadata carries `invoice_id` (and `reference`) so the webhook
 ///   reconciles the payment to OUR invoice row.
 /// * `sequenceType: recurring` with the Mollie customer + mandate is the
 ///   stored-mandate charge; the mandate lives on the Mollie customer, never in the body.
 /// * The idempotency key embeds the immutable local operation identity
 ///   (invoice id) AND the FROZEN amount, so a retry after a wallet-balance
-///   change replays the SAME key — and a changed remainder can never mint
+///   change replays the SAME key, and a changed remainder can never mint
 ///   a second charge under a new key (F34).
 /// * Returns `Ok(None)` when the tenant has no stored Mollie mandate or no
 ///   `MOLLIE_API_KEY` is configured (the wallet + dunning path covers them).
@@ -2288,7 +2288,7 @@ async fn create_and_finalize_mollie_usage_invoice(
         return Ok(None);
     }
     let Ok(mollie) = MollieClient::from_env() else {
-        return Ok(None); // not Mollie-configured — wallet + dunning path
+        return Ok(None); // not Mollie-configured, wallet + dunning path
     };
 
     let stored: Option<(String, String)> = sqlx::query_as(
@@ -2307,14 +2307,14 @@ async fn create_and_finalize_mollie_usage_invoice(
     .await
     .map_err(|e| format!("Mollie stored-mandate lookup failed: {e}"))?;
     let Some((customer_id, mandate_id)) = stored else {
-        return Ok(None); // no stored payment method — wallet + dunning path
+        return Ok(None); // no stored payment method, wallet + dunning path
     };
 
     // The metadata IS the settlement contract: the webhook reconciles this
     // charge to OUR invoice row.
     let reference = format!("invoice:{}", invoice.id);
     // Frozen external operation identity: local invoice + FROZEN amount
-    // (audit F34/SM7 F3 — a changed remainder can never reuse a previously
+    // (audit F34/SM7 F3, a changed remainder can never reuse a previously
     // issued key; currency is the invoice's immutable currency).
     let idempotency_key = format!("usageinv_{}_{}c", invoice.id.simple(), amount_cents);
 
@@ -2343,7 +2343,7 @@ async fn create_and_finalize_mollie_usage_invoice(
 
     if payment.id.trim().is_empty() {
         return Err(
-            "Mollie payment response carries no id — refusing to bind an unidentifiable charge"
+            "Mollie payment response carries no id, refusing to bind an unidentifiable charge"
                 .to_string(),
         );
     }
@@ -2385,8 +2385,8 @@ pub struct CollectionResumeStats {
 }
 
 /// Resume stranded collection operations (audit F33): invoices whose
-/// `collect_usage_invoice` outbox row is still pending/in_progress — e.g.
-/// the process died between invoice creation and collection — are run
+/// `collect_usage_invoice` outbox row is still pending/in_progress, e.g.
+/// the process died between invoice creation and collection, are run
 /// through the same idempotent ladder again. Only operations whose retry
 /// backoff has elapsed are claimed; operations past the attempt cap are
 /// dead-lettered to `failed` and EXPOSED instead of being silently
@@ -2437,7 +2437,7 @@ pub async fn resume_pending_collections(state: &AppState) -> Result<CollectionRe
                 tenant_id = %tenant_id,
                 invoice_id = %invoice_id,
                 attempts,
-                "collection resume: attempts exhausted — operation dead-lettered for operator review"
+                "collection resume: attempts exhausted, operation dead-lettered for operator review"
             );
             stats.dead_lettered += 1;
             continue;
@@ -2447,7 +2447,7 @@ pub async fn resume_pending_collections(state: &AppState) -> Result<CollectionRe
             .await
             .map_err(|e| format!("collection resume: invoice lookup failed: {e}"))?;
         let Some(invoice) = invoice else {
-            warn!(invoice_id = %invoice_id, "collection resume: invoice row missing — marking outbox failed");
+            warn!(invoice_id = %invoice_id, "collection resume: invoice row missing, marking outbox failed");
             let _ = sqlx::query(
                 "UPDATE invoice_collection_outbox SET status = 'failed', last_error = 'invoice row missing', updated_at = NOW() WHERE invoice_id = $1 AND operation = 'collect_usage_invoice'",
             )
@@ -2491,7 +2491,7 @@ pub async fn resume_pending_collections(state: &AppState) -> Result<CollectionRe
                 tenant_id = %tenant_id,
                 invoice_id = %invoice_id,
                 error = %error,
-                "collection resume: ladder failed — retryable state retained on the outbox"
+                "collection resume: ladder failed, retryable state retained on the outbox"
             );
             continue;
         }
@@ -2511,7 +2511,7 @@ pub async fn resume_pending_collections(state: &AppState) -> Result<CollectionRe
 /// subscription state. Email sending on an ACTIVE paid subscription uses
 /// the overage ceiling; everything else (API calls, free tenants, TRIALING
 /// subscriptions, no-subscription tenants, unlimited plans) keeps its raw
-/// plan limit — a trial has not paid for an overage allowance, so granting
+/// plan limit, a trial has not paid for an overage allowance, so granting
 /// the 2× ceiling pre-payment double-counted the allowance (audit 1.3).
 pub fn effective_email_quota(plan_limit: i64, subscription_active_paid: bool) -> i64 {
     if subscription_active_paid {
@@ -2523,7 +2523,7 @@ pub fn effective_email_quota(plan_limit: i64, subscription_active_paid: bool) ->
 
 /// Short-lived cache for the paid-subscription gate: this runs on the email
 /// send hot path (record_with_quota_check), and one indexed SELECT per send
-/// is avoidable — subscription state changes on webhook timescales, not
+/// is avoidable, subscription state changes on webhook timescales, not
 /// per-send. 60s staleness matches the suppression-cache precedent.
 const SUBSCRIPTION_CACHE_TTL_SECS: u64 = 60;
 
@@ -2543,9 +2543,9 @@ fn paid_subscription_cache() -> &'static moka::sync::Cache<String, bool> {
 /// `active` on a priced plan). Trialing is deliberately NOT paid here: the
 /// overage allowance is a post-payment benefit, and counting trials made
 /// the enforcement ceiling 2× the plan limit before any money moved
-/// (audit 1.3). Cached briefly — used per-send by the quota gate.
+/// (audit 1.3). Cached briefly, used per-send by the quota gate.
 ///
-/// Audit F28: the existence check selects `EXISTS(...)` (bool) — the old
+/// Audit F28: the existence check selects `EXISTS(...)` (bool), the old
 /// `SELECT 1` binds Postgres INT4 into an i64 and fails to decode.
 pub async fn tenant_has_active_paid_subscription(
     pool: &PgPool,
@@ -2563,7 +2563,7 @@ pub async fn tenant_has_active_paid_subscription(
 }
 
 /// Existence-check SQL for the paid-subscription gate (audit F28):
-/// `EXISTS(...)` selects bool — the previous `SELECT 1` bound INT4 into an
+/// `EXISTS(...)` selects bool, the previous `SELECT 1` bound INT4 into an
 /// i64 and failed to decode. Pinned by unit test.
 const PAID_SUBSCRIPTION_EXISTS_SQL: &str = r#"
     SELECT EXISTS(
@@ -2577,7 +2577,7 @@ const PAID_SUBSCRIPTION_EXISTS_SQL: &str = r#"
     "#;
 
 /// Drop the tenant's cached paid-subscription gate. Called by entitlement
-/// writers (admin plan override — audit F06) so the 60s cache cannot serve
+/// writers (admin plan override, audit F06) so the 60s cache cannot serve
 /// the pre-override answer after a plan changed.
 pub fn invalidate_subscription_cache(tenant_id: &str) {
     paid_subscription_cache().invalidate(tenant_id);
@@ -2599,7 +2599,7 @@ mod tests {
 
     #[test]
     fn effective_quota_only_widens_for_active_paid_subscriptions() {
-        // free / trial / canceled: hard plan limit — no pre-payment ceiling
+        // free / trial / canceled: hard plan limit, no pre-payment ceiling
         assert_eq!(effective_email_quota(50_000, false), 50_000);
         // active paid subscription: overage ceiling
         assert_eq!(effective_email_quota(50_000, true), 100_000);
@@ -2632,7 +2632,7 @@ mod tests {
         assert_eq!(format_rate_per_thousand_emails(80, "EUR"), "0.80 EUR");
         assert_eq!(format_rate_per_thousand_emails(125, "EUR"), "1.25 EUR");
         // A non-EUR snapshot currency is rendered, not coerced to EUR
-        // (audit F32) — and never mixed with a € symbol (SM7 F9).
+        // (audit F32), and never mixed with a € symbol (SM7 F9).
         assert_eq!(format_rate_per_thousand_emails(40, "usd"), "0.40 USD");
         // Degenerate rates never render negative.
         assert_eq!(format_rate_per_thousand_emails(0, "EUR"), "0.00 EUR");
@@ -2640,7 +2640,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // Audit SM7 F3 — the collection amount is frozen on the outbox payload
+    // Audit SM7 F3, the collection amount is frozen on the outbox payload
     // at the first Mollie attempt; retries reuse it (hence the EXACT
     // idempotency keys) instead of re-deriving a moved remainder.
     // ------------------------------------------------------------------
@@ -2663,7 +2663,7 @@ mod tests {
         assert_eq!(frozen_collection_amount(None), None);
 
         // A non-integer or non-positive "frozen" figure is corruption, not a
-        // freeze — the caller re-freezes the live remainder.
+        // freeze, the caller re-freezes the live remainder.
         let float_payload = serde_json::json!({ "mollieCollectionCents": 4_321.5 });
         assert_eq!(frozen_collection_amount(Some(&float_payload)), None);
         let zero_payload = serde_json::json!({ "mollieCollectionCents": 0 });
@@ -2679,7 +2679,7 @@ mod tests {
     /// what makes a changed remainder unable to mint a second Mollie charge.
     /// The seed format itself is pinned here (it is load-bearing across
     /// attempts; the conversion froze it to `usageinv_{invoice}_{amount}c`
-    /// — usage kind and currency moved out of the key because Mollie binds
+    ///, usage kind and currency moved out of the key because Mollie binds
     /// the currency through the body's `amount.currency` instead).
     #[test]
     fn mollie_collection_key_seed_is_stable_per_frozen_amount() {
@@ -2687,8 +2687,8 @@ mod tests {
         let seed =
             |amount_cents: i64| format!("usageinv_{}_{}c", invoice_id.simple(), amount_cents);
         let first_attempt = seed(5_000);
-        // Retry after an allocation landed: the frozen amount (5_000) — not
-        // the live remainder (3_000) — feeds the key.
+        // Retry after an allocation landed: the frozen amount (5_000), not
+        // the live remainder (3_000), feeds the key.
         assert_eq!(seed(5_000), first_attempt);
         assert_ne!(seed(3_000), first_attempt);
     }
@@ -2742,7 +2742,7 @@ mod tests {
     #[test]
     fn mollie_idempotency_key_is_stable_per_invoice_and_frozen_amount() {
         // (Documented contract; the key is built inline in
-        // create_and_finalize_mollie_usage_invoice — pin the shape.) Mollie
+        // create_and_finalize_mollie_usage_invoice, pin the shape.) Mollie
         // has no provider-side invoice objects and the collection is ONE
         // `POST /payments`, so the key embeds exactly the local invoice id
         // and the frozen amount (audit F34): a retry with a changed
@@ -2757,7 +2757,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // Audit F29 — ONLY the exact period-identity constraint (by name) is
+    // Audit F29, ONLY the exact period-identity constraint (by name) is
     // a period replay; arbitrary unique violations are not.
     // ------------------------------------------------------------------
 
@@ -2834,7 +2834,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // Audit F32 — checked overage arithmetic must never wrap.
+    // Audit F32, checked overage arithmetic must never wrap.
     // ------------------------------------------------------------------
 
     #[test]
@@ -2848,7 +2848,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // Audit F35 — outstanding derivation.
+    // Audit F35, outstanding derivation.
     // ------------------------------------------------------------------
 
     #[test]
@@ -2884,7 +2884,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // Audit F28 — existence checks must select EXISTS (bool), never a
+    // Audit F28, existence checks must select EXISTS (bool), never a
     // bare `SELECT 1` (INT4 -> i64 decode failure).
     // ------------------------------------------------------------------
 
@@ -2907,7 +2907,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // Audits F29/F31/F32 — the sweep selects only unbilled periods,
+    // Audits F29/F31/F32, the sweep selects only unbilled periods,
     // excludes completed work in SQL, pages with a COMPLETE keyset (no
     // age cutoff: unresolved work is retained), and reads the pricing
     // snapshot columns.
@@ -2916,7 +2916,7 @@ mod tests {
     #[test]
     fn sweep_selects_only_unbilled_periods() {
         assert!(SWEEP_UNBILLED_PERIODS_SQL.contains("invoice_state = 'unbilled'"));
-        // Completed states are excluded by the unbilled filter — the
+        // Completed states are excluded by the unbilled filter, the
         // terminal states must never appear as an inclusion list.
         assert!(!SWEEP_UNBILLED_PERIODS_SQL.contains("invoiced"));
         assert!(!SWEEP_UNBILLED_PERIODS_SQL.contains("collected"));
@@ -2925,20 +2925,20 @@ mod tests {
 
     #[test]
     fn sweep_pagination_is_a_complete_keyset() {
-        // Keyset predicate + deterministic ORDER matching it — the
+        // Keyset predicate + deterministic ORDER matching it, the
         // (period_end, tenant_id) pair alone was NOT a unique row ordering
         // (audit F31).
         assert!(SWEEP_UNBILLED_PERIODS_SQL.contains("(period_end, tenant_id, id) >"));
         assert!(SWEEP_UNBILLED_PERIODS_SQL.contains("ORDER BY period_end, tenant_id, id"));
         assert!(SWEEP_UNBILLED_PERIODS_SQL.contains("LIMIT $4"));
-        // No OFFSET — offsets re-visit rows as pages complete.
+        // No OFFSET, offsets re-visit rows as pages complete.
         assert!(!SWEEP_UNBILLED_PERIODS_SQL.to_lowercase().contains("offset"));
     }
 
     #[test]
     fn sweep_never_ages_out_unresolved_periods() {
         // Audit F31: raw-event retention (40 days) must not be the expiry
-        // policy for unresolved financial work — no age cutoff, and
+        // policy for unresolved financial work, no age cutoff, and
         // per-period backoff gates retries instead.
         assert!(!SWEEP_UNBILLED_PERIODS_SQL.contains("INTERVAL '40 days'"));
         assert!(!SWEEP_UNBILLED_PERIODS_SQL.contains("40 days"));
@@ -2954,7 +2954,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // Audit F32 — one effective plan feeds BOTH the allowance and the
+    // Audit F32, one effective plan feeds BOTH the allowance and the
     // pricing rate: the live resolution selects the override-aware plan
     // (COALESCE(po.plan, t.plan)) together with its email_limit.
     // ------------------------------------------------------------------
@@ -3371,7 +3371,7 @@ mod coverage_adversarial {
 
     // The freeze itself is FIRST-writer-wins (audit SM7 F3): a collector
     // that took over an expired lease mid-attempt cannot move the figure —
-    // and with it the idempotency keys — once another attempt froze first;
+    // and with it the idempotency keys, once another attempt froze first;
     // it is handed the frozen amount back to collect under.
     env_test!(freeze_collection_amount_first_freeze_wins, |env| {
         let tenant = "ovcov_freeze";
@@ -3386,7 +3386,7 @@ mod coverage_adversarial {
         assert_eq!(effective, 6_000);
 
         // …a concurrent collector re-deriving a moved remainder (an
-        // allocation landed: 4_000) must NOT move the freeze — it collects
+        // allocation landed: 4_000) must NOT move the freeze, it collects
         // under the first attempt's figure so both share ONE Mollie key.
         let effective = freeze_collection_amount(&env.pool, invoice_id, 4_000)
             .await
@@ -3854,7 +3854,7 @@ mod coverage_adversarial {
 
             // A configured key with NO stored mandate is not an error: the
             // tenant simply collects through the wallet + dunning path, and
-            // no provider call is attempted (Mollie needs no profile id — the
+            // no provider call is attempted (Mollie needs no profile id, the
             // secret key identifies the account).
             std::env::set_var("MOLLIE_API_KEY", "mollie-test-key-fixture");
             let none = create_and_finalize_mollie_usage_invoice(
@@ -4101,7 +4101,7 @@ mod coverage_adversarial {
 
     // Audit SM7 F5: an address-less PAYG month is COMMITTED as `needs_review`
     // (visible, retained for reconciliation), never rolled back into
-    // nonexistence — the sweep only revisits the last two completed months,
+    // nonexistence, the sweep only revisits the last two completed months,
     // so a rolled-back claim used to make the month (and its revenue) vanish
     // when usage aged out.
     env_test!(
@@ -4278,7 +4278,7 @@ mod coverage_adversarial {
 
     // The page-size boundary: with more than SWEEP_PAGE unbilled periods the
     // sweep MUST continue past the first page through the keyset cursor —
-    // a broken cursor silently drops every period beyond row 500 — and ONE
+    // a broken cursor silently drops every period beyond row 500, and ONE
     // failing period must be isolated (recorded with backoff) while the
     // rest of the sweep still progresses.
     env_test!(sweep_pages_past_page_size_and_isolates_failures, |env| {
@@ -4403,7 +4403,7 @@ mod coverage_adversarial {
         .execute(&env.pool)
         .await
         .expect("unbilled period");
-        // needs_review, 20 days old — the YOUNGER unbilled row must not
+        // needs_review, 20 days old, the YOUNGER unbilled row must not
         // hide it (the aging metric reports the OLDEST unresolved work).
         sqlx::query(
             "INSERT INTO billing_periods
@@ -4434,7 +4434,7 @@ mod coverage_adversarial {
     });
 
     // A legacy period with an EMPTY pricing snapshot is backfilled ONCE
-    // from the authoritative per-plan records under the period lock — the
+    // from the authoritative per-plan records under the period lock, the
     // invoice is priced at the resolved rate and the snapshot is frozen on
     // the period row.
     env_test!(empty_snapshot_is_backfilled_from_the_live_plan, |env| {
@@ -4461,7 +4461,7 @@ mod coverage_adversarial {
             .expect("address");
         let now = Utc::now();
         send_emails(env, tenant, 1500, now - chrono::Duration::days(3)).await;
-        // Snapshot carries NEITHER plan NOR allowance NOR rate — and it
+        // Snapshot carries NEITHER plan NOR allowance NOR rate, and it
         // names the subscription whose live row resolves both.
         let period = BillingPeriodRow {
             id: Uuid::new_v4(),
@@ -4512,7 +4512,7 @@ mod coverage_adversarial {
     });
 
     // An aged period whose usage read is ZERO cannot distinguish "no
-    // usage" from "events aged out" — it must surface for review, never be
+    // usage" from "events aged out", it must surface for review, never be
     // silently skipped or billed.
     env_test!(aged_zero_usage_period_is_retained_for_review, |env| {
         let tenant = "ovcov_aged";
@@ -4611,7 +4611,7 @@ mod coverage_adversarial {
         assert_eq!(
             period_state(env, period.id).await,
             "unbilled",
-            "the failed claim rolled back whole — the period is retried next sweep"
+            "the failed claim rolled back whole, the period is retried next sweep"
         );
         let outbox: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM invoice_collection_outbox")
             .fetch_one(&env.pool)
@@ -4621,7 +4621,7 @@ mod coverage_adversarial {
     });
 
     // The unique-index backstop: when the period's invoice already exists,
-    // it is ADOPTED (single collection) — and when its stored amount
+    // it is ADOPTED (single collection), and when its stored amount
     // disagrees with the recomputed snapshot pricing the mismatch is
     // surfaced loudly instead of silently swallowed.
     env_test!(
@@ -4647,7 +4647,7 @@ mod coverage_adversarial {
             send_emails(env, tenant, 1500, Utc::now() - chrono::Duration::days(3)).await;
 
             // A pre-existing invoice for THIS period, in USD and for a stale
-            // amount — the constraint fires, the invoice is adopted once, and
+            // amount, the constraint fires, the invoice is adopted once, and
             // the disagreement is reported.
             let existing = Uuid::new_v4();
             sqlx::query(
@@ -4703,7 +4703,7 @@ mod coverage_adversarial {
     );
 
     // PAYG claims adopt an existing month invoice through the same
-    // savepoint recovery — one collection, never two.
+    // savepoint recovery, one collection, never two.
     env_test!(payg_month_adopts_existing_invoice, |env| {
         let tenant = "ovcov_payg_adopt";
         seed_tenant(env, tenant, "payg").await;
@@ -4769,7 +4769,7 @@ mod coverage_adversarial {
     });
 
     // A failing usage read fails the PAYG month loudly (the claim rolls
-    // back and the sweep records the failure) — it is never billed as zero.
+    // back and the sweep records the failure), it is never billed as zero.
     env_test!(payg_usage_read_failure_rolls_the_claim_back, |env| {
         let tenant = "ovcov_payg_readfail";
         seed_tenant(env, tenant, "payg").await;
@@ -4855,7 +4855,7 @@ mod coverage_adversarial {
     });
 
     // An unreadable wallet is a RETRYABLE collection failure: the error is
-    // recorded on the outbox with the lease released — never silently
+    // recorded on the outbox with the lease released, never silently
     // treated as an empty wallet.
     env_test!(unreadable_wallet_fails_the_ladder_retryably, |env| {
         let tenant = "ovcov_wallet_err";
@@ -4902,7 +4902,7 @@ mod coverage_adversarial {
 
     // A wallet held in ANOTHER currency is never spent (mixing currencies
     // would mint phantom money), and an EMPTY same-currency wallet applies
-    // nothing — both proceed to the dunning handoff, debiting nobody.
+    // nothing, both proceed to the dunning handoff, debiting nobody.
     env_test!(mismatched_and_empty_wallets_are_never_spent, |env| {
         let tenant = "ovcov_wallet_ccy";
         seed_tenant(env, tenant, "growth").await;
@@ -4986,7 +4986,7 @@ mod coverage_adversarial {
     });
 
     // A replayed wallet application (the immutable allocation already
-    // exists) debits NOTHING again — the operation rolls back whole.
+    // exists) debits NOTHING again, the operation rolls back whole.
     env_test!(wallet_allocation_replay_debits_nothing, |env| {
         let tenant = "ovcov_wallet_replay";
         seed_tenant(env, tenant, "growth").await;
@@ -5106,7 +5106,7 @@ mod coverage_adversarial {
                 .expect("dunning");
         assert_eq!(
             dunning, 1,
-            "only the stranded-pending invoice enters dunning — a settled one never does"
+            "only the stranded-pending invoice enters dunning, a settled one never does"
         );
         let retry: Option<DateTime<Utc>> =
             sqlx::query_scalar("SELECT next_retry_at FROM dunning_records WHERE tenant_id = $1")
@@ -5132,7 +5132,7 @@ mod coverage_adversarial {
 
     // A stolen lease must abort the finalization WHOLE: the invoice stays
     // draft, dunning is not entered, and the outbox keeps the thief's
-    // state — the previous owner's completion matches zero rows.
+    // state, the previous owner's completion matches zero rows.
     env_test!(stolen_lease_aborts_the_finalization, |env| {
         let tenant = "ovcov_lease";
         seed_tenant(env, tenant, "growth").await;
@@ -5260,8 +5260,8 @@ mod coverage_adversarial {
         drop(guard);
     });
 
-    // Mollie responses without an id are HARD errors — never half-recorded
-    // mappings — and a non-settled status or a non-2xx response is a
+    // Mollie responses without an id are HARD errors, never half-recorded
+    // mappings, and a non-settled status or a non-2xx response is a
     // failure, not a silent collection.
     env_test!(
         mollie_responses_without_payment_id_or_failed_status_are_errors,
@@ -5376,7 +5376,7 @@ mod coverage_adversarial {
 
     // A tenant with NO stored recurring token on file takes the wallet +
     // dunning path cleanly, even with Mollie fully configured (Mollie has no
-    // customer object — the stored token is what a charge would need).
+    // customer object, the stored token is what a charge would need).
     env_test!(
         mollie_collection_skips_tenants_without_a_stored_token,
         |env| {
@@ -5443,7 +5443,7 @@ mod coverage_adversarial {
     );
 
     // The paid-subscription gate reads the DB, caches, and only a real
-    // invalidation re-reads — the quota ceiling must follow plan changes
+    // invalidation re-reads, the quota ceiling must follow plan changes
     // within one cache generation.
     env_test!(paid_subscription_gate_caches_until_invalidated, |env| {
         let tenant = "ovcov_gate";

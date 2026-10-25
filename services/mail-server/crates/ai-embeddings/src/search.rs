@@ -29,7 +29,7 @@ impl<'a> SearchEngine<'a> {
         }
     }
 
-    /// Search by text query — generates embedding then searches.
+    /// Search by text query, generates embedding then searches.
     pub async fn search_by_text(
         &self,
         query: &str,
@@ -47,7 +47,7 @@ impl<'a> SearchEngine<'a> {
         Ok(results)
     }
 
-    /// Search by raw vector — skips embedding generation.
+    /// Search by raw vector, skips embedding generation.
     pub fn search_by_vector(
         &self,
         vector: &[f32],

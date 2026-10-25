@@ -6,7 +6,7 @@
 //!   non-production open relay is still a relay).
 //! - The hostname is RESOLVED and every answer checked against the
 //!   private/reserved ranges before connecting, and the connection is
-//!   PINNED to the validated address — hostname-only checks are DNS-blind,
+//!   PINNED to the validated address, hostname-only checks are DNS-blind,
 //!   and re-resolution between check and connect enables DNS rebinding
 //!   (same pattern as `crates/devex-service/src/webhook_tester.rs`).
 
@@ -123,7 +123,7 @@ async fn proxy_request(
         ]));
     }
 
-    // Allowlist gate — an empty allowlist means NO proxying is permitted,
+    // Allowlist gate, an empty allowlist means NO proxying is permitted,
     // in EVERY environment (P1): the previous non-production carve-out made
     // any dev/staging deployment an authenticated open relay.
     let allowlist_str = std::env::var("CONTROL_PLANE_PROXY_ALLOWLIST").unwrap_or_default();
@@ -135,7 +135,7 @@ async fn proxy_request(
 
     if allowlist.is_empty() {
         return Err(ApiError::Validation(vec![
-            "Proxy not configured — set CONTROL_PLANE_PROXY_ALLOWLIST".into(),
+            "Proxy not configured, set CONTROL_PLANE_PROXY_ALLOWLIST".into(),
         ]));
     }
 
@@ -191,7 +191,7 @@ async fn proxy_request(
         ]));
     }
 
-    // Resolve-then-pin (P1): the checks above are DNS-blind — an allowlisted
+    // Resolve-then-pin (P1): the checks above are DNS-blind, an allowlisted
     // hostname that RESOLVES to a private/reserved address still reaches the
     // internal network. Resolve off the async runtime, reject when ANY
     // answer is private (the attacker controls which answer the connector
@@ -213,7 +213,7 @@ async fn proxy_request(
     }
 
     // Everything past this point operates exclusively on the validated,
-    // pinned target — the single seam the SSRF guard guarantees.
+    // pinned target, the single seam the SSRF guard guarantees.
     let target = ValidatedProxyTarget {
         url: body.url.clone(),
         host_display: raw_host.to_string(),
@@ -230,7 +230,7 @@ struct ValidatedProxyTarget {
     /// The caller's original URL (the pinned client resolves `host_lower`
     /// to `pinned_addr`, so this URL cannot escape the validation).
     url: String,
-    /// The host as the caller wrote it — used only for the audit trail.
+    /// The host as the caller wrote it, used only for the audit trail.
     host_display: String,
     host_lower: String,
     pinned_addr: SocketAddr,
@@ -393,7 +393,7 @@ fn is_private_ipv6(ip: &Ipv6Addr) -> bool {
     if s[0] & 0xffc0 == 0xfe80 || s[0] & 0xfe00 == 0xfc00 || s[0] & 0xffc0 == 0xfec0 {
         return true;
     }
-    // 6to4 (2002::/16) and Teredo (2001:0::/32) embed IPv4 — inspect it.
+    // 6to4 (2002::/16) and Teredo (2001:0::/32) embed IPv4, inspect it.
     if s[0] == 0x2002 {
         let embedded = Ipv4Addr::new(
             (s[1] >> 8) as u8,
@@ -461,7 +461,7 @@ mod tests {
             );
         }
         assert!(!is_private_ip(&"93.184.216.34".parse::<IpAddr>().unwrap()));
-        // IPv4-mapped loopback — the exact gap in the shared helper.
+        // IPv4-mapped loopback, the exact gap in the shared helper.
         assert!(is_private_ip(
             &"::ffff:127.0.0.1".parse::<IpAddr>().unwrap()
         ));
@@ -596,7 +596,7 @@ mod adversarial_tests {
                 ))
             });
             // Either the host is not in the allowlist or the SSRF guard
-            // refuses it — never a successful forward to a private target.
+            // refuses it, never a successful forward to a private target.
             assert!(
                 matches!(resp, Err(ApiError::Validation(_))),
                 "{url} (allowlist {allowlist}) must be refused, got {resp:?}"
@@ -715,7 +715,7 @@ mod passthrough_tests {
     /// A loopback upstream that observes the forwarded request and can
     /// be told which response to give. Returns (base_addr, observed-URI
     /// receiver). The caller builds the proxy's pinned client against
-    /// this address — exactly what `forward_validated_proxy_request`
+    /// this address, exactly what `forward_validated_proxy_request`
     /// does once the SSRF guard has produced a `ValidatedProxyTarget`.
     struct MockUpstream {
         addr: SocketAddr,
@@ -1047,7 +1047,7 @@ mod passthrough_tests {
                 .any(|addr| addr.ip().is_loopback() && addr.port() == 80),
             "the loopback answer carries the requested port"
         );
-        // An empty hostname cannot resolve — the error side is surfaced.
+        // An empty hostname cannot resolve, the error side is surfaced.
         assert!(resolve_host("", 443).await.is_err());
     }
 

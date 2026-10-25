@@ -432,8 +432,8 @@ impl EAIService {
 /// Security (F1): the closing `>` must appear strictly AFTER the opening
 /// `<`. A `>` before the `<` (e.g. `"><a@b>"`), or trailing garbage after
 /// the closing `>`, is malformed and returns an error instead of computing
-/// a reversed (panicking) byte slice. When no `<` is present — or the `<`
-/// is never closed — the whole (trimmed) input is treated as the address,
+/// a reversed (panicking) byte slice. When no `<` is present, or the `<`
+/// is never closed, the whole (trimmed) input is treated as the address,
 /// matching the previous lenient behavior.
 fn split_display_email(
     email: &str,
@@ -622,7 +622,7 @@ mod tests {
         assert_eq!(addr, "carol@example.com");
 
         // Unterminated '<': whole input kept as the address (lenient legacy
-        // behavior — downstream domain validation rejects it).
+        // behavior, downstream domain validation rejects it).
         let (_, addr) = split_display_email("<dan@example.com", None).expect("unterminated");
         assert_eq!(addr, "<dan@example.com");
     }

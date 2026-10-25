@@ -1,8 +1,8 @@
-//! Invariant I27 — cross-tenant recipient isolation on the inbound path.
+//! Invariant I27, cross-tenant recipient isolation on the inbound path.
 //!
 //! A single SMTP envelope can name recipients of several tenants' domains.
-//! Each tenant's view of that message — the stored row's `rcpt_to` and the
-//! `message.inbound` webhook payload queued to ITS queue — must carry only
+//! Each tenant's view of that message, the stored row's `rcpt_to` and the
+//! `message.inbound` webhook payload queued to ITS queue, must carry only
 //! that tenant's own addresses. The pre-fix implementation bound the row to
 //! the FIRST resolved tenant but stored/enqueued the union, disclosing the
 //! other tenant's recipients to that tenant's webhook consumer.

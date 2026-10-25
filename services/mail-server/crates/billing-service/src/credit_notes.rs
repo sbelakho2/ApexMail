@@ -26,7 +26,7 @@ pub struct CreateCreditNoteInput {
     pub reason: String,
     /// Tenant receiving the credit.
     pub tenant_id: String,
-    /// Opaque idempotency key — must be unique per idempotent operation.
+    /// Opaque idempotency key, must be unique per idempotent operation.
     /// If a credit note was already created with this key, the existing
     /// record is returned and no duplicate is created.
     pub idempotency_key: String,
@@ -39,16 +39,16 @@ pub struct CreditNote {
     pub invoice_id: Uuid,
     pub tenant_id: String,
     pub amount: i64,
-    /// ISO-4217 code of the credited invoice's currency — a credit must
+    /// ISO-4217 code of the credited invoice's currency, a credit must
     /// reconcile in the currency it was issued in (audit F60).
     pub currency: String,
     pub reason: String,
     pub idempotency_key: String,
     pub created_at: DateTime<Utc>,
-    /// Audit F60 — the part of `amount` reducing the unpaid obligation.
+    /// Audit F60, the part of `amount` reducing the unpaid obligation.
     #[serde(default)]
     pub debt_reduction_cents: i64,
-    /// Audit F60 — the part of `amount` refunding actually-paid value
+    /// Audit F60, the part of `amount` refunding actually-paid value
     /// (the only part that minted wallet balance).
     #[serde(default)]
     pub refunded_cents: i64,
@@ -93,11 +93,11 @@ pub enum CreditNoteError {
 
 /// Invoice row lookup used by [`create_credit_note`]. `FOR UPDATE` serializes
 /// concurrent credit-note writers on the same invoice so the read of
-/// `already_credited` can never race (Fix F — TOCTOU over-credit).
+/// `already_credited` can never race (Fix F, TOCTOU over-credit).
 const LOCK_INVOICE_FOR_CREDIT_SQL: &str = "SELECT status::text, COALESCE(total, amount, 0)::bigint, currency FROM invoices WHERE id = $1 AND tenant_id = $2 FOR UPDATE";
 
 /// Validate a credit amount against the invoice total and the amount already
-/// credited (pure — Fix F). Callers must hold a row lock on the invoice while
+/// credited (pure, Fix F). Callers must hold a row lock on the invoice while
 /// reading `already_credited` for this to be race-free.
 fn validate_credit_amount(
     amount: i64,
@@ -113,11 +113,11 @@ fn validate_credit_amount(
     Ok(())
 }
 
-/// Split a credit into its two dispositions (audit F60, pure — unit-tested):
+/// Split a credit into its two dispositions (audit F60, pure, unit-tested):
 ///
-/// * `debt_reduction` — the part reducing the still-UNPAID obligation
+/// * `debt_reduction`, the part reducing the still-UNPAID obligation
 ///   (what the outstanding derivation subtracts);
-/// * `refund` — the part returning value that was ACTUALLY PAID (the only
+/// * `refund`, the part returning value that was ACTUALLY PAID (the only
 ///   part eligible to mint wallet balance).
 ///
 /// Splitting prevents the double benefit: crediting an unpaid invoice
@@ -139,9 +139,9 @@ fn split_credit_disposition(
 
 /// Replay comparison (audit F60): a retried request with the same
 /// (tenant, idempotency key) is a REPLAY only when the payload matches the
-/// stored credit note — same invoice, same amount. A key reused for a
+/// stored credit note, same invoice, same amount. A key reused for a
 /// different payload is an error, never a silent return of someone else's
-/// credit. Pure — unit-tested.
+/// credit. Pure, unit-tested.
 fn replay_matches(existing: &CreditNoteRow, input: &CreateCreditNoteInput) -> bool {
     existing.invoice_id == input.invoice_id && existing.amount == input.amount
 }
@@ -150,20 +150,20 @@ fn replay_matches(existing: &CreditNoteRow, input: &CreateCreditNoteInput) -> bo
 ///
 /// If a credit note with the same `(tenant_id, idempotency_key)` already
 /// exists AND the payload matches, the existing record is returned and no
-/// changes are made to the wallet or invoice — exactly-once semantics
+/// changes are made to the wallet or invoice, exactly-once semantics
 /// under retries. A key reused for a DIFFERENT payload is rejected with
 /// [`CreditNoteError::IdempotencyKeyReused`].
 ///
 /// ## Idempotency guarantees (audit F60)
 ///
 /// 1. The replay lookup + payload compare happen BEFORE any credit is
-///    reserved — a mismatched retry never touches the wallet.
+///    reserved, a mismatched retry never touches the wallet.
 /// 2. `ON CONFLICT (tenant_id, idempotency_key) DO NOTHING` prevents
 ///    duplicate rows; idempotency is scoped to the TENANT so one tenant's
 ///    key can never adopt another tenant's credit.
 /// 3. Invoice lock, credit-note row, wallet credit and audit log commit in
 ///    ONE transaction.
-/// 4. Fix F — the invoice row is locked with `SELECT ... FOR UPDATE` for the
+/// 4. Fix F, the invoice row is locked with `SELECT ... FOR UPDATE` for the
 ///    whole transaction, so two concurrent credit notes (different keys)
 ///    cannot both read the same `already_credited` and over-credit the
 ///    invoice; the second is rejected with `AmountExceedsInvoice`.
@@ -171,7 +171,7 @@ fn replay_matches(existing: &CreditNoteRow, input: &CreateCreditNoteInput) -> bo
 /// ## Pre-conditions
 ///
 /// - The referred invoice must exist and be in a creditable state
-///   (`Paid`, `Pending`, or `Uncollectible` — not `Void` or `Draft`).
+///   (`Paid`, `Pending`, or `Uncollectible`, not `Void` or `Draft`).
 /// - The credit amount must be positive and not exceed the invoice total.
 pub async fn create_credit_note(
     pool: &PgPool,
@@ -236,7 +236,7 @@ pub async fn create_credit_note(
                 stored_amount = existing.amount,
                 requested_invoice_id = %input.invoice_id,
                 requested_amount = input.amount,
-                "credit-note idempotency key reused for a different payload — rejected"
+                "credit-note idempotency key reused for a different payload, rejected"
             );
             return Err(CreditNoteError::IdempotencyKeyReused {
                 idempotency_key: input.idempotency_key,
@@ -289,9 +289,9 @@ pub async fn create_credit_note(
     // ── Audit F60: derive the credit's DISPOSITION under the lock ─────
     // The split decides which part reduces the unpaid obligation and
     // which part refunds value that was actually paid (see
-    // `split_credit_disposition`). Everything below — the credit note
+    // `split_credit_disposition`). Everything below, the credit note
     // row, its unique operation id and (only for the refund part) the
-    // wallet mint — derives from this split inside the same locked
+    // wallet mint, derives from this split inside the same locked
     // transaction, so concurrent credits can never over-derive capacity.
     let payments_cents: i64 = sqlx::query_scalar(
         "SELECT COALESCE(SUM(amount_cents), 0)::BIGINT FROM invoice_payment_allocations WHERE invoice_id = $1",
@@ -349,10 +349,10 @@ pub async fn create_credit_note(
 
     let credit_note = match row {
         Some(row) => {
-            // First-time insert — mint wallet value ONLY for the actually
+            // First-time insert, mint wallet value ONLY for the actually
             // paid, refundable part of the credit (audit F60: the
             // debt-reduction part reduces the unpaid obligation and must
-            // NOT create spendable value — that was the double benefit).
+            // NOT create spendable value, that was the double benefit).
             // The wallet is single-currency: a refund in the invoice's
             // currency must never land in a wallet held in another
             // currency. Create with the invoice currency; when a wallet
@@ -383,7 +383,7 @@ pub async fn create_credit_note(
                         invoice_id = %input.invoice_id,
                         invoice_currency = %invoice_currency,
                         wallet_currency = %wallet_currency,
-                        "credit-note refund currency mismatch refused — refund via the payment provider instead"
+                        "credit-note refund currency mismatch refused, refund via the payment provider instead"
                     );
                     return Err(CreditNoteError::CurrencyMismatch {
                         invoice_currency,
@@ -396,7 +396,7 @@ pub async fn create_credit_note(
                 // 2. Increment the balance via UPDATE ... RETURNING and record the
                 //    transaction using the RETURNING balance as `balance_after`.
                 // Sequential statements (not sibling CTEs) because data-modifying
-                // CTEs cannot see each other's writes — the UPDATE would miss a
+                // CTEs cannot see each other's writes, the UPDATE would miss a
                 // wallet created in the same statement.
                 sqlx::query(
                     r#"
@@ -448,7 +448,7 @@ pub async fn create_credit_note(
         }
         None => {
             // Lost a concurrent insert race on (tenant, key): the winner's
-            // record IS this request's replay — compare and return it, or
+            // record IS this request's replay, compare and return it, or
             // reject a divergent payload (audit F60).
             let existing: CreditNoteRow = sqlx::query_as(
                 r#"
@@ -518,7 +518,7 @@ struct CreditNoteRow {
     reason: String,
     idempotency_key: String,
     /// Audit F60 disposition split (NULL on rows that predate migration
-    /// 183 — treated as a full debt reduction).
+    /// 183, treated as a full debt reduction).
     debt_reduction_cents: Option<i64>,
     refunded_cents: Option<i64>,
     created_at: DateTime<Utc>,
@@ -573,7 +573,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // Audit F60 — replay comparison gates every idempotent retry.
+    // Audit F60, replay comparison gates every idempotent retry.
     // ------------------------------------------------------------------
 
     fn sample_row(invoice_id: Uuid, amount: i64) -> CreditNoteRow {
@@ -628,7 +628,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // Fix F — credit cap enforced under invoice row lock.
+    // Fix F, credit cap enforced under invoice row lock.
     // ------------------------------------------------------------------
 
     #[test]
@@ -677,7 +677,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // Audit F60 — the disposition split: one credit yields exactly one
+    // Audit F60, the disposition split: one credit yields exactly one
     // unit of benefit per cent, split between debt reduction and refund.
     // ------------------------------------------------------------------
 
@@ -701,7 +701,7 @@ mod tests {
     fn partial_payment_splits_the_credit_exactly_once() {
         // 100 invoice, 40 paid, outstanding 60; credit 20: 20 goes to debt
         // (60 -> 40), nothing refunds. Credit 70 instead: 60 clears the
-        // debt and 10 refunds paid value — 70 units of benefit total.
+        // debt and 10 refunds paid value, 70 units of benefit total.
         let (debt, refund) = split_credit_disposition(20, 40, 60);
         assert_eq!((debt, refund), (20, 0));
         let (debt, refund) = split_credit_disposition(70, 40, 60);
@@ -1145,7 +1145,7 @@ mod coverage_adversarial {
     });
 
     // ------------------------------------------------------------------
-    // Audit SM7 F4 — a SQL-level accounting-hook failure must NOT abort the
+    // Audit SM7 F4, a SQL-level accounting-hook failure must NOT abort the
     // billing write. The hook runs inside a SAVEPOINT, so a poisoned
     // transaction is healed and the failure lands on the same logged-skip
     // policy as typed errors.
@@ -1223,8 +1223,8 @@ mod coverage_adversarial {
     );
 
     // DF-5 finding B: the `billing.credit_note_created` event is a CANONICAL
-    // audit chain row — hash re-derives byte-exactly from the stored columns
-    // through the shared formula (empty user segment — machine writer), the
+    // audit chain row, hash re-derives byte-exactly from the stored columns
+    // through the shared formula (empty user segment, machine writer), the
     // signature re-derives from the chain link, and the row is LINKED into
     // the global chain head the append advanced.
     env_test!(
@@ -1362,7 +1362,7 @@ mod coverage_adversarial {
         // The refund can never exceed what was actually paid.
         assert_eq!(split_credit_disposition(300, 50, 100), (100, 50));
         assert_eq!(split_credit_disposition(0, 100, 100), (0, 0));
-        // A negative requested amount never mints spendable value — the
+        // A negative requested amount never mints spendable value, the
         // caller's amount validation rejects such a request before this
         // point, so only the no-mint guarantee matters here.
         let (_, refund) = split_credit_disposition(-5, 100, 100);

@@ -1,4 +1,4 @@
-{# Prose SECTION template — legal/policy sections rendered with section context.
+{# Prose SECTION template, legal/policy sections rendered with section context.
    Sections (folders with _index.md) get `section` instead of `page`; this
    mirrors prose.html markdown-for-markdown so converting a bundle page into
    a real section keeps the rendered output (and the URL) identical. #}
@@ -15,29 +15,43 @@
 {% block twitter_description %}{% if section.description %}{{ section.description }}{% else %}{{ config.description }}{% endif %}{% endblock twitter_description %}
 
 {% block content %}
-<div class="max-w-3xl mx-auto px-6 py-20 lg:py-32">
-  <h1 class="mb-4 break-words apex-page-title">{{ section.title }}</h1>
-  {% if section.extra.last_updated %}
-  {# Machine-readable, localized date — same contract as prose.html. #}
-  <p class="mb-12 apex-em">
-    {% if i18n_data and i18n_data[l] and i18n_data[l]['a11y'] and i18n_data[l]['a11y']['last_updated'] %}{{ i18n_data[l]['a11y']['last_updated'] }}{% else %}Last updated:{% endif %}
-    <time datetime="{{ section.extra.last_updated }}">{{ section.extra.last_updated }}</time>
-  </p>
-  {% endif %}
-  <div class="apex-prose">
-    {# Content is rendered from trusted Markdown source files only (legal/policy pages). #}
-    {# |safe is acceptable because the content author is the site owner, not end users. #}
-    {{ section.content | safe }}
+{% set page_mode = section.extra.mkt_page_mode | default(value="") %}
+{% set band_title = section.title %}
+{% set band_sub = section.description | default(value="") %}
+{% set band_kicker = "" %}
+{% if page_mode == "trust" %}
+{% if i18n_data and i18n_data[l] and i18n_data[l]["page_mode"] and i18n_data[l]["page_mode"]["trust"] %}{% set band_kicker = i18n_data[l]["page_mode"]["trust"] %}{% else %}{% set band_kicker = "Trust" %}{% endif %}
+{% elif page_mode == "architecture" %}
+{% if i18n_data and i18n_data[l] and i18n_data[l]["page_mode"] and i18n_data[l]["page_mode"]["architecture"] %}{% set band_kicker = i18n_data[l]["page_mode"]["architecture"] %}{% else %}{% set band_kicker = "Architecture" %}{% endif %}
+{% endif %}
+{% include "partials/hero-band.html" %}
+<section class="apex-mkt-section apex-mkt-section--dense">
+  <div class="apex-mkt-container">
+    <div class="mx-auto max-w-3xl">
+      {% if section.extra.last_updated %}
+      {# Machine-readable, localized date, same contract as prose.html. #}
+      <p class="mb-8 apex-em">
+        {% if i18n_data and i18n_data[l] and i18n_data[l]['a11y'] and i18n_data[l]['a11y']['last_updated'] %}{{ i18n_data[l]['a11y']['last_updated'] }}{% else %}Last updated:{% endif %}
+        <time datetime="{{ section.extra.last_updated }}">{{ section.extra.last_updated }}</time>
+      </p>
+      {% endif %}
+      <div class="apex-prose">
+        {# Content is rendered from trusted Markdown source files only (legal/policy pages). #}
+        {# |safe is acceptable because the content author is the site owner, not end users. #}
+        {{ section.content | safe }}
+      </div>
+      {% if section.pages %}
+      <div class="mt-12 border-t pt-8">
+        <h2 class="mb-4 apex-h2">{% if i18n_data and i18n_data[l] and i18n_data[l]['a11y'] and i18n_data[l]['a11y']['related'] %}{{ i18n_data[l]['a11y']['related'] }}{% else %}Related{% endif %}</h2>
+        <ul class="space-y-2">
+          {% for page in section.pages %}
+          <li><a href="{{ page.permalink }}" class="apex-link">{{ page.title }}</a></li>
+          {% endfor %}
+        </ul>
+      </div>
+      {% endif %}
+    </div>
   </div>
-  {% if section.pages %}
-  <div class="mt-12 border-t pt-8">
-    <h2 class="mb-4 apex-h2">{% if i18n_data and i18n_data[l] and i18n_data[l]['a11y'] and i18n_data[l]['a11y']['related'] %}{{ i18n_data[l]['a11y']['related'] }}{% else %}Related{% endif %}</h2>
-    <ul class="space-y-2">
-      {% for page in section.pages %}
-      <li><a href="{{ page.permalink }}" class="apex-link">{{ page.title }}</a></li>
-      {% endfor %}
-    </ul>
-  </div>
-  {% endif %}
-</div>
+</section>
+{% if page_mode == "trust" %}{% include "partials/trust-band.html" %}{% endif %}
 {% endblock content %}

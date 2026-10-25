@@ -1,4 +1,4 @@
-//! Lockout backend abstraction — pluggable storage for lockout state
+//! Lockout backend abstraction, pluggable storage for lockout state
 //!
 //! Provides a [`LockoutBackend`] trait so that lockout events can be stored
 //! in-memory (default) or in an external shared store (e.g., Redis) for
@@ -184,14 +184,14 @@ pub struct RedisLockoutBackend {
     #[cfg(feature = "redis-lockout")]
     conn: std::sync::Mutex<Option<redis::Connection>>,
     /// Construction error, surfaced via `construction_error()` instead of
-    /// a panic (typed error — see [`LockoutBackendError`]).
+    /// a panic (typed error, see [`LockoutBackendError`]).
     #[cfg(feature = "redis-lockout")]
     init_error: Option<LockoutBackendError>,
 }
 
 impl RedisLockoutBackend {
     /// Create a new Redis lockout backend.
-    /// Invalid URLs no longer panic — the backend is created in a degraded
+    /// Invalid URLs no longer panic, the backend is created in a degraded
     /// state and the error is reported via [`Self::construction_error`].
     pub fn new(url: String) -> Self {
         Self::with_prefix(url, "ato:lockout:".into())
@@ -206,7 +206,7 @@ impl RedisLockoutBackend {
                 tracing::error!(
                     redis_url = %url,
                     error = %e,
-                    "RedisLockoutBackend: invalid Redis URL — backend degraded to no-op"
+                    "RedisLockoutBackend: invalid Redis URL, backend degraded to no-op"
                 );
                 None
             }
@@ -256,7 +256,7 @@ impl RedisLockoutBackend {
     }
 
     /// Run `f` with a persistent connection, reconnecting once on failure.
-    /// The connection is cached between calls — previously every lockout
+    /// The connection is cached between calls, previously every lockout
     /// operation opened a brand-new TCP connection to Redis.
     ///
     /// Audit F8: connects with an explicit timeout and stamps per-socket
@@ -286,7 +286,7 @@ impl RedisLockoutBackend {
                         tracing::error!(
                             redis_url = %self.url,
                             op = op,
-                            "RedisLockoutBackend: could not set socket timeouts — reconnecting without cache"
+                            "RedisLockoutBackend: could not set socket timeouts, reconnecting without cache"
                         );
                     }
                     *guard = Some(c);
@@ -315,7 +315,7 @@ impl RedisLockoutBackend {
                     redis_url = %self.url,
                     op = op,
                     error = %e,
-                    "RedisLockoutBackend: command failed or timed out — connection recycled, falling back to in-memory behavior"
+                    "RedisLockoutBackend: command failed or timed out, connection recycled, falling back to in-memory behavior"
                 );
                 None
             }
@@ -388,7 +388,7 @@ impl LockoutBackend for RedisLockoutBackend {
         tracing::error!(
             user_id = %user_id,
             redis_url = %self.url,
-            "RedisLockoutBackend: record_lockout called but redis-lockout feature is not enabled — ATO protection is DISABLED"
+            "RedisLockoutBackend: record_lockout called but redis-lockout feature is not enabled, ATO protection is DISABLED"
         );
     }
 
@@ -396,7 +396,7 @@ impl LockoutBackend for RedisLockoutBackend {
         tracing::error!(
             user_id = %user_id,
             redis_url = %self.url,
-            "RedisLockoutBackend: recent_lockouts called but redis-lockout feature is not enabled — ATO protection is DISABLED"
+            "RedisLockoutBackend: recent_lockouts called but redis-lockout feature is not enabled, ATO protection is DISABLED"
         );
         0
     }
@@ -405,7 +405,7 @@ impl LockoutBackend for RedisLockoutBackend {
         tracing::error!(
             user_id = %user_id,
             redis_url = %self.url,
-            "RedisLockoutBackend: clear called but redis-lockout feature is not enabled — ATO protection is DISABLED"
+            "RedisLockoutBackend: clear called but redis-lockout feature is not enabled, ATO protection is DISABLED"
         );
     }
 }
@@ -473,7 +473,7 @@ mod tests {
 
     #[test]
     fn test_invalid_redis_url_does_not_panic() {
-        // The constructor previously `.expect()`-ed on invalid URLs — a
+        // The constructor previously `.expect()`-ed on invalid URLs, a
         // misconfigured env var could panic the whole process at startup.
         let backend = RedisLockoutBackend::new("not a valid redis url %%%".into());
         // Degraded, not panicked; contract still honors the trait.

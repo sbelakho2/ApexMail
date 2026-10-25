@@ -27,11 +27,11 @@ Transaktions-E-Mails sind geschäftskritische Infrastruktur. Verzögerte Passwor
 
 ## Die ApexMail-Lösung
 
-- **REST-API** (`POST /v1/messages`) — JSON-Payloads mit Idempotenzschlüsseln. Einreichen und fertig.
-- **SMTP-Relay** (`smtp.apexmail.ee:587` mit STARTTLS) — Direkter Ersatz für bestehende SMTP-Clients.
-- **Isolierte Sendekonfiguration** — Dedizierte IPs, benutzerdefinierte Domains und Suppressionslisten lassen sich je E-Mail-Typ abgrenzen.
-- **Signierte Webhooks** — Echtzeit-Ereignisse `delivered`, `bounced`, `complained`, `opened`, `clicked`, jedes mit eindeutiger Ereignis-ID und HMAC-Signatur.
-- **Idempotenz** — Deduplizieren Sie Übermittlungen mit clientseitig bereitgestellten Schlüsseln. Nach Netzwerkfehlern sicher erneut übermitteln.
+- **REST-API** (`POST /v1/messages`), JSON-Payloads mit Idempotenzschlüsseln. Einreichen und fertig.
+- **SMTP-Relay** (`smtp.apexmail.ee:587` mit STARTTLS), Direkter Ersatz für bestehende SMTP-Clients.
+- **Isolierte Sendekonfiguration**, Dedizierte IPs, benutzerdefinierte Domains und Suppressionslisten lassen sich je E-Mail-Typ abgrenzen.
+- **Signierte Webhooks**, Echtzeit-Ereignisse `delivered`, `bounced`, `complained`, `opened`, `clicked`, jedes mit eindeutiger Ereignis-ID und HMAC-Signatur.
+- **Idempotenz**, Deduplizieren Sie Übermittlungen mit clientseitig bereitgestellten Schlüsseln. Nach Netzwerkfehlern sicher erneut übermitteln.
 
 ## Technische Umsetzung
 

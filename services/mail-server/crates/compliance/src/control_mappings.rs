@@ -1,12 +1,12 @@
-//! DORA / NIS2 control mapping — the "evidence pack" index.
+//! DORA / NIS2 control mapping, the "evidence pack" index.
 //!
 //! The plan's A-group promise is that every public claim is provable. Two EU
 //! regimes make that promise concrete for an ICT service provider:
 //!
-//! * **DORA** (Regulation (EU) 2022/2554) — the ICT third-party register
+//! * **DORA** (Regulation (EU) 2022/2554), the ICT third-party register
 //!   (Art. 28), detection/logging (Art. 10), incident management and
 //!   reporting (Art. 17/19) and the protection/continuity controls.
-//! * **NIS2** (Directive (EU) 2022/2555) — the Art. 21(2) basic risk
+//! * **NIS2** (Directive (EU) 2022/2555), the Art. 21(2) basic risk
 //!   management expectations and the Art. 23 reporting duty.
 //!
 //! # Truthfulness rule
@@ -43,7 +43,7 @@ pub struct ControlMapping {
     /// auditor can verify the claim without reading the whole file.
     pub evidence_note: &'static str,
     /// Whether the current implementation is complete or has known gaps, and
-    /// which — an honest mapping has no silent holes.
+    /// which, an honest mapping has no silent holes.
     pub status: &'static str,
 }
 
@@ -83,7 +83,7 @@ pub const DORA_MAPPINGS: &[ControlMapping] = &[
     ControlMapping {
         framework: "dora",
         control_id: "Art. 10",
-        title: "Detection of anomalous activities — logging and audit trail",
+        title: "Detection of anomalous activities, logging and audit trail",
         evidence: "services/mail-server/crates/compliance/src/audit_logger.rs",
         evidence_note: "Every privileged action writes a hash-chained audit row \
             (apexmail_lib::audit) that /audit/verify re-derives; a broken chain is detected, \
@@ -132,7 +132,7 @@ pub const DORA_MAPPINGS: &[ControlMapping] = &[
     ControlMapping {
         framework: "dora",
         control_id: "Art. 9",
-        title: "Protection and prevention — hardened managed baseline",
+        title: "Protection and prevention, hardened managed baseline",
         evidence: "tools/check_security_posture.py",
         evidence_note: "The managed-cloud security baseline is a CI gate: a deployment \
             drifting from the enforced WAF/rate-limit/HSTS posture fails validation instead \
@@ -142,7 +142,7 @@ pub const DORA_MAPPINGS: &[ControlMapping] = &[
     ControlMapping {
         framework: "dora",
         control_id: "Art. 26",
-        title: "Testing of digital operational resilience — vulnerability scanning",
+        title: "Testing of digital operational resilience, vulnerability scanning",
         evidence: "ci/stages/security.sh",
         evidence_note: "The security stage runs the image/config scans (Trivy with \
             trivy-secret.yaml) and the migration/schema security checks on every pipeline \
@@ -184,7 +184,7 @@ pub const NIS2_MAPPINGS: &[ControlMapping] = &[
     ControlMapping {
         framework: "nis2",
         control_id: "Art. 21(2)(d)",
-        title: "Supply chain security — suppliers and service providers",
+        title: "Supply chain security, suppliers and service providers",
         evidence: "tools/generate_subprocessors.py",
         evidence_note: "The ICT/processor register is DERIVED from the deployment \
             configuration (compose + env), a drift gate fails CI when the published register \
@@ -205,7 +205,7 @@ pub const NIS2_MAPPINGS: &[ControlMapping] = &[
     ControlMapping {
         framework: "nis2",
         control_id: "Art. 21(2)(f)",
-        title: "Cryptography and encryption — authenticity of communications",
+        title: "Cryptography and encryption, authenticity of communications",
         evidence: "services/mail-server/crates/mail-common/src/routing_receipt.rs",
         evidence_note: "Ed25519-signed routing receipts (one per accepted message, migration \
             255) with a public verification endpoint; DKIM signing and the \
@@ -244,7 +244,7 @@ pub const NIS2_MAPPINGS: &[ControlMapping] = &[
     ControlMapping {
         framework: "nis2",
         control_id: "Art. 23(1)",
-        title: "Reporting obligations — early warning and incident notification",
+        title: "Reporting obligations, early warning and incident notification",
         evidence: "services/mail-server/crates/compliance/src/breach_notification.rs",
         evidence_note: "Deadline-tracked authority notification with an auditable outbox and \
             submission receipts (the same workflow satisfies GDPR Art. 33/34 timing).",
@@ -305,7 +305,7 @@ mod tests {
     }
 
     /// The truthfulness pin: every mapped evidence pointer EXISTS. A row whose
-    /// artifact is deleted fails here — the mapping cannot outlive its
+    /// artifact is deleted fails here, the mapping cannot outlive its
     /// evidence.
     #[test]
     fn every_mapped_evidence_pointer_exists() {

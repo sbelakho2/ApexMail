@@ -4,10 +4,10 @@
 //! refresh/purge task was ever spawned, so the advertised feed path could
 //! never block anything. This module owns the missing production wiring:
 //!
-//! * `THREAT_INTEL_FEED_URLS` — comma-separated feed URLs (plain domain-per-line
+//! * `THREAT_INTEL_FEED_URLS`, comma-separated feed URLs (plain domain-per-line
 //!   or URL-per-line, e.g. abuse.ch exports). Empty = no feeds.
-//! * `THREAT_INTEL_FEED_TTL_SECS` — entry lifetime (default 24h).
-//! * `THREAT_INTEL_FEED_REFRESH_SECS` — refresh cadence (default 1h); the first
+//! * `THREAT_INTEL_FEED_TTL_SECS`, entry lifetime (default 24h).
+//! * `THREAT_INTEL_FEED_REFRESH_SECS`, refresh cadence (default 1h); the first
 //!   tick fires immediately at startup.
 //!
 //! The blocklist instance is SHARED with the grader engine (state.rs passes the

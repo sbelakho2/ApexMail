@@ -3,13 +3,13 @@
 //! The Mailboxes "Archive + Journaling" add-on writes one immutable row per
 //! journaled message. This module is the CUSTOMER read surface:
 //!
-//! * `GET /v1/journal?tenantId=…&limit=…&offset=…` — metadata only (id,
+//! * `GET /v1/journal?tenantId=…&limit=…&offset=…`, metadata only (id,
 //!   direction, from, to, subject, messageId, journaledAt), newest first.
 //!   The raw body is deliberately absent from list rows.
-//! * `GET /v1/journal/:id` — metadata plus the raw message, capped at
+//! * `GET /v1/journal/:id`, metadata plus the raw message, capped at
 //!   [`mailstore_core::journal::JOURNAL_RAW_JSON_CAP_BYTES`] with
 //!   `rawTruncated`/`rawSize` telling the caller exactly what it received.
-//! * `GET /v1/journal/:id/raw` — the complete stored raw copy as
+//! * `GET /v1/journal/:id/raw`, the complete stored raw copy as
 //!   `message/rfc822` (the console's download link).
 //!
 //! Authorization is tenant-admin (`*` scope) AND tenant-scoped: the resolved
@@ -53,7 +53,7 @@ const MAX_OFFSET: i64 = 10_000_000;
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct JournalQuery {
     /// Explicit tenant scope. Must equal the authenticated tenant (a
-    /// different value is refused — there is no cross-tenant read).
+    /// different value is refused, there is no cross-tenant read).
     pub tenant_id: Option<String>,
     #[serde(default = "default_limit")]
     pub limit: i64,
@@ -104,7 +104,7 @@ pub struct JournalDetail {
     /// Base64 of the stored bytes when the message is not valid UTF-8
     /// (8-bit MIME bodies, NUL bytes). `None` when `rawEncoding` is utf-8.
     pub raw_base64: Option<String>,
-    /// `utf-8` or `base64` — how to read the payload above.
+    /// `utf-8` or `base64`, how to read the payload above.
     pub raw_encoding: String,
     pub raw_size: usize,
     pub raw_truncated: bool,
@@ -277,7 +277,7 @@ mod tests {
             Err(ApiError::Forbidden(_))
         ));
 
-        // Another tenant — even for an admin — is refused.
+        // Another tenant, even for an admin, is refused.
         assert!(matches!(
             authorized_tenant(&admin, Some("tenant-b")),
             Err(ApiError::Forbidden(_))

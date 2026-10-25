@@ -5,7 +5,7 @@
 //! production chain applied through the REAL production migrator
 //! (`migrator::test_support::shared_canonical_db`, audit F01), the sales
 //! schema is then verified by [`crate::routes::initialize_schema`], and every
-//! test gets a FRESH pool on that shared database — a sqlx pool is bound to
+//! test gets a FRESH pool on that shared database, a sqlx pool is bound to
 //! the runtime that created it, and sharing one across `#[tokio::test]`
 //! runtimes deadlocks with `PoolTimedOut`.
 //!
@@ -22,7 +22,7 @@ use sqlx::PgPool;
 const SALES_TEST_DB: &str = "apexmail_sales_test";
 
 /// Process-wide initialization marker: provisioning runs exactly once per
-/// test PROCESS. The POOL is not shared — see the module docs.
+/// test PROCESS. The POOL is not shared, see the module docs.
 static INIT: tokio::sync::OnceCell<bool> = tokio::sync::OnceCell::const_new();
 
 /// A fresh pool on the canonical provisioned test database.
@@ -43,7 +43,7 @@ pub(crate) async fn canonical_test_pool(test_name: &str) -> Option<PgPool> {
                 {
                     Ok(db) => db,
                     // F01: the URL is configured, so an unreachable server or a
-                    // failed clone/migration is an infrastructure FAILURE — it
+                    // failed clone/migration is an infrastructure FAILURE, it
                     // must fail the suite, not silently skip every test.
                     Err(error) => panic!("{}", error.panic_message()),
                 };
@@ -55,7 +55,7 @@ pub(crate) async fn canonical_test_pool(test_name: &str) -> Option<PgPool> {
                 panic!(
                     "canonical test database {SALES_TEST_DB} is missing the sales schema: \
                      {error} (SALES_TEST_DATABASE_URL is configured, so this is an \
-                     infrastructure failure — fix the database, do not skip the test)"
+                     infrastructure failure, fix the database, do not skip the test)"
                 );
             }
             true
@@ -126,7 +126,7 @@ async fn connect(url: &str) -> Option<PgPool> {
 /// `legal_policy::resolve_jurisdiction` only passes through a 2-letter ASCII
 /// key (anything else normalizes to the `UNKNOWN` fail-closed default), so the
 /// fixture namespace is 676 codes. A check-then-insert cannot be made safe
-/// under parallel test processes — it intermittently produced duplicate-key
+/// under parallel test processes, it intermittently produced duplicate-key
 /// (23505) failures on `sales_jurisdiction_policies`. The insert is therefore
 /// optimistic: a unique violation means another test claimed that code, so
 /// generate another.
@@ -143,7 +143,7 @@ pub(crate) async fn insert_unique_jurisdiction_policy(
 /// A jurisdiction deliberately kept free of any policy row.
 ///
 /// The "no policy at all" case cannot be established by probing for a free code
-/// in a namespace other tests are concurrently inserting into — a probe
+/// in a namespace other tests are concurrently inserting into, a probe
 /// followed by another process's insert is exactly the race that made the
 /// fail-closed fixture flaky. This code is excluded from the code generator
 /// below, so nothing else ever writes a policy for it.

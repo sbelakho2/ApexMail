@@ -529,7 +529,7 @@ mod tests {
         ((config.capacity as f64 / config.refill_rate) as i64) * config.refill_interval_ms + 1000
     }
 
-    /// Integration test (gated on REDIS_TEST_URL — no ambient default):
+    /// Integration test (gated on REDIS_TEST_URL, no ambient default):
     /// pins that the token bucket key TTL follows the refill math
     /// `(capacity / refill_rate) * refill_interval_ms + 1000` and NOT the
     /// dimensionally wrong `refill_interval_ms * capacity + 1000`.

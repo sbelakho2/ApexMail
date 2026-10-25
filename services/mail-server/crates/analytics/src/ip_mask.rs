@@ -26,7 +26,7 @@ pub fn mask_ip(ip: &str) -> String {
         Ok(IpAddr::V4(v4)) => mask_v4(v4.octets()).to_string(),
         Ok(IpAddr::V6(v6)) => {
             if let Some(v4) = v6.to_ipv4_mapped() {
-                // IPv4-mapped — mask the embedded IPv4 address.
+                // IPv4-mapped, mask the embedded IPv4 address.
                 mask_v4(v4.octets()).to_string()
             } else {
                 mask_v6(v6.segments()).to_string()

@@ -12,7 +12,7 @@ competitor_description = "Twilio SendGrid is a popular email delivery platform o
 pricing_as_of = "2026-10-04"
 currency_note = "Prices are shown in EUR. Where a provider publishes only USD, the EUR figure is converted at 1 USD = €0.92 (reference rate, 2026-08-19) and the provider's published USD price is shown in parentheses. Exclude applicable taxes."
 og_image = "/images/og-image.png"
-# Feature comparison counts — update when capabilities change
+# Feature comparison counts, update when capabilities change
 verdict_title = "How ApexMail differs from SendGrid"
 verdict_points = [
   "Better deliverability with automatic IP warming and reputation protection",
@@ -28,7 +28,7 @@ verdict_points = [
 # spans and any inline markup. Winner is one of: apexmail | competitor | tie | none.
 comparison_sections = [
   { title = "DELIVERABILITY", rows = [
-    { feature = "Delivery Rate", apex = '<span>Not directly comparable — provider-defined measurement</span>', comp = '<span class="">Not directly comparable — provider-defined measurement</span>', winner = "none" },
+    { feature = "Delivery Rate", apex = '<span>Not directly comparable, provider-defined measurement</span>', comp = '<span class="">Not directly comparable, provider-defined measurement</span>', winner = "none" },
     { feature = "Dedicated IP", apex = '<span>Approved add-on on Pro; 1 included on Growth and Business; 3 on Enterprise Cloud</span>', comp = '<span class="">Pro: €82.75 (US$89.95)/mo; dedicated IPs on request</span>', winner = "none" },
     { feature = "IP Warming", apex = '<span>Automatic</span>', comp = '<span class="">Automatic</span>', winner = "tie" },
     { feature = "DKIM Rotation", apex = '<span>Configurable automatic</span>', comp = '<span class="">Manual</span>', winner = "none" },
@@ -51,7 +51,7 @@ comparison_sections = [
   ]},
   { title = "PRICING", rows = [
     { feature = "Free Tier", apex = '<span>3,000 emails/mo + one-time 30,000 launch allowance</span>', comp = '<span class="">100 emails/day</span>', winner = "none" },
-    { feature = "100K emails/mo", apex = '<span>€89 (Pro: 150K)</span>', comp = '<span class="">€82.75 (US$89.95) — Pro; Essentials from €18.35 (US$19.95)</span>', winner = "apexmail" },
+    { feature = "100K emails/mo", apex = '<span>€89 (Pro: 150K)</span>', comp = '<span class="">€82.75 (US$89.95), Pro; Essentials from €18.35 (US$19.95)</span>', winner = "apexmail" },
     { feature = "SSO Included", apex = '<span>Business and Enterprise plans</span>', comp = '<span class="">Included on Pro</span>', winner = "none" },
     { feature = "Custom Deployment Review", apex = '<span>Enterprise review</span>', comp = '<span class="">✗</span>', winner = "none" }
   ]},

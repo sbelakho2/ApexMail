@@ -13,7 +13,7 @@
 //!   up to an hour; the enforced cap is now what the docs state).
 //! - Signed with RS256 using the application's RSA private key
 //!   (the same public key the tracking-service uses to verify).
-//! - Scoped to `["stream"]` — the tracking-service rejects tokens without
+//! - Scoped to `["stream"]`, the tracking-service rejects tokens without
 //!   this scope.
 //!
 //! SECURITY (SEC-119): All JWT operations use RS256 (asymmetric) to prevent
@@ -67,7 +67,7 @@ pub struct StreamTokenResponse {
     pub stream_url: String,
 }
 
-/// `POST /v1/stream/token` — issue a short-lived SSE stream token.
+/// `POST /v1/stream/token`, issue a short-lived SSE stream token.
 async fn create_stream_token(
     State(state): State<AppState>,
     auth_user: AuthUser,
@@ -88,7 +88,7 @@ async fn create_stream_token(
         (None, None) => {
             tracing::warn!(
                 tenant_id = %auth_user.tenant_id,
-                "stream token request without a user or API key identity — rejected"
+                "stream token request without a user or API key identity, rejected"
             );
             return Err(ApiError::Unauthorized(
                 "stream tokens require an authenticated user or API key".into(),
@@ -147,13 +147,13 @@ struct StreamTokenClaims {
     pub sub: String,
     /// Tenant ID.
     pub tenant_id: String,
-    /// Scopes — always `["stream"]`.
+    /// Scopes, always `["stream"]`.
     pub scopes: Vec<String>,
     /// Expiration (Unix timestamp).
     pub exp: u64,
     /// Issued-at (Unix timestamp).
     pub iat: u64,
-    /// Token type — always "stream" (session tokens use "session").
+    /// Token type, always "stream" (session tokens use "session").
     pub typ: &'static str,
     /// Optional event type filter (informational, also enforced client-side).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -181,7 +181,7 @@ mod tests {
         // Max
         assert_eq!(7200u64.clamp(60, 3600), 3600);
         // Audit J: the documented hard cap is 3600s and the documented
-        // default is 300s — aggressive callers cannot exceed one hour and
+        // default is 300s, aggressive callers cannot exceed one hour and
         // absent callers get five minutes.
         assert_eq!(u64::MAX.clamp(60, 3600), 3600);
         assert_eq!(0u64.clamp(60, 3600), 60);
@@ -219,7 +219,7 @@ mod adversarial_tests {
     }
 
     fn decode_token(token: &str) -> DecodedStreamClaims {
-        // The claims set is what this module owns — signature correctness is
+        // The claims set is what this module owns, signature correctness is
         // proven by the 500-on-bad-key arm and by RS256 being the only
         // signing path.
         use base64::Engine as _;

@@ -117,7 +117,7 @@ impl IncidentRepo {
     /// This is the public status history's reader: the window is expressed in
     /// SQL so an old incident cannot leak into a bounded public report and a
     /// caller cannot accidentally page the whole table. An EMPTY result is a
-    /// determinate answer ("no incidents recorded in the window") — callers
+    /// determinate answer ("no incidents recorded in the window"), callers
     /// must keep it distinguishable from an error, which is an UNKNOWN.
     pub async fn list_since(
         pool: &PgPool,
@@ -137,7 +137,7 @@ impl IncidentRepo {
     }
 
     /// F86: the ONE typed state transition. `next` alone determines both the
-    /// stored status and resolved_at — resolving stamps NOW(), any other
+    /// stored status and resolved_at, resolving stamps NOW(), any other
     /// state clears the timestamp (reopening included). There is no separate
     /// (status, resolved) parameter pair to get out of sync.
     pub async fn transition(
@@ -226,7 +226,7 @@ mod tests {
     }
 
     /// F86: only Resolved stamps the timestamp; every other state clears it
-    /// (reopening included) — one typed value, no contradictory pairs.
+    /// (reopening included), one typed value, no contradictory pairs.
     #[test]
     fn test_only_resolved_state_carries_resolution() {
         assert!(IncidentStatus::Resolved.is_resolved());

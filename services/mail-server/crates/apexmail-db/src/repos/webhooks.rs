@@ -16,7 +16,7 @@
 //!   into [`crate::types::Webhook::secret`];
 //! * legacy plaintext rows are migrated to envelopes on read;
 //! * [`WebhooksRepo::secret_for_signing`] is the single authorized fetch
-//!   returning the plaintext — for the outbound-signing path only.
+//!   returning the plaintext, for the outbound-signing path only.
 
 use chrono::{DateTime, Utc};
 use sqlx::PgPool;
@@ -39,7 +39,7 @@ fn webhook_aad(webhook_id: &str) -> Vec<u8> {
 
 /// Mask a plaintext secret down to its display prefix (audit F4).
 ///
-/// Secrets no longer than the prefix length reveal nothing at all — a fixed
+/// Secrets no longer than the prefix length reveal nothing at all, a fixed
 /// placeholder keeps even the length class from being obvious.
 pub(crate) fn mask_secret(plaintext: &str) -> String {
     if plaintext.chars().count() > MASKED_PREFIX_CHARS {
@@ -66,7 +66,7 @@ pub struct WebhooksRepo;
 impl WebhooksRepo {
     /// Create a new webhook. `secret` is stored as an encrypted envelope
     /// (AAD = `webhook={id}`); the returned [`Webhook`] carries only the
-    /// MASKED prefix — the caller already holds the plaintext it passed in.
+    /// MASKED prefix, the caller already holds the plaintext it passed in.
     pub async fn create(
         pool: &PgPool,
         tenant_id: &str,
@@ -168,7 +168,7 @@ impl WebhooksRepo {
     /// Secrets are masked.
     ///
     /// `cursor_id` is the VARCHAR(26) short id of the last row of the
-    /// previous page (migration 075) — bind it as text, never as a UUID.
+    /// previous page (migration 075), bind it as text, never as a UUID.
     pub async fn list_keyset(
         pool: &PgPool,
         tenant_id: &str,
@@ -192,7 +192,7 @@ impl WebhooksRepo {
                 .fetch_all(pool)
                 .await?,
                 _ => {
-                    // First page — no cursor
+                    // First page, no cursor
                     sqlx::query_as::<_, Webhook>(
                     "SELECT id, tenant_id, url, events, secret, status, created_at, updated_at \
                      FROM webhooks WHERE tenant_id = $1 \
@@ -233,7 +233,7 @@ impl WebhooksRepo {
     /// Delete a webhook.
     ///
     /// `id` is the VARCHAR(26) short id stored by [`create`] (migration
-    /// 075) — binding it as text matches the column type.
+    /// 075), binding it as text matches the column type.
     pub async fn delete(pool: &PgPool, tenant_id: &str, id: &str) -> Result<bool, sqlx::Error> {
         let result = sqlx::query("DELETE FROM webhooks WHERE id = $1 AND tenant_id = $2")
             .bind(id)
@@ -292,7 +292,7 @@ fn mask_stored_secret(stored: &str, webhook_id: &str) -> String {
     match apexmail_lib::secret_at_rest::decrypt_at_rest(stored, &webhook_aad(webhook_id)) {
         Ok(plaintext) => mask_secret(&plaintext),
         Err(error) => {
-            tracing::warn!(%error, webhook_id, "webhook secret display projection could not decrypt — masking fully");
+            tracing::warn!(%error, webhook_id, "webhook secret display projection could not decrypt, masking fully");
             "••••••••".to_string()
         }
     }
@@ -382,7 +382,7 @@ mod tests {
             );
         }
         // A boundary-length secret (exactly the prefix size) reveals nothing
-        // either — the masked form is only for LONGER secrets.
+        // either, the masked form is only for LONGER secrets.
         assert_eq!(super::mask_secret("whsec_0f"), "••••••••");
     }
 

@@ -47,7 +47,7 @@ pub struct ThreatIntelConfig {
     /// Feed refreshes MERGE per source (only the sources present in the
     /// payload are replaced; every other source keeps its last-known-good
     /// entries). With this flag set, a configured feed that fails or returns
-    /// nothing also has its stale entries dropped — use only when operators
+    /// nothing also has its stale entries dropped, use only when operators
     /// prefer an empty blocklist over a stale one for broken feeds.
     #[serde(default)]
     pub drop_absent_sources_on_refresh: bool,
@@ -160,7 +160,7 @@ impl Default for ThreatIntelConfig {
                 FeedSource {
                     name: "abuse.ch ThreatFox IOCs".into(),
                     // ThreatFox hostfile export is `<IP> <domain>` per
-                    // line — a hosts file, not a bare IP list.
+                    // line, a hosts file, not a bare IP list.
                     url: "https://threatfox.abuse.ch/downloads/hostfile/".into(),
                     format: FeedFormat::HostsFile,
                     refresh_interval_secs: 1800,

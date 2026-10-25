@@ -72,7 +72,7 @@ impl EngagementTrustService {
     /// documented `trend` member of the trust-score response.
     ///
     /// The comparison counts DISTINCT engaged messages (opened or clicked) —
-    /// the same cardinality the trust inputs use — and is tenant-scoped.
+    /// the same cardinality the trust inputs use, and is tenant-scoped.
     /// `unknown` is returned when neither window has any engagement: it is
     /// an honest absence, not a fabricated "stable".
     pub async fn trust_trend(&self, tenant_id: &str, email: &str) -> anyhow::Result<&'static str> {
@@ -110,7 +110,7 @@ impl EngagementTrustService {
 
     /// F6:computes campaign trust with ONE batched GROUP BY query per page
     /// instead of a per-subscriber round-trip (the old N+1 issued one
-    /// `GROUP BY event_type` query per recipient — thousands of sequential
+    /// `GROUP BY event_type` query per recipient, thousands of sequential
     /// queries for a large campaign).
     ///
     /// The paged inner SELECT reproduces the previous cursor pagination
@@ -118,7 +118,7 @@ impl EngagementTrustService {
     /// JOIN + FILTER aggregation produces the SAME trust inputs the
     /// per-subscriber path produced (tenant-wide counts over the last 90
     /// days, with zero rows for recipients whose engagement predates the
-    /// window — they still count toward `subscriber_count` and score with
+    /// window, they still count toward `subscriber_count` and score with
     /// zero engagement, as before).
     pub async fn campaign_trust(
         &self,
@@ -192,7 +192,7 @@ impl EngagementTrustService {
 
         let map: std::collections::HashMap<String, i64> = counts.into_iter().collect();
 
-        // Same construction as the batched campaign path (F6) — both feed
+        // Same construction as the batched campaign path (F6), both feed
         // identical inputs into compute_trust_score.
         Ok(engagement_from_counts(&SubscriberCountsRow {
             email: email.to_string(),
@@ -222,7 +222,7 @@ struct SubscriberCountsRow {
     bounced: i64,
 }
 
-/// Build a [`SubscriberEngagement`] from per-event-type counts — the single
+/// Build a [`SubscriberEngagement`] from per-event-type counts, the single
 /// shared definition of the trust inputs (rates + the same default
 /// compliance/recency scores the per-subscriber path used).
 fn engagement_from_counts(row: &SubscriberCountsRow) -> SubscriberEngagement {
@@ -520,7 +520,7 @@ mod tests {
         assert!(trust.self_orientation >= 0.0); // 0 = best, 100 = worst
     }
 
-    /// The trust inputs must count DISTINCT message ids — repeat opens/clicks
+    /// The trust inputs must count DISTINCT message ids, repeat opens/clicks
     /// of one message can no longer inflate open_rate/click_rate above 1.0
     /// (which the final score clamps away, hiding the cardinality defect).
     #[test]

@@ -20,7 +20,7 @@ pub struct InferenceConfig {
     pub api_key: Option<String>,
     pub timeout: Duration,
     /// Default generation budget (AI_MAX_TOKENS) and sampling temperature
-    /// (AI_TEMPERATURE) — previously parsed by config and never consumed.
+    /// (AI_TEMPERATURE), previously parsed by config and never consumed.
     pub max_tokens: u32,
     pub temperature: f64,
 }
@@ -187,7 +187,7 @@ impl LlmClient {
                     error = %error,
                     configured_secs = config.timeout.as_secs(),
                     fallback_secs = fallback_timeout.as_secs(),
-                    "model HTTP client build failed — retrying with a minimal sane timeout"
+                    "model HTTP client build failed, retrying with a minimal sane timeout"
                 );
                 Client::builder()
                     .timeout(fallback_timeout)
@@ -195,7 +195,7 @@ impl LlmClient {
                     .unwrap_or_else(|fallback_error| {
                         tracing::error!(
                             error = %fallback_error,
-                            "model HTTP client build failed twice — using default client; per-request timeouts still bound every call"
+                            "model HTTP client build failed twice, using default client; per-request timeouts still bound every call"
                         );
                         Client::new()
                     })
@@ -294,7 +294,7 @@ impl LlmClient {
         let started = Instant::now();
         // Prompt-injection hardening: the user JSON is field-truncated and
         // wrapped in <user_data> fencing, and the system prompt declares the
-        // block untrusted data — the payload can no longer impersonate
+        // block untrusted data, the payload can no longer impersonate
         // instructions by pretty-printing itself into the prompt.
         let user_prompt = build_predict_user_prompt(&input)?;
         let text = self
@@ -525,8 +525,8 @@ mod tests {
 
         let body = captured.await.expect("captured request body");
         // The JSON payload is wrapped in exactly one fence pair (the system
-        // prompt also names the tags when instructing the model — that is
-        // intentional — so count the fence-opening followed by JSON).
+        // prompt also names the tags when instructing the model, that is
+        // intentional, so count the fence-opening followed by JSON).
         assert_eq!(
             body.matches("<user_data>\\n{").count(),
             1,
@@ -664,7 +664,7 @@ mod tests {
     }
 
     /// Provider error bodies must arrive at logs/callers only as a short,
-    /// clearly-marked prefix — they can echo the user's prompt verbatim.
+    /// clearly-marked prefix, they can echo the user's prompt verbatim.
     #[tokio::test]
     async fn provider_error_bodies_are_truncated_before_logging_or_returning() {
         let endpoint = spawn_failing_endpoint().await;
@@ -805,7 +805,7 @@ mod tests {
     }
 
     /// A provider that closes the connection mid-body produces a clean
-    /// ModelUnavailable ("could not read") — never a partial answer.
+    /// ModelUnavailable ("could not read"), never a partial answer.
     #[tokio::test]
     async fn truncated_provider_response_is_an_error_not_a_partial_answer() {
         use tokio::io::AsyncWriteExt;
@@ -866,7 +866,7 @@ mod tests {
     }
 
     /// Streaming yields bounded, char-boundary-safe chunks whose
-    /// concatenation is exactly the model response — proven with multibyte
+    /// concatenation is exactly the model response, proven with multibyte
     /// content straddling the 512-byte window.
     #[tokio::test]
     async fn streaming_chunks_are_boundary_safe_and_lossless() {
@@ -936,7 +936,7 @@ mod tests {
         }
     }
 
-    /// A configured provider credential is sent as a bearer token — and an
+    /// A configured provider credential is sent as a bearer token, and an
     /// HTTPS-looking endpoint keeps the full URL contract.
     #[tokio::test]
     async fn provider_credentials_travel_as_bearer_tokens() {

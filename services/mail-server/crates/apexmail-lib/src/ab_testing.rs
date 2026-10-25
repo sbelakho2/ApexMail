@@ -1,4 +1,4 @@
-//! Campaign A/B experiment execution rules — the ONE deterministic
+//! Campaign A/B experiment execution rules, the ONE deterministic
 //! assignment + winner-decision contract shared by the campaign send path
 //! (`worker-processors::campaigns`) and the experiment results API
 //! (`api-server::routes::campaign_experiments`).
@@ -12,8 +12,8 @@
 //! * otherwise → `phase = 'holdout'` (held until a winner is declared);
 //! * test rows get `arm_index = (bucket / 10000) % arm_count`.
 //!
-//! The hash keys on `(experiment, recipient)` — never on row order or a
-//! generated row id — so a replay, a resend, or a re-expansion of the same
+//! The hash keys on `(experiment, recipient)`, never on row order or a
+//! generated row id, so a replay, a resend, or a re-expansion of the same
 //! audience assigns the SAME arm to the same contact. The persisted
 //! `campaign_recipients.ab_bucket` makes the assignment auditable without
 //! recomputing the hash.
@@ -25,7 +25,7 @@
 //! 1. **Minimum sample.** Every arm must have at least [`MIN_ARM_TRIALS`]
 //!    sent test recipients. Below that the decision is
 //!    [`AbVerdict::Refused`] with code `insufficient_sample` naming the arm
-//!    and its trial count — the caller must surface that reason, never
+//!    and its trial count, the caller must surface that reason, never
 //!    declare a leader from an under-powered sample.
 //! 2. **Two-proportion z-test.** The leader (highest success rate, ties
 //!    broken by lowest arm index) is compared against the runner-up with the
@@ -90,7 +90,7 @@ WHERE cr.id = s.id";
 /// the metric event. The per-arm `updated_at` (the experiment window clock)
 /// is deliberately preserved.
 ///
-/// Used by the worker (which also writes the refreshed counters back) — the
+/// Used by the worker (which also writes the refreshed counters back), the
 /// API's read-only twin is [`AB_OUTCOMES_SELECT_SQL`]; both compute the same
 /// numbers and must stay in lockstep.
 pub const AB_OUTCOMES_REFRESH_SQL: &str = "\
@@ -148,7 +148,7 @@ pub struct ArmOutcome {
 }
 
 impl ArmOutcome {
-    /// Success rate over the arm's trials (`0.0` for zero trials — an arm
+    /// Success rate over the arm's trials (`0.0` for zero trials, an arm
     /// that sent nothing can never lead).
     pub fn rate(&self) -> f64 {
         if self.trials <= 0 {
@@ -247,7 +247,7 @@ pub fn decide_winner(arms: &[ArmOutcome]) -> AbVerdict {
     if pooled >= 1.0 {
         return AbVerdict::Refused {
             code: "no_signal",
-            reason: "every trial succeeded — the arms carry no measurable difference".into(),
+            reason: "every trial succeeded, the arms carry no measurable difference".into(),
         };
     }
 
@@ -358,7 +358,7 @@ mod tests {
 
     #[test]
     fn a_larger_lead_needs_less_sample_but_never_below_the_floor() {
-        // 40% vs 10% with 40 trials each: z ≈ 3.1 — significant, and 40 is
+        // 40% vs 10% with 40 trials each: z ≈ 3.1, significant, and 40 is
         // above the 30-trial floor.
         let verdict = decide_winner(&[arm(0, 40, 16), arm(1, 40, 4)]);
         assert!(matches!(verdict, AbVerdict::Winner { arm_index: 0, .. }));

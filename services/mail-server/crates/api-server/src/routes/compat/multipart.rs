@@ -5,18 +5,18 @@
 //! body AND a `multipart/form-data` body (file parts for `attachment`). The
 //! workspace's `axum` build carries no `multipart` feature (deliberately, see
 //! the workspace manifest), and the parser this surface needs is the narrow
-//! RFC 2046 subset below — boundaries, `Content-Disposition` parameters and
+//! RFC 2046 subset below, boundaries, `Content-Disposition` parameters and
 //! raw part bytes. It is therefore implemented here, with unit tests covering
 //! the adversarial cases (missing boundary, unterminated body, boundary text
 //! inside a part's payload, quoted/escaped parameters, LF-only line endings).
 //!
 //! Every failure is a named string the caller renders in the provider's error
-//! shape — a malformed body is never silently accepted as an empty form.
+//! shape, a malformed body is never silently accepted as an empty form.
 
 /// One decoded `multipart/form-data` part.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct MultipartPart {
-    /// `Content-Disposition; name="…"` — always present on a form-data part.
+    /// `Content-Disposition; name="…"`, always present on a form-data part.
     pub name: String,
     /// `filename="…"` when the part is a file upload (absent for plain
     /// fields, and for a file part that carries no filename).
@@ -130,7 +130,7 @@ fn find_delimiter(body: &[u8], from: usize, delimiter: &[u8]) -> Option<usize> {
             return Some(index - 1);
         }
         // A boundary-looking sequence inside a payload that is NOT at the
-        // start of a line is data (RFC 2046 §5.1.1) — keep scanning.
+        // start of a line is data (RFC 2046 §5.1.1), keep scanning.
         cursor = index + delimiter.len();
     }
     None

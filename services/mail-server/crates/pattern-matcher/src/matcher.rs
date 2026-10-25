@@ -9,7 +9,7 @@
 //!   Unicode Normalization Form C (NFC) before matching, preventing Unicode
 //!   equivalence attacks where visually identical characters with different
 //!   codepoint sequences bypass pattern detection. Match offsets refer to the
-//!   NFC-normalized text — see [`MatchResult::normalized`] for when they are
+//!   NFC-normalized text, see [`MatchResult::normalized`] for when they are
 //!   also valid for the original input.
 
 use aho_corasick::{AhoCorasick, AhoCorasickBuilder, MatchKind};
@@ -25,25 +25,25 @@ use unicode_normalization::UnicodeNormalization;
 pub struct MatchResult {
     pub pattern_index: usize,
     /// Opaque identifier that replaces the raw pattern text (O-13.1).
-    /// Format: `"pat-{index}"` — does NOT reveal the actual matched pattern.
+    /// Format: `"pat-{index}"`, does NOT reveal the actual matched pattern.
     pub opaque_id: String,
     /// Byte offset of the match start.
     ///
     /// # Offsets coordinate system (O-13.2)
     /// Offsets refer to the **NFC-normalized** form of the input text. See
-    /// [`Self::normalized`] — when it is `false` the normalization was an
+    /// [`Self::normalized`], when it is `false` the normalization was an
     /// identity transform and these offsets are also valid for slicing the
     /// original input text.
     pub start: usize,
-    /// Byte offset (exclusive) of the match end — same coordinate system as
+    /// Byte offset (exclusive) of the match end, same coordinate system as
     /// [`Self::start`].
     pub end: usize,
     /// Whether NFC normalization changed the input text before matching.
     ///
-    /// * `false` — normalization was an identity transform (e.g. ASCII or
+    /// * `false`, normalization was an identity transform (e.g. ASCII or
     ///   already-NFC input): `start`/`end` are byte offsets into the
     ///   original input and are safe to use for slicing it.
-    /// * `true` — the text changed under NFC (e.g. NFD input where
+    /// * `true`, the text changed under NFC (e.g. NFD input where
     ///   `e` + U+0301 becomes `é`): `start`/`end` refer to the normalized
     ///   copy ONLY. They MUST NOT be used to slice the original text, whose
     ///   byte layout may differ.
@@ -157,7 +157,7 @@ impl PatternMatcher {
 
     /// Whether the fast Aho-Corasick automaton is active.
     /// `false` means the matcher is operating in the (correct but slower)
-    /// literal fallback mode — operators can alert on this.
+    /// literal fallback mode, operators can alert on this.
     pub fn is_healthy(&self) -> bool {
         self.automaton.is_some()
     }
@@ -191,12 +191,12 @@ impl PatternMatcher {
     /// matching by using a different normalization form.
     ///
     /// Returns a borrowed `Cow` when normalization is an identity transform
-    /// (ASCII or already-NFC input) — in that case match offsets computed on
+    /// (ASCII or already-NFC input), in that case match offsets computed on
     /// the returned text are also valid for the original input. When an
     /// owned `Cow` is returned the text changed and offsets refer to the
     /// normalized copy only.
     fn normalize(text: &str) -> Cow<'_, str> {
-        // Fast path: ASCII input is already in NFC — no copy needed.
+        // Fast path: ASCII input is already in NFC, no copy needed.
         if text.is_ascii() {
             return Cow::Borrowed(text);
         }
@@ -448,7 +448,7 @@ mod tests {
     #[test]
     fn test_nfc_input_offsets_valid_for_original() {
         let matcher = build_matcher(vec![("café", "accented")]);
-        let nfc = "café"; // é as single codepoint U+00E9 — already NFC
+        let nfc = "café"; // é as single codepoint U+00E9, already NFC
         let results = matcher.find_all(nfc);
         assert_eq!(results.len(), 1);
         assert!(!results[0].normalized);
@@ -511,7 +511,7 @@ mod tests {
     fn test_find_first_falls_back_when_automaton_unavailable() {
         // Audit finding: `find_first` used `self.automaton.as_ref()?` with no
         // fallback arm, so in degraded mode it returned None for EVERY input
-        // — all detection was silently lost for consumers calling this
+        //, all detection was silently lost for consumers calling this
         // method while `find_all`/`is_match`/`count_matches` kept working.
         let matcher = PatternMatcher {
             automaton: None,

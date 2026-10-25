@@ -12,9 +12,9 @@ pub struct SSOConfiguration {
     pub enabled: bool,
     pub domain: String,
     pub metadata_url: Option<String>,
-    /// The IDP's entity id — the `<saml:Issuer>` we accept on responses and
+    /// The IDP's entity id, the `<saml:Issuer>` we accept on responses and
     /// assertions. (Audit rename: the column was `entity_id`, which invited
-    /// putting the IdP value into the AuthnRequest Issuer — that element must
+    /// putting the IdP value into the AuthnRequest Issuer, that element must
     /// always name APEXMAIL, the SP: `config.sso.saml.entity_id`.)
     pub idp_entity_id: Option<String>,
     pub sso_url: Option<String>,
@@ -164,7 +164,7 @@ pub struct SSOCallbackResult {
     pub session: SSOSessionInfo,
     pub is_new_user: bool,
     /// The canonical console session minted for this login (audit P1-3).
-    /// Never serialized — the cookie rides the redirect's Set-Cookie header.
+    /// Never serialized, the cookie rides the redirect's Set-Cookie header.
     #[serde(default, skip_serializing)]
     pub canonical: Option<CanonicalSession>,
 }
@@ -189,7 +189,7 @@ pub struct SamlValidationContext {
     pub expected_request_id: Option<String>,
 }
 
-/// The canonical console session minted for a validated SSO login — the same
+/// The canonical console session minted for a validated SSO login, the same
 /// `am_session` JWT + cookie shape the web login issues, so an SSO callback
 /// lands the user in a REAL logged-in console session instead of only an
 /// enterprise bearer token.

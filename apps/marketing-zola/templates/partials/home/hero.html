@@ -1,4 +1,4 @@
-{# Hero — ARK Swiss poster (lane T, 2026-10-23). The headline is a stated
+{# Hero, ARK Swiss poster (lane T, 2026-10-23). The headline is a stated
    FACT, not a slogan: every accepted ApexMail message carries an Ed25519-
    signed routing receipt the sender can verify. The subtitle names the EU
    company (Bel Consulting OÜ, Tallinn), the EU data centres (Finland) and the EEA storage default. The honest Global-vs-EU-only scope
@@ -6,7 +6,7 @@
    /eu-sovereign/ and in the sovereignty section directly below.
 
    The evidence block lists the REAL canonical routing-receipt payload
-   fields — the exact bytes the Ed25519 signature covers — as published on
+   fields, the exact bytes the Ed25519 signature covers, as published on
    /eu-sovereign/ and implemented in
    services/mail-server/crates/mail-common/src/routing_receipt.rs
    (canonical_payload / RECEIPT_PAYLOAD_VERSION). Field NAMES only: no
@@ -43,7 +43,7 @@
           </div>
           <div class="apex-evidence__hatch" aria-hidden="true"></div>
           <div class="apex-evidence__body">
-            {# The canonical signed payload, field names only — what the
+            {# The canonical signed payload, field names only, what the
                Ed25519 signature actually covers (Ed25519, RFC 8032).
                actual_source_ip appears only when the transport reported a
                source IP; the absence itself is part of the signed statement. #}

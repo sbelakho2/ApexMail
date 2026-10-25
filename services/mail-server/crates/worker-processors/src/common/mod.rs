@@ -25,11 +25,11 @@ pub use pool::{create_db_pool, create_redis_pool, DbPool, RedisPool};
 /// parallel nextest load): the default provider chain probing EC2 metadata,
 /// and the SDK's rustls trust store being built from macOS native roots,
 /// which reads the keychain through the Security framework and can come back
-/// empty under load — aborting client construction with
+/// empty under load, aborting client construction with
 /// `TrustStore configured to enable native roots but no valid root
 /// certificates parsed!`. Pointing `AWS_CA_BUNDLE` at the system PEM bundle
 /// reads a plain file instead. Test-only: the worker binary runs on Linux
-/// with native roots. Only set when the variable is absent — an explicit
+/// with native roots. Only set when the variable is absent, an explicit
 /// choice (or CI's own CA configuration) wins.
 #[cfg(test)]
 pub(crate) fn ensure_aws_test_env() {

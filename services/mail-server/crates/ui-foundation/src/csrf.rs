@@ -77,7 +77,7 @@ mod tests {
     /// Review §5.1 csrf.rs: extend the consumer/secret-binding coverage so a
     /// malformed rendered token cannot silently break every workflow. The
     /// token the views embed must be a genuine HMAC of its own nonce, with
-    /// the documented `<ms>:<uuid>` nonce — exactly what the api-server's
+    /// the documented `<ms>:<uuid>` nonce, exactly what the api-server's
     /// `validate_csrf_token` recomputes.
     #[test]
     fn generated_token_verifies_against_the_consumer_contract() {

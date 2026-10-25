@@ -1,4 +1,4 @@
-//! Email processor — SMTP/SES delivery with DKIM, tracking, warmup, rate limiting.
+//! Email processor, SMTP/SES delivery with DKIM, tracking, warmup, rate limiting.
 //!
 //! This module handles the email sending pipeline://! - SMTP/SES transport abstraction
 //! - Hybrid routing:dedicated IPs → self-hosted, shared → SES

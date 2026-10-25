@@ -21,7 +21,7 @@ const STATE_KEY: &str = "ha:failover:state";
 pub const PRIMARY_CLAIM_TTL_SECS: u64 = 300;
 
 /// SM10 F6: a single replica lag probe may not stall the failover sequence
-/// longer than this — probes run against the shared pool on a degraded DB
+/// longer than this, probes run against the shared pool on a degraded DB
 /// (the very condition that triggers failover), where an unbounded query
 /// could outlive the failover lock and let a second coordinator in.
 const REPLICA_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
@@ -31,7 +31,7 @@ const REPLICA_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_sec
 const PROMOTE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 /// SM10 F3: connection budget for the per-node promotion/verification pools.
 const PROMOTE_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
-/// SM10 F3: bounded post-promotion verification — the target must report
+/// SM10 F3: bounded post-promotion verification, the target must report
 /// `pg_is_in_recovery() = false` within this budget before the failover may
 /// claim completion. (Test builds shrink the budget so the verification-
 /// failure path stays hermetic-fast.)
@@ -51,7 +51,7 @@ const PROMOTE_VERIFY_INTERVAL: std::time::Duration = std::time::Duration::from_m
 /// failover threshold.
 pub const FLAP_DAMPING_SAMPLES: u32 = 2;
 
-/// Fix #10: atomic compare-and-delete — the key is deleted only if it
+/// Fix #10: atomic compare-and-delete, the key is deleted only if it
 /// still holds our owner token. Built once (SHA-1 is computed per
 /// `Script::new`).
 const COMPARE_DELETE_SCRIPT: &str = r#"
@@ -67,7 +67,7 @@ fn compare_delete_script() -> &'static redis::Script {
     SCRIPT.get_or_init(|| redis::Script::new(COMPARE_DELETE_SCRIPT))
 }
 
-/// Fix #12: atomic compare-and-expire — the TTL is extended only if the
+/// Fix #12: atomic compare-and-expire, the TTL is extended only if the
 /// key still holds our owner token, so a claim lost to (or overwritten
 /// by) another node is never resurrected by our refresh.
 const COMPARE_EXPIRE_SCRIPT: &str = r#"
@@ -88,11 +88,11 @@ fn compare_expire_script() -> &'static redis::Script {
 enum ReplicaHealth {
     /// Replication row found; lag in milliseconds verified.
     Replicating(f64),
-    /// Database reachable but NO replication row — the candidate is not
+    /// Database reachable but NO replication row, the candidate is not
     /// replicating (wrong role / broken replication): verifiably unhealthy.
     NotReplicating,
     /// The probe itself failed (monitoring DB unreachable): candidate
-    /// health UNKNOWN — kept as a last-resort failover target.
+    /// health UNKNOWN, kept as a last-resort failover target.
     Unknown,
 }
 
@@ -102,15 +102,15 @@ enum ReplicaHealth {
 /// after one health-cron tick.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HealthObservation {
-    /// Unhealthy and the damping window is satisfied — forward to
+    /// Unhealthy and the damping window is satisfied, forward to
     /// [`FailoverService::report_failure`].
     ReportFailure,
-    /// Unhealthy but still inside the damping window — take no action yet.
+    /// Unhealthy but still inside the damping window, take no action yet.
     Damped,
-    /// A Healthy sample ended an unhealthy run — reset the component's
+    /// A Healthy sample ended an unhealthy run, reset the component's
     /// failure counter ([`FailoverService::reset_failures_for`]).
     ResetFailures,
-    /// Degraded/unknown, or Healthy with no prior unhealthy run — hold.
+    /// Degraded/unknown, or Healthy with no prior unhealthy run, hold.
     Hold,
 }
 
@@ -120,7 +120,7 @@ pub enum HealthObservation {
 /// `FLAP_DAMPING_SAMPLES` CONSECUTIVE `Unhealthy` samples before a sample is
 /// forwarded to `report_failure`, and any `Healthy` sample breaks the run and
 /// asks for the component's failure counter to be reset. `Degraded` is
-/// neither a failure nor a recovery — it holds the run untouched. Counters
+/// neither a failure nor a recovery, it holds the run untouched. Counters
 /// are per component (B.6 isolation is preserved end to end).
 ///
 /// Pure and synchronous so the cron's decision logic is unit-testable; the
@@ -268,7 +268,7 @@ impl FailoverService {
         }
         drop(counts);
         if trigger {
-            info!("Failure threshold reached — initiating automatic failover");
+            info!("Failure threshold reached, initiating automatic failover");
             if let Err(e) = self
                 .initiate_failover(
                     FailoverType::Automatic,
@@ -277,7 +277,7 @@ impl FailoverService {
                 .await
             {
                 // The failed attempt must not leave the machine stuck in
-                // Detecting — subsequent failures can re-trigger.
+                // Detecting, subsequent failures can re-trigger.
                 let mut s = self.state.write().await;
                 if *s == FailoverState::Detecting {
                     *s = FailoverState::Normal;
@@ -308,7 +308,7 @@ impl FailoverService {
     /// STONITH fencing failure ABORTS the failover (never "proceed anyway"),
     /// and the lock is released on every completion and failure path.
     ///
-    /// SM10 F3: the sequence now performs the REAL promotion — after the old
+    /// SM10 F3: the sequence now performs the REAL promotion, after the old
     /// primary is fenced, `pg_promote` runs ON the target and the promotion
     /// is verified (`pg_is_in_recovery() = false`, bounded retry) BEFORE the
     /// claims are rewritten and a `completed` event is emitted. On any
@@ -317,7 +317,7 @@ impl FailoverService {
     /// LEAVES THE FENCE IN PLACE (fail-closed: the old primary may be
     /// partitioned, and unfencing it now would reopen the split-brain
     /// window). Operators remediate by investigating, unfencing and
-    /// re-running — retries from `Failed` are allowed.
+    /// re-running, retries from `Failed` are allowed.
     ///
     /// SM10 F6: the lock is watchdog-renewed for the whole sequence and
     /// every replica probe is time-boxed, so degraded infrastructure cannot
@@ -357,10 +357,10 @@ impl FailoverService {
         if !self.try_acquire_lock().await {
             let mut s = self.state.write().await;
             *s = prior_state;
-            return Err("Failed to acquire failover lock — another failover in progress?".into());
+            return Err("Failed to acquire failover lock, another failover in progress?".into());
         }
 
-        // SM10 F6: watchdog renewal — target probing, promotion and
+        // SM10 F6: watchdog renewal, target probing, promotion and
         // verification run against degraded infrastructure (the very
         // condition that triggers failover) and can outlive the base TTL.
         let watchdog = self.spawn_lock_watchdog();
@@ -386,22 +386,22 @@ impl FailoverService {
         if watchdog.lost() {
             self.abort_failover(prior_state, watchdog).await;
             return Err(
-                "failover lock lost during target selection — aborting before any mutation \
+                "failover lock lost during target selection, aborting before any mutation \
                  (another coordinator may be active)"
                     .into(),
             );
         }
 
-        // Run STONITH fencing on old primary — B.1: failure ABORTS.
+        // Run STONITH fencing on old primary, B.1: failure ABORTS.
         if let Err(e) = self.fence_node(&current_primary).await {
             error!(
                 node = %current_primary,
                 error = %e,
-                "STONITH fencing failed — aborting failover (staying on current state)"
+                "STONITH fencing failed, aborting failover (staying on current state)"
             );
             self.abort_failover(prior_state, watchdog).await;
             return Err(format!(
-                "STONITH fencing of '{current_primary}' failed — failover aborted (unsafe to proceed): {e}"
+                "STONITH fencing of '{current_primary}' failed, failover aborted (unsafe to proceed): {e}"
             ));
         }
 
@@ -418,7 +418,7 @@ impl FailoverService {
                     &failover_type,
                     &reason,
                     started_at,
-                    "failover lock lost after fencing — refusing to continue mutating shared state",
+                    "failover lock lost after fencing, refusing to continue mutating shared state",
                     true,
                     watchdog,
                 )
@@ -452,14 +452,14 @@ impl FailoverService {
                     &failover_type,
                     &reason,
                     started_at,
-                    "failover lock lost after promotion — refusing to rewrite claims",
+                    "failover lock lost after promotion, refusing to rewrite claims",
                     true,
                     watchdog,
                 )
                 .await);
         }
 
-        // SM10 F3: verify the promotion took (bounded retry) — declaring
+        // SM10 F3: verify the promotion took (bounded retry), declaring
         // victory over a node still in recovery is the "promotion theater"
         // this step exists to kill.
         if let Err(e) = self.verify_promoted(&target).await {
@@ -486,7 +486,7 @@ impl FailoverService {
                     &failover_type,
                     &reason,
                     started_at,
-                    "failover lock lost after verification — refusing to rewrite claims",
+                    "failover lock lost after verification, refusing to rewrite claims",
                     true,
                     watchdog,
                 )
@@ -507,7 +507,7 @@ impl FailoverService {
                     started_at,
                     &format!(
                         "failed to record the primary claim for '{target}' AFTER a verified \
-                         promotion — the topology changed but the claim trail is broken: {e}"
+                         promotion, the topology changed but the claim trail is broken: {e}"
                     ),
                     false,
                     watchdog,
@@ -545,7 +545,7 @@ impl FailoverService {
                 "lag_threshold_ms": self.config.replication.lag_threshold_ms,
                 "lag_unverified": verified_lag_ms.is_none(),
                 // SM10 F3: the promotion RAN and was verified, but consumers
-                // still read the configured DATABASE_URL — repointing and
+                // still read the configured DATABASE_URL, repointing and
                 // restarting them is an operator action (compose-level
                 // automation is out of scope for the HA service). The event
                 // carries the instruction so the audit trail records what is
@@ -553,13 +553,13 @@ impl FailoverService {
                 "promotion_verified": true,
                 "consumer_repoint_required": true,
                 "consumer_repoint_instruction":
-                    "consumers still read DATABASE_URL — repoint it at the promoted primary \
+                    "consumers still read DATABASE_URL, repoint it at the promoted primary \
                      and restart them",
             })),
         };
 
         if let Err(e) = self.record_event(&event).await {
-            tracing::warn!(error = %e, event_id = %event_id, "Failed to record failover event — audit trail gap");
+            tracing::warn!(error = %e, event_id = %event_id, "Failed to record failover event, audit trail gap");
         }
 
         // Update primary
@@ -592,7 +592,7 @@ impl FailoverService {
 
     /// Restore the prior state and release the distributed lock after a
     /// failed failover attempt (B.4/B.5). Only valid for failures BEFORE the
-    /// old primary was fenced — afterwards [`Self::fail_failover`] records
+    /// old primary was fenced, afterwards [`Self::fail_failover`] records
     /// an honest failure instead (SM10 F3).
     async fn abort_failover(&self, prior_state: FailoverState, watchdog: LockWatchdog) {
         watchdog.stop();
@@ -626,7 +626,7 @@ impl FailoverService {
             to = to_node,
             error = %error,
             lock_lost,
-            "FAILOVER FAILED after fencing — the old primary stays fenced (fail-closed); \
+            "FAILOVER FAILED after fencing, the old primary stays fenced (fail-closed); \
              investigate, unfence, then retry"
         );
         let completed_at = Utc::now();
@@ -641,7 +641,7 @@ impl FailoverService {
             completed_at: Some(completed_at),
             duration_ms: Some((completed_at - started_at).num_milliseconds().max(0)),
             // The topology state is unknown (old primary fenced, target not
-            // confirmed serving) — never claim a loss-free outcome.
+            // confirmed serving), never claim a loss-free outcome.
             data_loss: true,
             metadata: Some(serde_json::json!({
                 "error": error,
@@ -656,7 +656,7 @@ impl FailoverService {
             })),
         };
         if let Err(e) = self.record_event(&event).await {
-            tracing::warn!(error = %e, event_id = %event.id, "Failed to record FAILED failover event — audit trail gap");
+            tracing::warn!(error = %e, event_id = %event.id, "Failed to record FAILED failover event, audit trail gap");
         }
         {
             let mut s = self.state.write().await;
@@ -668,7 +668,7 @@ impl FailoverService {
         watchdog.stop();
         self.release_lock().await;
         format!(
-            "failover failed: {error} (old primary '{from_node}' remains fenced — \
+            "failover failed: {error} (old primary '{from_node}' remains fenced, \
              remediate before retrying)"
         )
     }
@@ -676,7 +676,7 @@ impl FailoverService {
     /// Initiate failback to the original primary.
     ///
     /// B.3: failback now (1) requires replication-lag evidence below the
-    /// configured threshold (an explicit `force` flag overrides — auditable),
+    /// configured threshold (an explicit `force` flag overrides, auditable),
     /// (2) acquires the distributed lock before any state transition, and
     /// (3) only records `data_loss: false` when the lag was actually
     /// verified.
@@ -701,7 +701,7 @@ impl FailoverService {
         // B.3: verify replication lag on the target BEFORE promoting it.
         // `pg_stat_replication.replay_lag` is the lag source used by
         // `ReplicationService::get_lag` in this crate.
-        // SM10 F6: the probe is time-boxed — a stalled monitoring query on
+        // SM10 F6: the probe is time-boxed, a stalled monitoring query on
         // a degraded DB must not hang the failback sequence under the lock.
         let lag_probe = tokio::time::timeout(
             REPLICA_PROBE_TIMEOUT,
@@ -716,7 +716,7 @@ impl FailoverService {
             Ok(Some(lag_ms)) => {
                 if !force {
                     return Err(format!(
-                        "Replication lag {lag_ms}ms exceeds threshold {}ms — failback refused \
+                        "Replication lag {lag_ms}ms exceeds threshold {}ms, failback refused \
                          (pass force=true to override)",
                         self.config.replication.lag_threshold_ms
                     ));
@@ -726,7 +726,7 @@ impl FailoverService {
             Ok(None) => {
                 if !force {
                     return Err(
-                        "unable to verify replication lag (no pg_stat_replication row) — \
+                        "unable to verify replication lag (no pg_stat_replication row), \
                          failback refused (pass force=true to override)"
                             .into(),
                     );
@@ -736,7 +736,7 @@ impl FailoverService {
             Err(e) => {
                 if !force {
                     return Err(format!(
-                        "unable to verify replication lag ({e}) — failback refused \
+                        "unable to verify replication lag ({e}), failback refused \
                          (pass force=true to override)"
                     ));
                 }
@@ -746,7 +746,7 @@ impl FailoverService {
 
         // Acquire the distributed lock (B.3, same as failover).
         if !self.try_acquire_lock().await {
-            return Err("Failed to acquire failover lock — another failover in progress?".into());
+            return Err("Failed to acquire failover lock, another failover in progress?".into());
         }
 
         {
@@ -760,12 +760,12 @@ impl FailoverService {
         // and clear the fence placed on the original during failover.
         self.release_primary_claim(&current).await;
         if let Err(e) = self.claim_primary(&original).await {
-            error!(error = %e, "Failed to record primary claim during failback — aborting");
+            error!(error = %e, "Failed to record primary claim during failback, aborting");
             let mut s = self.state.write().await;
             *s = prior_state;
             self.release_lock().await;
             return Err(format!(
-                "Failed to record primary claim for '{original}' — failback aborted: {e}"
+                "Failed to record primary claim for '{original}', failback aborted: {e}"
             ));
         }
         self.unfence_node(&original).await;
@@ -776,7 +776,7 @@ impl FailoverService {
         // forced failback records the missing evidence in metadata instead
         // of silently claiming zero loss. The flag matches
         // `initiate_failover`'s semantics (true when lag was NOT verified)
-        // — it was previously inverted, so a verified-good failback was
+        //, it was previously inverted, so a verified-good failback was
         // recorded as lossy and a forced, unverified one as loss-free.
         let event = FailoverEvent {
             id: Uuid::new_v4(),
@@ -820,7 +820,7 @@ impl FailoverService {
     }
 
     /// Replication lag (milliseconds) for the node's `pg_stat_replication`
-    /// row, if any. `Ok(None)` means no row was found — no evidence.
+    /// row, if any. `Ok(None)` means no row was found, no evidence.
     async fn verify_replication_lag(&self, node: &str) -> Result<Option<f64>, String> {
         let row: Option<(Option<f64>,)> = sqlx::query_as(
             "SELECT EXTRACT(EPOCH FROM replay_lag) * 1000 AS lag_ms
@@ -841,7 +841,7 @@ impl FailoverService {
     /// sequence). A detection pass racing that window used to flag
     /// `SplitBrain` and wedge the state machine (`initiate_failover` refuses
     /// in `split_brain`). While the failover lock is held, detection
-    /// therefore SKIPS — the coexisting claims belong to a coordinated
+    /// therefore SKIPS, the coexisting claims belong to a coordinated
     /// sequence, not to a split brain. (Residual race: the lock may lapse
     /// between this check and the SCAN; the watchdog renewal (SM10 F6)
     /// keeps that window negligible.)
@@ -861,7 +861,7 @@ impl FailoverService {
             .map_err(|e| e.to_string())?;
         if lock_held.is_some() {
             info!(
-                "failover lock held — skipping split-brain detection \
+                "failover lock held, skipping split-brain detection \
                  (claims legitimately coexist mid-failover)"
             );
             return Ok(false);
@@ -892,7 +892,7 @@ impl FailoverService {
     ///    split-brain this function exists to end, and it fails closed on
     ///    `ensure_not_fenced` once fenced;
     /// 3. only then are the claims rewritten (all dropped, the winner's set
-    ///    fresh — value = this coordinator's node id so
+    ///    fresh, value = this coordinator's node id so
     ///    `run_claim_refresh_loop`'s compare-and-expire can keep it alive).
     ///
     /// A fencing failure ABORTS with the claims untouched.
@@ -900,11 +900,11 @@ impl FailoverService {
         info!(winner = winner_node, "Resolving split-brain");
         if !self.try_acquire_lock().await {
             return Err(
-                "Failed to acquire failover lock — another failover/resolution in progress?".into(),
+                "Failed to acquire failover lock, another failover/resolution in progress?".into(),
             );
         }
         // SM10 F6: fencing round-trips per claim-holder can outlive the
-        // base TTL on a degraded cluster — run under the same watchdog as
+        // base TTL on a degraded cluster, run under the same watchdog as
         // the failover sequence.
         let watchdog = self.spawn_lock_watchdog();
 
@@ -953,7 +953,7 @@ impl FailoverService {
         for loser in &losers {
             if let Err(e) = self.fence_node(loser).await {
                 return Err(format!(
-                    "failed to fence losing claim-holder '{loser}' — split-brain NOT resolved \
+                    "failed to fence losing claim-holder '{loser}', split-brain NOT resolved \
                      (claims untouched): {e}"
                 ));
             }
@@ -1033,7 +1033,7 @@ impl FailoverService {
     // ── Internal helpers ───────────────────────────────────
 
     /// Fix #13: probe a replica's health/role. Reuses the failback lag
-    /// logic (`pg_stat_replication` row presence IS the role probe — a
+    /// logic (`pg_stat_replication` row presence IS the role probe, a
     /// replica that is replicating has a row; a promoted/standalone node
     /// does not).
     async fn probe_replica_health(&self, replica: &str) -> ReplicaHealth {
@@ -1044,7 +1044,7 @@ impl FailoverService {
                 return health.clone();
             }
         }
-        // SM10 F6: time-box every lag check — a stalled query against the
+        // SM10 F6: time-box every lag check, a stalled query against the
         // shared pool (degraded DB = the failover scenario) must not keep
         // the failover sequence (and its lock) alive indefinitely.
         match tokio::time::timeout(REPLICA_PROBE_TIMEOUT, self.verify_replication_lag(replica))
@@ -1057,7 +1057,7 @@ impl FailoverService {
                 warn!(
                     replica,
                     timeout_secs = REPLICA_PROBE_TIMEOUT.as_secs(),
-                    "replica lag probe timed out — health unknown"
+                    "replica lag probe timed out, health unknown"
                 );
                 ReplicaHealth::Unknown
             }
@@ -1068,7 +1068,7 @@ impl FailoverService {
     ///
     /// Priority:
     /// 1. the first replica with a VERIFIED replication row (healthy);
-    /// 2. the first replica whose health is UNKNOWN (probe failed — e.g.
+    /// 2. the first replica whose health is UNKNOWN (probe failed, e.g.
     ///    the monitoring DB is unreachable; refusing to fail over at all
     ///    would trade availability for information);
     /// 3. replicas that are verifiably NOT replicating are SKIPPED.
@@ -1100,13 +1100,13 @@ impl FailoverService {
                 ReplicaHealth::NotReplicating => {
                     warn!(
                         replica = r,
-                        "replica is not replicating (no pg_stat_replication row) — skipping"
+                        "replica is not replicating (no pg_stat_replication row), skipping"
                     );
                 }
                 ReplicaHealth::Unknown => {
                     warn!(
                         replica = r,
-                        "replica health unknown (probe failed) — fallback candidate"
+                        "replica health unknown (probe failed), fallback candidate"
                     );
                     if first_unknown.is_none() {
                         first_unknown = Some(r.clone());
@@ -1118,7 +1118,7 @@ impl FailoverService {
             return Ok((r, None));
         }
         // Everything was verifiably unhealthy (or only the primary is
-        // configured): refuse — promoting a non-replicating node is a
+        // configured): refuse, promoting a non-replicating node is a
         // guaranteed data-loss split.
         Err("No healthy failover target: every replica is verifiably not replicating".into())
     }
@@ -1127,7 +1127,7 @@ impl FailoverService {
 
     /// Connection URL for a node's PostgreSQL. Replicas are reached with the
     /// primary's credentials/port (`DB_USER`/`DB_PASSWORD`/`DB_PORT`/
-    /// `DB_NAME`) — the node id is the host. `pg_promote` must run ON the
+    /// `DB_NAME`), the node id is the host. `pg_promote` must run ON the
     /// standby, so this cannot reuse the service pool (which points at the
     /// old primary).
     fn replica_conn_url(&self, node: &str) -> String {
@@ -1166,7 +1166,7 @@ impl FailoverService {
                 Some(true) => Ok(()),
                 // pg_promote returns false when the server is not a standby.
                 _ => Err(format!(
-                    "pg_promote on '{node}' did not succeed — node is not a standby"
+                    "pg_promote on '{node}' did not succeed, node is not a standby"
                 )),
             }
         };
@@ -1218,7 +1218,7 @@ impl FailoverService {
                 Ok(false) => {
                     info!(
                         node,
-                        attempt, "promotion verified — target reports pg_is_in_recovery() = false"
+                        attempt, "promotion verified, target reports pg_is_in_recovery() = false"
                     );
                     return Ok(());
                 }
@@ -1227,18 +1227,18 @@ impl FailoverService {
                         node,
                         attempt,
                         attempts = PROMOTE_VERIFY_ATTEMPTS,
-                        "target still in recovery after pg_promote — retrying"
+                        "target still in recovery after pg_promote, retrying"
                     );
                 }
                 Err(e) => {
-                    warn!(node, attempt, error = %e, "promotion verification probe failed — retrying");
+                    warn!(node, attempt, error = %e, "promotion verification probe failed, retrying");
                 }
             }
             tokio::time::sleep(PROMOTE_VERIFY_INTERVAL).await;
         }
         Err(format!(
             "'{node}' still reports pg_is_in_recovery() = true after \
-             {PROMOTE_VERIFY_ATTEMPTS} verification attempts — refusing to claim a promoted \
+             {PROMOTE_VERIFY_ATTEMPTS} verification attempts, refusing to claim a promoted \
              primary"
         ))
     }
@@ -1252,7 +1252,7 @@ impl FailoverService {
 
     // ── SM10 F6: failover-lock watchdog renewal ────────────────────
 
-    /// Spawn the watchdog with the production interval (TTL/3 — at most one
+    /// Spawn the watchdog with the production interval (TTL/3, at most one
     /// failed renewal can elapse before the base TTL lapses, mirroring the
     /// primary-claim refresh discipline).
     fn spawn_lock_watchdog(&self) -> LockWatchdog {
@@ -1316,7 +1316,7 @@ impl FailoverService {
         result.unwrap_or(false)
     }
 
-    /// B.4: release the failover lock — COMPARE-AND-DELETE (fix #10).
+    /// B.4: release the failover lock, COMPARE-AND-DELETE (fix #10).
     ///
     /// The previous GET-then-DEL pair was non-atomic: if the lock expired
     /// after our GET (which matched us as owner) and was REACQUIRED by
@@ -1352,7 +1352,7 @@ impl FailoverService {
             .map_err(|e| e.to_string())
     }
 
-    /// B.1/B.2: STONITH fencing — mark the node as fenced in Redis. Every
+    /// B.1/B.2: STONITH fencing, mark the node as fenced in Redis. Every
     /// write-acceptance point in this service refuses to serve while the
     /// node's fence key exists (see [`FailoverService::ensure_not_fenced`]);
     /// data-plane services enforce the same key via `crate::fence` (SM10 F4).
@@ -1410,25 +1410,25 @@ impl FailoverService {
     ///
     /// Fix #9: an UNREADABLE fence status (Redis down / error) fails
     /// CLOSED. The previous fail-open behavior let a fenced-but-
-    /// unobservable node keep accepting writes — during a Redis outage a
+    /// unobservable node keep accepting writes, during a Redis outage a
     /// fenced node would silently keep serving, defeating STONITH exactly
     /// when coordination is degraded.
     pub async fn ensure_not_fenced(&self) -> Result<(), String> {
         let node = self.config.multi_region.node_id.clone();
         match self.is_fenced_node(&node).await {
             Ok(true) => Err(format!(
-                "node '{node}' is fenced (ha:fenced:{node} present) — writes refused"
+                "node '{node}' is fenced (ha:fenced:{node} present), writes refused"
             )),
             Ok(false) => Ok(()),
             Err(e) => {
                 error!(
                     node = %node,
                     error = %e,
-                    "CRITICAL: fence status unreadable — failing CLOSED, writes refused \
+                    "CRITICAL: fence status unreadable, failing CLOSED, writes refused \
                      (cannot prove this node is not fenced)"
                 );
                 Err(format!(
-                    "fence status for '{node}' unreadable ({e}) — failing closed, writes refused"
+                    "fence status for '{node}' unreadable ({e}), failing closed, writes refused"
                 ))
             }
         }
@@ -1438,7 +1438,7 @@ impl FailoverService {
     /// `detect_split_brain` able to see two simultaneous primaries.
     ///
     /// Fix #11: a FAILED `SET NX` (another claimant already holds the key)
-    /// is an ERROR carrying the current holder — the previous `()` reply
+    /// is an ERROR carrying the current holder, the previous `()` reply
     /// type silently discarded Redis's nil and reported success, so a
     /// competing coordinator believed it had recorded its claim.
     async fn claim_primary(&self, node: &str) -> Result<(), String> {
@@ -1460,7 +1460,7 @@ impl FailoverService {
                 .await
                 .unwrap_or(None);
             return Err(format!(
-                "primary claim for '{node}' is already held by '{}' — competing claim detected",
+                "primary claim for '{node}' is already held by '{}', competing claim detected",
                 holder.unwrap_or_else(|| "unknown".into())
             ));
         }
@@ -1500,7 +1500,7 @@ impl FailoverService {
                 Ok(false) => {
                     warn!(
                         primary = %primary,
-                        "our primary claim was taken by another node — flagging split-brain"
+                        "our primary claim was taken by another node, flagging split-brain"
                     );
                     let mut s = self.state.write().await;
                     *s = FailoverState::SplitBrain;
@@ -1586,7 +1586,7 @@ impl FailoverService {
 /// Handle over the lock-renewal watchdog spawned for the duration of a
 /// locked failover/resolution sequence (SM10 F6). The base TTL (60 s) can be
 /// outlived by target probing + promotion + verification on degraded
-/// infrastructure — the watchdog keeps re-extending OUR lock, and reports
+/// infrastructure, the watchdog keeps re-extending OUR lock, and reports
 /// the moment the lock is lost so the sequence can stop mutating shared
 /// state before a second coordinator starts its own.
 struct LockWatchdog {
@@ -1625,7 +1625,7 @@ async fn run_lock_watchdog_loop(
     let client = match redis::Client::open(redis_url.as_str()) {
         Ok(client) => client,
         Err(e) => {
-            error!(error = %e, "lock watchdog cannot open Redis client — lock will lapse");
+            error!(error = %e, "lock watchdog cannot open Redis client, lock will lapse");
             lock_lost.store(true, std::sync::atomic::Ordering::SeqCst);
             return;
         }
@@ -1656,13 +1656,13 @@ async fn run_lock_watchdog_loop(
                         error!(
                             owner = %owner,
                             "CRITICAL: failover lock LOST mid-sequence (expired and taken by \
-                             another coordinator) — the running sequence must abort"
+                             another coordinator), the running sequence must abort"
                         );
                         lock_lost.store(true, std::sync::atomic::Ordering::SeqCst);
                         return;
                     }
                     Err(e) => {
-                        warn!(error = %e, "failover lock renewal failed — retrying next tick");
+                        warn!(error = %e, "failover lock renewal failed, retrying next tick");
                     }
                 }
             }
@@ -2004,7 +2004,7 @@ mod tests {
     }
 
     /// SM10 F3 test seam: the promotion of `node` SUCCEEDS and the node is
-    /// verified out of recovery — lets the "failover completes" tests run
+    /// verified out of recovery, lets the "failover completes" tests run
     /// hermetically (no live standby to promote) while still exercising the
     /// real promotion-and-verification sequence.
     async fn seam_promotion_succeeds(svc: &FailoverService, node: &str) {
@@ -2285,7 +2285,7 @@ mod tests {
             assert_eq!(svc.get_state().await, FailoverState::Normal);
             assert_eq!(*svc.primary_node.read().await, "node-primary");
             // Forced failback has no lag evidence: data_loss must be TRUE.
-            // (Updated for the F6 inversion fix — this assertion previously
+            // (Updated for the F6 inversion fix, this assertion previously
             // pinned the inverted `lag_verified.is_some()` value, which
             // contradicted its own "must NOT be claimed false" comment.)
             assert!(
@@ -2312,7 +2312,7 @@ mod tests {
     #[test]
     fn test_ensure_not_fenced_fails_closed_on_store_error() {
         test_runtime().block_on(async {
-            // Redis unreachable: is_fenced_node errors — writes must be
+            // Redis unreachable: is_fenced_node errors, writes must be
             // REFUSED (previously the error path returned Ok, letting a
             // fenced-but-unobservable node keep serving).
             let svc = FailoverService::new(test_pool(), dead_redis_config());
@@ -2648,7 +2648,7 @@ mod tests {
             bootstrap_tables(&pool).await.expect("bootstrap (2nd run, idempotent)");
 
             // Round-trip a failover event through record_event/get_history
-            // — this INSERT failed at runtime before the tables existed.
+            //, this INSERT failed at runtime before the tables existed.
             let mut cfg = Config::from_env().expect("HA config must load in development");
             cfg.multi_region.node_id = "roundtrip-node".into();
             let svc = FailoverService::new(pool.clone(), Arc::new(cfg));
@@ -2713,7 +2713,7 @@ mod tests {
             gate.observe("db", &HealthStatus::Unhealthy),
             HealthObservation::ReportFailure
         );
-        // Still unhealthy: keep reporting — report_failure's own threshold
+        // Still unhealthy: keep reporting, report_failure's own threshold
         // counter does the rest.
         assert_eq!(
             gate.observe("db", &HealthStatus::Unhealthy),
@@ -2783,7 +2783,7 @@ mod tests {
             let mut cfg = Config::from_env().expect("HA config must load in development");
             cfg.failover.threshold = 2;
             // A triggered attempt fails FAST at target selection (no
-            // replicas) — the assertions below only care about the counters.
+            // replicas), the assertions below only care about the counters.
             cfg.database.replica_hosts = vec![];
             let svc = FailoverService::new(test_pool(), Arc::new(cfg));
             let mut gate = FlapDampedHealthGate::new(FLAP_DAMPING_SAMPLES);
@@ -2848,11 +2848,11 @@ mod tests {
         });
     }
 
-    // ── SM10 F3: the failover REALLY promotes — and fails honestly ──
+    // ── SM10 F3: the failover REALLY promotes, and fails honestly ──
 
     /// `pg_promote` on the target fails: the failover must record an honest
     /// FAILED outcome, park in [`FailoverState::Failed`], LEAVE THE OLD
-    /// PRIMARY FENCED (fail-closed) and release the lock — never claim a
+    /// PRIMARY FENCED (fail-closed) and release the lock, never claim a
     /// topology change that did not happen.
     #[test]
     fn test_promotion_failure_parks_failed_and_leaves_fence() {
@@ -2906,7 +2906,7 @@ mod tests {
     }
 
     /// The promotion command ran but the target never left recovery: the
-    /// bounded verification must exhaust and FAIL the failover — declaring
+    /// bounded verification must exhaust and FAIL the failover, declaring
     /// `completed` over a still-in-recovery node is exactly the promotion
     /// theater this step kills.
     #[test]
@@ -2989,7 +2989,7 @@ mod tests {
     // ── SM10 F5: split-brain resolution fences losers under the lock ──
 
     /// Resolution must FENCE every losing claim-holder BEFORE rewriting any
-    /// claim — a loser that keeps acting as primary is the split brain this
+    /// claim, a loser that keeps acting as primary is the split brain this
     /// function exists to end.
     #[test]
     fn test_resolve_split_brain_fences_losers_before_rewriting_claims() {
@@ -3155,7 +3155,7 @@ mod tests {
                 .unwrap();
 
             // The "slow probe": well past the 2 s base TTL budget in wall
-            // time the lock must still be alive — renewed toward 60 s.
+            // time the lock must still be alive, renewed toward 60 s.
             let watchdog =
                 svc.spawn_lock_watchdog_with_interval(std::time::Duration::from_millis(100));
             tokio::time::sleep(std::time::Duration::from_millis(600)).await;
@@ -3175,7 +3175,7 @@ mod tests {
     }
 
     /// A lock taken over by another coordinator is never resurrected by the
-    /// watchdog — it reports LOST so the sequence can stop mutating state.
+    /// watchdog, it reports LOST so the sequence can stop mutating state.
     #[test]
     fn test_lock_watchdog_reports_lost_lock_and_never_resurrects() {
         let Some(redis) = spawn_test_redis() else {
@@ -3223,7 +3223,7 @@ mod tests {
                 .unwrap();
             assert!(
                 ttl > FAILOVER_LOCK_TTL as i64,
-                "the watchdog must NOT resurrect a foreign lock — a renewal would have \
+                "the watchdog must NOT resurrect a foreign lock, a renewal would have \
                  re-extended it to {FAILOVER_LOCK_TTL} s (TTL {ttl})"
             );
             watchdog.stop();
@@ -3234,8 +3234,8 @@ mod tests {
 
     /// Claims legitimately coexist mid-failover (the new claim is taken
     /// before the old one is released, under the lock). Detection must SKIP
-    /// while the lock is held — flagging SplitBrain then wedges the state
-    /// machine — and still detect a REAL split brain once it is released.
+    /// while the lock is held, flagging SplitBrain then wedges the state
+    /// machine, and still detect a REAL split brain once it is released.
     #[test]
     fn test_detect_split_brain_skips_while_failover_lock_held() {
         let Some(redis) = spawn_test_redis() else {

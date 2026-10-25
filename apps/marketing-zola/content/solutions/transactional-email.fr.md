@@ -27,11 +27,11 @@ L'email transactionnel est une infrastructure critique. Des réinitialisations d
 
 ## La solution ApexMail
 
-- **API REST** (`POST /v1/messages`) — Payloads JSON avec clés d'idempotence. Soumettez et n'y pensez plus.
-- **Relais SMTP** (`smtp.apexmail.ee:587` avec STARTTLS) — Remplacement direct pour vos clients SMTP existants.
-- **Configuration d'envoi isolée** — IP dédiées, domaines personnalisés et listes de suppression peuvent être délimités par type d'email.
-- **Webhooks signés** — Événements `delivered`, `bounced`, `complained`, `opened`, `clicked` en temps réel, chacun avec un ID d'événement unique et une signature HMAC.
-- **Idempotence** — Dédupliquez les soumissions grâce aux clés fournies par le client. Renvoyez sans risque après une erreur réseau.
+- **API REST** (`POST /v1/messages`), Payloads JSON avec clés d'idempotence. Soumettez et n'y pensez plus.
+- **Relais SMTP** (`smtp.apexmail.ee:587` avec STARTTLS), Remplacement direct pour vos clients SMTP existants.
+- **Configuration d'envoi isolée**, IP dédiées, domaines personnalisés et listes de suppression peuvent être délimités par type d'email.
+- **Webhooks signés**, Événements `delivered`, `bounced`, `complained`, `opened`, `clicked` en temps réel, chacun avec un ID d'événement unique et une signature HMAC.
+- **Idempotence**, Dédupliquez les soumissions grâce aux clés fournies par le client. Renvoyez sans risque après une erreur réseau.
 
 ## Implémentation technique
 

@@ -1,4 +1,4 @@
-//! Content policy scanning — confidentiality markers, classification labels
+//! Content policy scanning, confidentiality markers, classification labels
 //!
 //! Detects organizational sensitivity markers in outbound email content://! - "CONFIDENTIAL", "INTERNAL ONLY", "DO NOT DISTRIBUTE"
 //! - Custom keyword lists configured by policy
@@ -62,7 +62,7 @@ fn lock_automaton_cache() -> std::sync::MutexGuard<'static, HashMap<u64, Arc<Aho
 
 /// Compile (or fetch from cache) the automaton for a keyword list.
 /// Returns `Err` with a human-readable reason when the automaton cannot be
-/// built — callers must treat this as "channel unavailable", never as
+/// built, callers must treat this as "channel unavailable", never as
 /// "no matches".
 fn automaton_for(keywords: &[String]) -> Result<Arc<AhoCorasick>, String> {
     let key = keywords_hash(keywords);
@@ -86,7 +86,7 @@ fn automaton_for(keywords: &[String]) -> Result<Arc<AhoCorasick>, String> {
 
 /// Scan content against confidentiality keywords.
 /// Fails loudly with `Err` when the matcher cannot be compiled (the caller
-/// is expected to log and count the outage — never to treat it as "clean").
+/// is expected to log and count the outage, never to treat it as "clean").
 pub fn scan_content_policy(text: &str, keywords: &[String]) -> Result<Vec<PolicyMatch>, String> {
     if keywords.is_empty() {
         return Ok(Vec::new());

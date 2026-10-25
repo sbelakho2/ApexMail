@@ -5,7 +5,7 @@
 <div class="border overflow-hidden">
   <div class="px-4 py-4">
     <p class="apex-em">Endpoints</p>
-    <p class="mt-2">Pick a lane, tune the JSON payload, then send — the request executes against the live sandbox API and the response page shows the real status, latency and body.</p>
+    <p class="mt-2">Pick a lane, tune the JSON payload, then send, the request executes against the live sandbox API and the response page shows the real status, latency and body.</p>
     <p class="mt-2">Send-lane recipients are limited to the reserved example.com domain; messages really queue, the worker really attempts delivery, and the full lifecycle is visible in the Messages lane.</p>
   </div>
 
@@ -21,7 +21,7 @@
     <form method="post" action="{{ explorer_api }}" class="grid gap-0 xl:grid-cols-[1fr_1fr]">
       <div class="p-4 sm:p-6">
         {# Accessible name for the request textarea (design/a11y audit):
-           a real <label for=...> like the contact forms use — the old bare
+           a real <label for=...> like the contact forms use, the old bare
            <p> heading left the JSON textarea unnamed for screen readers. #}
         <label for="explorer-send-request-body" class="mb-3 block apex-em apex-label">Request Composer <span class="ml-2 apex-section-head">JSON payload for POST /v1/messages</span></label>
         <textarea id="explorer-send-request-body" name="body" rows="10" spellcheck="false" aria-describedby="explorer-send-help" class="w-full min-h-[14rem] p-4 border apex-textarea apex-input">{
@@ -30,14 +30,14 @@
   "subject": "Hello from ApexMail",
   "html": "&lt;h1&gt;Welcome!&lt;/h1&gt;"
 }</textarea>
-        <p id="explorer-send-help" class="mt-2">Runs against the isolated sandbox with a real sandbox API key; every recipient must end in @example.com. The response renders on the result page — use Back to return to this workbench.</p>
+        <p id="explorer-send-help" class="mt-2">Runs against the isolated sandbox with a real sandbox API key; every recipient must end in @example.com. The response renders on the result page, use Back to return to this workbench.</p>
         <input type="hidden" name="lane" value="send">
         <button type="submit" class="apex-btn apex-btn--primary mt-4 w-full xl:w-auto apex-btn--sm">Send sandbox request</button>
       </div>
       <div class="p-4 sm:p-6">
         <p class="mb-3 apex-em">Response Inspector <span class="ml-2 apex-section-head">No request sent</span></p>
         <div class="min-h-[14rem] border p-4">
-          <p class="">No request sent yet. Press Send — the request executes against the live sandbox and the result page shows the real status code, latency and JSON body. Failures render verbatim (validation errors, rate limits and 4xx/5xx responses are not rewritten).</p>
+          <p class="">No request sent yet. Press Send, the request executes against the live sandbox and the result page shows the real status code, latency and JSON body. Failures render verbatim (validation errors, rate limits and 4xx/5xx responses are not rewritten).</p>
         </div>
         <div class="mt-4 grid gap-3 sm:grid-cols-3">
           <div class="border px-3 py-2">Real handlers, real queue</div>
@@ -55,10 +55,10 @@
       <span class="break-all">/v1/messages?limit=20</span>
       <span class="border px-2 py-1 apex-em apex-section-head">Sandbox</span>
     </div>
-    <form method="post" action="{{ explorer_api }}" class="flex flex-wrap items-center gap-4 px-4 py-4 sm:px-6"> {# nosemgrep: python.django.security.django-no-csrf-token.django-no-csrf-token — static Zola/Tera template, not Django; the cross-origin API endpoint owns its own CSRF handling #}
+    <form method="post" action="{{ explorer_api }}" class="flex flex-wrap items-center gap-4 px-4 py-4 sm:px-6"> {# nosemgrep: python.django.security.django-no-csrf-token.django-no-csrf-token, static Zola/Tera template, not Django; the cross-origin API endpoint owns its own CSRF handling #}
       <input type="hidden" name="lane" value="messages">
       <input type="hidden" name="body" value="">
-      <p class="">Delivery stream and lifecycle lookup — the sandbox tenant's own messages, including everything you sent above.</p>
+      <p class="">Delivery stream and lifecycle lookup, the sandbox tenant's own messages, including everything you sent above.</p>
       <button type="submit" class="apex-btn apex-btn--primary ml-auto shrink-0 apex-btn--sm">List messages</button>
     </form>
   </section>
@@ -70,7 +70,7 @@
       <span class="break-all">/v1/domains</span>
       <span class="border px-2 py-1 apex-em apex-section-head">Sandbox</span>
     </div>
-    <form method="post" action="{{ explorer_api }}" class="flex flex-wrap items-center gap-4 px-4 py-4 sm:px-6"> {# nosemgrep: python.django.security.django-no-csrf-token.django-no-csrf-token — static Zola/Tera template, not Django; the cross-origin API endpoint owns its own CSRF handling #}
+    <form method="post" action="{{ explorer_api }}" class="flex flex-wrap items-center gap-4 px-4 py-4 sm:px-6"> {# nosemgrep: python.django.security.django-no-csrf-token.django-no-csrf-token, static Zola/Tera template, not Django; the cross-origin API endpoint owns its own CSRF handling #}
       <input type="hidden" name="lane" value="domains">
       <input type="hidden" name="body" value="">
       <p class="">Identity posture and DNS verification status for the sandbox tenant's domains.</p>
@@ -98,7 +98,7 @@
       <div class="p-4 sm:p-6">
         <p class="mb-3 apex-em">Response Inspector</p>
         <div class="min-h-[8rem] border p-4">
-          <p class="">No request sent yet. Press Provision domain — the creation response with DNS records renders on the result page.</p>
+          <p class="">No request sent yet. Press Provision domain, the creation response with DNS records renders on the result page.</p>
         </div>
       </div>
     </form>

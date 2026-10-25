@@ -50,7 +50,7 @@ impl SpfRecord {
     pub fn parse(txt: &str) -> Option<Self> {
         let txt = txt.trim();
         // RFC 7208 §12/§4.5: the version term is exactly "v=spf1" followed
-        // by end-of-record or whitespace — "v=spf1evil" is NOT an SPF record
+        // by end-of-record or whitespace, "v=spf1evil" is NOT an SPF record
         // (a plain starts_with accepted it and shadowed real records).
         let after_version = txt.strip_prefix("v=spf1")?;
         if !after_version.is_empty() && !after_version.starts_with(char::is_whitespace) {

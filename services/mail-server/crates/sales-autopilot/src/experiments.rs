@@ -1,4 +1,4 @@
-//! §17/§18/§37/§28 — contextual experiments, the reward ladder, economic
+//! §17/§18/§37/§28, contextual experiments, the reward ladder, economic
 //! exploration limits and the next-best-action policy.
 //!
 //! # The optimizer is in the send path
@@ -17,7 +17,7 @@
 //! `200_sales_autopilot_v2_unification.sql:807-835`), **not**
 //! `campaign_arms` (migration 197). Two reasons:
 //!
-//! * `campaign_arms` is keyed to `sales_campaigns` — a different execution
+//! * `campaign_arms` is keyed to `sales_campaigns`, a different execution
 //!   identity than the sequence/enrollment path this optimizer serves, and it
 //!   carries no per-arm `contacts`, `negative_outcomes` or
 //!   `enrichment_cost_eur` counters, which the §37 exploration budgets need;
@@ -33,7 +33,7 @@
 //! | outcome | reward | role |
 //! |---|---|---|
 //! | `delivered` | `0.0` | operational metric only |
-//! | `open` | `0.0` | informational only — **never a success signal** |
+//! | `open` | `0.0` | informational only, **never a success signal** |
 //! | `click` | `0.05` | weak intent |
 //! | `reply` | `0.2` | modest |
 //! | `positive_reply` | `0.5` | strong |
@@ -54,7 +54,7 @@
 //!
 //! `delivered`/`open` move no posterior parameter at all (they increment only
 //! the `contacts` exposure counter). Therefore 10 000 opens cannot promote an
-//! arm over one with real replies — see the release-gate test
+//! arm over one with real replies, see the release-gate test
 //! `ten_thousand_opens_never_win_an_arm`.
 //!
 //! # Contextual selection (§18)
@@ -78,7 +78,7 @@
 //! sparse bucket can never be steered by a random arm. The audit's warning is
 //! the design constraint: *"the globally winning message for a French
 //! 30-person SaaS CTO may get sent to a German enterprise procurement
-//! director — that is not intelligence."*
+//! director, that is not intelligence."*
 //!
 //! # §37 exploration economics
 //!
@@ -95,7 +95,7 @@
 //! [`next_best_action`] is a pure function of EV − cost, evidence sufficiency,
 //! reply state, address verification and intent. It can choose `DoNothing`
 //! (weak prospects), `Enrich`/`CollectEvidence`/`ResearchCompany`/
-//! `VerifyEmail` (high EV with thin evidence — spending €0.20 on information
+//! `VerifyEmail` (high EV with thin evidence, spending €0.20 on information
 //! beats a premature send), and never chooses an external send when a human
 //! has replied or when outreach cost exceeds expected value.
 
@@ -403,7 +403,7 @@ pub fn validate_posterior(alpha: f64, beta: f64) -> Result<(), SalesError> {
 ///
 /// * positive reward: `alpha += reward`, `trials += 1`, `successes += 1`;
 /// * negative reward: `beta += |reward|`, `trials += 1`, `negative_outcomes += 1`;
-/// * zero (delivered/open): only `contacts += 1` — the posterior does not move.
+/// * zero (delivered/open): only `contacts += 1`, the posterior does not move.
 pub fn apply_reward_to_posterior(
     arm: &mut ArmPosterior,
     kind: RewardKind,
@@ -603,7 +603,7 @@ impl ExperimentContext {
     }
 
     /// Sanitized, deterministic bucket key over the selected dimensions.
-    /// Returns `None` when every selected dimension is absent — the caller
+    /// Returns `None` when every selected dimension is absent, the caller
     /// must then use the global posterior (never a random arm).
     pub fn bucket_key(&self, dimensions: &[String]) -> Option<String> {
         let selected: Vec<&str> = if dimensions.is_empty() {
@@ -738,7 +738,7 @@ impl Default for ExplorationBudget {
 
 impl ExplorationBudget {
     /// Parse the `budgets` JSONB object. A non-object (including a bare JSON
-    /// string or number) is a configuration error — the caller must not treat
+    /// string or number) is a configuration error, the caller must not treat
     /// it as "no limits". Present numeric fields are parsed strictly (a string
     /// where a number belongs is an error); out-of-domain numbers are then
     /// sanitised fail-closed by [`Self::sanitized`].
@@ -1092,7 +1092,7 @@ pub fn may_promote_arm(
 // ---------------------------------------------------------------------------
 
 /// `sales_experiments.status` vocabulary (migration line 793-794). An
-/// unrecognised status fails closed to `Stopped` — it is never treated as
+/// unrecognised status fails closed to `Stopped`, it is never treated as
 /// `Running`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1504,7 +1504,7 @@ impl ExperimentEngine {
     ///
     /// Order of decisions (each documented in [`VariantSelection::reason`]):
     ///
-    /// 1. a draft experiment is a configuration error — never send against it;
+    /// 1. a draft experiment is a configuration error, never send against it;
     /// 2. a paused/stopped/promoted experiment is exploit-only (best arm);
     /// 3. [`may_explore`] is enforced before any arm is drawn;
     /// 4. contextual fallback: a bucket with `< MIN_CONTEXT_SAMPLES` trials
@@ -1845,7 +1845,7 @@ fn parse_context_dimensions(value: &serde_json::Value) -> Vec<String> {
 ///
 /// Hostile inputs are rejected before any SQL: an empty/oversized
 /// `outcome_key`, a non-finite or negative `value_eur`, a corrupt arm
-/// posterior (`alpha`/`beta` <= 0 or non-finite — the DB CHECK would reject it
+/// posterior (`alpha`/`beta` <= 0 or non-finite, the DB CHECK would reject it
 /// anyway, but the error must name the arm), or an experiment that does not
 /// belong to the tenant.
 pub async fn record_reward(
@@ -1980,7 +1980,7 @@ pub async fn record_reward(
             outcome_key,
             experiment_id = %experiment_id,
             variant,
-            "experiment outcome replay — posterior unchanged"
+            "experiment outcome replay, posterior unchanged"
         );
     }
 
@@ -2474,7 +2474,7 @@ pub fn next_best_action(input: &NextActionInput) -> (DecisionAction, String) {
         return (
             DecisionAction::OperatorTask,
             format!(
-                "a human already replied; automation must not send again — routing to an operator \
+                "a human already replied; automation must not send again, routing to an operator \
                  (EV {:.2} EUR)",
                 input.expected_value_eur
             ),
@@ -2610,7 +2610,7 @@ pub fn next_best_action(input: &NextActionInput) -> (DecisionAction, String) {
             DecisionAction::ChangeAngle,
             format!(
                 "the previous angle failed after {} touches; repeating it would be the spam \
-                 defect — changing angle (EV {ev:.2} EUR)",
+                 defect, changing angle (EV {ev:.2} EUR)",
                 input.prior_touches
             ),
         );
@@ -5016,7 +5016,7 @@ mod adversarial_policy_tests {
 
     /// The contextual bucket: with too few bucket trials the global posterior
     /// is used (documented shrinkage), and the derived bucket experiment is
-    /// provisioned idempotently — concurrent selections race to create ONE
+    /// provisioned idempotently, concurrent selections race to create ONE
     /// bucket family.
     #[tokio::test]
     async fn context_buckets_fall_back_then_own_the_posture_and_race_safely() {

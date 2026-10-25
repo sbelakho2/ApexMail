@@ -4,8 +4,8 @@
 //!
 //! | Warmup-IP selection for the send | Route |
 //! |----------------------------------|-------|
-//! | A warming `dedicated_ips` row is selected (`Domain::warmup_ip`) | [`DeliveryRoute::Dedicated`] — the relay MTA must bind its recipient-facing socket to that IP |
-//! | None | [`DeliveryRoute::SesShared`] — AWS SES shared IP pool |
+//! | A warming `dedicated_ips` row is selected (`Domain::warmup_ip`) | [`DeliveryRoute::Dedicated`], the relay MTA must bind its recipient-facing socket to that IP |
+//! | None | [`DeliveryRoute::SesShared`], AWS SES shared IP pool |
 //!
 //! There is **no** per-tenant preference toggle: the presence of a selected
 //! dedicated IP is the sole determinant. A tenant with dedicated IPs still
@@ -19,7 +19,7 @@
 //! Route resolution used to live here behind a SECOND `EmailTransport`
 //! trait (with a `bind_ip` `TransportConfig`, a `send_raw_email` path and a
 //! DB-backed `TransportRouter` cache) that the running processor never
-//! called. Two transport abstractions existed and only one was live — so
+//! called. Two transport abstractions existed and only one was live, so
 //! warmup admission could reserve capacity on an IP nothing actually sent
 //! from (release-blocker 15). The duplicate trait, its send path, its cache
 //! and its wrapper were deleted. The single active contract is
@@ -34,7 +34,7 @@ use super::types::DeliveryRoute;
 /// Which backend a resolved [`DeliveryRoute`] is bound to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TransportKind {
-    /// AWS SES shared IP pool — no dedicated source IP to bind.
+    /// AWS SES shared IP pool, no dedicated source IP to bind.
     SesShared,
     /// Self-hosted relay MTA carrying a dedicated source IP.
     Dedicated,
