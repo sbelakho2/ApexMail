@@ -357,6 +357,8 @@ validate_repo_gates() {
         # payload stays inside its ceiling, and the marketing/console asset
         # trees carry no client JavaScript at all. Self-test included so the
         # plant-a-script arm can fail.
+        # Every built page renders its real body (h1 + non-stub main).
+        ci_check "marketing page content" python3 tools/check_marketing_pages.py
         ci_check "asset budget" python3 tools/check_asset_budget.py
         ci_check "asset budget self-test" python3 tools/check_asset_budget.py --self-test
         # The meta-proof (2026-10-07 gates review): the gate's own masker

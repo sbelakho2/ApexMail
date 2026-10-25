@@ -1,0 +1,18 @@
+{# ── Composed opening band for content-driven pages ────────────────────
+   Context variables (set by the caller before the include):
+     band_kicker  optional short label (page-type or family)
+     band_title   the page/section title
+     band_sub     optional description
+   Every content page opens as a designed band, not a raw document
+   (owner directive 2026-10-25: variety and rhythm on every screen). #}
+<section class="apex-mkt-hero apex-mkt-hero--compact">
+  <div class="apex-mkt-container">
+    <div class="apex-mkt-hero__layout">
+      <div class="apex-mkt-hero__copy">
+        {% if band_kicker %}<span class="apex-mkt-kicker">{{ band_kicker }}</span>{% endif %}
+        <h1 class="apex-mkt-hero__title">{{ band_title }}</h1>
+        {% if band_sub %}<p class="apex-mkt-hero__sub">{{ band_sub }}</p>{% endif %}
+      </div>
+    </div>
+  </div>
+</section>

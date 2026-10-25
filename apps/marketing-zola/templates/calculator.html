@@ -15,4 +15,14 @@
   {% if page.description %}{{ page.description }}{% else %}{{ config.description }}{% endif %}
 {% endblock og_description %}
 
-{% block content %}test{% endblock content %}
+{% block content %}
+{% include "partials/calculator/hero.html" %}
+
+{# Server-submitted estimate: the form POSTs to the api-server's pricing
+   endpoint, which computes the estimate from the billing-service plan
+   tables and renders the result page. No client-side calculator. #}
+{% include "partials/pricing/calculator.html" %}
+
+{% include "partials/calculator/competitor-breakdown.html" %}
+{% include "partials/calculator/cta.html" %}
+{% endblock content %}

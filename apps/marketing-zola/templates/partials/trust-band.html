@@ -1,0 +1,32 @@
+{# ── Closing evidence band for trust-mode pages ────────────────────────
+   Paper documents get one deliberate ink contrast event and a checkable
+   close (law 11/12: one dominant interruption per page; trust pages
+   refuse crimson fields, so the contract lives on ink). #}
+<section class="apex-mkt-section apex-mkt-section--ink">
+  <div class="apex-mkt-container">
+    <div class="apex-mkt-heading--statement">
+      <span class="apex-mkt-kicker">
+        {% if i18n_data and i18n_data[l] and i18n_data[l]["trust_band"] and i18n_data[l]["trust_band"]["kicker"] %}{{ i18n_data[l]["trust_band"]["kicker"] }}{% else %}Evidence{% endif %}
+      </span>
+      <h2 class="apex-mkt-heading__title">
+        {% if i18n_data and i18n_data[l] and i18n_data[l]["trust_band"] and i18n_data[l]["trust_band"]["title"] %}{{ i18n_data[l]["trust_band"]["title"] }}{% else %}The claims above are checkable.{% endif %}
+      </h2>
+    </div>
+    <p class="apex-lead">
+      {% if i18n_data and i18n_data[l] and i18n_data[l]["trust_band"] and i18n_data[l]["trust_band"]["lead"] %}{{ i18n_data[l]["trust_band"]["lead"] }}{% else %}Every accepted message carries an Ed25519-signed routing receipt. Verify one with the published public key: the receipt is the record, not the dashboard.{% endif %}
+    </p>
+    <div class="apex-evidence apex-evidence--mkt">
+      <div class="apex-evidence__head">
+        <span>{% if i18n_data and i18n_data[l] and i18n_data[l]["trust_band"] and i18n_data[l]["trust_band"]["receipt"] %}{{ i18n_data[l]["trust_band"]["receipt"] }}{% else %}Routing receipt{% endif %}</span>
+        <span class="apex-evidence__seal" aria-label="{% if i18n_data and i18n_data[l] and i18n_data[l]["a11y"] and i18n_data[l]["a11y"]["evidence_seal"] %}{{ i18n_data[l]["a11y"]["evidence_seal"] }}{% else %}Signed and verified{% endif %}">SIGNED / VERIFIED</span>
+      </div>
+      <div class="apex-evidence__hatch" aria-hidden="true"></div>
+      <div class="apex-evidence__body">
+        <div class="apex-mono">apexmail-routing-receipt/v1, message_id, tenant_id, transport, accepted_at, actual_source_ip</div>
+        <p class="apex-meta mt-2">
+          {% if i18n_data and i18n_data[l] and i18n_data[l]["trust_band"] and i18n_data[l]["trust_band"]["note"] %}{{ i18n_data[l]["trust_band"]["note"] | safe }}{% else %}Verify against the published key on <a href="/eu-sovereign/">the sovereignty page</a>.{% endif %}
+        </p>
+      </div>
+    </div>
+  </div>
+</section>
