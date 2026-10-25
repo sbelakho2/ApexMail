@@ -2361,7 +2361,7 @@ impl SequenceStepHandler {
             postal_address: None,
             privacy_url: None,
         };
-        let rendered = match &plan.content {
+        let mut rendered = match &plan.content {
             PlannedContent::Strategy { subject, body } => {
                 let (footer_html, footer_text) = render_outreach_footer(&footer);
                 RenderedMessage {
@@ -2386,6 +2386,14 @@ impl SequenceStepHandler {
                 }
             }
         };
+
+        // Invariant I11: an autonomous send says how it was produced and how
+        // to reach a human — appended to BOTH bodies (HTML and plain text).
+        let disclosure = crate::reply_autosend::AUTO_SEND_AI_DISCLOSURE;
+        rendered.html = rendered.html.map(|body| {
+            format!("{body}\n<p style=\"font-size:12px;color:#666\">{disclosure}</p>")
+        });
+        rendered.text = rendered.text.map(|body| format!("{body}\n\n{disclosure}"));
 
         // ── The Decision Packet ────────────────────────────────────────────
         // Every external effect goes through the central engine: autonomy, kill
@@ -2994,6 +3002,12 @@ mod tests {
             "the strategy arm must append the rendered footer to both bodies"
         );
 
+        // Invariant I11: the send path appends the AI disclosure to both
+        // bodies — the constant must be referenced in THIS module's send arm.
+        assert!(
+            source.contains("AUTO_SEND_AI_DISCLOSURE"),
+            "the sequence send path must carry the AI disclosure constant"
+        );
         // The template arm must go through the same renderer.
         assert!(
             source.contains(concat!(

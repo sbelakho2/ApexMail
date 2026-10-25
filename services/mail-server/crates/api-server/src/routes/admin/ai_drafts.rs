@@ -919,6 +919,12 @@ pub async fn auto_send_one(state: &AppState, id: &str) -> Result<AutoSendOutcome
     } else {
         subject.clone()
     };
+    // Invariant I11: the autonomous reply discloses its origin and the way
+    // back to a human, in both bodies, before it is queued.
+    let reply = format!(
+        "{reply}\n\n{}",
+        sales_autopilot::reply_autosend::AUTO_SEND_AI_DISCLOSURE
+    );
     let reply_html: String = crate::routes::helpers::html_escape(&reply)
         .split("\n\n")
         .map(|paragraph| format!("<p>{}</p>", paragraph.replace('\n', "<br/>")))
@@ -2485,6 +2491,30 @@ mod auto_send_tests {
                 priority,
                 crate::routes::system_sender::QUEUE_PRIORITY_FIRST_RESPONSE,
                 "an auto-sent first response rides the same priority lane as an approved one"
+            );
+
+            // Invariant I11: the autonomous reply discloses its origin and
+            // the way to a human IN BOTH queued bodies.
+            let (queued_html, queued_text): (Option<String>, Option<String>) = sqlx::query_as(
+                "SELECT html_body, text_body FROM email_queue \
+                 WHERE lower(\"to\") = lower($1) ORDER BY created_at DESC LIMIT 1",
+            )
+            .bind(&recipient)
+            .fetch_one(&pool)
+            .await
+            .expect("queued bodies");
+            let disclosure = sales_autopilot::reply_autosend::AUTO_SEND_AI_DISCLOSURE;
+            assert!(
+                queued_html
+                    .as_deref()
+                    .is_some_and(|body| body.contains(disclosure)),
+                "the queued HTML body must carry the AI disclosure"
+            );
+            assert!(
+                queued_text
+                    .as_deref()
+                    .is_some_and(|body| body.contains(disclosure)),
+                "the queued text body must carry the AI disclosure"
             );
             let queued_at: Option<chrono::DateTime<chrono::Utc>> = sqlx::query_scalar(
                 "SELECT queued_at FROM first_response_requests WHERE id = $1",

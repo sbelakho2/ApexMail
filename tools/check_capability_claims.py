@@ -746,6 +746,25 @@ for entry in CAPABILITIES:
             "the linked fact records the capability as ADVERTISED but the registry stage is "
             "sub-runtime-wired — advertise only wired capabilities",
         )
+        # 2026-10-25 capability-truth wave: the ladder is monotonic — an
+        # ADVERTISED capability must also be MONITORED (an alerting rule /
+        # dashboard in deploy/ names its verdict counters) and its stage must
+        # reach `monitored`. Without this the registry admitted
+        # `monitored: false, advertised: true` — a stronger security
+        # impression than the operation provides.
+        check(
+            f"facts-advertised-monitored:{cap}",
+            fact.get("monitored") is True and dep.get("monitored") is True,
+            "the capability is ADVERTISED but not monitored (deployment.monitored / "
+            "facts monitored must be true; add the alerting rule + dashboard for its "
+            "verdict counters first)",
+        )
+        check(
+            f"facts-advertised-stage-monitored:{cap}",
+            STAGE_INDEX.get(entry.get("stage"), -1) >= STAGE_INDEX.get("monitored", 99),
+            "the capability is ADVERTISED but its registry stage does not reach `monitored` — "
+            "complete monitoring, then promote the stage",
+        )
     if entry.get("stage") == "advertised":
         check(
             f"facts-advertised-true:{cap}", fact.get("advertised") is True,

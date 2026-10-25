@@ -1,0 +1,227 @@
+{
+ "title": "Content Security (spam \u00b7 IDS \u00b7 sandbox \u00b7 DLP \u00b7 WAF)",
+ "uid": "content-security",
+ "tags": [
+  "apexmail",
+  "security"
+ ],
+ "timezone": "utc",
+ "schemaVersion": 39,
+ "refresh": "1m",
+ "panels": [
+  {
+   "id": 1,
+   "type": "timeseries",
+   "title": "Spam verdicts (rate 5m)",
+   "gridPos": {
+    "h": 8,
+    "w": 12,
+    "x": 12,
+    "y": 0
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short"
+    },
+    "overrides": []
+   },
+   "targets": [
+    {
+     "expr": "sum(rate(mta_content_security_spam_total{result=\"tagged\"}[5m]))",
+     "legendFormat": "tagged",
+     "refId": "A"
+    },
+    {
+     "expr": "sum(rate(mta_content_security_spam_total{result=\"rejected\"}[5m]))",
+     "legendFormat": "rejected",
+     "refId": "B"
+    },
+    {
+     "expr": "sum(rate(mta_content_security_spam_total{result=\"engine_failed\"}[5m]))",
+     "legendFormat": "engine_failed",
+     "refId": "C"
+    }
+   ]
+  },
+  {
+   "id": 2,
+   "type": "timeseries",
+   "title": "IDS verdicts (rate 5m)",
+   "gridPos": {
+    "h": 8,
+    "w": 12,
+    "x": 0,
+    "y": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short"
+    },
+    "overrides": []
+   },
+   "targets": [
+    {
+     "expr": "sum(rate(mta_content_security_ids_total{result=\"pass\"}[5m]))",
+     "legendFormat": "pass",
+     "refId": "A"
+    },
+    {
+     "expr": "sum(rate(mta_content_security_ids_total{result=\"alerted\"}[5m]))",
+     "legendFormat": "alerted",
+     "refId": "B"
+    },
+    {
+     "expr": "sum(rate(mta_content_security_ids_total{result=\"refused\"}[5m]))",
+     "legendFormat": "refused",
+     "refId": "C"
+    },
+    {
+     "expr": "sum(rate(mta_content_security_ids_total{result=\"engine_failed\"}[5m]))",
+     "legendFormat": "engine_failed",
+     "refId": "D"
+    }
+   ]
+  },
+  {
+   "id": 3,
+   "type": "timeseries",
+   "title": "Attachment sandbox (rate 5m)",
+   "gridPos": {
+    "h": 8,
+    "w": 12,
+    "x": 12,
+    "y": 16
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short"
+    },
+    "overrides": []
+   },
+   "targets": [
+    {
+     "expr": "sum(rate(mta_content_security_sandbox_total{result=\"clean\"}[5m]))",
+     "legendFormat": "clean",
+     "refId": "A"
+    },
+    {
+     "expr": "sum(rate(mta_content_security_sandbox_total{result=\"rejected_verdict\"}[5m]))",
+     "legendFormat": "rejected_verdict",
+     "refId": "B"
+    },
+    {
+     "expr": "sum(rate(mta_content_security_sandbox_total{result=\"quarantined_verdict\"}[5m]))",
+     "legendFormat": "quarantined_verdict",
+     "refId": "C"
+    },
+    {
+     "expr": "sum(rate(mta_content_security_sandbox_total{result=\"engine_failed\"}[5m]))",
+     "legendFormat": "engine_failed",
+     "refId": "D"
+    }
+   ]
+  },
+  {
+   "id": 4,
+   "type": "timeseries",
+   "title": "Sandbox actions (1h)",
+   "gridPos": {
+    "h": 8,
+    "w": 12,
+    "x": 0,
+    "y": 24
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short"
+    },
+    "overrides": []
+   },
+   "targets": [
+    {
+     "expr": "sum(increase(mta_content_security_sandbox_actions_total{action=\"stripped\"}[1h]))",
+     "legendFormat": "stripped",
+     "refId": "A"
+    },
+    {
+     "expr": "sum(increase(mta_content_security_sandbox_actions_total{action=\"rejected\"}[1h]))",
+     "legendFormat": "rejected",
+     "refId": "B"
+    }
+   ]
+  },
+  {
+   "id": 5,
+   "type": "timeseries",
+   "title": "Outbound DLP gate (1h)",
+   "gridPos": {
+    "h": 8,
+    "w": 12,
+    "x": 12,
+    "y": 32
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short"
+    },
+    "overrides": []
+   },
+   "targets": [
+    {
+     "expr": "sum(increase(apexmail_dlp_presend_refused_total[1h]))",
+     "legendFormat": "refused",
+     "refId": "A"
+    },
+    {
+     "expr": "sum(increase(apexmail_dlp_presend_held_total[1h]))",
+     "legendFormat": "held",
+     "refId": "B"
+    },
+    {
+     "expr": "sum(increase(apexmail_dlp_engine_unavailable_failopen_total[15m]))",
+     "legendFormat": "fail_open",
+     "refId": "C"
+    }
+   ]
+  },
+  {
+   "id": 6,
+   "type": "timeseries",
+   "title": "WAF decisions (rate 5m)",
+   "gridPos": {
+    "h": 8,
+    "w": 12,
+    "x": 0,
+    "y": 40
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short"
+    },
+    "overrides": []
+   },
+   "targets": [
+    {
+     "expr": "sum(rate(apexmail_waf_decisions_total{result=\"allowed\"}[5m]))",
+     "legendFormat": "allowed",
+     "refId": "A"
+    },
+    {
+     "expr": "sum(rate(apexmail_waf_decisions_total{result=\"monitor\"}[5m]))",
+     "legendFormat": "monitor",
+     "refId": "B"
+    },
+    {
+     "expr": "sum(rate(apexmail_waf_decisions_total{result=\"would_block\"}[5m]))",
+     "legendFormat": "would_block",
+     "refId": "C"
+    },
+    {
+     "expr": "sum(rate(apexmail_waf_decisions_total{result=\"blocked\"}[5m]))",
+     "legendFormat": "blocked",
+     "refId": "D"
+    }
+   ]
+  }
+ ]
+}

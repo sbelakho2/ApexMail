@@ -1330,8 +1330,13 @@ services:
       # static attachment inspection (SandboxEngine, X-Apex-Attachment-Scan
       # headers), and SMTP intrusion detection (IdsEngine). Enable by setting
       # the flags in the deployment .env — refusal/strip actions are separate
-      # opt-ins (MTA_SPAM_REJECT_ENABLED, MTA_ATTACHMENT_SCAN_MODE,
-      # MTA_IDS_REFUSE); a filter error always fails OPEN to tag-only.
+      # ENFORCED by managed default (2026-10-25 capability-truth wave): the
+      # corpora tests (content_security.rs benign/attack corpus with measured
+      # false-positive bounds) back the refuse/strip defaults, the verdict
+      # counters are alerted (deploy/alerting-rules.yml) and dashboarded
+      # (content-security.json). An operator can still revert each arm with
+      # MTA_SPAM_REJECT_ENABLED=false / MTA_IDS_REFUSE=false /
+      # MTA_ATTACHMENT_SCAN_MODE=flag; a filter error always fails OPEN.
       MTA_SPAM_FILTER_ENABLED: "${MTA_SPAM_FILTER_ENABLED:?production must define the spam-filter policy (managed baseline — true)}"
       MTA_ATTACHMENT_SCAN_ENABLED: "${MTA_ATTACHMENT_SCAN_ENABLED:?production must define the attachment-scan policy (managed baseline — true)}"
       MTA_IDS_ENABLED: "${MTA_IDS_ENABLED:?production must define the IDS policy (managed baseline — true)}"
@@ -1339,8 +1344,8 @@ services:
       # Enforcement opt-ins (separate from inspection above). Explicit false
       # defaults: tag-only spam and detection-only IDS are the managed
       # baseline until the operator tunes them.
-      MTA_SPAM_REJECT_ENABLED: ${MTA_SPAM_REJECT_ENABLED:-false}
-      MTA_IDS_REFUSE: ${MTA_IDS_REFUSE:-false}
+      MTA_SPAM_REJECT_ENABLED: ${MTA_SPAM_REJECT_ENABLED:-true}
+      MTA_IDS_REFUSE: ${MTA_IDS_REFUSE:-true}
     secrets:
       - postgres_password
       - redis_password

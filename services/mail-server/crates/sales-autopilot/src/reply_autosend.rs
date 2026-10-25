@@ -151,6 +151,15 @@ pub const COMPLAINT_OR_OPTOUT_COUNT_SQL: &str = r#"
       AND created_at >= NOW() - make_interval(days => $2::int)
 "#;
 
+/// The AI-transparency disclosure every autonomous outbound message carries
+/// (invariant I11). Both autonomous writers render it into the body — the
+/// reply auto-send path (api-server) and the sequence worker — so no
+/// unattended send leaves the platform without saying how it was produced and
+/// how to reach a human.
+pub const AUTO_SEND_AI_DISCLOSURE: &str = "This message was drafted automatically by \
+     ApexMail's AI assistant and checked against ApexMail's knowledge base before sending. \
+     Reply to reach a human at support@apexmail.ee.";
+
 /// The auto-send audit action (api-server writes it inside the send
 /// transaction).
 pub const AUTO_SENT_AUDIT_ACTION: &str = "control_plane.ai_draft.auto_sent";
@@ -1196,6 +1205,15 @@ pub async fn evaluate_for_send(
             "autonomy_not_granted: tenant mode is '{autonomy_mode}'; only 'autonomous_guarded' \
              permits autonomous execution"
         ));
+    } else {
+        // Ring 4 — invariant I22: the MODE grants execution; an active,
+        // OWNER-APPROVED policy pack covering this tenant AND the action kind
+        // (with budget left) is the AUTHORITY. Fail-closed: no pack, wrong
+        // action coverage or exhausted caps refuse here.
+        let verdict = crate::policy_packs::evaluate(&mut *conn, tenant_id, "reply_autosend").await?;
+        if !verdict.allowed {
+            reasons.extend(verdict.reasons);
+        }
     }
 
     Ok(GateVerdict {
@@ -1266,6 +1284,209 @@ mod gate_db_tests {
         .execute(pool)
         .await
         .expect("seed autonomy state");
+    }
+
+    /// Invariant I22 — the pack ring. Grant + evidence + autonomy all pass,
+    /// but the AUTHORITY is the pack: missing, wrong-action, expired and
+    /// exhausted packs all refuse; a covering pack with budget allows.
+    #[tokio::test]
+    async fn autonomous_send_requires_an_active_owner_approved_policy_pack() {
+        let Some(pool) = canonical_test_pool("f9_policy_pack").await else {
+            return;
+        };
+        let tenant = unique_test_tenant("f9pack");
+        let class = LowRiskClass::Scheduling;
+
+        // The pack table has a real FK to tenants — the tenant must exist.
+        sqlx::query(
+            "INSERT INTO tenants (id, name, plan, status) \
+             VALUES ($1, $2, 'free', 'active') ON CONFLICT (id) DO NOTHING",
+        )
+        .bind(&tenant)
+        .bind(format!("I22 {tenant}"))
+        .execute(&pool)
+        .await
+        .expect("seed tenant");
+
+        // Seed everything EXCEPT the pack: grant row + evidence + autonomy.
+        sqlx::query(
+            "INSERT INTO sales_autonomy_state (tenant_id, mode, kill_switch) \
+             VALUES ($1, 'autonomous_guarded', FALSE) \
+             ON CONFLICT (tenant_id) DO UPDATE SET mode = 'autonomous_guarded', kill_switch = FALSE",
+        )
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .expect("seed autonomy");
+        sqlx::query(
+            "INSERT INTO reply_autosend_grants (tenant_id, reply_class, enabled, \
+                enabled_by, enabled_at, evidence_required_approvals, evidence_window_days) \
+             VALUES ($1, $2, TRUE, 'test-operator', NOW(), 10, 30) \
+             ON CONFLICT (tenant_id, reply_class) DO UPDATE SET enabled = TRUE, \
+                enabled_by = EXCLUDED.enabled_by, enabled_at = EXCLUDED.enabled_at, \
+                evidence_required_approvals = 10, evidence_window_days = 30",
+        )
+        .bind(&tenant)
+        .bind(class.as_str())
+        .execute(&pool)
+        .await
+        .expect("seed grant");
+        // Real approvals satisfy the evidence ring (floor: 10 in 30 days).
+        seed_approvals(&pool, &tenant, class, 10, 1).await;
+
+        let mut conn = pool.acquire().await.expect("acquire");
+
+        // No pack: refused with the typed reason (fail closed).
+        let verdict = evaluate_for_send(&mut conn, &tenant, class)
+            .await
+            .expect("evaluate without a pack");
+        assert!(!verdict.allowed);
+        assert!(
+            verdict
+                .reasons
+                .iter()
+                .any(|r| r.contains("policy_pack_missing")),
+            "{:?}",
+            verdict.reasons
+        );
+
+        // A pack that does not cover the action kind: still refused.
+        crate::policy_packs::approve(
+            &pool,
+            &tenant,
+            "research-only",
+            &["research".to_string()],
+            100,
+            1000,
+            "audit-operator",
+        )
+        .await
+        .expect("approve research-only pack");
+        let verdict = evaluate_for_send(&mut conn, &tenant, class)
+            .await
+            .expect("evaluate with a non-covering pack");
+        assert!(!verdict.allowed);
+        assert!(
+            verdict
+                .reasons
+                .iter()
+                .any(|r| r.contains("policy_pack_action_not_covered")),
+            "{:?}",
+            verdict.reasons
+        );
+
+        // An EXPIRED covering pack: refused.
+        sqlx::query("DELETE FROM sales_policy_packs WHERE tenant_id = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .expect("clear packs");
+        crate::policy_packs::approve(
+            &pool,
+            &tenant,
+            "expired-pack",
+            &["reply_autosend".to_string()],
+            100,
+            1000,
+            "audit-operator",
+        )
+        .await
+        .expect("approve expired pack");
+        sqlx::query("UPDATE sales_policy_packs SET expires_at = NOW() - INTERVAL '1 day' WHERE tenant_id = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .expect("expire pack");
+        let verdict = evaluate_for_send(&mut conn, &tenant, class)
+            .await
+            .expect("evaluate with an expired pack");
+        assert!(!verdict.allowed);
+        assert!(
+            verdict
+                .reasons
+                .iter()
+                .any(|r| r.contains("policy_pack_missing")),
+            "an expired pack must fail closed: {:?}",
+            verdict.reasons
+        );
+
+        // A covering, active, owner-approved pack: allowed.
+        sqlx::query("DELETE FROM sales_policy_packs WHERE tenant_id = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .expect("clear packs");
+        crate::policy_packs::approve(
+            &pool,
+            &tenant,
+            "reply-pack",
+            &["reply_autosend".to_string(), "sequence_send".to_string()],
+            100,
+            1000,
+            "audit-operator",
+        )
+        .await
+        .expect("approve covering pack");
+        let verdict = evaluate_for_send(&mut conn, &tenant, class)
+            .await
+            .expect("evaluate with the covering pack");
+        assert!(
+            verdict.allowed,
+            "a covering pack authorizes the send: {:?}",
+            verdict.reasons
+        );
+
+        // Budget: cap the pack at zero remaining (2 today, cap 2) and the
+        // same gate refuses with the cap reason.
+        sqlx::query("UPDATE sales_policy_packs SET daily_message_cap = 2 WHERE tenant_id = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .expect("set cap");
+        // Seed the REAL production ledger rows: the auto-send path writes
+        // `control_plane.ai_draft.auto_sent` under the system tenant with the
+        // routed tenant in details.tenantId (ai_drafts.rs auto-send txn).
+        for i in 0..2 {
+            sqlx::query(
+                "INSERT INTO audit_logs (id, tenant_id, user_id, action, resource, resource_id, \
+                     details, outcome, timestamp, created_at, hash, signature) \
+                 VALUES ($1, 'system', NULL, 'control_plane.ai_draft.auto_sent', 'ai_draft', $3, \
+                     jsonb_build_object('tenantId', $2::text, 'replyClass', 'scheduling'), \
+                     'success', NOW(), NOW(), '', '')",
+            )
+            .bind(format!("pack_budget_{tenant}_{i}"))
+            .bind(&tenant)
+            .bind(format!("inb_pack_{tenant}_{i}"))
+            .execute(&pool)
+            .await
+            .expect("seed autonomous send audit");
+        }
+        let verdict = evaluate_for_send(&mut conn, &tenant, class)
+            .await
+            .expect("evaluate with an exhausted cap");
+        assert!(!verdict.allowed);
+        assert!(
+            verdict
+                .reasons
+                .iter()
+                .any(|r| r.contains("policy_pack_daily_cap_reached")),
+            "{:?}",
+            verdict.reasons
+        );
+
+        sqlx::query(
+            "DELETE FROM audit_logs WHERE action = 'control_plane.ai_draft.auto_sent' \
+             AND details->>'tenantId' = $1",
+        )
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .expect("cleanup audits");
+        sqlx::query("DELETE FROM sales_policy_packs WHERE tenant_id = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .expect("cleanup packs");
     }
 
     /// Seed a live user in the system tenant with the given role.

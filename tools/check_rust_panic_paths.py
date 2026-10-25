@@ -15,8 +15,8 @@ PANIC_RE = re.compile(r"\.(unwrap|expect)\s*\(")
 TEST_FILE_RE = re.compile(r"(^|/)tests?(/|$)")
 
 
-def is_test_file(path: Path) -> bool:
-    relative = path.relative_to(CRATES).as_posix()
+def is_test_file(path: Path, root: Path = CRATES) -> bool:
+    relative = path.relative_to(root).as_posix()
     if TEST_FILE_RE.search(relative):
         return True
     # Common benchmark and test helper locations.
@@ -25,11 +25,11 @@ def is_test_file(path: Path) -> bool:
     return False
 
 
-def rust_sources() -> list[Path]:
+def rust_sources(root: Path = CRATES) -> list[Path]:
     return sorted(
         path
-        for path in CRATES.rglob("*.rs")
-        if "/target/" not in path.as_posix() and not is_test_file(path)
+        for path in root.rglob("*.rs")
+        if "/target/" not in path.as_posix() and not is_test_file(path, root)
     )
 
 
@@ -129,11 +129,11 @@ def count_braces_delta(
     return delta, in_double, in_raw
 
 
-def count_panic_paths() -> tuple[int, list[str]]:
+def count_panic_paths(root: Path = CRATES) -> tuple[int, list[str]]:
     count = 0
     examples: list[str] = []
-    for path in rust_sources():
-        relative = path.relative_to(ROOT)
+    for path in rust_sources(root):
+        relative = path.relative_to(root)
         skip_block = False
         skip_depth = 0
         pending_test_attr = False
@@ -191,7 +191,43 @@ def count_panic_paths() -> tuple[int, list[str]]:
     return count, examples
 
 
+def self_test() -> int:
+    """Drift-injection self-test: a panic path in production code must be
+    counted, the same panic in tests/ must be ignored, and a clean tree must
+    report zero."""
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        prod = root / "src"
+        prod.mkdir(parents=True)
+        (prod / "lib.rs").write_text(
+            'pub fn f() -> u8 { let v: u8 = (1 / 0).unwrap(); println!("{{literal}}"); v }\n'
+        )
+        count, _ = count_panic_paths(root)
+        if count != 1:
+            print(f"self-test FAIL: production panic path counted {count} != 1", file=sys.stderr)
+            return 1
+        (root / "tests").mkdir()
+        (root / "tests" / "it.rs").write_text(
+            'fn g() { let x: i32 = "x".parse().expect("parse"); assert_eq!(x, 0); }\n'
+        )
+        count, _ = count_panic_paths(root)
+        if count != 1:
+            print(f"self-test FAIL: test-file panic path was counted ({count} != 1)", file=sys.stderr)
+            return 1
+        (prod / "lib.rs").write_text("pub fn f() -> u8 { 0 }\n")
+        count, _ = count_panic_paths(root)
+        if count != 0:
+            print(f"self-test FAIL: clean tree reported {count} != 0", file=sys.stderr)
+            return 1
+    print("panic-path self-test: ok")
+    return 0
+
+
 def main() -> int:
+    if "--self-test" in sys.argv[1:]:
+        return self_test()
     count, examples = count_panic_paths()
     if count > MAX_PANIC_PATHS:
         print(

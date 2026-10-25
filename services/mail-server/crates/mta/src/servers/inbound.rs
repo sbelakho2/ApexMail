@@ -1712,19 +1712,21 @@ impl InboundServer {
         //    "bounces+" anywhere (e.g. "user+bounces+tag@dom").
         let is_verp = ctx.rcpt_to.iter().any(|r| r.starts_with("bounces+"));
 
-        // 4. Resolve the tenant that owns the first recipient's domain
-        //    (nullable: rows with an unknown/local-only recipient stay untagged).
-        let tenant_id: Option<String> = match ctx.rcpt_to.iter().find_map(|r| recipient_domain(r)) {
-            Some(domain) => sqlx::query_scalar(
-                "SELECT tenant_id FROM domains WHERE LOWER(name) = LOWER($1) LIMIT 1",
-            )
-            .bind(domain)
-            .fetch_optional(&self.pool)
-            .await
-            .ok()
-            .flatten(),
-            None => None,
-        };
+        // 4. Resolve recipients PER OWNING TENANT (invariant I27) — one
+        //    query per unique domain. The row binds to the first resolved
+        //    tenant and stores ONLY that tenant's own addresses; the union of
+        //    a cross-tenant envelope is never written under one tenant.
+        let recipient_groups = self.group_recipients(&ctx.rcpt_to).await?;
+        let tenant_id: Option<String> = ctx.rcpt_to.iter().find_map(|rcpt| {
+            recipient_groups
+                .iter()
+                .find_map(|(tenant, own)| own.contains(rcpt).then(|| tenant.clone()))
+        });
+        let stored_recipients: Vec<String> = tenant_id
+            .as_ref()
+            .and_then(|tenant| recipient_groups.get(tenant))
+            .cloned()
+            .unwrap_or_else(|| ctx.rcpt_to.clone());
 
         // 5. Spam/phishing scan (spam-filter crate). Verdict headers are
         //    attached to the stored message; a REJECT classification refuses
@@ -1851,7 +1853,7 @@ impl InboundServer {
         .bind(&message_id)
         .bind(tenant_id.as_deref())
         .bind(sender)
-        .bind(&ctx.rcpt_to)
+        .bind(&stored_recipients)
         .bind(ctx.client_ip.to_string())
         .bind(helo)
         .bind(&stored_message)
@@ -1877,8 +1879,14 @@ impl InboundServer {
 
         // 11. Queue webhook notification (best-effort, after the durable
         //    commit — a webhook failure must never reject accepted mail).
-        self.queue_inbound_webhook(&message_id, tenant_id.as_deref(), mail_from, &ctx.rcpt_to)
-            .await?;
+        queue_inbound_events_for_tenants(
+            &self.pool,
+            &message_id,
+            mail_from,
+            &recipient_groups,
+            tenant_id.as_deref(),
+        )
+        .await;
 
         info!(
             id = %message_id,
@@ -2015,37 +2023,19 @@ impl InboundServer {
         }
     }
 
-    async fn queue_inbound_webhook(
+    /// Group this envelope's recipients by OWNING TENANT (invariant I27).
+    ///
+    /// A single message can arrive for several tenants' domains at once. Each
+    /// tenant's view of it — the stored row and the queued webhook — must
+    /// carry only that tenant's own addresses; the union would disclose
+    /// another tenant's recipients. Domains are resolved once each.
+    async fn group_recipients(
         &self,
-        message_id: &str,
-        tenant_id: Option<&str>,
-        from: &str,
         rcpt_to: &[String],
-    ) -> anyhow::Result<()> {
-        let payload = serde_json::json!({
-            "message_id": message_id,
-            "from": from,
-            "recipients": rcpt_to,
-            "timestamp": chrono::Utc::now().to_rfc3339(),
-        });
-
-        // Enqueue into the canonical `webhook_queue` table the worker's
-        // webhook processor drains; the former LPUSH onto the
-        // `mta:webhook_queue` Redis list had no consumer, so accepted
-        // inbound mail never produced a webhook. Best-effort by contract:
-        // the message is already persisted and a queue failure must never
-        // reject the mail or fail the session. Tenant-less mail (no
-        // resolvable owning tenant) cannot be routed and is skipped.
-        super::util::queue_tenant_webhook_event(
-            &self.pool,
-            tenant_id.unwrap_or_default(),
-            "message.inbound",
-            message_id,
-            &payload,
-        )
-        .await;
-
-        Ok(())
+    ) -> anyhow::Result<std::collections::BTreeMap<String, Vec<String>>> {
+        group_recipients_by_tenant(&self.pool, rcpt_to)
+            .await
+            .map_err(|error| anyhow::anyhow!("recipient tenant grouping failed: {error}"))
     }
 
     // ── rate limiting ──────────────────────────────────────────────────────────
@@ -2638,6 +2628,81 @@ fn should_advertise_starttls(
 /// `writable()` indefinitely, so a peer that tripped the per-IP connection
 /// cap and then never read could pin the refusal task forever. The refusal
 /// is best-effort: timing out simply closes the socket.
+/// Group recipients by owning tenant. Domains are resolved once each; an
+/// address whose domain resolves to no tenant is excluded from every tenant's
+/// group (tenant-less mail is not any tenant's to see).
+pub async fn group_recipients_by_tenant(
+    pool: &sqlx::PgPool,
+    rcpt_to: &[String],
+) -> Result<std::collections::BTreeMap<String, Vec<String>>, sqlx::Error> {
+    let mut by_domain: std::collections::HashMap<String, Option<String>> =
+        std::collections::HashMap::new();
+    let mut out: std::collections::BTreeMap<String, Vec<String>> = std::collections::BTreeMap::new();
+    for rcpt in rcpt_to {
+        let Some(domain) = recipient_domain(rcpt).map(str::to_string) else { continue };
+        let tenant = match by_domain.get(&domain) {
+            Some(cached) => cached.clone(),
+            None => {
+                let resolved: Option<String> = sqlx::query_scalar(
+                    "SELECT tenant_id FROM domains WHERE LOWER(name) = LOWER($1) LIMIT 1",
+                )
+                .bind(&domain)
+                .fetch_optional(pool)
+                .await
+                .ok()
+                .flatten();
+                by_domain.insert(domain, resolved.clone());
+                resolved
+            }
+        };
+        if let Some(tenant) = tenant {
+            out.entry(tenant).or_default().push(rcpt.clone());
+        }
+    }
+    Ok(out)
+}
+
+/// Queue one `message.inbound` webhook event PER owning tenant, each payload
+/// carrying only that tenant's recipients (invariant I27). `fallback_tenant`
+/// is queued with its OWN subset only — it never widens the group.
+pub async fn queue_inbound_events_for_tenants(
+    pool: &sqlx::PgPool,
+    message_id: &str,
+    from: &str,
+    grouped: &std::collections::BTreeMap<String, Vec<String>>,
+    fallback_tenant: Option<&str>,
+) {
+    let mut queued = std::collections::HashSet::new();
+    for (tenant, recipients) in grouped {
+        queued.insert(tenant.clone());
+        let payload = serde_json::json!({
+            "message_id": message_id,
+            "from": from,
+            "recipients": recipients,
+            "timestamp": chrono::Utc::now().to_rfc3339(),
+        });
+        super::util::queue_tenant_webhook_event(
+            pool, tenant, "message.inbound", message_id, &payload,
+        )
+        .await;
+    }
+    if let Some(tenant) = fallback_tenant.filter(|t| !queued.contains(*t)) {
+        // The row is bound to this tenant (spam analytics etc.) but no
+        // recipient resolves to it: queue an event with NO recipients rather
+        // than smuggling another tenant's addresses under its name.
+        let payload = serde_json::json!({
+            "message_id": message_id,
+            "from": from,
+            "recipients": [],
+            "timestamp": chrono::Utc::now().to_rfc3339(),
+        });
+        super::util::queue_tenant_webhook_event(
+            pool, tenant, "message.inbound", message_id, &payload,
+        )
+        .await;
+    }
+}
+
 async fn write_line_tcp(socket: &TcpStream, data: &str) -> std::io::Result<()> {
     write_line_tcp_bounded(socket, data, REFUSAL_WRITE_TIMEOUT).await
 }

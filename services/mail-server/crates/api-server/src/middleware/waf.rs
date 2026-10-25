@@ -72,16 +72,26 @@ pub async fn waf_middleware(
     };
 
     match threat.decision {
-        WafDecision::Allow => next.run(req).await,
+        WafDecision::Allow => {
+            metrics::counter!("apexmail_waf_decisions_total", "result" => "allowed").increment(1);
+            next.run(req).await
+        }
         WafDecision::Monitor => {
+            metrics::counter!("apexmail_waf_decisions_total", "result" => "monitor").increment(1);
             log_threat("WAF monitor", &threat);
             next.run(req).await
         }
         WafDecision::Block(status) => {
             if state.config.waf_enforce {
+                metrics::counter!("apexmail_waf_decisions_total", "result" => "blocked").increment(1);
                 log_threat("WAF block", &threat);
                 blocked_response(status, &threat, req.uri().path(), req.headers())
             } else {
+                metrics::counter!(
+                    "apexmail_waf_decisions_total",
+                    "result" => "would_block"
+                )
+                .increment(1);
                 // Monitor mode: the engine WOULD have blocked; record it
                 // at WARN so operators can size the false-positive rate
                 // before flipping WAF_ENFORCE.

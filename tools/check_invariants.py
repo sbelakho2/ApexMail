@@ -160,15 +160,61 @@ def collect(expect: dict, invariants: dict, crates: set[str], lanes_text: str) -
         iid = entry.get("id", "?")
         if not entry.get("test_anchors"):
             problems.append(f"{iid}: no test anchor named")
+        # 2026-10-25 HEAD-audit repair: an anchor must name something that can
+        # actually RUN (a file/crate carrying tests, or a gate that self-tests).
+        # "The path exists" was an inventory check, not evidence.
         for anchor in entry.get("test_anchors", []):
-            # Anchors are crate names, repo-relative paths, or tools/ paths.
-            candidates = [REPO / anchor, WS / anchor.split("/")[0],
-                          REPO / "services" / "mail-server" / anchor]
-            if not any(c.exists() for c in candidates):
-                problems.append(f"{iid}: test anchor {anchor!r} does not exist in the tree")
+            if not anchor_exercisable(anchor):
+                problems.append(
+                    f"{iid}: test anchor {anchor!r} has no executable test in it — "
+                    "name a file/crate that carries #[test]/#[tokio::test]/def test_/--self-test"
+                )
         if not entry.get("gates"):
             problems.append(f"{iid}: no gate named")
+        plan = (entry.get("plan_test_today") or "").strip()
+        if not plan or plan.startswith("None"):
+            problems.append(
+                f"{iid}: plan_test_today is {plan!r} — an invariant with no test today "
+                "must not claim enforcement (write the test or mark the invariant aspirational)"
+            )
     return problems
+
+
+def anchor_exercisable(anchor: str) -> bool:
+    """True when the anchor names something that RUNS tests."""
+    if (REPO / anchor).is_file():
+        return _file_is_exercisable(REPO / anchor)
+    for crate in (WS / anchor.split("/")[0], REPO / "services" / "mail-server" / anchor):
+        if crate.is_dir():
+            if (crate / "tests").is_dir() and any((crate / "tests").glob("*.rs")):
+                return True
+            if any(
+                _file_is_exercisable(p)
+                for p in crate.rglob("*.rs")
+                if "/target/" not in str(p)
+            ):
+                return True
+    fallback = [REPO / anchor, WS / anchor.split("/")[0]]
+    for c in fallback:
+        if c.is_file() and _file_is_exercisable(c):
+            return True
+    return False
+
+
+def _file_is_exercisable(path: Path) -> bool:
+    if path.is_dir():
+        return False
+    try:
+        text = path.read_text(errors="replace")
+    except OSError:
+        return False
+    if path.suffix == ".rs":
+        return "#[test]" in text or "#[tokio::test]" in text or "#[sqlx::test]" in text
+    if path.suffix == ".py":
+        return "def test_" in text or "--self-test" in text or "unittest" in text
+    if path.suffix in {".toml", ".txt"}:
+        return True
+    return False
 
 
 def main(argv: list[str]) -> int:

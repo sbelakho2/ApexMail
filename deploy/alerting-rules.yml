@@ -537,3 +537,120 @@ groups:
         annotations:
           summary: "Alerting pipeline watchdog"
           description: "This alert should always be firing to verify alert delivery."
+
+  # ── Content-security controls (2026-10-25 capability-truth wave) ─────────
+  # The five security controls are advertised; "advertised" requires
+  # monitoring (registry stage_rules), so each control's verdict counters
+  # carry alerting here. The fail-open alerts page the operator whenever an
+  # engine stops producing verdicts — a silent filter is worse than none.
+  - name: apexmail-content-security
+    rules:
+      - alert: SpamFilterFailingOpen
+        expr: increase(mta_content_security_spam_total{result="engine_failed"}[15m]) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Spam filter is failing open (engine errors)"
+          description: "The spam engine produced {{ $value }} engine failures in 15m — mail is being tagged UNKNOWN and delivered unfiltered."
+          runbook_url: "https://apexmail.ee/docs/alerts#spam-filter-failing-open"
+
+      - alert: SpamRejectionSpike
+        expr: increase(mta_content_security_spam_total{result="rejected"}[1h]) > 50
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Spam REJECT spike at DATA time"
+          description: "{{ $value }} messages refused by the spam filter in 1h. A burst can mean a campaign against a tenant — or a threshold set too low (check the false-positive corpus before touching MTA_SPAM_REJECT_THRESHOLD)."
+          runbook_url: "https://apexmail.ee/docs/alerts#spam-rejection-spike"
+
+      - alert: IdsRefusalsFired
+        expr: increase(mta_content_security_ids_total{result="refused"}[1h]) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "IDS refused inbound messages"
+          description: "{{ $value }} DATA-time refusals by the IDS in 1h (Drop/Reject verdicts). Inspect the X-Apex-Ids-Verdict headers for the signature ids involved."
+          runbook_url: "https://apexmail.ee/docs/alerts#ids-refusals-fired"
+
+      - alert: IdsFailingOpen
+        expr: increase(mta_content_security_ids_total{result="engine_failed"}[15m]) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "IDS is failing open (engine panics)"
+          description: "{{ $value }} IDS engine panics in 15m — payloads are passing uninspected."
+          runbook_url: "https://apexmail.ee/docs/alerts#ids-failing-open"
+
+      - alert: AttachmentSandboxFailingOpen
+        expr: increase(mta_content_security_sandbox_total{result="engine_failed"}[15m]) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Attachment sandbox is failing open (scan errors)"
+          description: "{{ $value }} attachments could not be scanned in 15m and were passed with decision=ERROR."
+          runbook_url: "https://apexmail.ee/docs/alerts#attachment-sandbox-failing-open"
+
+      - alert: AttachmentSandboxActionedMail
+        expr: increase(mta_content_security_sandbox_actions_total[1h]) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Sandbox stripped or rejected attachments"
+          description: "{{ $value }} attachment actions (strip/reject) in 1h — active content reached the gate and was neutralized."
+          runbook_url: "https://apexmail.ee/docs/alerts#attachment-sandbox-actioned-mail"
+
+      - alert: DlpPresendRefusals
+        expr: increase(apexmail_dlp_presend_refused_total[1h]) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Outbound DLP refused sends"
+          description: "{{ $value }} outbound sends refused by the pre-send DLP gate in 1h (high-severity policy findings)."
+          runbook_url: "https://apexmail.ee/docs/alerts#dlp-presend-refusals"
+
+      - alert: DlpPresendQuarantines
+        expr: increase(apexmail_dlp_presend_held_total[1h]) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Outbound DLP quarantined sends"
+          description: "{{ $value }} sends held as deferred by the DLP gate in 1h — an operator review backlog may be forming."
+          runbook_url: "https://apexmail.ee/docs/alerts#dlp-presend-quarantines"
+
+      - alert: DlpFailingOpen
+        expr: increase(apexmail_dlp_engine_unavailable_failopen_total[15m]) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Outbound DLP is failing open (engine unavailable)"
+          description: "{{ $value }} sends delivered WITHOUT a DLP verdict in 15m (engine unavailable; fail-open contract)."
+          runbook_url: "https://apexmail.ee/docs/alerts#dlp-failing-open"
+
+      - alert: WafBlockedRequests
+        expr: increase(apexmail_waf_decisions_total{result="blocked"}[15m]) > 10
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "WAF is blocking requests"
+          description: "{{ $value }} requests blocked by the WAF in 15m — expected under attack; a spike with no incident means a rule is too broad."
+          runbook_url: "https://apexmail.ee/docs/alerts#waf-blocked-requests"
+
+      - alert: WafWouldBlockSustained
+        expr: increase(apexmail_waf_decisions_total{result="would_block"}[6h]) > 500
+        for: 0m
+        labels:
+          severity: info
+        annotations:
+          summary: "WAF monitor mode keeps would-blocking"
+          description: "{{ $value }} would-block verdicts in 6h. If the false-positive rate stays near zero (checked in the WAF dashboard), flip WAF_ENFORCE."
+          runbook_url: "https://apexmail.ee/docs/alerts#waf-would-block-sustained"
