@@ -1943,7 +1943,7 @@ services:
     healthcheck:
       test:
         - CMD-SHELL
-        - pgrep -f postgres-backup-encrypt.sh >/dev/null && test -n "$$(find /backups -name '*.enc' -mmin -1500 2>/dev/null)"
+        - pgrep -f postgres-backup-encrypt.sh >/dev/null && test -n "$$(find /backups -name '*.enc' -mmin -1500 2>/dev/null)" && test -n "$$(find /backups -name '.last_offsite_ok' -mmin -1500 2>/dev/null)"
       interval: 5m
       timeout: 10s
       retries: 3
@@ -1956,8 +1956,9 @@ services:
     # encryption (the old `openssl enc -aes-256-gcm` invocation was
     # unsupported and silently produced unusable output), restorability
     # verification (decrypt + pg_restore --list) BEFORE deleting the
-    # plaintext, a bounded backup count, and an optional offsite copy
-    # (BACKUP_TARGET, rsync over ssh).
+    # plaintext, a bounded backup count, and a MANDATORY offsite copy
+    # (BACKUP_TARGET, rsync over ssh; the healthcheck requires the fresh
+    # .last_offsite_ok stamp the mirror writes).
     entrypoint: ["/bin/sh", "/usr/local/bin/postgres-backup-encrypt.sh"]
     volumes:
       - ./deploy/hardening/scripts/postgres-backup-encrypt.sh:/usr/local/bin/postgres-backup-encrypt.sh:ro
@@ -1982,8 +1983,10 @@ services:
       BACKUP_KEEP_COUNT: ${BACKUP_KEEP_COUNT:-30}
       # Encryption key from a Docker secret (preferred over the env var).
       BACKUP_ENCRYPTION_KEY_FILE: /run/secrets/backup_encryption_key
-      # Optional offsite mirror, e.g. "backup-user@offsite::apexmail" or
-      # "backup-user@offsite:/srv/apexmail-backups" (rsync over ssh).
+      # MANDATORY offsite mirror (durability audit 2026-10-26), e.g.
+      # "backup-user@offsite::apexmail" or "backup-user@offsite:/srv/apexmail-backups"
+      # (rsync over ssh). An empty value is refused: a backup that has not
+      # left the host is not a backup.
       #
       # ── OFFSITE EGRESS (F1) — operator runbook ──────────────────────────
       # rsync-over-ssh needs BOTH an egress path and an SSH key:
@@ -1999,9 +2002,9 @@ services:
       #      /var/run/apexmail-backup-ssh/known_hosts on the host and mount
       #      it (see the volumes entry) — the scheduler is non-interactive
       #      and cannot answer a first-connection host-key prompt.
-      # Without both, BACKUP_TARGET rsync fails (logged, non-fatal) and the
-      # encrypted backups stay on the host volume only.
-      BACKUP_TARGET: ${BACKUP_TARGET:-}
+      # Without both, BACKUP_TARGET rsync FAILS LOUDLY and the healthcheck
+      # below turns the container unhealthy — the mirror is mandatory.
+      BACKUP_TARGET: ${BACKUP_TARGET:?production must define the offsite backup target (mandatory mirror)}
     networks:
       - apexmail_data_internal
       - apexmail_backup_egress
@@ -2013,6 +2016,61 @@ services:
       resources:
         limits:
           memory: 256M
+          cpus: '0.5'
+        reservations:
+          memory: 64M
+
+  # ===========================================================================
+  # RESTORE DRILL (automated recovery exercise with evidence — 2026-10-26)
+  # ===========================================================================
+  # Restores the newest encrypted backup into a SCRATCH database on the live
+  # postgres service, probes integrity (schema, migration ledger, core row
+  # counts), drops the scratch database, and writes a JSON evidence record
+  # with measured RPO/RTO to /backups/drill-evidence/. The healthcheck
+  # requires a fresh record within the cadence window, so a drill that never
+  # succeeds is unhealthy, not silent. Reuses the postgres-backup image
+  # (stock postgres + openssl; psql/pg_restore included).
+  postgres-restore-drill:
+    image: ${GHCR_NS:-ghcr.io/sbelakho2/apexmail}/postgres-backup:latest
+    build:
+      context: ./deploy/hardening
+      dockerfile: Dockerfile.postgres-backup
+    restart: unless-stopped
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pgrep -f postgres-restore-drill.sh >/dev/null && test -n "$$(find /backups/drill-evidence -name 'restore-drill-*.json' -mmin -44640 2>/dev/null)"
+      interval: 6h
+      timeout: 10s
+      retries: 2
+      start_period: 30m
+    depends_on:
+      postgres:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "/usr/local/bin/postgres-restore-drill.sh"]
+    volumes:
+      - ./deploy/hardening/scripts/postgres-restore-drill.sh:/usr/local/bin/postgres-restore-drill.sh:ro
+      - postgres_backups:/backups
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_DB: ${POSTGRES_DB:-apexmail}
+      POSTGRES_USER: ${POSTGRES_USER:-apexmail}
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+      BACKUP_DIR: /backups
+      DRILL_EVIDENCE_DIR: /backups/drill-evidence
+      DRILL_DATABASE: ${DRILL_DATABASE:-apexmail_restore_drill}
+      DRILL_INTERVAL_SECS: ${DRILL_INTERVAL_SECS:-2592000}
+      BACKUP_ENCRYPTION_KEY_FILE: /run/secrets/backup_encryption_key
+    networks:
+      - apexmail_data_internal
+    secrets:
+      - postgres_password
+      - backup_encryption_key
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          memory: 512M
           cpus: '0.5'
         reservations:
           memory: 64M

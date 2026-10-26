@@ -38,7 +38,7 @@ last_updated = "2026-10-02"
 
 ### Inspection des requêtes (pare-feu applicatif web)
 
-[roadmap] Un pare-feu d'inspection des requêtes (WAF) fondé sur des règles SQLi/XSS/traversal/injection-de-commandes/SSRF évalue aujourd'hui la méthode, le chemin, la chaîne de requête et les en-têtes des requêtes API publiques en mode monitor : les verdicts sont journalisés, pas bloqués. Activer le blocage par défaut et étendre l'inspection aux corps de requête figurent sur la feuille de route ; la posture par défaut du cloud géré n'inclut pas de blocage WAF. La détection/prévention d'intrusion (IDS/IPS) existe comme bibliothèque qui n'inspecte aucun trafic réel et n'est pas non plus un contrôle actif.
+Un pare-feu d'inspection des requêtes (WAF) fondé sur des règles SQLi/XSS/traversal/injection-de-commandes/SSRF évalue la méthode, le chemin, la chaîne de requête et les en-têtes des requêtes API publiques : la base de production gérée l'exécute en mode application, les verdicts que le moteur bloquerait sont bloqués et chaque décision est journalisée. [roadmap] L'inspection des corps de requête et une capacité de détection/prévention d'intrusion (IDS/IPS, aujourd'hui une bibliothèque sans inspection de trafic réel) restent sur la feuille de route et ne sont pas des contrôles actifs.
 
 - Validation et assainissement des entrées sur tous les points de terminaison API (au niveau des handlers).
 - Limitation de débit par point de terminaison et clé API.
@@ -113,11 +113,11 @@ L'intégrité du système est vérifiée par des contrôles automatisés et réc
 
 ## Sécurité opérationnelle
 
-- Vérifications des antécédents pour le personnel ayant accès à la production.
-- Revues d'accès trimestrielles.
-- L'accès à la production nécessite une authentification multi-facteurs et une approbation.
-- Gestion des changements avec revue par les pairs et capacité de restauration.
-- Séparation des tâches entre le développement et les opérations.
+- Exploitation à une seule personne : chaque changement est écrit par l'opérateur et doit passer les CI et gates de sécurité obligatoires du dépôt avant déploiement.
+- Revues d'accès trimestrielles par l'opérateur.
+- L'accès à la production nécessite une authentification multi-facteurs.
+- Gestion des changements avec capacité de restauration ; journaux de CI, piste d'audit et bénédictions de gates fournissent la preuve infalsifiable qu'un second vérificateur assurerait autrement.
+- L'hôte de déploiement refuse tout build sans bénédiction de gates fraîche des pipelines obligatoires ; les contrôles à haut risque font l'objet d'une revue externe indépendante périodique au lieu d'un second regard interne.
 
 ## Liens connexes
 

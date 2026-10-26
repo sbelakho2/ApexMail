@@ -49,12 +49,14 @@ Two compose services implement backups (`docker-compose.prod.yml`):
 4. Prune: PostgreSQL keeps `BACKUP_KEEP_DAYS` (14) / weeks (8) / months (6)
    with a newest-`BACKUP_KEEP_COUNT` (30) bound; ClickHouse keeps 14 days /
    14 artifacts.
-5. Optionally mirror offsite: when `BACKUP_TARGET` is set (rsync over SSH,
+5. Mirror offsite — **mandatory** since 2026-10-26 (durability audit):
+   encrypted artifacts are rsynced to the offsite host (rsync over SSH,
    key at `/var/run/apexmail-backup-ssh/id_ed25519`, pinned `known_hosts`,
-   dedicated `apexmail_backup_egress` network), encrypted artifacts are
-   copied to the offsite host. Without `BACKUP_TARGET`, backups exist **only
-   on the same physical host** as the database — a host-disk failure without
-   an offsite mirror can be total data loss. Configure it.
+   dedicated `apexmail_backup_egress` network). The compose service
+   refuses an empty `BACKUP_TARGET` (`${VAR:?}`), the backup run fails
+   non-zero when the mirror fails, and the healthcheck requires a fresh
+   `.last_offsite_ok` stamp — a backup that has not left the host does not
+   count as a backup.
 
 Health monitoring: each backup container's healthcheck requires the scheduler
 process to be alive **and** an encrypted artifact newer than 25 h to exist.
@@ -98,9 +100,9 @@ Data written after the last nightly backup is lost (RPO ≤ 24 h).
 
 1. **Rebuild the host** — `deploy/scripts/hetzner-bootstrap.sh` (Docker,
    UFW, sshd hardening, `/opt/apexmail`).
-2. **Restore the offsite backups** — if `BACKUP_TARGET` was configured, the
-   encrypted artifacts exist off-host; rsync them back. If it was **not**
-   configured, the backups died with the host: this is a total-loss scenario.
+2. **Restore the offsite backups** — encrypted artifacts exist off-host
+   (the mirror is mandatory; the healthcheck refuses a local-only state);
+   rsync them back.
 3. **Re-deploy from scratch** — follow *Fresh-host bootstrap* in
    `deploy/DEPLOYMENT.md`: clone the repo, render `.env` from
    `.env.production.example`, re-create all `PROD_*_FILE` secret files,
@@ -121,11 +123,18 @@ mailstore volumes, so a crashed service recovers with no data action.
 ## DR testing
 
 See [Disaster Recovery Testing](disaster-recovery-testing.md) for the drill
-cadence. The drill that matters most is **Procedure 2 on a scratch host**:
-provision a throwaway Hetzner machine, run the bootstrap + pipeline + restore
-end-to-end from the offsite mirror, and record the actual RTO. Every backup's
-restorability is additionally verified automatically at backup time
-(decrypt + `pg_restore --list` before the plaintext is deleted).
+cadence. Two automated exercises run continuously since 2026-10-26:
+every backup is verified at backup time (decrypt + `pg_restore --list`
+before the plaintext is deleted), and the `postgres-restore-drill`
+compose service restores the newest backup into a scratch database on a
+cadence, runs integrity probes, drops the scratch database and writes a
+JSON evidence record (`backup_at`, `recovery_started_at`,
+`recovered_at`, measured `rpo_seconds` / `rto_seconds`, integrity
+counts) under `/backups/drill-evidence/`. A drill that never succeeds
+turns the container unhealthy. The manual **Procedure 2 on a scratch
+host** remains the drill that matters most: provision a throwaway
+Hetzner machine, run the bootstrap + pipeline + restore end-to-end from
+the offsite mirror, and record the actual RTO.
 
 ## Data retention
 

@@ -164,6 +164,25 @@ pub struct TrustPortalService {
     db: PgPool,
 }
 
+/// ApexMail's own public attestations, exactly as they are true today:
+/// a GDPR Article 28 DPA is in place; there is no SOC 2 attestation and
+/// there is no HIPAA/BAA offering. The owner rule is that not even
+/// "ready", "aligned" or "preparation underway" may appear externally;
+/// readiness is tracked internally only. (P0 finding 2026-10-26: the
+/// public /trust/overview route previously fabricated both.)
+pub const OWN_ATTESTATIONS: &[&str] = &["GDPR (Article 28 DPA)"];
+
+/// Refuse a self-attestation that claims an external attestation regime
+/// ApexMail does not hold. Used by the overview path and its tests.
+pub fn check_trust_claim(claim: &str) -> bool {
+    let lower = claim.to_ascii_lowercase();
+    !(lower.contains("soc 2")
+        || lower.contains("soc2")
+        || lower.contains("iso 27001")
+        || lower.contains("hipaa")
+        || lower.contains("baa"))
+}
+
 impl TrustPortalService {
     pub fn new(db: PgPool) -> Self {
         Self { db }
@@ -661,10 +680,16 @@ impl TrustPortalService {
                 }
             }
         }
-        // Always list ApexMail's own attestations.
-        cert_set.insert("SOC 2 Type II".into());
-        cert_set.insert("HIPAA (BAA available)".into());
-        cert_set.insert("GDPR (Article 28 DPA)".into());
+        // Always list ApexMail's own attestations. The list is the truth
+        // and nothing but the truth: ApexMail holds no SOC 2 attestation
+        // and offers no HIPAA/BAA. The owner rule is that not even
+        // "ready", "aligned" or "preparation underway" may appear
+        // externally; readiness is tracked internally only. (P0 finding
+        // 2026-10-26: the public /trust/overview route previously
+        // fabricated both.)
+        for attestation in OWN_ATTESTATIONS {
+            cert_set.insert((*attestation).to_string());
+        }
         Ok(TrustOverview {
             generated_at: Utc::now(),
             certifications: cert_set.into_iter().collect(),
@@ -1506,15 +1531,15 @@ mod db_tests {
         assert!(overview.published_documents.is_empty());
         assert!(overview.subprocessors.is_empty());
         assert!(overview.recent_incidents.is_empty());
-        assert!(overview
-            .certifications
-            .contains(&"SOC 2 Type II".to_string()));
-        assert!(overview
-            .certifications
-            .contains(&"HIPAA (BAA available)".to_string()));
-        assert!(overview
-            .certifications
-            .contains(&"GDPR (Article 28 DPA)".to_string()));
+        // The public overview must never fabricate attestation regimes.
+        // ApexMail holds GDPR (Art. 28 DPA) only: no SOC 2, no ISO, no
+        // HIPAA/BAA, not even "ready" or "underway" phrasing.
+        assert_eq!(overview.certifications, vec!["GDPR (Article 28 DPA)".to_string()]);
+        assert!(check_trust_claim("GDPR (Article 28 DPA)"));
+        assert!(!check_trust_claim("SOC 2 Type II"));
+        assert!(!check_trust_claim("SOC 2 ready"));
+        assert!(!check_trust_claim("ISO 27001"));
+        assert!(!check_trust_claim("HIPAA (BAA available)"));
 
         // Certifications from public subprocessors are aggregated and sorted.
         svc.upsert_subprocessor(SubprocessorInput {
@@ -1545,7 +1570,12 @@ mod db_tests {
         .await
         .expect("corrupt certifications");
         let overview = svc.overview().await.expect("overview survives");
+        // Operator-corrupted subprocessor certs never resurrect a false
+        // self-attestation either.
         assert!(overview
+            .certifications
+            .contains(&"GDPR (Article 28 DPA)".to_string()));
+        assert!(!overview
             .certifications
             .contains(&"SOC 2 Type II".to_string()));
     }

@@ -128,10 +128,12 @@ const DEFAULT_CONTROLS: &[ControlSeed] = &[
         category: "Common Criteria, Control Environment",
         title: "Demonstrates a commitment to integrity and ethical values",
         description:
-            "ApexMail maintains a published code of conduct, ethical hiring policies, and \
-             documented disciplinary procedures. Annual ethics training is mandatory.",
-        owner: "People Operations",
-        evidence_required: &["code_of_conduct_acknowledgement", "ethics_training_log"],
+            "Single-operator company: the founder operates under the published code of \
+             conduct; ethical obligations bind through vendor DPAs and annual policy \
+             review. There are no employees to hire, discipline or train (audit: the \
+             previous wording described an organisation that does not exist).",
+        owner: "Founder / System Operator",
+        evidence_required: &["code_of_conduct_acknowledgement", "annual_policy_review_log"],
         automation: AutomationLevel::Manual,
     },
     ControlSeed {
@@ -139,10 +141,11 @@ const DEFAULT_CONTROLS: &[ControlSeed] = &[
         category: "Common Criteria, Control Environment",
         title: "Board exercises oversight responsibility",
         description:
-            "An independent security committee reviews quarterly risk reports, audit \
-             findings, and material policy changes.",
-        owner: "Executive",
-        evidence_required: &["security_committee_minutes"],
+            "Quarterly control review: the operator reviews risk, incidents and material \
+             policy changes; where independence is genuinely required an external \
+             assessor reviews the high-risk controls instead of an imaginary committee.",
+        owner: "Founder / System Operator",
+        evidence_required: &["quarterly_control_review_log"],
         automation: AutomationLevel::Manual,
     },
     ControlSeed {
@@ -150,10 +153,11 @@ const DEFAULT_CONTROLS: &[ControlSeed] = &[
         category: "Common Criteria, Control Environment",
         title: "Establishes structure, authority, and responsibility",
         description:
-            "Organisational chart, job descriptions, and segregation-of-duties matrix are \
-             reviewed annually.",
-        owner: "People Operations",
-        evidence_required: &["org_chart", "sod_matrix"],
+            "Solo-operator scope statement: every function sits with the founder/system \
+             operator, and duty separation is enforced by the release path (CI gates plus \
+             deploy-host blessing verification), not by staff roles.",
+        owner: "Founder / System Operator",
+        evidence_required: &["solo_operator_scope_statement", "release_gate_evidence"],
         automation: AutomationLevel::Manual,
     },
     // ── Communication and Information (CC2) ────────────────────────────────
@@ -164,7 +168,7 @@ const DEFAULT_CONTROLS: &[ControlSeed] = &[
         description:
             "Production systems emit audit logs (hash-chained, tamper-evident) for all \
              security-relevant operations.",
-        owner: "Engineering",
+        owner: "Founder / System Operator",
         evidence_required: &["audit_log_sample", "audit_chain_verification"],
         automation: AutomationLevel::Automated,
     },
@@ -173,9 +177,9 @@ const DEFAULT_CONTROLS: &[ControlSeed] = &[
         category: "Common Criteria, Communication and Information",
         title: "Internally communicates information about objectives and responsibilities",
         description:
-            "Security policies, incident-response runbooks, and on-call rotations are \
-             published and reviewed semi-annually.",
-        owner: "Security",
+            "Security policies, incident-response runbooks and the alert escalation path \
+             are published and reviewed semi-annually.",
+        owner: "Founder / System Operator",
         evidence_required: &["policy_publication_log", "runbook_review_log"],
         automation: AutomationLevel::Manual,
     },
@@ -187,7 +191,7 @@ const DEFAULT_CONTROLS: &[ControlSeed] = &[
         description:
             "Annual risk assessment identifies threats to confidentiality, integrity, \
              availability, and privacy of customer data; tracked in risk_profiles table.",
-        owner: "Security",
+        owner: "Founder / System Operator",
         evidence_required: &["risk_assessment_export"],
         automation: AutomationLevel::Hybrid,
     },
@@ -198,7 +202,7 @@ const DEFAULT_CONTROLS: &[ControlSeed] = &[
         description:
             "Tenant-level risk scoring runs continuously; flags above the critical \
              threshold trigger automated rate-limiting and human review.",
-        owner: "Engineering",
+        owner: "Founder / System Operator",
         evidence_required: &["risk_profile_snapshot", "flag_resolutions_log"],
         automation: AutomationLevel::Automated,
     },
@@ -209,8 +213,8 @@ const DEFAULT_CONTROLS: &[ControlSeed] = &[
         title: "Selects, develops, and performs ongoing monitoring",
         description:
             "Continuous monitoring via Prometheus + Grafana; alert rules in \
-             deploy/alerting-rules.yml; on-call paged for SEV-1/2.",
-        owner: "Engineering",
+             deploy/alerting-rules.yml; SEV-1/2 alerts are routed to the operator.",
+        owner: "Founder / System Operator",
         evidence_required: &["monitoring_alerts_log"],
         automation: AutomationLevel::Automated,
     },
@@ -221,7 +225,7 @@ const DEFAULT_CONTROLS: &[ControlSeed] = &[
         description:
             "Quarterly internal-audit findings are tracked to closure with assigned owner \
              and remediation date.",
-        owner: "Security",
+        owner: "Founder / System Operator",
         evidence_required: &["internal_audit_report", "remediation_tracker"],
         automation: AutomationLevel::Manual,
     },
@@ -231,9 +235,11 @@ const DEFAULT_CONTROLS: &[ControlSeed] = &[
         category: "Common Criteria, Control Activities",
         title: "Selects and develops control activities",
         description:
-            "Change-management policy requires peer review for all production deploys; \
-             pull-request approvals are recorded in source control.",
-        owner: "Engineering",
+            "Change management runs every production deploy through the repository's \
+             required CI and security gates; gate results and the deploy blessing are \
+             recorded as evidence. The single operator authors changes, the machine \
+             gates review them.",
+        owner: "Founder / System Operator",
         evidence_required: &["change_management_log"],
         automation: AutomationLevel::Hybrid,
     },
@@ -244,7 +250,7 @@ const DEFAULT_CONTROLS: &[ControlSeed] = &[
         description:
             "Infrastructure-as-code (Terraform/Helm) gates production changes; the \
              build pipeline blocks merges that fail tests, lints, or security scans.",
-        owner: "Engineering",
+        owner: "Founder / System Operator",
         evidence_required: &["ci_pipeline_log"],
         automation: AutomationLevel::Automated,
     },
@@ -255,7 +261,7 @@ const DEFAULT_CONTROLS: &[ControlSeed] = &[
         description:
             "All security-relevant SOPs are versioned in the documentation portal and \
              reviewed annually.",
-        owner: "Security",
+        owner: "Founder / System Operator",
         evidence_required: &["policy_review_log"],
         automation: AutomationLevel::Manual,
     },
@@ -267,7 +273,7 @@ const DEFAULT_CONTROLS: &[ControlSeed] = &[
         description:
             "Role-based access control enforced via JWT scopes and admin-route guards; \
              audit log records every privileged operation.",
-        owner: "Security",
+        owner: "Founder / System Operator",
         evidence_required: &["access_review", "rbac_policy", "audit_log_sample"],
         automation: AutomationLevel::Automated,
     },
@@ -278,7 +284,7 @@ const DEFAULT_CONTROLS: &[ControlSeed] = &[
         description:
             "Quarterly access review enumerates active human and machine identities, \
              access levels, and reasons.",
-        owner: "Security",
+        owner: "Founder / System Operator",
         evidence_required: &["quarterly_access_review"],
         automation: AutomationLevel::Hybrid,
     },
@@ -289,7 +295,7 @@ const DEFAULT_CONTROLS: &[ControlSeed] = &[
         description:
             "Customer-supplied secrets are encrypted at rest with AES-256-GCM; rotation \
              policies are enforced by the secret manager (max 90 days for production).",
-        owner: "Engineering",
+        owner: "Founder / System Operator",
         evidence_required: &["secret_rotation_log"],
         automation: AutomationLevel::Automated,
     },
@@ -300,7 +306,7 @@ const DEFAULT_CONTROLS: &[ControlSeed] = &[
         description:
             "All production infrastructure runs in SOC 2 / ISO 27001 certified data \
              centers (see Trust Portal subprocessor list).",
-        owner: "Operations",
+        owner: "Founder / System Operator",
         evidence_required: &["subprocessor_attestations"],
         automation: AutomationLevel::Manual,
     },
@@ -311,7 +317,7 @@ const DEFAULT_CONTROLS: &[ControlSeed] = &[
         description:
             "WAF, IDS, DDoS protection, and rate-limiting form the perimeter; events are \
              ingested into the security data lake.",
-        owner: "Engineering",
+        owner: "Founder / System Operator",
         evidence_required: &["waf_event_summary", "ids_event_summary"],
         automation: AutomationLevel::Automated,
     },
@@ -322,7 +328,7 @@ const DEFAULT_CONTROLS: &[ControlSeed] = &[
         description:
             "DLP rules block exfiltration of PHI/PII; outbound mail is scanned by the \
              DLP engine and content scanner.",
-        owner: "Security",
+        owner: "Founder / System Operator",
         evidence_required: &["dlp_policy_summary"],
         automation: AutomationLevel::Automated,
     },
@@ -333,7 +339,7 @@ const DEFAULT_CONTROLS: &[ControlSeed] = &[
         description:
             "All inbound mail is sandboxed and scanned for malware; suspicious \
              attachments are quarantined.",
-        owner: "Security",
+        owner: "Founder / System Operator",
         evidence_required: &["scan_results_summary"],
         automation: AutomationLevel::Automated,
     },
@@ -343,8 +349,9 @@ const DEFAULT_CONTROLS: &[ControlSeed] = &[
         category: "Common Criteria, System Operations",
         title: "Detects and monitors changes",
         description:
-            "Configuration drift detection runs hourly; unexpected changes alert on-call.",
-        owner: "Engineering",
+            "Configuration drift detection runs hourly; unexpected changes alert the \
+             operator.",
+        owner: "Founder / System Operator",
         evidence_required: &["drift_detection_log"],
         automation: AutomationLevel::Automated,
     },
@@ -355,7 +362,7 @@ const DEFAULT_CONTROLS: &[ControlSeed] = &[
         description:
             "SIEM rules trigger on anomalous patterns (failed-auth bursts, privilege \
              escalations, suspicious queue volumes).",
-        owner: "Security",
+        owner: "Founder / System Operator",
         evidence_required: &["siem_alert_summary"],
         automation: AutomationLevel::Automated,
     },
@@ -366,7 +373,7 @@ const DEFAULT_CONTROLS: &[ControlSeed] = &[
         description:
             "Documented incident-response playbooks; SEV-1/2 incidents tracked in the \
              trust portal incident log.",
-        owner: "Security",
+        owner: "Founder / System Operator",
         evidence_required: &["incident_response_log"],
         automation: AutomationLevel::Hybrid,
     },
@@ -377,7 +384,7 @@ const DEFAULT_CONTROLS: &[ControlSeed] = &[
         description:
             "Incident triage SLAs: SEV-1 acknowledge < 15min, mitigate < 1h; tracked in \
              trust_portal_incidents.",
-        owner: "Security",
+        owner: "Founder / System Operator",
         evidence_required: &["incident_metrics"],
         automation: AutomationLevel::Automated,
     },
@@ -387,7 +394,7 @@ const DEFAULT_CONTROLS: &[ControlSeed] = &[
         title: "Identifies and develops corrective actions",
         description:
             "Post-incident reviews produce action items tracked to closure.",
-        owner: "Engineering",
+        owner: "Founder / System Operator",
         evidence_required: &["postmortem_log"],
         automation: AutomationLevel::Manual,
     },
@@ -399,7 +406,7 @@ const DEFAULT_CONTROLS: &[ControlSeed] = &[
         description:
             "All production changes are authorised via signed pull requests; emergency \
              changes require post-hoc review.",
-        owner: "Engineering",
+        owner: "Founder / System Operator",
         evidence_required: &["change_management_log"],
         automation: AutomationLevel::Hybrid,
     },
@@ -411,7 +418,7 @@ const DEFAULT_CONTROLS: &[ControlSeed] = &[
         description:
             "Annual penetration test by independent third party; findings remediated by \
              severity SLA.",
-        owner: "Security",
+        owner: "Founder / System Operator",
         evidence_required: &["pentest_report", "remediation_log"],
         automation: AutomationLevel::Manual,
     },
@@ -422,7 +429,7 @@ const DEFAULT_CONTROLS: &[ControlSeed] = &[
         description:
             "Subprocessors undergo security review before onboarding and annually \
              thereafter; tracked in trust_portal_subprocessors.",
-        owner: "Security",
+        owner: "Founder / System Operator",
         evidence_required: &["vendor_review_log"],
         automation: AutomationLevel::Manual,
     },
@@ -434,7 +441,7 @@ const DEFAULT_CONTROLS: &[ControlSeed] = &[
         description:
             "Capacity dashboards monitor send-queue depth, database connection pool \
              utilisation, and per-tenant rate-limiter state; auto-scaling configured.",
-        owner: "Engineering",
+        owner: "Founder / System Operator",
         evidence_required: &["capacity_metrics"],
         automation: AutomationLevel::Automated,
     },
@@ -445,7 +452,7 @@ const DEFAULT_CONTROLS: &[ControlSeed] = &[
         description:
             "Daily encrypted backups with monthly restore tests; documented BCP/DR plan \
              with quarterly tabletop exercises.",
-        owner: "Engineering",
+        owner: "Founder / System Operator",
         evidence_required: &["backup_test_log", "dr_drill_log"],
         automation: AutomationLevel::Hybrid,
     },
@@ -455,7 +462,7 @@ const DEFAULT_CONTROLS: &[ControlSeed] = &[
         title: "Tests recovery plan procedures",
         description:
             "Annual full-scale BCP/DR exercise with measured RTO and RPO.",
-        owner: "Engineering",
+        owner: "Founder / System Operator",
         evidence_required: &["dr_drill_log"],
         automation: AutomationLevel::Manual,
     },
@@ -467,7 +474,7 @@ const DEFAULT_CONTROLS: &[ControlSeed] = &[
         description:
             "Customer data classified by sensitivity; encryption at rest (AES-256) and \
              in transit (TLS 1.2+); dedicated encryption keys per tenant for HIPAA.",
-        owner: "Security",
+        owner: "Founder / System Operator",
         evidence_required: &["encryption_config", "kms_audit_log"],
         automation: AutomationLevel::Automated,
     },
@@ -478,7 +485,7 @@ const DEFAULT_CONTROLS: &[ControlSeed] = &[
         description:
             "GDPR right-to-erasure executed via gdpr_automation; deletion confirmed \
              with audit-log evidence.",
-        owner: "Security",
+        owner: "Founder / System Operator",
         evidence_required: &["gdpr_deletion_log"],
         automation: AutomationLevel::Automated,
     },
@@ -490,7 +497,7 @@ const DEFAULT_CONTROLS: &[ControlSeed] = &[
         description:
             "Idempotency keys protect message-submission paths; failed deliveries are \
              retried with exponential backoff and surfaced via webhooks.",
-        owner: "Engineering",
+        owner: "Founder / System Operator",
         evidence_required: &["delivery_metrics"],
         automation: AutomationLevel::Automated,
     },
@@ -513,7 +520,7 @@ const DEFAULT_CONTROLS: &[ControlSeed] = &[
         description:
             "Double opt-in tokens persisted in double_opt_in_tokens; consent records \
              include signed proof documents.",
-        owner: "Engineering",
+        owner: "Founder / System Operator",
         evidence_required: &["consent_records_summary"],
         automation: AutomationLevel::Automated,
     },
@@ -524,7 +531,7 @@ const DEFAULT_CONTROLS: &[ControlSeed] = &[
         description:
             "Subscriber-level metadata is limited to what is required for delivery; PHI \
              is suppressed in audit logs when HIPAA mode is enabled.",
-        owner: "Engineering",
+        owner: "Founder / System Operator",
         evidence_required: &["pii_minimisation_review"],
         automation: AutomationLevel::Manual,
     },
@@ -535,7 +542,7 @@ const DEFAULT_CONTROLS: &[ControlSeed] = &[
         description:
             "Retention policies enforced via gdpr_automation::enforce_retention; \
              expired consent records and exports are purged daily.",
-        owner: "Engineering",
+        owner: "Founder / System Operator",
         evidence_required: &["retention_enforcement_log"],
         automation: AutomationLevel::Automated,
     },
@@ -546,7 +553,7 @@ const DEFAULT_CONTROLS: &[ControlSeed] = &[
         description:
             "Data-subject access requests automated via /gdpr/submit and processed \
              within the configured SLA.",
-        owner: "Security",
+        owner: "Founder / System Operator",
         evidence_required: &["dsr_metrics"],
         automation: AutomationLevel::Automated,
     },
@@ -568,7 +575,7 @@ const DEFAULT_CONTROLS: &[ControlSeed] = &[
         description:
             "Bounce, complaint, and verification feedback loops update subscriber state \
              in near real time.",
-        owner: "Engineering",
+        owner: "Founder / System Operator",
         evidence_required: &["data_quality_metrics"],
         automation: AutomationLevel::Automated,
     },

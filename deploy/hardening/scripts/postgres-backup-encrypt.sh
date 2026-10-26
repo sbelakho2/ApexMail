@@ -132,22 +132,31 @@ encrypt_backup() {
     secure_remove "$input_file"
 }
 
-# Copy the newest backup offsite when BACKUP_TARGET is configured.
+# Mandatory offsite mirror (durability audit 2026-10-26: optional →
+# required). A backup that has not left the host is NOT a backup: the
+# single host can die before the next nightly run, and a local-only copy
+# gives RPO 24h with zero geographic redundancy. Failure is loud and
+# non-zero, and success refreshes the `.last_offsite_ok` stamp the
+# compose healthcheck requires, so a skipped or failed mirror turns the
+# container unhealthy instead of scrolling past in a log line.
 offsite_copy() {
     newest="$(ls -1t "$BACKUP_DIR"/apexmail-backup-*.sql.gz.enc 2>/dev/null | head -n 1 || true)"
     [ -n "$newest" ] || return 0
     if [ -z "$BACKUP_TARGET" ]; then
+        err "BACKUP_TARGET is not set — the offsite mirror is MANDATORY; $(basename "$newest") exists only on this host"
+        return 1
+    fi
+    if ! command -v rsync >/dev/null 2>&1; then
+        err "rsync unavailable — cannot mirror $(basename "$newest") offsite"
+        return 1
+    fi
+    if rsync -a "$newest" "$BACKUP_TARGET/"; then
+        log "offsite copy OK: $(basename "$newest") -> ${BACKUP_TARGET}"
+        touch "$BACKUP_DIR/.last_offsite_ok" 2>/dev/null || true
         return 0
     fi
-    if command -v rsync >/dev/null 2>&1; then
-        if rsync -a "$newest" "$BACKUP_TARGET/"; then
-            log "offsite copy OK: $(basename "$newest") -> ${BACKUP_TARGET}"
-        else
-            warn "offsite rsync to ${BACKUP_TARGET} failed (exit $?)"
-        fi
-    else
-        warn "BACKUP_TARGET set but rsync is not available in this image"
-    fi
+    err "offsite rsync to ${BACKUP_TARGET} failed (exit $?) — $(basename "$newest") is LOCAL-ONLY"
+    return 1
 }
 
 # Count-based retention: keep the newest BACKUP_KEEP_COUNT encrypted backups.
@@ -350,7 +359,11 @@ perform_backup() {
         return 1
     fi
 
-    offsite_copy
+    if ! offsite_copy; then
+        err "backup ${timestamp} is encrypted and verified LOCALLY but NOT mirrored offsite — healthcheck turns unhealthy within one interval"
+        return 1
+    fi
+    return 0
 }
 
 # ── Dry run (--dry-run|-n) ────────────────────────────────────────────────────

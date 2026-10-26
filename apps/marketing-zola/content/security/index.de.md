@@ -38,7 +38,7 @@ last_updated = "2026-10-02"
 
 ### Anforderungsprüfung (Web Application Firewall)
 
-[roadmap] Eine Anforderungsprüf-Firewall (WAF) auf Basis von SQLi/XSS/Traversal/Command-Injection/SSRF-Regeln wertet heute Methode, Pfad, Query-String und Header öffentlicher API-Anfragen im Monitor-Modus aus: Entscheidungen werden protokolliert, nicht blockiert. Die standardmäßige Blockierdurchsetzung und die Prüfung von Anfragekörpern sind auf der Roadmap; die Standardkonfiguration der Managed Cloud umfasst kein WAF-Blocking. Intrusion Detection/Prevention (IDS/IPS) existiert als Bibliothek, die keinen Live-Verkehr prüft, und ist ebenfalls kein aktives Kontrollelement.
+Eine Anforderungsprüf-Firewall (WAF) auf Basis von SQLi/XSS/Traversal/Command-Injection/SSRF-Regeln wertet Methode, Pfad, Query-String und Header öffentlicher API-Anfragen aus: die verwaltete Produktionsbasis betreibt sie im Durchsetzungsmodus, Entscheidungen, die die Engine blocken würde, werden blockiert, und jede Entscheidung wird protokolliert. [roadmap] Die Prüfung von Anfragekörpern sowie eine Intrusion-Detection/-Prevention-Fähigkeit (IDS/IPS, heute eine Bibliothek ohne Live-Verkehrsprüfung) stehen auf der Roadmap und sind keine aktiven Kontrollen.
 
 - Eingabevalidierung und -bereinigung an allen API-Endpunkten (Handler-Ebene).
 - Ratenbegrenzung pro Endpunkt und API-Schlüssel.
@@ -113,11 +113,11 @@ Die Systemintegrität wird durch automatisierte, wiederkehrende Prüfungen im ge
 
 ## Betriebliche Sicherheit
 
-- Hintergrundüberprüfungen für Personal mit Produktionszugriff.
-- Vierteljährliche Zugriffsüberprüfungen.
-- Produktionszugriff erfordert Multi-Faktor-Authentifizierung und Genehmigung.
-- Änderungsmanagement mit Peer-Review und Rollback-Fähigkeit.
-- Aufgabentrennung zwischen Entwicklung und Betrieb.
+- Einbetrieb durch eine Person: jede Änderung wird vom Operator erstellt und muss die verpflichtenden CI- und Sicherheits-Gates des Repositories passieren, bevor sie ausgerollt wird.
+- Vierteljährliche Zugriffsüberprüfungen durch den Operator.
+- Produktionszugriff erfordert Multi-Faktor-Authentifizierung.
+- Änderungsmanagement mit Rollback-Fähigkeit; CI-Logs, Audit-Trail und Gate-Blessings liefern die manipulationssicheren Nachweise, die sonst ein zweiter Prüfer erbringen würde.
+- Der Deploy-Host lehnt jedes Build ohne frisches Gate-Blessing der erforderlichen Lanes ab; hochriskante Kontrollen werden stattdessen regelmäßig extern und unabhängig geprüft.
 
 ## Verwandte Themen
 

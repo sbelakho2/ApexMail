@@ -537,10 +537,13 @@ fn get_compliance_info(params: &serde_json::Value) -> serde_json::Value {
             "apexmail_dpa_contact": "dpo@apexmail.ee",
             "apexmail_provides": "Audit logs for compromised API key activity, timestamps of key creation/revocation, IP addresses that used the key"
         }),
-        "soc2_incident" => serde_json::json!({
-            "impact": "SOC2 Type II report may note incident in management's description of the system",
-            "auditor_notification": "Yes, notify auditor within 30 days with incident timeline and remediation",
-            "apexmail_provides": "SOC2 bridge letter describing incident scope and mitigation"
+        // Truthful incident facts: ApexMail holds no SOC 2 attestation, so
+        // there is no bridge letter and no auditor to notify. This arm used
+        // to fabricate all three (P0 audit finding 2026-10-26).
+        "incident_response" => serde_json::json!({
+            "process": "Security incidents are handled under the incident-response policy: detect, contain, remediate, notify affected customers, record the timeline in the audit log.",
+            "attestation_note": "ApexMail holds no SOC 2 or ISO 27001 attestation today; no bridge letter and no auditor notification exists.",
+            "apexmail_provides": "Audit-log exports for affected key and API activity (timestamps, IP addresses), plus a written incident summary on request."
         }),
         "gdpr_dsar" => serde_json::json!({
             "deadline": "30 days from request",
@@ -548,10 +551,10 @@ fn get_compliance_info(params: &serde_json::Value) -> serde_json::Value {
             "auto_erasure": "Events, suppressions, consent_records deleted. Aggregate billing data preserved (no PII)."
         }),
         "data_residency" => {
-            serde_json::json!({"location":"EU/EEA","primary":"Helsinki, Finland","standby":"Nuremberg, Germany","encryption":"AES-256-GCM at rest, TLS 1.2+ in transit","certifications":["ISO 27001","SOC2 Type II"]})
+            serde_json::json!({"location":"EU/EEA","primary":"Helsinki, Finland (single region; no standby)","encryption":"AES-256-GCM at rest, TLS 1.2+ in transit","certifications":[]})
         }
         _ => {
-            serde_json::json!({"error": format!("unknown topic: {topic}. Try: gdpr_breach_notification, soc2_incident, gdpr_dsar, data_residency")})
+            serde_json::json!({"error": format!("unknown topic: {topic}. Try: gdpr_breach_notification, incident_response, gdpr_dsar, data_residency")})
         }
     }
 }
@@ -1761,7 +1764,7 @@ mod tests {
     fn compliance_topics_cover_every_arm() {
         for topic in [
             "gdpr_breach_notification",
-            "soc2_incident",
+            "incident_response",
             "gdpr_dsar",
             "data_residency",
         ] {
@@ -1772,6 +1775,21 @@ mod tests {
         assert!(
             r["error"].as_str().unwrap().contains("unknown topic"),
             "unpublished claims must not resolve"
+        );
+        // The old fabricated SOC 2 topic stays dead, and the assistant can
+        // never resolve any attestation regime ApexMail does not hold.
+        let r = get_compliance_info(&serde_json::json!({"topic":"soc2_incident"}));
+        assert!(r.get("error").is_some(), "fabricated SOC 2 topic must not resolve");
+        // Residency is Finland-only, single region, no standby, no certs.
+        let r = get_compliance_info(&serde_json::json!({"topic":"data_residency"}));
+        assert_eq!(r["certifications"].as_array().unwrap().len(), 0);
+        assert!(
+            r["primary"].as_str().unwrap().contains("Helsinki, Finland"),
+            "{r}"
+        );
+        assert!(
+            !r.to_string().contains("Germany"),
+            "hosting claims must not mention Germany"
         );
     }
 

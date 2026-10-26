@@ -274,6 +274,34 @@ impl RewardKind {
         }
     }
 
+    /// The monetary terminal reward (economic bug fix 2026-10-26): a
+    /// retained subscription is worth its retained EUR, not a flat rung —
+    /// one retained €20 Developer account and one retained €4,000
+    /// Dedicated Tenant must not contribute the same posterior move.
+    ///
+    /// * `ln(1 + MRR / 10)` with a €10 reference: €20 ≈ 1.10,
+    ///   €229 ≈ 3.17, €4,000 ≈ 6.0 — a €2k customer is worth
+    ///   substantially more than a €20 customer.
+    /// * Winsorised at €10,000 so a single whale cannot dominate the
+    ///   sampler (≈ 6.91 maximum).
+    /// * Floored just above the categorical paid rung (1.0), keeping the
+    ///   ladder strictly increasing: retained always beats paid.
+    /// * `value_eur = 0` means the amount is unknown (the column
+    ///   defaults to 0): the original categorical 1.2 is kept rather than
+    ///   inventing a figure.
+    ///
+    /// All other rungs keep their categorical value.
+    pub fn reward_with_value(self, value_eur: f64) -> f64 {
+        if self == Self::RetainedMrr {
+            if !value_eur.is_finite() || value_eur <= 0.0 {
+                return self.reward();
+            }
+            let mrr = value_eur.min(10_000.0);
+            return (1.0 + mrr / 10.0).ln().max(1.05);
+        }
+        self.reward()
+    }
+
     /// Negative outcomes are penalties (and increment the negative-outcome
     /// budget counter).
     pub fn is_negative(self) -> bool {
@@ -1878,7 +1906,7 @@ pub async fn record_reward(
             "value_eur must be finite and >= 0, got {value_eur}"
         )));
     }
-    let reward = kind.reward();
+    let reward = kind.reward_with_value(value_eur);
     if !reward.is_finite() {
         return Err(SalesError::InvalidInput(format!(
             "reward for {kind} must be finite"
@@ -2083,7 +2111,7 @@ pub async fn record_rewards_batch(
             );
             continue;
         }
-        let reward = input.kind.reward();
+        let reward = input.kind.reward_with_value(input.value_eur);
         if !reward.is_finite() {
             fail(
                 &mut outcomes,
@@ -2680,6 +2708,40 @@ mod tests {
     fn reward_ladder_is_strictly_increasing_and_opens_are_zero() {
         assert_eq!(RewardKind::Delivered.reward(), 0.0);
         assert_eq!(RewardKind::Open.reward(), 0.0);
+    }
+
+    #[test]
+    fn retained_terminal_reward_scales_with_monetary_value() {
+        // Economic bug (audit 2026-10-26): retained_mrr used to be a flat
+        // 1.2, so a €20 account and a €4,000 account moved the posterior
+        // identically. The terminal rung now scales with retained EUR.
+        let twenty = RewardKind::RetainedMrr.reward_with_value(20.0);
+        let two_k = RewardKind::RetainedMrr.reward_with_value(2_000.0);
+        let four_k = RewardKind::RetainedMrr.reward_with_value(4_000.0);
+        assert!(
+            two_k > twenty * 4.0,
+            "a €2k customer must be worth substantially more than €20: {two_k} vs {twenty}"
+        );
+        assert!(four_k > two_k, "monotonic in value: {four_k} vs {two_k}");
+        // Winsorised: one €50k whale cannot dominate the sampler.
+        let whale = RewardKind::RetainedMrr.reward_with_value(50_000.0);
+        let capped = RewardKind::RetainedMrr.reward_with_value(10_000.0);
+        assert!((whale - capped).abs() < 1e-9, "{whale} vs {capped}");
+        // Ladder stays strictly increasing: retained beats the paid rung.
+        assert!(twenty > RewardKind::PaidSubscription.reward());
+        assert!(whale < 10.0, "bounded reward: {whale}");
+        // Unknown money (column default 0) keeps the original categorical rung.
+        assert_eq!(
+            RewardKind::RetainedMrr.reward_with_value(0.0),
+            RewardKind::RetainedMrr.reward()
+        );
+        // Non-terminal rungs are untouched by the value.
+        assert_eq!(RewardKind::Trial.reward_with_value(9_999.0), RewardKind::Trial.reward());
+        assert_eq!(RewardKind::Complaint.reward_with_value(500.0), RewardKind::Complaint.reward());
+    }
+
+    #[test]
+    fn categorical_ladder_stays_strictly_increasing_without_money() {
         let mut previous = f64::NEG_INFINITY;
         for kind in POSITIVE_REWARD_LADDER {
             let reward = kind.reward();

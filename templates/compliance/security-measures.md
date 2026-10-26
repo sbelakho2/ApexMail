@@ -130,15 +130,14 @@ This document serves as Annex 1 to the [Data Processing Agreement (DPA)](../lega
 - Recovery Time Objective (RTO): 4 hours.
 - Recovery Point Objective (RPO): 24 hours.
 - Disaster recovery tested annually.
-- Incident response team with defined escalation paths.
+- Incident response process with a defined escalation path (single operator, documented steps, audit-logged timeline).
 
 ## 10. Personnel Security
 
-- Background checks for personnel with access to production systems.
-- Confidentiality agreements for all personnel and contractors.
-- Security awareness training.
-- Access rights reviewed on role change or departure.
-- Principle of least privilege enforced.
+- Single-operator company: nobody beyond the founder/system operator holds production access, so there are no background checks, training programs or contractor agreements to claim.
+- Production access requires multi-factor authentication; administrative access is logged and auditable.
+- Access rights (dashboard roles and API keys) are reviewed quarterly and revoked on rotation or scope change.
+- Principle of least privilege enforced: scoped roles, purpose-bound API keys, and an operator-only system surface separated from customer consoles.
 
 ## 11. Data Separation
 

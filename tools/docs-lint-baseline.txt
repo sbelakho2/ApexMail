@@ -149,12 +149,12 @@
 2 apps/marketing-zola/content/responsible-disclosure/index.md
 1 apps/marketing-zola/content/secure-email-for-regulated-saas/index.de.md
 2 apps/marketing-zola/content/secure-email-for-regulated-saas/index.es.md
-2 apps/marketing-zola/content/secure-email-for-regulated-saas/index.fr.md
+1 apps/marketing-zola/content/secure-email-for-regulated-saas/index.fr.md
 1 apps/marketing-zola/content/secure-email-for-regulated-saas/index.md
 4 apps/marketing-zola/content/security/index.de.md
-11 apps/marketing-zola/content/security/index.es.md
-11 apps/marketing-zola/content/security/index.fr.md
-16 apps/marketing-zola/content/security/index.md
+12 apps/marketing-zola/content/security/index.es.md
+12 apps/marketing-zola/content/security/index.fr.md
+17 apps/marketing-zola/content/security/index.md
 1 apps/marketing-zola/content/sla/index.de.md
 3 apps/marketing-zola/content/sla/index.es.md
 2 apps/marketing-zola/content/sla/index.fr.md
@@ -351,7 +351,7 @@
 5 docs/operations/backup-verification.md
 6 docs/operations/cache-warming.md
 20 docs/operations/disaster-recovery-testing.md
-15 docs/operations/disaster-recovery.md
+16 docs/operations/disaster-recovery.md
 0 docs/operations/draft-review.md
 8 docs/operations/emergency-key-revocation.md
 7 docs/operations/encryption-at-rest.md
@@ -424,4 +424,4 @@
 31 docs/user-guide/glossary.md
 13 docs/user-guide/inbox-placement-testing.md
 32 docs/user-guide/troubleshooting.md
-TOTAL 4793
+TOTAL 4796

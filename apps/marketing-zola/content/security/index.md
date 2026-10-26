@@ -39,7 +39,7 @@ mkt_page_mode = "trust"
 
 ### Request Screening (Web Application Firewall)
 
-[roadmap] A request-screening firewall (WAF) built on SQLi/XSS/traversal/command-injection/SSRF rules evaluates the method, path, query string and headers of public API requests in monitor mode today: verdicts are logged, not blocked. Enabling blocking enforcement by default and extending inspection to request bodies are on the roadmap; the managed cloud's default posture does not include WAF blocking. Intrusion detection/prevention (IDS/IPS) exists as a library that inspects zero live traffic and is likewise not an active control.
+A request-screening firewall (WAF) built on SQLi/XSS/traversal/command-injection/SSRF rules evaluates the method, path, query string and headers of public API requests: the managed production baseline runs it in enforcement mode, verdicts the engine would block are blocked, and every decision is logged. [roadmap] Extending inspection to request bodies, and intrusion detection/prevention (IDS/IPS, a library that inspects no live traffic today), remain on the roadmap and are not active controls.
 
 - Input validation and sanitization on all API endpoints (handler-level validation).
 - Rate limiting per endpoint and API key.
@@ -122,11 +122,11 @@ Mollie B.V. is a payment institution supervised by De Nederlandsche Bank (DNB), 
 
 ## Operational Security
 
-- Background checks for personnel with production access.
-- Access reviews conducted quarterly.
-- Production access requires multi-factor authentication and approval.
-- Change management with peer review and rollback capability.
-- Segregation of duties between development and operations.
+- Single-operator operation: every change is authored by the operator and must pass the repository's required CI and security gates before it can deploy.
+- Access reviews conducted quarterly by the operator.
+- Production access requires multi-factor authentication.
+- Change management with rollback capability; CI logs, the audit trail and the gate blessing record what changed and which gates held, tamper-evident evidence instead of a second reviewer.
+- The deploy host refuses any build without a fresh gate blessing from the required lanes; high-risk controls get periodic independent external review in place of an internal second pair of eyes.
 
 ## Related
 

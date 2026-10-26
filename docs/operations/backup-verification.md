@@ -4,7 +4,9 @@
 > Hetzner S3 buckets, and WAL-archive checks. None of that exists. The real
 > deployment is a single Hetzner host; backups are nightly encrypted dumps
 > (`postgres-backup`, `clickhouse-backup` compose services) with an offsite
-> rsync mirror when `BACKUP_TARGET` is set. See
+> rsync mirror, **mandatory** since 2026-10-26 (`BACKUP_TARGET` is
+refused empty; the healthcheck requires the mirror's `.last_offsite_ok`
+stamp). See
 > [Disaster Recovery](disaster-recovery.md) for the full mechanism.
 
 > **Cadence:** automatic restorability check on every backup; manual restore
@@ -66,6 +68,17 @@ docker compose -f docker-compose.yml -f docker-compose.prod.yml --env-file .env 
 Retention defaults: PostgreSQL `BACKUP_KEEP_DAYS=14` / weeks 8 / months 6 /
 newest 30; ClickHouse 14 days / 14 artifacts. Offsite mirror retention is
 whatever the offsite host's own pruning provides — verify it during drills.
+
+## Automated Restore Drill (continuous since 2026-10-26)
+
+`deploy/hardening/scripts/postgres-restore-drill.sh` (compose service
+`postgres-restore-drill`) restores the newest backup into a scratch
+database on `DRILL_INTERVAL_SECS` (default 30 days), probes integrity
+(schema, migration ledger, core row counts), drops the scratch database,
+and writes a JSON evidence record with measured RPO/RTO to
+`/backups/drill-evidence/`. The container healthcheck requires a fresh
+record, so a drill that never succeeds is unhealthy, not silent. The tool
+ships `--self-test` (evidence schema + RPO/RTO math, no database) for CI.
 
 ## Manual Restore Drill (monthly)
 

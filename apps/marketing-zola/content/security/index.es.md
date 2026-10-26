@@ -38,7 +38,7 @@ last_updated = "2026-10-02"
 
 ### Inspección de solicitudes (firewall de aplicaciones web)
 
-[roadmap] Un firewall de inspección de solicitudes (WAF) basado en reglas SQLi/XSS/traversal/inyección-de-comandos/SSRF evalúa hoy método, ruta, cadena de consulta y encabezados de las solicitudes públicas de la API en modo monitor: los veredictos se registran, no se bloquean. Habilitar el bloqueo por defecto y extender la inspección a los cuerpos de solicitud está en la hoja de ruta; la postura por defecto de la nube gestionada no incluye bloqueo WAF. La detección/prevención de intrusiones (IDS/IPS) existe como biblioteca que no inspecciona tráfico real y tampoco es un control activo.
+Un firewall de inspección de solicitudes (WAF) basado en reglas SQLi/XSS/traversal/inyección-de-comandos/SSRF evalúa el método, la ruta, la cadena de consulta y los encabezados de las solicitudes públicas de la API: la base de producción gestionada lo ejecuta en modo de aplicación, los veredictos que el motor bloquearía se bloquean y cada decisión se registra. [roadmap] Inspeccionar los cuerpos de solicitud y una capacidad de detección/prevención de intrusiones (IDS/IPS, hoy una biblioteca que no inspecciona tráfico real) siguen en la hoja de ruta y no son controles activos.
 
 - Validación y saneamiento de entrada en todos los endpoints de la API (a nivel de handler).
 - Limitación de velocidad por endpoint y clave API.
@@ -113,11 +113,11 @@ La integridad del sistema se verifica mediante controles automatizados y recurre
 
 ## Seguridad operativa
 
-- Verificación de antecedentes para personal con acceso a producción.
-- Revisiones de acceso trimestrales.
-- El acceso a producción requiere autenticación multifactor y aprobación.
-- Gestión de cambios con revisión por pares y capacidad de reversión.
-- Segregación de funciones entre desarrollo y operaciones.
+- Operación de una sola persona: cada cambio lo escribe el operador y debe superar los CI y gates de seguridad obligatorios del repositorio antes de desplegarse.
+- Revisiones de acceso trimestrales realizadas por el operador.
+- El acceso a producción requiere autenticación multifactor.
+- Gestión de cambios con capacidad de reversión; los registros de CI, la auditoría y las bendiciones de gates aportan la evidencia a prueba de manipulaciones que de otro modo haría un segundo revisor.
+- El host de despliegue rechaza cualquier build sin una bendición de gates fresca de los pipelines obligatorios; los controles de alto riesgo reciben revisión externa e independiente periódica en lugar de un segundo par de ojos interno.
 
 ## Relacionado
 
