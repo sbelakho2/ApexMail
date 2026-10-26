@@ -32,7 +32,7 @@ Les entrées Dedicated Tenant et BYOC ci-dessous décrivent un modèle uniquemen
 
 | Sous-traitant | Finalité | Emplacement | Garantie de transfert |
 |---|---|---|---|
-| Hetzner Online GmbH | Infrastructure principale (calcul, stockage, réseau) | Finlande (UE) | Traitement intra-EEE ; les règles de transfert du chapitre V du RGPD ne s'appliquent pas |
+| Fournisseur d'infrastructure UE | Infrastructure principale (calcul, stockage, réseau) | Finlande (UE) | Traitement intra-EEE ; les règles de transfert du chapitre V du RGPD ne s'appliquent pas |
 | Amazon Web Services, Inc. (AWS S3) | Stockage d'objets de télémétrie lorsqu'il est activé | Région S3 configurée (par défaut : `eu-central-1`) | Traitement intra-EEE et la garantie de transfert applicable |
 | Amazon Web Services, Inc. (AWS SES) | Transport de livraison d'email lorsqu'il est activé | Région SES configurée | Traitement intra-EEE et la garantie de transfert applicable |
 | Mollie B.V. | Traitement des paiements | Pays-Bas (UE) ; les réseaux de cartes traitent à l'échelle mondiale selon le DPA Mollie | Traitement intra-UE (Mollie B.V., Amsterdam) |

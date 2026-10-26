@@ -21,7 +21,7 @@ purpose.
 
 Applies to all data stored, processed, or backed up by the ApexMail platform,
 including data held in PostgreSQL, Redis, object storage, and encrypted backups on
-Hetzner infrastructure (EU).
+EU infrastructure.
 
 ---
 

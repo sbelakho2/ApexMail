@@ -7,7 +7,8 @@
 #
 # What this does, on a schedule (RESTORE_DRILL_INTERVAL_SECS, default 30d):
 #   1. picks the newest encrypted backup in BACKUP_DIR,
-#   2. decrypts it (AES-256-CBC + PBKDF2, same as the backup script),
+#   2. decrypts and gunzips it through the canonical envelope
+#      (backup-envelope.sh, the SAME file the producer encrypts with),
 #   3. restores it into a SCRATCH database (DRILL_DATABASE) on the live
 #      postgres service, which is then DROPPED — the production data is
 #      never touched,
@@ -22,10 +23,22 @@
 # healthcheck (evidence younger than the cadence window) turns the
 # container unhealthy so a drill that never succeeds is visible.
 #
-# --self-test: exercises the evidence writer and RPO math with synthetic
-# inputs (no database) so the tool itself is gateable in CI.
+# --self-test: runs a REAL codec round trip through the canonical envelope
+# (backup-envelope.sh, shared with the producer — including a drifted-
+# parameter rejection) plus the evidence writer and RPO math, with no
+# database, so the tool itself is gateable in CI.
 
 set -eu
+
+# The canonical backup envelope — SAME file the producer encrypts with.
+# (External audit 2026-10-26: this drill used to decrypt with drifted PBKDF2
+# parameters and skipped the gzip stage, so no real backup could ever pass.)
+_envelope_lib="$(dirname "$0")/backup-envelope.sh"
+if [ ! -f "$_envelope_lib" ]; then
+    _envelope_lib=/usr/local/lib/backup-envelope.sh
+fi
+# shellcheck source=backup-envelope.sh
+. "$_envelope_lib"
 
 BACKUP_DIR="${BACKUP_DIR:-/backups}"
 DRILL_EVIDENCE_DIR="${DRILL_EVIDENCE_DIR:-$BACKUP_DIR/drill-evidence}"
@@ -58,6 +71,11 @@ EOF
 }
 
 self_test() {
+    # 1. The envelope round trip — a REAL encode/decode through the same
+    #    production functions the producer and drill use (this is the check
+    #    that catches producer/consumer parameter drift).
+    backup_envelope_self_test || return 1
+    # 2. The evidence writer and RPO/RTO math.
     tmp="$(mktemp -d)"
     DRILL_EVIDENCE_DIR="$tmp" write_evidence \
         "$tmp/synthetic.json" "recovered" "apexmail-backup-19700101-000000.sql.gz.enc" \
@@ -67,7 +85,7 @@ self_test() {
     grep -q '"rto_seconds":30' "$tmp/synthetic.json" || return 1
     grep -q '"core_rows_ok":true' "$tmp/synthetic.json" || return 1
     rm -rf "$tmp"
-    log "self-test OK: evidence schema, RPO/RTO math"
+    log "self-test OK: envelope codec round trip + evidence schema + RPO/RTO math"
     return 0
 }
 
@@ -87,39 +105,42 @@ drill_once() {
     log "drill start: restoring $(basename "$newest") into scratch database $DRILL_DATABASE"
 
     tmp="$(mktemp)"
+    dump="$(mktemp)"
     if [ -f "${POSTGRES_PASSWORD_FILE:-}" ]; then
         PGPASSWORD="$(tr -d '\r\n' < "$POSTGRES_PASSWORD_FILE")"
         export PGPASSWORD
     fi
-    keyfile="${BACKUP_ENCRYPTION_KEY_FILE:-/run/secrets/backup_encryption_key}"
-    if [ -f "$keyfile" ]; then
-        openssl enc -aes-256-cbc -d -pbkdf2 -iter 100000 -salt \
-            -in "$newest" -out "$tmp" -pass file:"$keyfile" 2>/dev/null
-        decrypt_ok=$?
-    else
-        openssl enc -aes-256-cbc -d -pbkdf2 -iter 100000 -salt \
-            -in "$newest" -out "$tmp" -pass env:BACKUP_ENCRYPTION_KEY 2>/dev/null
-        decrypt_ok=$?
+    # Decrypt + uncompress through the SAME canonical envelope the producer
+    # wrote with; each stage is named so a failure is attributable.
+    if ! backup_envelope_key; then
+        err "no backup encryption key available (BACKUP_ENCRYPTION_KEY_FILE / BACKUP_ENCRYPTION_KEY)"
+        rm -f "$tmp" "$dump"
+        return 1
     fi
-    if [ "$decrypt_ok" -ne 0 ]; then
-        err "decryption of $(basename "$newest") failed — the backup may be unreadable"
-        rm -f "$tmp"
+    if ! backup_envelope_decrypt "$newest" "$tmp" 2>/dev/null; then
+        err "decryption of $(basename "$newest") FAILED — wrong key or envelope drift; the newest backup is not recoverable"
+        rm -f "$tmp" "$dump"
+        return 1
+    fi
+    if ! backup_envelope_uncompress "$tmp" "$dump"; then
+        err "gunzip of $(basename "$newest") FAILED — the plaintext is not gzip (producer/producer-envelope drift)"
+        rm -f "$tmp" "$dump"
         return 1
     fi
 
     # Scratch database lifecycle: created, restored, probed, dropped.
     psql -h "$POSTGRES_HOST" -U "$POSTGRES_USER" -d postgres -v ON_ERROR_STOP=1 \
-        -c "DROP DATABASE IF EXISTS $DRILL_DATABASE" >/dev/null || { rm -f "$tmp"; return 1; }
+        -c "DROP DATABASE IF EXISTS $DRILL_DATABASE" >/dev/null || { rm -f "$tmp" "$dump"; return 1; }
     psql -h "$POSTGRES_HOST" -U "$POSTGRES_USER" -d postgres -v ON_ERROR_STOP=1 \
-        -c "CREATE DATABASE $DRILL_DATABASE" >/dev/null || { rm -f "$tmp"; return 1; }
+        -c "CREATE DATABASE $DRILL_DATABASE" >/dev/null || { rm -f "$tmp" "$dump"; return 1; }
 
-    if ! pg_restore -h "$POSTGRES_HOST" -U "$POSTGRES_USER" -d "$DRILL_DATABASE" "$tmp"; then
+    if ! pg_restore -h "$POSTGRES_HOST" -U "$POSTGRES_USER" -d "$DRILL_DATABASE" "$dump"; then
         err "pg_restore failed"
         psql -h "$POSTGRES_HOST" -U "$POSTGRES_USER" -d postgres -c "DROP DATABASE IF EXISTS $DRILL_DATABASE" >/dev/null 2>&1 || true
-        rm -f "$tmp"
+        rm -f "$tmp" "$dump"
         return 1
     fi
-    rm -f "$tmp"
+    rm -f "$tmp" "$dump"
 
     # Integrity probes: the schema, the migration ledger, and core row
     # counts must be readable in the RECOVERED database.

@@ -13,8 +13,8 @@
 //!   performs no Redis reads and every request proceeds unchanged.
 //! * `NODE_ID`, the fence identity (same variable the HA service's
 //!   `multi_region.node_id` reads; defaults to `node-{pid}`).
-//! * `REDIS_URL` (or `REDIS_HOST`/`REDIS_PORT`/`REDIS_PASSWORD`/`REDIS_DB`)
-//!  , the fence authority.
+//! * `REDIS_URL` (or `REDIS_HOST`/`REDIS_PORT`/`REDIS_PASSWORD`/`REDIS_DB`),
+//!   the fence authority.
 //!
 //! # Semantics
 //!

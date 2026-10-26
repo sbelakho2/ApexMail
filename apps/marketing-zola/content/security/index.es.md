@@ -38,7 +38,7 @@ last_updated = "2026-10-02"
 
 ### Inspección de solicitudes (firewall de aplicaciones web)
 
-Un firewall de inspección de solicitudes (WAF) basado en reglas SQLi/XSS/traversal/inyección-de-comandos/SSRF evalúa el método, la ruta, la cadena de consulta y los encabezados de las solicitudes públicas de la API: la base de producción gestionada lo ejecuta en modo de aplicación, los veredictos que el motor bloquearía se bloquean y cada decisión se registra. [roadmap] Inspeccionar los cuerpos de solicitud y una capacidad de detección/prevención de intrusiones (IDS/IPS, hoy una biblioteca que no inspecciona tráfico real) siguen en la hoja de ruta y no son controles activos.
+Un firewall de inspección de solicitudes (WAF) basado en reglas SQLi/XSS/traversal/inyección-de-comandos/SSRF evalúa el método, la ruta, la cadena de consulta y los encabezados de las solicitudes públicas de la API: la base de producción gestionada lo ejecuta en modo de aplicación, los veredictos que el motor bloquearía se bloquean y cada decisión se registra. [roadmap] Inspeccionar los cuerpos de solicitud sigue en la hoja de ruta y no es un control activo. La detección de intrusiones es un control activo en la ruta de correo entrante: el motor IDS inspecciona cada mensaje que acepta el MTA y la base de producción rechaza los mensajes que lo activan.
 
 - Validación y saneamiento de entrada en todos los endpoints de la API (a nivel de handler).
 - Limitación de velocidad por endpoint y clave API.
@@ -68,17 +68,17 @@ La integridad del sistema se verifica mediante controles automatizados y recurre
 | **Integridad de los artefactos de implementación** | Las imágenes de contenedor se verifican por digest, no se firman: cada ejecución del pipeline registra un manifiesto de release (digests SHA-256 por imagen, `SHA256SUMS.images`) y genera una anulación de compose con digests fijados; el despliegue se niega a levantar cualquier imagen cuyo digest no coincida con ese manifiesto. | Cada despliegue | Manifiesto de release + verificación de digest antes del rollout en la etapa de despliegue |
 | **Integridad del registro de auditoría** | Las tablas del registro de auditoría llevan una cadena hash: el resumen SHA-256 de cada fila se encadena a su predecesor. | Continuo (por escritura) | Cadena hash del registro de auditoría |
 | **Registros de despliegue** | Cada ejecución del pipeline registra un manifiesto (etapa, estado, código de salida, duración) más los registros por etapa. Son registros operativos, no un libro mayor a prueba de manipulaciones orientado al cliente. | Cada despliegue | Manifiestos de ejecución de CI (`ci/runs/<ts>/manifest.json`) |
-| **Verificación de copias de seguridad** | Cada copia de seguridad se descifra y valida estructuralmente de forma automática (`pg_restore --list`) antes de borrar la copia en claro, una copia ilegible nunca se cuenta como buena. Los ejercicios completos de restauración son manuales y siguen la cadencia trimestral documentada. | Cada copia (validación automática); trimestral (ejercicios manuales) | Validación de restaurabilidad al crear la copia; registros de ejercicios DR |
+| **Verificación de copias de seguridad** | Cada copia de seguridad se descifra y valida estructuralmente de forma automática (`pg_restore --list`) antes de borrar la copia en claro, una copia ilegible nunca se cuenta como buena. Un ejercicio de restauración restaura automáticamente la copia más reciente en una base de datos temporal cada 30 días y registra evidencia de recuperación medida. | Cada copia (validación automática); cada 30 días (ejercicio de restauración) | Validación de restaurabilidad al crear la copia; evidencia del ejercicio |
 | **Resiliencia en tiempo de ejecución** | Los servicios se ejecutan con healthchecks y reinicio automático; una sonda de contenido fallida tras el despliegue dispara la reversión automática a los pins de imagen anteriores. | Continuo | Healthchecks de contenedores; etapa de verificación + rollback |
 
 ## Seguridad de infraestructura
 
-- Hetzner Online GmbH para computación, almacenamiento y redes en la región de implementación configurada (un único host ejecuta la pila completa; no hay topología multirregión).
+- Infraestructura cloud europea (computación, almacenamiento y redes) situada en Finlandia (UE); todo el procesamiento de infraestructura permanece dentro del EEE.
 - Sistemas operativos Debian/Ubuntu reforzados con CIS.
 - Parches de seguridad automatizados con implementación por etapas.
 - Despliegue declarativo y versionado: toda la pila está definida en archivos Docker Compose y se despliega mediante el pipeline de CI autoalojado.
-- Segmentación de red Docker entre redes de frontend, backend y base de datos en el host de despliegue.
-- Cortafuegos del host: acceso entrante limitado a los puertos de servicio de correo/web (25, 80, 443, 587, 993) más puertos de operación; las bases de datos no exponen puertos del host.
+- Segmentación de red Docker entre redes de frontend, backend y base de datos.
+- Cortafuegos del host: acceso entrante limitado a los puertos de servicio de correo/web (25, 80, 443, 587, 993) más puertos de gestión; las bases de datos no exponen puertos públicos.
 - Gestión de secretos mediante Docker secrets montados desde archivos con permisos restringidos (0600); ningún secreto incrustado en imágenes o código fuente.
 
 ## Gestión de vulnerabilidades
@@ -108,16 +108,16 @@ La integridad del sistema se verifica mediante controles automatizados y recurre
 
 - Resumen de prueba de penetración: planificado para publicación después de completar la primera prueba de penetración externa de la aplicación y remediar los hallazgos altos/críticos. Actualmente no disponible.
 - Las solicitudes de cuestionarios de seguridad se evalúan caso por caso usando los materiales de revisión actuales; los paquetes SIG, CAIQ o HECVAT estandarizados no son un derecho de producto.
-- Los registros de auditoría están disponibles en Growth, Business y Enterprise; la retención depende del plan contratado.
+- ApexMail registra las acciones de API, configuración y administración en un registro de auditoría a prueba de manipulaciones; la retención depende del plan contratado.
 - La facilitación de auditorías de clientes está sujeta a revisión contractual Enterprise.
 
 ## Seguridad operativa
 
-- Operación de una sola persona: cada cambio lo escribe el operador y debe superar los CI y gates de seguridad obligatorios del repositorio antes de desplegarse.
-- Revisiones de acceso trimestrales realizadas por el operador.
+- Cada cambio debe superar los CI y gates de seguridad obligatorios del repositorio antes de poder desplegarse; el pipeline de despliegue rechaza cualquier build sin una bendición de gates fresca que cubra esas etapas.
+- Las revisiones de acceso se realizan trimestralmente.
 - El acceso a producción requiere autenticación multifactor.
-- Gestión de cambios con capacidad de reversión; los registros de CI, la auditoría y las bendiciones de gates aportan la evidencia a prueba de manipulaciones que de otro modo haría un segundo revisor.
-- El host de despliegue rechaza cualquier build sin una bendición de gates fresca de los pipelines obligatorios; los controles de alto riesgo reciben revisión externa e independiente periódica en lugar de un segundo par de ojos interno.
+- Gestión de cambios con capacidad de reversión: los registros de CI, el registro de auditoría y la bendición de gates documentan qué cambió y qué gates superaron, evidencia a prueba de manipulaciones en lugar de práctica informal.
+- Los controles de alto riesgo reciben revisión externa e independiente periódica.
 
 ## Relacionado
 

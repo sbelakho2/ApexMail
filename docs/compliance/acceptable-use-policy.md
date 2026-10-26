@@ -1,7 +1,7 @@
 # Acceptable Use Policy (AUP)
 
 > **Classification:** Internal Policy / Customer-Facing (summary published in ToS)
-> **Owner:** Trust & Safety, Bel Consulting OÜ
+> **Owner:** ApexMail
 > **Legal Entity:** Bel Consulting OÜ, Registry Code 16588745, Tallinn, Estonia
 > **Last Reviewed:** 2026-02-09
 > **Review Cycle:** Semi-annually
@@ -164,7 +164,7 @@ unless:
 - A formal complaint or legal request requires investigation.
 - The account owner requests a review as part of an appeal.
 
-All manual reviews are logged and restricted to authorised Trust & Safety personnel.
+All manual reviews are logged and restricted to authorised ApexMail personnel.
 
 ---
 
@@ -212,8 +212,7 @@ Suspended or terminated users may appeal by:
 
 ### 8.2 Review Process
 
-- Appeals are reviewed by the Trust & Safety Lead within **5 business days**.
-- The reviewer was not involved in the original enforcement decision.
+- Appeals are reviewed by ApexMail within **5 business days**.
 - The customer is notified of the outcome in writing.
 - Decisions on zero-tolerance violations (§3.1) are final and not subject to
   appeal.

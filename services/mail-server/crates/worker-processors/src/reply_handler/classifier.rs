@@ -741,11 +741,8 @@ mod tests {
 
     #[tokio::test]
     async fn full_classification_uses_deterministic_first() {
-        let input = ReplyInput::new(
-            "Re: proposal",
-            "This sounds great, can we schedule a call?",
-        )
-        .with_header("Auto-Submitted", "auto-replied");
+        let input = ReplyInput::new("Re: proposal", "This sounds great, can we schedule a call?")
+            .with_header("Auto-Submitted", "auto-replied");
         let outcome = classify_full(&ErroringClassifier, &input).await;
         assert_eq!(outcome.disposition, ReplyDisposition::OutOfOffice);
         assert_eq!(outcome.classifier, ClassifierKind::Deterministic);

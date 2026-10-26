@@ -20,7 +20,7 @@ ApexMail offers a Business Associate Agreement (BAA) as part of the **Enterprise
 The BAA covers:
 
 - **PHI handled by ApexMail** — Email content, metadata, and attachments that contain PHI
-- **Subprocessors** — AWS (SES, S3), Hetzner (dedicated IPs), ClickHouse (analytics)
+- **Subprocessors** — AWS (SES, S3), EU infrastructure provider (dedicated IPs), ClickHouse (analytics)
 - **Permitted uses** — Email delivery, analytics, storage, and compliance obligations
 - **Breach notification** — Notification within 72 hours per HIPAA requirements
 - **Termination** — 30-day cure period for material breaches

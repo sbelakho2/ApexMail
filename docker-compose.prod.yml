@@ -1962,6 +1962,9 @@ services:
     entrypoint: ["/bin/sh", "/usr/local/bin/postgres-backup-encrypt.sh"]
     volumes:
       - ./deploy/hardening/scripts/postgres-backup-encrypt.sh:/usr/local/bin/postgres-backup-encrypt.sh:ro
+      # The canonical envelope (cipher/KDF/iterations), shared with the
+      # restore drill — one implementation, mounted live over the baked copy.
+      - ./deploy/hardening/scripts/backup-envelope.sh:/usr/local/lib/backup-envelope.sh:ro
       - postgres_backups:/backups
       # F1 — SSH key for the BACKUP_TARGET rsync (read-only, host path is
       # env-overridable). Optional known_hosts alongside it when present;
@@ -2050,6 +2053,8 @@ services:
     entrypoint: ["/bin/sh", "/usr/local/bin/postgres-restore-drill.sh"]
     volumes:
       - ./deploy/hardening/scripts/postgres-restore-drill.sh:/usr/local/bin/postgres-restore-drill.sh:ro
+      # The canonical envelope the producer wrote with (see postgres-backup).
+      - ./deploy/hardening/scripts/backup-envelope.sh:/usr/local/lib/backup-envelope.sh:ro
       - postgres_backups:/backups
     environment:
       POSTGRES_HOST: postgres

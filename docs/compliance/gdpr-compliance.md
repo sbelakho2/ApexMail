@@ -13,7 +13,7 @@
 This document defines how ApexMail (operated by Bel Consulting OÜ) complies with
 Regulation (EU) 2016/679 (General Data Protection Regulation). It covers all personal
 data processed through the ApexMail platform, internal tooling, and supporting
-infrastructure hosted on Hetzner Cloud ARM servers in the European Union.
+infrastructure hosted in the European Union.
 
 ---
 
@@ -25,7 +25,7 @@ infrastructure hosted on Hetzner Cloud ARM servers in the European Union.
 |------|-------|-------------|
 | **Data Controller** | ApexMail Customer | Determines the purposes and means of processing their end-users' personal data (e.g., recipient lists, email content). |
 | **Data Processor** | Bel Consulting OÜ | Processes personal data on behalf of the controller according to documented instructions. |
-| **Sub-processor** | Hetzner Online GmbH | Infrastructure provider; hosts compute and storage in EU data centres. |
+| **Sub-processor** | EU infrastructure provider | Compute and storage in EU data centres. |
 
 Bel Consulting OÜ acts as a **data controller** for:
 
@@ -168,7 +168,7 @@ A DPA is executed with every customer in accordance with Article 28. The DPA cov
 
 | Sub-processor | Purpose | Location |
 |---------------|---------|----------|
-| Hetzner Online GmbH | Infrastructure (compute, storage) | EU (Finland) |
+| EU infrastructure provider | Infrastructure (compute, storage) | EU (Finland) |
 
 ---
 
@@ -225,10 +225,10 @@ data, enabling controllers to fulfil their own notification obligations.
 
 The supplied deployment configuration targets EU/EEA regions for primary data processing and storage. Active locations, storage providers, and transfer safeguards must be confirmed for the deployed environment:
 
-- **Compute:** Hetzner Cloud ARM servers (EU data centres).
-- **Database:** PostgreSQL (hosted on Hetzner, EU).
-- **Cache:** Redis (hosted on Hetzner, EU).
-- **Backups:** Stored on Hetzner, EU.
+- **Compute:** EU data centres.
+- **Database:** PostgreSQL, hosted in the EU.
+- **Cache:** Redis, hosted in the EU.
+- **Backups:** Stored in the EU.
 
 ### 9.2 Transfers Outside the EEA
 
@@ -300,9 +300,9 @@ Maintained under Article 30. The register includes:
 
 | Activity | Data Categories | Controller | Retention | Sub-processors |
 |----------|----------------|------------|-----------|----------------|
-| Email delivery | Recipient email, name, content | Customer | Per retention policy | Hetzner |
-| Engagement tracking | Email, IP (hashed), user agent | Customer | 90d / 365d (enterprise) | Hetzner |
-| List management | Recipient PII per controller | Customer | Duration of contract | Hetzner |
+| Email delivery | Recipient email, name, content | Customer | Per retention policy | EU infrastructure provider |
+| Engagement tracking | Email, IP (hashed), user agent | Customer | 90d / 365d (enterprise) | EU infrastructure provider |
+| List management | Recipient PII per controller | Customer | Duration of contract | EU infrastructure provider |
 
 ---
 
@@ -323,7 +323,7 @@ Summary of measures under Article 32 (detailed in related policies):
 
 ## 13. Training and Awareness
 
-- All team members complete GDPR awareness training upon onboarding.
+- All personnel with access to personal data complete GDPR awareness training.
 - Annual refresher training is mandatory.
 - Role-specific training for personnel handling personal data.
 - Training records are maintained.
@@ -338,4 +338,4 @@ This policy is reviewed:
 - **Upon material changes** to processing activities, infrastructure, or applicable law.
 - **After data protection incidents** to incorporate lessons learned.
 
-Changes are tracked in version control and communicated to the team.
+Changes are tracked in version control.

@@ -6553,9 +6553,9 @@ async fn form_autopilot_decision_review(
                 "approved" => {
                     format!("Decision approved, {released} action(s) released to the queue.")
                 }
-                _ => format!(
-                    "Decision recorded as rejected, {released} linked action(s) cancelled."
-                ),
+                _ => {
+                    format!("Decision recorded as rejected, {released} linked action(s) cancelled.")
+                }
             };
             redirect_success(&flash, &return_to, &state.config)
         }
@@ -11895,10 +11895,22 @@ mod tests {
         // "//evil.com", a protocol-relative hop straight to the
         // attacker. Control characters (CR/LF/TAB) can additionally
         // smuggle headers or corrupt parsers. None may survive.
-        assert_eq!(consent_safe_return_to(Some("/\\evil.com")), "https://apexmail.ee/");
-        assert_eq!(consent_safe_return_to(Some("\\/evil.com")), "https://apexmail.ee/");
-        assert_eq!(consent_safe_return_to(Some("/pricing\\@evil.example")), "https://apexmail.ee/");
-        assert_eq!(consent_safe_return_to(Some("/pricing\\")), "https://apexmail.ee/");
+        assert_eq!(
+            consent_safe_return_to(Some("/\\evil.com")),
+            "https://apexmail.ee/"
+        );
+        assert_eq!(
+            consent_safe_return_to(Some("\\/evil.com")),
+            "https://apexmail.ee/"
+        );
+        assert_eq!(
+            consent_safe_return_to(Some("/pricing\\@evil.example")),
+            "https://apexmail.ee/"
+        );
+        assert_eq!(
+            consent_safe_return_to(Some("/pricing\\")),
+            "https://apexmail.ee/"
+        );
         // The absolute-URL branch must be guarded by the same rule.
         assert_eq!(
             consent_safe_return_to(Some("https://apexmail.ee/\\evil.com")),
@@ -11916,9 +11928,18 @@ mod tests {
         );
         // A control char *inside* the path is rejected; one at the very
         // edge is already neutralised by the trim() above it.
-        assert_eq!(consent_safe_return_to(Some("/pri\u{0007}cing")), "https://apexmail.ee/");
-        assert_eq!(consent_safe_return_to(Some("/pricing\u{0007}")), "https://apexmail.ee/");
-        assert_eq!(consent_safe_return_to(Some("/pricing\t")), "https://apexmail.ee/pricing");
+        assert_eq!(
+            consent_safe_return_to(Some("/pri\u{0007}cing")),
+            "https://apexmail.ee/"
+        );
+        assert_eq!(
+            consent_safe_return_to(Some("/pricing\u{0007}")),
+            "https://apexmail.ee/"
+        );
+        assert_eq!(
+            consent_safe_return_to(Some("/pricing\t")),
+            "https://apexmail.ee/pricing"
+        );
         // …while the honest values still pass through untouched.
         assert_eq!(
             consent_safe_return_to(Some("/pricing?back=1")),
@@ -12079,7 +12100,10 @@ mod tests {
             "https://app.apexmail.ee/dashboard"
         );
         // Open redirects are rejected and fall back to the site home.
-        assert_eq!(consent_safe_return_to(Some("https://evil.example")), "https://apexmail.ee/");
+        assert_eq!(
+            consent_safe_return_to(Some("https://evil.example")),
+            "https://apexmail.ee/"
+        );
         assert_eq!(
             consent_safe_return_to(Some("https://evil.example/?u=https://apexmail.ee")),
             "https://apexmail.ee/"
@@ -12098,8 +12122,14 @@ mod tests {
             "https://apexmail.ee/"
         );
         // Protocol-relative and garbage values never leak through.
-        assert_eq!(consent_safe_return_to(Some("//evil.example")), "https://apexmail.ee/");
-        assert_eq!(consent_safe_return_to(Some("javascript:alert(1)")), "https://apexmail.ee/");
+        assert_eq!(
+            consent_safe_return_to(Some("//evil.example")),
+            "https://apexmail.ee/"
+        );
+        assert_eq!(
+            consent_safe_return_to(Some("javascript:alert(1)")),
+            "https://apexmail.ee/"
+        );
         assert_eq!(consent_safe_return_to(Some("")), "https://apexmail.ee/");
         assert_eq!(consent_safe_return_to(None), "https://apexmail.ee/");
     }

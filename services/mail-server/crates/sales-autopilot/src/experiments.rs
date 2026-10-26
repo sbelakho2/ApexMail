@@ -2736,8 +2736,14 @@ mod tests {
             RewardKind::RetainedMrr.reward()
         );
         // Non-terminal rungs are untouched by the value.
-        assert_eq!(RewardKind::Trial.reward_with_value(9_999.0), RewardKind::Trial.reward());
-        assert_eq!(RewardKind::Complaint.reward_with_value(500.0), RewardKind::Complaint.reward());
+        assert_eq!(
+            RewardKind::Trial.reward_with_value(9_999.0),
+            RewardKind::Trial.reward()
+        );
+        assert_eq!(
+            RewardKind::Complaint.reward_with_value(500.0),
+            RewardKind::Complaint.reward()
+        );
     }
 
     #[test]

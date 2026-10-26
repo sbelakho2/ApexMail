@@ -32,7 +32,7 @@ Die unten genannten Einträge zu Dedicated Tenant und BYOC beschreiben ein Model
 
 | Unterauftragsverarbeiter | Zweck | Standort | Übertragungsgarantie |
 |---|---|---|---|
-| Hetzner Online GmbH | Kerninfrastruktur (Compute, Storage, Netzwerk) | Finnland (EU) | Übermittlung innerhalb der EEA; die Kapitel-V-Regeln der DSGVO finden keine Anwendung |
+| EU-Infrastrukturanbieter | Kerninfrastruktur (Compute, Storage, Netzwerk) | Finnland (EU) | Übermittlung innerhalb der EEA; die Kapitel-V-Regeln der DSGVO finden keine Anwendung |
 | Amazon Web Services, Inc. (AWS S3) | Telemetrie-Objektspeicher, wenn aktiviert | Konfigurierte S3-Region (Standard: `eu-central-1`) | EU-Standardvertragsklauseln (AWS-DPA) |
 | Amazon Web Services, Inc. (AWS SES) | E-Mail-Zustelltransport, wenn aktiviert | Konfigurierte SES-Region | EU-Standardvertragsklauseln (AWS-DPA) |
 | Mollie B.V. | Zahlungsabwicklung | Niederlande (EU); Kartennetzwerke verarbeiten global gemäß dem Mollie-DPA | Verarbeitung innerhalb der EU (Mollie B.V., Amsterdam) |

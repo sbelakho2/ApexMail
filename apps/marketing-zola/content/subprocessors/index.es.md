@@ -10,7 +10,7 @@ last_updated = "2026-07-29"
 
 Esta página enumera los proveedores externos contratados por Bel Consulting OÜ (que opera como ApexMail) que pueden tratar datos personales de clientes en el curso de la prestación del servicio ApexMail. Este registro se mantiene de conformidad con el artículo 28 del RGPD y la sección 5 del Acuerdo de Tratamiento de Datos de ApexMail.
 
-Con el enrutamiento EU-only, la entrada de AWS SES no transporta el correo de ningún inquilino: los mensajes salen exclusivamente por los MTA propios de ApexMail sobre infraestructura de Hetzner. El enrutamiento EU-only y su evidencia, incluida la distinción frente al modo global predeterminado, que usa AWS SES en su región de la UE, se explican en la [página de soberanía de la UE](/es/eu-sovereign/).
+Con el enrutamiento EU-only, la entrada de AWS SES no transporta el correo de ningún inquilino: los mensajes salen exclusivamente por los MTA propios de ApexMail sobre infraestructura de la UE gestionada por ApexMail (Finlandia). El enrutamiento EU-only y su evidencia, incluida la distinción frente al modo global predeterminado, que usa AWS SES en su región de la UE, se explican en la [página de soberanía de la UE](/es/eu-sovereign/).
 
 ### Subprocesadores de infraestructura
 
@@ -18,7 +18,7 @@ Las siguientes entidades externas tratan datos personales de clientes por cuenta
 
 | Entidad legal | Marca | Servicio | Finalidad | Categorías de datos | País de tratamiento | País de almacenamiento | País corporativo | Mecanismo de transferencia | Obligatorio |
 |---|---|---|---|---|---|---|---|---|---|
-| Hetzner Online GmbH | Hetzner | Alojamiento en la nube | Cómputo, almacenamiento, red | Datos del servicio principal en la implementación compartida predeterminada | Región UE/EEE configurada | Región UE/EEE configurada | Finlandia | Tratamiento intra-EEE; las normas de transferencia del capítulo V del RGPD no se aplican | Sí |
+| Proveedor de infraestructura de la UE (nombrado en el anexo de subprocesadores del DPA del cliente) | Proveedor de infraestructura | Alojamiento en la nube | Cómputo, almacenamiento, red | Datos del servicio principal en la implementación compartida predeterminada | Finlandia | Finlandia | UE/EEE | Tratamiento intra-EEE; las normas de transferencia del capítulo V del RGPD no se aplican | Sí. Instalación activa: Helsinki, Finlandia (UE/EEE). |
 | Amazon Web Services, Inc. | AWS S3 | Almacenamiento de objetos de telemetría | Almacenamiento de telemetría cuando está activado | Los registros de Loki y las trazas de Tempo pueden contener metadatos operativos | Región de S3 configurada (predeterminada: `eu-central-1`) | Región de S3 configurada (predeterminada: `eu-central-1`) | EE. UU. | Cláusulas Contractuales Tipo de la UE (DPA de AWS) | No, solo cuando la implementación activa usa almacenamiento S3 |
 | Amazon Web Services, Inc. | AWS SES | Transporte de entrega de email | Entrega de email cuando está activada | Contenido de los emails y direcciones de los destinatarios | Región de SES configurada | Región de SES configurada | EE. UU. | Cláusulas Contractuales Tipo de la UE (DPA de AWS) | No, solo cuando la implementación activa usa SES |
 | Google LLC | Google | Autenticación OAuth | Inicio de sesión mediante Google OAuth | Tokens OAuth, dirección de email, nombre | Global (datos de la UE) | Usuarios con sede en el EEE: EEE | EE. UU. | Cláusulas Contractuales Tipo (SCC) | No, solo si el cliente activa Google OAuth |
@@ -27,12 +27,12 @@ Las siguientes entidades externas tratan datos personales de clientes por cuenta
 
 ### Infraestructura autoalojada (no son subprocesadores externos)
 
-El siguiente software lo despliega y gestiona ApexMail sobre infraestructura de Hetzner. Los editores del software no tratan datos de clientes.
+El siguiente software lo despliega y gestiona ApexMail sobre infraestructura de la UE gestionada por ApexMail (Finlandia). Los editores del software no tratan datos de clientes.
 
 | Software | Finalidad | Categorías de datos | País de tratamiento | País de almacenamiento | Notas |
 |---|---|---|---|---|---|
-| ClickHouse (código abierto) | Base de datos de analítica | Eventos de entrega, eventos de apertura y clic, datos de rebotes y quejas | Región de implementación configurada | Región de implementación configurada | Autoalojado por ApexMail. ClickHouse, Inc. no trata datos de clientes. |
-| Redis (código abierto) | Caché en memoria | Tokens de sesión, contadores de límite de tasa | Región de implementación configurada | Región de implementación configurada | Autoalojado por ApexMail. Redis Ltd. no trata datos de clientes. |
+| ClickHouse (código abierto) | Base de datos de analítica | Eventos de entrega, eventos de apertura y clic, datos de rebotes y quejas | Región de la UE de ApexMail (Finlandia) | Región de la UE de ApexMail (Finlandia) | Autoalojado por ApexMail sobre infraestructura de la UE gestionada por ApexMail (Finlandia). ClickHouse, Inc. no trata datos de clientes. |
+| Redis (código abierto) | Caché en memoria | Tokens de sesión, contadores de límite de tasa | Región de la UE de ApexMail (Finlandia) | Región de la UE de ApexMail (Finlandia) | Autoalojado por ApexMail sobre infraestructura de la UE gestionada por ApexMail (Finlandia). Redis Ltd. no trata datos de clientes. |
 
 ### Procesador de pagos
 
@@ -50,4 +50,4 @@ Si se opone a un nuevo subprocesador por motivos razonables de protección de da
 
 | Fecha | Cambio | Descripción |
 |---|---|---|
-| 2026-07-29 | Publicación inicial | Registro de subprocesadores publicado con Hetzner (infraestructura), AWS (S3/SES, cuando están activados), Google (OAuth), GitHub (OAuth) y Mollie (pagos). ClickHouse y Redis son software autoalojado, no subprocesadores (véase arriba). |
+| 2026-07-29 | Publicación inicial | Registro de subprocesadores publicado con el proveedor de infraestructura de la UE (infraestructura), AWS (S3/SES, cuando están activados), Google (OAuth), GitHub (OAuth) y Mollie (pagos). ClickHouse y Redis son software autoalojado, no subprocesadores (véase arriba). |

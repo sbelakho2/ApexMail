@@ -38,7 +38,7 @@ last_updated = "2026-10-02"
 
 ### Inspection des requêtes (pare-feu applicatif web)
 
-Un pare-feu d'inspection des requêtes (WAF) fondé sur des règles SQLi/XSS/traversal/injection-de-commandes/SSRF évalue la méthode, le chemin, la chaîne de requête et les en-têtes des requêtes API publiques : la base de production gérée l'exécute en mode application, les verdicts que le moteur bloquerait sont bloqués et chaque décision est journalisée. [roadmap] L'inspection des corps de requête et une capacité de détection/prévention d'intrusion (IDS/IPS, aujourd'hui une bibliothèque sans inspection de trafic réel) restent sur la feuille de route et ne sont pas des contrôles actifs.
+Un pare-feu d'inspection des requêtes (WAF) fondé sur des règles SQLi/XSS/traversal/injection-de-commandes/SSRF évalue la méthode, le chemin, la chaîne de requête et les en-têtes des requêtes API publiques : la base de production gérée l'exécute en mode application, les verdicts que le moteur bloquerait sont bloqués et chaque décision est journalisée. [roadmap] L'inspection des corps de requête reste à la feuille de route et n'est pas un contrôle actif. La détection d'intrusion est un contrôle actif sur le courrier entrant : le moteur IDS inspecte chaque message accepté par le MTA et la base de production refuse les messages qui le déclenchent.
 
 - Validation et assainissement des entrées sur tous les points de terminaison API (au niveau des handlers).
 - Limitation de débit par point de terminaison et clé API.
@@ -68,17 +68,17 @@ L'intégrité du système est vérifiée par des contrôles automatisés et réc
 | **Intégrité des artefacts de déploiement** | Les images de conteneurs sont vérifiées par digest, pas signées : chaque exécution du pipeline enregistre un manifeste de release (digests SHA-256 par image, `SHA256SUMS.images`) et génère un override compose épinglé par digest ; le déploiement refuse de démarrer toute image dont le digest ne correspond pas à ce manifeste. | Chaque déploiement | Manifeste de release + vérification des digests avant le rollout dans l'étape de déploiement |
 | **Intégrité du journal d'audit** | Les tables du journal d'audit portent une chaîne de hachage : le résumé SHA-256 de chaque ligne est chaîné à son prédécesseur. | Continu (par écriture) | Chaîne de hachage du journal d'audit |
 | **Journaux de déploiement** | Chaque exécution du pipeline enregistre un manifeste (étape, statut, code de sortie, durée) plus les journaux par étape. Ce sont des enregistrements opérationnels, pas un registre inviolable orienté client. | Chaque déploiement | Manifestes d'exécution CI (`ci/runs/<ts>/manifest.json`) |
-| **Vérification des sauvegardes** | Chaque sauvegarde est automatiquement déchiffrée et validée structurellement (`pg_restore --list`) avant suppression de la copie en clair, une sauvegarde illisible n'est jamais comptée comme bonne. Les exercices complets de restauration sont manuels et suivent la cadence trimestrielle documentée. | Chaque sauvegarde (validation automatique) ; trimestriel (exercices manuels) | Validation de restaurabilité à la sauvegarde ; registres des exercices DR |
+| **Vérification des sauvegardes** | Chaque sauvegarde est automatiquement déchiffrée et validée structurellement (`pg_restore --list`) avant suppression de la copie en clair, une sauvegarde illisible n'est jamais comptée comme bonne. Un exercice de restauration restaure automatiquement la sauvegarde la plus récente dans une base de données temporaire tous les 30 jours et enregistre des preuves de récupération mesurées. | Chaque sauvegarde (validation automatique) ; tous les 30 jours (exercice de restauration) | Validation de restaurabilité à la sauvegarde ; preuves de l'exercice |
 | **Résilience à l'exécution** | Les services s'exécutent avec healthchecks et redémarrage automatique ; une sonde de contenu échouée après le déploiement déclenche le rollback automatique vers les épinglages d'images précédents. | Continu | Healthchecks de conteneurs ; étape de vérification + rollback |
 
 ## Sécurité de l'infrastructure
 
-- Hetzner Online GmbH pour le calcul, le stockage et le réseau dans la région de déploiement configurée (un seul hôte exécute la pile complète ; il n'existe pas de topologie multirégion).
+- Infrastructure cloud européenne (calcul, stockage et réseau) située en Finlande (UE) ; tout le traitement d'infrastructure reste dans l'EEE.
 - Systèmes d'exploitation Debian/Ubuntu renforcés CIS.
 - Correctifs de sécurité automatisés avec déploiement progressif.
 - Déploiement déclaratif et versionné : toute la pile est définie dans des fichiers Docker Compose et déployée par le pipeline CI auto-hébergé.
-- Segmentation réseau Docker entre les réseaux frontend, backend et base de données sur l'hôte de déploiement.
-- Pare-feu de l'hôte : accès entrant limité aux ports de service mail/web (25, 80, 443, 587, 993) plus les ports d'exploitation ; les bases de données n'exposent aucun port hôte.
+- Segmentation réseau Docker entre les réseaux frontend, backend et base de données.
+- Pare-feu de l'hôte : accès entrant limité aux ports de service mail/web (25, 80, 443, 587, 993) plus les ports de gestion ; les bases de données n'exposent aucun port public.
 - Gestion des secrets via Docker secrets montés depuis des fichiers à permissions restreintes (0600) ; aucun secret intégré aux images ou au code source.
 
 ## Gestion des vulnérabilités
@@ -108,16 +108,16 @@ L'intégrité du système est vérifiée par des contrôles automatisés et réc
 
 - Résumé du test d'intrusion : prévu pour publication après la réalisation du premier test d'intrusion externe de l'application et la remédiation des résultats élevés/critiques. Actuellement non disponible.
 - Les demandes de questionnaires de sécurité sont évaluées au cas par cas à partir des éléments de revue actuels ; les packs SIG, CAIQ ou HECVAT standardisés ne constituent pas un droit de produit.
-- Les journaux d'audit sont disponibles sur Growth, Business et Enterprise ; la conservation dépend du forfait souscrit.
+- ApexMail enregistre les actions API, de configuration et d'administration dans une piste d'audit inviolable ; la conservation dépend du forfait souscrit.
 - La facilitation d'audit client est soumise à une revue contractuelle Enterprise.
 
 ## Sécurité opérationnelle
 
-- Exploitation à une seule personne : chaque changement est écrit par l'opérateur et doit passer les CI et gates de sécurité obligatoires du dépôt avant déploiement.
-- Revues d'accès trimestrielles par l'opérateur.
+- Chaque changement doit passer les gates CI et de sécurité obligatoires du dépôt avant de pouvoir être déployé ; le pipeline de déploiement refuse tout build sans bénédiction de gates fraîche couvrant ces étapes.
+- Les revues d'accès sont trimestrielles.
 - L'accès à la production nécessite une authentification multi-facteurs.
-- Gestion des changements avec capacité de restauration ; journaux de CI, piste d'audit et bénédictions de gates fournissent la preuve infalsifiable qu'un second vérificateur assurerait autrement.
-- L'hôte de déploiement refuse tout build sans bénédiction de gates fraîche des pipelines obligatoires ; les contrôles à haut risque font l'objet d'une revue externe indépendante périodique au lieu d'un second regard interne.
+- Gestion des changements avec capacité de restauration : journaux de CI, piste d'audit et bénédiction de gates consignent ce qui a changé et quels gates ont tenu, preuves inviolables plutôt que pratique informelle.
+- Les contrôles à haut risque font l'objet d'une revue externe indépendante périodique.
 
 ## Liens connexes
 

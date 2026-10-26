@@ -10,8 +10,8 @@
 //!  1. ingest stores the statement (account, amounts, dates, digest, import
 //!     link) and re-ingesting the same statement is a no-op (line count
 //!     unchanged);
-//!  2. malformed rows are refused with per-row errors and NOTHING is written
-//!    , unparseable dates/amounts, currency disagreeing with the account,
+//!  2. malformed rows are refused with per-row errors and NOTHING is written,
+//!     unparseable dates/amounts, currency disagreeing with the account,
 //!     unknown accounts, duplicates in the file, dates outside the declared
 //!     period, and lines already stored (re-issued file → conflict);
 //!  3. the sweep posts the ingested non-zero lines exactly once (journal

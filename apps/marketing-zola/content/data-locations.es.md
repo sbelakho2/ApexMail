@@ -32,7 +32,7 @@ Las entradas de Dedicated Tenant y BYOC que aparecen a continuación describen u
 
 | Subprocesador | Finalidad | Ubicación | Garantía de transferencia |
 |---|---|---|---|
-| Hetzner Online GmbH | Infraestructura principal (computación, almacenamiento, red) | Finlandia (UE) | Tratamiento intra-EEE; no se aplican las reglas de transferencia del capítulo V del RGPD |
+| Proveedor de infraestructura de la UE | Infraestructura principal (computación, almacenamiento, red) | Finlandia (UE) | Tratamiento intra-EEE; no se aplican las reglas de transferencia del capítulo V del RGPD |
 | Amazon Web Services, Inc. (AWS S3) | Almacenamiento de objetos de telemetría cuando está habilitado | Región S3 configurada (predeterminada: `eu-central-1`) | Tratamiento intra-EEE y la garantía de transferencia aplicable |
 | Amazon Web Services, Inc. (AWS SES) | Transporte de entrega de correo cuando está habilitado | Región SES configurada | Tratamiento intra-EEE y la garantía de transferencia aplicable |
 | Mollie B.V. | Procesamiento de pagos | Países Bajos (UE); las redes de tarjetas procesan globalmente según el DPA de Mollie | Tratamiento intra-UE (Mollie B.V., Ámsterdam) |

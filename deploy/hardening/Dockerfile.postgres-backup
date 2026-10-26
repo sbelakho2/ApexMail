@@ -12,3 +12,7 @@ FROM prodrigestivill/postgres-backup-local:16-alpine
 # hadolint ignore=DL3018
 RUN apk upgrade --no-cache \
     && apk add --no-cache openssl rsync
+# The canonical backup envelope, baked in so the producer and the
+# restore-drill containers decode identically even without bind mounts
+# (compose mounts the repo copy over this path for live development).
+COPY scripts/backup-envelope.sh /usr/local/lib/backup-envelope.sh

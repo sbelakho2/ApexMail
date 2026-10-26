@@ -38,7 +38,7 @@ last_updated = "2026-10-02"
 
 ### Anforderungsprüfung (Web Application Firewall)
 
-Eine Anforderungsprüf-Firewall (WAF) auf Basis von SQLi/XSS/Traversal/Command-Injection/SSRF-Regeln wertet Methode, Pfad, Query-String und Header öffentlicher API-Anfragen aus: die verwaltete Produktionsbasis betreibt sie im Durchsetzungsmodus, Entscheidungen, die die Engine blocken würde, werden blockiert, und jede Entscheidung wird protokolliert. [roadmap] Die Prüfung von Anfragekörpern sowie eine Intrusion-Detection/-Prevention-Fähigkeit (IDS/IPS, heute eine Bibliothek ohne Live-Verkehrsprüfung) stehen auf der Roadmap und sind keine aktiven Kontrollen.
+Eine Anforderungsprüf-Firewall (WAF) auf Basis von SQLi/XSS/Traversal/Command-Injection/SSRF-Regeln wertet Methode, Pfad, Query-String und Header öffentlicher API-Anfragen aus: die verwaltete Produktionsbasis betreibt sie im Durchsetzungsmodus, Entscheidungen, die die Engine blocken würde, werden blockiert, und jede Entscheidung wird protokolliert. [roadmap] Die Prüfung von Anfragekörpern bleibt auf der Roadmap und ist keine aktive Kontrolle. Die Intrusion Detection ist eine aktive Kontrolle auf dem eingehenden Mailpfad: die IDS-Engine prüft jede vom MTA angenommene Nachricht, und die Produktionsbasis verweigert Nachrichten, die sie auslöst.
 
 - Eingabevalidierung und -bereinigung an allen API-Endpunkten (Handler-Ebene).
 - Ratenbegrenzung pro Endpunkt und API-Schlüssel.
@@ -68,17 +68,17 @@ Die Systemintegrität wird durch automatisierte, wiederkehrende Prüfungen im ge
 | **Integrität der Bereitstellungsartefakte** | Container-Images werden per Digest verifiziert, nicht signiert: Jede Pipeline-Ausführung zeichnet ein Release-Manifest auf (SHA-256-Digests je Image, `SHA256SUMS.images`) und erzeugt eine digest-gepinnte Compose-Override-Datei; die Bereitstellung verweigert den Start jedes Images, dessen Digest nicht zum Manifest passt. | Jede Bereitstellung | Release-Manifest + Digest-Verifizierung vor dem Rollout in der Deploy-Stufe |
 | **Audit-Log-Integrität** | Audit-Log-Tabellen tragen eine Hash-Kette: Der SHA-256-Digest jeder Zeile ist mit ihrem Vorgänger verkettet. | Kontinuierlich (je Schreibvorgang) | Audit-Log-Hash-Kette |
 | **Bereitstellungsprotokolle** | Jede Pipeline-Ausführung zeichnet ein Manifest (Stufe, Status, Exit-Code, Dauer) sowie Stufen-Protokolle auf. Dies sind Betriebsprotokolle, kein manipulationssicheres, kundenseitiges Protokoll. | Jede Bereitstellung | CI-Run-Manifeste (`ci/runs/<ts>/manifest.json`) |
-| **Backup-Verifizierung** | Jedes Backup wird automatisch entschlüsselt und strukturell validiert (`pg_restore --list`), bevor die Klartext-Kopie gelöscht wird, ein nicht lesbares Backup gilt nie als gut. Vollständige Wiederherstellungsübungen sind manuell und folgen der dokumentierten vierteljährlichen Kadenz. | Je Backup (automatische Validierung); vierteljährlich (manuelle Übungen) | Wiederherstellbarkeitsprüfung beim Backup; DR-Übungsprotokolle |
+| **Backup-Verifizierung** | Jedes Backup wird automatisch entschlüsselt und strukturell validiert (`pg_restore --list`), bevor die Klartext-Kopie gelöscht wird, ein nicht lesbares Backup gilt nie als gut. Eine Wiederherstellungsübung stellt das neueste Backup automatisch in einer Scratch-Datenbank wieder her und zeichnet gemessene Wiederherstellungsnachweise auf. | Je Backup (automatische Validierung); alle 30 Tage (Wiederherstellungsübung) | Wiederherstellbarkeitsprüfung beim Backup; Nachweise der Wiederherstellungsübung |
 | **Laufzeit-Resilienz** | Dienste laufen mit Healthchecks und automatischem Neustart; ein fehlgeschlagener Content-Probe nach dem Deploy löst automatisches Rollback auf die vorherigen Image-Pins aus. | Kontinuierlich | Container-Healthchecks; Verify-Stufe + Rollback |
 
 ## Infrastruktursicherheit
 
-- Hetzner Online GmbH für Compute, Storage und Networking in der konfigurierten Bereitstellungsregion (ein einzelner Host betreibt den gesamten Stack; es gibt keine Multi-Region-Topologie).
+- Europäische Cloud-Infrastruktur (Compute, Storage und Networking) in Finnland (EU); die gesamte Infrastrukturverarbeitung bleibt innerhalb des EWR.
 - CIS-gehärtete Debian/Ubuntu-Betriebssysteme.
 - Automatisierte Sicherheitspatches mit gestaffelter Einführung.
 - Deklarative, versionskontrollierte Bereitstellung: Der gesamte Stack ist in Docker-Compose-Dateien definiert und wird über die selbst gehostete CI-Pipeline ausgerollt.
-- Docker-Netzwerksegmentierung zwischen Frontend-, Backend- und Datenbank-Netzwerken auf dem Bereitstellungshost.
-- Host-Firewall: Eingehender Zugriff auf die Mail-/Web-Service-Ports (25, 80, 443, 587, 993) sowie Operator-Ports beschränkt; Datenbanken haben keine Host-Port-Freigabe.
+- Docker-Netzwerksegmentierung zwischen Frontend-, Backend- und Datenbank-Netzwerken.
+- Host-Firewall: Eingehender Zugriff auf die Mail-/Web-Service-Ports (25, 80, 443, 587, 993) sowie Verwaltungsports beschränkt; Datenbanken haben keine öffentliche Port-Freigabe.
 - Geheimnisverwaltung über Docker Secrets aus berechtigungsbeschränkten Dateien (0600); keine Geheimnisse in Images oder Quellcode.
 
 ## Schwachstellenmanagement
@@ -108,16 +108,16 @@ Die Systemintegrität wird durch automatisierte, wiederkehrende Prüfungen im ge
 
 - Zusammenfassung des Penetrationstests: geplant zur Veröffentlichung nach Abschluss des ersten externen Anwendungs-Penetrationstests und Behebung hoher/kritischer Ergebnisse. Derzeit nicht verfügbar.
 - Sicherheitsfragebögen werden anhand aktueller Prüfdokumentation im Einzelfall bewertet; standardisierte SIG-, CAIQ- oder HECVAT-Pakete sind kein Produktmerkmal.
-- Audit-Protokolle sind für Growth, Business und Enterprise verfügbar; die Aufbewahrung richtet sich nach dem abonnierten Tarif.
+- ApexMail zeichnet API-, Konfigurations- und Admin-Aktionen in einem manipulationssicheren Audit-Trail auf; die Aufbewahrung richtet sich nach dem abonnierten Tarif.
 - Unterstützung bei Kundenaudits unterliegt einer Enterprise-Vertragsprüfung.
 
 ## Betriebliche Sicherheit
 
-- Einbetrieb durch eine Person: jede Änderung wird vom Operator erstellt und muss die verpflichtenden CI- und Sicherheits-Gates des Repositories passieren, bevor sie ausgerollt wird.
-- Vierteljährliche Zugriffsüberprüfungen durch den Operator.
+- Jede Änderung muss die verpflichtenden CI- und Sicherheits-Gates des Repositories passieren, bevor sie ausgerollt wird; die Deploy-Pipeline verweigert jedes Build ohne frisches Gate-Blessing, das diese Lanes abdeckt.
+- Zugriffsüberprüfungen erfolgen vierteljährlich.
 - Produktionszugriff erfordert Multi-Faktor-Authentifizierung.
-- Änderungsmanagement mit Rollback-Fähigkeit; CI-Logs, Audit-Trail und Gate-Blessings liefern die manipulationssicheren Nachweise, die sonst ein zweiter Prüfer erbringen würde.
-- Der Deploy-Host lehnt jedes Build ohne frisches Gate-Blessing der erforderlichen Lanes ab; hochriskante Kontrollen werden stattdessen regelmäßig extern und unabhängig geprüft.
+- Änderungsmanagement mit Rollback-Fähigkeit: CI-Logs, Audit-Trail und Gate-Blessing halten fest, was sich geändert hat und welche Gates gehalten haben, manipulationssichere Nachweise statt informeller Praxis.
+- Hochriskante Kontrollen werden regelmäßig extern und unabhängig geprüft.
 
 ## Verwandte Themen
 

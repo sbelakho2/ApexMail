@@ -105,6 +105,41 @@ step "Step 0: Verify environment"
 [[ -d "$DEPLOY_DIR" ]] || { error "$DEPLOY_DIR does not exist."; exit 1; }
 [[ -f "$ENV_FILE" ]]   || { error ".env not found at $ENV_FILE"; exit 1; }
 
+# ── Step 0.5: Gate blessing verification (fail-closed) ───────────────────────
+# BOTH deploy paths verify the blessing (TOM §8.3, public security page):
+# the canonical pipeline verifies it in ci/stages/fetch.sh; this manual
+# hotfix path verifies the SAME manifest here with the SAME function, so an
+# accidental deploy of an ungated commit cannot happen through either door.
+# The pipeline invokes this script with the lock-inherited flag after its
+# own fetch-stage verification for the same HEAD — skip the duplicate there.
+if [[ "${APEXMAIL_DEPLOY_LOCK_INHERITED:-0}" = "1" ]]; then
+    log "Gate blessing: already verified by the CI pipeline's fetch stage (inherited deploy)."
+elif [[ "${APEXMAIL_UNGATED_DEPLOY:-}" = "1" ]]; then
+    warn "EMERGENCY OVERRIDE: APEXMAIL_UNGATED_DEPLOY=1 — deploying WITHOUT gate-blessing verification (audit-visible bypass)"
+else
+    step "Step 0.5: Gate blessing verification"
+    _gb_head="$(git -C "$DEPLOY_DIR" rev-parse HEAD 2>/dev/null || true)"
+    if [[ -z "$_gb_head" ]]; then
+        error "no git HEAD in $DEPLOY_DIR — this deploy cannot be bound to a gate blessing; set APEXMAIL_UNGATED_DEPLOY=1 only for a genuine emergency"
+        exit 1
+    fi
+    if [[ -f "$DEPLOY_DIR/ci/lib.sh" ]]; then
+        CI_ROOT="$DEPLOY_DIR/ci" CI_REPO_ROOT="$DEPLOY_DIR" CI_RUNS_DIR="$DEPLOY_DIR/ci/runs"
+        export CI_ROOT CI_REPO_ROOT CI_RUNS_DIR
+        # shellcheck source=/dev/null
+        . "$DEPLOY_DIR/ci/lib.sh"
+        if _gb_refusal="$(gate_blessing_refusal "$DEPLOY_DIR/ci/runs" "$_gb_head")"; then
+            error "gate blessing refused for $_gb_head: ${_gb_refusal}"
+            error "run the CI gate line for this commit and push its blessing (ci/pipeline.sh push-blessing <host>), or set APEXMAIL_UNGATED_DEPLOY=1 for a documented emergency"
+            exit 1
+        fi
+        log "Gate blessing OK for $_gb_head (required lanes recorded under the current pipeline config)."
+    else
+        error "$DEPLOY_DIR/ci/lib.sh is missing — cannot verify the gate blessing; refusing an unverifiable deploy"
+        exit 1
+    fi
+fi
+
 # ── Concurrency lock (audit fix + F5) ────────────────────────────────────────
 # THE SAME LOCK the CI pipeline takes (ci/pipeline.sh): two overlapping
 # deploys — one manual, one pipeline — race the build, the migrator and

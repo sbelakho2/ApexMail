@@ -19,12 +19,25 @@
 #
 # The encryption key is read from BACKUP_ENCRYPTION_KEY_FILE (Docker secret,
 # preferred) or the BACKUP_ENCRYPTION_KEY env var. Without a key the backup
-# is stored UNENCRYPTED with a loud warning (not recommended).
+# FAILS (fail-closed; the TOM promises encrypted backups). Development can
+# opt into the old behaviour with ALLOW_UNENCRYPTED_BACKUPS=true.
 #
 # Wired into the postgres-backup service in docker-compose.prod.yml.
 # =============================================================================
 
 set -eu
+
+# The canonical backup envelope (cipher/KDF/iterations/gzip) lives in
+# backup-envelope.sh, sourced by BOTH this producer and the restore drill —
+# a parameter drift between them once made the drill unable to decode real
+# backups (external audit 2026-10-26). Prefer the sibling file (bind mount
+# or repo checkout), fall back to the copy baked into the image.
+_envelope_lib="$(dirname "$0")/backup-envelope.sh"
+if [ ! -f "$_envelope_lib" ]; then
+    _envelope_lib=/usr/local/lib/backup-envelope.sh
+fi
+# shellcheck source=backup-envelope.sh
+. "$_envelope_lib"
 
 ENCRYPTION_KEY="${BACKUP_ENCRYPTION_KEY:-}"
 ENCRYPTION_KEY_FILE="${BACKUP_ENCRYPTION_KEY_FILE:-}"
@@ -41,8 +54,6 @@ BACKUP_TARGET="${BACKUP_TARGET:-}"
 
 # Daily backup schedule (informational; the loop below sleeps 24h).
 SCHEDULE="${SCHEDULE:-@daily}"
-
-OPENSSL_ITER=600000
 
 # Sanitize numeric inputs so arithmetic below can never explode.
 case "$BACKUP_KEEP_DAYS" in
@@ -92,20 +103,31 @@ encrypt_backup() {
     input_file="$1"
     output_file="$2"
 
+    # Fail closed (external audit 2026-10-26 §4): the TOM/DPA promises
+    # encrypted backups, so a missing key or missing openssl is a FAILED
+    # backup, not a silent plaintext. Throwaway development can opt out
+    # explicitly with ALLOW_UNENCRYPTED_BACKUPS=true.
     if [ -z "$ENCRYPTION_KEY" ]; then
-        warn "BACKUP_ENCRYPTION_KEY(_FILE) not set — storing backup UNENCRYPTED"
-        mv "$input_file" "$output_file"
-        return 0
+        if [ "${ALLOW_UNENCRYPTED_BACKUPS:-false}" = "true" ]; then
+            warn "BACKUP_ENCRYPTION_KEY(_FILE) not set — ALLOW_UNENCRYPTED_BACKUPS=true, storing backup UNENCRYPTED"
+            mv "$input_file" "$output_file"
+            return 0
+        fi
+        err "BACKUP_ENCRYPTION_KEY(_FILE) not set — refusing to store an UNENCRYPTED backup (encrypted backups are contractual; set ALLOW_UNENCRYPTED_BACKUPS=true only for disposable development data)"
+        return 1
     fi
     if ! command -v openssl >/dev/null 2>&1; then
-        warn "openssl not available — storing backup UNENCRYPTED"
-        mv "$input_file" "$output_file"
-        return 0
+        if [ "${ALLOW_UNENCRYPTED_BACKUPS:-false}" = "true" ]; then
+            warn "openssl not available — ALLOW_UNENCRYPTED_BACKUPS=true, storing backup UNENCRYPTED"
+            mv "$input_file" "$output_file"
+            return 0
+        fi
+        err "openssl not available — refusing to store an UNENCRYPTED backup (the image bakes openssl in; this container is misbuilt)"
+        return 1
     fi
+    BACKUP_ENVELOPE_KEY="$ENCRYPTION_KEY"
 
-    if openssl enc -aes-256-cbc -pbkdf2 -iter "$OPENSSL_ITER" -md sha256 \
-            -pass "pass:${ENCRYPTION_KEY}" \
-            -in "$input_file" -out "$output_file"; then
+    if backup_envelope_encrypt "$input_file" "$output_file"; then
         log "encrypted: $(basename "$output_file")"
     else
         rc=$?
@@ -115,16 +137,14 @@ encrypt_backup() {
     fi
 
     # ── Restore verification BEFORE destroying the plaintext ──────────────
-    if openssl enc -d -aes-256-cbc -pbkdf2 -iter "$OPENSSL_ITER" -md sha256 \
-            -pass "pass:${ENCRYPTION_KEY}" \
-            -in "$output_file" \
-            | gzip -d \
-            | pg_restore --list > /dev/null 2>&1; then
-        log "restore verification OK (decrypt + pg_restore --list)"
+    if backup_envelope_decrypt "$output_file" "${output_file}.verify.sql.gz" 2>/dev/null \
+        && backup_envelope_uncompress "${output_file}.verify.sql.gz" "${output_file}.verify.dump" 2>/dev/null \
+        && pg_restore --list "${output_file}.verify.dump" > /dev/null 2>&1; then
+        log "restore verification OK (decrypt + gunzip + pg_restore --list)"
+        rm -f "${output_file}.verify.sql.gz" "${output_file}.verify.dump"
     else
-        rc=$?
-        err "restore verification FAILED (decrypt/pg_restore exit ${rc}) — plaintext kept at ${input_file}; removing bad ciphertext"
-        rm -f "$output_file"
+        err "restore verification FAILED (decrypt/gunzip/pg_restore) — plaintext kept at ${input_file}; removing bad ciphertext"
+        rm -f "$output_file" "${output_file}.verify.sql.gz" "${output_file}.verify.dump"
         return 1
     fi
 

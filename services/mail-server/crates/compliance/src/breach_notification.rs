@@ -842,10 +842,7 @@ impl BreachNotifier {
         )
         .await;
         self.touch_document(breach_id).await?;
-        info!(
-            breach_id,
-            "Authority receipt recorded, breach acknowledged"
-        );
+        info!(breach_id, "Authority receipt recorded, breach acknowledged");
         self.fetch(breach_id)
             .await?
             .ok_or_else(|| "Breach report missing after receipt".into())

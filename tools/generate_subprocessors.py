@@ -30,7 +30,7 @@ sovereign chain no active subprocessor may process or store customer personal
 data in the United States. The tool REFUSES (exit 2) when the derived active
 set contains a US processing/storage region, or a US-domiciled processor
 engaged without an approved GDPR Chapter V transfer basis. The current
-production configuration (SES ``eu-west-1``, Hetzner ``hel1`` FI, Mollie
+production configuration (SES ``eu-west-1``, infrastructure ``hel1`` FI, Mollie
 B.V. NL, EU OAuth regions) passes;
 ``--self-test`` proves the check FAILS when the fixture env sets
 ``us-east-1``.
@@ -73,7 +73,7 @@ CHANGE_HISTORY = [
     (
         "2026-07-29",
         "Initial publication",
-        "Subprocessor register published with Hetzner (infrastructure), AWS (S3/SES, when "
+        "Subprocessor register published with the EU infrastructure provider, AWS (S3/SES, when "
         "enabled), Google (OAuth), GitHub (OAuth) and Mollie (payments). ClickHouse and Redis "
         "are self-hosted software, not subprocessors (see above).",
     ),
@@ -136,11 +136,17 @@ class Processor:
 PROCESSOR_CATALOG: list[Processor] = [
     Processor(
         key="hetzner",
-        legal_entity="Hetzner Online GmbH",
-        brand="Hetzner",
+        # Owner directive 2026-10-26: the infrastructure provider's legal
+        # name and brand are NOT published on any public surface (register,
+        # security page, sovereignty page, data-locations, AI answers). The
+        # named entity is disclosed to customers through the DPA subprocessor
+        # annex at contract time, not on the website. The internal key stays
+        # so env/config derivation and the sovereign-chain check keep working.
+        legal_entity="EU infrastructure provider (named in the customer DPA subprocessor annex)",
+        brand="Infrastructure provider",
         purpose="Cloud hosting (compute, storage, networking)",
         data_categories="Core service data in the default shared deployment",
-        corporate_country="Germany",
+        corporate_country="EU/EEA",
         transfer_basis="Intra-EEA processing; GDPR Chapter V transfer rules do not apply",
         required="Yes",
         certifications=[],
@@ -192,7 +198,7 @@ PROCESSOR_CATALOG: list[Processor] = [
         },
         default_region="eu-west-1",
         optional_note="Active only while EMAIL_TRANSPORT_TYPE=ses; dedicated IP transfers ride "
-        "ApexMail's own Hetzner MTAs. AWS EU regions may include Germany; ApexMail's own "
+        "ApexMail's own EU MTAs. AWS EU regions may include Germany; ApexMail's own "
         "hosting is in Finland.",
     ),
     Processor(
@@ -254,21 +260,21 @@ SELF_HOSTED = [
         "clickhouse",
         "ClickHouse (open-source)",
         "Analytics database (delivery events, opens, clicks, bounce/complaint data)",
-        "Self-hosted by ApexMail on Hetzner infrastructure; ClickHouse, Inc. does not process "
+        "Self-hosted by ApexMail on ApexMail-managed EU infrastructure (Finland); ClickHouse, Inc. does not process "
         "customer data.",
     ),
     (
         "redis",
         "Redis (open-source)",
         "In-memory cache (session tokens, rate-limit counters)",
-        "Self-hosted by ApexMail on Hetzner infrastructure; Redis Ltd. does not process "
+        "Self-hosted by ApexMail on ApexMail-managed EU infrastructure (Finland); Redis Ltd. does not process "
         "customer data.",
     ),
     (
         "observability",
         "Grafana / Loki / Tempo / Prometheus (open-source)",
         "Observability stack (dashboards, logs, traces, metrics)",
-        "Self-hosted by ApexMail on Hetzner infrastructure; the software publishers do not "
+        "Self-hosted by ApexMail on ApexMail-managed EU infrastructure (Finland); the software publishers do not "
         "process customer data.",
     ),
 ]
@@ -388,6 +394,12 @@ def derive_active(config: dict[str, str]) -> list[ActiveEntry]:
         if not enabled:
             continue
         country, storage, region_label = resolve_location(processor, region)
+        if processor.key == "hetzner":
+            # Owner directive 2026-10-26: never render the provider's
+            # facility CODES (hel1/ash/hil) publicly — they identify the
+            # vendor. The rendered region is the country/EEA fact only; the
+            # raw env value stays internal for the enabled/region checks.
+            region_label = None if country == "Finland" else region_label
         entry = ActiveEntry(
             processor=processor,
             region=region_label,
@@ -399,8 +411,7 @@ def derive_active(config: dict[str, str]) -> list[ActiveEntry]:
             entry.notes.append(processor.optional_note)
         if processor.key == "hetzner":
             entry.notes.append(
-                "Hetzner EU location: Helsinki (hel1, FI); the active default is "
-                f"{region_label or processor.default_region}"
+                "Active facility: Helsinki, Finland (EU/EEA)."
             )
         active.append(entry)
     return active
@@ -477,7 +488,7 @@ def render_marketing_register(active: list[ActiveEntry], services: set[str]) -> 
         if service not in services and service != "observability":
             continue
         self_hosted_rows.append(
-            "| {name} | {purpose} | {data} | Hetzner deployment region | Hetzner deployment "
+            "| {name} | {purpose} | {data} | ApexMail EU region (Finland) | ApexMail EU region (Finland) |"
             "region | {note} |".format(
                 name=name,
                 purpose=purpose,
@@ -503,7 +514,7 @@ last_updated = "{REGISTER_LAST_UPDATED}"
 
 This page lists third-party vendors engaged by Bel Consulting OÜ (trading as ApexMail) that may process customer personal data in the course of providing the ApexMail service. This register is maintained in accordance with Article 28 of the GDPR and Section 5 of the ApexMail Data Processing Agreement. It is generated from the deployment's own configuration, so the listed set and locations cannot drift from what the deployment actually runs.
 
-Under EU-only routing the AWS SES entry carries no tenant's mail: messages leave exclusively through ApexMail's own MTAs on Hetzner infrastructure. EU-only routing and its evidence, including the distinction from the Global default, which uses AWS SES in its EU region, are set out on the [EU sovereignty page](/eu-sovereign/).
+Under EU-only routing the AWS SES entry carries no tenant's mail: messages leave exclusively through ApexMail's own MTAs on ApexMail-managed EU infrastructure (Finland). EU-only routing and its evidence, including the distinction from the Global default, which uses AWS SES in its EU region, are set out on the [EU sovereignty page](/eu-sovereign/).
 
 ### Infrastructure Subprocessors
 
@@ -519,7 +530,7 @@ The following third-party entities process customer personal data on behalf of A
 
 ### Self-Hosted Infrastructure (not third-party subprocessors)
 
-The following software is deployed and managed by ApexMail on Hetzner infrastructure. The software publishers do not process customer data.
+The following software is deployed and managed by ApexMail on ApexMail-managed EU infrastructure (Finland). The software publishers do not process customer data.
 
 | Software | Purpose | Data Categories | Processing Country | Storage Country | Notes |
 |---|---|---|---|---|---|
@@ -582,13 +593,13 @@ Whether an optional subprocessor (OAuth providers, SES, S3 telemetry) is engaged
 
 ## Self-Hosted Infrastructure (not third-party subprocessors)
 
-The following software is deployed and managed by ApexMail on Hetzner infrastructure. The software publishers do not process customer data.
+The following software is deployed and managed by ApexMail on ApexMail-managed EU infrastructure (Finland). The software publishers do not process customer data.
 
 | Software | Purpose | Data Processed | Location | Transfer Safeguard |
 |---|---|---|---|---|
-| **Redis** (open-source) | In-memory caching, rate limiting, session storage | Session tokens, rate limit counters, ephemeral processing state | Hetzner deployment region | Redis Ltd. does not process customer data; intra-EEA processing. |
-| **ClickHouse** (open-source) | Analytics data storage and querying for per-account email analytics | Delivery events, engagement events (opens, clicks), bounce/complaint data, aggregated metrics | Hetzner deployment region | ClickHouse, Inc. does not process customer data; intra-EEA processing. |
-| **Grafana / Loki / Tempo / Prometheus** (open-source) | Observability stack: dashboards, logs, traces, metrics | Operational telemetry | Hetzner deployment region | The software publishers do not process customer data; intra-EEA processing. |
+| **Redis** (open-source) | In-memory caching, rate limiting, session storage | Session tokens, rate limit counters, ephemeral processing state | ApexMail EU region (Finland) | Redis Ltd. does not process customer data; intra-EEA processing. |
+| **ClickHouse** (open-source) | Analytics data storage and querying for per-account email analytics | Delivery events, engagement events (opens, clicks), bounce/complaint data, aggregated metrics | ApexMail EU region (Finland) | ClickHouse, Inc. does not process customer data; intra-EEA processing. |
+| **Grafana / Loki / Tempo / Prometheus** (open-source) | Observability stack: dashboards, logs, traces, metrics | Operational telemetry | ApexMail EU region (Finland) | The software publishers do not process customer data; intra-EEA processing. |
 
 ## Subprocessor Changes
 
@@ -639,7 +650,7 @@ def render_trust_portal_seed(active: list[ActiveEntry], services: set[str]) -> s
                 "name": f"{name} (self-hosted)",
                 "purpose": f"{purpose}, self-hosted by ApexMail; the publisher is not a "
                 "subprocessor",
-                "location": "Hetzner deployment region",
+                "location": "ApexMail EU region (Finland)",
                 "data_categories": ["Operational telemetry"],
                 "dpa_url": None,
                 "certifications": [],

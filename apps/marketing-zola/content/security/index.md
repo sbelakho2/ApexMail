@@ -39,7 +39,7 @@ mkt_page_mode = "trust"
 
 ### Request Screening (Web Application Firewall)
 
-A request-screening firewall (WAF) built on SQLi/XSS/traversal/command-injection/SSRF rules evaluates the method, path, query string and headers of public API requests: the managed production baseline runs it in enforcement mode, verdicts the engine would block are blocked, and every decision is logged. [roadmap] Extending inspection to request bodies, and intrusion detection/prevention (IDS/IPS, a library that inspects no live traffic today), remain on the roadmap and are not active controls.
+A request-screening firewall (WAF) built on SQLi/XSS/traversal/command-injection/SSRF rules evaluates the method, path, query string and headers of public API requests: the managed production baseline runs it in enforcement mode, verdicts the engine would block are blocked, and every decision is logged. [roadmap] Extending inspection to request bodies remains on the roadmap and is not an active control. Intrusion detection is an active control on the inbound mail path: the IDS engine inspects every message the MTA accepts and the production baseline refuses messages that trip it.
 
 - Input validation and sanitization on all API endpoints (handler-level validation).
 - Rate limiting per endpoint and API key.
@@ -69,7 +69,7 @@ System integrity is verified through automated, recurring checks across the depl
 | **Deployment artifact integrity** | Container images are digest-verified, not signed: each pipeline run records a release manifest (per-image SHA-256 digests, `SHA256SUMS.images`) and renders a digest-pinned compose override; deployment refuses to bring up any image whose digest does not match that manifest. | Every deployment | Release manifest + pre-deploy digest verification in the deploy stage |
 | **Audit-log integrity** | Audit-log tables carry a hash chain: each row's SHA-256 digest is chained to its predecessor. | Continuous (per write) | Audit-log hash chain |
 | **Deployment records** | Every pipeline run records a manifest (stage, status, exit code, duration) plus per-stage logs. These are internal operational records with no tamper-proofing guarantee and no customer-facing query surface. | Every deployment | CI run manifests (`ci/runs/<ts>/manifest.json`) |
-| **Backup verification** | Every backup is automatically decrypted and structurally validated (`pg_restore --list`) before the plaintext is deleted, a backup that cannot be read is never counted as good. Full restore drills are manual at the documented quarterly cadence. | Every backup (automated validation); quarterly (manual drills) | Backup-time restorability validation; DR drill records |
+| **Backup verification** | Every backup is automatically decrypted and structurally validated (`pg_restore --list`) before the plaintext is deleted, a backup that cannot be read is never counted as good. A restore drill automatically restores the newest backup into a scratch database every 30 days and records measured recovery evidence. | Every backup (automated validation); every 30 days (restore drill) | Backup-time restorability validation; drill evidence records |
 | **Runtime resilience** | Services run health-checked with automatic restart; a failed post-deploy content probe triggers automatic rollback to the previous image pins. | Continuous | Container healthchecks; deploy-stage verify + rollback |
 
 All verification results are internal operational controls. Current security-review material may be made available to qualified Enterprise prospects or customers upon request; it is not an external certification or a product entitlement.
@@ -78,12 +78,12 @@ The term "System Integrity Controls" refers to the combination of these controls
 
 ## Infrastructure Security
 
-- Hetzner Online GmbH for compute, storage, and networking in the configured deployment region (a single host runs the full stack; there is no multi-region topology).
+- European cloud infrastructure (compute, storage, and networking) located in Finland (EU); all infrastructure processing stays within the EEA.
 - CIS-hardened Debian/Ubuntu operating systems.
 - Automated security patching with staged rollout.
 - Declarative, version-controlled deployment: the entire stack is defined in Docker Compose files and deployed by the self-hosted CI pipeline.
-- Docker network segmentation between frontend, backend, and database networks on the deployment host.
-- Host firewall: inbound access limited to the mail/web service ports (25, 80, 443, 587, 993) plus operator ports; databases have no host port exposure.
+- Docker network segmentation between frontend, backend, and database networks.
+- Host firewall: inbound access limited to the mail/web service ports (25, 80, 443, 587, 993) plus management ports; databases have no public port exposure.
 - Secrets management via Docker secrets mounted from permission-restricted files (0600); no secrets baked into images or source.
 
 ## Vulnerability Management
@@ -117,16 +117,16 @@ Mollie B.V. is a payment institution supervised by De Nederlandsche Bank (DNB), 
 
 - Penetration test summary: planned for publication after the first external application penetration test is completed and high/critical findings are remediated. Not currently available.
 - Security-questionnaire requests are assessed case by case using current review material; no standardized SIG, CAIQ, or HECVAT pack is a product entitlement.
-- ApexMail records API, configuration and admin actions in an operator audit trail; event retention follows the subscribed plan.
+- ApexMail records API, configuration and admin actions in a tamper-evident audit trail; event retention follows the subscribed plan.
 - Customer audit facilitation subject to Enterprise contract review.
 
 ## Operational Security
 
-- Single-operator operation: every change is authored by the operator and must pass the repository's required CI and security gates before it can deploy.
-- Access reviews conducted quarterly by the operator.
+- Every change must pass the repository's required CI and security gates before it can deploy; the deployment pipeline refuses any build without a fresh gate blessing covering those lanes.
+- Access reviews are conducted quarterly.
 - Production access requires multi-factor authentication.
-- Change management with rollback capability; CI logs, the audit trail and the gate blessing record what changed and which gates held, tamper-evident evidence instead of a second reviewer.
-- The deploy host refuses any build without a fresh gate blessing from the required lanes; high-risk controls get periodic independent external review in place of an internal second pair of eyes.
+- Change management with rollback capability: CI logs, the audit trail and the gate blessing record what changed and which gates held — tamper-evident evidence rather than informal practice.
+- High-risk controls receive periodic independent external review.
 
 ## Related
 

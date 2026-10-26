@@ -551,7 +551,7 @@ fn get_compliance_info(params: &serde_json::Value) -> serde_json::Value {
             "auto_erasure": "Events, suppressions, consent_records deleted. Aggregate billing data preserved (no PII)."
         }),
         "data_residency" => {
-            serde_json::json!({"location":"EU/EEA","primary":"Helsinki, Finland (single region; no standby)","encryption":"AES-256-GCM at rest, TLS 1.2+ in transit","certifications":[]})
+            serde_json::json!({"location":"EU/EEA","primary":"Helsinki, Finland (EU/EEA)","encryption":"AES-256-GCM at rest, TLS 1.2+ in transit","certifications":[]})
         }
         _ => {
             serde_json::json!({"error": format!("unknown topic: {topic}. Try: gdpr_breach_notification, incident_response, gdpr_dsar, data_residency")})
@@ -1779,8 +1779,11 @@ mod tests {
         // The old fabricated SOC 2 topic stays dead, and the assistant can
         // never resolve any attestation regime ApexMail does not hold.
         let r = get_compliance_info(&serde_json::json!({"topic":"soc2_incident"}));
-        assert!(r.get("error").is_some(), "fabricated SOC 2 topic must not resolve");
-        // Residency is Finland-only, single region, no standby, no certs.
+        assert!(
+            r.get("error").is_some(),
+            "fabricated SOC 2 topic must not resolve"
+        );
+        // Residency is Finland (EU/EEA); no certification claims.
         let r = get_compliance_info(&serde_json::json!({"topic":"data_residency"}));
         assert_eq!(r["certifications"].as_array().unwrap().len(), 0);
         assert!(

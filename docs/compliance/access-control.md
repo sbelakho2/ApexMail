@@ -1,240 +1,169 @@
 # Access Control Policy
 
-> **Classification:** Internal Policy — Confidential
-> **Owner:** Engineering Lead, Bel Consulting OÜ
-> **Legal Entity:** Bel Consulting OÜ, Registry Code 16588745, Tallinn, Estonia
-> **Last Reviewed:** 2026-02-09
-> **Review Cycle:** Annually, and upon team changes
+> **Classification:** Internal Policy, Confidential
+> **Owner:** ApexMail
+> Legal Entity: Bel Consulting OÜ, Registry Code 16588745, Tallinn, Estonia
+> Last Reviewed: 2026-10-25
+> Review Cycle: Annually
 
 ---
 
 ## 1. Purpose
 
-This policy defines how access to ApexMail systems, infrastructure, data, and
-tooling is granted, managed, and revoked. It enforces the principle of least
-privilege to minimise the risk of unauthorised access.
+This policy defines how access to ApexMail systems, data, and tooling is
+granted, used, and revoked. It enforces least privilege to reduce the risk of
+unauthorised access.
 
 ---
 
 ## 2. Scope
 
-All systems operated by Bel Consulting OÜ for ApexMail:
+All systems operated by ApexMail:
 
-- Production and staging infrastructure (Hetzner Cloud ARM servers).
-- PostgreSQL and Redis instances.
-- Application admin interfaces.
-- Source code repositories (GitHub).
-- CI/CD pipelines.
-- Cloud dashboards (Hetzner Cloud Console).
-- Monitoring and observability tools.
-- Internal communication tools.
+- The production environment and its services.
+- The ApexMail console, dashboard, and API.
+- Source code repositories and the release pipeline.
+- Monitoring and observability tooling.
+- Secrets, credentials, and certificates.
 
 ---
 
 ## 3. Principle of Least Privilege
 
-- Access is granted only to the resources required for a person's role.
-- Access defaults to **deny**. Permissions are explicitly granted.
-- Elevated access is temporary and time-bound where possible.
-- No shared accounts. Every individual has a unique identity.
+- Access is granted only to what a task requires.
+- Access defaults to deny. Permissions are granted explicitly.
+- Elevated access is temporary and recorded.
+- No shared accounts. Every identity is unique.
 
 ---
 
-## 4. Role-Based Access Control (RBAC)
+## 4. Console Roles
 
-### 4.1 Defined Roles
+The product implements role-based access control for every console session and
+API key. Roles and their scope sets are defined in the auth code and applied
+on every request.
 
-| Role | Description | Scope |
-|------|-------------|-------|
-| **Admin** | Full platform access including infrastructure, database, and user management. Reserved for founders/CTO. | All systems |
-| **Developer** | Code repository access (read/write), CI/CD, staging environment, application logs. Production access limited to read-only monitoring. | Repos, CI/CD, staging, monitoring |
-| **Support** | Customer-facing admin panel (read-only customer data, limited actions: password reset, account unlock). No infrastructure access. | Admin panel (scoped) |
-| **Billing** | Access to billing dashboard, invoice management, Mollie dashboard. No access to customer email content or recipient data. | Billing systems |
+| Role | Grants |
+|------|--------|
+| **owner** | Full access to every scope, including billing. MFA required. |
+| **admin** | Full access to every scope, including billing. MFA required. |
+| **developer** | Read and write scopes for messages, domains, templates, events, analytics, contacts, lists, logs, webhooks, campaigns, automations, suppressions, dedicated IPs, support, and retention. |
+| **viewer** | Read-only scopes across the same areas. |
+| **member** | Default role for accounts with no other assignment. Message reading only. |
 
-### 4.2 Access Matrix
+Enforcement:
 
-| System | Admin | Developer | Support | Billing |
-|--------|-------|-----------|---------|---------|
-| Hetzner Cloud Console | ✅ Full | ❌ | ❌ | ❌ |
-| Production servers (SSH) | ✅ Full | ❌ (break-glass only) | ❌ | ❌ |
-| Staging servers (SSH) | ✅ Full | ✅ Full | ❌ | ❌ |
-| PostgreSQL (production) | ✅ Read/write | 🔶 Read-only | ❌ | ❌ |
-| PostgreSQL (staging) | ✅ Read/write | ✅ Read/write | ❌ | ❌ |
-| Redis (production) | ✅ Full | 🔶 Read-only | ❌ | ❌ |
-| GitHub repositories | ✅ Admin | ✅ Write | ❌ | ❌ |
-| CI/CD pipeline | ✅ Admin | ✅ Trigger/view | ❌ | ❌ |
-| Admin panel | ✅ Full | 🔶 Read-only | 🔶 Scoped | ❌ |
-| Monitoring dashboards | ✅ Full | ✅ Full | 🔶 Read-only | ❌ |
-| Billing dashboard | ✅ Full | ❌ | ❌ | ✅ Full |
-
----
-
-## 5. Authentication Requirements
-
-### 5.1 Multi-Factor Authentication (MFA)
-
-MFA is **mandatory** for:
-
-- All access to production infrastructure.
-- Hetzner Cloud Console.
-- GitHub organisation membership.
-- CI/CD admin access.
-- Admin panel access.
-- Billing and payment dashboards.
-
-Acceptable MFA methods:
-
-- Hardware security keys (FIDO2/WebAuthn) — **preferred**.
-- TOTP authenticator apps (Authy, Google Authenticator).
-- SMS-based MFA is **not accepted** due to SIM-swap risks.
-
-### 5.2 Password Policy
-
-- Minimum 16 characters.
-- Use of a password manager is required.
-- No password reuse across services.
-- Passwords rotated upon suspected compromise.
+- The control plane, which is the production administration surface, accepts
+  only `admin` and `owner` sessions with MFA enabled. It re-reads the live
+  role, MFA state, and account status from the database on every request, so a
+  role demotion or MFA removal revokes control-plane authority immediately.
+- Session scopes are recomputed from the current role on every request. A
+  demotion narrows an existing session without waiting for token expiry.
+- MFA is required to establish a session with an `admin` or `owner` role,
+  including sign-in through the SSO path.
+- Billing read is granted by no role. Invoice access requires a deliberately
+  minted credential that carries that scope.
 
 ---
 
-## 6. SSH Key Management (Hetzner Servers)
+## 5. Authentication and MFA
 
-### 6.1 Key Requirements
-
-- **Algorithm:** Ed25519 (preferred) or RSA 4096-bit minimum.
-- **Passphrase:** Required on all private keys.
-- **Storage:** Private keys stored only on the user's workstation, protected by
-  the OS keychain or an encrypted vault.
-
-### 6.2 Key Distribution
-
-- Public keys added to servers via configuration management (Ansible/scripts in
-  `tools/` or deploy configuration).
-- No manual key placement on production servers.
-- Root login via SSH is **disabled**. Access via named user accounts with `sudo`.
-
-### 6.3 Key Rotation
-
-- SSH keys rotated annually, or immediately upon suspected compromise.
-- Departing team members' keys removed within **24 hours** of offboarding.
+- Passwords run from 15 to 128 characters, are screened against common weak
+  passwords, and refuse repeated or sequential character runs. Password
+  managers and paste are supported.
+- Multi-factor authentication uses time-based one-time passwords with lockout
+  and replay hardening, plus recovery codes. SMS-based MFA is not used.
+- Production administration requires MFA: console `admin` and `owner` sessions
+  carry MFA on every control-plane request.
+- Password authentication is disabled on the production host. SSH accepts key
+  pairs only, and root login is limited to keys.
 
 ---
 
-## 7. Database Access
+## 6. Production Host Access
 
-### 7.1 Production Database (PostgreSQL)
-
-| Role | Access Level | Connection Method |
-|------|-------------|-------------------|
-| Application service | Read/write (scoped to application schema) | Connection string in secrets manager |
-| Admin | Read/write (all schemas) | SSH tunnel + named user |
-| Developer | **Read-only** | SSH tunnel + read-only role (break-glass, logged) |
-| Migrations | Read/write (DDL + DML) | Separate `migration_runner` role, CI-only |
-| Support / Billing | ❌ No direct access | Via admin panel only |
-
-### 7.2 Migration Safeguards
-
-- Production migrations executed only through the CI/CD pipeline.
-- The `migration_runner` role has DDL permissions but is only activated during
-  migration runs.
-- Destructive migrations (DROP TABLE, DROP COLUMN, data deletion) require
-  **two approvals** and are never auto-applied
-  (see [Change Management](./change-management.md)).
-
-### 7.3 Query Logging
-
-All queries executed against production PostgreSQL by human users are logged
-(statement logging for the read-only and admin roles). Logs retained for 1 year.
+- Production host access is limited to authorized personnel with production
+  access.
+- Administrative actions taken on production are recorded in the audit trail
+  (§8).
+- Elevated access for a specific task is time-bound and recorded.
 
 ---
 
-## 8. Secrets Management
+## 7. API Keys
 
-### 8.1 Storage
-
-- All secrets (API keys, database credentials, TLS keys, third-party tokens)
-  stored in environment variables injected at deploy time.
-- Secrets **never** committed to source code repositories.
-- `.env` files are in `.gitignore` and used only for local development with
-  non-production values.
-
-### 8.2 Rotation
-
-| Secret Type | Rotation Frequency |
-|-------------|-------------------|
-| Database passwords | Every 6 months, or on compromise |
-| API keys (internal) | Every 6 months |
-| TLS certificates | Auto-renewed (Let's Encrypt) |
-| SSH keys | Annually |
-| Third-party tokens | Per vendor recommendation, max 1 year |
-
-### 8.3 Exposure Response
-
-If a secret is suspected or confirmed to be exposed:
-
-1. Rotate the secret immediately.
-2. Audit access logs for the compromised credential.
-3. File a security incident if misuse is suspected
-   (see [Incident Response](./incident-response.md)).
+- API keys are stored as keyed hashes. The plaintext key is shown once and is
+  never persisted.
+- Keys carry scopes from a registered scope registry. An issuing caller can
+  only mint scopes it already holds, and the wildcard scope only passes to
+  callers that already hold it.
+- Every key carries an expiry timestamp and is looked up by hash on every
+  request.
+- Key issuance and use are auditable through the tenant audit trail (§8).
 
 ---
 
-## 9. Access Reviews
+## 8. Audit Logging
 
-### 9.1 Quarterly Reviews
+Administrative actions are written to the `audit_logs` table. Entries form a
+hash chain: each entry links to the hash of its predecessor, and the chain head
+advances transactionally, so tampering with history is detectable.
 
-Every quarter, the Admin role holder reviews:
-
-- List of all personnel with access to each system.
-- Appropriateness of each person's role and permissions.
-- Any dormant accounts (no login in 90+ days).
-- Any lingering temporary/elevated access.
-
-Findings documented and remediated within 7 days.
-
-### 9.2 Annual Certification
-
-Annually, each team member confirms:
-
-- They still require the access they hold.
-- They are not aware of any shared or compromised credentials.
-- Their MFA is active and recovery codes are stored securely.
+Customers read their own trail through the audit API with the `audit:read`
+scope, and exports are themselves audited. Retention follows the Data
+Retention Policy: one year minimum.
 
 ---
 
-## 10. Offboarding Procedure
+## 9. Secrets Management
 
-When a team member departs (voluntary or involuntary):
-
-| Step | Action | Deadline |
-|------|--------|----------|
-| 1 | Disable/remove GitHub organisation membership | Within 1 hour |
-| 2 | Remove SSH keys from all servers | Within 24 hours |
-| 3 | Revoke Hetzner Cloud Console access | Within 1 hour |
-| 4 | Revoke CI/CD access | Within 1 hour |
-| 5 | Revoke admin panel credentials | Within 1 hour |
-| 6 | Rotate any shared secrets the person had access to | Within 24 hours |
-| 7 | Revoke access to monitoring, communication, and billing tools | Within 24 hours |
-| 8 | Confirm all access removed (checklist sign-off) | Within 48 hours |
-
-For involuntary departures, steps 1–5 are executed **before** the departure
-notification where possible.
+- Production secrets reach services as files through Docker secrets, mounted
+  by the compose files. Nothing secret is committed: `.env` files are
+  gitignored and hold non-production values only.
+- Rotation follows the schedule in `docs/operations/secret-rotation.md` and is
+  performed by `scripts/rotate-secrets.sh` with dual-key overlap windows.
+- Secrets stored through the platform secret manager are encrypted with
+  `AES-256-GCM`, carry an access hierarchy with expiry and revocation, keep
+  version history, and support automatic rotation.
 
 ---
 
-## 11. Break-Glass Procedure
+## 10. Access Reviews
 
-For emergency access beyond normal role permissions:
+### 10.1 Quarterly review
 
-1. Requester contacts an Admin with justification.
-2. Access granted with time limit (max 4 hours, extendable once).
-3. All actions performed under break-glass access are logged.
-4. Access revoked automatically at expiry or manually by Admin.
-5. Post-access review within 24 hours to confirm no misuse.
+Every quarter, dashboard roles and API keys are reviewed:
+
+- Each role still matches what its holder needs.
+- API keys still match the scopes their consumers need.
+- Dormant accounts and unused keys are identified.
+- Lingering elevated access is removed.
+
+Findings are remediated within 7 days.
 
 ---
 
-## 12. Related Documents
+## 11. Access Revocation
+
+- Access is removed as soon as it is no longer required.
+- A role demotion or MFA removal takes effect on the next request through the
+  live re-check in the control plane (§4).
+- Secrets tied to removed access are rotated under §9.
+
+---
+
+## 12. Roadmap — not currently implemented
+
+- A formal internal role matrix for production access, beyond the product
+  roles in §4.
+- A time-boxed break-glass workflow for elevated production access.
+- WebAuthn passkeys as an MFA method alongside time-based one-time passwords.
+- A documented inventory and rotation schedule for SSH keys.
+- Statement logging for interactive database sessions.
+
+---
+
+## 13. Related Documents
 
 - [GDPR Compliance Framework](./gdpr-compliance.md)
 - [Incident Response Plan](./incident-response.md)

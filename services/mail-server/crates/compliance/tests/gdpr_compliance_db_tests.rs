@@ -3958,3 +3958,607 @@ async fn invoice_snapshot_redaction_is_set_based_and_byte_identical() {
             .expect("the old text comparison never errored on garbage");
     assert_eq!(legacy_garbage_matches, 0);
 }
+
+// ── External audit 2026-10-26, finding 9: the sales person graph ────────────
+
+/// Build an ENTIRE prospect across the Sales Autopilot person graph —
+/// account, contact, email + phone points, evidence, sequence version +
+/// step + enrollment + step execution, reply classification, meeting,
+/// decision, outcome, queued action, AI first-response draft, inbound
+/// message with a pending AI reply, campaign recipient, calendar event,
+/// unsubscribe record, discovery candidate, consent evidence, policy
+/// decision, enrichment fact — then:
+///
+///   1. ACCESS discloses every one of those rows to the subject, and
+///   2. ERASURE leaves ZERO subject PII anywhere in the graph (no email,
+///      no name token, no free-text residue), while process/statistical
+///      rows survive pseudonymised (enrollment, steps, outcome, meeting,
+///      account, and the opt-out list that MUST outlive erasure).
+///
+/// This is the acceptance test the audit specified instead of "patching
+/// twenty tables into two giant functions without proving it".
+#[tokio::test]
+async fn full_prospect_access_then_erasure_leaves_no_sales_pii() {
+    let Some(redis) = redis_pool().await else {
+        eprintln!("skipping: set TEST_REDIS_URL to run the full-prospect sales DSR test");
+        return;
+    };
+    let Some(pool) = test_pool("sales_prospect").await else {
+        return;
+    };
+    let tenant = unique_tenant();
+    seed_tenant(&pool, &tenant).await;
+
+    let suffix = &Uuid::new_v4().simple().to_string()[..10];
+    let subject = format!("prospect-{suffix}@buyer.ee");
+    let name_token = format!("Zqvxprospect{suffix}");
+    let phone = format!("+3725{suffix}");
+
+    let account_id = Uuid::new_v4();
+    let contact_id = Uuid::new_v4();
+    let email_point = Uuid::new_v4();
+    let phone_point = Uuid::new_v4();
+    let sequence_id = Uuid::new_v4();
+    let version_id = Uuid::new_v4();
+    let step_id = Uuid::new_v4();
+    let enrollment_id = Uuid::new_v4();
+    let step_exec_id = Uuid::new_v4();
+    let campaign_id = Uuid::new_v4();
+
+    // ── The full prospect ────────────────────────────────────────────────
+    sqlx::query("INSERT INTO sales_accounts (id, tenant_id, company, domain) VALUES ($1,$2,$3,$4)")
+        .bind(account_id)
+        .bind(&tenant)
+        .bind(format!("{name_token} OÜ"))
+        .bind(format!("{suffix}.example"))
+        .execute(&pool)
+        .await
+        .expect("account");
+
+    sqlx::query(
+        "INSERT INTO sales_contacts (id, tenant_id, account_id, full_name, job_title, legacy_lead_email)
+         VALUES ($1,$2,$3,$4,'Head of API',$5)",
+    )
+    .bind(contact_id)
+    .bind(&tenant)
+    .bind(account_id)
+    .bind(&name_token)
+    .bind(&subject)
+    .execute(&pool)
+    .await
+    .expect("contact");
+
+    for (pid, channel, value) in [
+        (email_point, "email", subject.as_str()),
+        (phone_point, "phone", phone.as_str()),
+    ] {
+        sqlx::query(
+            "INSERT INTO sales_contact_points (id, tenant_id, contact_id, channel, value, normalized_value)
+             VALUES ($1,$2,$3,$4,$5,$6)",
+        )
+        .bind(pid)
+        .bind(&tenant)
+        .bind(contact_id)
+        .bind(channel)
+        .bind(value)
+        .bind(value.to_lowercase())
+        .execute(&pool)
+        .await
+        .expect("point");
+    }
+
+    sqlx::query(
+        "INSERT INTO sales_evidence (id, tenant_id, contact_id, proposition, source_kind, observed_at)
+         VALUES ($1,$2,$3,$4,'manual',NOW())",
+    )
+    .bind(Uuid::new_v4())
+    .bind(&tenant)
+    .bind(contact_id)
+    .bind(format!("{name_token} leads the API team"))
+    .execute(&pool)
+    .await
+    .expect("evidence");
+
+    sqlx::query("INSERT INTO sales_sequences (id, tenant_id, name) VALUES ($1,$2,'intro')")
+        .bind(sequence_id)
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .expect("sequence");
+    sqlx::query(
+        "INSERT INTO sales_sequence_versions (id, tenant_id, sequence_id, version) VALUES ($1,$2,$3,1)",
+    )
+    .bind(version_id)
+    .bind(&tenant)
+    .bind(sequence_id)
+    .execute(&pool)
+    .await
+    .expect("version");
+    sqlx::query(
+        "INSERT INTO sales_sequence_steps (id, tenant_id, version_id, step_index, kind) VALUES ($1,$2,$3,0,'email')",
+    )
+    .bind(step_id)
+    .bind(&tenant)
+    .bind(version_id)
+    .execute(&pool)
+    .await
+    .expect("step");
+    sqlx::query(
+        "INSERT INTO sales_enrollments (id, tenant_id, sequence_version_id, account_id, contact_id, contact_point_id)
+         VALUES ($1,$2,$3,$4,$5,$6)",
+    )
+    .bind(enrollment_id)
+    .bind(&tenant)
+    .bind(version_id)
+    .bind(account_id)
+    .bind(contact_id)
+    .bind(email_point)
+    .execute(&pool)
+    .await
+    .expect("enrollment");
+    sqlx::query(
+        "INSERT INTO sales_step_executions (id, tenant_id, enrollment_id, sequence_version_id, sequence_step_id, step_index, idempotency_key)
+         VALUES ($1,$2,$3,$4,$5,0,$6)",
+    )
+    .bind(step_exec_id)
+    .bind(&tenant)
+    .bind(enrollment_id)
+    .bind(version_id)
+    .bind(step_id)
+    .bind(format!("exec-{suffix}"))
+    .execute(&pool)
+    .await
+    .expect("step execution");
+
+    sqlx::query(
+        "INSERT INTO sales_reply_classifications (id, tenant_id, enrollment_id, contact_id, disposition, classifier, reasoning)
+         VALUES ($1,$2,$3,$4,'positive','ai',$5)",
+    )
+    .bind(Uuid::new_v4())
+    .bind(&tenant)
+    .bind(enrollment_id)
+    .bind(contact_id)
+    .bind(format!("{name_token} asked for a demo"))
+    .execute(&pool)
+    .await
+    .expect("classification");
+
+    sqlx::query(
+        "INSERT INTO sales_meetings (id, tenant_id, enrollment_id, account_id, contact_id, start_at, end_at)
+         VALUES ($1,$2,$3,$4,$5,NOW() + INTERVAL '1 day', NOW() + INTERVAL '1 day 30 min')",
+    )
+    .bind(Uuid::new_v4())
+    .bind(&tenant)
+    .bind(enrollment_id)
+    .bind(account_id)
+    .bind(contact_id)
+    .execute(&pool)
+    .await
+    .expect("meeting");
+
+    sqlx::query(
+        "INSERT INTO sales_decisions (id, tenant_id, account_id, contact_id, action, autonomy_mode, rationale, enforcement, review_status)
+         VALUES ($1,$2,$3,$4,'sequence_send','supervised',$5,'execute','not_required')",
+    )
+    .bind(Uuid::new_v4())
+    .bind(&tenant)
+    .bind(account_id)
+    .bind(contact_id)
+    .bind(format!("invite {name_token} to a demo"))
+    .execute(&pool)
+    .await
+    .expect("decision");
+
+    sqlx::query(
+        "INSERT INTO sales_outcomes (id, tenant_id, account_id, contact_id, enrollment_id, outcome, value_eur)
+         VALUES ($1,$2,$3,$4,$5,'reply',0)",
+    )
+    .bind(Uuid::new_v4())
+    .bind(&tenant)
+    .bind(account_id)
+    .bind(contact_id)
+    .bind(enrollment_id)
+    .execute(&pool)
+    .await
+    .expect("outcome");
+
+    sqlx::query(
+        "INSERT INTO sales_actions (id, tenant_id, action_type, entity_type, entity_id, due_at, idempotency_key, payload)
+         VALUES ($1,$2,'reply_autosend','contact',$3,NOW(),$4,$5)",
+    )
+    .bind(Uuid::new_v4())
+    .bind(&tenant)
+    .bind(contact_id)
+    .bind(format!("act-{suffix}"))
+    .bind(serde_json::json!({ "email": subject, "name": name_token }))
+    .execute(&pool)
+    .await
+    .expect("action");
+
+    sqlx::query(
+        "INSERT INTO sales_consent_evidence (id, tenant_id, contact_id, contact_point_id, consent_text, consent_version, source, collected_at)
+         VALUES ($1,$2,$3,$4,'I agree to be contacted',1,'form',NOW())",
+    )
+    .bind(Uuid::new_v4())
+    .bind(&tenant)
+    .bind(contact_id)
+    .bind(email_point)
+    .execute(&pool)
+    .await
+    .expect("consent evidence");
+
+    sqlx::query(
+        "INSERT INTO sales_contact_policy_decisions (id, tenant_id, account_id, contact_id, contact_point_id, jurisdiction, decision, basis)
+         VALUES ($1,$2,$3,$4,$5,'EE','allowed','legitimate_interest')",
+    )
+    .bind(Uuid::new_v4())
+    .bind(&tenant)
+    .bind(account_id)
+    .bind(contact_id)
+    .bind(email_point)
+    .execute(&pool)
+    .await
+    .expect("policy decision");
+
+    sqlx::query(
+        "INSERT INTO sales_enrichment_facts (id, tenant_id, subject_type, subject_id, field, value, provider)
+         VALUES ($1,$2,'contact',$3,'title','{\"v\":\"Head of API\"}','manual')",
+    )
+    .bind(Uuid::new_v4())
+    .bind(&tenant)
+    .bind(contact_id)
+    .execute(&pool)
+    .await
+    .expect("enrichment");
+
+    sqlx::query(
+        "INSERT INTO inbound_messages (id, tenant_id, from_email, to_email, subject, body_text, ai_response, client_ip, headers)
+         VALUES ($1,$2,$3,'inbox@tenant.ee',$4,$5,$6,'203.0.113.7','{\"from\":\"$3\"}'::jsonb)",
+    )
+    .bind(format!("inb-{}", &Uuid::new_v4().simple().to_string()[..20]))
+    .bind(&tenant)
+    .bind(&subject)
+    .bind(format!("Re: {name_token} intro"))
+    .bind(format!("{name_token}: interested, send pricing"))
+    .bind(format!("Draft reply for {name_token}"))
+    .execute(&pool)
+    .await
+    .expect("inbound message");
+
+    sqlx::query(
+        "INSERT INTO first_response_requests (id, tenant_id, kind, subject_ref, payload)
+         VALUES ($1,$2,'inbound_email',$3,$4)",
+    )
+    .bind(format!(
+        "frr-{}",
+        &Uuid::new_v4().simple().to_string()[..20]
+    ))
+    .bind(&tenant)
+    .bind(contact_id.to_string())
+    .bind(serde_json::json!({ "email": subject, "name": name_token, "phone": phone }))
+    .execute(&pool)
+    .await
+    .expect("first response");
+
+    sqlx::query(
+        "INSERT INTO sales_inbox_messages (id, tenant_id, sender, subject) VALUES ($1,$2,$3,$4)",
+    )
+    .bind(Uuid::new_v4())
+    .bind(&tenant)
+    .bind(&subject)
+    .bind(format!("Re: intro {name_token}"))
+    .execute(&pool)
+    .await
+    .expect("inbox message");
+
+    sqlx::query("INSERT INTO sales_unsubscribes (tenant_id, email) VALUES ($1,$2)")
+        .bind(&tenant)
+        .bind(&subject)
+        .execute(&pool)
+        .await
+        .expect("unsubscribe");
+
+    sqlx::query(
+        "INSERT INTO sales_unsubscribe_tokens (token_hash, tenant_id, email, expires_at)
+         VALUES ($1,$2,$3,NOW() + INTERVAL '7 days')",
+    )
+    .bind(format!("hash-{suffix}").into_bytes())
+    .bind(&tenant)
+    .bind(&subject)
+    .execute(&pool)
+    .await
+    .expect("unsubscribe token");
+
+    sqlx::query(
+        "INSERT INTO sales_calendar_events (id, tenant_id, title, attendees, start_at, end_at)
+         VALUES ($1,$2,$3,$4::text[],NOW() + INTERVAL '2 days', NOW() + INTERVAL '2 days 30 min')",
+    )
+    .bind(Uuid::new_v4())
+    .bind(&tenant)
+    .bind(format!("{name_token} sync"))
+    .bind(format!("{{{subject}}}"))
+    .execute(&pool)
+    .await
+    .expect("calendar event");
+
+    sqlx::query(
+        "INSERT INTO sales_campaigns (id, tenant_id, name, template_id) VALUES ($1,$2,'launch','t1')",
+    )
+    .bind(campaign_id)
+    .bind(&tenant)
+    .execute(&pool)
+    .await
+    .expect("campaign");
+    sqlx::query("INSERT INTO sales_campaign_recipients (campaign_id, email) VALUES ($1,$2)")
+        .bind(campaign_id)
+        .bind(&subject)
+        .execute(&pool)
+        .await
+        .expect("campaign recipient");
+
+    sqlx::query(
+        "INSERT INTO sales_discovery_candidates (id, tenant_id, source, contact_email, company_name)
+         VALUES ($1,$2,'manual',$3,$4)",
+    )
+    .bind(Uuid::new_v4())
+    .bind(&tenant)
+    .bind(&subject)
+    .bind(format!("{name_token} OÜ"))
+    .execute(&pool)
+    .await
+    .expect("discovery candidate");
+
+    // ── 1. ACCESS: every row disclosed to the subject ─────────────────────
+    let access_id = Uuid::new_v4().to_string();
+    seed_request(&pool, &access_id, &tenant, &subject, "access").await;
+    let gdpr_access = automation(pool.clone());
+    gdpr_access
+        .process_request(&access_id)
+        .await
+        .expect("access export");
+    let (data,): (serde_json::Value,) =
+        sqlx::query_as("SELECT data FROM gdpr_exports WHERE request_id = $1")
+            .bind(&access_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    for store in [
+        "sales_contacts",
+        "sales_contact_points",
+        "sales_evidence",
+        "sales_enrollments",
+        "sales_step_executions",
+        "sales_reply_classifications",
+        "sales_meetings",
+        "sales_decisions",
+        "sales_outcomes",
+        "sales_actions",
+        "first_response_requests",
+        "inbound_messages",
+        "sales_inbox_messages",
+        "sales_unsubscribes",
+        "sales_unsubscribe_tokens",
+        "sales_calendar_events",
+        "sales_campaign_recipients",
+        "sales_discovery_candidates",
+        "sales_accounts",
+        "sales_consent_evidence",
+        "sales_contact_policy_decisions",
+        "sales_enrichment_facts",
+    ] {
+        assert!(
+            data[store]
+                .as_array()
+                .map(|a| !a.is_empty())
+                .unwrap_or(false),
+            "access export must disclose the subject's {store} rows"
+        );
+    }
+    assert_eq!(
+        data["sales_contact_points"].as_array().unwrap().len(),
+        2,
+        "email AND phone points disclosed"
+    );
+    assert_eq!(
+        data["sales_contacts"][0]["full_name"].as_str(),
+        Some(name_token.as_str()),
+        "the contact's name is readable in access (erasure happens separately)"
+    );
+    assert!(
+        data["inbound_messages"][0]["ai_response"]
+            .as_str()
+            .unwrap_or_default()
+            .contains(name_token.as_str()),
+        "the pending AI draft is part of what the subject may access"
+    );
+
+    // ── 2. ERASURE: zero subject PII remains in the graph ─────────────────
+    let erase_id = Uuid::new_v4().to_string();
+    seed_request(&pool, &erase_id, &tenant, &subject, "erasure").await;
+    let gdpr_erase = GdprAutomation::new(pool.clone(), redis, test_gdpr_config());
+    gdpr_erase
+        .process_request(&erase_id)
+        .await
+        .expect("erasure should succeed");
+    let (status, _): (String, Option<serde_json::Value>) =
+        sqlx::query_as("SELECT status, result FROM data_subject_requests WHERE id = $1")
+            .bind(&erase_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(
+        status == "completed" || status == "partial",
+        "the erasure reaches a terminal success state (partial only because this \
+         test config intentionally disables the config-gated ClickHouse step, \
+         which reports skipped_not_configured); got {status}"
+    );
+
+    // Deleted: no row anywhere may still match the subject's email …
+    for (table, predicate) in [
+        (
+            "sales_contact_points",
+            "LOWER(normalized_value) = LOWER($1) OR LOWER(value) = LOWER($1)",
+        ),
+        ("sales_evidence", "FALSE"),
+        ("sales_decisions", "FALSE"),
+        ("sales_reply_classifications", "FALSE"),
+        ("sales_contact_policy_decisions", "FALSE"),
+        ("sales_consent_evidence", "FALSE"),
+        (
+            "sales_actions",
+            "LOWER(payload::text) LIKE '%' || LOWER($1) || '%'",
+        ),
+        (
+            "first_response_requests",
+            "LOWER(payload::text) LIKE '%' || LOWER($1) || '%'",
+        ),
+        ("sales_inbox_messages", "LOWER(sender) = LOWER($1)"),
+        ("sales_unsubscribe_tokens", "LOWER(email) = LOWER($1)"),
+        ("sales_calendar_events", "$1 = ANY(attendees)"),
+        (
+            "sales_discovery_candidates",
+            "LOWER(contact_email) = LOWER($1)",
+        ),
+        ("sales_enrichment_facts", "subject_type = 'contact'"),
+    ] {
+        let sql = if predicate == "FALSE" {
+            format!("SELECT COUNT(*) FROM {table} WHERE tenant_id = $2")
+        } else {
+            format!("SELECT COUNT(*) FROM {table} WHERE tenant_id = $2 AND ({predicate})")
+        };
+        // These tables seeded exactly ONE contact-scoped set for this test.
+        let (c,): (i64,) = sqlx::query_as(&sql)
+            .bind(&subject)
+            .bind(&tenant)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(c, 0, "{table}: subject rows must be gone after erasure");
+    }
+
+    // Free-text residue: the person's NAME token must appear nowhere.
+    for (table, column) in [
+        ("sales_evidence", "proposition"),
+        ("sales_decisions", "rationale"),
+        ("sales_reply_classifications", "reasoning"),
+        ("sales_actions", "payload::text"),
+        ("first_response_requests", "payload::text"),
+        ("sales_inbox_messages", "subject"),
+    ] {
+        let (c,): (i64,) = sqlx::query_as(&format!(
+            "SELECT COUNT(*) FROM {table} WHERE tenant_id = $1 AND LOWER({column}) LIKE '%' || LOWER($2) || '%'"
+        ))
+        .bind(&tenant)
+        .bind(&name_token)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(c, 0, "{table}.{column}: person name residue must be gone");
+    }
+
+    // Campaign recipients have no tenant column: the subject's row is keyed
+    // through the tenant's campaign.
+    let (cr_left,): (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM sales_campaign_recipients cr
+         JOIN sales_campaigns sc ON sc.id = cr.campaign_id
+         WHERE sc.tenant_id = $1 AND LOWER(cr.email) = LOWER($2)",
+    )
+    .bind(&tenant)
+    .bind(&subject)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        cr_left, 0,
+        "sales_campaign_recipients: subject rows must be gone after erasure"
+    );
+
+    // Anonymized, not deleted: the contact tombstone and the inbound record.
+    let (contacts_left, tombstone_ok, fields_clean): (i64, bool, bool) = sqlx::query_as(
+        "SELECT COUNT(*),
+                BOOL_AND(legacy_lead_email LIKE 'erased+%' AND full_name LIKE 'erased+%'),
+                BOOL_AND(job_title IS NULL AND lead_notes IS NULL)
+         FROM sales_contacts WHERE tenant_id = $1",
+    )
+    .bind(&tenant)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(contacts_left, 1, "the contact row survives as a tombstone");
+    assert!(
+        tombstone_ok,
+        "email and name replaced by the redaction marker"
+    );
+    assert!(fields_clean, "free-text person fields nulled");
+
+    let (inbound_left, inbound_clean): (i64, bool) = sqlx::query_as(
+        "SELECT COUNT(*),
+                BOOL_AND(from_email LIKE 'erased+%' AND subject LIKE 'erased+%'
+                         AND body_text IS NULL AND body_html IS NULL
+                         AND ai_response IS NULL AND client_ip IS NULL
+                         AND headers IS NULL AND raw_message IS NULL)
+         FROM inbound_messages WHERE tenant_id = $1",
+    )
+    .bind(&tenant)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(inbound_left, 1, "the inbound record survives as a shell");
+    assert!(
+        inbound_clean,
+        "every person-bearing field of the inbound shell is redacted"
+    );
+
+    let (disc_left, disc_clean): (i64, bool) = sqlx::query_as(
+        "SELECT COUNT(*), BOOL_AND(contact_email LIKE 'erased+%')
+         FROM sales_discovery_candidates WHERE tenant_id = $1",
+    )
+    .bind(&tenant)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(disc_left, 1, "discovery company facts retained");
+    assert!(disc_clean, "but the candidate's email is redacted");
+
+    // Retained on purpose: pseudonymous process/statistical rows + opt-out.
+    for (table, expected) in [
+        ("sales_accounts", 1i64),
+        ("sales_enrollments", 1),
+        ("sales_step_executions", 1),
+        ("sales_outcomes", 1),
+        ("sales_meetings", 1),
+        ("sales_unsubscribes", 1),
+    ] {
+        let (c,): (i64,) = sqlx::query_as(&format!(
+            "SELECT COUNT(*) FROM {table} WHERE tenant_id = $1"
+        ))
+        .bind(&tenant)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(c, expected, "{table}: retained rows must survive");
+    }
+
+    // And no raw email remains ANYWHERE in the retained graph text.
+    let (raw_email_left,): (i64,) = sqlx::query_as(
+        "SELECT (
+           (SELECT COUNT(*) FROM sales_contacts WHERE tenant_id = $1 AND LOWER(COALESCE(legacy_lead_email,'')) = LOWER($2)) +
+           (SELECT COUNT(*) FROM sales_contact_points WHERE tenant_id = $1 AND (LOWER(normalized_value) = LOWER($2) OR LOWER(value) = LOWER($2))) +
+           (SELECT COUNT(*) FROM sales_inbox_messages WHERE tenant_id = $1 AND LOWER(sender) = LOWER($2)) +
+           (SELECT COUNT(*) FROM sales_unsubscribe_tokens WHERE tenant_id = $1 AND LOWER(email) = LOWER($2)) +
+           (SELECT COUNT(*) FROM sales_campaign_recipients cr JOIN sales_campaigns sc ON sc.id = cr.campaign_id WHERE sc.tenant_id = $1 AND LOWER(cr.email) = LOWER($2)) +
+           (SELECT COUNT(*) FROM sales_discovery_candidates WHERE tenant_id = $1 AND LOWER(COALESCE(contact_email,'')) = LOWER($2)) +
+           (SELECT COUNT(*) FROM inbound_messages WHERE tenant_id = $1 AND (LOWER(COALESCE(from_email,'')) = LOWER($2) OR LOWER(COALESCE(mail_from,'')) = LOWER($2))) +
+           (SELECT COUNT(*) FROM sales_calendar_events WHERE tenant_id = $1 AND EXISTS (SELECT 1 FROM unnest(attendees) a WHERE LOWER(a) = LOWER($2)))
+         )",
+    )
+    .bind(&tenant)
+    .bind(&subject)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        raw_email_left, 0,
+        "the raw subject email must not remain in any sales store; sales_unsubscribes is the sole, deliberate exception — the opt-out list keeps the address exactly like the platform suppression_list (Art. 17(3)(e)), and it is disclosed in the access export"
+    );
+}

@@ -28,7 +28,7 @@ ApexMail supports GDPR compliance through documented data processing, subject ri
 | **Deletion Process** | Cascade deletion via API or support request; retention schedule published |
 | **Export Process** | JSON/CSV export formats; API-driven or support-assisted |
 | **Breach Notification** | 72-hour notification to Data Protection Authority; customer notification without undue delay |
-| **Data Location** | European Union (Hetzner, Finland) |
+| **Data Location** | European Union (Finland) |
 | **Transfer Safeguards** | Standard Contractual Clauses; EU-based processing where feasible |
 | **Customer Responsibilities** | Lawful basis for processing; consent management; data accuracy |
 
@@ -55,7 +55,7 @@ ApexMail's HIPAA readiness is under active development.
 | **Required Configuration** | Dedicated IP, encryption at rest, audit logging, BAA on file |
 | **Excluded Features** | Shared IP pools, public analytics sharing, non-encrypted backups |
 | **Logging Restrictions** | Access logs must be retained for HIPAA audit requirements (6 years minimum) |
-| **Support Access Restrictions** | Support staff access to PHI requires explicit customer approval |
+| **Support Access Restrictions** | Access to PHI requires explicit customer approval |
 | **Current Status** | Planned — readiness assessment Q2 2027 |
 
 ---

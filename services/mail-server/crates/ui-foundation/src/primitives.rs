@@ -1173,8 +1173,13 @@ impl<'a> EmptyState<'a> {
             .map(|text| format!("<p class=\"mx-auto max-w-[320px]\">{}</p>", text))
             .unwrap_or_default();
         let action = match (self.action_label, self.action_href) {
-            (Some(label), Some(href)) => format!("<a href=\"{}\" class=\"mt-6 apex-btn\">{}</a>", href, label),
-            (Some(label), None) => format!("<button type=\"button\" class=\"mt-6 apex-btn\">{}</button>", label),
+            (Some(label), Some(href)) => {
+                format!("<a href=\"{}\" class=\"mt-6 apex-btn\">{}</a>", href, label)
+            }
+            (Some(label), None) => format!(
+                "<button type=\"button\" class=\"mt-6 apex-btn\">{}</button>",
+                label
+            ),
             _ => String::new(),
         };
         format!(
@@ -1785,9 +1790,18 @@ pub struct Table<'a> {
 
 impl<'a> Table<'a> {
     pub fn render_html(&self) -> String {
-        let headers = self.columns.iter().map(|column| {
-            format!("<th scope=\"col\" class=\"align-middle whitespace-nowrap {}\">{}</th>", table_align_class(column.align), column.label)
-        }).collect::<Vec<_>>().join("");
+        let headers = self
+            .columns
+            .iter()
+            .map(|column| {
+                format!(
+                    "<th scope=\"col\" class=\"align-middle whitespace-nowrap {}\">{}</th>",
+                    table_align_class(column.align),
+                    column.label
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("");
         let rows = if self.rows.is_empty() {
             let colspan = self.columns.len().max(1);
             // A bare "No rows to display" is a dead end: render a real
@@ -1818,10 +1832,7 @@ impl<'a> Table<'a> {
                             } else {
                                 align.to_string()
                             };
-                            format!(
-                                "<td class=\"align-middle {}\">{}</td>",
-                                cell_class, value
-                            )
+                            format!("<td class=\"align-middle {}\">{}</td>", cell_class, value)
                         })
                         .collect::<Vec<_>>()
                         .join("");
@@ -1896,7 +1907,10 @@ impl PaginationControls {
             } else {
                 ""
             };
-            format!("<button class=\"apex-btn\"{}>{}</button>", disabled_attr, label)
+            format!(
+                "<button class=\"apex-btn\"{}>{}</button>",
+                disabled_attr, label
+            )
         };
         format!(
             "<div class=\"flex items-center gap-2\" role=\"navigation\" aria-label=\"Pagination controls\">{}{}<span class=\"px-2\">Page {} of {}</span>{}{}</div>",

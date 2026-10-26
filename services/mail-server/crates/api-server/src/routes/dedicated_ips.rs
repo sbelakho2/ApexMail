@@ -436,8 +436,7 @@ fn calculate_reputation_score(
 fn ip_provider_to_api_error(e: IpProviderError) -> ApiError {
     match e {
         IpProviderError::PlanNotEligible => ApiError::Forbidden(
-            "your plan does not include dedicated IP access, please upgrade to Pro or above"
-                .into(),
+            "your plan does not include dedicated IP access, please upgrade to Pro or above".into(),
         ),
         IpProviderError::LimitReached { limit, .. } => ApiError::BadRequest(format!(
             "dedicated IP limit reached ({limit}). Contact support to increase your allocation."

@@ -10,7 +10,7 @@ last_updated = "2026-07-29"
 
 Diese Seite listet Drittanbieter auf, die von der Bel Consulting OÜ (handelnd als ApexMail) beauftragt werden und im Rahmen der Erbringung des ApexMail-Dienstes personenbezogene Daten von Kunden verarbeiten können. Dieses Register wird gemäß Artikel 28 der DSGVO und Abschnitt 5 der ApexMail-Auftragsverarbeitungsvereinbarung geführt.
 
-Unter EU-only-Routing trägt der AWS-SES-Eintrag keine Mail eines Mandanten: Nachrichten verlassen das System ausschließlich über die eigenen MTAs von ApexMail auf Hetzner-Infrastruktur. EU-only-Routing und seine Belege, samt der Unterscheidung zum globalen Standard, der AWS SES in dessen EU-Region nutzt, sind auf der [EU-Souveränitätsseite](/de/eu-sovereign/) dargelegt.
+Unter EU-only-Routing trägt der AWS-SES-Eintrag keine Mail eines Mandanten: Nachrichten verlassen das System ausschließlich über die eigenen MTAs von ApexMail auf von ApexMail verwalteter EU-Infrastruktur (Finnland). EU-only-Routing und seine Belege, samt der Unterscheidung zum globalen Standard, der AWS SES in dessen EU-Region nutzt, sind auf der [EU-Souveränitätsseite](/de/eu-sovereign/) dargelegt.
 
 ### Infrastruktur-Unterauftragsverarbeiter
 
@@ -18,7 +18,7 @@ Die folgenden Drittunternehmen verarbeiten personenbezogene Daten von Kunden im 
 
 | Juristische Person | Marke | Dienst | Zweck | Datenkategorien | Verarbeitungsland | Speicherland | Unternehmenssitz | Übermittlungsmechanismus | Erforderlich |
 |---|---|---|---|---|---|---|---|---|---|
-| Hetzner Online GmbH | Hetzner | Cloud-Hosting | Compute, Storage, Networking | Kerndienstdaten in der standardmäßigen Shared-Bereitstellung | Konfigurierte EU/EWR-Region | Konfigurierte EU/EWR-Region | Finnland | Verarbeitung innerhalb des EWR; die Übermittlungsregeln nach Kapitel V DSGVO gelten nicht | Ja |
+| EU-Infrastrukturanbieter (benannt im Unterauftragsverarbeiter-Anhang des Kunden-DPA) | Infrastrukturanbieter | Cloud-Hosting | Compute, Storage, Networking | Kerndienstdaten in der standardmäßigen Shared-Bereitstellung | Finnland | Finnland | EU/EWR | Verarbeitung innerhalb des EWR; die Übermittlungsregeln nach Kapitel V DSGVO gelten nicht | Ja. Aktive Einrichtung: Helsinki, Finnland (EU/EWR). |
 | Amazon Web Services, Inc. | AWS S3 | Telemetrie-Objektspeicher | Telemetrie-Objektspeicher, wenn aktiviert | Loki-Logs und Tempo-Traces können Betriebsmetadaten enthalten | Konfigurierte S3-Region (Standard: `eu-central-1`) | Konfigurierte S3-Region (Standard: `eu-central-1`) | USA | EU-Standardvertragsklauseln (AWS-DPA) | Nein, nur wenn die aktive Bereitstellung S3-Speicher verwendet |
 | Amazon Web Services, Inc. | AWS SES | E-Mail-Zustelltransport | E-Mail-Zustellung, wenn aktiviert | E-Mail-Inhalte und Empfängeradressen | Konfigurierte SES-Region | Konfigurierte SES-Region | USA | EU-Standardvertragsklauseln (AWS-DPA) | Nein, nur wenn die aktive Bereitstellung SES verwendet |
 | Google LLC | Google | OAuth-Authentifizierung | Anmeldung über Google OAuth | OAuth-Tokens, E-Mail-Adresse, Name | Global (EU-Daten) | Nutzer mit Sitz im EWR: EWR | USA | Standardvertragsklauseln (SCCs) | Nein, nur wenn der Kunde Google OAuth aktiviert |
@@ -27,12 +27,12 @@ Die folgenden Drittunternehmen verarbeiten personenbezogene Daten von Kunden im 
 
 ### Selbst gehostete Infrastruktur (keine Drittanbieter-Unterauftragsverarbeiter)
 
-Die folgende Software wird von ApexMail auf Hetzner-Infrastruktur bereitgestellt und betrieben. Die Software-Herausgeber verarbeiten keine Kundendaten.
+Die folgende Software wird von ApexMail auf von ApexMail verwalteter EU-Infrastruktur (Finnland) bereitgestellt und betrieben. Die Software-Herausgeber verarbeiten keine Kundendaten.
 
 | Software | Zweck | Datenkategorien | Verarbeitungsland | Speicherland | Hinweise |
 |---|---|---|---|---|---|
-| ClickHouse (Open Source) | Analytik-Datenbank | Zustellereignisse, Öffnungs- und Klickereignisse, Bounce- und Beschwerdedaten | Konfigurierte Bereitstellungsregion | Konfigurierte Bereitstellungsregion | Von ApexMail selbst gehostet. ClickHouse, Inc. verarbeitet keine Kundendaten. |
-| Redis (Open Source) | In-Memory-Cache | Sitzungstokens, Zähler für Ratenbegrenzung | Konfigurierte Bereitstellungsregion | Konfigurierte Bereitstellungsregion | Von ApexMail selbst gehostet. Redis Ltd. verarbeitet keine Kundendaten. |
+| ClickHouse (Open Source) | Analytik-Datenbank | Zustellereignisse, Öffnungs- und Klickereignisse, Bounce- und Beschwerdedaten | ApexMail-EU-Region (Finnland) | ApexMail-EU-Region (Finnland) | Von ApexMail selbst gehostet auf von ApexMail verwalteter EU-Infrastruktur (Finnland). ClickHouse, Inc. verarbeitet keine Kundendaten. |
+| Redis (Open Source) | In-Memory-Cache | Sitzungstokens, Zähler für Ratenbegrenzung | ApexMail-EU-Region (Finnland) | ApexMail-EU-Region (Finnland) | Von ApexMail selbst gehostet auf von ApexMail verwalteter EU-Infrastruktur (Finnland). Redis Ltd. verarbeitet keine Kundendaten. |
 
 ### Zahlungsabwickler
 
@@ -50,4 +50,4 @@ Wenn Sie aus berechtigten datenschutzrechtlichen Gründen Widerspruch gegen eine
 
 | Datum | Änderung | Beschreibung |
 |---|---|---|
-| 2026-07-29 | Erstveröffentlichung | Unterauftragsverarbeiter-Register veröffentlicht mit Hetzner (Infrastruktur), AWS (S3/SES, wenn aktiviert), Google (OAuth), GitHub (OAuth) und Mollie (Zahlungen). ClickHouse und Redis sind selbst gehostete Software und keine Unterauftragsverarbeiter (siehe oben). |
+| 2026-07-29 | Erstveröffentlichung | Unterauftragsverarbeiter-Register veröffentlicht mit dem EU-Infrastrukturanbieter (Infrastruktur), AWS (S3/SES, wenn aktiviert), Google (OAuth), GitHub (OAuth) und Mollie (Zahlungen). ClickHouse und Redis sind selbst gehostete Software und keine Unterauftragsverarbeiter (siehe oben). |

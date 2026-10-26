@@ -151,7 +151,12 @@ pub struct AccessRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrustOverview {
     pub generated_at: DateTime<Utc>,
-    pub certifications: Vec<String>,
+    /// ApexMail's OWN attestations ONLY, gated by [`check_trust_claim`].
+    /// NEVER merged with subprocessor certifications: a processor's
+    /// "ISO 27001" appearing beside ApexMail's own claims in one headline
+    /// array is structurally ambiguous (external audit 2026-10-26, finding
+    /// 1). Subprocessor certifications live on `subprocessors[].certifications`.
+    pub apexmail_attestations: Vec<String>,
     pub subprocessors: Vec<Subprocessor>,
     pub recent_incidents: Vec<Incident>,
     pub published_documents: Vec<Document>,
@@ -669,30 +674,30 @@ impl TrustPortalService {
         let documents = self.list_documents_public().await?;
         let subprocessors = self.list_subprocessors_public().await?;
         let recent_incidents = self.list_incidents_public(10).await?;
-        // Distinct certifications across all subprocessors → headline list.
-        let mut cert_set = std::collections::BTreeSet::new();
-        for s in &subprocessors {
-            if let serde_json::Value::Array(arr) = &s.certifications {
-                for v in arr {
-                    if let Some(s) = v.as_str() {
-                        cert_set.insert(s.to_string());
-                    }
-                }
-            }
-        }
-        // Always list ApexMail's own attestations. The list is the truth
-        // and nothing but the truth: ApexMail holds no SOC 2 attestation
-        // and offers no HIPAA/BAA. The owner rule is that not even
-        // "ready", "aligned" or "preparation underway" may appear
+        // ApexMail's OWN attestations, strictly separated from subprocessor
+        // certifications (which stay on each subprocessor row). The list is
+        // the truth and nothing but the truth: ApexMail holds no SOC 2
+        // attestation and offers no HIPAA/BAA. The owner rule is that not
+        // even "ready", "aligned" or "preparation underway" may appear
         // externally; readiness is tracked internally only. (P0 finding
         // 2026-10-26: the public /trust/overview route previously
         // fabricated both.)
+        //
+        // check_trust_claim IS the runtime boundary: an attestation that
+        // claims an external regime ApexMail does not hold fails the
+        // overview itself instead of being published.
+        let mut apexmail_attestations = Vec::with_capacity(OWN_ATTESTATIONS.len());
         for attestation in OWN_ATTESTATIONS {
-            cert_set.insert((*attestation).to_string());
+            if !check_trust_claim(attestation) {
+                return Err(format!(
+                    "OWN_ATTESTATIONS entry {attestation:?} claims a certification ApexMail does not hold — fix the constant, not this gate"
+                ));
+            }
+            apexmail_attestations.push((*attestation).to_string());
         }
         Ok(TrustOverview {
             generated_at: Utc::now(),
-            certifications: cert_set.into_iter().collect(),
+            apexmail_attestations,
             subprocessors,
             recent_incidents,
             published_documents: documents,
@@ -1533,8 +1538,12 @@ mod db_tests {
         assert!(overview.recent_incidents.is_empty());
         // The public overview must never fabricate attestation regimes.
         // ApexMail holds GDPR (Art. 28 DPA) only: no SOC 2, no ISO, no
-        // HIPAA/BAA, not even "ready" or "underway" phrasing.
-        assert_eq!(overview.certifications, vec!["GDPR (Article 28 DPA)".to_string()]);
+        // HIPAA/BAA, not even "ready" or "underway" phrasing — and its own
+        // attestations are a separate field, never a merged headline array.
+        assert_eq!(
+            overview.apexmail_attestations,
+            vec!["GDPR (Article 28 DPA)".to_string()]
+        );
         assert!(check_trust_claim("GDPR (Article 28 DPA)"));
         assert!(!check_trust_claim("SOC 2 Type II"));
         assert!(!check_trust_claim("SOC 2 ready"));
@@ -1555,10 +1564,20 @@ mod db_tests {
         .expect("subprocessor");
         let overview = svc.overview().await.expect("overview");
         assert_eq!(overview.subprocessors.len(), 1);
-        assert!(overview.certifications.contains(&"ISO 27001".to_string()));
-        let mut sorted = overview.certifications.clone();
-        sorted.sort();
-        assert_eq!(overview.certifications, sorted, "deduplicated and stable");
+        // The subprocessor's certifications stay on the subprocessor row —
+        // and NEVER leak into ApexMail's own attestation field, even for
+        // claims (ISO 27001 / SOC 2 Type II) ApexMail itself does not hold.
+        let sub_certs = overview.subprocessors[0].certifications.clone();
+        assert!(sub_certs
+            .as_array()
+            .expect("array")
+            .iter()
+            .any(|v| v == "ISO 27001"));
+        assert_eq!(
+            overview.apexmail_attestations,
+            vec!["GDPR (Article 28 DPA)".to_string()],
+            "no merged headline: subprocessor certifications must not join the own-attestation field"
+        );
 
         // Non-array certifications (operator corruption) are skipped, not fatal.
         sqlx::query(
@@ -1570,13 +1589,15 @@ mod db_tests {
         .await
         .expect("corrupt certifications");
         let overview = svc.overview().await.expect("overview survives");
-        // Operator-corrupted subprocessor certs never resurrect a false
-        // self-attestation either.
-        assert!(overview
-            .certifications
-            .contains(&"GDPR (Article 28 DPA)".to_string()));
+        // Operator-corrupted subprocessor certs never touch the own-
+        // attestation field, and a subprocessor's "SOC 2 Type II" (a
+        // legitimate third-party claim) never appears as ApexMail's own.
+        assert_eq!(
+            overview.apexmail_attestations,
+            vec!["GDPR (Article 28 DPA)".to_string()]
+        );
         assert!(!overview
-            .certifications
+            .apexmail_attestations
             .contains(&"SOC 2 Type II".to_string()));
     }
 
@@ -1644,10 +1665,10 @@ mod db_tests {
             "every generated registry row is public (the page is public)"
         );
         assert!(
-            seed.subprocessors
-                .iter()
-                .any(|s| s.name == "Hetzner Online GmbH"),
-            "the infrastructure provider must be present"
+            seed.subprocessors.iter().any(|s| s.name
+                == "EU infrastructure provider (named in the customer DPA subprocessor annex)"),
+            "the infrastructure provider (public name withheld by owner
+            directive; disclosed in the customer DPA annex) must be present"
         );
 
         let Some((_pool, svc)) = service("generated_seed").await else {

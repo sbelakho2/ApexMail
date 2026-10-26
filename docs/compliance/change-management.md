@@ -1,18 +1,18 @@
 # Change Management Policy
 
 > **Classification:** Internal Policy
-> **Owner:** Engineering Lead, Bel Consulting OÜ
-> **Legal Entity:** Bel Consulting OÜ, Registry Code 16588745, Tallinn, Estonia
-> **Last Reviewed:** 2026-02-09
-> **Review Cycle:** Annually
+> **Owner:** ApexMail
+> Legal Entity: Bel Consulting OÜ, Registry Code 16588745, Tallinn, Estonia
+> Last Reviewed: 2026-10-25
+> Review Cycle: Annually
 
 ---
 
 ## 1. Purpose
 
-This policy governs how changes to the ApexMail platform are proposed, reviewed,
-tested, deployed, and rolled back. It ensures that changes are introduced safely,
-with appropriate oversight, and with minimal risk to customers and data.
+This policy governs how changes to the ApexMail platform are prepared, gated,
+released, and rolled back. Every change passes the same deterministic controls
+before it reaches production.
 
 ---
 
@@ -22,7 +22,7 @@ All changes to:
 
 - Application source code (all packages in the monorepo).
 - Database schemas (migrations).
-- Infrastructure configuration (Hetzner servers, networking, DNS).
+- Infrastructure configuration (servers, networking, DNS).
 - CI/CD pipeline configuration.
 - Dependency versions (runtime libraries, base Docker images).
 - Feature flags and runtime configuration.
@@ -30,254 +30,209 @@ All changes to:
 
 ---
 
-## 3. Change Categories
+## 3. Change Categories and Their Controls
 
-| Category | Description | Review Requirements |
-|----------|-------------|-------------------|
-| **Standard** | Routine code changes, feature development, bug fixes. | 1 code review approval. |
-| **Security-sensitive** | Changes to authentication, authorisation, encryption, data access patterns, or secrets handling. | 2 code review approvals (at least 1 from security-aware reviewer). |
-| **Infrastructure** | Changes to server configuration, networking, DNS, or cloud resources. | 1 approval from Admin role holder. |
-| **Database migration** | Schema changes (DDL), data migrations. | 1 approval (standard), 2 approvals (destructive). |
-| **Emergency** | Hotfixes for production outages or active security incidents. | 1 approval (may be retrospective). See §8. |
+The author prepares the change. The mandatory independent control for every
+category is the CI gate suite described in §4. Categories differ only in the
+additional controls that apply on top of it.
 
----
-
-## 4. Code Review Requirements
-
-### 4.1 General Rules
-
-- **All changes** to the main branch require at least **1 approving review** from a
-  team member who did not author the change.
-- Self-merges are prohibited except under the emergency change process (§8).
-- Reviews must assess: correctness, security implications, test coverage,
-  performance impact, and adherence to coding standards.
-
-### 4.2 Security-Sensitive Changes
-
-Changes touching the following areas require **2 approving reviews**:
-
-- Authentication and session management.
-- Authorisation and RBAC logic.
-- Cryptographic operations (hashing, encryption, key management).
-- Data access layer (direct database queries, ORM model changes).
-- API input validation and sanitisation.
-- Secrets or environment variable handling.
-- CORS, CSP, and other security headers.
-- Dependencies with known security advisories.
-
-At least one reviewer must have demonstrated security awareness (documented in
-the team skills matrix or prior security review experience).
-
-### 4.3 Review Checklist
-
-Reviewers should verify:
-
-- [ ] No secrets, credentials, or PII in the diff.
-- [ ] Input validation for all new API endpoints.
-- [ ] SQL injection prevention (parameterised queries).
-- [ ] Appropriate error handling (no stack traces exposed to users).
-- [ ] Test coverage for new or changed behavior.
-- [ ] Migration safety (see §6).
-- [ ] No unnecessary permission escalation.
-- [ ] Logging does not capture sensitive data.
+| Category | Description | Additional controls |
+|----------|-------------|---------------------|
+| **Standard** | Routine code changes, feature work, defect repairs. | CI gate suite (§4). |
+| **Security-sensitive** | Authentication, authorisation, encryption, data access, secrets handling. | CI gate suite with the security lanes (§4.2). |
+| **Database migration** | Schema and data migrations. | Migration rules (§5). |
+| **High-risk** | Migrations that alter applied ledger rows; changes on auth, billing, or security paths. | Migration rules (§5) and the additional gates (§6). |
+| **Emergency** | Hotfixes for outages or active security incidents. | Emergency process (§10). |
 
 ---
 
-## 5. Deployment Process
+## 4. The Independent Control: CI Gate Lanes
 
-### 5.1 Standard Deployment Pipeline
+### 4.1 Required lanes
 
-```
-Developer branch
-  → Pull Request (code review + CI checks)
-    → Merge to main
-      → CI build (lint, test, audit, image scan)
-        → Deploy to staging
-          → Staging validation (automated + manual smoke tests)
-            → Canary deployment (10% of production traffic)
-              → Monitor canary (15 minutes minimum)
-                → Full production rollout
-                  → Post-deployment monitoring (30 minutes)
-```
+The required lane set is committed at `ci/required-lanes.txt`. A blessing that
+is missing a row for any required lane, or records a row as anything other
+than ok, is refused. The set covers the stage lanes `fetch`, `validate`,
+`docs`, `ui`, `test`, and `security`, the required test sub-lanes (Rust, SDK
+suites, browser, PHP, coverage ratchet), and the validation gates (lane
+waivers, stub ban, invariants registry, ARK law, mirror, and artifacts
+checks).
 
-### 5.2 CI Checks (Required to Pass)
+### 4.2 Security lanes
 
-| Check | Tool | Blocking |
-|-------|------|----------|
-| Linting (Rust) | `cargo clippy` | ✅ Yes |
-| Type checking (Rust) | `cargo check` | ✅ Yes |
-| Unit tests (Rust) | `cargo test` | ✅ Yes |
-| Integration tests | `cargo test` targeted crates + environment checks | ✅ Yes |
-| Dependency audit (Rust) | `cargo audit` | ✅ Yes (critical/high) |
-| Container image scan | Trivy | ✅ Yes (critical/high) |
-| Build | Cargo | ✅ Yes |
+The `security` stage runs the security scanners on every change: `semgrep`
+static analysis, `gitleaks` full-history secret scanning, `cargo audit`
+dependency advisories, and `trivy` filesystem and image scans. Findings above
+threshold fail the run. Triage happens in the committed scanner configuration
+files, with justifications recorded next to each accepted finding.
 
-### 5.3 Staging Validation
+### 4.3 Fail-closed execution
 
-- Staging environment mirrors production configuration.
-- Automated smoke tests run after each staging deployment.
-- Manual validation required for UI changes and new features.
-- Staging must be green before production deployment proceeds.
+The pipeline stops at the first failing stage. A stage that ends as skip,
+advisory, timeout, or failure is not a pass, and a run in that state cannot
+produce a release blessing.
 
-### 5.4 Canary Deployment
+### 4.4 Rationale in the commit message
 
-- 10% of production traffic routed to the canary instance.
-- Monitored for **minimum 15 minutes** before full rollout.
-- Key metrics watched: error rate, latency (p50, p95, p99), email delivery rate.
-- Automatic rollback if error rate increases by >2x or latency p99 exceeds
-  thresholds.
+Every change carries a recorded rationale in its commit message. The git
+history is the change record: what was done, and why, in the commit that
+carries it.
 
 ---
 
-## 6. Database Migration Safeguards
+## 5. Migration Safety
 
-### 6.1 General Rules
+### 5.1 The additive-only rule
 
-- Migrations are versioned and stored in the repository (`migrations/` directories).
-- Migrations run via CI/CD using a dedicated `migration_runner` database role.
-- No manual migration execution in production.
+`tools/migration_lint.py` runs in the `validate` stage and refuses migration
+SQL that breaks the additive, idempotent conventions:
 
-### 6.2 Safe Migration Practices
+- Destructive statements (`DROP TABLE`, `DROP COLUMN`, `DROP DATABASE`) must
+  carry `IF EXISTS`.
+- A destructive statement may also sit inside an existence-probing guard.
+- `CREATE TABLE` and `CREATE INDEX` must be guarded with `IF NOT EXISTS`.
+- `TRUNCATE` and `GRANT ALL` are forbidden in migrations.
+- Every file must be valid inside one transaction. No explicit `COMMIT`, no
+  `CREATE INDEX CONCURRENTLY`.
+- `DELETE` and `UPDATE` statements without a `WHERE` clause are refused.
 
-- **Additive changes preferred:** Add columns, tables, and indexes. Avoid dropping
-  or renaming in the same release.
-- **Backward compatibility:** Migrations must not break the currently running
-  application version. Deploy code that handles both old and new schemas, then
-  migrate, then clean up.
-- **Timeouts:** Long-running migrations (e.g., large table rewrites) must include
-  a statement timeout and be tested against production-size data.
+### 5.2 The production ledger
 
-### 6.3 Destructive Migrations
+Applied migration files are checksummed in `_sqlx_migrations`, and the
+migrator refuses to run if a recorded file's bytes change. Applied files are
+therefore never edited in place. New migrations must satisfy the lint rules;
+older exemptions inside the linter are recorded with justifications.
 
-The following operations are classified as **destructive** and require additional
-safeguards:
+### 5.3 The migrate stage
 
-- `DROP TABLE`
-- `DROP COLUMN`
-- `TRUNCATE`
-- Bulk `DELETE` or `UPDATE` affecting >10% of a table.
-- Column type changes that may lose data.
-
-**Requirements for destructive migrations:**
-
-1. **2 code review approvals** (at least 1 from an Admin role holder).
-2. Data backup verified before execution.
-3. Migration tested against a production-size dataset in staging.
-4. Execution plan reviewed (`EXPLAIN`) for performance impact.
-5. Scheduled during a maintenance window if the table is large.
+The `migrate` stage runs the migrator before any service is recreated. It
+dumps the applied ledger into the run directory first, as the pre-run backup.
+It then fails the deploy if the applied count ever decreases.
 
 ---
 
-## 7. Feature Flags
+## 6. High-Risk Changes
 
-### 7.1 Purpose
-
-Feature flags allow new functionality to be deployed to production without being
-immediately visible to all users. This decouples deployment from release.
-
-### 7.2 Guidelines
-
-- New features behind flags by default if they affect user-facing behavior.
-- Flags have an owner and a planned removal date (max 90 days after full rollout).
-- Stale flags (past removal date) are tracked and cleaned up in regular maintenance.
-- Flag state stored in the database or configuration, not hardcoded.
-
-### 7.3 Flag Lifecycle
-
-```
-Created (disabled)
-  → Enabled for internal testing
-    → Enabled for beta users (% rollout)
-      → Enabled for all users (100%)
-        → Flag removed from code (cleanup PR)
-```
+- Migrations that alter applied ledger rows follow §5 in full, including the
+  ledger backup and the applied-count assertion.
+- Changes on billing paths must pass `tools/check_prod_billing_wiring.py` in
+  the `validate` stage. The gate pins the production payment wiring and
+  refuses drift to retired provider surfaces.
+- Every workspace change must pass `tools/check_invariants.py`, which keeps
+  the invariant registry and the test-expectations file aligned with what the
+  tree actually contains.
+- Security-sensitive paths are covered by the security lanes (§4.2) like any
+  other change.
 
 ---
 
-## 8. Emergency Change Process (Hotfix Path)
+## 7. Release: The Gate Blessing
 
-For production outages, active security incidents, or critical vulnerabilities
-where the standard process is too slow:
+After a green run of the full stage line, CI records a gate blessing: the
+commit sha, the pipeline-config hash, and the per-lane statuses of that run.
+The writer lives in `ci/pipeline.sh`; the refusal contract lives in
+`ci/lib.sh` as `gate_blessing_refusal`.
 
-### 8.1 Criteria
+A blessing is accepted only when all of the following hold:
 
-- Active P1 or P2 incident (see [Incident Response](./incident-response.md)).
-- Critical vulnerability with known exploit (CVSS ≥ 9.0).
+- a blessing file exists on the host;
+- its sha matches the commit being deployed;
+- its pipeline-config hash matches the current pipeline configuration;
+- every required lane in it records status ok.
+
+Both deploy paths verify the blessing fail-closed before doing any work: the
+canonical pipeline in `ci/stages/fetch.sh`, and the manual deploy script at
+Step 0.5 of `deploy/scripts/deploy.sh`. A deploy without a valid blessing for
+the current commit is refused.
+
+### 7.1 Emergency override
+
+`APEXMAIL_UNGATED_DEPLOY=1` bypasses the blessing check for a genuine
+emergency. The bypass prints a loud warning that names itself as an
+audit-visible bypass, and the deploy log records it.
+
+---
+
+## 8. Rollback
+
+- Before services are recreated, `deploy/scripts/deploy.sh` snapshots the
+  current images under a `:pre-deploy` tag (Step 1.5).
+- If post-deploy verification fails, Step 8 retags that snapshot back onto
+  `:latest` and recreates the stack, with no registry round-trip.
+- The canonical pipeline's `verify` stage rolls the stack back to the previous
+  verified sha when its probes fail (`CI_ROLLBACK_ON_VERIFY_FAIL`).
+- For migrations, the run directory keeps the ledger dump taken before the
+  run. Schema rollback is a corrective migration applied forward; the dump
+  restores the record of what was applied.
+
+---
+
+## 9. Branch Protection
+
+- Force pushes and branch deletions are forbidden on `main`. The rule is
+  applied to the repository through the GitHub API.
+- The `fetch` stage refuses to build a commit that is not pushed to `main`
+  (`prove_head_pushed` in `ci/stages/fetch.sh`).
+- Required status checks at the repository boundary are release-governance
+  work and are tracked in §13.
+
+---
+
+## 10. Emergency Changes
+
+### 10.1 Criteria
+
+- Active P1 or P2 incident, per the [Incident Response](./incident-response.md)
+  plan.
+- Critical vulnerability with a known exploit and a severity score of 9.0 or
+  above.
 - Production outage affecting email delivery.
 
-### 8.2 Process
+### 10.2 Process
 
-1. Hotfix branch created from the current production tag.
-2. **Minimal change** targeting only the issue (no unrelated changes).
-3. **1 code review approval** (can be asynchronous via chat/call if needed).
-4. CI build must pass (tests may be scoped to the affected area).
-5. Deployed directly to production (skipping staging and canary).
-6. Immediate post-deployment monitoring (minimum 30 minutes).
-7. Hotfix backported to the main branch via standard PR.
-
-### 8.3 Post-Emergency Review
-
-Within 48 hours of an emergency change:
-
-- Document what was changed and why.
-- Confirm the backport to main is merged.
-- Assess whether the standard process should be updated to prevent future
-  emergency changes for similar issues.
-- File in the incident post-mortem if part of an incident.
+1. The change is minimal and targets only the incident.
+2. It lands on `main` and runs through the same CI gate suite (§4).
+3. It deploys through the release pipeline and its blessing (§7).
+4. When the gate line cannot be run in time, the deploy sets
+   `APEXMAIL_UNGATED_DEPLOY=1`. The deploy log then carries an explicit
+   emergency classification alongside the loud bypass line.
+5. The gates relied upon are reviewed retrospectively within 48 hours, and the
+   outcome is recorded in the incident record.
 
 ---
 
-## 9. Rollback Procedures
+## 11. Feature Flags
 
-### 9.1 Application Rollback
-
-- Previous container images are retained (tagged by commit SHA and build number).
-- Rollback is a redeployment of the previous known-good image.
-- Rollback decision made by the deployer or Incident Commander.
-- Rollback target: complete within **5 minutes** of decision.
-
-### 9.2 Database Rollback
-
-- Every migration has a corresponding `down` migration.
-- Database rollbacks are tested in staging before production use.
-- If a rollback is not safe (data loss risk), the forward-fix approach is
-  preferred: deploy a new migration that corrects the issue.
-
-### 9.3 Rollback Triggers
-
-Automatic or manual rollback is triggered by:
-
-- Error rate increase >2x baseline after deployment.
-- Latency p99 exceeding defined thresholds.
-- Email delivery rate drop >5%.
-- Any unhandled exception in a critical path.
+Feature flags live in the database and are evaluated at runtime. A tenant
+override wins over the global flag, a malformed override is ignored rather
+than interpreted, and evaluation failures surface as errors. Administrative
+flag changes are written to the audit trail.
 
 ---
 
-## 10. Change Log Requirements
+## 12. Change Records
 
-### 10.1 What to Log
-
-All changes to production systems must be recorded:
-
-- **Application changes:** Tracked via Git history and PR descriptions.
-- **Infrastructure changes:** Logged in the ops channel and configuration
-  management history.
-- **Database migrations:** Tracked in the `migrations/` directories and CI logs.
-- **Emergency changes:** Documented in the incident record.
-
-### 10.2 PR Description Standards
-
-Every pull request must include:
-
-- **Summary:** What the change does and why.
-- **Testing:** How the change was tested.
-- **Rollback plan:** How to revert if something goes wrong.
-- **Migration notes:** If applicable, migration details and backward compatibility.
+- Application changes: git history, with the rationale in the commit message.
+- Migrations: the `migrations/` directories and the CI stage logs.
+- Releases: the run records under `ci/runs/`, including manifests, stage
+  logs, and the blessing.
+- Emergency changes: the deploy log and the incident record.
 
 ---
 
-## 11. Related Documents
+## 13. Roadmap — not currently implemented
+
+- Repository-boundary release governance: signed commits and lane-complete
+  blessings enforced at the repository boundary, with required status checks
+  configured on `main`.
+- Progressive rollout: a canary stage in the deploy gate, with traffic
+  shifting and automatic evaluation before full rollout. A deploy today is one
+  verified rollout with post-deploy probes and automatic rollback.
+- Automated feature-flag expiry and stale-flag cleanup.
+
+---
+
+## 14. Related Documents
 
 - [Incident Response Plan](./incident-response.md)
 - [Vulnerability Management Policy](./vulnerability-management.md)

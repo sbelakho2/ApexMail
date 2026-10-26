@@ -161,9 +161,7 @@ impl WarmupAdmit for RedisWarmupGate {
             return Ok(WarmupAdmission::Admitted);
         }
         let started = lifecycle.warmup_started_at.ok_or_else(|| {
-            format!(
-                "warming IP {source_ip} has no warmup_started_at, refusing to admit unanchored"
-            )
+            format!("warming IP {source_ip} has no warmup_started_at, refusing to admit unanchored")
         })?;
         let now = Utc::now();
         let utc_day = now.format("%Y-%m-%d").to_string();

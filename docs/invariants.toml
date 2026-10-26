@@ -206,7 +206,7 @@ id = "I25"
 statement = "A data-subject request reaches every store holding that person, sales data included"
 code = ["compliance gdpr_automation.rs"]
 test_anchors = ["compliance"]
-plan_test_today = "Store-map tests without the sales tables"
+plan_test_today = "Store-map tests cover BOTH directions for the full sales person graph (25 registry entries driving erasure + export from one source, F9-pinned), plus the full-prospect DB test that builds an entire prospect, accesses it, erases it and proves no subject PII remains while pseudonymous process/statistical rows and the opt-out survive"
 gates = ["V23", "T11"]
 
 [[invariant]]

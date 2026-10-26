@@ -291,8 +291,7 @@ pub fn default_plans() -> Vec<PlanSeed> {
         PlanSeed {
             name: "enterprise",
             display_name: "Enterprise Cloud",
-            description:
-                "From €1,750/month, annual-contract platform plan for large organizations",
+            description: "From €1,750/month, annual-contract platform plan for large organizations",
             price_monthly: 175_000,
             price_yearly: 1_750_000,
             price_monthly_usd: 195_000,

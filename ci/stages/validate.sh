@@ -553,6 +553,15 @@ validate_repo_gates() {
         ci_check "postgres backup retention self-test" \
             sh "$REPO_ROOT/deploy/hardening/scripts/postgres-backup-encrypt.sh" \
             --self-test-retention
+        # Restore-drill codec contract (external audit 2026-10-26): the
+        # drill and the producer must share ONE backup envelope. The
+        # self-test runs a real encode/decode round trip through the
+        # canonical codec (backup-envelope.sh) plus a drifted-parameter
+        # rejection — the defect class where the drill decrypted with wrong
+        # PBKDF2 iterations and no real backup could ever pass.
+        ci_check "postgres restore-drill envelope round-trip self-test" \
+            sh "$REPO_ROOT/deploy/hardening/scripts/postgres-restore-drill.sh" \
+            --self-test
     fi
 
     # (c2) migration SQL lint (enterprise conventions — NEW 2026-09-10):

@@ -33,10 +33,7 @@ fn test_parallel_crypto_threads() {
 
     for (i, h) in handles.into_iter().enumerate() {
         h.join().unwrap_or_else(|_| {
-            panic!(
-                "crypto thread {} panicked, possible invariant violation",
-                i
-            )
+            panic!("crypto thread {} panicked, possible invariant violation", i)
         });
     }
 }

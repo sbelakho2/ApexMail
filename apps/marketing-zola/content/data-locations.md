@@ -30,7 +30,7 @@ This matrix describes the deployed EU/EEA configuration. Core service data (rows
 
 | Sub-processor | Purpose | Location | Transfer Safeguard |
 |---|---|---|---|
-| Hetzner Online GmbH | Core infrastructure (compute, storage, networking) | Finland (EU) | Intra-EEA processing; GDPR Chapter V transfer rules do not apply |
+| EU infrastructure provider | Core infrastructure (compute, storage, networking) | Finland (EU) | Intra-EEA processing; GDPR Chapter V transfer rules do not apply |
 | Amazon Web Services, Inc. (AWS S3) | Telemetry object storage when enabled | Configured S3 region (default: `eu-central-1`, EU) | EU SCCs when the configured region is outside the EEA |
 | Amazon Web Services, Inc. (AWS SES) | Email-delivery transport when enabled | Configured SES region (EU default) | EU SCCs when the configured region is outside the EEA |
 | Mollie B.V. | Payment processing | Netherlands (EU); card scheme networks process globally under the Mollie DPA | Intra-EEA processing (Mollie B.V., Amsterdam) |

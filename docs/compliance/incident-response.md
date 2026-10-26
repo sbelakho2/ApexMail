@@ -1,9 +1,9 @@
 # Security Incident Response Plan
 
-> **Classification:** Internal Policy — Confidential
-> **Owner:** Engineering Lead, Bel Consulting OÜ
+> **Classification:** Internal Policy, Confidential
+> **Owner:** ApexMail
 > **Legal Entity:** Bel Consulting OÜ, Registry Code 16588745, Tallinn, Estonia
-> **Last Reviewed:** 2026-02-09
+> **Last Reviewed:** 2026-10-25
 > **Review Cycle:** Annually, and after every P1/P2 incident
 
 ---
@@ -22,7 +22,7 @@ regulatory notification obligations under GDPR.
 This plan covers all systems operated by Bel Consulting OÜ for the ApexMail
 platform:
 
-- Hetzner Cloud ARM servers (EU).
+- Production servers (EU).
 - PostgreSQL databases.
 - Redis instances.
 - Application services (API, worker, tracking, MTA).
@@ -52,30 +52,31 @@ platform:
 
 ---
 
-## 4. Response Team
+## 4. Response Responsibility
 
-### 4.1 Roles
+### 4.1 Who Responds
 
-| Role | Responsibility | Assigned To |
-|------|---------------|-------------|
-| **Incident Commander (IC)** | Owns the incident end-to-end. Makes decisions on escalation, communication, and resource allocation. Single point of authority. | Engineering Lead (primary), CTO (backup) |
-| **Communications Lead** | Manages all external and internal communications. Drafts customer notifications, status page updates, and regulatory notifications. | Product / Business Lead |
-| **Engineering Lead** | Directs technical investigation, containment, and remediation. Coordinates engineering resources. | Senior Engineer on rotation |
-| **Data Protection Lead** | Assesses GDPR implications. Determines if breach notification is required. Prepares DPA notification. | Designated DPL |
+ApexMail handles incidents at company level. The responsible engineer owns an
+incident end to end: triage, containment, eradication, recovery, and the
+timestamped record of actions taken. Customer notifications, status page
+updates, and regulatory notifications are prepared by ApexMail. The Data
+Protection Lead (privacy@apexmail.ee) assesses GDPR implications and prepares
+supervisory-authority notifications.
 
-### 4.2 On-Call
+### 4.2 Alert Delivery
 
-- A primary on-call engineer is available 24/7 and reachable within 15 minutes.
-- Escalation to the Incident Commander if the on-call engineer assesses the event
-  as P1 or P2.
-- On-call rotation is managed via PagerDuty / internal tooling.
+- Monitoring alerts are delivered by email to the addresses configured in the
+  alerting pipeline.
+- An alert is acknowledged within 15 minutes and assessed against the severity
+  levels in §3.
+- Events assessed as P1 or P2 escalate to the responsible engineer.
 
 ### 4.3 Escalation Path
 
 ```
 Alert triggered
-  → On-call engineer (15 min)
-    → Incident Commander (if P1/P2)
+  → Acknowledged (15 min)
+    → Responsible engineer (if P1/P2)
       → Data Protection Lead (if personal data involved)
         → External counsel (if regulatory notification required)
 ```
@@ -89,7 +90,7 @@ Alert triggered
 **Objective:** Confirm the incident and assess severity.
 
 1. Alert received via monitoring, customer report, or manual observation.
-2. On-call engineer acknowledges the alert within **15 minutes**.
+2. The alert is acknowledged within **15 minutes**.
 3. Initial triage: Determine scope, affected systems, and severity level.
 4. Assign incident severity (P1–P4).
 5. Open an incident channel (dedicated chat channel or thread).
@@ -139,7 +140,7 @@ Alert triggered
 **Objective:** Improve future response capability.
 
 1. Schedule a post-incident review within **5 business days** of resolution.
-2. All response team members participate.
+2. ApexMail personnel involved in the response participate in the review.
 3. Produce a post-incident report (see §8).
 4. Identify action items with owners and deadlines.
 5. Update runbooks, monitoring, and this plan as needed.
@@ -153,7 +154,8 @@ Alert triggered
 **During the incident:**
 
 - All communication in the dedicated incident channel.
-- Status updates from the IC every **30 minutes** (P1) or **2 hours** (P2).
+- Status updates are posted every **30 minutes** for P1 and every **2 hours**
+  for P2.
 - No speculation in public channels.
 
 **Internal notification template:**
@@ -163,7 +165,7 @@ INCIDENT [P1/P2/P3/P4] — [Short description]
 Status: [Investigating / Contained / Resolved]
 Affected systems: [List]
 Impact: [Customer-facing impact description]
-IC: [Name]
+Responsible engineer: [Name]
 Next update: [Time]
 ```
 
@@ -210,7 +212,7 @@ Contact:
 |--------|----------|-------------|
 | Internal assessment of GDPR implications | Within **4 hours** of incident confirmation | Data Protection Lead |
 | Notification to supervisory authority (Andmekaitse Inspektsioon) | Within **72 hours** of becoming aware of the breach | Data Protection Lead |
-| Notification to affected data controllers (customers) | **Without undue delay** after breach confirmation | Communications Lead + DPL |
+| Notification to affected data controllers (customers) | **Without undue delay** after breach confirmation | ApexMail |
 | Notification to affected data subjects (if high risk) | **Without undue delay** after assessment | Data Controller (customer), assisted by ApexMail |
 
 **Supervisory authority notification includes (Art. 33):**
@@ -260,7 +262,7 @@ For all P1 and P2 incidents:
 Incident ID: [INC-YYYY-NNN]
 Severity: [P1/P2/P3/P4]
 Duration: [Detection to resolution]
-Incident Commander: [Name]
+Responsible engineer: [Name]
 
 Timeline:
 [Timestamped sequence of events from detection to resolution]
@@ -304,9 +306,9 @@ recurrence.
 ### 9.1 Plan Testing
 
 - **Tabletop exercises:** Conducted quarterly. Walk through a hypothetical P1
-  scenario with the response team.
+  scenario.
 - **Live drills:** Conducted annually. Simulate a realistic incident end-to-end
-  without prior notice to the on-call team.
+  without prior notice.
 
 ### 9.2 Plan Updates
 
@@ -315,7 +317,7 @@ This plan is updated:
 - After every P1 or P2 incident (incorporating lessons learned).
 - After tabletop exercises or live drills.
 - Annually during the scheduled compliance review.
-- When team composition or infrastructure changes materially.
+- When infrastructure or tooling changes materially.
 
 ---
 

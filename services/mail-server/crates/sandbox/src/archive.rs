@@ -224,8 +224,7 @@ fn sweep_zip(
                 if !encrypted_already_scored {
                     outcome.findings.push(InspectionFinding {
                         id: "ARCHIVE_ENTRY_UNREADABLE",
-                        description: "archive entry could not be read, contents uninspected"
-                            .into(),
+                        description: "archive entry could not be read, contents uninspected".into(),
                         risk: 3.0,
                     });
                 }

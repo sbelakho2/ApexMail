@@ -45,14 +45,14 @@ La lista actual de subencargados autorizados se mantiene en el [Registro de sube
 
 | Subencargado | Finalidad | Ubicación | Garantía de transferencia |
 |---|---|---|---|
-| Hetzner Online GmbH | Infraestructura principal (computación, almacenamiento) | Región UE/EEE configurada | Tratamiento intra-EEE; no se aplican las reglas de transferencia del capítulo V del RGPD |
+| Proveedor de infraestructura de la UE | Infraestructura principal (computación, almacenamiento) | Región UE/EEE configurada | Tratamiento intra-EEE; no se aplican las reglas de transferencia del capítulo V del RGPD |
 | Amazon Web Services, Inc. | Almacenamiento de objetos de telemetría cuando está habilitado | Región S3 configurada (predeterminada: `eu-central-1`) | Cláusulas contractuales tipo de la UE (DPA de AWS) |
 | Amazon Web Services, Inc. | Transporte de entrega de correo cuando está habilitado | Región SES configurada | Cláusulas contractuales tipo de la UE (DPA de AWS) |
 | Google LLC | Autenticación OAuth opcional | Global (entidad estadounidense, datos tratados según configuración OAuth) | Cláusulas Contractuales Tipo |
 | GitHub, Inc. | Autenticación OAuth opcional | Global (entidad estadounidense) | Cláusulas Contractuales Tipo |
 | Mollie B.V. | Procesamiento de pagos | Países Bajos (UE); las redes de tarjetas procesan globalmente según el DPA de Mollie | Tratamiento intra-UE (Mollie B.V., Ámsterdam) |
 
-La infraestructura autogestionada (ClickHouse, Redis) se ejecuta en servidores Hetzner bajo el control operativo de ApexMail. Los editores upstream de código abierto no procesan datos de clientes.
+La infraestructura autogestionada (ClickHouse, Redis) se ejecuta en infraestructura de la UE gestionada por ApexMail (Finlandia). Los editores upstream de código abierto no procesan datos de clientes.
 
 ### Procesador de pagos
 

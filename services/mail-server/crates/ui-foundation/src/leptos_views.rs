@@ -1541,7 +1541,10 @@ fn render_campaign_editor_page_with_data(
     }
     .render_html();
 
-    let save_button = format!("<button type=\"submit\" class=\"apex-btn apex-btn--primary\">{}</button>", primary_action_label);
+    let save_button = format!(
+        "<button type=\"submit\" class=\"apex-btn apex-btn--primary\">{}</button>",
+        primary_action_label
+    );
     // Review §4.11: saving is save-as-configured, and "Save as draft" is a
     // distinct native submit that authorizes nothing, the named button
     // value reaches the handler, which clears any schedule instead of
@@ -2260,7 +2263,10 @@ fn sales_panel(id: &str, eyebrow: &str, title: &str, body: &str) -> String {
 
 /// Honest empty/unavailable statement, never a fake row.
 fn sales_note(text: &str) -> String {
-    format!(r#"<p class="apex-block apex-block--tight mt-5">{}</p>"#, html_escape(text))
+    format!(
+        r#"<p class="apex-block apex-block--tight mt-5">{}</p>"#,
+        html_escape(text)
+    )
 }
 
 /// Warning-toned statement: an engaged kill switch or a data-availability gap.

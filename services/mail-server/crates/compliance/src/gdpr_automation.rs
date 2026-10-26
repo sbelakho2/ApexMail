@@ -1076,6 +1076,41 @@ impl GdprAutomation {
         )
         .await?;
 
+        // ── Sales Autopilot person graph: registry-driven (F9). The SAME
+        // map entry that drives erasure provides the export statement, so
+        // access and erasure cannot describe different store sets. (Finding
+        // 9, external audit 2026-10-26: the sales graph was absent from
+        // BOTH directions before this entry set existed.)
+        for store in erasure_stores() {
+            match store {
+                ErasureStore::SalesSubject {
+                    name,
+                    export_sql,
+                    anonymize: _,
+                    erase_sql: _,
+                } => {
+                    self.export_table(&mut data, &mut stores, name, export_sql, email, tid)
+                        .await?;
+                }
+                ErasureStore::SalesRetained {
+                    name,
+                    reason: _,
+                    export_sql: Some(export_sql),
+                } => {
+                    self.export_table(&mut data, &mut stores, name, export_sql, email, tid)
+                        .await?;
+                }
+                ErasureStore::SalesRetained {
+                    name,
+                    reason: _,
+                    export_sql: None,
+                } => {
+                    stores.push(StoreExportResult::not_subject_data(name));
+                }
+                _ => {}
+            }
+        }
+
         // Tenant-owned resources carry no personal data of the subject —
         // listed in the manifest for transparency, never queried. The
         // ClickHouse analytics store is declared as not-exportable here
@@ -1677,6 +1712,64 @@ impl GdprAutomation {
                 // ClickHouse HTTP interface (same env contract as the
                 // analytics crate's client).
                 return self.erase_clickhouse_events(email).await;
+            }
+            SalesSubject {
+                name: _,
+                erase_sql,
+                anonymize,
+                export_sql: _,
+            } => {
+                // Registry-driven sales store: execute the entry's own
+                // subject-scoped statement ($1 tenant, $2 email, and the
+                // redaction marker as $3 for anonymize entries).
+                let marker = redact_marker(email);
+                let mut q = sqlx::query(erase_sql).bind(tid).bind(email);
+                if anonymize {
+                    q = q.bind(&marker);
+                }
+                return match q.execute(&self.db).await {
+                    Ok(r) => StoreErasureResult {
+                        store: store.name(),
+                        status: if anonymize {
+                            StoreErasureStatus::Anonymized
+                        } else {
+                            StoreErasureStatus::Deleted
+                        },
+                        rows_affected: r.rows_affected(),
+                        error: None,
+                    },
+                    // A missing TABLE is an honest skip; a missing column on
+                    // a canonical table is schema drift and FAILS visibly.
+                    Err(e) if is_missing_table(&e) => StoreErasureResult {
+                        store: store.name(),
+                        status: StoreErasureStatus::SkippedMissingTable,
+                        rows_affected: 0,
+                        error: Some(e.to_string()),
+                    },
+                    Err(e) => {
+                        tracing::error!(store = store.name(), error = %e, "sales erasure store failure");
+                        StoreErasureResult {
+                            store: store.name(),
+                            status: StoreErasureStatus::Failed,
+                            rows_affected: 0,
+                            error: Some(e.to_string()),
+                        }
+                    }
+                };
+            }
+            SalesRetained {
+                name: _,
+                reason,
+                export_sql: _,
+            } => {
+                // Pseudonymous links, company facts or opt-out enforcement:
+                // intentionally kept, disclosed on the certificate.
+                return StoreErasureResult {
+                    store: store.name(),
+                    status: StoreErasureStatus::Retained(reason),
+                    rows_affected: 0,
+                    error: None,
+                };
             }
             Retained { name: _, reason } => {
                 // Statutory / tenant-owned data: intentionally NOT deleted.
@@ -2785,6 +2878,32 @@ pub enum ErasureStore {
     /// `ALTER TABLE events DELETE WHERE recipient = ...`, reported honestly
     /// on the certificate whether configured, submitted or failed.
     ClickHouseEvents,
+    /// Sales Autopilot person graph (external audit 2026-10-26 finding 9:
+    /// the canonical DSR machinery omitted sales data entirely). One
+    /// registry entry drives BOTH the erasure statement and the access
+    /// export, so the two directions cannot drift apart (F9 by
+    /// construction). Binding contract:
+    ///   erase_sql  — `$1` = tenant id, `$2` = subject email, `$3` = the
+    ///                redaction marker (anonymize entries only),
+    ///   export_sql — `$1` = subject email, `$2` = tenant id (the
+    ///                `export_table` convention).
+    /// Every statement is subject-scoped; `test_erasure_plan_...` enforces
+    /// the scoping and the contact-resolution fingerprint.
+    SalesSubject {
+        name: &'static str,
+        erase_sql: &'static str,
+        export_sql: &'static str,
+        /// Certificate reports `anonymized` instead of `deleted`.
+        anonymize: bool,
+    },
+    /// Sales store intentionally retained (pseudonymous links, company
+    /// facts, opt-out enforcement), with an OPTIONAL subject-scoped export
+    /// so access still discloses what is held about the subject.
+    SalesRetained {
+        name: &'static str,
+        reason: &'static str,
+        export_sql: Option<&'static str>,
+    },
     /// Store intentionally retained (with reason), never deleted.
     Retained {
         name: &'static str,
@@ -2803,10 +2922,35 @@ impl ErasureStore {
             Self::AnonymizeMessageContent => "messages",
             Self::AnonymizeUserTombstone => "users",
             Self::ClickHouseEvents => "clickhouse_events",
+            Self::SalesSubject { name, .. } => name,
+            Self::SalesRetained { name, .. } => name,
             Self::Retained { name, .. } => name,
         }
     }
+
+    /// The canonical sales-contact resolution this entry relies on (empty
+    /// for direct email-column stores). Pinned by the plan test against
+    /// [`SALES_RESOLVE_ERASE`] so per-entry SQL copies cannot drift.
+    pub fn sales_resolver(&self) -> Option<&'static str> {
+        match self {
+            Self::SalesSubject { erase_sql, .. } if erase_sql.contains(SALES_RESOLVE_ERASE) => {
+                Some(SALES_RESOLVE_ERASE)
+            }
+            _ => None,
+        }
+    }
 }
+
+/// The canonical sales-contact resolution used by the sales erasure SQL
+/// (binding: `$1` = tenant id, `$2` = subject email). The plan test pins
+/// every contact-scoped [`ErasureStore::SalesSubject`] entry to carry
+/// exactly this text, so the per-entry copies cannot drift from it.
+const SALES_RESOLVE_ERASE: &str = r"SELECT id FROM sales_contacts WHERE tenant_id = $1 AND LOWER(COALESCE(legacy_lead_email, '')) = LOWER($2) UNION SELECT contact_id FROM sales_contact_points WHERE tenant_id = $1 AND channel = 'email' AND LOWER(normalized_value) = LOWER($2)";
+
+/// The same resolution for the access-export binding (`$1` = email,
+/// `$2` = tenant), the `export_table` convention.
+#[cfg_attr(not(test), allow(dead_code))] // pinned by the plan test
+const SALES_RESOLVE_EXPORT: &str = r"SELECT id FROM sales_contacts WHERE tenant_id = $2 AND LOWER(COALESCE(legacy_lead_email, '')) = LOWER($1) UNION SELECT contact_id FROM sales_contact_points WHERE tenant_id = $2 AND channel = 'email' AND LOWER(normalized_value) = LOWER($1)";
 
 /// The complete erasure data map, mirroring the access-export data map.
 ///
@@ -2895,6 +3039,202 @@ pub fn erasure_stores() -> Vec<ErasureStore> {
         Retained {
             name: "webhooks",
             reason: "retained: tenant-owned resource (no subject ownership column)",
+        },
+        // ── Sales Autopilot person graph (external audit 2026-10-26,
+        //    finding 9: "the canonical DSR implementation itself omits the
+        //    sales graph"). Every entry drives BOTH erasure and export.
+        //    Policy: person PII -> erase/anonymize; company facts and
+        //    statistical outcomes -> retain (pseudonymous after the contact
+        //    anonymization); financial/legal evidence handled elsewhere.
+
+        // ORDER IS LOAD-BEARING (pinned by the full-prospect DB test):
+        //  1. every resolver-dependent store runs FIRST, while the contact
+        //     still resolves through legacy_lead_email OR its email point;
+        //  2. sales_contacts' tombstone runs next — it rewrites
+        //     legacy_lead_email, the resolver's first arm;
+        //  3. sales_contact_points then deletes the email point (the
+        //     resolver's second arm) — its own statement's pre-state still
+        //     resolves the contact for the phone-point branch;
+        //  4. direct email-column stores need no resolution and run after.
+        // An anonymize-then-derive order would leave the derived stores
+        // unable to find their contact and silently spare person data.
+        // Derived free-text / person content keyed by the contact.
+        SalesSubject {
+            name: "sales_evidence",
+            erase_sql: r"DELETE FROM sales_evidence WHERE tenant_id = $1 AND contact_id IN (SELECT id FROM sales_contacts WHERE tenant_id = $1 AND LOWER(COALESCE(legacy_lead_email, '')) = LOWER($2) UNION SELECT contact_id FROM sales_contact_points WHERE tenant_id = $1 AND channel = 'email' AND LOWER(normalized_value) = LOWER($2))",
+            export_sql: r"SELECT row_to_json(e) FROM sales_evidence e WHERE e.tenant_id = $2 AND e.contact_id IN (SELECT id FROM sales_contacts WHERE tenant_id = $2 AND LOWER(COALESCE(legacy_lead_email, '')) = LOWER($1) UNION SELECT contact_id FROM sales_contact_points WHERE tenant_id = $2 AND channel = 'email' AND LOWER(normalized_value) = LOWER($1))",
+            anonymize: false,
+        },
+        SalesSubject {
+            name: "sales_decisions",
+            erase_sql: r"DELETE FROM sales_decisions WHERE tenant_id = $1 AND contact_id IN (SELECT id FROM sales_contacts WHERE tenant_id = $1 AND LOWER(COALESCE(legacy_lead_email, '')) = LOWER($2) UNION SELECT contact_id FROM sales_contact_points WHERE tenant_id = $1 AND channel = 'email' AND LOWER(normalized_value) = LOWER($2))",
+            export_sql: r"SELECT row_to_json(d) FROM sales_decisions d WHERE d.tenant_id = $2 AND d.contact_id IN (SELECT id FROM sales_contacts WHERE tenant_id = $2 AND LOWER(COALESCE(legacy_lead_email, '')) = LOWER($1) UNION SELECT contact_id FROM sales_contact_points WHERE tenant_id = $2 AND channel = 'email' AND LOWER(normalized_value) = LOWER($1))",
+            anonymize: false,
+        },
+        SalesSubject {
+            name: "sales_reply_classifications",
+            erase_sql: r"DELETE FROM sales_reply_classifications WHERE tenant_id = $1 AND contact_id IN (SELECT id FROM sales_contacts WHERE tenant_id = $1 AND LOWER(COALESCE(legacy_lead_email, '')) = LOWER($2) UNION SELECT contact_id FROM sales_contact_points WHERE tenant_id = $1 AND channel = 'email' AND LOWER(normalized_value) = LOWER($2))",
+            export_sql: r"SELECT row_to_json(r) FROM sales_reply_classifications r WHERE r.tenant_id = $2 AND r.contact_id IN (SELECT id FROM sales_contacts WHERE tenant_id = $2 AND LOWER(COALESCE(legacy_lead_email, '')) = LOWER($1) UNION SELECT contact_id FROM sales_contact_points WHERE tenant_id = $2 AND channel = 'email' AND LOWER(normalized_value) = LOWER($1))",
+            anonymize: false,
+        },
+        SalesSubject {
+            name: "sales_enrichment_facts",
+            erase_sql: r"DELETE FROM sales_enrichment_facts WHERE tenant_id = $1 AND subject_type = 'contact' AND subject_id IN (SELECT id FROM sales_contacts WHERE tenant_id = $1 AND LOWER(COALESCE(legacy_lead_email, '')) = LOWER($2) UNION SELECT contact_id FROM sales_contact_points WHERE tenant_id = $1 AND channel = 'email' AND LOWER(normalized_value) = LOWER($2))",
+            export_sql: r"SELECT row_to_json(f) FROM sales_enrichment_facts f WHERE f.tenant_id = $2 AND f.subject_type = 'contact' AND f.subject_id IN (SELECT id FROM sales_contacts WHERE tenant_id = $2 AND LOWER(COALESCE(legacy_lead_email, '')) = LOWER($1) UNION SELECT contact_id FROM sales_contact_points WHERE tenant_id = $2 AND channel = 'email' AND LOWER(normalized_value) = LOWER($1))",
+            anonymize: false,
+        },
+        SalesSubject {
+            name: "sales_contact_policy_decisions",
+            erase_sql: r"DELETE FROM sales_contact_policy_decisions WHERE tenant_id = $1 AND contact_id IN (SELECT id FROM sales_contacts WHERE tenant_id = $1 AND LOWER(COALESCE(legacy_lead_email, '')) = LOWER($2) UNION SELECT contact_id FROM sales_contact_points WHERE tenant_id = $1 AND channel = 'email' AND LOWER(normalized_value) = LOWER($2))",
+            export_sql: r"SELECT row_to_json(pc) FROM sales_contact_policy_decisions pc WHERE pc.tenant_id = $2 AND pc.contact_id IN (SELECT id FROM sales_contacts WHERE tenant_id = $2 AND LOWER(COALESCE(legacy_lead_email, '')) = LOWER($1) UNION SELECT contact_id FROM sales_contact_points WHERE tenant_id = $2 AND channel = 'email' AND LOWER(normalized_value) = LOWER($1))",
+            anonymize: false,
+        },
+        SalesSubject {
+            name: "sales_consent_evidence",
+            erase_sql: r"DELETE FROM sales_consent_evidence WHERE tenant_id = $1 AND contact_id IN (SELECT id FROM sales_contacts WHERE tenant_id = $1 AND LOWER(COALESCE(legacy_lead_email, '')) = LOWER($2) UNION SELECT contact_id FROM sales_contact_points WHERE tenant_id = $1 AND channel = 'email' AND LOWER(normalized_value) = LOWER($2))",
+            export_sql: r"SELECT row_to_json(ce) FROM sales_consent_evidence ce WHERE ce.tenant_id = $2 AND ce.contact_id IN (SELECT id FROM sales_contacts WHERE tenant_id = $2 AND LOWER(COALESCE(legacy_lead_email, '')) = LOWER($1) UNION SELECT contact_id FROM sales_contact_points WHERE tenant_id = $2 AND channel = 'email' AND LOWER(normalized_value) = LOWER($1))",
+            anonymize: false,
+        },
+        // Work-queue rows carrying outreach copies / person text: matched by
+        // entity linkage OR the email appearing in the JSON payload.
+        SalesSubject {
+            name: "sales_actions",
+            erase_sql: r"DELETE FROM sales_actions WHERE tenant_id = $1 AND ((entity_type = 'contact' AND entity_id IN (SELECT id FROM sales_contacts WHERE tenant_id = $1 AND LOWER(COALESCE(legacy_lead_email, '')) = LOWER($2) UNION SELECT contact_id FROM sales_contact_points WHERE tenant_id = $1 AND channel = 'email' AND LOWER(normalized_value) = LOWER($2))) OR (entity_type = 'contact_point' AND entity_id IN (SELECT id FROM sales_contact_points WHERE tenant_id = $1 AND (LOWER(normalized_value) = LOWER($2) OR contact_id IN (SELECT id FROM sales_contacts WHERE tenant_id = $1 AND LOWER(COALESCE(legacy_lead_email, '')) = LOWER($2) UNION SELECT contact_id FROM sales_contact_points WHERE tenant_id = $1 AND channel = 'email' AND LOWER(normalized_value) = LOWER($2))))) OR LOWER(payload::text) LIKE '%%' || LOWER($2) || '%%')",
+            export_sql: r"SELECT row_to_json(a) FROM sales_actions a WHERE a.tenant_id = $2 AND ((a.entity_type = 'contact' AND a.entity_id IN (SELECT id FROM sales_contacts WHERE tenant_id = $2 AND LOWER(COALESCE(legacy_lead_email, '')) = LOWER($1) UNION SELECT contact_id FROM sales_contact_points WHERE tenant_id = $2 AND channel = 'email' AND LOWER(normalized_value) = LOWER($1))) OR a.payload::text LIKE '%%' || LOWER($1) || '%%')",
+            anonymize: false,
+        },
+        // AI first-response drafts grounded on the lead's submission payload.
+        SalesSubject {
+            name: "first_response_requests",
+            erase_sql: r"DELETE FROM first_response_requests WHERE tenant_id = $1 AND (subject_ref IN (SELECT id::text FROM sales_contacts WHERE id IN (SELECT id FROM sales_contacts WHERE tenant_id = $1 AND LOWER(COALESCE(legacy_lead_email, '')) = LOWER($2) UNION SELECT contact_id FROM sales_contact_points WHERE tenant_id = $1 AND channel = 'email' AND LOWER(normalized_value) = LOWER($2))) OR LOWER(payload::text) LIKE '%%' || LOWER($2) || '%%')",
+            export_sql: r"SELECT row_to_json(fr) FROM first_response_requests fr WHERE fr.tenant_id = $2 AND (fr.subject_ref IN (SELECT id::text FROM sales_contacts WHERE id IN (SELECT id FROM sales_contacts WHERE tenant_id = $2 AND LOWER(COALESCE(legacy_lead_email, '')) = LOWER($1) UNION SELECT contact_id FROM sales_contact_points WHERE tenant_id = $2 AND channel = 'email' AND LOWER(normalized_value) = LOWER($1))) OR fr.payload::text LIKE '%%' || LOWER($1) || '%%')",
+            anonymize: false,
+        },
+        // The contact row itself: anonymized to a tombstone so enrollment/
+        // outcome links keep working without any human-resolving fields.
+        SalesSubject {
+            name: "sales_contacts",
+            erase_sql: r"UPDATE sales_contacts SET full_name = $3, job_title = NULL, department = NULL, seniority = NULL, persona = NULL, country = NULL, timezone = NULL, language = NULL, legacy_lead_email = CASE WHEN legacy_lead_email IS NULL THEN NULL ELSE $3 END, lead_notes = NULL, lead_tags = NULL WHERE tenant_id = $1 AND id IN (SELECT id FROM sales_contacts WHERE tenant_id = $1 AND LOWER(COALESCE(legacy_lead_email, '')) = LOWER($2) UNION SELECT contact_id FROM sales_contact_points WHERE tenant_id = $1 AND channel = 'email' AND LOWER(normalized_value) = LOWER($2))",
+            export_sql: r"SELECT row_to_json(c) FROM sales_contacts c WHERE c.tenant_id = $2 AND c.id IN (SELECT id FROM sales_contacts WHERE tenant_id = $2 AND LOWER(COALESCE(legacy_lead_email, '')) = LOWER($1) UNION SELECT contact_id FROM sales_contact_points WHERE tenant_id = $2 AND channel = 'email' AND LOWER(normalized_value) = LOWER($1))",
+            anonymize: true,
+        },
+        // Every channel point (email, phone, social) of the subject —
+        // matched directly by value OR through the resolved contact, so a
+        // phone/linkedin point of the same person is erased too.
+        SalesSubject {
+            name: "sales_contact_points",
+            erase_sql: r"DELETE FROM sales_contact_points WHERE tenant_id = $1 AND (LOWER(normalized_value) = LOWER($2) OR LOWER(value) = LOWER($2) OR contact_id IN (SELECT id FROM sales_contacts WHERE tenant_id = $1 AND LOWER(COALESCE(legacy_lead_email, '')) = LOWER($2) UNION SELECT contact_id FROM sales_contact_points WHERE tenant_id = $1 AND channel = 'email' AND LOWER(normalized_value) = LOWER($2)))",
+            export_sql: r"SELECT row_to_json(p) FROM sales_contact_points p WHERE p.tenant_id = $2 AND (LOWER(p.normalized_value) = LOWER($1) OR LOWER(p.value) = LOWER($1) OR p.contact_id IN (SELECT id FROM sales_contacts WHERE tenant_id = $2 AND LOWER(COALESCE(legacy_lead_email, '')) = LOWER($1) UNION SELECT contact_id FROM sales_contact_points WHERE tenant_id = $2 AND channel = 'email' AND LOWER(normalized_value) = LOWER($1)))",
+            anonymize: false,
+        },
+        // The prospect's inbound mail incl. the pending AI draft: anonymized
+        // in place (processing record survives, every person-bearing field
+        // redacted — envelope, subject, bodies, raw bytes, headers,
+        // attachments, client IP, AI output).
+        SalesSubject {
+            name: "inbound_messages",
+            erase_sql: r"UPDATE inbound_messages SET from_email = CASE WHEN from_email IS NOT NULL AND LOWER(from_email) = LOWER($2) THEN $3 ELSE from_email END, to_email = CASE WHEN to_email IS NOT NULL AND LOWER(to_email) = LOWER($2) THEN $3 ELSE to_email END, mail_from = CASE WHEN mail_from IS NOT NULL AND LOWER(mail_from) = LOWER($2) THEN $3 ELSE mail_from END, subject = CASE WHEN subject IS NULL THEN NULL ELSE $3 END, body_text = NULL, body_html = NULL, raw_message = NULL, headers = NULL, attachments = NULL, client_ip = NULL, ai_response = NULL, suggested_action = NULL, classification = NULL, classification_confidence = NULL, rcpt_to = CASE WHEN rcpt_to IS NOT NULL AND $2 = ANY(rcpt_to) THEN (SELECT COALESCE(array_agg(CASE WHEN LOWER(x) = LOWER($2) THEN $3 ELSE x END), '{}'::text[]) FROM unnest(rcpt_to) AS x) ELSE rcpt_to END WHERE tenant_id = $1 AND ((from_email IS NOT NULL AND LOWER(from_email) = LOWER($2)) OR (to_email IS NOT NULL AND LOWER(to_email) = LOWER($2)) OR (mail_from IS NOT NULL AND LOWER(mail_from) = LOWER($2)) OR (rcpt_to IS NOT NULL AND $2 = ANY(rcpt_to)))",
+            export_sql: r"SELECT row_to_json(m) FROM inbound_messages m WHERE m.tenant_id = $2 AND ((m.from_email IS NOT NULL AND LOWER(m.from_email) = LOWER($1)) OR (m.to_email IS NOT NULL AND LOWER(m.to_email) = LOWER($1)) OR (m.mail_from IS NOT NULL AND LOWER(m.mail_from) = LOWER($1)) OR (m.rcpt_to IS NOT NULL AND $1 = ANY(m.rcpt_to)))",
+            anonymize: true,
+        },
+        SalesSubject {
+            name: "sales_inbox_messages",
+            erase_sql: r"DELETE FROM sales_inbox_messages WHERE tenant_id = $1 AND LOWER(sender) = LOWER($2)",
+            export_sql: r"SELECT row_to_json(i) FROM sales_inbox_messages i WHERE i.tenant_id = $2 AND LOWER(i.sender) = LOWER($1)",
+            anonymize: false,
+        },
+        SalesSubject {
+            name: "sales_unsubscribe_tokens",
+            erase_sql: r"DELETE FROM sales_unsubscribe_tokens WHERE tenant_id = $1 AND LOWER(email) = LOWER($2)",
+            export_sql: r"SELECT row_to_json(t) FROM sales_unsubscribe_tokens t WHERE t.tenant_id = $2 AND LOWER(t.email) = LOWER($1)",
+            anonymize: false,
+        },
+        SalesSubject {
+            name: "sales_calendar_events",
+            erase_sql: r"DELETE FROM sales_calendar_events WHERE tenant_id = $1 AND EXISTS (SELECT 1 FROM unnest(attendees) AS a WHERE LOWER(a) = LOWER($2))",
+            export_sql: r"SELECT row_to_json(ev) FROM sales_calendar_events ev WHERE ev.tenant_id = $2 AND EXISTS (SELECT 1 FROM unnest(ev.attendees) AS a WHERE LOWER(a) = LOWER($1))",
+            anonymize: false,
+        },
+        SalesSubject {
+            name: "sales_campaign_recipients",
+            erase_sql: r"DELETE FROM sales_campaign_recipients WHERE LOWER(email) = LOWER($2) AND campaign_id IN (SELECT id FROM sales_campaigns WHERE tenant_id = $1)",
+            export_sql: r"SELECT row_to_json(cr) FROM sales_campaign_recipients cr WHERE LOWER(cr.email) = LOWER($1) AND cr.campaign_id IN (SELECT id FROM sales_campaigns sc WHERE sc.tenant_id = $2)",
+            anonymize: false,
+        },
+        // Discovery candidate email: anonymized, company facts retained.
+        SalesSubject {
+            name: "sales_discovery_candidates",
+            erase_sql: r"UPDATE sales_discovery_candidates SET contact_email = $3 WHERE tenant_id = $1 AND contact_email IS NOT NULL AND LOWER(contact_email) = LOWER($2)",
+            export_sql: r"SELECT row_to_json(dc) FROM sales_discovery_candidates dc WHERE dc.tenant_id = $2 AND dc.contact_email IS NOT NULL AND LOWER(dc.contact_email) = LOWER($1)",
+            anonymize: true,
+        },
+        // ── Retained: pseudonymous links and company facts that hold no
+        //    human-resolvable PII once sales_contacts is anonymized, plus
+        //    the opt-out list which (like suppression_list) MUST survive
+        //    erasure or a complained address could be re-mailed.
+        SalesRetained {
+            name: "sales_unsubscribes",
+            reason: "retained: opt-out enforcement (CAN-SPAM/GDPR legitimate interest)",
+            export_sql: Some(
+                r"SELECT row_to_json(s) FROM sales_unsubscribes s WHERE s.tenant_id = $2 AND LOWER(s.email) = LOWER($1)",
+            ),
+        },
+        SalesRetained {
+            name: "sales_accounts",
+            reason: "retained: company/account facts (not personal data)",
+            export_sql: Some(
+                r"SELECT DISTINCT ON (a.id) row_to_json(a) FROM sales_accounts a WHERE a.tenant_id = $2 AND a.id IN (SELECT account_id FROM sales_contacts WHERE id IN (SELECT id FROM sales_contacts WHERE tenant_id = $2 AND LOWER(COALESCE(legacy_lead_email, '')) = LOWER($1) UNION SELECT contact_id FROM sales_contact_points WHERE tenant_id = $2 AND channel = 'email' AND LOWER(normalized_value) = LOWER($1)))",
+            ),
+        },
+        SalesRetained {
+            name: "sales_enrollments",
+            reason: "retained: process state linked to an anonymized contact (no personal columns)",
+            export_sql: Some(
+                r"SELECT row_to_json(en) FROM sales_enrollments en WHERE en.tenant_id = $2 AND en.contact_id IN (SELECT id FROM sales_contacts WHERE tenant_id = $2 AND LOWER(COALESCE(legacy_lead_email, '')) = LOWER($1) UNION SELECT contact_id FROM sales_contact_points WHERE tenant_id = $2 AND channel = 'email' AND LOWER(normalized_value) = LOWER($1))",
+            ),
+        },
+        SalesRetained {
+            name: "sales_step_executions",
+            reason:
+                "retained: process state linked to an anonymized enrollment (no personal columns)",
+            export_sql: Some(
+                r"SELECT row_to_json(se) FROM sales_step_executions se WHERE se.tenant_id = $2 AND se.enrollment_id IN (SELECT en.id FROM sales_enrollments en WHERE en.contact_id IN (SELECT id FROM sales_contacts WHERE tenant_id = $2 AND LOWER(COALESCE(legacy_lead_email, '')) = LOWER($1) UNION SELECT contact_id FROM sales_contact_points WHERE tenant_id = $2 AND channel = 'email' AND LOWER(normalized_value) = LOWER($1)))",
+            ),
+        },
+        SalesRetained {
+            name: "sales_outcomes",
+            reason: "retained: statistical outcome (pseudonymous link; aggregate learning)",
+            export_sql: Some(
+                r"SELECT row_to_json(o) FROM sales_outcomes o WHERE o.tenant_id = $2 AND (o.contact_id IN (SELECT id FROM sales_contacts WHERE tenant_id = $2 AND LOWER(COALESCE(legacy_lead_email, '')) = LOWER($1) UNION SELECT contact_id FROM sales_contact_points WHERE tenant_id = $2 AND channel = 'email' AND LOWER(normalized_value) = LOWER($1)) OR o.enrollment_id IN (SELECT en.id FROM sales_enrollments en WHERE en.contact_id IN (SELECT id FROM sales_contacts WHERE tenant_id = $2 AND LOWER(COALESCE(legacy_lead_email, '')) = LOWER($1) UNION SELECT contact_id FROM sales_contact_points WHERE tenant_id = $2 AND channel = 'email' AND LOWER(normalized_value) = LOWER($1))))",
+            ),
+        },
+        SalesRetained {
+            name: "sales_meetings",
+            reason:
+                "retained: scheduling record linked to an anonymized contact (no personal columns)",
+            export_sql: Some(
+                r"SELECT row_to_json(m) FROM sales_meetings m WHERE m.tenant_id = $2 AND m.contact_id IN (SELECT id FROM sales_contacts WHERE tenant_id = $2 AND LOWER(COALESCE(legacy_lead_email, '')) = LOWER($1) UNION SELECT contact_id FROM sales_contact_points WHERE tenant_id = $2 AND channel = 'email' AND LOWER(normalized_value) = LOWER($1))",
+            ),
+        },
+        SalesRetained {
+            name: "sales_opportunities",
+            reason: "retained: account-level pipeline record (no personal columns)",
+            export_sql: Some(
+                r"SELECT row_to_json(op) FROM sales_opportunities op WHERE op.tenant_id = $2 AND op.contact_id IN (SELECT id FROM sales_contacts WHERE tenant_id = $2 AND LOWER(COALESCE(legacy_lead_email, '')) = LOWER($1) UNION SELECT contact_id FROM sales_contact_points WHERE tenant_id = $2 AND channel = 'email' AND LOWER(normalized_value) = LOWER($1))",
+            ),
+        },
+        SalesRetained {
+            name: "sales_scores",
+            reason:
+                "retained: derived numeric score linked to an anonymized contact (no personal data)",
+            export_sql: None,
+        },
+        SalesRetained {
+            name: "sales_sender_identities",
+            reason: "retained: tenant-owned sending identity (account-closure path)",
+            export_sql: Some(
+                r"SELECT row_to_json(si) FROM sales_sender_identities si WHERE si.tenant_id = $2 AND LOWER(si.from_email) = LOWER($1)",
+            ),
         },
     ]
 }
@@ -3762,6 +4102,42 @@ mod tests {
                 ErasureStore::AnonymizeMessageContent => { /* canonical messages store */ }
                 ErasureStore::AnonymizeUserTombstone => { /* canonical users store */ }
                 ErasureStore::ClickHouseEvents => { /* best-effort analytics purge */ }
+                ErasureStore::SalesSubject {
+                    name,
+                    erase_sql,
+                    export_sql,
+                    anonymize: _,
+                } => {
+                    // Subject-scoping in BOTH directions with the correct
+                    // binding per direction, plus the canonical contact
+                    // resolution byte-identical wherever it appears — the
+                    // guard against per-entry SQL copy drift.
+                    assert!(
+                        erase_sql.contains("$1") && erase_sql.contains("$2"),
+                        "{name}: erase_sql must bind tenant ($1) and email ($2)"
+                    );
+                    assert!(
+                        erase_sql.to_lowercase().contains("lower("),
+                        "{name}: erase_sql must match the subject case-insensitively"
+                    );
+                    assert!(
+                        export_sql.contains("$1") && export_sql.contains("$2"),
+                        "{name}: export_sql must bind email ($1) and tenant ($2)"
+                    );
+                    if erase_sql.contains(SALES_RESOLVE_ERASE) {
+                        assert!(
+                            export_sql.contains(SALES_RESOLVE_EXPORT),
+                            "{name}: export resolution must be the mirrored binding of erase_sql"
+                        );
+                    }
+                }
+                ErasureStore::SalesRetained {
+                    name,
+                    reason,
+                    export_sql: _,
+                } => {
+                    assert!(!reason.is_empty(), "{name} retention needs a reason");
+                }
                 ErasureStore::Retained { name, reason } => {
                     assert!(!reason.is_empty(), "{name} retention needs a reason");
                 }
@@ -3779,6 +4155,8 @@ mod tests {
                 ErasureStore::AnonymizeMessageContent => "messages",
                 ErasureStore::AnonymizeUserTombstone => "users",
                 ErasureStore::ClickHouseEvents => "clickhouse_events",
+                ErasureStore::SalesSubject { name, .. } => *name,
+                ErasureStore::SalesRetained { name, .. } => *name,
                 ErasureStore::Retained { name, .. } => *name,
             })
             .collect();
@@ -3865,6 +4243,36 @@ mod tests {
             "api_keys",
             "webhooks",
             "clickhouse_events",
+            // Sales Autopilot person graph (audit finding 9): both
+            // directions mirror each other by construction — the same
+            // registry entry supplies the erasure statement and the export
+            // statement — and the list is pinned here anyway so a store
+            // added to only one direction fails F9 loudly.
+            "sales_contacts",
+            "sales_contact_points",
+            "sales_evidence",
+            "sales_decisions",
+            "sales_reply_classifications",
+            "sales_enrichment_facts",
+            "sales_contact_policy_decisions",
+            "sales_consent_evidence",
+            "sales_actions",
+            "first_response_requests",
+            "inbound_messages",
+            "sales_inbox_messages",
+            "sales_unsubscribe_tokens",
+            "sales_calendar_events",
+            "sales_campaign_recipients",
+            "sales_discovery_candidates",
+            "sales_unsubscribes",
+            "sales_accounts",
+            "sales_enrollments",
+            "sales_step_executions",
+            "sales_outcomes",
+            "sales_meetings",
+            "sales_opportunities",
+            "sales_scores",
+            "sales_sender_identities",
         ];
         let mut from_erasure: Vec<&str> = export_store_names().to_vec();
         let mut from_export = export_reads.to_vec();

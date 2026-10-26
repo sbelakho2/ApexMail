@@ -24,7 +24,7 @@
 **Risk:** An attacker can:
 1. Flood the DSAR submission endpoint to exhaust system resources
 2. Brute-force DSAR verification tokens (no rate limiting + SHA-256 hash without sufficient entropy)
-3. Submit repeated DSAR requests for the same data subject to harass or overwhelm the compliance team
+3. Submit repeated DSAR requests for the same data subject to harass or overwhelm ApexMail
 
 **Current state:** DSAR functionality is not yet fully implemented in the codebase — `dsar.rs` in the compliance crate does not exist. This document provides the implementation plan and rate limiting strategy for when DSAR is built.
 

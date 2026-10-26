@@ -45,8 +45,8 @@
 //!    (`POST /accounting/bank-statements/import`) is the writer the sweep
 //!    posts from, so the statement ledger loop is live end to end.
 //! 9. Statutory obligation sync, daily
-//! 10. Consent expiry (expired `consent_records` revoked + marketing cascade)
-//!    , every `CONSENT_EXPIRY_CHECK_INTERVAL_SECS` (default 3600s). This is
+//! 10. Consent expiry (expired `consent_records` revoked + marketing cascade),
+//!     every `CONSENT_EXPIRY_CHECK_INTERVAL_SECS` (default 3600s). This is
 //!     the job's ONE production driver: before this arm existed the module
 //!     was dead code and expired consents were never revoked.
 

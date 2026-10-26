@@ -348,10 +348,7 @@ async fn empty_audience_workflow_is_honest_zero_recipients_zero_sends() {
             .fetch_one(&pool)
             .await
             .expect("recipient count");
-    assert_eq!(
-        recipients, 0,
-        "zero recipients, honest empty, not everyone"
-    );
+    assert_eq!(recipients, 0, "zero recipients, honest empty, not everyone");
 
     let messages: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE metadata->>'campaign_id' = $1")

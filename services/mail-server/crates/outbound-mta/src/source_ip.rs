@@ -33,9 +33,7 @@ pub enum SourceIpError {
         "cannot bind the recipient-facing socket to requested source IP {requested}: {message}"
     )]
     Bind { requested: IpAddr, message: String },
-    #[error(
-        "requested source IP {requested} but the kernel bound {actual}, refusing before DATA"
-    )]
+    #[error("requested source IP {requested} but the kernel bound {actual}, refusing before DATA")]
     Unverified { requested: IpAddr, actual: IpAddr },
     #[error("cannot read the socket's bound local address for requested source IP {requested}: {message}")]
     LocalAddressUnavailable { requested: IpAddr, message: String },

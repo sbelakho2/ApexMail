@@ -291,9 +291,7 @@ impl VectorStore {
             writeln!(writer, "{}{}", HMAC_HEADER_PREFIX, sig)?;
             info!(count, "NDJSON export with HMAC integrity signature");
         } else if count > 0 {
-            warn!(
-                "NDJSON export without HMAC, integrity not protected (set PERSISTENCE_HMAC_KEY)"
-            );
+            warn!("NDJSON export without HMAC, integrity not protected (set PERSISTENCE_HMAC_KEY)");
         }
 
         Ok(count)
