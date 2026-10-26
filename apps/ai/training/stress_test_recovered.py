@@ -207,7 +207,7 @@ RECOVERED_STRESS_TESTS = {
         {"q": "Is ApexMail HIPAA compliant?",
          "checks": {"must_contain_any": ["Enterprise Cloud", "BAA", "contact", "HIPAA"]}},
         {"q": "Where is my data stored geographically?",
-         "checks": {"must_contain_any": ["EU", "Europe", "Hetzner", "Germany"]}},
+         "checks": {"must_contain_any": ["EU", "EEA", "Europe", "Finland"]}},
     ],
 
     "quota_mechanics": [

@@ -307,7 +307,9 @@ fn tracking_panel(state: &str) -> crate::tracking_domain::TrackingDomainPanel {
 
 /// A populated time-travel reconstruction, mirroring the api-server's
 /// `message_timeline_page_data`: state/as-of/history KPIs over the
-/// transition table (shared data-list primitives).
+/// transition table (shared data-list primitives). Sources use the
+/// customer lifecycle vocabulary (accepted / queue / delivery_attempt /
+/// delivery_event / campaign), never internal store names.
 fn timeline_populated_data() -> crate::view_data::ListPageData {
     use crate::view_data::{DataCell, DataRowData, KpiCardData, ListPageData, TableData};
 
@@ -333,8 +335,8 @@ fn timeline_populated_data() -> crate::view_data::ListPageData {
                     id: "0".to_string(),
                     cells: vec![
                         DataCell::time("2 minutes ago", "2026-10-08T01:39:12Z"),
-                        DataCell::mono("delivery"),
-                        DataCell::mono("queued"),
+                        DataCell::mono("accepted"),
+                        DataCell::mono("message.accepted"),
                         DataCell::status("accepted"),
                         DataCell::text("queued for delivery"),
                     ],
@@ -343,8 +345,8 @@ fn timeline_populated_data() -> crate::view_data::ListPageData {
                     id: "1".to_string(),
                     cells: vec![
                         DataCell::time("2 minutes ago", "2026-10-08T01:39:41Z"),
-                        DataCell::mono("mta"),
-                        DataCell::mono("smtp_transaction"),
+                        DataCell::mono("delivery_attempt"),
+                        DataCell::mono("delivery.attempt_succeeded"),
                         DataCell::status("delivered"),
                         DataCell::text("250 2.0.0 Ok: queued as 4Wx1"),
                     ],
@@ -353,8 +355,8 @@ fn timeline_populated_data() -> crate::view_data::ListPageData {
                     id: "2".to_string(),
                     cells: vec![
                         DataCell::time("just now", "2026-10-08T01:40:03Z"),
-                        DataCell::mono("events"),
-                        DataCell::mono("open"),
+                        DataCell::mono("delivery_event"),
+                        DataCell::mono("event.opened"),
                         DataCell::status("tracked"),
                         DataCell::text("opened from a masked client"),
                     ],
@@ -871,8 +873,16 @@ mod tests {
             "the transition table header must render"
         );
         assert!(
-            timeline.contains("smtp_transaction"),
+            timeline.contains("delivery.attempt_succeeded"),
             "transition rows must render"
+        );
+        // The wire vocabulary is the email lifecycle, never internal store
+        // names (third external audit).
+        assert!(timeline.contains("delivery_attempt"));
+        assert!(timeline.contains("delivery_event"));
+        assert!(
+            !timeline.contains(">mta<") && !timeline.contains(">events<"),
+            "internal source names must not render"
         );
         assert!(
             !timeline.contains("No message selected"),

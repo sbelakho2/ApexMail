@@ -112,7 +112,7 @@ pub fn receipt_public_key_response(public_key: &[u8; 32]) -> ReceiptPublicKeyRes
         public_key_base64: base64_no_pad(public_key),
         public_key_hex: public_key.iter().map(|b| format!("{b:02x}")).collect(),
         verify_url: "/v1/routing/receipts/verify",
-        payload_format: "apexmail-routing-receipt/v1, LF-delimited fields: message_id,                          tenant_id, transport, accepted_at, actual_source_ip (only when the                          transport reported one); the exact bytes are signed as-is",
+        payload_format: "two canonical forms, both signed as-is: apexmail-routing-receipt/v1                          (internal: message_id, tenant_id, transport, accepted_at, actual_source_ip) and                          apexmail-routing-proof/v2 (customer proof: receipt_id, routing_policy,                          policy_satisfied, residency_class, accepted_at)",
     }
 }
 
@@ -173,30 +173,41 @@ pub struct VerifyReceiptRequest {
     pub public_key: Option<String>,
 }
 
-/// Split the canonical payload into its fields, refusing anything that is
-/// not a version-1 receipt (a valid signature over an unrelated blob is not
-/// a routing receipt).
+/// Split a canonical payload into its fields, refusing anything that is
+/// neither a version-1 receipt nor a version-2 customer proof (a valid
+/// signature over an unrelated blob is not a routing receipt).
 pub fn parse_receipt_payload(payload: &str) -> Result<Vec<(String, String)>, String> {
     let mut lines = payload.lines();
-    if lines.next() != Some(mail_common::routing_receipt::RECEIPT_PAYLOAD_VERSION) {
-        return Err(format!(
-            "payload does not start with `{}`",
-            mail_common::routing_receipt::RECEIPT_PAYLOAD_VERSION
-        ));
-    }
-    let mut fields = Vec::new();
-    for line in lines {
-        let (key, value) = line
-            .split_once('=')
-            .ok_or_else(|| format!("payload line `{line}` is not `key=value`"))?;
-        const ALLOWED: [&str; 5] = [
+    let first = lines.next().unwrap_or_default();
+    let allowed: &[&str] = if first == mail_common::routing_receipt::RECEIPT_PAYLOAD_VERSION {
+        &[
             "message_id",
             "tenant_id",
             "transport",
             "accepted_at",
             "actual_source_ip",
-        ];
-        if !ALLOWED.contains(&key) {
+        ]
+    } else if first == mail_common::routing_receipt::PROOF_PAYLOAD_VERSION {
+        &[
+            "receipt_id",
+            "routing_policy",
+            "policy_satisfied",
+            "residency_class",
+            "accepted_at",
+        ]
+    } else {
+        return Err(format!(
+            "payload does not start with `{}` or `{}`",
+            mail_common::routing_receipt::RECEIPT_PAYLOAD_VERSION,
+            mail_common::routing_receipt::PROOF_PAYLOAD_VERSION
+        ));
+    };
+    let mut fields = Vec::new();
+    for line in lines {
+        let (key, value) = line
+            .split_once('=')
+            .ok_or_else(|| format!("payload line `{line}` is not `key=value`"))?;
+        if !allowed.contains(&key) {
             return Err(format!("unknown payload field `{key}`"));
         }
         fields.push((key.to_string(), value.to_string()));
@@ -923,6 +934,18 @@ mod tests {
     }
 
     use mail_common::routing_receipt::{RECEIPT_PUBLIC_KEY_ENV, RECEIPT_SIGNING_KEY_ENV};
+
+    #[test]
+    fn proof_payload_parser_accepts_v2_and_refuses_cross_form_fields() {
+        let proof = "apexmail-routing-proof/v2\nreceipt_id=ab12cd34ef56ab12\nrouting_policy=eu_only\npolicy_satisfied=true\nresidency_class=EEA\naccepted_at=2026-10-15T09:30:00.123+00:00";
+        let fields = parse_receipt_payload(proof).expect("v2 proof parses");
+        assert_eq!(fields[0], ("receipt_id".into(), "ab12cd34ef56ab12".into()));
+        // Cross-form contamination: an internal-receipt field inside a
+        // proof body is refused (and vice versa).
+        let contaminated = format!("{proof}\ntransport=ses");
+        assert!(parse_receipt_payload(&contaminated).is_err());
+        assert!(parse_receipt_payload("apexmail-routing-proof/v3\nreceipt_id=x").is_err());
+    }
 
     /// The pure payload parser refuses non-receipt shapes (pinned so the
     /// endpoint's 400 cannot silently widen into "verify anything").

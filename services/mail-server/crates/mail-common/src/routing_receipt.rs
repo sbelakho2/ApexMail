@@ -75,6 +75,76 @@ pub const RECEIPT_KEY_BYTES: usize = 32;
 /// Length of an Ed25519 signature in bytes.
 pub const RECEIPT_SIGNATURE_BYTES: usize = 64;
 
+/// First line of the CUSTOMER-PROOF canonical payload (v2). The v1
+/// receipt is the INTERNAL record (ledger, enterprise audits) and carries
+/// tenant/transport/source-IP fields; what a CUSTOMER verifies is this
+/// minimal proof: an opaque receipt id, the routing policy in force, that
+/// the policy was satisfied, the residency class, and when the message was
+/// accepted. Nothing about transports, providers, hosts or IPs (external
+/// audit 2026-10-26: a trustworthy receipt does not need to disclose
+/// routing internals to be a proof).
+pub const PROOF_PAYLOAD_VERSION: &str = "apexmail-routing-proof/v2";
+
+/// The signed fields of one customer-facing routing proof.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CustomerProofFields<'a> {
+    /// Opaque receipt identity. NOT the platform message id and NOT the
+    /// tenant id: derive it (e.g. `hex(sha256(version + message_id +
+    /// tenant_id))[..32]`) so the proof is correlatable only by the party
+    /// that already knows the message.
+    pub receipt_id: &'a str,
+    /// The routing policy in force for the message (e.g. `eu_only`).
+    pub routing_policy: &'a str,
+    /// Whether the acceptance satisfied the policy (always `true` on a
+    /// signed proof: a policy violation never mints one).
+    pub policy_satisfied: bool,
+    /// The residency class of the accepted route (e.g. `EEA`).
+    pub residency_class: &'a str,
+    /// RFC 3339 UTC acceptance time, the same value as the internal
+    /// receipt's `accepted_at`.
+    pub accepted_at: &'a str,
+}
+
+/// Build the canonical customer-proof payload bytes that are signed.
+/// Same determinism and newline-refusal contract as
+/// [`canonical_payload`].
+pub fn canonical_customer_proof(
+    fields: &CustomerProofFields<'_>,
+) -> Result<String, ReceiptPayloadError> {
+    for (name, value) in [
+        ("receipt_id", fields.receipt_id),
+        ("routing_policy", fields.routing_policy),
+        ("residency_class", fields.residency_class),
+        ("accepted_at", fields.accepted_at),
+    ] {
+        if value.contains('\n') || value.contains('\r') {
+            return Err(ReceiptPayloadError { field: name });
+        }
+    }
+    Ok(format!(
+        "{PROOF_PAYLOAD_VERSION}\nreceipt_id={}\nrouting_policy={}\npolicy_satisfied={}\nresidency_class={}\naccepted_at={}",
+        fields.receipt_id,
+        fields.routing_policy,
+        fields.policy_satisfied,
+        fields.residency_class,
+        fields.accepted_at,
+    ))
+}
+
+/// The opaque receipt id for a (message, tenant) pair: 32 hex chars of
+/// sha256 over the version tag and both identities. Customers correlate
+/// proofs only with knowledge they already have; the platform can always
+/// re-derive the mapping.
+pub fn customer_proof_receipt_id(message_id: &str, tenant_id: &str) -> String {
+    let mut h = Sha256::new();
+    h.update(PROOF_PAYLOAD_VERSION.as_bytes());
+    h.update(b"\0");
+    h.update(message_id.as_bytes());
+    h.update(b"\0");
+    h.update(tenant_id.as_bytes());
+    hex::encode(&h.finalize()[..16])
+}
+
 /// Reason a receipt key could not be used. Deliberately does NOT echo key
 /// material.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -387,6 +457,17 @@ impl RoutingReceiptSigner {
         let payload = canonical_payload(fields)?;
         Ok(self.sign_payload(&payload))
     }
+
+    /// Canonicalize + sign the CUSTOMER-PROOF form (v2). Same key, same
+    /// key id, a different version tag: a proof signature can never be
+    /// replayed as an internal receipt or vice versa.
+    pub fn sign_customer_proof(
+        &self,
+        fields: &CustomerProofFields<'_>,
+    ) -> Result<SignedRoutingReceipt, ReceiptPayloadError> {
+        let payload = canonical_customer_proof(fields)?;
+        Ok(self.sign_payload(&payload))
+    }
 }
 
 /// `hex(sha256(public_key))[..16]`.
@@ -536,6 +617,63 @@ mod tests {
             accepted_at: "2026-10-15T09:30:00.123+00:00",
             actual_source_ip: ip,
         }
+    }
+
+    #[test]
+    fn customer_proof_is_minimal_signed_and_never_carries_internals() {
+        let signer = RoutingReceiptSigner::from_seed(&seed(11)).unwrap();
+        let receipt_id = customer_proof_receipt_id("msg_01HZX", "tenant-a");
+        let proof = signer
+            .sign_customer_proof(&CustomerProofFields {
+                receipt_id: &receipt_id,
+                routing_policy: "eu_only",
+                policy_satisfied: true,
+                residency_class: "EEA",
+                accepted_at: "2026-10-15T09:30:00.123+00:00",
+            })
+            .unwrap();
+        // Verifies under the published key alone.
+        verify_payload(&proof.payload, &proof.signature, &signer.public_key()).unwrap();
+        // And carries NONE of the internal receipt's routing internals.
+        for absent in [
+            "tenant-a",
+            "msg_01HZX",
+            "transport=",
+            "actual_source_ip",
+            "ses",
+            "dedicated",
+        ] {
+            assert!(
+                !proof.payload.contains(absent),
+                "proof must not carry `{absent}`"
+            );
+        }
+        assert!(proof.payload.starts_with("apexmail-routing-proof/v2\n"));
+        // The opaque id is deterministic and does not leak its inputs.
+        assert_eq!(
+            receipt_id,
+            customer_proof_receipt_id("msg_01HZX", "tenant-a")
+        );
+        assert_ne!(
+            receipt_id,
+            customer_proof_receipt_id("msg_01HZY", "tenant-a")
+        );
+        assert!(!receipt_id.contains("msg"));
+        // A proof signature cannot be replayed as an internal receipt shape.
+        assert!(!proof.payload.starts_with(RECEIPT_PAYLOAD_VERSION));
+    }
+
+    #[test]
+    fn customer_proof_refuses_newlines() {
+        let err = canonical_customer_proof(&CustomerProofFields {
+            receipt_id: "ok",
+            routing_policy: "eu\n_only",
+            policy_satisfied: true,
+            residency_class: "EEA",
+            accepted_at: "t",
+        })
+        .expect_err("newline refused");
+        assert_eq!(err.field, "routing_policy");
     }
 
     #[test]

@@ -881,7 +881,7 @@ EXAMPLE_CONTEXTS: dict[str, dict] = {
             "SOC 2 Type II: On file",
             "DMARC: p=reject on all 15 domains",
             "TLS: Enforced (TLS 1.2+)",
-            "Data residency: EU (Frankfurt)",
+            "Data residency: EU/EEA",
         ],
         "api_keys": [
             "Transactional (am_live_ec1...): Active, scopes: emails:send",
@@ -997,7 +997,7 @@ EXAMPLE_CONTEXTS: dict[str, dict] = {
         "compliance": [
             "HIPAA BAA: Signed on 2023-07-15",
             "SOC 2 Type II: On file, last audit 2025-09-01",
-            "Data residency: EU (Frankfurt)",
+            "Data residency: EU/EEA",
             "Encryption: AES-256 at rest, TLS 1.2+ in transit",
         ],
     },

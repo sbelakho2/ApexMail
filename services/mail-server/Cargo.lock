@@ -6071,6 +6071,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "apexmail-dns-resolver",
+ "apexmail-lib",
  "async-trait",
  "axum 0.7.9",
  "chrono",

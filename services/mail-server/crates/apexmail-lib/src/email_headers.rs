@@ -56,6 +56,84 @@ pub const MIME_HEADER_REPLY_TO: &str = "reply-to";
 /// The reserved internal header namespace prefix (lowercased comparison).
 const RESERVED_NAMESPACE_PREFIX: &str = "x-apexmail-";
 
+/// True when `line` (a raw header line, no terminator) starts a header
+/// whose name is inside the reserved internal `X-ApexMail-*` namespace
+/// (ASCII case-insensitive).
+fn is_reserved_header_line(line: &[u8]) -> bool {
+    let Some(colon) = line.iter().position(|b| *b == b':') else {
+        return false;
+    };
+    let name: Vec<u8> = line[..colon]
+        .iter()
+        .copied()
+        .skip_while(|b| *b == b' ' || *b == b'\t')
+        .collect();
+    const PREFIX: &[u8] = b"x-apexmail-";
+    name.len() >= PREFIX.len()
+        && name[..PREFIX.len()]
+            .iter()
+            .zip(PREFIX)
+            .all(|(a, b)| a.to_ascii_lowercase() == *b)
+}
+
+/// Remove every reserved internal `X-ApexMail-*` header (including folded
+/// continuation lines) from a raw RFC 5322 message. THE canonical byte-level
+/// stripper for the recipient-facing trust boundary: every delivery
+/// transport (the SES raw-MIME adapter, the outbound relay's DATA stage)
+/// must hand only the output of this function to anything outside the
+/// platform — the recipient-side message carries ZERO internal correlation
+/// headers (tenant ids, queue ids, campaign ids, route/source-IP metadata).
+///
+/// Byte-level by design: it operates on the serialized message exactly as
+/// the transport will send it, with no parse/serialize round trip that
+/// could reorder or re-fold headers. The header section ends at the first
+/// blank line; everything after it (the body, including body text that
+/// merely looks like a header) is copied verbatim.
+pub fn strip_reserved_headers(message: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(message.len());
+    let mut index = 0usize;
+    let mut skipping_folded = false;
+    while index < message.len() {
+        // Locate the end of this line, including the terminating '\n' when
+        // present. `line` excludes the line ending.
+        let (line_end, next_index) = match message[index..].iter().position(|b| *b == b'\n') {
+            Some(offset) => {
+                let end = index + offset;
+                let line_end = if end > index && message[end - 1] == b'\r' {
+                    end - 1
+                } else {
+                    end
+                };
+                (line_end, end + 1)
+            }
+            None => (message.len(), message.len()),
+        };
+        let line = &message[index..line_end];
+
+        // A blank line ends the header section: copy the remainder verbatim.
+        if line.is_empty() {
+            out.extend_from_slice(&message[index..]);
+            break;
+        }
+
+        let is_continuation = matches!(line.first(), Some(b' ') | Some(b'\t'));
+        if is_continuation {
+            if !skipping_folded {
+                out.extend_from_slice(&message[index..next_index]);
+            }
+            index = next_index;
+            continue;
+        }
+
+        skipping_folded = is_reserved_header_line(line);
+        if !skipping_folded {
+            out.extend_from_slice(&message[index..next_index]);
+        }
+        index = next_index;
+    }
+    out
+}
+
 /// True when `name` falls inside the reserved `X-ApexMail-*` namespace,
 /// compared case-insensitively. Every external submission boundary (send API
 /// custom headers, worker custom-header merge) AND the pre-transport filter
@@ -435,5 +513,47 @@ mod tests {
         assert!(message_category::is_preference_exempt("service"));
         assert!(!message_category::is_preference_exempt("marketing"));
         assert!(!message_category::is_preference_exempt("newsletter"));
+    }
+}
+
+#[cfg(test)]
+mod strip_reserved_headers_tests {
+    use super::strip_reserved_headers;
+
+    #[test]
+    fn strips_every_reserved_header_case_insensitively_with_folded_lines() {
+        let raw = b"From: a@b.c\r\nX-ApexMail-Message-ID: m-1\r\n x-folded: gone\r\nx-apexmail-tenant-id: t-1\r\nKeep: yes\r\n\r\nX-ApexMail-Route: body-text-is-verbatim\r\n";
+        let clean = strip_reserved_headers(raw);
+        let text = String::from_utf8(clean).unwrap();
+        assert!(
+            text.starts_with("From: a@b.c\r\nKeep: yes\r\n\r\n"),
+            "got {text:?}"
+        );
+        // The invariant is about the HEADER SECTION; the body stays verbatim
+        // (the trailing body line below deliberately looks like a header).
+        let header_section = text.split("\r\n\r\n").next().unwrap();
+        assert!(!header_section.to_ascii_lowercase().contains("x-apexmail-"));
+    }
+
+    #[test]
+    fn near_miss_names_survive_and_body_is_verbatim() {
+        let raw = b"X-ApexMailX: keep\nX-ApexMail: gone\nSubject: s\n\nX-ApexMail-Route: not-a-header-in-body\n";
+        let clean = strip_reserved_headers(raw);
+        let text = String::from_utf8(clean).unwrap();
+        // Both spellings WITHOUT the trailing hyphen are near-misses that
+        // must survive; only the reserved `X-ApexMail-*` namespace goes.
+        assert!(text.contains("X-ApexMailX: keep"));
+        assert!(text.contains("X-ApexMail: gone"));
+        assert!(
+            text.contains("X-ApexMail-Route: not-a-header-in-body"),
+            "body is verbatim"
+        );
+    }
+
+    #[test]
+    fn headerless_and_empty_inputs_pass_through() {
+        assert_eq!(strip_reserved_headers(b""), b"");
+        let body_only = b"just a body\n";
+        assert_eq!(strip_reserved_headers(body_only), body_only);
     }
 }

@@ -562,6 +562,14 @@ validate_repo_gates() {
         ci_check "postgres restore-drill envelope round-trip self-test" \
             sh "$REPO_ROOT/deploy/hardening/scripts/postgres-restore-drill.sh" \
             --self-test
+        # Public-artifact disclosure gates (external audit 2026-10-26
+        # items 12+13): deployment plumbing must not ship in the static
+        # build, and the SERVED OpenAPI spec must never grow admin or
+        # provider surfaces. --self-test proves both detection directions.
+        ci_check "public artifacts allowlist + OpenAPI boundary" \
+            python3 "$REPO_ROOT/tools/check_public_artifacts.py"
+        ci_check "public artifacts gate self-test" \
+            python3 "$REPO_ROOT/tools/check_public_artifacts.py" --self-test
     fi
 
     # (c2) migration SQL lint (enterprise conventions — NEW 2026-09-10):

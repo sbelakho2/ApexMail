@@ -550,8 +550,10 @@ fn get_compliance_info(params: &serde_json::Value) -> serde_json::Value {
             "apexmail_endpoint": "Dashboard → GDPR → New Request or API",
             "auto_erasure": "Events, suppressions, consent_records deleted. Aggregate billing data preserved (no PII)."
         }),
+        // Residency is disclosed at region level only: the facility, city,
+        // provider, and topology stay internal (audit 3, owner directive).
         "data_residency" => {
-            serde_json::json!({"location":"EU/EEA","primary":"Helsinki, Finland (EU/EEA)","encryption":"AES-256-GCM at rest, TLS 1.2+ in transit","certifications":[]})
+            serde_json::json!({"location":"EU/EEA","details":"The applicable residency commitment is defined by the customer's deployment and agreement.","encryption":"AES-256-GCM at rest, TLS 1.2+ in transit","certifications":[]})
         }
         _ => {
             serde_json::json!({"error": format!("unknown topic: {topic}. Try: gdpr_breach_notification, incident_response, gdpr_dsar, data_residency")})
@@ -878,6 +880,7 @@ fn get_webhook_setup(params: &serde_json::Value) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use regex::Regex;
 
     // Existing tool tests
     #[test]
@@ -1783,16 +1786,45 @@ mod tests {
             r.get("error").is_some(),
             "fabricated SOC 2 topic must not resolve"
         );
-        // Residency is Finland (EU/EEA); no certification claims.
+        // Residency is region-level only ("EU/EEA"); no certification claims,
+        // and the serialized answer must carry no facility, provider, cloud
+        // region, hostname, or IP literal (audit 3: inverted property).
         let r = get_compliance_info(&serde_json::json!({"topic":"data_residency"}));
         assert_eq!(r["certifications"].as_array().unwrap().len(), 0);
+        let serialized = r.to_string();
+        for facility in [
+            "Helsinki",
+            "Nuremberg",
+            "Hetzner",
+            "hel1",
+            "eu-west-1",
+            "eu-central-1",
+        ] {
+            assert!(
+                !serialized.contains(facility),
+                "data_residency must not disclose {facility}: {serialized}"
+            );
+        }
         assert!(
-            r["primary"].as_str().unwrap().contains("Helsinki, Finland"),
-            "{r}"
-        );
-        assert!(
-            !r.to_string().contains("Germany"),
+            !serialized.contains("Germany"),
             "hosting claims must not mention Germany"
+        );
+        // No hostname-shaped token may appear. The pattern is the FQDN
+        // shape (dot-separated labels ending in an alphabetic TLD of at
+        // least two characters), so protocol versions like "TLS 1.2+" are
+        // not mistaken for hostnames.
+        let hostname =
+            Regex::new(r"[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)*\.[A-Za-z]{2,}\b")
+                .expect("hostname regex");
+        assert!(
+            !hostname.is_match(&serialized),
+            "data_residency must not carry a hostname: {serialized}"
+        );
+        // No IPv4 literal may appear.
+        let ipv4 = Regex::new(r"\d+\.\d+\.\d+\.\d+").expect("ipv4 regex");
+        assert!(
+            !ipv4.is_match(&serialized),
+            "data_residency must not carry an IP literal: {serialized}"
         );
     }
 

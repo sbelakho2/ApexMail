@@ -104,9 +104,6 @@ pub const APEXMAIL_ROUTE_VALUE_PREFIX: &str = "v1 dedicated";
 /// `worker-processors/src/email/transport.rs::APEXMAIL_SOURCE_IP_REPLY_HEADER`.
 pub const APEXMAIL_SOURCE_IP_REPLY_HEADER: &str = "X-ApexMail-Source-IP";
 
-/// The prefix reserving the internal header namespace.
-const RESERVED_INTERNAL_HEADER_PREFIX: &str = "x-apexmail-";
-
 /// Parsed `X-ApexMail-Route: v1 dedicated <id> <ip>` value.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RouteMetadata {
@@ -152,26 +149,6 @@ pub fn source_ip_reply_header(record: &AcceptanceRecord) -> Option<String> {
         .map(|ip| format!("{APEXMAIL_SOURCE_IP_REPLY_HEADER}: {ip}"))
 }
 
-/// True when `line` starts a header whose name is inside the reserved
-/// internal `X-ApexMail-*` namespace.
-fn is_reserved_internal_header_line(line: &[u8]) -> bool {
-    let Some(colon) = line.iter().position(|b| *b == b':') else {
-        return false;
-    };
-    let name = &line[..colon];
-    let name = name
-        .iter()
-        .copied()
-        .skip_while(|b| *b == b' ' || *b == b'\t')
-        .collect::<Vec<u8>>();
-    // ASCII case-insensitive comparison against the reserved prefix.
-    name.len() >= RESERVED_INTERNAL_HEADER_PREFIX.len()
-        && name
-            .iter()
-            .zip(RESERVED_INTERNAL_HEADER_PREFIX.as_bytes())
-            .all(|(a, b)| a.to_ascii_lowercase() == *b)
-}
-
 /// Remove every reserved internal `X-ApexMail-*` header (including folded
 /// continuation lines) from a raw RFC 5322 message before it crosses the
 /// trust boundary. The route header carries internal routing metadata and the
@@ -179,48 +156,9 @@ fn is_reserved_internal_header_line(line: &[u8]) -> bool {
 /// recipient server, so this runs on the submission path AND again directly
 /// before DATA.
 pub fn strip_internal_headers(message: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(message.len());
-    let mut index = 0usize;
-    let mut skipping_folded = false;
-    while index < message.len() {
-        // Locate the end of this line, including the terminating '\n' when
-        // present. `line` excludes the line ending.
-        let (line_end, next_index) = match message[index..].iter().position(|b| *b == b'\n') {
-            Some(offset) => {
-                let end = index + offset;
-                let line_end = if end > index && message[end - 1] == b'\r' {
-                    end - 1
-                } else {
-                    end
-                };
-                (line_end, end + 1)
-            }
-            None => (message.len(), message.len()),
-        };
-        let line = &message[index..line_end];
-
-        // A blank line ends the header section: copy the remainder verbatim.
-        if line.is_empty() {
-            out.extend_from_slice(&message[index..]);
-            break;
-        }
-
-        let is_continuation = matches!(line.first(), Some(b' ') | Some(b'\t'));
-        if is_continuation {
-            if !skipping_folded {
-                out.extend_from_slice(&message[index..next_index]);
-            }
-            index = next_index;
-            continue;
-        }
-
-        skipping_folded = is_reserved_internal_header_line(line);
-        if !skipping_folded {
-            out.extend_from_slice(&message[index..next_index]);
-        }
-        index = next_index;
-    }
-    out
+    // Single implementation: the canonical byte-level stripper lives in
+    // apexmail-lib (every transport adapter uses the same one).
+    apexmail_lib::email_headers::strip_reserved_headers(message)
 }
 
 #[cfg(test)]

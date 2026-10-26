@@ -527,6 +527,7 @@ impl BounceServer {
         //    other recognisable VERP address, unsigned v1, bad-MAC v2,
         //    expired v2, is kept as a non-suppressive observation only.
         let mut authoritative: Option<VerpV2Claims> = None;
+        let mut authoritative_version: &'static str = "none";
         let mut observation: Option<VerpResolution> = None;
         for addr in rcpt_to {
             match resolve_verp_address(
@@ -535,8 +536,14 @@ impl BounceServer {
                 self.verp_secret.as_deref().filter(|_| self.verp_v2_enabled),
                 now_unix,
             ) {
+                Some(VerpResolution::V3Authoritative(claims)) => {
+                    authoritative = Some(claims);
+                    authoritative_version = "v3";
+                    break;
+                }
                 Some(VerpResolution::V2Authoritative(claims)) => {
                     authoritative = Some(claims);
+                    authoritative_version = "v2";
                     break;
                 }
                 Some(other) if observation.is_none() => {
@@ -561,7 +568,7 @@ impl BounceServer {
                 Some(claims) => (
                     Some(claims.queue_id.clone()),
                     Some(claims.recipient.clone()),
-                    "v2",
+                    authoritative_version,
                     None,
                 ),
                 None => match &observation {
@@ -579,6 +586,12 @@ impl BounceServer {
                         None,
                         "v2-rejected",
                         Some(format!("v2 rejected: {reason}")),
+                    ),
+                    Some(VerpResolution::V3Rejected(reason)) => (
+                        None,
+                        None,
+                        "v3-rejected",
+                        Some(format!("v3 rejected: {reason}")),
                     ),
                     _ => (None, None, "none", claimed_dsn_recipient(&message)),
                 },
@@ -1097,6 +1110,12 @@ pub(crate) enum VerpResolution {
     /// verification must not leak attacker-controlled claims into any
     /// decision.
     V2Rejected(VerpV2Error),
+    /// v3 AEAD token decrypted and unexpired — the CURRENT minted grammar;
+    /// authoritative under the same queue-row cross-check as v2.
+    V3Authoritative(VerpV2Claims),
+    /// v3-shaped but unverifiable (AEAD failure, expired, or no secret).
+    /// Same non-leak contract as [`VerpResolution::V2Rejected`].
+    V3Rejected(VerpV2Error),
     /// Legacy unsigned grammar, retained for READ compatibility only.
     /// Recorded as an observation; never suppression authority. Retirement
     /// condition documented at [`parse_verp_v1_address`].
@@ -1123,6 +1142,17 @@ pub(crate) fn resolve_verp_address(
         return None;
     }
     let local = addr.split('@').next()?;
+    if apexmail_lib::verp::verp_v3_token_from_local(local).is_some() {
+        let Some(secret) = verp_secret else {
+            return Some(VerpResolution::V3Rejected(VerpV2Error::Unconfigured));
+        };
+        return Some(
+            match apexmail_lib::verp::verify_verp_v3_local(secret, local, now_unix) {
+                Ok(claims) => VerpResolution::V3Authoritative(claims),
+                Err(reason) => VerpResolution::V3Rejected(reason),
+            },
+        );
+    }
     if apexmail_lib::verp::verp_v2_token_from_local(local).is_some() {
         let Some(secret) = verp_secret else {
             return Some(VerpResolution::V2Rejected(VerpV2Error::Unconfigured));

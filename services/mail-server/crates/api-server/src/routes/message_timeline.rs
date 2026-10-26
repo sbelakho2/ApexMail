@@ -6,21 +6,30 @@
 //!
 //! # Reconstruction contract
 //!
-//! Sources (every row is append-only evidence; nothing is derived twice):
+//! Sources (every row is append-only evidence; nothing is derived twice).
+//! The WIRE names are the customer lifecycle vocabulary (third external
+//! audit: customers see the email lifecycle, never SQL table names); the
+//! internal names are what this module queries:
 //!
-//! | Source | Timestamp key | Evidence |
-//! |---|---|---|
-//! | `messages` | `created_at`, `sent_at`, `delivered_at`, `scheduled_at` | acceptance; the aggregate stamps written when every recipient copy reaches the state |
-//! | `email_queue` | `created_at`, `sent_at`, `delivered_at`, `updated_at`(+`status`) | per-copy enqueue/attempt/delivery lifecycle |
-//! | `email_delivery_log` | `attempted_at` | one row per SMTP attempt (`success`, `error_message`, attempt number, `email_queue.max_attempts` for the terminal judgement) |
-//! | `events` | `timestamp` | analytics/provider facts: `sent`, `delivered`, `opened`, `clicked`, `bounced`, `complained`, `unsubscribed`, `failed` |
-//! | `campaign_recipients` | `created_at`, `updated_at`(+`status`) | campaign send bookkeeping by `message_id` back-reference |
+//! | Internal store | Wire (lifecycle) name | Timestamp key | Evidence |
+//! |---|---|---|---|
+//! | `messages` | `accepted` | `created_at`, `sent_at`, `delivered_at`, `scheduled_at` | acceptance; the aggregate stamps written when every recipient copy reaches the state |
+//! | `campaign_recipients` | `campaign` | `created_at`, `updated_at`(+`status`) | campaign send bookkeeping by `message_id` back-reference |
+//! | `email_queue` | `queue` | `created_at`, `sent_at`, `delivered_at`, `updated_at`(+`status`) | per-copy enqueue/attempt/delivery lifecycle |
+//! | `email_delivery_log` | `delivery_attempt` | `attempted_at` | one row per SMTP attempt (`success`, `error_message`, attempt number, `email_queue.max_attempts` for the terminal judgement) |
+//! | `events` | `delivery_event` | `timestamp` | analytics/provider facts: `sent`, `delivered`, `opened`, `clicked`, `bounced`, `complained`, `unsubscribed`, `failed` |
 //!
 //! Ordering: every entry is ordered by `(at ASC, source_rank ASC, row id
 //! ASC)` with source ranks `messages`=1 < `campaign_recipients`=2 <
 //! `email_queue`=3 < `email_delivery_log`=4 < `events`=5, so at one identical
 //! timestamp the more downstream fact (the provider event) wins. The
 //! reconstructed state is the status of the LAST entry with `at <= T`.
+//!
+//! Free-text details (`detail`) ride the shared customer-safe classifier
+//! ([`crate::routes::helpers::sanitize_delivery_detail`]): raw SMTP
+//! transcripts, provider error bodies, database errors, hostnames, and IP
+//! literals are replaced by a classified lifecycle summary at this
+//! boundary, never passed through.
 //!
 //! Statuses produced: `accepted` (message row created), `scheduled` (T is
 //! before `scheduled_at`), `queued`, `sending`, `sent`, `delivered`,
@@ -81,6 +90,22 @@ const RANK_CAMPAIGN_RECIPIENT: i32 = 2;
 const RANK_QUEUE: i32 = 3;
 const RANK_DELIVERY_LOG: i32 = 4;
 const RANK_EVENTS: i32 = 5;
+
+/// Internal store name → customer lifecycle name (third external audit:
+/// the timeline wire payload must name lifecycle stages, never ApexMail's
+/// SQL tables). Every [`RawEntry::source`] is one of the five literals this
+/// module itself sets; the catch-all keeps the mapping total (and
+/// customer-safe) if a future source literal is added without a wire name.
+pub(crate) fn lifecycle_source_name(source: &str) -> &'static str {
+    match source {
+        "messages" => "accepted",
+        "campaign_recipients" => "campaign",
+        "email_queue" => "queue",
+        "email_delivery_log" => "delivery_attempt",
+        "events" => "delivery_event",
+        _ => "delivery_event",
+    }
+}
 
 #[derive(Debug, Deserialize)]
 pub struct TimelineQuery {
@@ -251,10 +276,14 @@ pub(crate) async fn reconstruct_timeline(
         .iter()
         .map(|entry| TimelineEntry {
             at: entry.at.to_rfc3339(),
-            source: entry.source,
+            source: lifecycle_source_name(entry.source),
             kind: entry.kind.clone(),
             status: entry.status.clone(),
-            detail: entry.detail.clone(),
+            // Third external audit: free-text details (queue last_error,
+            // delivery-log error bodies, SMTP responses) are classified to
+            // a lifecycle summary at this boundary; house-generated
+            // lifecycle details pass through the classifier unchanged.
+            detail: crate::routes::helpers::sanitize_delivery_detail_opt(entry.detail.as_deref()),
         })
         .collect();
 
@@ -266,7 +295,7 @@ pub(crate) async fn reconstruct_timeline(
         Some(entry) => (
             entry.status.clone().unwrap_or_default(),
             Some(entry.at.to_rfc3339()),
-            Some(entry.source),
+            Some(lifecycle_source_name(entry.source)),
         ),
         None => (
             "queued".to_string(),
@@ -290,17 +319,17 @@ pub(crate) async fn reconstruct_timeline(
         );
     let insufficient = if !has_pipeline_sources && progressed_beyond_acceptance {
         Some(InsufficientHistory {
-            reason: "the append-only delivery sources (email_queue, email_delivery_log, \
-                     events, campaign_recipients) hold no rows for this message; its state \
+            reason: "the delivery lifecycle sources (campaign, queue, delivery_attempt, \
+                     delivery_event) hold no rows for this message; its state \
                      after acceptance cannot be reconstructed, only acceptance itself is \
                      provable"
                 .into(),
             checked_sources: vec![
-                "messages",
-                "email_queue",
-                "email_delivery_log",
-                "events",
-                "campaign_recipients",
+                lifecycle_source_name("messages"),
+                lifecycle_source_name("campaign_recipients"),
+                lifecycle_source_name("email_queue"),
+                lifecycle_source_name("email_delivery_log"),
+                lifecycle_source_name("events"),
             ],
         })
     } else {
@@ -332,7 +361,7 @@ pub(crate) async fn reconstruct_timeline(
             state: ReconstructedState {
                 status: "accepted".into(),
                 since: Some(message.created_at.to_rfc3339()),
-                source: Some("messages"),
+                source: Some(lifecycle_source_name("messages")),
                 description: format!(
                     "only acceptance is provable; {}",
                     insufficient
@@ -730,6 +759,23 @@ mod tests {
 
     const SCOPE_READ: &[&str] = &["messages:read"];
 
+    /// The wire vocabulary (third external audit): internal store names map
+    /// to lifecycle names; nothing a customer sees names a SQL table.
+    #[test]
+    fn lifecycle_source_name_maps_every_internal_store() {
+        assert_eq!(lifecycle_source_name("messages"), "accepted");
+        assert_eq!(lifecycle_source_name("campaign_recipients"), "campaign");
+        assert_eq!(lifecycle_source_name("email_queue"), "queue");
+        assert_eq!(
+            lifecycle_source_name("email_delivery_log"),
+            "delivery_attempt"
+        );
+        assert_eq!(lifecycle_source_name("events"), "delivery_event");
+        // The mapping is total: an unknown literal still answers a
+        // customer-safe lifecycle name.
+        assert_eq!(lifecycle_source_name("future_source"), "delivery_event");
+    }
+
     fn auth_for(tenant: &str, scopes: &[&str]) -> AuthUser {
         AuthUser {
             tenant_id: tenant.to_string(),
@@ -971,13 +1017,14 @@ mod tests {
         }
 
         // The full timeline at the last timestamp orders by (at, source
-        // rank) and names every source that contributed.
+        // rank) and names every source that contributed, with the WIRE
+        // lifecycle vocabulary (third external audit: no SQL table names).
         let full = reconstruct(&state, message_id, second(100)).await;
         let sources: Vec<&str> = full.timeline.iter().map(|entry| entry.source).collect();
-        for expected in ["messages", "email_queue", "email_delivery_log", "events"] {
+        for expected in ["accepted", "queue", "delivery_attempt", "delivery_event"] {
             assert!(
                 sources.contains(&expected),
-                "missing source {expected}: {sources:?}"
+                "missing lifecycle source {expected}: {sources:?}"
             );
         }
         let instants: Vec<&str> = full
@@ -1038,7 +1085,7 @@ mod tests {
 
         let at = reconstruct(&state, message_id, base + chrono::Duration::seconds(30)).await;
         assert_eq!(at.state.status, "suppressed");
-        assert_eq!(at.state.source, Some("events"));
+        assert_eq!(at.state.source, Some("delivery_event"));
 
         cleanup(&pool, &tenant).await;
         pool.close().await;
@@ -1145,8 +1192,147 @@ mod tests {
             "the reason states the gap: {}",
             insufficient.reason
         );
-        assert!(insufficient.checked_sources.contains(&"email_delivery_log"));
+        // The wire vocabulary is the lifecycle, never the SQL tables.
+        assert_eq!(
+            insufficient.checked_sources,
+            vec![
+                "accepted",
+                "campaign",
+                "queue",
+                "delivery_attempt",
+                "delivery_event"
+            ],
+        );
         assert_eq!(gap.state.status, "accepted", "only acceptance is provable");
+        assert_eq!(gap.state.source, Some("accepted"));
+
+        cleanup(&pool, &tenant).await;
+        pool.close().await;
+    }
+
+    /// Third external audit (P1): the customer timeline must not ship raw
+    /// SMTP transcripts, provider error bodies, hostnames, or IP literals
+    /// in `detail`, and must name sources with the lifecycle vocabulary.
+    /// A seeded queue `last_error` and delivery-log `error_message`
+    /// carrying exactly those leaks answer as classified summaries.
+    #[tokio::test]
+    async fn timeline_details_are_sanitized_and_sources_use_lifecycle_names() {
+        let Some((state, pool)) = state_and_pool("timeline_sanitize").await else {
+            return;
+        };
+        let tenant = apexmail_lib::id::generate_id("", 26);
+        seed_tenant_with_plan(
+            &pool,
+            &tenant,
+            &unique_plan_name("tl_san"),
+            plan_features(true),
+        )
+        .await;
+
+        let message_id = Uuid::new_v4();
+        let queue_id = Uuid::new_v4();
+        let base = Utc::now() - chrono::Duration::seconds(90);
+        let failed_at = base + chrono::Duration::seconds(30);
+        sqlx::query(
+            "INSERT INTO messages (id, tenant_id, from_email, to_emails, subject, status, \
+             created_at, updated_at) \
+             VALUES ($1, $2, 'news@timeline.test', $3, 'Timeline', 'failed', $4, $5)",
+        )
+        .bind(message_id)
+        .bind(&tenant)
+        .bind(serde_json::json!(["leak@example.test"]))
+        .bind(base)
+        .bind(failed_at)
+        .execute(&pool)
+        .await
+        .expect("seed message");
+
+        // The queue row carries a raw connection transcript fragment.
+        sqlx::query(
+            "INSERT INTO email_queue (id, message_id, tenant_id, from_address, to_addresses, \
+             subject, status, created_at, updated_at, attempts, max_attempts, last_error) \
+             VALUES ($1, $2, $3, 'news@timeline.test', ARRAY[$4], 'Timeline', 'failed', $5, $6, 2, 5, \
+             'connect to 1.2.3.4:25 timed out (ses provider)')",
+        )
+        .bind(queue_id)
+        .bind(message_id)
+        .bind(&tenant)
+        .bind("leak@example.test")
+        .bind(base)
+        .bind(failed_at)
+        .execute(&pool)
+        .await
+        .expect("seed queue row");
+
+        // The delivery attempt carries a provider error body with a
+        // hostname and a permanent rejection.
+        sqlx::query(
+            "INSERT INTO email_delivery_log (id, email_id, attempt_number, success, status, \
+             created_at, attempted_at, smtp_response, error_message) \
+             VALUES ($1, $2, 2, false, 'failed', $3, $4, '550 5.1.1 user unknown', \
+             '550 rejected by mail-wm1-f43.google.com (bounces@ses.example.com)')",
+        )
+        .bind(Uuid::new_v4())
+        .bind(queue_id)
+        .bind(base)
+        .bind(failed_at)
+        .execute(&pool)
+        .await
+        .expect("seed failed delivery attempt");
+
+        let timeline =
+            reconstruct(&state, message_id, failed_at + chrono::Duration::seconds(5)).await;
+
+        // Wire source names are the lifecycle vocabulary.
+        for entry in &timeline.timeline {
+            assert!(
+                [
+                    "accepted",
+                    "campaign",
+                    "queue",
+                    "delivery_attempt",
+                    "delivery_event"
+                ]
+                .contains(&entry.source),
+                "lifecycle source name required, got {}",
+                entry.source
+            );
+        }
+
+        // Every detail on the wire is a classified summary or a house
+        // lifecycle string; the leaks never pass through.
+        let wire = serde_json::to_value(&timeline).expect("serialize timeline");
+        let wire_text = wire.to_string();
+        for leak in [
+            "1.2.3.4",
+            "ses.",
+            "google.com",
+            "connect to",
+            "550 5.1.1",
+            "user unknown",
+        ] {
+            assert!(
+                !wire_text.contains(leak),
+                "leak {leak} survived: {wire_text}"
+            );
+        }
+        let details: Vec<String> = timeline
+            .timeline
+            .iter()
+            .filter_map(|entry| entry.detail.clone())
+            .collect();
+        assert!(
+            details
+                .iter()
+                .any(|detail| detail == "delivery temporarily refused by recipient server"),
+            "the connection failure is classified: {details:?}"
+        );
+        assert!(
+            details
+                .iter()
+                .any(|detail| detail == "permanent failure: recipient rejected"),
+            "the provider rejection is classified: {details:?}"
+        );
 
         cleanup(&pool, &tenant).await;
         pool.close().await;

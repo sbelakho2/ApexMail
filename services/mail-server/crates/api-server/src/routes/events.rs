@@ -48,6 +48,9 @@ pub struct EventResponse {
     pub message_id: Option<String>,
     pub event_type: String,
     pub recipient: Option<String>,
+    /// Customer-safe metadata: an ALLOWLIST projection of the raw
+    /// `events.metadata` column (see [`customer_event_metadata`]). Raw
+    /// metadata never crosses this boundary.
     pub metadata: Option<serde_json::Value>,
     pub timestamp: String,
 }
@@ -76,6 +79,80 @@ pub struct TimeseriesPoint {
     pub timestamp: String,
     pub count: i64,
     pub event_type: String,
+}
+
+// ─── Customer-safe metadata projection ─────────────────────────
+//
+// Third external audit (P1): the customer events endpoint returned the
+// `events.metadata` JSONB column verbatim, so one future producer writing a
+// transport name, source IP, host, or provider identity into that column
+// would ship it straight to customers. The customer response is now an
+// ALLOWLIST projection: only keys that describe the event in
+// provider-agnostic terms survive; everything else (transport names,
+// transport_message_id, actual_source_ip/source_ip, host, provider_source,
+// recipient_provider, internal queue ids, tenant ids, anything
+// provider-specific) is dropped at this boundary. Internal/admin consumers
+// keep reading the raw column through their own queries; the projection
+// exists ONLY here.
+
+/// Metadata keys a customer may see. Event basics the console already
+/// surfaces: the SMTP response summary/code, the provider-agnostic status
+/// reason, bounce classification, the recipient's user agent and the
+/// customer's own clicked link.
+const CUSTOMER_METADATA_KEYS: &[&str] = &[
+    "smtp_code",
+    "smtp_response",
+    "reason",
+    "bounce_category",
+    "bounce_type",
+    "bounce_subtype",
+    "ua",
+    "link_url",
+];
+
+/// Metadata keys whose values are provider/MTA-generated free text: even
+/// though the key is allowed, the string is classified through the shared
+/// delivery-detail sanitizer before it reaches a customer.
+const SANITIZED_METADATA_KEYS: &[&str] = &["smtp_response", "reason"];
+
+/// Project one event's raw metadata onto the customer-safe allowlist DTO.
+///
+/// * `None`/`null`/non-object metadata → `None` (nothing to show).
+/// * Object → only allowlisted keys survive; provider-generated free text
+///   inside surviving keys is classified to a lifecycle summary; a
+///   projection that ends up empty → `None`.
+pub(crate) fn customer_event_metadata(
+    raw: Option<&serde_json::Value>,
+) -> Option<serde_json::Value> {
+    let object = raw
+        .filter(|value| !value.is_null())
+        .and_then(|value| value.as_object())?;
+
+    let mut projected = serde_json::Map::new();
+    for key in CUSTOMER_METADATA_KEYS {
+        let Some(value) = object.get(*key) else {
+            continue; // not present on this event
+        };
+        let value = if SANITIZED_METADATA_KEYS.contains(key) {
+            match value.as_str() {
+                // Free-text summaries are classified; non-string shapes
+                // (a numeric reason, an embedded object) are dropped, they
+                // are not a customer-facing summary.
+                Some(text) => {
+                    serde_json::Value::String(super::helpers::sanitize_delivery_detail(text))
+                }
+                None => continue,
+            }
+        } else {
+            value.clone()
+        };
+        projected.insert((*key).to_string(), value);
+    }
+    if projected.is_empty() {
+        None
+    } else {
+        Some(serde_json::Value::Object(projected))
+    }
 }
 
 // ─── Handlers ──────────────────────────────────────────────────
@@ -423,7 +500,7 @@ impl From<EventRow> for EventResponse {
             message_id: r.message_id,
             event_type: r.event_type,
             recipient: r.recipient,
-            metadata: r.metadata,
+            metadata: customer_event_metadata(r.metadata.as_ref()),
             timestamp: r.timestamp.to_rfc3339(),
         }
     }
@@ -490,6 +567,131 @@ mod tests {
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["event_type"], "opened");
+    }
+
+    // ── Customer-safe metadata projection (third external audit) ──
+
+    /// The audit's leaky shape: a producer writing transport, source IP,
+    /// host, and recipient-provider keys into `events.metadata`. The
+    /// customer wire projection must answer with the provider-agnostic
+    /// reason ONLY, while the raw column (what internal/admin consumers
+    /// read through their own queries) keeps every key untouched.
+    #[test]
+    fn customer_metadata_projection_strips_internal_keys_and_keeps_the_admin_view_raw() {
+        let raw = serde_json::json!({
+            "transport": "ses",
+            "source_ip": "1.2.3.4",
+            "actual_source_ip": "1.2.3.4",
+            "host": "internal.example",
+            "recipient_provider": "google",
+            "provider_source": "mx_resolved",
+            "transport_message_id": "0100018c-internal-id",
+            "queue_id": "q_12345",
+            "tenant_id": "advt0000000000",
+            "reason": "greylisted",
+        });
+
+        // Customer view: the allowlist projection.
+        let customer = customer_event_metadata(Some(&raw)).expect("reason survives");
+        assert_eq!(customer, serde_json::json!({"reason": "greylisted"}));
+
+        // Admin/internal view: the raw column is untouched by this
+        // boundary (admin routes and internal consumers query the table
+        // directly and keep every key).
+        let raw_json = serde_json::to_value(&raw).expect("raw metadata serializes");
+        for key in [
+            "transport",
+            "source_ip",
+            "actual_source_ip",
+            "host",
+            "recipient_provider",
+            "provider_source",
+            "transport_message_id",
+            "queue_id",
+            "tenant_id",
+        ] {
+            assert!(raw_json.get(key).is_some(), "raw column keeps {key}");
+        }
+
+        // The wire DTO applies the same projection end to end.
+        let row = EventRow {
+            id: "evt_leak".into(),
+            message_id: None,
+            event_type: "bounced".into(),
+            recipient: Some("a@example.com".into()),
+            metadata: Some(raw),
+            timestamp: DateTime::parse_from_rfc3339("2026-10-25T12:00:00Z")
+                .expect("timestamp")
+                .with_timezone(&Utc),
+        };
+        let response = EventResponse::from(row);
+        let json = serde_json::to_value(&response).expect("serialize");
+        assert_eq!(
+            json["metadata"],
+            serde_json::json!({"reason": "greylisted"})
+        );
+        assert!(
+            json["metadata"].to_string().find("ses").is_none(),
+            "no transport identity on the wire"
+        );
+    }
+
+    /// Free text inside ALLOWED keys is classified, not forwarded: an SMTP
+    /// response summary carrying a hostname or an IP becomes a lifecycle
+    /// summary.
+    #[test]
+    fn customer_metadata_projection_sanitizes_allowed_free_text() {
+        let raw = serde_json::json!({
+            "smtp_response": "550 5.1.1 user unknown via mail-wm1-f43.google.com",
+            "reason": "connect to 1.2.3.4:25 timed out",
+            "smtp_code": 550,
+            "bounce_type": "hard_bounce",
+        });
+        let customer = customer_event_metadata(Some(&raw)).expect("projection");
+        assert_eq!(
+            customer["smtp_response"], "permanent failure: recipient rejected",
+            "{}",
+            customer
+        );
+        assert_eq!(
+            customer["reason"], "delivery temporarily refused by recipient server",
+            "{}",
+            customer
+        );
+        // Scalars and non-free-text allowlisted keys pass as they are.
+        assert_eq!(customer["smtp_code"], 550);
+        assert_eq!(customer["bounce_type"], "hard_bounce");
+    }
+
+    /// Absent, null, non-object, and fully-stripped metadata all answer
+    /// `null` on the wire, never `{}` and never a passthrough of odd
+    /// shapes (an array or a bare string is not an event summary).
+    #[test]
+    fn customer_metadata_projection_handles_empty_and_hostile_shapes() {
+        assert_eq!(customer_event_metadata(None), None);
+        assert_eq!(
+            customer_event_metadata(Some(&serde_json::Value::Null)),
+            None
+        );
+        assert_eq!(
+            customer_event_metadata(Some(&serde_json::json!([]))),
+            None,
+            "an array is not an event summary"
+        );
+        assert_eq!(
+            customer_event_metadata(Some(&serde_json::json!("ses:250 ok"))),
+            None,
+            "a bare string is not an event summary"
+        );
+        // Nothing allowlisted survives: the whole object is dropped.
+        assert_eq!(
+            customer_event_metadata(Some(&serde_json::json!({
+                "transport": "ses",
+                "source_ip": "1.2.3.4",
+                "host": "internal.example",
+            }))),
+            None
+        );
     }
 
     #[test]
@@ -943,6 +1145,83 @@ mod adversarial_tests {
             ],
             "every row exactly once across the tie group"
         );
+
+        pool.close().await;
+    }
+
+    /// Third external audit (P1): the customer events API must never ship
+    /// the raw `events.metadata` column. A seeded event carrying transport,
+    /// source IP, host, and recipient-provider metadata answers the list
+    /// AND the detail route with the allowlist projection only, while the
+    /// stored row (the internal/admin view) keeps every key.
+    #[tokio::test]
+    async fn events_metadata_is_projected_customer_safe_on_both_read_routes() {
+        let Some(pool) = crate::test_db::canonical_pool("events_metadata_projection").await else {
+            return;
+        };
+        let (env, tenant) = AdvEnv::tenant(pool.clone(), &["events:read"]).await;
+        let leaky = serde_json::json!({
+            "transport": "ses",
+            "source_ip": "1.2.3.4",
+            "host": "internal.example",
+            "recipient_provider": "google",
+            "reason": "greylisted",
+        });
+        let id = seed_event(
+            &pool,
+            &tenant,
+            "bounced",
+            "leak@example.com",
+            None,
+            Some(leaky.clone()),
+        )
+        .await;
+
+        // List route: the row answers with the allowlist projection.
+        let (status, body) = env.get("/v1/events?event_type=bounced").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let items = body.as_array().expect("array");
+        let row = items
+            .iter()
+            .find(|item| item["id"] == id.as_str())
+            .expect("the seeded leaky event is listed");
+        assert_eq!(row["metadata"], serde_json::json!({"reason": "greylisted"}));
+
+        // Detail route: the same projection.
+        let (status, body) = env.get(&format!("/v1/events/{id}")).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(
+            body["metadata"],
+            serde_json::json!({"reason": "greylisted"})
+        );
+        let wire = body.to_string();
+        assert!(!wire.contains("ses"), "no transport identity: {wire}");
+        assert!(!wire.contains("1.2.3.4"), "no source IP: {wire}");
+        assert!(
+            !wire.contains("internal.example"),
+            "no internal host: {wire}"
+        );
+        assert!(!wire.contains("google"), "no recipient provider: {wire}");
+
+        // The admin/internal view (the stored column) keeps everything:
+        // admin routes query the table directly and stay on the raw shape.
+        let stored: serde_json::Value =
+            sqlx::query_scalar("SELECT metadata FROM events WHERE id = $1 AND tenant_id = $2")
+                .bind(&id)
+                .bind(&tenant)
+                .fetch_one(&pool)
+                .await
+                .expect("stored metadata");
+        for key in [
+            "transport",
+            "source_ip",
+            "host",
+            "recipient_provider",
+            "reason",
+        ] {
+            assert!(stored.get(key).is_some(), "raw column keeps {key}");
+        }
+        assert_eq!(stored, leaky, "the raw column is untouched");
 
         pool.close().await;
     }

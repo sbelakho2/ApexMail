@@ -682,7 +682,7 @@ STRESS_TESTS = {
         {"q": "Do you provide a Data Processing Agreement (DPA)?",
          "checks": {"must_contain_any": ["DPA", "Data Processing", "support@apexmail.ee"]}},
         {"q": "Where does ApexMail store data? We need EU residency.",
-         "checks": {"must_contain_any": ["EU", "Estonia", "Tallinn", "EEA"]}},
+         "checks": {"must_contain_any": ["EU", "EEA", "Europe", "Finland"]}},
         {"q": "How do we comply with CAN-SPAM using ApexMail?",
          "checks": {"must_contain_any": ["unsubscribe", "physical address", "opt-out"]}},
         {"q": "A California resident invoked CCPA. How do we handle it?",

@@ -226,6 +226,13 @@ LEGACY_HEADER = {
     # machine). Grandfathered rather than edited: a suppressed header warning
     # costs nothing, a broken migrator on the host costs a deployment.
     "210_inbound_delivery_ledger.sql",
+    # 269/270 landed with descriptive first lines during the Mollie and
+    # policy-pack waves; both are applied on the production ledger, so the
+    # bytes are checksum-frozen (VersionMismatch on any edit, even a
+    # comment). Grandfathered like the rest; normalize only in a deliberate
+    # ledger-refresh sweep.
+    "269_mollie_billing_renames.sql",
+    "270_sales_policy_packs.sql",
 }
 
 # (a)/(b)/(d) semantic-convention exemptions in ledger files. These are

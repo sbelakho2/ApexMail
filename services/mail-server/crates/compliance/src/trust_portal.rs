@@ -196,6 +196,15 @@ impl TrustPortalService {
     // ── Documents ──────────────────────────────────────────────────────────
 
     pub async fn upsert_document(&self, input: DocumentInput) -> Result<Document, String> {
+        // Migration 271 enforces this at the table; fail fast with a clear
+        // error before the round trip (a public document can never be
+        // NDA-gated, and the anonymous list must never face that state).
+        if input.public && input.requires_nda {
+            return Err(
+                "a public document cannot require an NDA (trust-portal invariant, migration 271)"
+                    .into(),
+            );
+        }
         let id = Uuid::new_v4().to_string();
         let mut hasher = Sha256::new();
         hasher.update(input.content_md.as_bytes());
@@ -310,6 +319,7 @@ impl TrustPortalService {
                     published_at, superseded_by, created_at, updated_at
              FROM trust_portal_documents
              WHERE public = TRUE
+               AND requires_nda = FALSE
                AND published_at IS NOT NULL
                AND superseded_by IS NULL
              ORDER BY published_at DESC",

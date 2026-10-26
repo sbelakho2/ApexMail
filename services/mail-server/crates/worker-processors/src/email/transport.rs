@@ -290,8 +290,10 @@ fn verp_token_ttl_secs() -> i64 {
         .unwrap_or(DEFAULT_VERP_TOKEN_TTL_SECS)
 }
 
-/// Build a VERP v2 envelope Return-Path:
-/// `bounces+v2.<token>@{verp_domain}`.
+/// Build a VERP v3 envelope Return-Path:
+/// `bounces+v3.<token>@{verp_domain}` (AEAD-encrypted token; see
+/// `apexmail_lib::verp`). The claims validation below is unchanged from
+/// the v2 era.
 ///
 /// The token is an HMAC-SHA256 over (queue/send id, tenant, recipient,
 /// expiry), minted by [`apexmail_lib::verp::mint_verp_v2_token`]. The
@@ -325,6 +327,42 @@ pub fn verp_return_path(
     // handling assumes.
     let (local, domain) = recipient.rsplit_once('@')?;
     if local.is_empty() || domain.is_empty() || recipient.contains(['\r', '\n']) {
+        return None;
+    }
+    let claims = apexmail_lib::verp::VerpV2Claims {
+        queue_id: queue_id.to_string(),
+        tenant_id: tenant_id.to_string(),
+        recipient: recipient.to_string(),
+        expires_at: now_unix.saturating_add(ttl_secs),
+    };
+    // v3: the token is AEAD-encrypted under a key derived from the same
+    // secret, so the Return-Path discloses nothing (v2's body was base64
+    // JSON any recipient could decode — external audit 2026-10-26 P0).
+    // `verp_return_path` (v2) is retained for in-flight verification and
+    // tests only; nothing mints v2 anymore.
+    Some(apexmail_lib::verp::verp_v3_address(
+        secret,
+        &claims,
+        verp_domain,
+    ))
+}
+
+/// The v2 grammar equivalent of [`verp_return_path`] — verification-only
+/// compatibility for mail still in flight when v3 shipped. Not minted by
+/// any production path.
+#[cfg(test)]
+pub fn verp_return_path_v2(
+    queue_id: &str,
+    tenant_id: &str,
+    recipient: &str,
+    verp_domain: &str,
+    secret: &[u8],
+    now_unix: i64,
+    ttl_secs: i64,
+) -> Option<String> {
+    let queue_id = queue_id.trim();
+    let tenant_id = tenant_id.trim();
+    if queue_id.is_empty() || tenant_id.is_empty() || ttl_secs <= 0 {
         return None;
     }
     let claims = apexmail_lib::verp::VerpV2Claims {
@@ -817,7 +855,7 @@ impl EmailTransport for SmtpTransport {
         // C: VERP v2 envelope Return-Path. When the platform-managed bounce
         // domain and the shared HMAC secret are configured and the message is
         // attributable, the SMTP envelope sender becomes
-        // `bounces+v2.<hmac-token>@{verp_domain}` so remote MTAs route bounces
+        // `bounces+v3.<aead-token>@{verp_domain}` so remote MTAs route bounces
         // back to the platform MTA's bounce parser (which authenticates the
         // token, attributes it to this queue row, and only then suppresses
         // hard bounces). The unsigned v1 grammar is no longer emitted: it is
@@ -1157,8 +1195,15 @@ impl SesTransport {
     /// Build a raw RFC 5322 MIME message from a `PreparedEmail`.
     /// We use `mail-builder` to construct the message identically to
     /// how `SmtpTransport` does it, then extract the raw bytes for SES.
+    ///
+    /// The reserved `X-ApexMail-*` namespace (tenant/message/campaign
+    /// correlation headers the worker emits) is STRIPPED here: SES delivers
+    /// the raw MIME to the recipient as-is, so anything left in would be
+    /// recipient-visible (external audit 2026-10-26, P0). SES event
+    /// correlation does not depend on those headers — it resolves through
+    /// `email_queue.smtp_message_id` (migration 186).
     fn build_raw_mime(email: &PreparedEmail) -> Vec<u8> {
-        build_raw_mime(email)
+        apexmail_lib::email_headers::strip_reserved_headers(&build_raw_mime(email))
     }
 
     /// Map an already-classified SES failure onto the processor error type.
@@ -2539,9 +2584,9 @@ mod tests {
         }
     }
 
-    // ── C: VERP v2 envelope Return-Path ───────────────────────────────────
+    // ── C: VERP v3 envelope Return-Path ───────────────────────────────────
 
-    /// The MTA verifies v2 tokens with `apexmail_lib::verp`; the generator
+    /// The MTA verifies v3 tokens with `apexmail_lib::verp`; the generator
     /// must round-trip through the SAME implementation (single source of
     /// truth), so these tests call the shared verifier directly.
     fn verify_generated(
@@ -2550,11 +2595,11 @@ mod tests {
         now: i64,
     ) -> apexmail_lib::verp::VerpV2Claims {
         let local = address.split('@').next().expect("generated address has @");
-        apexmail_lib::verp::verify_verp_v2_local(secret, local, now).expect("token must verify")
+        apexmail_lib::verp::verify_verp_v3_local(secret, local, now).expect("token must verify")
     }
 
     #[test]
-    fn verp_return_path_round_trips_through_v2_verifier() {
+    fn verp_return_path_round_trips_through_v3_verifier() {
         let secret = b"test-secret-test-secret-test-secret";
         let verp_domain = "bounces.apexmail.ee";
         let now = 1_700_000_000i64;
@@ -2570,9 +2615,12 @@ mod tests {
         )
         .expect("valid VERP address");
         assert!(
-            return_path.starts_with("bounces+v2."),
-            "v2 grammar: {return_path}"
+            return_path.starts_with("bounces+v3."),
+            "v3 grammar: {return_path}"
         );
+        // The no-decodable-claims property itself is pinned in
+        // apexmail-lib's `v3_token_carries_nothing_decodable`; here the
+        // grammar boundary (v3, not v2) is what matters.
         assert!(return_path.ends_with("@bounces.apexmail.ee"));
 
         let claims = verify_generated(&return_path, secret, now + 1);
@@ -2623,6 +2671,74 @@ mod tests {
         // Angle-bracketed forms (as they appear in headers) are trimmed.
         let rp = verp_return_path("m", "ten", " <x@y.z> ", domain, secret, 0, 60).unwrap();
         assert_eq!(verify_generated(&rp, secret, 1).recipient, "x@y.z");
+    }
+
+    /// The SES adapter's wire bytes (external audit 2026-10-26, P0): the
+    /// recipient-facing MIME must contain ZERO reserved `X-ApexMail-*`
+    /// headers, while the pre-strip build still carries them (proving the
+    /// strip is what removes them, not the builder never adding them).
+    #[test]
+    fn ses_adapter_wire_bytes_carry_no_reserved_headers() {
+        let email = PreparedEmail {
+            send_unit: "email_queue:job-wire:rcpt@example.com".into(),
+            from: "sender@example.com".into(),
+            from_name: None,
+            ses_configuration_set: None,
+            to: "rcpt@example.com".into(),
+            subject: "Wire test".into(),
+            html: None,
+            text: Some("body".into()),
+            headers: vec![
+                ("X-ApexMail-Message-ID".to_string(), "qm-1".to_string()),
+                ("X-ApexMail-Tenant-ID".to_string(), "ten_abc".to_string()),
+                ("X-ApexMail-Campaign-ID".to_string(), "camp-9".to_string()),
+                ("X-Customer-Header".to_string(), "keep-me".to_string()),
+            ],
+            attachments: vec![],
+            dkim: None,
+            mime_to: vec![],
+            mime_cc: vec![],
+            reply_to: None,
+            verp: None,
+        };
+        let before = build_raw_mime(&email);
+        let before_text = String::from_utf8_lossy(&before).to_ascii_lowercase();
+        assert!(
+            before_text.contains("x-apexmail-message-id"),
+            "builder emits the reserved headers"
+        );
+        let wire = SesTransport::build_raw_mime(&email);
+        let wire_text = String::from_utf8_lossy(&wire).to_ascii_lowercase();
+        assert!(
+            !wire_text.contains("x-apexmail-"),
+            "SES wire bytes must carry no reserved header: {wire_text}"
+        );
+        assert!(
+            wire_text.contains("x-customer-header"),
+            "customer headers survive"
+        );
+    }
+
+    /// In-flight compatibility: mail minted before the v3 switch carries a
+    /// v2 token, and the MTA still verifies it until expiry.
+    #[test]
+    fn legacy_v2_tokens_still_verify_for_in_flight_mail() {
+        let secret = b"test-secret-test-secret-test-secret";
+        let rp = verp_return_path_v2(
+            "m-legacy",
+            "ten_abc",
+            "old@example.com",
+            "bounces.apexmail.ee",
+            secret,
+            1_700_000_000,
+            3600,
+        )
+        .expect("legacy v2 mint");
+        assert!(rp.starts_with("bounces+v3."));
+        let local = rp.split('@').next().unwrap();
+        let claims =
+            apexmail_lib::verp::verify_verp_v2_local(secret, local, 1_700_000_001).unwrap();
+        assert_eq!(claims.queue_id, "m-legacy");
     }
 
     /// VERP enablement: absent env → platform default domain; explicit
@@ -2682,7 +2798,7 @@ mod tests {
             }),
         };
         let rp = verp_return_path_for(&email).expect("attributable mail gets VERP");
-        assert!(rp.starts_with("bounces+v2."), "v2 grammar: {rp}");
+        assert!(rp.starts_with("bounces+v3."), "v3 grammar: {rp}");
         assert!(rp.ends_with("@bounces.apexmail.ee"));
 
         // No message id header => no attribution => no VERP.
@@ -3618,7 +3734,7 @@ mod wire_and_ses_tests {
                 ..email.clone()
             };
             let return_path = verp_return_path_for(&bound).expect("verp return path");
-            assert!(return_path.starts_with("bounces+v2."), "{return_path}");
+            assert!(return_path.starts_with("bounces+v3."), "{return_path}");
             std::env::remove_var("VERP_HMAC_SECRET");
         }
     }
@@ -3976,7 +4092,7 @@ mod residual_transport_arms {
                 .unwrap_or_else(|e| e.into_inner())
                 .clone();
             if let Some(last) = mail_froms.last() {
-                if last.to_ascii_lowercase().contains("bounces+v2.") {
+                if last.to_ascii_lowercase().contains("bounces+v3.") {
                     receipt = Some(attempt.expect("signed VERP submission"));
                     break;
                 }

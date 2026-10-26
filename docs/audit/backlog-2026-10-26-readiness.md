@@ -32,6 +32,28 @@ surface (owner directive 2026-10-26).
 | 14 | Parser fuzzing campaigns (I15) | **OPEN** | SMTP/MIME hostile-parser territory. Cadence: CI smoke (seconds) → nightly hours → pre-release long campaign; every crash becomes a permanent regression corpus entry. |
 | 15 | Centralize security-capability truth (one generated fact drives registry, deployment facts, public prose, TOM, questionnaires, AI answers, audit controls) | **OPEN** | The IDS underclaim/overclaim pair proved six hand-maintained descriptions drift; prose fixed this wave, centralization not yet built. |
 
+## Third external audit (exfiltration-path scan of e898698e) — 2026-10-26
+
+| # | Program | Status | Where the truth lives |
+|---|---|---|---|
+| E1 | VERP Return-Path reversibility (P0) | **DONE** | `apexmail_lib::verp` v3: AES-256-GCM token (key domain-separated from `VERP_HMAC_SECRET`), nothing decodable on the wire; worker mints v3 only, bounce server verifies v3 + v2-in-flight + v1-observation; pinned by `v3_token_carries_nothing_decodable` and the no-claims wire tests. |
+| E2 | Mailbot prompt provider disclosure (P0) | **DONE** | Prompt rewritten: provider/transport/team language and the stale pricing table removed, 11-item never-disclose list added, pricing only from the runtime catalog; `ai-service/tests/prompt_disclosure_scan.rs` gates every prompt file AND the training corpora (drift-injection proven). 8 stale corpus generators scrubbed. |
+| E3 | Reserved X-ApexMail-* headers on recipient mail (P0) | **DONE** | Canonical byte-level `strip_reserved_headers` in `apexmail_lib::email_headers` (single implementation); the SES raw-MIME adapter strips before SendRawEmail (correlation is via `email_queue.smtp_message_id`, not headers); the relay delegates; wire-capture test pins zero reserved headers + customer headers surviving. |
+| E4 | Console Assistant residency geography (P1) | **DONE** | `data_residency` = EU/EEA only; the test now asserts the NEGATIVE property (no Helsinki/Nuremberg/provider/region-codes/hosts/IPs). |
+| E5 | Health endpoints expose dependency state (P1) | **DONE** | Anonymous `/health/ready` + `/health/deep` answer `{"status":"ok"}` / 503 `{"status":"unavailable"}` only; full detail requires loopback or the `METRICS_TOKEN` bearer; all consumers (Prometheus blackbox, compose checks, lifecycle tests) verified. |
+| E6 | Routing receipts expose transport/tenant/IP (P1) | **DONE** | `apexmail-routing-proof/v2` customer proof (opaque receipt id, policy, satisfied, residency class, timestamp, Ed25519 signature over the minimal payload — no tenant/transport/IP); public verify endpoint accepts both forms and refuses cross-form fields; internal v1 receipt unchanged for the ledger. |
+| E7 | Events API raw metadata (P1) | **DONE** | Customer routes serialize an allowlist DTO (no transport/source-IP/host/provider keys); admin keeps raw. |
+| E8 | Timeline names internal stores (P1) | **DONE** | Lifecycle source names (accepted/campaign/queue/delivery_attempt/delivery_event) + shared detail sanitizer (no IPs/hostnames/provider identities/SMTP transcripts/DB errors). |
+| E9 | Status page shows implementation services (P1) | **DONE** | Components are product names only (API, Dashboard, Email sending, Login and account access, Billing and checkout, Tracking and analytics, Inbound email, Webhooks); no database/server/process names. |
+| E10 | Questionnaire private-doc default (P1) | **DONE** | `include_private_documents` defaults to FALSE; private evidence only on explicit opt-in. |
+| E11 | Trust portal public+NDA defect (P1) | **DONE** | Migration 271 CHECK constraint (proven live: contradictory insert refused), public query filters `requires_nda = FALSE`, upsert fails fast. |
+| E12 | Static build artifact allowlist (P2) | **DONE** | `.htaccess`/`_headers`/`_redirects` removed from the served tree (their live redirects ported to nginx.conf); `tools/check_public_artifacts.py` gates the static tree + the served OpenAPI (admin/cp/internal/provider patterns), self-tested, wired into validate. |
+| E13 | OpenAPI admin-surface gate (P2) | **DONE** | Same tool: the SERVED spec stays clean (it is today; the internal docs/api source legitimately documents admin routes). |
+| E14 | SES callback route fingerprinting (P2) | **OPEN** | Move to `/hooks/delivery/<opaque-config-id>` at the next API revision (route churn for existing deployments). |
+| E15 | DisclosureClass/GovernedFact architecture | **OPEN** | The root fix: one enum (Public/Customer/SecurityReview/Internal) + external views on every outward path (website, assistant, mailbot, customer API, questionnaire, receipts, status, PDF/DPA). The landed items are DTO-level instances; the crate-level type system is the follow-up. |
+| E16 | Nine exposure-test program | **PARTIAL** | Landed: outbound wire test (E3), prompt/corpus gate (E2), artifact allowlist (E12/E13). Open: external route census, API-response schema gate (crate-wide DTO lint), live-model adversarial disclosure battery (owner-gated credentials), generated-document render gate, protocol-surface sweep (DKIM/Received/tracking URLs), legal exception manifest. |
+| E17 | Dormant AI corpus regression risk | **DONE** | Corpora scrubbed + the prompt_disclosure_scan gate covers training/RAG inputs, not just website files. |
+
 Release posture (audits' read, accepted): controlled production launch of core
 mail yes; Console Assistant controlled yes; Mailbot internal/beta only;
 SOC 2/ISO preparation yes, formal observation window not yet.

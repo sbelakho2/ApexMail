@@ -860,7 +860,7 @@ async fn collect_db_probe_results(state: &AppState) -> (Vec<serde_json::Value>, 
         .await
         .is_ok();
     services.push(serde_json::json!({
-        "name": "Database", "status": if db_ok { "operational" } else { "degraded" }
+        "name": "API", "status": if db_ok { "operational" } else { "degraded" }
     }));
     if !db_ok {
         all_operational = false;
@@ -873,7 +873,7 @@ async fn collect_db_probe_results(state: &AppState) -> (Vec<serde_json::Value>, 
             .await
             .is_ok();
     services.push(serde_json::json!({
-        "name": "Tenants API", "status": if tenants_ok { "operational" } else { "degraded" }
+        "name": "Dashboard", "status": if tenants_ok { "operational" } else { "degraded" }
     }));
     if !tenants_ok {
         all_operational = false;
@@ -887,7 +887,7 @@ async fn collect_db_probe_results(state: &AppState) -> (Vec<serde_json::Value>, 
     .await
     .is_ok();
     services.push(serde_json::json!({
-        "name": "Message Pipeline", "status": if messages_ok { "operational" } else { "degraded" }
+        "name": "Email sending", "status": if messages_ok { "operational" } else { "degraded" }
     }));
     if !messages_ok {
         all_operational = false;
@@ -899,7 +899,7 @@ async fn collect_db_probe_results(state: &AppState) -> (Vec<serde_json::Value>, 
         .await
         .is_ok();
     services.push(serde_json::json!({
-        "name": "Auth Server", "status": if auth_ok { "operational" } else { "degraded" }
+        "name": "Login and account access", "status": if auth_ok { "operational" } else { "degraded" }
     }));
     if !auth_ok {
         all_operational = false;
@@ -911,7 +911,7 @@ async fn collect_db_probe_results(state: &AppState) -> (Vec<serde_json::Value>, 
         .await
         .is_ok();
     services.push(serde_json::json!({
-        "name": "Billing API", "status": if billing_ok { "operational" } else { "degraded" }
+        "name": "Billing and checkout", "status": if billing_ok { "operational" } else { "degraded" }
     }));
     if !billing_ok {
         all_operational = false;
@@ -922,9 +922,37 @@ async fn collect_db_probe_results(state: &AppState) -> (Vec<serde_json::Value>, 
         "SELECT COUNT(*) FROM messages WHERE status = 'delivered' AND created_at > NOW() - INTERVAL '1 hour'"
     ).fetch_one(&state.db).await.is_ok();
     services.push(serde_json::json!({
-        "name": "Analytics API", "status": if analytics_ok { "operational" } else { "degraded" }
+        "name": "Tracking and analytics", "status": if analytics_ok { "operational" } else { "degraded" }
     }));
     if !analytics_ok {
+        all_operational = false;
+    }
+
+    // Inbound email (the customer-facing mailbox path).
+    let inbound_ok = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM inbound_messages WHERE received_at > NOW() - INTERVAL '5 minutes'",
+    )
+    .fetch_one(&state.db)
+    .await
+    .is_ok();
+    services.push(serde_json::json!({
+        "name": "Inbound email", "status": if inbound_ok { "operational" } else { "degraded" }
+    }));
+    if !inbound_ok {
+        all_operational = false;
+    }
+
+    // Webhook delivery.
+    let webhooks_ok = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM webhook_events WHERE created_at > NOW() - INTERVAL '5 minutes'",
+    )
+    .fetch_one(&state.db)
+    .await
+    .is_ok();
+    services.push(serde_json::json!({
+        "name": "Webhooks", "status": if webhooks_ok { "operational" } else { "degraded" }
+    }));
+    if !webhooks_ok {
         all_operational = false;
     }
 
@@ -2327,17 +2355,19 @@ mod tests {
             .map(|s| s["name"].as_str().unwrap())
             .collect();
         for expected in [
-            "Database",
-            "Tenants API",
-            "Message Pipeline",
-            "Auth Server",
-            "Billing API",
-            "Analytics API",
+            "API",
+            "Dashboard",
+            "Email sending",
+            "Login and account access",
+            "Billing and checkout",
+            "Tracking and analytics",
+            "Inbound email",
+            "Webhooks",
             "Mail Server (SMTP)",
         ] {
             assert!(names.contains(&expected), "missing {expected}: {names:?}");
         }
-        let db = services.iter().find(|s| s["name"] == "Database").unwrap();
+        let db = services.iter().find(|s| s["name"] == "API").unwrap();
         assert_eq!(db["status"], "operational");
         let smtp = services
             .iter()
@@ -2357,7 +2387,7 @@ mod tests {
             .unwrap();
         let html = String::from_utf8(body.to_vec()).unwrap();
         assert!(html.contains("ApexMail Status"));
-        assert!(html.contains("Database"));
+        assert!(html.contains("Email sending"));
         assert!(html.contains("degraded"), "server-rendered probe result");
         assert!(html.contains("Last checked"));
         // 6 of 7 operational → minor degradation branch.
@@ -2591,7 +2621,7 @@ mod tests {
             "overall message: {html}"
         );
         // Every card is rendered in the degraded/error style (never "ok").
-        assert_eq!(html.matches("class=\"status warn\"").count(), 7, "{html}");
+        assert_eq!(html.matches("class=\"status warn\"").count(), 9, "{html}");
         assert!(!html.contains("class=\"status ok\""), "{html}");
 
         let response = status_api(State(state)).await.into_response();

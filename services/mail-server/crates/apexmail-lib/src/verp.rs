@@ -27,15 +27,35 @@
 //!   `crates/mta/src/servers/bounce.rs` for the documented retirement
 //!   condition.
 //!
+//! # v3 (current): AEAD-encrypted tokens, nothing decodable on the wire
+//!
+//! v2's payload is base64url JSON: the MAC authenticates it, but ANY
+//! recipient (or observer of the Return-Path) can decode tenant id, queue
+//! id and the recipient address verbatim — an HMAC is not encryption
+//! (external audit 2026-10-26, P0). v3 keeps the stateless design and
+//! changes the token body to AES-256-GCM over the same claim JSON under a
+//! key derived from `VERP_HMAC_SECRET` with a domain-separated KDF:
+//!
+//! ```text
+//! bounces+v3.<base64url(nonce[12] || aes-256-gcm(key, payload_json))>
+//! ```
+//!
+//! The token reveals nothing without the platform secret; ciphertext
+//! length is the only (unavoidable for a stateless token) metadata. v2
+//! tokens stay verifiable until their expiry so in-flight mail keeps its
+//! bounce attribution; the worker mints v3 only.
+//!
 //! The secret is `VERP_HMAC_SECRET` (>= 32 bytes, identical in the worker
 //! that mints tokens and the MTA that verifies them); startup fails fast in
 //! production when it is missing (see `mta::config::MtaConfig::validate`).
 
+use aes_gcm::aead::{Aead, KeyInit, Payload};
+use aes_gcm::{Aes256Gcm, Nonce};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
-use sha2::Sha256;
+use sha2::{Digest, Sha256};
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -113,7 +133,8 @@ impl std::fmt::Display for VerpV2Error {
 impl std::error::Error for VerpV2Error {}
 
 fn mac_bytes(secret: &[u8], payload: &[u8]) -> [u8; 32] {
-    let mut mac = HmacSha256::new_from_slice(secret).expect("HMAC-SHA256 accepts any key length");
+    let mut mac = <HmacSha256 as hmac::Mac>::new_from_slice(secret)
+        .expect("HMAC-SHA256 accepts any key length");
     mac.update(VERP_V2_MAC_CONTEXT);
     mac.update(payload);
     mac.finalize().into_bytes().into()
@@ -233,6 +254,152 @@ pub fn verify_verp_v2_local(
     verify_verp_v2_token(secret, token, now_unix)
 }
 
+// ── VERP v3: AEAD-encrypted, opaque-on-the-wire tokens ─────────────────────
+
+/// Address local-part prefix that identifies a v3 VERP return path.
+pub const VERP_V3_ADDRESS_PREFIX: &str = "bounces+v3.";
+
+/// Payload version marker for v3 tokens (inside the encrypted body).
+pub const VERP_V3_PAYLOAD_VERSION: &str = "v3";
+
+/// Domain-separation input for the v3 AEAD key derivation: the SAME
+/// `VERP_HMAC_SECRET` feeds both v2 (HMAC) and v3 (AES-GCM), but a v3 key
+/// can never be confused with the v2 MAC or any other use of the secret.
+const VERP_V3_KEY_CONTEXT: &[u8] = b"apexmail.verp.v3.key\0";
+
+/// AES-GCM nonce length (the standard 96-bit size for Aes256Gcm).
+const VERP_V3_NONCE_LEN: usize = 12;
+
+/// Minimum nonce+ciphertext+tag length for a sane v3 token body.
+const VERP_V3_MIN_BODY_LEN: usize = VERP_V3_NONCE_LEN + 16;
+
+fn verp_v3_key(secret: &[u8]) -> aes_gcm::aead::Key<Aes256Gcm> {
+    let mut h = Sha256::new();
+    h.update(VERP_V3_KEY_CONTEXT);
+    h.update(secret);
+    h.finalize()
+}
+
+/// Mint an encrypted v3 token for `claims`. The claim JSON (the exact v2
+/// wire fields) is AES-256-GCM encrypted under the derived key; the token
+/// body is `nonce || ciphertext||tag`, base64url. Verification stays
+/// stateless (no database row), but nothing on the wire decodes without
+/// the platform secret.
+pub fn mint_verp_v3_token(secret: &[u8], claims: &VerpV2Claims) -> String {
+    let payload = VerpV2Payload {
+        v: VERP_V3_PAYLOAD_VERSION.to_string(),
+        q: claims.queue_id.clone(),
+        t: claims.tenant_id.clone(),
+        r: claims.recipient.clone(),
+        e: claims.expires_at,
+    };
+    let payload_bytes =
+        serde_json::to_vec(&payload).expect("VERP v3 payload serialization is infallible");
+    let mut nonce_bytes = [0u8; VERP_V3_NONCE_LEN];
+    use rand::RngCore;
+    rand::rng().fill_bytes(&mut nonce_bytes);
+    let cipher = Aes256Gcm::new(&verp_v3_key(secret));
+    let sealed = cipher
+        .encrypt(
+            Nonce::from_slice(&nonce_bytes),
+            Payload {
+                msg: &payload_bytes,
+                aad: VERP_V3_KEY_CONTEXT,
+            },
+        )
+        .expect("AES-256-GCM encryption of a small payload cannot fail");
+    let mut body = nonce_bytes.to_vec();
+    body.extend_from_slice(&sealed);
+    URL_SAFE_NO_PAD.encode(body)
+}
+
+/// Build the full v3 return path `bounces+v3.<token>@domain`.
+pub fn verp_v3_address(secret: &[u8], claims: &VerpV2Claims, verp_domain: &str) -> String {
+    format!(
+        "{}{}@{}",
+        VERP_V3_ADDRESS_PREFIX,
+        mint_verp_v3_token(secret, claims),
+        verp_domain
+    )
+}
+
+/// Extract the raw token from a `bounces+v3.<token>` local part, if the
+/// local part uses the v3 grammar. Does NOT decrypt anything.
+pub fn verp_v3_token_from_local(local: &str) -> Option<&str> {
+    let token = local.strip_prefix(VERP_V3_ADDRESS_PREFIX)?;
+    let token = token.trim();
+    if token.len() < VERP_V3_MIN_BODY_LEN || token.len() > VERP_V2_MAX_TOKEN_LEN {
+        return None;
+    }
+    if !token
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.')
+    {
+        return None;
+    }
+    Some(token)
+}
+
+/// Decrypt and verify a v3 token. Check order mirrors v2: shape → AEAD
+/// (authentication and decryption in one step, constant-time tag compare
+/// inside the AEAD) → payload version → expiry. On ANY failure the claims
+/// must not be trusted.
+pub fn verify_verp_v3_token(
+    secret: &[u8],
+    token: &str,
+    now_unix: i64,
+) -> Result<VerpV2Claims, VerpV2Error> {
+    let token = token.trim();
+    if token.len() < VERP_V3_MIN_BODY_LEN || token.len() > VERP_V2_MAX_TOKEN_LEN {
+        return Err(VerpV2Error::Malformed);
+    }
+    let body = URL_SAFE_NO_PAD
+        .decode(token)
+        .map_err(|_| VerpV2Error::Malformed)?;
+    if body.len() < VERP_V3_MIN_BODY_LEN {
+        return Err(VerpV2Error::Malformed);
+    }
+    let (nonce, sealed) = body.split_at(VERP_V3_NONCE_LEN);
+    let cipher = Aes256Gcm::new(&verp_v3_key(secret));
+    let payload_bytes = cipher
+        .decrypt(
+            Nonce::from_slice(nonce),
+            Payload {
+                msg: sealed,
+                aad: VERP_V3_KEY_CONTEXT,
+            },
+        )
+        .map_err(|_| VerpV2Error::BadSignature)?;
+    let payload: VerpV2Payload =
+        serde_json::from_slice(&payload_bytes).map_err(|_| VerpV2Error::Malformed)?;
+    if payload.v != VERP_V3_PAYLOAD_VERSION
+        || payload.q.is_empty()
+        || payload.t.is_empty()
+        || payload.r.is_empty()
+    {
+        return Err(VerpV2Error::Malformed);
+    }
+    if now_unix >= payload.e {
+        return Err(VerpV2Error::Expired);
+    }
+    Ok(VerpV2Claims {
+        queue_id: payload.q,
+        tenant_id: payload.t,
+        recipient: payload.r,
+        expires_at: payload.e,
+    })
+}
+
+/// Verify a full address local part of the form `bounces+v3.<token>`.
+pub fn verify_verp_v3_local(
+    secret: &[u8],
+    local: &str,
+    now_unix: i64,
+) -> Result<VerpV2Claims, VerpV2Error> {
+    let token = verp_v3_token_from_local(local).ok_or(VerpV2Error::Malformed)?;
+    verify_verp_v3_token(secret, token, now_unix)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -318,6 +485,86 @@ mod tests {
         assert_eq!(verified.recipient, "user@example.com");
     }
 
+    #[test]
+    fn v3_round_trip_returns_bound_claims() {
+        let token = mint_verp_v3_token(SECRET, &claims(2_000_000_000));
+        let verified = verify_verp_v3_token(SECRET, &token, 1_000_000_000).unwrap();
+        assert_eq!(verified, claims(2_000_000_000));
+    }
+
+    #[test]
+    fn v3_token_carries_nothing_decodable() {
+        // The P0 this fixes: v2's body was base64 JSON readable by any
+        // recipient. The v3 body must not parse as JSON, contain no
+        // recognizable claim values, and two mints of the same claims must
+        // differ (fresh nonce).
+        let c = claims(2_000_000_000);
+        let a = mint_verp_v3_token(SECRET, &c);
+        let b = mint_verp_v3_token(SECRET, &c);
+        assert_ne!(a, b, "fresh nonce per mint");
+        for token in [&a, &b] {
+            let body = URL_SAFE_NO_PAD.decode(token).unwrap();
+            assert!(
+                serde_json::from_slice::<serde_json::Value>(&body).is_err(),
+                "token body must not be decodable JSON"
+            );
+            let text = String::from_utf8_lossy(&body);
+            assert!(!text.contains("ten_abc"), "tenant id must not appear");
+            assert!(
+                !text.contains("user@example.com"),
+                "recipient must not appear"
+            );
+            assert!(!text.contains(&c.queue_id), "queue id must not appear");
+        }
+        // And the address grammar is distinct in both directions.
+        assert!(verp_v2_token_from_local(&format!("bounces+v3.{a}")).is_none());
+        assert!(verp_v3_token_from_local(&format!("bounces+v2.{a}")).is_none());
+    }
+
+    #[test]
+    fn v3_wrong_secret_tampered_and_expired_tokens_are_rejected() {
+        let c = claims(2_000_000_000);
+        assert_eq!(
+            verify_verp_v3_token(
+                b"another-secret-another-secret-32",
+                &mint_verp_v3_token(SECRET, &c),
+                1
+            ),
+            Err(VerpV2Error::BadSignature)
+        );
+        let token = mint_verp_v3_token(SECRET, &c);
+        let mut tampered = token.clone();
+        let flip = if tampered.ends_with('A') { 'B' } else { 'A' };
+        tampered.pop();
+        tampered.push(flip);
+        assert_eq!(
+            verify_verp_v3_token(SECRET, &tampered, 1_000_000_000),
+            Err(VerpV2Error::BadSignature),
+            "AEAD authentication fails closed on any bit flip"
+        );
+        let expired = mint_verp_v3_token(SECRET, &claims(1_000));
+        assert_eq!(
+            verify_verp_v3_token(SECRET, &expired, 1_000),
+            Err(VerpV2Error::Expired)
+        );
+        assert_eq!(
+            verify_verp_v3_local(SECRET, "bounces+v3.", 1),
+            Err(VerpV2Error::Malformed)
+        );
+    }
+
+    #[test]
+    fn v3_address_round_trip() {
+        let c = claims(2_000_000_000);
+        let address = verp_v3_address(SECRET, &c, "bounces.apexmail.ee");
+        assert!(address.starts_with("bounces+v3."));
+        assert!(address.ends_with("@bounces.apexmail.ee"));
+        let local = address.split('@').next().unwrap();
+        assert_eq!(
+            verify_verp_v3_local(SECRET, local, 1_000_000_000).unwrap(),
+            c
+        );
+    }
     #[test]
     fn token_shape_rejects_whitespace_and_control_characters() {
         assert!(verp_v2_token_from_local("bounces+v2.").is_none());

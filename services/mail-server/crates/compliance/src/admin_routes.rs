@@ -773,7 +773,11 @@ async fn build_questionnaire_context(
         })?;
     }
 
-    let include_private = request.include_private_documents.unwrap_or(true);
+    // Private documents are NEVER included unless the caller affirmatively
+    // opts in with include_private_documents=true (audit 3: the old
+    // default-on silently attached internal evidence to procurement
+    // questionnaires). Omitted or false both mean public-only.
+    let include_private = request.include_private_documents.unwrap_or(false);
     let documents = if include_private {
         state.trust.list_documents_admin().await
     } else {
@@ -1906,6 +1910,57 @@ mod db_tests {
         assert!(
             !serialized.contains("TOP SECRET ROADMAP"),
             "a public questionnaire must not disclose private documents"
+        );
+        assert!(
+            !serialized.contains(private_slug.as_str()),
+            "explicit include_private_documents=false must exclude the private document"
+        );
+
+        // The DEFAULT (flag omitted) must also exclude private documents:
+        // private evidence is opt-in only (audit 3 flipped the default).
+        let default_report = json_data(
+            trust_generate_questionnaire(
+                State(state.clone()),
+                auth(),
+                Path("sig".into()),
+                Some(Json(QuestionnaireGenerationRequest {
+                    include_markdown_report: Some(true),
+                    ..Default::default()
+                })),
+            )
+            .await,
+        )
+        .await;
+        let serialized = serde_json::to_string(&default_report).expect("serialize");
+        assert!(
+            !serialized.contains("TOP SECRET ROADMAP"),
+            "an omitted include_private_documents must default to public-only"
+        );
+        assert!(
+            !serialized.contains(private_slug.as_str()),
+            "an omitted include_private_documents must exclude the private document"
+        );
+
+        // The affirmative opt-in keeps working: an explicit true DOES attach
+        // the private document to the generated questionnaire.
+        let private_report = json_data(
+            trust_generate_questionnaire(
+                State(state.clone()),
+                auth(),
+                Path("sig".into()),
+                Some(Json(QuestionnaireGenerationRequest {
+                    include_private_documents: Some(true),
+                    include_markdown_report: Some(true),
+                    ..Default::default()
+                })),
+            )
+            .await,
+        )
+        .await;
+        let serialized = serde_json::to_string(&private_report).expect("serialize");
+        assert!(
+            serialized.contains(private_slug.as_str()),
+            "explicit include_private_documents=true must attach the private document"
         );
 
         assert_eq!(

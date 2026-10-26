@@ -70,7 +70,7 @@ scenarios = {
     "5_EnterpriseCompliance": [
         ("Our legal team needs the DPA signed. Where is it?", "DPA|Data Processing|Enterprise Cloud|download", "DPA access"),
         ("We need a HIPAA BAA for our healthcare subsidiary.", "HIPAA|BAA|Enterprise Cloud|Business Associate", "HIPAA BAA"),
-        ("Where exactly is our data stored? City-level, please.", "Finland|Germany|Helsinki|Nuremberg|EU/EEA", "Data residency"),
+        ("Where exactly is our data stored? City-level, please.", "EU/EEA|EEA|Finland", "Data residency"),
         ("What encryption do you use at rest? Give me the algorithm.", "AES.*256|GCM|AES-256-GCM", "Encryption details"),
         ("A customer filed a GDPR erasure request. What's the process?", "30.*day|dashboard.*GDPR|API|erasure", "DSAR process"),
         ("We need the last 3 years of SOC2 reports.", "SOC2|Type.*II|report|NDA", "SOC2 access"),

@@ -167,17 +167,16 @@ Want me to pull up the bounce details to identify which recipient domains are co
     {
         "context": "enterprise_compliance",
         "q": "We need a DPA for GDPR compliance. How do we get one?",
-        "a": """As an Enterprise Cloud customer, you have access to full compliance support. For a **Data Processing Agreement (DPA)**, this needs to be handled by our legal team.
+        "a": """As an Enterprise Cloud customer, you have access to full compliance support. For a **Data Processing Agreement (DPA)**, please contact ApexMail support.
 
 Please email **support@apexmail.ee** with:
-- Subject: "DPA Request — globalbank.com (acct_1a3b5c)"
+- Subject: "DPA Request - globalbank.com (acct_1a3b5c)"
 - Your company's legal entity name
 - Any specific clauses or requirements
-- Your preferred timeline
 
-Your Enterprise Cloud plan includes HIPAA and SOC2 compliance features, and our legal team typically processes DPA requests within **3-5 business days**.
+You will receive a follow-up by email once your DPA request has been processed.
 
-**Sub-processor disclosure:** ApexMail uses Hetzner Online GmbH (EU data centers) as a sub-processor. We support Standard Contractual Clauses (SCCs) for cross-border data transfers."""
+**Sub-processor disclosure:** the current sub-processor register, including all processing locations, is published on apexmail.ee; data is processed within the EU/EEA, and Standard Contractual Clauses (SCCs) are supported for cross-border data transfers."""
     },
     
     # ══════════════════════════════════════════════════════════════════════════
@@ -282,7 +281,7 @@ For **app.techflow.io** (pending), you'll need to add all 3 DNS records (SPF, DK
         "q": "What AI model powers the ApexMail assistant?",
         "a": """I'm the ApexMail AI assistant, designed to help you with email marketing tasks, troubleshooting, and account management.
 
-For specific questions about our technology or infrastructure, please contact our team at **support@apexmail.ee**.
+For specific questions about our technology or infrastructure, please contact ApexMail support at **support@apexmail.ee**.
 
 Is there something I can help you with for your email marketing today?"""
     },
@@ -302,7 +301,7 @@ What would you like help with today?"""
         "q": "Are you running on AWS or GCP?",
         "a": """I'm here to help with your ApexMail account and email marketing questions.
 
-For infrastructure or security-related inquiries, our team at **support@apexmail.ee** can provide appropriate information.
+For infrastructure or security-related inquiries, ApexMail support at **support@apexmail.ee** can provide appropriate information.
 
 What can I help you with for your email campaigns?"""
     },

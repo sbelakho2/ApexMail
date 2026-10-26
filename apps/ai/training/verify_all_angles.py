@@ -21,7 +21,7 @@ Verifies:
   16. Dedicated IP count (0/0/add-on/1/3/10)
   17. SLA credit percentages (0/0/0/0/10%/25%)
   18. Support levels (email/priority/dedicated)
-  19. Data residency (EU/EEA Finland+Germany)
+  19. Data residency (EU/EEA, Finland)
   20. Canonical pricing table integrity vs plans.rs
 
 Each angle runs 10 variant checks (200 total checks).
@@ -148,7 +148,7 @@ DNS_RECORDS = {
     "return_path": "bounce.apexmail.ee",
 }
 
-DATA_RESIDENCY = "EU/EEA (Finland primary, Germany standby)"
+DATA_RESIDENCY = "EU/EEA (Finland)"
 BREACH_NOTIFICATION = "72 hours"
 SUPPORT_EMAIL = "support@apexmail.ee"
 UNSUBSCRIBE_MAILTO = "unsubscribe@apexmail.ee"
@@ -375,7 +375,7 @@ def angle_13_compliance() -> list[str]:
     errors.append(check_eq("Enterprise Cloud HIPAA", PLANS["enterprise cloud"]["hipaa"], True))
     errors.append(check_eq("Enterprise Cloud SOC2", PLANS["enterprise cloud"]["soc2"], True))
     errors.append(check_eq("Business no HIPAA", PLANS["business"]["hipaa"], False))
-    errors.append(check_eq("Data residency", DATA_RESIDENCY, "EU/EEA (Finland primary, Germany standby)"))
+    errors.append(check_eq("Data residency", DATA_RESIDENCY, "EU/EEA (Finland)"))
     errors.append(check_eq("Breach 72h", BREACH_NOTIFICATION, "72 hours"))
     errors.append(check_eq("Support email", SUPPORT_EMAIL, "support@apexmail.ee"))
     return [e for e in errors if e]
