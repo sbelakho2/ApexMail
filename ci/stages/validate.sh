@@ -78,8 +78,19 @@ validate_compose() {
     fi
     _dummy_dir=$(mktemp -d "${TMPDIR:-/tmp}/apexmail-dummyenv.XXXXXX")
     _dummy_env=$_dummy_dir/env
+    # The WAL-archiving override (deploy/docker-compose.wal-archive.yml,
+    # operator-included) is part of the render contract: its ${VAR:?} guards
+    # join the dummy set and the merged base+prod+override config must
+    # render, or a broken PITR enablement would only be discovered on the
+    # deploy host.
+    _wal_override="$REPO_ROOT/deploy/docker-compose.wal-archive.yml"
+    _compose_files="-f docker-compose.yml -f docker-compose.prod.yml"
+    if [ -f "$_wal_override" ]; then
+        _compose_files="$_compose_files -f $_wal_override"
+    fi
     _guards=$(grep -ohE '\$\{[A-Z0-9_]+:\?' \
-        "$REPO_ROOT/docker-compose.yml" "$REPO_ROOT/docker-compose.prod.yml" 2>/dev/null \
+        "$REPO_ROOT/docker-compose.yml" "$REPO_ROOT/docker-compose.prod.yml" \
+        ${_wal_override:+"$_wal_override"} 2>/dev/null \
         | grep -oE '[A-Z0-9_]+:' | tr -d ':' | sort -u || true)
     for _v in $_guards; do
         case $_v in
@@ -90,14 +101,15 @@ validate_compose() {
     : >"$_dummy_dir/secret"
     ci_info "compose config -q with dummy env ($(grep -c . "$_dummy_env") guarded vars)"
     _cc_rc=0
-    (cd "$REPO_ROOT" && docker compose -f docker-compose.yml -f docker-compose.prod.yml \
+    # shellcheck disable=SC2086  # intentional word splitting of -f args
+    (cd "$REPO_ROOT" && docker compose $_compose_files \
         --env-file "$_dummy_env" config -q) >>"$CI_STAGE_LOG" 2>&1 || _cc_rc=$?
     rm -rf "$_dummy_dir"
     if [ "$_cc_rc" -ne 0 ]; then
         ci_err "docker compose config failed (see log above)"
         return "$_cc_rc"
     fi
-    ci_info "PASS: compose config renders (base + prod overlay)"
+    ci_info "PASS: compose config renders (base + prod overlay${_wal_override:+ + wal-archive override})"
     return "$CI_EXIT_OK"
 }
 
@@ -562,6 +574,19 @@ validate_repo_gates() {
         ci_check "postgres restore-drill envelope round-trip self-test" \
             sh "$REPO_ROOT/deploy/hardening/scripts/postgres-restore-drill.sh" \
             --self-test
+        # WAL-archiving / PITR enablement (external audit 2026-10-26 infra
+        # blocker #1): the archive_command helper's spool+offsite contract
+        # and exit codes (local dir target, no ssh), the weekly physical
+        # base-backup gate/cadence/retention in the backup scheduler (stub
+        # pg_basebackup), and the PITR restore plumbing (fetch, recovery
+        # config generation, drill-shaped evidence — no live postgres).
+        ci_check "pg-wal-archive spool/offsite self-test" \
+            sh "$REPO_ROOT/deploy/hardening/scripts/pg-wal-archive.sh" --self-test
+        ci_check "postgres wal-base backup self-test" \
+            sh "$REPO_ROOT/deploy/hardening/scripts/postgres-backup-encrypt.sh" \
+            --self-test-wal-base
+        ci_check "pg-pitr-restore plumbing self-test" \
+            sh "$REPO_ROOT/deploy/hardening/scripts/pg-pitr-restore.sh" --self-test
         # Public-artifact disclosure gates (external audit 2026-10-26
         # items 12+13): deployment plumbing must not ship in the static
         # build, and the SERVED OpenAPI spec must never grow admin or

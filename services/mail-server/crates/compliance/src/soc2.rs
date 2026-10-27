@@ -248,8 +248,10 @@ const DEFAULT_CONTROLS: &[ControlSeed] = &[
         category: "Common Criteria, Control Activities",
         title: "Selects and develops general controls over technology",
         description:
-            "Infrastructure-as-code (Terraform/Helm) gates production changes; the \
-             build pipeline blocks merges that fail tests, lints, or security scans.",
+            "Production infrastructure and service configuration are version-controlled; \
+             releases are gated through automated validation (build pipeline blocking \
+             changes that fail tests, lints, or security scans) and a deployment-blessing \
+             mechanism the deploy path verifies before rollout.",
         owner: "Founder / System Operator",
         evidence_required: &["ci_pipeline_log"],
         automation: AutomationLevel::Automated,
@@ -337,8 +339,11 @@ const DEFAULT_CONTROLS: &[ControlSeed] = &[
         category: "Common Criteria, Logical and Physical Access Controls",
         title: "Detects and prevents malicious software",
         description:
-            "All inbound mail is sandboxed and scanned for malware; suspicious \
-             attachments are quarantined.",
+            "Inbound MIME attachments are statically and content-inspected (file-type \
+             detection, known-malware hash checking, archive and macro analysis) under a \
+             configured flag/strip/reject policy; suspicious attachments are quarantined. \
+             Dynamic detonation sandboxing is available to embedders and is not exercised \
+             by the mail flow.",
         owner: "Founder / System Operator",
         evidence_required: &["scan_results_summary"],
         automation: AutomationLevel::Automated,

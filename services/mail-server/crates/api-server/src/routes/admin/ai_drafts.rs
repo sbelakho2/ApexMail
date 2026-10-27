@@ -6,12 +6,21 @@
 //! platform's verified system sender, `queue_system_email`, attributed to
 //! the system tenant that owns the sending domain) or reject them.
 //!
-//! Consent guarantee (F4, live-mailbot dogfood): an AI-composed reply is a
-//! MARKETING-class send (`email_queue.message_category` defaults to
-//! 'marketing'), so approval runs the SAME shared send-admission consent gate
-//! as the REST send path. A recipient without an ACTIVE marketing consent
-//! record is refused with the enforcer's named reason; the claim rolls back,
-//! nothing is queued, and the draft stays pending and recoverable.
+//! Delivery-class guarantee (fourth external audit, P0): an approved AI
+//! reply is a REPLY to an inbound customer message, SERVICE correspondence
+//! within an existing conversation (the recipient emailed first), so the
+//! release class is the typed
+//! `sales_autopilot::purpose::reply_class_for_ai_draft` (service), written
+//! EXPLICITLY into `messages.message_category` /
+//! `email_queue.message_category`, never the 'marketing' schema default. The
+//! MARKETING consent requirement does NOT gate a service reply; the
+//! release-time admission still probes BOTH canonical suppression stores
+//! (the tenant list and the platform bounce/complaint list) for every
+//! class, and a suppressed (bounce, complaint, opt-out) recipient is
+//! refused with the named reason: the claim rolls back, nothing is queued,
+//! and the draft stays pending and recoverable. Were a future class ever
+//! marketing, the same admission call enforces the consent gate exactly as
+//! before (fail closed on an unavailable store).
 //!
 //! Audit guarantee (external-audit P1): every decision's evidence is written
 //! INSIDE the transaction that applies the decision, and its failure aborts
@@ -150,7 +159,7 @@ const CLAIM_DRAFT_FOR_APPROVAL_SQL: &str = r#"
       AND pending_approval = true
       AND ai_response IS NOT NULL
       AND ($2 OR tenant_id = $3)
-    RETURNING tenant_id, from_email, subject, ai_response,
+    RETURNING tenant_id, from_email, subject, body_text, ai_response,
               (suggested_action->>'first_response') = 'true',
               received_at,
               suggested_action->>'first_response_request_id'
@@ -232,6 +241,7 @@ pub(crate) async fn approve_draft_core(
         Option<String>,
         Option<String>,
         Option<String>,
+        Option<String>,
         Option<bool>,
         chrono::DateTime<chrono::Utc>,
         Option<String>,
@@ -246,6 +256,7 @@ pub(crate) async fn approve_draft_core(
         tenant_id,
         from_email,
         subject,
+        inbound_body_text,
         reply,
         is_first_response,
         accepted_at,
@@ -260,6 +271,7 @@ pub(crate) async fn approve_draft_core(
     let tenant_id = tenant_id.unwrap_or_default();
     let from_email = from_email.unwrap_or_default();
     let subject = subject.unwrap_or_default();
+    let inbound_body_text = inbound_body_text.unwrap_or_default();
     let reply = reply.unwrap_or_default();
 
     // WP F9: the approval records the draft's risk class alongside the
@@ -334,37 +346,83 @@ pub(crate) async fn approve_draft_core(
         ]));
     }
 
-    // F4 (live-mailbot dogfood): an approved AI reply is a MARKETING-class
-    // send, `email_queue.message_category` is NOT NULL DEFAULT 'marketing',
-    // and this path never asked for a narrower category. The REST send path
-    // runs the shared send-admission consent gate ([`SendAdmissionService::
-    // enforce_consent`]) before it queues; this approval is the same kind of
-    // recipient-carrying admission, so it must run the same gate, or an
-    // approved reply could mail a recipient with NO marketing consent on
-    // file. The check runs INSIDE the claim's transaction and a refusal (or
-    // an unavailable consent store, fail closed) rolls the claim back:
-    // nothing is consumed, nothing is queued, and the draft stays pending for
-    // review. The refusal is still durable decision evidence via the
-    // committed best-effort write below, exactly like the unroutable-draft
-    // refusal.
-    let admission =
-        billing_service::send_admission::SendAdmissionService::new(std::sync::Arc::new(
-            billing_service::send_admission::PostgresAdmissionBackend::new(
-                state.db.clone(),
-                state.redis.clone(),
-            ),
-        ));
-    let category = apexmail_lib::email_headers::message_category::MARKETING;
+    // Fourth external audit (P0): an approved AI reply is a REPLY to an
+    // inbound customer message, SERVICE correspondence within an existing
+    // conversation. The release class is EXPLICIT and typed
+    // (`purpose::reply_class_for_ai_draft`), never derived from the
+    // `email_queue.message_category` schema default ('marketing') the old
+    // path silently inherited; the MARKETING consent requirement does not
+    // gate it. What still gates the release, unchanged:
+    //   * suppression, BOTH canonical stores (tenant `suppressions` plus the
+    //     platform bounce/complaint `suppression_list`), for every class,
+    //     refused inside this transaction;
+    //   * the human approval itself (this operator's decision is the review
+    //     the purpose policy's autonomy requirement asks for);
+    //   * everything downstream (system-sender readiness, the audit row
+    //     committing atomically with the send).
+    // The inbound message is classified by the deterministic purpose
+    // taxonomy for the record and for the autonomous sweep's stricter veto
+    // (`purpose::reply_release_decision`); on THIS human path the recorded
+    // classification is advisory, the operator has already reviewed.
+    let inbound_purpose = sales_autopilot::purpose::classify(&subject, &inbound_body_text);
+    let release = sales_autopilot::purpose::reply_release_decision(&inbound_purpose);
+    let delivery_class = sales_autopilot::purpose::reply_class_for_ai_draft();
+    let category = delivery_class.message_category().ok_or_else(|| {
+        ApiError::Internal("a reply release requires a sendable delivery class".into())
+    })?;
     {
+        let admission =
+            billing_service::send_admission::SendAdmissionService::new(std::sync::Arc::new(
+                billing_service::send_admission::PostgresAdmissionBackend::new(
+                    state.db.clone(),
+                    state.redis.clone(),
+                ),
+            ));
         match admission
-            .enforce_consent(&tenant_id, std::slice::from_ref(&from_email), category)
+            .enforce_consent_for_class(&tenant_id, std::slice::from_ref(&from_email), category)
             .await
         {
             Ok(()) => {}
+            Err(billing_service::send_admission::SendAdmissionError::RecipientSuppressed {
+                email,
+                reason,
+            }) => {
+                // A suppressed (bounce/complaint/opt-out) recipient is never
+                // mailed under ANY class. The claim rolls back: nothing is
+                // consumed, nothing is queued, and the draft stays pending
+                // for review. The refusal is still durable decision evidence
+                // via the committed best-effort write below.
+                let _ = tx.rollback().await;
+                let refusal = format!("recipient is suppressed for {email}: {reason}");
+                crate::audit_log::insert_audit_log_best_effort_with_env(
+                    &state.db,
+                    state.config.environment.is_production(),
+                    Some(auth.tenant_id.as_str()),
+                    auth.user_id.as_deref(),
+                    "control_plane.ai_draft.approval_refused",
+                    "ai_draft",
+                    Some(&id),
+                    serde_json::json!({
+                        "note": note,
+                        "reason": refusal,
+                        "routedTenantId": tenant_id,
+                        "recipient": email,
+                        "deliveryClass": delivery_class.as_str(),
+                        "inboundPurpose": inbound_purpose.purpose.as_str(),
+                    }),
+                    None,
+                    None,
+                )
+                .await;
+                return Err(ApiError::Validation(vec![refusal]));
+            }
             Err(billing_service::send_admission::SendAdmissionError::ConsentRefused {
                 email,
                 reason,
             }) => {
+                // Reachable only if the release class were ever a
+                // marketing-class category: the F4 gate, byte-for-byte as
+                // before. A service class never lands here.
                 let _ = tx.rollback().await;
                 let refusal = format!("marketing consent required for {email}: {reason}");
                 crate::audit_log::insert_audit_log_best_effort_with_env(
@@ -380,6 +438,8 @@ pub(crate) async fn approve_draft_core(
                         "reason": refusal,
                         "routedTenantId": tenant_id,
                         "recipient": email,
+                        "deliveryClass": delivery_class.as_str(),
+                        "inboundPurpose": inbound_purpose.purpose.as_str(),
                     }),
                     None,
                     None,
@@ -388,14 +448,13 @@ pub(crate) async fn approve_draft_core(
                 return Err(ApiError::Validation(vec![refusal]));
             }
             Err(error) => {
-                // FAIL CLOSED: a consent store we cannot read is never
-                // permission to send. The claim rolls back and the draft
-                // stays pending and approvable once the store recovers.
+                // FAIL CLOSED: a suppression/consent store we cannot read is
+                // never permission to send. The claim rolls back and the
+                // draft stays pending and approvable once the store recovers.
                 let _ = tx.rollback().await;
-                tracing::error!(error = %error, draft_id = %id, "approve: consent lookup failed");
+                tracing::error!(error = %error, draft_id = %id, "approve: admission lookup failed");
                 return Err(ApiError::Internal(
-                    "could not verify the recipient's marketing consent; draft still pending"
-                        .into(),
+                    "could not verify the recipient's send admission; draft still pending".into(),
                 ));
             }
         }
@@ -446,28 +505,34 @@ pub(crate) async fn approve_draft_core(
         },
     );
     let text_body = reply.clone();
-    let message_uuid = match crate::routes::system_sender::queue_system_email_in_transaction(
-        &mut tx,
-        &from_email,
-        &subject,
-        &html_body,
-        &text_body,
-        vec!["ai-draft-approval".to_string()],
-        priority,
-    )
-    .await
-    {
-        Ok(message_uuid) => message_uuid,
-        Err(e) => {
-            // Enqueue failed, rolling back undoes the claim, so the draft
-            // remains pending and recoverable instead of consumed.
-            let _ = tx.rollback().await;
-            tracing::error!(error = %e, draft_id = %id, "approve: queue insert failed");
-            return Err(ApiError::Internal(
-                "could not queue the reply; draft still pending".into(),
-            ));
-        }
-    };
+    // The delivery class rides the queue row EXPLICITLY (fourth external
+    // audit, P0): the class decides the dispatch-time consent regime, so it
+    // is a server-owned constant on the row, never the 'marketing' schema
+    // default the old path inherited.
+    let message_uuid =
+        match crate::routes::system_sender::queue_system_email_in_transaction_with_category(
+            &mut tx,
+            &from_email,
+            &subject,
+            &html_body,
+            &text_body,
+            vec!["ai-draft-approval".to_string()],
+            priority,
+            category,
+        )
+        .await
+        {
+            Ok(message_uuid) => message_uuid,
+            Err(e) => {
+                // Enqueue failed, rolling back undoes the claim, so the draft
+                // remains pending and recoverable instead of consumed.
+                let _ = tx.rollback().await;
+                tracing::error!(error = %e, draft_id = %id, "approve: queue insert failed");
+                return Err(ApiError::Internal(
+                    "could not queue the reply; draft still pending".into(),
+                ));
+            }
+        };
 
     if is_first_response.unwrap_or(false) {
         // The SLO's measured interval: from the platform ACCEPTING the lead
@@ -519,6 +584,15 @@ pub(crate) async fn approve_draft_core(
             "routedTenantId": tenant_id.clone(),
             "recipient": from_email.clone(),
             "queuedMessageId": message_uuid.to_string(),
+            // Fourth external audit (P0): the SERVICE classification of this
+            // release, the deterministic purpose of the inbound message and
+            // its risk. The delivery class is the audit's durable answer to
+            // "what consent regime applied to this send".
+            "deliveryClass": delivery_class.as_str(),
+            "messageCategory": category,
+            "inboundPurpose": inbound_purpose.purpose.as_str(),
+            "purposeRisk": inbound_purpose.risk.as_str(),
+            "purposeAutonomy": release.autonomy.as_str(),
             // WP F9, the promotion evidence reads this field: an approval of
             // a LOW class counts toward that class's evidence bar.
             "replyClass": approval_class
@@ -643,14 +717,19 @@ fn _status_guard(_s: StatusCode) {}
 //
 // A draft of a LOW-risk class may be released WITHOUT a human approval, but
 // only when the promotion gate (`sales_autopilot::reply_autosend`) allows it,
-// and the gate is re-evaluated INSIDE the same transaction that claims the
-// draft, checks consent, and enqueues the reply. Every refusal rolls back, so
-// the draft stays pending and human-approvable: the fail-closed direction.
+// AND the deterministic purpose policy (`sales_autopilot::purpose`) does not
+// hold it for human review, and the gate is re-evaluated INSIDE the same
+// transaction that claims the draft, checks suppression/consent under the
+// reply's explicit delivery class, and enqueues the reply. Every refusal
+// rolls back, so the draft stays pending and human-approvable: the
+// fail-closed direction.
 //
 // The sweep is the automation actor. It attributes its audit row to the
-// system tenant with no human user id (`automation: "reply_autosend"`), and it
-// rides the SAME priority lane and the SAME consent gate as the human
-// approval, the only differences are the actor and the audit action.
+// system tenant with no human user id (`automation: "reply_autosend"`), and
+// it rides the SAME priority lane and the SAME delivery-class admission as
+// the human approval (service correspondence, suppression always, marketing
+// consent only for a marketing class), the only differences are the actor
+// and the audit action.
 
 /// The intents a LOW class can map from (the classifier's LOW-eligible
 /// dispositions). The candidate query pre-filters on them so a HIGH draft is
@@ -692,7 +771,7 @@ const CLAIM_DRAFT_FOR_AUTO_SEND_SQL: &str = r#"
     WHERE id = $1
       AND pending_approval = true
       AND ai_response IS NOT NULL
-    RETURNING tenant_id, from_email, subject, ai_response,
+    RETURNING tenant_id, from_email, subject, body_text, ai_response,
               classification, classification_confidence, suggested_action,
               (suggested_action->>'first_response') = 'true',
               received_at,
@@ -701,6 +780,7 @@ const CLAIM_DRAFT_FOR_AUTO_SEND_SQL: &str = r#"
 
 /// One claimed draft, as the auto-send read it.
 type ClaimedDraftRow = (
+    Option<String>,
     Option<String>,
     Option<String>,
     Option<String>,
@@ -722,8 +802,8 @@ pub enum AutoSendOutcome {
         reply_class: String,
         queued_message_id: String,
     },
-    /// The gate (or the classifier) refused; the draft is untouched and stays
-    /// pending for human approval.
+    /// The gate (or the classifier, or the purpose policy) refused; the draft
+    /// is untouched and stays pending for human approval.
     Held { draft_id: String, reason: String },
     /// The draft was already handled by someone else.
     NotAvailable { draft_id: String },
@@ -796,6 +876,7 @@ pub async fn auto_send_one(state: &AppState, id: &str) -> Result<AutoSendOutcome
         tenant,
         from_email,
         subject,
+        inbound_body_text,
         reply,
         classification,
         classification_confidence,
@@ -813,6 +894,7 @@ pub async fn auto_send_one(state: &AppState, id: &str) -> Result<AutoSendOutcome
     let tenant_id = tenant.unwrap_or_default();
     let from_email = from_email.unwrap_or_default();
     let subject = subject.unwrap_or_default();
+    let inbound_body_text = inbound_body_text.unwrap_or_default();
     let reply = reply.unwrap_or_default();
     let held = |draft_id: &str, reason: String| AutoSendOutcome::Held {
         draft_id: draft_id.to_string(),
@@ -857,6 +939,32 @@ pub async fn auto_send_one(state: &AppState, id: &str) -> Result<AutoSendOutcome
         return Ok(held(id, format!("classifier: {}", verdict.class_string())));
     };
 
+    // 1b. The purpose layer (fourth external audit, Tier-1 item 6). The
+    //     (purpose, risk) -> DeliveryClass/autonomy policy decides whether
+    //     this reply may leave AUTONOMOUSLY at all: human-review purposes
+    //     (billing, refunds, privacy, legal, procurement, security),
+    //     no-autonomous-response purposes (abuse, phishing) and no-reply
+    //     sources (autoresponders, delivery status notifications, spam) are
+    //     HELD for a human whatever the promotion gate's evidence says, and
+    //     a high risk never auto-sends. This layer can only ever TIGHTEN
+    //     the gate below, never bypass it; the 11-value disposition
+    //     vocabulary above stays the sales-analytics and promotion-class
+    //     authority, untouched.
+    let inbound_purpose = sales_autopilot::purpose::classify(&subject, &inbound_body_text);
+    let release = sales_autopilot::purpose::reply_release_decision(&inbound_purpose);
+    if !release.sweep_may_release {
+        tx.rollback().await?;
+        return Ok(held(
+            id,
+            format!(
+                "purpose policy: {} {} ({})",
+                inbound_purpose.purpose.as_str(),
+                inbound_purpose.risk.as_str(),
+                release.hold_reason
+            ),
+        ));
+    }
+
     // 2. The promotion gate, re-checked HERE, inside the send transaction
     //    (grant row, live evidence, tenant autonomy mode, kill switch).
     let gate = match autosend::evaluate_for_send(&mut tx, &tenant_id, class).await {
@@ -874,9 +982,13 @@ pub async fn auto_send_one(state: &AppState, id: &str) -> Result<AutoSendOutcome
         return Ok(held(id, format!("gate: {}", gate.reasons.join("; "))));
     }
 
-    // 3. The SAME consent gate the human approval runs (F4), inside the same
-    //    transaction: a refusal rolls the claim back and the draft stays
-    //    pending.
+    // 3. The SAME suppression gates the human approval runs, under the
+    //    reply's EXPLICIT delivery class (fourth external audit, P0): the
+    //    reply is SERVICE correspondence, so the marketing-consent
+    //    requirement does not gate it, but BOTH canonical suppression stores
+    //    (tenant list plus the platform bounce/complaint list) still do,
+    //    inside this transaction: a refusal rolls the claim back and the
+    //    draft stays pending.
     let admission =
         billing_service::send_admission::SendAdmissionService::new(std::sync::Arc::new(
             billing_service::send_admission::PostgresAdmissionBackend::new(
@@ -884,25 +996,43 @@ pub async fn auto_send_one(state: &AppState, id: &str) -> Result<AutoSendOutcome
                 state.redis.clone(),
             ),
         ));
-    let category = apexmail_lib::email_headers::message_category::MARKETING;
+    let delivery_class = sales_autopilot::purpose::reply_class_for_ai_draft();
+    let category = delivery_class.message_category().ok_or_else(|| {
+        ApiError::Internal("a reply release requires a sendable delivery class".into())
+    })?;
     match admission
-        .enforce_consent(&tenant_id, std::slice::from_ref(&from_email), category)
+        .enforce_consent_for_class(&tenant_id, std::slice::from_ref(&from_email), category)
         .await
     {
         Ok(()) => {}
+        Err(billing_service::send_admission::SendAdmissionError::RecipientSuppressed {
+            email,
+            reason,
+        }) => {
+            // Suppression (bounce/complaint/opt-out) applies to every class.
+            tx.rollback().await?;
+            return Ok(held(
+                id,
+                format!("recipient is suppressed for {email}: {reason}"),
+            ));
+        }
         Err(billing_service::send_admission::SendAdmissionError::ConsentRefused {
             email,
             reason,
         }) => {
+            // Reachable only if the release class were ever a marketing-class
+            // category: the F4 gate, unchanged. A service class never lands
+            // here.
             tx.rollback().await?;
             return Ok(held(id, format!("consent refused for {email}: {reason}")));
         }
         Err(error) => {
-            // Fail closed: an unreadable consent store is never permission.
+            // Fail closed: an unreadable suppression/consent store is never
+            // permission.
             tx.rollback().await?;
-            tracing::error!(error = %error, draft_id = %id, "auto-send: consent lookup failed");
+            tracing::error!(error = %error, draft_id = %id, "auto-send: admission lookup failed");
             return Err(ApiError::Internal(
-                "could not verify the recipient's marketing consent; draft still pending".into(),
+                "could not verify the recipient's send admission; draft still pending".into(),
             ));
         }
     }
@@ -939,26 +1069,30 @@ pub async fn auto_send_one(state: &AppState, id: &str) -> Result<AutoSendOutcome
         },
     );
     let text_body = reply.clone();
-    let message_uuid = match crate::routes::system_sender::queue_system_email_in_transaction(
-        &mut tx,
-        &from_email,
-        &subject,
-        &html_body,
-        &text_body,
-        vec!["ai-draft-auto-send".to_string()],
-        priority,
-    )
-    .await
-    {
-        Ok(message_uuid) => message_uuid,
-        Err(e) => {
-            tx.rollback().await?;
-            tracing::error!(error = %e, draft_id = %id, "auto-send: queue insert failed");
-            return Err(ApiError::Internal(
-                "could not queue the reply; draft still pending".into(),
-            ));
-        }
-    };
+    // The delivery class rides the queue row EXPLICITLY, same as the human
+    // approval (fourth external audit, P0).
+    let message_uuid =
+        match crate::routes::system_sender::queue_system_email_in_transaction_with_category(
+            &mut tx,
+            &from_email,
+            &subject,
+            &html_body,
+            &text_body,
+            vec!["ai-draft-auto-send".to_string()],
+            priority,
+            category,
+        )
+        .await
+        {
+            Ok(message_uuid) => message_uuid,
+            Err(e) => {
+                tx.rollback().await?;
+                tracing::error!(error = %e, draft_id = %id, "auto-send: queue insert failed");
+                return Err(ApiError::Internal(
+                    "could not queue the reply; draft still pending".into(),
+                ));
+            }
+        };
 
     if is_first_response.unwrap_or(false) {
         let latency = (chrono::Utc::now() - accepted_at).num_seconds().max(0) as f64;
@@ -989,6 +1123,14 @@ pub async fn auto_send_one(state: &AppState, id: &str) -> Result<AutoSendOutcome
         Some(id),
         serde_json::json!({
             "automation": "reply_autosend",
+            // Fourth external audit (P0): the SERVICE classification of this
+            // autonomous release plus the deterministic purpose/risk the
+            // policy layer derived from the inbound message.
+            "deliveryClass": delivery_class.as_str(),
+            "messageCategory": category,
+            "inboundPurpose": inbound_purpose.purpose.as_str(),
+            "purposeRisk": inbound_purpose.risk.as_str(),
+            "purposeAutonomy": release.autonomy.as_str(),
             "replyClass": verdict.class_string(),
             "riskClass": "low",
             "grounding": {
@@ -1052,6 +1194,10 @@ mod approval_db_tests {
             tenant_id        VARCHAR(26),
             from_email       VARCHAR(255),
             subject          VARCHAR(255),
+            -- The inbound body the deterministic purpose classifier reads
+            -- (fourth external audit, Tier-1 item 6): the claim RETURNS it,
+            -- so the fixture must carry it or every claim dies 42703.
+            body_text        TEXT,
             ai_response      TEXT,
             pending_approval BOOLEAN NOT NULL DEFAULT false,
             processed_at     TIMESTAMPTZ,
@@ -1068,6 +1214,39 @@ mod approval_db_tests {
         for sql in [CLAIM_DRAFT_FOR_APPROVAL_SQL, REJECT_DRAFT_SQL] {
             assert!(!sql.contains("::uuid"), "regression: {sql}");
             assert!(sql.contains("id = $1"), "must bind the id as text: {sql}");
+        }
+        // Fourth external audit (Tier-1 item 6): both claims return the
+        // inbound `body_text` (with the subject) the deterministic purpose
+        // classifier reads; without it the release decision would fall back
+        // to subject-only classification.
+        for sql in [CLAIM_DRAFT_FOR_APPROVAL_SQL, CLAIM_DRAFT_FOR_AUTO_SEND_SQL] {
+            assert!(
+                sql.contains("body_text"),
+                "the claim must return the inbound body_text: {sql}"
+            );
+            assert!(
+                sql.contains("subject"),
+                "the claim must return the subject: {sql}"
+            );
+        }
+        // Fixture drift guard: every column the claims RETURN must exist in
+        // INBOUND_MESSAGES_DDL, or the whole approval_db_tests family dies
+        // 42703 the moment TEST_DATABASE_URL makes it actually run (while
+        // passing as soft-skips everywhere else — the worst kind of latent).
+        for column in [
+            "body_text",
+            "subject",
+            "ai_response",
+            "suggested_action",
+            "pending_approval",
+            "received_at",
+            "tenant_id",
+            "from_email",
+        ] {
+            assert!(
+                INBOUND_MESSAGES_DDL.contains(column),
+                "INBOUND_MESSAGES_DDL must carry the claimed column {column}"
+            );
         }
     }
 
@@ -1156,6 +1335,7 @@ mod approval_db_tests {
                 Option<String>,
                 Option<String>,
                 Option<String>,
+                Option<String>,
                 Option<bool>,
                 chrono::DateTime<chrono::Utc>,
                 Option<String>,
@@ -1181,6 +1361,7 @@ mod approval_db_tests {
                 Option<String>,
                 Option<String>,
                 Option<String>,
+                Option<String>,
                 Option<bool>,
                 chrono::DateTime<chrono::Utc>,
                 Option<String>,
@@ -1192,6 +1373,7 @@ mod approval_db_tests {
         let row = sqlx::query_as::<
             _,
             (
+                Option<String>,
                 Option<String>,
                 Option<String>,
                 Option<String>,
@@ -1226,12 +1408,13 @@ mod approval_db_tests {
         let (tx, row) = claim(&pool, &id)
             .await
             .expect("claim must bind a varchar id");
-        let (tenant, from, subject, reply, first_response, _accepted_at, request_ref) =
+        let (tenant, from, subject, body, reply, first_response, _accepted_at, request_ref) =
             row.expect("pending draft must be claimable");
         // SQL three-valued logic: a NULL suggested_action yields NULL here,
         // which the handler treats as not-a-first-response.
         assert_eq!(first_response, None, "an ordinary draft has no marker");
         assert_eq!(request_ref, None);
+        assert_eq!(body, None, "the helper row carries no body_text");
         assert_eq!(tenant.as_deref(), Some("test-f11-tenant"));
         assert_eq!(from.as_deref(), Some("customer@x.ee"));
         assert_eq!(subject.as_deref(), Some("Re: invoice"));
@@ -1804,14 +1987,15 @@ mod approval_http_tests {
         });
     }
 
-    /// The shared send-admission consent gate (F4) applies to AI-draft
-    /// approvals: an AI-composed reply is a MARKETING-class send, so a
-    /// recipient with no active marketing consent record must be REFUSED with
-    /// the enforcer's named reason, the draft stays pending (nothing
-    /// consumed), nothing is queued and nothing can reach Mailpit. The same
-    /// draft then approves cleanly once an active consent record exists.
+    /// Fourth external audit, P0 (the release-semantics fix): an approved AI
+    /// reply is SERVICE correspondence. A recipient with NO marketing consent
+    /// record at all must receive the approved reply: the release succeeds,
+    /// the queue row carries the explicit 'service' category (never the
+    /// 'marketing' schema default the old path inherited), and the audit
+    /// trail records the service classification with the deterministic
+    /// purpose/risk of the inbound message.
     #[test]
-    fn approve_refuses_without_marketing_consent_and_stays_recoverable() {
+    fn approve_releases_a_reply_without_marketing_consent_as_service_mail() {
         let _dkim_guard = crate::test_db::DKIM_ENV_MUTEX
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -1824,26 +2008,157 @@ mod approval_http_tests {
             .build()
             .expect("runtime");
         runtime.block_on(async {
-            let Some(pool) = crate::test_db::canonical_pool("ai_draft_consent").await else {
+            let Some(pool) = crate::test_db::canonical_pool("ai_draft_service_release").await
+            else {
                 return;
             };
             seed_system_sender(&pool).await;
             let env = AdvEnv::admin(pool.clone()).await;
-            let tenant = "ten_consent_gate_000000";
+            let tenant = "ten_service_release_0000";
+            // A support question from a recipient with no marketing consent
+            // on file: the consent_records table stays EMPTY for them.
             let recipient = format!(
-                "no-consent-{}@corp.example",
+                "support-{}@corp.example",
                 &uuid::Uuid::new_v4().simple().to_string()[..8]
             );
             let id = draft_id();
-            seed_pending_draft(&pool, &id, tenant, &recipient).await;
+            sqlx::query(
+                "INSERT INTO inbound_messages
+                     (id, tenant_id, from_email, subject, body_text, ai_response,
+                      pending_approval, is_verp_reply, received_at)
+                 VALUES ($1, $2, $3, 'The dashboard errors on import', 'every CSV import fails', \
+                         'sorry about that, the team is on it', true, false, NOW())
+                 ON CONFLICT (id) DO NOTHING",
+            )
+            .bind(&id)
+            .bind(tenant)
+            .bind(&recipient)
+            .execute(&pool)
+            .await
+            .expect("seed draft");
+
+            let consent_rows: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM consent_records WHERE tenant_id = $1 AND LOWER(email) = LOWER($2)",
+            )
+            .bind(tenant)
+            .bind(&recipient)
+            .fetch_one(&pool)
+            .await
+            .expect("consent count");
+            assert_eq!(
+                consent_rows, 0,
+                "the fixture must have NO marketing consent record"
+            );
 
             let (status, body) = env
                 .post(&format!("/v1/admin/ai/drafts/{id}/approve"), "{}")
                 .await;
-            assert_eq!(status, axum::http::StatusCode::BAD_REQUEST, "{body}");
+            assert_eq!(
+                status,
+                axum::http::StatusCode::OK,
+                "a reply to an inbound message must release without marketing consent: {body}"
+            );
+            assert_eq!(body["approved"], true, "{body}");
+
+            // The queue row carries the explicit SERVICE category, on both
+            // the queue row and its message row: the class is a server-owned
+            // constant, never the 'marketing' schema default.
+            let categories: Vec<(String, String)> = sqlx::query_as(
+                "SELECT q.message_category, m.message_category \
+                 FROM email_queue q JOIN messages m ON m.id = q.message_id \
+                 WHERE lower(q.\"to\") = lower($1)",
+            )
+            .bind(&recipient)
+            .fetch_all(&pool)
+            .await
+            .expect("queue rows");
+            assert!(!categories.is_empty(), "the reply was queued");
+            for (queue_category, message_category) in &categories {
+                assert_eq!(queue_category, "service", "queue row category");
+                assert_eq!(message_category, "service", "message row category");
+            }
+
+            // The audit trail records the service classification (test d):
+            // the delivery class, the queue category, and the deterministic
+            // purpose/risk of the inbound message (a support question).
+            let details: serde_json::Value = sqlx::query_scalar(
+                "SELECT details FROM audit_logs \
+                 WHERE action = 'control_plane.ai_draft.approved' AND resource_id = $1",
+            )
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .expect("approval audit row");
+            assert_eq!(details["deliveryClass"], "service", "{details}");
+            assert_eq!(details["messageCategory"], "service", "{details}");
+            assert_eq!(details["inboundPurpose"], "technical_support", "{details}");
+            assert_eq!(details["purposeRisk"], "low", "{details}");
+
+            // The queue category is preference-exempt: the dispatch-time
+            // gate will not demand a marketing preference for it, while
+            // global suppression still applies there as always.
+            assert!(apexmail_lib::email_headers::message_category::is_preference_exempt(
+                "service"
+            ));
+
+            pool.close().await;
+        });
+    }
+
+    /// Fourth external audit, P0 test (b): a suppressed (bounce/complaint)
+    /// recipient is STILL refused, service class included. The platform
+    /// bounce/complaint store (`suppression_list`) blocks the release with
+    /// its reason, the claim rolls back (the draft stays pending and
+    /// recoverable), nothing is queued, and the refusal is on the audit
+    /// record. Removing the suppression makes the same draft approvable.
+    #[test]
+    fn approve_refuses_a_bounce_suppressed_recipient_and_stays_recoverable() {
+        let _dkim_guard = crate::test_db::DKIM_ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        std::env::set_var(
+            apexmail_lib::dkim::DKIM_PRIVATE_KEY_ENCRYPTION_KEY_ENV,
+            "3f7a1c9e2b5d48f01a6c3e792d4b8f15a0c6e3917d2f4b8a5c1e7309d4f2b6a8",
+        );
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async {
+            let Some(pool) = crate::test_db::canonical_pool("ai_draft_suppressed").await else {
+                return;
+            };
+            seed_system_sender(&pool).await;
+            let env = AdvEnv::admin(pool.clone()).await;
+            let tenant = "ten_suppressed_gate_000";
+            let recipient = format!(
+                "bounced-{}@corp.example",
+                &uuid::Uuid::new_v4().simple().to_string()[..8]
+            );
+            let id = draft_id();
+            seed_pending_draft(&pool, &id, tenant, &recipient).await;
+            sqlx::query(
+                "INSERT INTO suppression_list (id, tenant_id, email, reason) \
+                 VALUES ($1, $2, $3, 'hard bounce')",
+            )
+            .bind(uuid::Uuid::new_v4().to_string())
+            .bind(tenant)
+            .bind(&recipient)
+            .execute(&pool)
+            .await
+            .expect("seed bounce suppression");
+
+            let (status, body) = env
+                .post(&format!("/v1/admin/ai/drafts/{id}/approve"), "{}")
+                .await;
+            assert_eq!(
+                status,
+                axum::http::StatusCode::BAD_REQUEST,
+                "a bounce-suppressed recipient must be refused: {body}"
+            );
             assert!(
-                body.to_string().contains("marketing consent"),
-                "the refusal must carry the enforcer's named reason: {body}"
+                body.to_string().contains("suppressed"),
+                "the refusal must name the suppression: {body}"
             );
 
             // Nothing was consumed and nothing was queued.
@@ -1855,7 +2170,7 @@ mod approval_http_tests {
                     .expect("draft row");
             assert!(
                 pending,
-                "a consent-refused approval must not consume the draft"
+                "a suppression-refused approval must not consume the draft"
             );
             let queued: i64 = sqlx::query_scalar(
                 "SELECT COUNT(*) FROM email_queue WHERE lower(\"to\") = lower($1)",
@@ -1866,11 +2181,28 @@ mod approval_http_tests {
             .expect("queue count");
             assert_eq!(
                 queued, 0,
-                "a consent-refused approval must not queue a reply"
+                "a suppression-refused approval must not queue a reply"
             );
 
-            // An active marketing consent record makes the same draft approvable.
-            grant_marketing_consent(&pool, tenant, &recipient).await;
+            // The refusal left durable decision evidence.
+            let refused: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM audit_logs \
+                 WHERE action = 'control_plane.ai_draft.approval_refused' AND resource_id = $1",
+            )
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .expect("refusal audit row");
+            assert_eq!(refused, 1, "the refusal is on the audit record");
+
+            // Removing the suppression makes the same draft approvable: the
+            // gate is live state, not a sticky mark.
+            sqlx::query("DELETE FROM suppression_list WHERE tenant_id = $1 AND email = $2")
+                .bind(tenant)
+                .bind(&recipient)
+                .execute(&pool)
+                .await
+                .expect("clear suppression");
             let (status, body) = env
                 .post(&format!("/v1/admin/ai/drafts/{id}/approve"), "{}")
                 .await;
@@ -2271,9 +2603,13 @@ mod auto_send_tests {
 
     /// A LOW-eligible draft: the mailbot's shape (`ai_response` +
     /// `pending_approval = true`) with the worker's classification fields.
+    /// `subject`/`body_text` are the INBOUND text the purpose classifier
+    /// reads (fourth external audit, Tier-1 item 6).
     struct DraftSeed<'a> {
         tenant: &'a str,
         recipient: &'a str,
+        subject: &'a str,
+        body_text: Option<&'a str>,
         classification: Option<&'a str>,
         confidence: f64,
         reply: &'a str,
@@ -2290,15 +2626,17 @@ mod auto_send_tests {
         };
         sqlx::query(
             "INSERT INTO inbound_messages
-                 (id, tenant_id, from_email, subject, ai_response, pending_approval,
+                 (id, tenant_id, from_email, subject, body_text, ai_response, pending_approval,
                   is_verp_reply, received_at, classification, classification_confidence,
                   suggested_action, processed, processed_at)
-             VALUES ($1, $2, $3, 'Re: your question', $4, true, false, NOW(), $5, $6, $7::jsonb,
+             VALUES ($1, $2, $3, $4, $5, $6, true, false, NOW(), $7, $8, $9::jsonb,
                      true, NOW())",
         )
         .bind(id)
         .bind(seed.tenant)
         .bind(seed.recipient)
+        .bind(seed.subject)
+        .bind(seed.body_text)
         .bind(seed.reply)
         .bind(seed.classification)
         .bind(seed.confidence)
@@ -2403,6 +2741,8 @@ mod auto_send_tests {
                     DraftSeed {
                         tenant: &tenant,
                         recipient: &recipient,
+                        subject: "Re: your question",
+                        body_text: None,
                         classification: Some("meeting_request"),
                         confidence: 0.95,
                         reply: "Thursday 10:00 works for us, shall I send an invite?",
@@ -2436,6 +2776,8 @@ mod auto_send_tests {
                 DraftSeed {
                     tenant: &tenant,
                     recipient: &recipient,
+                    subject: "Re: your question",
+                    body_text: None,
                     classification: Some("meeting_request"),
                     confidence: 0.95,
                     reply: "Thursday 10:00 works for us, shall I send an invite?",
@@ -2576,7 +2918,27 @@ mod auto_send_tests {
             assert_eq!(row.3["automation"], "reply_autosend");
             assert_eq!(row.3["replyClass"], "scheduling");
             assert_eq!(row.3["riskClass"], "low");
+            // Fourth external audit (P0): the autonomous release is SERVICE
+            // correspondence with the explicit queue category, and the
+            // deterministic purpose layer's verdict rides the record (the
+            // fixture's inbound text matches no purpose rule: `other`).
+            assert_eq!(row.3["deliveryClass"], "service");
+            assert_eq!(row.3["messageCategory"], "service");
+            assert_eq!(row.3["inboundPurpose"], "other");
+            assert_eq!(row.3["purposeRisk"], "low");
+            assert_eq!(row.3["purposeAutonomy"], "promotion_gate");
             assert_eq!(row.3["routedTenantId"], tenant.as_str());
+            // The queued row carries the class explicitly, never the
+            // 'marketing' schema default.
+            let queued_category: String = sqlx::query_scalar(
+                "SELECT message_category FROM email_queue \
+                 WHERE lower(\"to\") = lower($1) ORDER BY created_at DESC LIMIT 1",
+            )
+            .bind(&recipient)
+            .fetch_one(&pool)
+            .await
+            .expect("queued category");
+            assert_eq!(queued_category, "service");
             assert_eq!(row.3["recipient"], recipient.as_str());
             assert_eq!(row.3["gate"]["replyClass"], "scheduling");
             assert_eq!(row.3["gate"]["enabledBy"], "f9-owner-user");
@@ -2628,6 +2990,8 @@ mod auto_send_tests {
                 DraftSeed {
                     tenant: &tenant,
                     recipient: &recipient,
+                    subject: "Re: your question",
+                    body_text: None,
                     classification: Some("meeting_request"),
                     confidence: 0.95,
                     reply: "Thursday 10:00 works for us, shall I send an invite?",
@@ -2663,6 +3027,10 @@ mod auto_send_tests {
             .await
             .expect("approval audit row");
             assert_eq!(details["replyClass"], "scheduling");
+            // Fourth external audit (P0): the human release is SERVICE
+            // correspondence too, whatever the promotion class.
+            assert_eq!(details["deliveryClass"], "service");
+            assert_eq!(details["messageCategory"], "service");
 
             pool.close().await;
         });
@@ -2751,6 +3119,8 @@ mod auto_send_tests {
                     DraftSeed {
                         tenant: &tenant,
                         recipient: &recipient,
+                        subject: "Re: your question",
+                        body_text: None,
                         classification,
                         confidence,
                         reply,
@@ -2842,6 +3212,8 @@ mod auto_send_tests {
                 DraftSeed {
                     tenant: &tenant,
                     recipient: &flagged,
+                    subject: "Re: your question",
+                    body_text: None,
                     classification: Some("meeting_request"),
                     confidence: 0.95,
                     reply: "Thursday 10:00 works for us, shall I send an invite?",
@@ -2905,6 +3277,8 @@ mod auto_send_tests {
                 DraftSeed {
                     tenant: &tenant,
                     recipient: &recipient,
+                    subject: "Re: your question",
+                    body_text: None,
                     classification: Some("meeting_request"),
                     confidence: 0.95,
                     reply: "Thursday 10:00 works for us, shall I send an invite?",
@@ -2957,6 +3331,151 @@ mod auto_send_tests {
             let (pending, queued) = pending_and_queued(&pool, &id, &recipient).await;
             assert!(!pending);
             assert_eq!(queued, 1);
+
+            pool.close().await;
+        });
+    }
+
+    /// Fourth external audit (Tier-1 item 6): the (purpose, risk) policy is
+    /// wired into the reply decision. Even with every promotion ring ready to
+    /// send, the autonomous sweep HOLDS the shapes the policy table marks for
+    /// human review or no reply:
+    ///
+    ///   * a refund dispute (human review, high risk),
+    ///   * a reply aimed at an autoresponder (no reply: `automated`),
+    ///   * an unsubscribe demand (no autonomous response: `abuse`),
+    ///
+    /// and each names its policy reason. The same drafts are NOT lost: the
+    /// human approval releases one as SERVICE mail with the purpose verdict
+    /// on the audit record, and the reply's delivery class is service on
+    /// every release, never marketing.
+    #[test]
+    fn purpose_policy_holds_review_and_no_reply_sources_even_with_the_gate_on() {
+        let _dkim_guard = crate::test_db::DKIM_ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        std::env::set_var(
+            apexmail_lib::dkim::DKIM_PRIVATE_KEY_ENCRYPTION_KEY_ENV,
+            "3f7a1c9e2b5d48f01a6c3e792d4b8f15a0c6e3917d2f4b8a5c1e7309d4f2b6a8",
+        );
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async {
+            let Some(pool) = crate::test_db::canonical_pool("f9_purpose_policy").await else {
+                return;
+            };
+            seed_system_sender(&pool).await;
+            let env = AdvEnv::admin(pool.clone()).await;
+            let tenant = new_tenant("ten_f9purp");
+            // Every promotion ring wide open: the purpose veto must hold
+            // WITHOUT consulting it.
+            seed_autonomy(&pool, &tenant, "autonomous_guarded", false).await;
+            for class in LowRiskClass::ALL {
+                promote(&pool, &tenant, class, 10, 30).await;
+            }
+
+            // All three carry a promotion-eligible disposition and confidence,
+            // so the OLD classifier alone would have released them.
+            let mut cases: Vec<(&str, String, String, &str)> = Vec::new();
+            for (label, subject, body, expected_reason) in [
+                (
+                    "refund",
+                    "We want a refund",
+                    Some("please refund my invoice, the charge was wrong"),
+                    "purpose_policy_human_review",
+                ),
+                (
+                    "automated",
+                    "Automatic reply: out of office",
+                    Some("I am out of office until Monday."),
+                    "purpose_policy_no_reply",
+                ),
+                (
+                    "unsubscribe",
+                    "Please unsubscribe me",
+                    Some("take me off all your lists, stop sending"),
+                    "purpose_policy_no_autonomous_response",
+                ),
+            ] {
+                let recipient = format!(
+                    "{label}-{}@corp.example",
+                    &uuid::Uuid::new_v4().simple().to_string()[..8]
+                );
+                let id = draft_id();
+                seed_draft(
+                    &pool,
+                    &id,
+                    DraftSeed {
+                        tenant: &tenant,
+                        recipient: &recipient,
+                        subject,
+                        body_text: body,
+                        classification: Some("meeting_request"),
+                        confidence: 0.95,
+                        reply: "Thanks for the note.",
+                        first_response_request_id: None,
+                    },
+                )
+                .await;
+                cases.push((label, recipient, id, expected_reason));
+            }
+
+            for (label, recipient, id, expected_reason) in &cases {
+                let state = test_state_over(pool.clone()).await;
+                let outcome = auto_send_one(&state, id).await.expect("auto-send attempt");
+                match outcome {
+                    AutoSendOutcome::Held { reason, .. } => {
+                        assert!(
+                            reason.contains(expected_reason),
+                            "{label} must be held for {expected_reason}: {reason}"
+                        );
+                        assert!(
+                            reason.contains("purpose policy:"),
+                            "{label} hold must name the purpose layer: {reason}"
+                        );
+                    }
+                    other => panic!("{label} must not auto-send, got {other:?}"),
+                }
+                let (pending, queued) = pending_and_queued(&pool, id, recipient).await;
+                assert!(pending, "{label} stays pending for a human");
+                assert_eq!(queued, 0, "{label} must never be auto-queued");
+            }
+
+            // The purpose layer tightens, it never loosens: the human path
+            // still releases the refund draft, as SERVICE mail, with the
+            // deterministic purpose verdict on the audit record.
+            let (_, refund_recipient, refund_id, _) = &cases[0];
+            let (status, body) = env
+                .post(&format!("/v1/admin/ai/drafts/{refund_id}/approve"), "{}")
+                .await;
+            assert_eq!(
+                status,
+                axum::http::StatusCode::OK,
+                "the human approval releases the held draft: {body}"
+            );
+            let category: String = sqlx::query_scalar(
+                "SELECT message_category FROM email_queue WHERE lower(\"to\") = lower($1)",
+            )
+            .bind(refund_recipient)
+            .fetch_one(&pool)
+            .await
+            .expect("queued category");
+            assert_eq!(category, "service", "the human release is service mail");
+            let details: serde_json::Value = sqlx::query_scalar(
+                "SELECT details FROM audit_logs WHERE resource = 'ai_draft' \
+                 AND action = 'control_plane.ai_draft.approved' AND resource_id = $1",
+            )
+            .bind(refund_id)
+            .fetch_one(&pool)
+            .await
+            .expect("approval audit row");
+            assert_eq!(details["deliveryClass"], "service");
+            assert_eq!(details["messageCategory"], "service");
+            assert_eq!(details["inboundPurpose"], "refund");
+            assert_eq!(details["purposeRisk"], "high");
+            assert_eq!(details["purposeAutonomy"], "human_review");
 
             pool.close().await;
         });

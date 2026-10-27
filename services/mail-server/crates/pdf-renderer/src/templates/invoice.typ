@@ -51,8 +51,18 @@
 #let status-value = lower(str(data.at("status", default: "unknown")))
 #let issued-at = str(data.at("issued_at", default: "—"))
 #let due-at = str(data.at("due_at", default: "—"))
-#let period-start = str(data.at("period_start", default: "—"))
-#let period-end = str(data.at("period_end", default: "—"))
+// Null period bounds render honestly ("not fixed") instead of em-dash
+// placeholders: a customer-facing document never shows a bare "—" where a
+// value was expected (style doctrine; external audit 2026-10-27 item on
+// honest rendering).
+#let period-start = data.at("period_start", default: none)
+#let period-end = data.at("period_end", default: none)
+#let period-none = period-start == none and period-end == none
+#let period-text = if period-none {
+  "not fixed"
+} else {
+  str(period-start) + " — " + str(period-end)
+}
 #let line-items = data.at("line_items", default: ())
 #let subtotal = data.at("subtotal", default: 0)
 #let vat-total = data.at("vat_total", default: 0)
@@ -123,7 +133,7 @@
       [*Status:*], [#upper(status-value)],
       [*Issued:*], [#issued-at],
       [*Due:*], [#due-at],
-      [*Period:*], [#period-start — #period-end],
+      [*Period:*], [#period-text],
     )
   ],
 )

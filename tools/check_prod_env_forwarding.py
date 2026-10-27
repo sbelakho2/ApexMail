@@ -118,6 +118,10 @@ ALLOWLIST: dict[str, str] = {
     "ENTERPRISE_PORT": "dev-only host-port mapping; production clears enterprise ports and uses the internal :3008",
     "OBSERVABILITY_PORT": "dev-only host-port mapping; production scrapes the internal observability listener",
     # ── Values consumed by deploy-time scripts, not containers ──────────────
+    "WAL_ARCHIVE_TARGET": "consumed by deploy/docker-compose.wal-archive.yml (operator-gated WAL-archiving override, off in the base prod overlay)",
+    "WAL_SSH_KEY_FILE": "consumed by deploy/docker-compose.wal-archive.yml (WAL archive rsync key mount, mirrors BACKUP_SSH_KEY_FILE)",
+    "WAL_SSH_KNOWN_HOSTS_FILE": "consumed by deploy/docker-compose.wal-archive.yml (pinned host keys for the non-interactive WAL rsync)",
+    "WAL_BASE_BACKUP_ENABLED": "consumed by deploy/hardening/scripts/postgres-backup-encrypt.sh (weekly physical base backup gate, operator-gated PITR)",
     "PAGERDUTY_ROUTING_KEY": "rendered into alertmanager.yml by deploy/scripts/render-alertmanager-config.sh",
     "OPSGENIE_API_KEY": "rendered into alertmanager.yml by deploy/scripts/render-alertmanager-config.sh",
     "SLACK_WEBHOOK_PATH": "rendered into alertmanager.yml by deploy/scripts/render-alertmanager-config.sh",

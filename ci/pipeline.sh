@@ -343,6 +343,10 @@ cmd_run() {
             _es_status=advisory-fail
         fi
         manifest_stage "$_es_st" "$_es_status" "$_es_rc" "$_es_start" "$_es_end"
+        # GitHub lane status (audit 2026-10-27 item 5, step 1 of the fix
+        # order): publish `apexmail/<lane>` contexts so required status
+        # checks can later be pinned to them. Fail-open by design.
+        ci_github_status_publish "$_es_st" "$_es_status"
         ci_info "── stage [$_es_st] $_es_status (exit $_es_rc, $(( _es_end - _es_start ))s) ──" >&2
         printf '%s\n' "$_es_status"
     }

@@ -276,3 +276,12 @@ Contributors are recognized in:
 - Project README
 
 Thank you for contributing to ApexMail! 🎉
+
+## Test-Scope Rule (REQUIRED)
+
+Never run tests on cold code or code your change does not affect. Scope runs
+to the crates you touched (`cargo nextest run -p <crate>`) and filter to the
+affected families (`-E 'test(<family>)'`). A bare full-workspace run is
+reserved for explicit release-verification requests; tests that need
+`TEST_DATABASE_URL` / `TEST_REDIS_URL` are not provisioned for changes that
+cannot reach the database.

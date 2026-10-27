@@ -1,13 +1,17 @@
 # Disaster Recovery & Backup Procedures
 
-> **Rewritten 2026-09-05.** Earlier versions of this document described a
-> two-region HA topology (Finland primary / Germany standby), STONITH fencing,
-> WireGuard interconnects, WAL archiving with PITR, and Kubernetes-based DR
-> tooling. **None of that exists.** This document now describes the actual
-> deployment: a **single Hetzner host in Finland** running the whole stack
-> under Docker Compose, protected by encrypted nightly database backups. There
-> is **no standby region and no automatic failover** — recovery means host
-> rebuild plus backup restore.
+> Rewritten 2026-09-05; a point-in-time recovery section was added
+> 2026-10-25. Earlier versions of this document described a two-region HA
+> topology (Finland primary / Germany standby), STONITH fencing, WireGuard
+> interconnects, WAL archiving with PITR, and Kubernetes-based DR tooling.
+> **None of that exists in production.** This document now describes the
+> actual deployment: a **single Hetzner host in Finland** running the whole
+> stack under Docker Compose, protected by encrypted nightly database
+> backups. There is **no standby region and no automatic failover** —
+> recovery means host rebuild plus backup restore. The one 2026-10-25
+> addition: the repository ships operator-gated WAL-archiving and
+> point-in-time recovery enablement, off until the operator includes the
+> override (see below).
 
 ## Reality check (what DR actually looks like here)
 
@@ -18,15 +22,17 @@
 | PostgreSQL backups | Nightly `pg_dump`, encrypted, restore-verified (see below) |
 | ClickHouse backups | Nightly per-table dumps, encrypted, restore-verified |
 | Redis backups | **None.** Redis holds cache/queue/challenge state only; after a loss the queue contents and cached state are gone |
-| WAL archiving / PITR | **Not implemented.** Recovery point granularity is the last nightly backup (RPO up to ~24 h) |
+| WAL archiving / PITR | **Enablement shipped, off in production.** Nothing archives until the operator sets `WAL_ARCHIVE_TARGET` and boots postgres with `deploy/docker-compose.wal-archive.yml` (checklist below). Until then the recovery point is the last nightly backup |
 | Failover automation | None — a host failure is an outage until the host is rebuilt or replaced |
 | Deployment | Self-hosted pipeline on the host (`ci/pipeline.sh`); see `deploy/DEPLOYMENT.md` |
 
 Honest objectives (to be validated in drills, not measured yet):
 
-- **RPO:** PostgreSQL and ClickHouse ≤ 24 h (nightly backup cadence). Setting
-  `BACKUP_TARGET` (offsite rsync mirror) protects against host loss, not
-  against the cadence.
+- **RPO:** PostgreSQL and ClickHouse ≤ 24 h logical (nightly backup
+  cadence); minutes-with-WAL for PostgreSQL when the operator enables
+  archiving, bounded by the archive lag the `apexmail-wal-archive` alerts
+  watch. Setting `BACKUP_TARGET` (offsite rsync mirror) protects against
+  host loss, not against the cadence.
 - **RTO:** hours, not minutes — a full recovery involves provisioning/rebuilding
   the host, re-running the bootstrap, rebuilding all images, and restoring the
   databases. Measure it in the quarterly drill and record the real number.
@@ -63,6 +69,87 @@ process to be alive **and** an encrypted artifact newer than 25 h to exist.
 A red `postgres-backup`/`clickhouse-backup` in `docker compose ps` means
 backups have silently stopped — treat as SEV2.
 
+## Point-in-time recovery (WAL archiving, operator-gated)
+
+Since 2026-10-25 the repository ships full WAL-archiving and point-in-time
+recovery enablement. It is **off until the operator turns it on**, and the
+production deploy step is owner-gated on purpose. The nightly logical dumps
+above stay exactly as they are and remain the primary recovery path; WAL
+adds replay-to-a-timestamp on top for PostgreSQL. ClickHouse keeps the
+nightly cadence either way.
+
+The pieces, and what each does:
+
+- `deploy/hardening/scripts/pg-wal-archive.sh`, the `archive_command`
+  helper. It spools each segment locally, rsyncs the batch to
+  `WAL_ARCHIVE_TARGET` (rsync over ssh, the same key/known_hosts pattern as
+  the backup mirror) and exits 0 only when the segment left the host. A
+  failed archive makes postgres retry, which is the designed backpressure.
+- `deploy/docker-compose.wal-archive.yml`, the compose override that boots
+  postgres with `archive_mode=on` and the helper mounted at
+  `/usr/local/bin/pg-wal-archive.sh`, wires the SSH material and refuses to
+  render without `WAL_ARCHIVE_TARGET`. It is active only when the operator
+  passes `-f deploy/docker-compose.wal-archive.yml`; the canonical
+  `docker-compose.prod.yml` deployment is untouched without it.
+- `WAL_BASE_BACKUP_ENABLED=1` on the postgres-backup service, which takes a
+  weekly physical base backup (`pg_basebackup -F tar -z`) into
+  `/backups/wal-base/`, keeps 2 generations and mirrors them offsite.
+  Replay needs a physical base; a logical dump cannot serve as one.
+- `deploy/hardening/scripts/pg-pitr-restore.sh`, the operator and drill
+  tool. It pulls the WAL archive back offsite, builds a scratch data dir
+  from a base backup, replays to an RFC3339 timestamp or `latest`, and
+  writes a drill-shaped JSON evidence record into `WAL_EVIDENCE_DIR`.
+- the `apexmail-wal-archive` alert group (`deploy/alerting-rules.yml`):
+  archive failures, a stale archive (more than 2 h since the last segment
+  landed) and a documented spool-growth follow-up.
+
+### Operator enablement checklist
+
+1. Provision an offsite WAL target reachable by rsync over ssh, e.g.
+   `backup-user@offsite.example:/srv/apexmail-wal-archive`, and set
+   `WAL_ARCHIVE_TARGET` in the deployment `.env`.
+2. Provision the SSH key at `/var/run/apexmail-backup-ssh/id_ed25519`
+   (or point `WAL_SSH_KEY_FILE` at another host path), register its public
+   half in the target's `authorized_keys`, and pre-seed a pinned
+   `known_hosts` file for `WAL_SSH_KNOWN_HOSTS_FILE`. The archiver is
+   non-interactive; a first-connection host-key prompt fails the archive
+   instead of hanging postgres. Reusing the backup mirror's key pair is fine.
+3. From the repo root, boot postgres with the override:
+   `docker compose -f docker-compose.yml -f docker-compose.prod.yml -f deploy/docker-compose.wal-archive.yml --env-file .env up -d postgres`
+   (then re-up the stack so dependents re-resolve). Compose refuses to
+   render without `WAL_ARCHIVE_TARGET`.
+4. Verify archiving works: `select archived_count, failed_count,
+   last_archived_time from pg_stat_archiver;` shows the count rising and
+   failures flat, and segment files appear on the target host.
+5. Set `WAL_BASE_BACKUP_ENABLED=1` in the `.env` so the next nightly pass
+   takes the first weekly physical base backup into `/backups/wal-base/`,
+   mirrored offsite with the dumps.
+6. Watch the new `apexmail-wal-archive` alerts. Verify once that the
+   postgres exporter exposes the `pg_stat_archiver` metrics (see the
+   dependency note in `deploy/alerting-rules.yml`).
+7. Run `pg-pitr-restore.sh` quarterly (on a scratch instance, not against
+   the live cluster) and file the JSON evidence with the drill records in
+   [Disaster Recovery Testing](disaster-recovery-testing.md).
+8. Until step 3 happens, the honest DR posture stays as documented above:
+   nightly logical dumps only.
+
+With archiving on, the PostgreSQL recovery point is "minutes", bounded by
+the archive lag the alerts watch, and recovery to any RFC3339 timestamp
+inside the retained WAL window becomes possible (Procedure 4).
+
+### Procedure 4: point-in-time recovery (only when enabled above)
+
+```bash
+# From the repo root, inside the postgres container (or any host with
+# postgres installed), as the postgres OS user:
+pg-pitr-restore.sh \
+  --base /backups/wal-base/apexmail-wal-base-20261025-010000.tar.gz \
+  --target 2026-10-25T08:30:00Z \
+  --target-action promote
+# Evidence lands in $WAL_EVIDENCE_DIR (pitr-restore-*.json) with the same
+# schema the monthly restore drill writes.
+```
+
 ### What is *not* backed up (known gaps)
 
 - **Redis** — queue contents, rate-limit counters, and KiwiCaptcha challenges
@@ -94,7 +181,8 @@ docker compose ... up -d
 make verify
 ```
 
-Data written after the last nightly backup is lost (RPO ≤ 24 h).
+Data written after the last nightly backup is lost (RPO ≤ 24 h). With WAL
+archiving on, Procedure 4 instead recovers to a chosen timestamp.
 
 ### Procedure 2: Full host loss (host rebuilt or replaced)
 

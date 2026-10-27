@@ -1606,7 +1606,10 @@ fn format_invoice_date(date: chrono::DateTime<Utc>) -> String {
 /// table, see [`LegacyInvoiceRow`]); an absent bound renders as an em dash
 /// instead of inventing a date.
 fn format_optional_invoice_date(date: Option<chrono::DateTime<Utc>>) -> String {
-    date.map(format_invoice_date).unwrap_or_else(|| "—".into())
+    // Honest render (fourth external audit 2026-10-27): a missing date says
+    // so in words instead of an em-dash placeholder in a customer document.
+    date.map(format_invoice_date)
+        .unwrap_or_else(|| "not fixed".into())
 }
 
 /// Format cents with the invoice's actual currency (the invoice carries a
@@ -8134,7 +8137,7 @@ mod adversarial_tests {
             String::from_utf8_lossy(&bytes)
         );
         let html = String::from_utf8_lossy(&bytes);
-        assert!(html.contains("Period:, to —"), "{html}");
+        assert!(html.contains("Period: not fixed"), "{html}");
         let (status, _, bytes) = get_raw(&env, &format!("/v1/billing/invoices/{id}/xml")).await;
         assert_eq!(
             status,

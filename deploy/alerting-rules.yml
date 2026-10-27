@@ -516,6 +516,69 @@ groups:
   # deploy/monitoring/alerts/disk-space.yml were removed at the same time).
   # A full disk used to fire four alerts through three rule files.
 
+  # ── WAL archive continuity (PITR enablement, external audit 2026-10-26) ────
+  # When WAL archiving is on (deploy/docker-compose.wal-archive.yml), a
+  # stalled archive pipeline means the PITR chain is silently breaking:
+  # postgres retries failed archives forever (correct backpressure) while
+  # pg_wal grows and the recovery point stops moving. These rules watch the
+  # archiver through the SAME postgres_exporter scrape the postgres alerts
+  # above consume (job="postgres", deploy/prometheus.yml).
+  #
+  # DEPENDENCY (honest note): the expressions use the standard
+  # postgres_exporter pg_stat_archiver collector names
+  # (pg_stat_archiver_failed_count / _last_archived_time, same lowercase
+  # naming family as pg_stat_activity_count and pg_settings_max_connections
+  # already used in apexmail-availability). If the deployed exporter image
+  # disables the archiver collector the series are absent and these rules
+  # stay INERT (no series → no alert) — verify once after enabling:
+  # `curl postgres-exporter:9187/metrics | grep pg_stat_archiver`.
+  # While the override is NOT enabled (archiving off, the default), the
+  # rules are also inert by design — nothing archives, nothing breaks.
+  - name: apexmail-wal-archive
+    rules:
+      - alert: PostgresWALArchiveFailing
+        expr: increase(pg_stat_archiver_failed_count{job="postgres"}[15m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "PostgreSQL WAL archiving is failing"
+          description: "{{ $value }} WAL segments failed to archive in 15m on {{ $labels.instance }}. Postgres retries automatically (pg_wal grows as backpressure); check the offsite target's reachability/SSH key and the postgres log's archive_command lines."
+          runbook_url: "https://apexmail.ee/docs/alerts#postgres-wal-archive-failing"
+
+      - alert: PostgresWALArchiveStalled
+        # > 2h since the last segment reached the archive = the measured-
+        # minutes RPO story is dead. CAUTION before paging: a fully idle
+        # database produces no WAL, so last_archived_time can legitimately
+        # go stale with zero failures — cross-check failed_count above and
+        # pg_wal size (`docker compose exec postgres pg_waldump -s` or the
+        # pg_wal disk usage in the WAL Disk Full runbook) before treating
+        # this alone as data loss risk.
+        expr: (time() - pg_stat_archiver_last_archived_time{job="postgres"}) > 7200
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "PostgreSQL WAL archive is stale (>2h since last archived segment)"
+          description: "No WAL segment has reached the offsite archive for {{ $value | humanizeDuration }} on {{ $labels.instance }}. The PITR recovery point stopped moving; either archiving is broken (see PostgresWALArchiveFailing) or the database has been write-idle for 2h+."
+          runbook_url: "https://apexmail.ee/docs/alerts#postgres-wal-archive-stalled"
+
+      # TODO (spool growth): alert on WAL spool backlog growth. The spool is
+      # the wal_spool docker volume (host path under
+      # /var/lib/docker/volumes/, mounted at /var/lib/postgresql/wal-spool in
+      # the postgres container). This file intentionally carries NO
+      # node_exporter rules — the node_filesystem family lives canonically
+      # in deploy/prometheus/alerts/infrastructure-alerts.yml (job="node";
+      # the F10 dedup note above). The precise rule needs the host-side
+      # mountpoint of the wal_spool volume, which is an operator/deploy-host
+      # fact; pin it once PITR is enabled, e.g. in infrastructure-alerts.yml:
+      #   - alert: PostgresWALSpoolBacklog
+      #     expr: node_filesystem_size_bytes{job="node",fstype!~"tmpfs|overlay",mountpoint="<wal_spool host path>"}
+      #           - node_filesystem_avail_bytes{...same selector...} > 16 * 1024 * 1024 * 1024
+      # (16 GiB of un-pushed spool = the offsite leg has been down for a
+      # long while despite PostgresWALArchiveFailing). Until that lands the
+      # host-disk alerts (HostDiskSpaceWarning/Critical) are the backstop.
+
   - name: apexmail-tls
     rules:
       - alert: TlsCertificateExpiringSoon

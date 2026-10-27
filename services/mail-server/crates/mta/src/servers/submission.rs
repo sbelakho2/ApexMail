@@ -1680,6 +1680,11 @@ fn admission_refusal_reply(error: &SendAdmissionError) -> &'static str {
         | SendAdmissionError::SuppressionUnavailable(_)
         | SendAdmissionError::ConsentUnavailable(_) => "451 4.3.0 Requested action aborted\r\n",
         SendAdmissionError::Suppressed(_) => "550 5.1.1 recipient address suppressed\r\n",
+        // A suppression-store hit under an explicitly classified
+        // preference-exempt send: the same terminal suppression reply.
+        SendAdmissionError::RecipientSuppressed { .. } => {
+            "550 5.1.1 recipient address suppressed\r\n"
+        }
         SendAdmissionError::ConsentRefused { .. } => "550 5.7.1 marketing consent required\r\n",
         SendAdmissionError::InvalidCategory { .. } => {
             "550 5.3.0 message category policy invalid\r\n"

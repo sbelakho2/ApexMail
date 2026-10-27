@@ -448,7 +448,7 @@ fn render_answer(
         return match kind {
             AnswerKind::HipaaBaa => "A HIPAA BAA workflow exists, but no active BAA was found for the requested tenant. Complete request, signature, countersignature, and activation before representing the tenant as HIPAA-active.".to_string(),
             _ => format!(
-                "ApexMail has a configured review workflow for this domain, but this generated answer needs security-team review because the expected control or evidence source was not present in the current evidence set. Expected controls: {}.",
+                "ApexMail has a configured review workflow for this domain, but this generated answer requires ApexMail review because the expected control or evidence source was not present in the current evidence set. Expected controls: {}.",
                 if source_controls.is_empty() { "not currently in scope".to_string() } else { source_controls.join(", ") }
             ),
         };
@@ -479,31 +479,21 @@ fn render_answer(
         AnswerKind::HipaaBaa => "A HIPAA BAA is active for the requested tenant. ApexMail tracks BAA request, customer signature, ApexMail countersignature, activation, termination, and hash-chained BAA events.".to_string(),
         AnswerKind::TrustPortal => "The Trust Portal exposes public documents, policy summaries, subprocessor records, incident history, and NDA-gated access requests for private security artifacts. Admin routes support document versioning and supersedence.".to_string(),
         AnswerKind::NetworkSecurity => "Network security answers map to SOC 2 logical access, transport security, provider throttling, WAF/IDS controls where enabled, and dedicated deployment architecture review for Enterprise customers.".to_string(),
-        AnswerKind::SecurityTraining => "Security awareness and role training are tracked as governance controls in the SOC 2 catalog and included in questionnaire packs as security-team attestation items.".to_string(),
+        AnswerKind::SecurityTraining => "Security awareness and role training are tracked as governance controls in the SOC 2 catalog and included in questionnaire packs as ApexMail attestation items.".to_string(),
         AnswerKind::AssetManagement => "Asset and service ownership maps to SOC 2 structure, responsibility, monitoring, and change controls. Questionnaire answers include owner fields so stale ownership can be reviewed.".to_string(),
         AnswerKind::VendorRisk => "Vendor risk is represented through the Trust Portal subprocessor registry, DPA URLs, certification metadata, and reviewable data-category mapping for each active subprocessor.".to_string(),
     }
 }
 
+/// Every generated answer is owned by the company itself (external audit
+/// 2026-10-27, finding 18): an org chart of named departments ("Compliance",
+/// "Security Engineering", "Operations") would be a fictional team, and the
+/// owner directive forbids inventing one just as it forbids disclosing the
+/// real operating structure. Internal accountability lives in the SOC 2
+/// control seeds' owner fields, not in customer-facing questionnaires.
 fn owner_for(kind: AnswerKind) -> &'static str {
-    match kind {
-        AnswerKind::Governance | AnswerKind::SecurityTraining => "Security",
-        AnswerKind::AccessControl | AnswerKind::NetworkSecurity | AnswerKind::AssetManagement => {
-            "Engineering"
-        }
-        AnswerKind::Encryption | AnswerKind::AuditLogging | AnswerKind::ChangeManagement => {
-            "Platform Security"
-        }
-        AnswerKind::IncidentResponse | AnswerKind::BusinessContinuity => "Operations",
-        AnswerKind::PrivacyRights
-        | AnswerKind::Consent
-        | AnswerKind::Subprocessors
-        | AnswerKind::DataRetention
-        | AnswerKind::HipaaBaa
-        | AnswerKind::TrustPortal
-        | AnswerKind::VendorRisk => "Compliance",
-        AnswerKind::VulnerabilityManagement => "Security Engineering",
-    }
+    let _ = kind;
+    "ApexMail"
 }
 
 fn notes_for(status: AnswerStatus, kind: AnswerKind) -> Option<String> {

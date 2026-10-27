@@ -96,7 +96,8 @@ running stack.
 4. Restart the stack; log in and send a test message.
 
 **Expected:** restore succeeds; everything written after the last nightly
-backup is absent (RPO ≤ 24 h by design — there is no WAL archiving or PITR).
+backup is absent (RPO ≤ 24 h until the operator enables WAL archiving, see
+the PITR section in [disaster-recovery.md](disaster-recovery.md)).
 
 ---
 

@@ -1,0 +1,125 @@
+# =============================================================================
+# docker-compose.wal-archive.yml — PostgreSQL WAL archiving override (PITR)
+# =============================================================================
+# Repo-side enablement for WAL archiving / PITR (external audit 2026-10-26,
+# infrastructure blocker #1). Including this file is the OPERATOR's explicit
+# production decision — nothing in the default deployment changes:
+#
+#   docker compose \
+#     -f docker-compose.yml \
+#     -f docker-compose.prod.yml \
+#     -f deploy/docker-compose.wal-archive.yml \
+#     --env-file .env up -d
+#
+# (run from the repository root: relative paths in EVERY compose file are
+# resolved against the project directory, which is the FIRST -f file's dir.)
+#
+# What it adds to the `postgres` service (map keys replace, lists append):
+#   * `command:` boots postgres with archive_mode=on and this repo's
+#     archive_command helper. The brief of the override: adding `command:`
+#     to the BASE file would overwrite image defaults unconditionally, so
+#     it lives ONLY here, and it execs `docker-entrypoint.sh postgres ...`
+#     (the image's own entrypoint) so init/secret handling is preserved.
+#   * `pg-wal-archive.sh` bind-mounted at /usr/local/bin (read-only).
+#   * `apexmail_backup_egress` — the dedicated NON-internal bridge the
+#     backup containers already use; apexmail_data_internal has no egress,
+#     so the WAL rsync needs this network to reach the offsite target.
+#   * env guards: WAL_ARCHIVE_TARGET is REQUIRED (`${VAR:?}` — compose
+#     refuses to render without it, the same fail-fast pattern every
+#     mandatory production variable uses).
+#
+# The operator must also provide (see docs/operations/disaster-recovery.md,
+# "Operator enablement checklist"):
+#   1. WAL_ARCHIVE_TARGET in .env, e.g.
+#      backup-user@offsite.example:/srv/apexmail-wal-archive
+#   2. An SSH key on the host readable at WAL_SSH_KEY_FILE and the target's
+#      authorized_keys provisioned with its public half; a pinned
+#      known_hosts file (the archiver is non-interactive — BatchMode=yes —
+#      so a first-connection host-key prompt FAILS the archive, it never
+#      hangs postgres). Defaults mirror the backup mirror's
+#      /var/run/apexmail-backup-ssh/ paths; the same key may be reused.
+#      The key is mounted root-owned under /root/.ssh (the backup-service
+#      pattern) and the command bootstrap below copies it into a
+#      postgres-owned volume, because archive_command runs as the postgres
+#      OS user and ssh refuses group/world-readable keys.
+#   3. WAL_BASE_BACKUP_ENABLED=1 so the nightly backup scheduler takes the
+#      WEEKLY physical base backup PITR replay needs (postgres-backup
+#      service, same env file).
+#
+# Failure semantics: archive_command failures make postgres retry the
+# segment (built-in backpressure); pg_wal grows while retries fail and the
+# `apexmail-wal-archive` alerts in deploy/alerting-rules.yml fire. The
+# spool volume is bounded by cleanup after every confirmed offsite push.
+#
+# Validated by ci/stages/validate.sh (docker compose config -q with a
+# dummy env, base + prod + this overlay).
+# =============================================================================
+
+services:
+  postgres:
+    # entrypoint stays the image default; command replaces the bare
+    # `postgres` CMD and is exec'd THROUGH docker-entrypoint.sh so the
+    # official init path (POSTGRES_PASSWORD_FILE secret handling, initial
+    # db creation, gosu drop to the postgres user) is unchanged.
+    command:
+      - /bin/sh
+      - -c
+      - |
+        set -eu
+        # The stock postgres:16-alpine image carries neither rsync nor an
+        # ssh client; install them via the backup-egress network. A missing
+        # package mirror must NOT block the database from starting (best-
+        # effort, like the backup scheduler's apk fallback): postgres boots,
+        # archiving fails loudly and retries, and the WAL-archive alerts
+        # stay red until the tools are present.
+        if ! command -v rsync >/dev/null 2>&1 || ! command -v ssh >/dev/null 2>&1; then
+          apk add --no-cache openssh-client rsync \
+            || echo '[wal-archive] WARNING: could not install rsync/openssh-client — archive_command will fail (and retry) until they are present' >&2
+        fi
+        # archive_command runs as the postgres OS user: make the spool and
+        # the SSH material it needs readable by that user (uid 70). The key
+        # arrives root-owned under /root/.ssh (backup-service pattern);
+        # copy it into the postgres-owned wal_ssh volume with 0600.
+        mkdir -p /var/lib/postgresql/wal-spool /var/lib/postgresql/wal-ssh
+        chown postgres:postgres /var/lib/postgresql/wal-spool /var/lib/postgresql/wal-ssh
+        if [ -f /root/.ssh/id_ed25519 ]; then
+          cp /root/.ssh/id_ed25519 /var/lib/postgresql/wal-ssh/id_ed25519
+          chown postgres:postgres /var/lib/postgresql/wal-ssh/id_ed25519
+          chmod 600 /var/lib/postgresql/wal-ssh/id_ed25519
+        fi
+        if [ -f /root/.ssh/known_hosts ]; then
+          cp /root/.ssh/known_hosts /var/lib/postgresql/wal-ssh/known_hosts
+          chown postgres:postgres /var/lib/postgresql/wal-ssh/known_hosts
+        fi
+        exec docker-entrypoint.sh postgres -c archive_mode=on -c archive_command='/usr/local/bin/pg-wal-archive.sh %p %f'
+    volumes:
+      - ./deploy/hardening/scripts/pg-wal-archive.sh:/usr/local/bin/pg-wal-archive.sh:ro
+      - wal_spool:/var/lib/postgresql/wal-spool
+      - wal_ssh:/var/lib/postgresql/wal-ssh
+      # SSH key + pinned known_hosts for the WAL rsync — the SAME host-path
+      # pattern as the postgres-backup service's BACKUP_SSH_KEY_FILE mounts
+      # (read-only; host paths env-overridable). The container is
+      # read_only:true, hence the writable named volumes above.
+      - ${WAL_SSH_KEY_FILE:-/var/run/apexmail-backup-ssh/id_ed25519}:/root/.ssh/id_ed25519:ro
+      - ${WAL_SSH_KNOWN_HOSTS_FILE:-/var/run/apexmail-backup-ssh/known_hosts}:/root/.ssh/known_hosts:ro
+    environment:
+      # REQUIRED: rsync-over-ssh target for archived segments, e.g.
+      # "backup-user@offsite.example:/srv/apexmail-wal-archive". An unset
+      # value refuses to render — archiving that cannot leave the host is
+      # not durability (the archive helper itself fails closed on an empty
+      # value as well).
+      WAL_ARCHIVE_TARGET: ${WAL_ARCHIVE_TARGET:?production must define the WAL archive target when the wal-archive override is included (PITR)}
+      WAL_SPOOL_DIR: /var/lib/postgresql/wal-spool
+      WAL_SSH_KEY_FILE: /var/lib/postgresql/wal-ssh/id_ed25519
+      WAL_SSH_KNOWN_HOSTS_FILE: /var/lib/postgresql/wal-ssh/known_hosts
+      WAL_RSYNC_TIMEOUT: ${WAL_RSYNC_TIMEOUT:-120}
+    networks:
+      # The WAL rsync needs real egress: apexmail_data_internal is
+      # internal:true; this is the same dedicated bridge the backup
+      # containers use (list append — the data_internal membership from
+      # the base file is preserved).
+      - apexmail_backup_egress
+
+volumes:
+  wal_spool:
+  wal_ssh:

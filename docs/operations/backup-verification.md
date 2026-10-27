@@ -117,7 +117,10 @@ check the per-table dumps are non-empty and parseable).
 
 ## RTO/RPO Validation
 
-There is no WAL archiving or PITR — these are the honest numbers:
+There is no WAL archiving or PITR **enabled in production yet** — the
+repository ships operator-gated enablement (see
+[Disaster Recovery](disaster-recovery.md)); until the operator includes the
+override these are the honest numbers:
 
 | Metric | Reality | How validated |
 |--------|---------|---------------|

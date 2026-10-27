@@ -42,7 +42,7 @@
 
 `docker-compose.yml` (32 services): `postgres`, `redis`, `observability`, `otel-collector`, `tempo`, `tracking`, `api-server`, `enterprise`, `mta`, `worker`, `imap-server`, `outbound-mta`, `pdf-renderer`, `billing-service`, `analytics-worker`, `ai-service`, `sales-autopilot`, `compliance`, `ha`, `isolation`, `mailpit`, `clickhouse`, `prometheus`, `grafana`, `loki`, `alertmanager`, `postgres-exporter`, `redis-exporter`, `clickhouse-exporter`, `node-exporter`, `blackbox-exporter`, `synthetic-monitor`
 
-`docker-compose.prod.yml` adds 10 services: `marketing`, `nginx`, `certbot`, `migrator`, `status-server`, `mailstore`, `postgres-backup`, `clickhouse-backup`, `redis-backup`, `analytics-backup`
+`docker-compose.prod.yml` adds 11 services: `marketing`, `nginx`, `certbot`, `migrator`, `status-server`, `mailstore`, `postgres-backup`, `postgres-restore-drill`, `clickhouse-backup`, `redis-backup`, `analytics-backup`
 
 ## 4. Capability registry stages
 
@@ -99,7 +99,7 @@ Source of truth: `docs/development/capability-registry.json` (ladder: implemente
 
 ## 4b. Schema migrations
 
-`services/mail-server/migrations/`: **242 `*.sql` files**, latest `270_sales_policy_packs.sql` (regenerated as the `ls | tail`).
+`services/mail-server/migrations/`: **243 `*.sql` files**, latest `271_trust_documents_public_nda_invariant.sql` (regenerated as the `ls | tail`).
 
 `tools/migrations/`: 35 `*.sql` files.
 

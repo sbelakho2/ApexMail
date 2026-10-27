@@ -6,10 +6,14 @@
 //!      2b. Tool execution: detects tool_call blocks, executes Rust-calculated results, feeds back to LLM
 //!   3. Verifier (Rust): deterministic checks on pricing, safety, DNS, quality
 //!
-//! SM9 #7: this module is UNWIRED LIBRARY CODE, `AiPipeline` is referenced
-//! only by its own tests; no binary routes traffic through it (the live
-//! generative path is `chat.rs`). The defenses below are maintained so the
-//! module is safe to wire, not because anything currently exercises them.
+//! SM9 #7: this module's full planner→generator→verifier orchestration is
+//! UNWIRED LIBRARY CODE, `AiPipeline` is referenced only by its own tests; no
+//! binary routes traffic through it (the live generative path is `chat.rs`).
+//! The defenses below are maintained so the module is safe to wire, not
+//! because anything currently exercises them. The deterministic tool
+//! implementations (`tools.rs`) and the tool_call extraction helpers
+//! (`extract_tool_call` / `extract_tool_calls`) ARE reused: `chat.rs` runs its
+//! bounded one-round read-only tool loop on top of them.
 
 use crate::defense::{self, sanitize_input, sanitize_llm_output, ThreatLevel};
 use crate::domain_dns::DomainDnsStore;
@@ -250,14 +254,18 @@ const KNOWLEDGE_STORE: &[(&str, &str)] = &[
     ("sto", "Send-time optimization uses tenant engagement history; 24h delivery window."),
 ];
 
-fn extract_tool_call(response: &str) -> Option<crate::tools::ToolCall> {
-    if let Some(start) = response.find("tool_call") {
-        if let Some(brace) = response[start..].find('{') {
+/// Locate the first `tool_call` JSON object at or after byte offset `from`,
+/// returning the parsed call and the byte offset just past its closing brace
+/// so a caller can scan for further blocks.
+fn locate_tool_call(response: &str, from: usize) -> Option<(crate::tools::ToolCall, usize)> {
+    let rest = response.get(from..)?;
+    if let Some(start) = rest.find("tool_call") {
+        if let Some(brace) = rest[start..].find('{') {
             let json_start = start + brace;
             // Find the matching closing brace by tracking nesting depth
             let mut depth = 0u32;
             let mut json_end = json_start;
-            for (i, ch) in response[json_start..].char_indices() {
+            for (i, ch) in rest[json_start..].char_indices() {
                 match ch {
                     '{' => depth += 1,
                     '}' => {
@@ -271,12 +279,35 @@ fn extract_tool_call(response: &str) -> Option<crate::tools::ToolCall> {
                 }
             }
             if json_end > json_start {
-                let json_str = &response[json_start..=json_end];
-                return serde_json::from_str::<crate::tools::ToolCall>(json_str).ok();
+                let json_str = &rest[json_start..=json_end];
+                let call = serde_json::from_str::<crate::tools::ToolCall>(json_str).ok()?;
+                return Some((call, from + json_end + 1));
             }
         }
     }
     None
+}
+
+/// Extract the first tool_call block in a model response.
+pub(crate) fn extract_tool_call(response: &str) -> Option<crate::tools::ToolCall> {
+    locate_tool_call(response, 0).map(|(call, _)| call)
+}
+
+/// Extract EVERY tool_call block in one model response, in order, capped at
+/// `max`. Chat's bounded one-round tool execution uses this so several blocks
+/// in a single answer each get exactly one deterministic execution while the
+/// round count stays at one.
+pub(crate) fn extract_tool_calls(response: &str, max: usize) -> Vec<crate::tools::ToolCall> {
+    let mut calls = Vec::new();
+    let mut from = 0;
+    while calls.len() < max {
+        let Some((call, end)) = locate_tool_call(response, from) else {
+            break;
+        };
+        calls.push(call);
+        from = end;
+    }
+    calls
 }
 
 #[derive(Clone)]

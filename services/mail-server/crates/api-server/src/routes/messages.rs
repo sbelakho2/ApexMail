@@ -3803,6 +3803,11 @@ fn map_send_admission_error(error: SendAdmissionError) -> ApiError {
                 .map(|email| format!("recipient is suppressed: {email}"))
                 .collect(),
         ),
+        // A suppression-store hit under an explicitly classified
+        // preference-exempt send: the same validation refusal shape.
+        SendAdmissionError::RecipientSuppressed { email, reason } => {
+            ApiError::Validation(vec![format!("recipient is suppressed: {email}: {reason}")])
+        }
         SendAdmissionError::QuotaExceeded => {
             ApiError::Forbidden(QUOTA_EXCEEDED_MESSAGE.to_string())
         }
@@ -5768,6 +5773,27 @@ Bcc: victim@example.com"@example.com"#
             ApiError::Validation(errors) => {
                 assert_eq!(errors, vec!["recipient is suppressed: blocked@example.com"]);
             }
+            other => panic!("expected Validation, got {other:?}"),
+        }
+    }
+
+    /// A suppression-store hit under an explicitly classified
+    /// preference-exempt send (the reply-release gate's variant) maps to the
+    /// same validation shape, with the store's reason carried through.
+    #[test]
+    fn recipient_suppressed_admission_maps_to_the_validation_message() {
+        let error = map_send_admission_error(SendAdmissionError::RecipientSuppressed {
+            email: "bounced@example.com".into(),
+            reason: "recipient is in suppression list: hard bounce".into(),
+        });
+        match error {
+            ApiError::Validation(errors) => assert_eq!(
+                errors,
+                vec![
+                    "recipient is suppressed: bounced@example.com: \
+                     recipient is in suppression list: hard bounce"
+                ]
+            ),
             other => panic!("expected Validation, got {other:?}"),
         }
     }

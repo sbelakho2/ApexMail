@@ -1813,6 +1813,11 @@ impl AutomationExecutor {
             Err(SendAdmissionError::Suppressed(_)) => {
                 return ActionRecord::skipped("suppressed_recipient");
             }
+            // A suppression-store hit under an explicitly classified
+            // preference-exempt send: the same terminal suppression skip.
+            Err(SendAdmissionError::RecipientSuppressed { .. }) => {
+                return ActionRecord::skipped("suppressed_recipient");
+            }
             Err(SendAdmissionError::InvalidCategory { .. }) => {
                 // Server-owned constant failed validation: a programming
                 // error. Terminal, loud, never a retry loop.

@@ -1,7 +1,6 @@
 {
   "currency_symbol": "€",
   "currency_code": "EUR",
-  "ip_cost": 30,
   "plans": [
     {
       "id": "free",

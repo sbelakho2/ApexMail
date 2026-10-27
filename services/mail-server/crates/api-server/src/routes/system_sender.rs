@@ -768,58 +768,129 @@ pub(crate) async fn queue_system_email_in_transaction(
     tags: Vec<String>,
     priority: i32,
 ) -> Result<Uuid, ApiError> {
+    queue_system_email_in_transaction_with_category(
+        tx,
+        recipient,
+        subject,
+        html_body,
+        text_body,
+        tags,
+        priority,
+        // The documented legacy bucket: exactly what the
+        // `email_queue.message_category` schema default fills in today
+        // (migration 187), now written EXPLICITLY so no queue row's class is
+        // decided by a column default. Send paths with a narrower class (the
+        // AI-reply release: service correspondence) use
+        // [`queue_system_email_in_transaction_with_category`] directly.
+        apexmail_lib::email_headers::message_category::MARKETING,
+    )
+    .await
+}
+
+/// [`queue_system_email_in_transaction`] with the message's delivery class
+/// written EXPLICITLY into `messages.message_category` and
+/// `email_queue.message_category` (fourth external audit, P0 release
+/// semantics): the class decides the dispatch-time consent regime, so it is
+/// a server-owned constant on the row, never a schema default. `category`
+/// must be a canonical, normalized category
+/// (`apexmail_lib::email_headers::message_category` constant or
+/// `validate` output).
+pub(crate) async fn queue_system_email_in_transaction_with_category(
+    tx: &mut sqlx::Transaction<'_, Postgres>,
+    recipient: &str,
+    subject: &str,
+    html_body: &str,
+    text_body: &str,
+    tags: Vec<String>,
+    priority: i32,
+    category: &str,
+) -> Result<Uuid, ApiError> {
+    let category =
+        apexmail_lib::email_headers::message_category::validate(category).ok_or_else(|| {
+            ApiError::Internal("system email refused: invalid message category".into())
+        })?;
     refuse_empty_presentation(html_body, text_body)?;
     let sender = fetch_system_sender(&mut **tx, true).await?;
     let message_id = Uuid::new_v4();
     let now = chrono::Utc::now();
 
-    sqlx::query(
-        "INSERT INTO messages (id, tenant_id, from_email, to_emails, subject, html_body, text_body, status, tags, created_at) \
-         VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7, 'queued', $8::jsonb, NOW())",
-    )
-    .bind(message_id)
-    .bind(SYSTEM_TENANT_ID)
-    .bind(SYSTEM_FROM_ADDRESS)
-    .bind(serde_json::json!([recipient]))
-    .bind(subject)
-    .bind(html_body)
-    .bind(text_body)
-    .bind(serde_json::json!(tags))
-    .execute(&mut **tx)
-    .await?;
+    sqlx::query(QUEUE_MESSAGES_INSERT_SQL)
+        .bind(message_id)
+        .bind(SYSTEM_TENANT_ID)
+        .bind(SYSTEM_FROM_ADDRESS)
+        .bind(serde_json::json!([recipient]))
+        .bind(subject)
+        .bind(html_body)
+        .bind(text_body)
+        .bind(&category)
+        .bind(serde_json::json!(tags))
+        .execute(&mut **tx)
+        .await?;
 
-    sqlx::query(
-        "INSERT INTO email_queue (\
-            id, message_id, tenant_id, domain_id, from_address, to_addresses, subject, \
-            \"from\", \"to\", html, text, tags, metadata, scheduled_at, priority, status, created_at, updated_at\
-         ) VALUES (\
-            $1, $2, $3, $4::uuid, $5, ARRAY[$6], $7, \
-            $5, $6, $8, $9, $10, $11, $12, $14, 'pending', $13, $13\
-         )",
-    )
-    .bind(Uuid::new_v4())
-    .bind(message_id)
-    .bind(SYSTEM_TENANT_ID)
-    .bind(&sender.id)
-    .bind(SYSTEM_FROM_ADDRESS)
-    .bind(recipient)
-    .bind(subject)
-    .bind(html_body)
-    .bind(text_body)
-    .bind(tags)
-    .bind(Option::<serde_json::Value>::None)
-    .bind(Option::<chrono::DateTime<chrono::Utc>>::None)
-    .bind(now)
-    .bind(priority)
-    .execute(&mut **tx)
-    .await?;
+    sqlx::query(QUEUE_EMAIL_QUEUE_INSERT_SQL)
+        .bind(Uuid::new_v4())
+        .bind(message_id)
+        .bind(SYSTEM_TENANT_ID)
+        .bind(&sender.id)
+        .bind(SYSTEM_FROM_ADDRESS)
+        .bind(recipient)
+        .bind(subject)
+        .bind(html_body)
+        .bind(text_body)
+        .bind(tags)
+        .bind(Option::<serde_json::Value>::None)
+        .bind(&category)
+        .bind(Option::<chrono::DateTime<chrono::Utc>>::None)
+        .bind(now)
+        .bind(priority)
+        .execute(&mut **tx)
+        .await?;
 
     Ok(message_id)
 }
 
+/// The `messages` half of the platform queue write. `message_category` is a
+/// bound parameter ($8): the row's delivery class is written EXPLICITLY,
+/// never left to the schema default (fourth external audit, P0).
+const QUEUE_MESSAGES_INSERT_SQL: &str = "INSERT INTO messages (id, tenant_id, from_email, to_emails, subject, html_body, text_body, message_category, status, tags, created_at) \
+     VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7, $8, 'queued', $9::jsonb, NOW())";
+
+/// The `email_queue` half of the platform queue write. `message_category` is
+/// bound parameter $12; scheduled_at $13, created/updated $14, priority $15.
+const QUEUE_EMAIL_QUEUE_INSERT_SQL: &str = "INSERT INTO email_queue (\
+    id, message_id, tenant_id, domain_id, from_address, to_addresses, subject, \
+    \"from\", \"to\", html, text, tags, metadata, message_category, scheduled_at, priority, status, created_at, updated_at\
+ ) VALUES (\
+    $1, $2, $3, $4::uuid, $5, ARRAY[$6], $7, \
+    $5, $6, $8, $9, $10, $11, $12, $13, $15, 'pending', $14, $14\
+ )";
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The queue write names the delivery class EXPLICITLY on BOTH rows
+    /// (fourth external audit, P0 release semantics): no platform-sent mail
+    /// may inherit `email_queue.message_category`'s 'marketing' schema
+    /// default, because the class decides the dispatch-time consent regime.
+    #[test]
+    fn queue_statements_write_the_message_category_explicitly() {
+        for sql in [QUEUE_MESSAGES_INSERT_SQL, QUEUE_EMAIL_QUEUE_INSERT_SQL] {
+            assert!(
+                sql.contains("message_category"),
+                "queue statement must write the category explicitly: {sql}"
+            );
+        }
+        // The legacy path's default is the documented non-exempt bucket: the
+        // exact value the schema default fills in today, now explicit.
+        assert_eq!(
+            apexmail_lib::email_headers::message_category::MARKETING,
+            "marketing"
+        );
+        // The category parameter is validated through the shared helper: a
+        // malformed category can never reach a queue row.
+        assert!(apexmail_lib::email_headers::message_category::validate("service").is_some());
+    }
 
     #[test]
     fn platform_sender_identity_is_consistent() {

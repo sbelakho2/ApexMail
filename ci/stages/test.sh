@@ -391,7 +391,16 @@ run_coverage_gate() {
     # and the baseline calibration happens on a host with the headroom.
     _cov_free_g=$(df -Pk "$RUN_DIR" 2>/dev/null | awk 'NR==2 {print int($4/1024/1024)}' || echo 0)
     if [ "${_cov_free_g:-0}" -lt 150 ]; then
+        # External audit 2026-10-27 (item 6): a supposedly mandatory release
+        # gate must not become optional because the machine is undersized.
+        # Default stays skip-loud for developer hosts; a release run sets
+        # CI_COVERAGE_DISK_REQUIRED=1 and the missing headroom FAILS the
+        # lane instead of silently downgrading coverage evidence.
         ci_warn "coverage gate SKIPPED: the instrumented pass needs ~86G of scratch tree PLUS its own ephemeral-Postgres peak (~45G) on top of the warm debug target; ${_cov_free_g}G free — reclaim space and re-run (ci/README.md, CI_COVERAGE_CHECK)"
+        if [ "${CI_COVERAGE_DISK_REQUIRED:-0}" = "1" ]; then
+            ci_err "CI_COVERAGE_DISK_REQUIRED=1: refusing to return OK without running the coverage gate (${_cov_free_g}G free < 150G)"
+            return 1
+        fi
         return "$CI_EXIT_OK"
     fi
     ci_info "running cargo llvm-cov nextest --workspace ($(printf '%s' "$_TEST_ENV" | tr ' ' ','))"

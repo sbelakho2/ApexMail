@@ -260,10 +260,13 @@ which is marked as such).
       WHERE c.relname IN ('email_queue_pkey', 'mail_messages_pkey');"
    ```
 
-3. **Restore from backup (PITR):**
+3. **Restore from backup (the logical dump path):**
    Decrypt + restore the newest encrypted dump taken before the corruption
    window (backups live in the `postgres_backups` volume, produced by
-   deploy/hardening/scripts/postgres-backup-encrypt.sh):
+   deploy/hardening/scripts/postgres-backup-encrypt.sh). With WAL archiving
+   on and a specific timestamp needed rather than the newest dump, run
+   deploy/hardening/scripts/pg-pitr-restore.sh instead (the point-in-time
+   recovery section of docs/operations/disaster-recovery.md):
    ```bash
    cd /opt/apexmail
    docker compose -f docker-compose.yml -f docker-compose.prod.yml exec postgres-backup sh -c \
@@ -315,12 +318,14 @@ which is marked as such).
    ```
 
 5. **Re-enable WAL archiving if disabled:**
-   ```bash
-   docker compose -f docker-compose.yml -f docker-compose.prod.yml exec postgres psql -U postgres -c \
-     "ALTER SYSTEM SET archive_mode = 'on';
-      ALTER SYSTEM SET archive_command = 'cp %p /wal-archive/%f';
-      SELECT pg_reload_conf();"
-   ```
+   With the wal-archive override in use, archiving settings are
+   compose-managed: deploy/docker-compose.wal-archive.yml passes
+   archive_mode and archive_command on the postgres command line. Re-create
+   the postgres container with that override rather than reloading a value
+   set through psql, which the next container recreate would discard
+   anyway; then confirm `archived_count` rises while `failed_count` stays
+   flat (query in the enablement checklist of
+   docs/operations/disaster-recovery.md).
 
 ## Post-Recovery Verification
 

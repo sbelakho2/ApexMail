@@ -22,6 +22,16 @@
 # FAILS (fail-closed; the TOM promises encrypted backups). Development can
 # opt into the old behaviour with ALLOW_UNENCRYPTED_BACKUPS=true.
 #
+# Weekly PHYSICAL base backup (PITR enablement, external audit 2026-10-26):
+# when WAL_BASE_BACKUP_ENABLED is truthy the scheduler additionally takes a
+# plain `pg_basebackup -F tar -z` once a week into ${BACKUP_DIR}/wal-base/
+# (2-generation retention). This is deliberately NOT the logical envelope —
+# PITR replay needs a physical base plus the archived WAL segments (see
+# pg-wal-archive.sh + deploy/docker-compose.wal-archive.yml + pg-pitr-restore.sh).
+# The nightly logical dumps are untouched and remain the recovery path this
+# script is built around; a base-backup failure is LOUD but never blocks or
+# degrades the nightly dump.
+#
 # Wired into the postgres-backup service in docker-compose.prod.yml.
 # =============================================================================
 
@@ -51,6 +61,21 @@ POSTGRES_DB="${POSTGRES_DB:-apexmail}"
 POSTGRES_USER="${POSTGRES_USER:-apexmail}"
 POSTGRES_PASSWORD_FILE="${POSTGRES_PASSWORD_FILE:-/run/secrets/postgres_password}"
 BACKUP_TARGET="${BACKUP_TARGET:-}"
+
+# ── Weekly physical base backup (PITR) — OFF until the operator turns it on ──
+# The gate stays closed by default: a physical base backup is only useful
+# together with WAL archiving (deploy/docker-compose.wal-archive.yml sets
+# archive_mode=on + WAL_ARCHIVE_TARGET), so enabling this before archiving
+# would burn I/O for nothing. The operator sets both in the deployment env.
+WAL_BASE_BACKUP_ENABLED="${WAL_BASE_BACKUP_ENABLED:-}"
+WAL_BASE_KEEP_GENERATIONS="${WAL_BASE_KEEP_GENERATIONS:-2}"
+WAL_BASE_INTERVAL_SECS="${WAL_BASE_INTERVAL_SECS:-604800}"
+case "$WAL_BASE_KEEP_GENERATIONS" in
+    ''|*[!0-9]*) WAL_BASE_KEEP_GENERATIONS=2 ;;
+esac
+case "$WAL_BASE_INTERVAL_SECS" in
+    ''|*[!0-9]*) WAL_BASE_INTERVAL_SECS=604800 ;;
+esac
 
 # Daily backup schedule (informational; the loop below sleeps 24h).
 SCHEDULE="${SCHEDULE:-@daily}"
@@ -177,6 +202,264 @@ offsite_copy() {
     fi
     err "offsite rsync to ${BACKUP_TARGET} failed (exit $?) — $(basename "$newest") is LOCAL-ONLY"
     return 1
+}
+
+# ── Weekly physical base backup (PITR) ───────────────────────────────────────
+# A physical base backup is the anchor PITR replays archived WAL against;
+# it is plain `pg_basebackup -F tar -z` output (base.tar.gz + pg_wal.tar.gz),
+# NOT the logical envelope — pg_recovery cannot replay into a pg_dump.
+# Artifacts: ${BACKUP_DIR}/wal-base/apexmail-wal-base-<ts>.tar.gz and
+# apexmail-wal-base-<ts>.pg_wal.tar.gz (paired by the shared timestamp).
+#
+# Cadence: WAL_BASE_INTERVAL_SECS (default 7d) measured against a stamp file
+# written ONLY after a fully successful run (artifact + offsite mirror), so
+# a failed mirror retries on the next scheduler pass instead of leaving a
+# week-old local-only base behind. The mirror itself reuses BACKUP_TARGET
+# (rsync over ssh, same key/known_hosts mounts as the nightly dump): a
+# same-host-only base backup is not durability, exactly like the dumps.
+# The nightly logical path is NEVER gated on this — failures are loud errors
+# and nothing more (see maybe_wal_base_backup callers in the main loop).
+
+# wal_file_epoch <file> — mtime as epoch; GNU stat first, then BSD, else 0.
+wal_file_epoch() {
+    stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null || printf '0\n'
+}
+
+# wal_base_due <now-epoch> — gate + cadence decision (pure; self-testable).
+wal_base_due() {
+    _wbd_now=$1
+    [ -n "$WAL_BASE_BACKUP_ENABLED" ] && [ "$WAL_BASE_BACKUP_ENABLED" != "0" ] && [ "$WAL_BASE_BACKUP_ENABLED" != "false" ] || return 1
+    _wbd_stamp="${BACKUP_DIR}/wal-base/.last_base_backup"
+    if [ ! -f "$_wbd_stamp" ]; then
+        return 0
+    fi
+    _wbd_last=$(wal_file_epoch "$_wbd_stamp")
+    [ "$((_wbd_now - _wbd_last))" -ge "$WAL_BASE_INTERVAL_SECS" ] || return 1
+    return 0
+}
+
+# wal_base_artifacts — newest-first list of the base backup tars, one per
+# line, with the .pg_wal.tar.gz siblings excluded (a case filter, not an
+# ls|grep pipe: the static-lint gate runs shellcheck -S warning over this
+# file, and the loop keeps the gate clean while the glob stays simple).
+wal_base_artifacts() {
+    ls -1t "${BACKUP_DIR}"/wal-base/apexmail-wal-base-*.tar.gz 2>/dev/null \
+        | while IFS= read -r _wba; do
+            case $_wba in
+                *.pg_wal.tar.gz) ;;
+                *) printf '%s\n' "$_wba" ;;
+            esac
+        done
+}
+
+# plan_wal_base_retention — prints the base artifacts beyond the newest
+# WAL_BASE_KEEP_GENERATIONS generations (the .pg_wal.tar.gz sibling of each
+# printed base is implied). Prints, removes nothing: cleanup_wal_base owns
+# removal, mirroring plan_retention/cleanup_old_backups.
+plan_wal_base_retention() {
+    wal_base_artifacts | tail -n +"$((WAL_BASE_KEEP_GENERATIONS + 1))" 2>/dev/null || true
+}
+
+cleanup_wal_base() {
+    plan_wal_base_retention | while IFS= read -r _cwb_old; do
+        [ -n "$_cwb_old" ] || continue
+        rm -f "$_cwb_old" "${_cwb_old%.tar.gz}.pg_wal.tar.gz"
+        log "wal-base retention: removed $(basename "$_cwb_old") (+ pg_wal sibling), keeping ${WAL_BASE_KEEP_GENERATIONS} generations"
+    done
+}
+
+# run_wal_base_backup <now-epoch> — one weekly attempt. Returns non-zero on
+# any failure WITHOUT touching the nightly logical path.
+run_wal_base_backup() {
+    _wb_now=$1
+    _wb_ts="$(date -u +%Y%m%d-%H%M%S)"
+    _wb_dir="${BACKUP_DIR}/wal-base"
+    _wb_spool="$(mktemp -d "${TMPDIR:-/tmp}/apexmail-wal-base-${_wb_ts}.XXXXXX")"
+
+    if [ -f "$POSTGRES_PASSWORD_FILE" ]; then
+        PGPASSWORD="$(tr -d '\r\n' < "$POSTGRES_PASSWORD_FILE")"
+        export PGPASSWORD
+    fi
+
+    log "wal-base: starting PHYSICAL base backup of ${POSTGRES_DB}@${POSTGRES_HOST} (pg_basebackup -F tar -z)"
+    if ! command -v pg_basebackup >/dev/null 2>&1; then
+        err "pg_basebackup not available — physical base backup skipped (the postgres-backup image bakes it in; this container is misbuilt)"
+        rm -rf "$_wb_spool"
+        return 1
+    fi
+    # -F tar -z: base.tar.gz + pg_wal.tar.gz in the -D directory. -X stream
+    # carries the WAL needed for a consistent restore inside the artifacts
+    # (no second connection to pg_wal required at unpack time).
+    if pg_basebackup -h "$POSTGRES_HOST" -U "$POSTGRES_USER" \
+            -D "$_wb_spool" -F tar -z -X stream -c fast \
+            --label="apexmail-wal-base-${_wb_ts}" \
+            2>/tmp/apexmail-wal-base.err; then
+        :
+    else
+        rc=$?
+        err "pg_basebackup failed (exit ${rc}); stderr follows:"
+        sed 's/^/  /' /tmp/apexmail-wal-base.err >&2 || true
+        rm -rf "$_wb_spool" /tmp/apexmail-wal-base.err
+        unset PGPASSWORD || true
+        return 1
+    fi
+    rm -f /tmp/apexmail-wal-base.err
+    unset PGPASSWORD || true
+
+    if [ ! -s "$_wb_spool/base.tar.gz" ]; then
+        err "pg_basebackup produced no base.tar.gz — physical base backup aborted"
+        rm -rf "$_wb_spool"
+        return 1
+    fi
+
+    mkdir -p "$_wb_dir"
+    chmod 700 "$_wb_dir" 2>/dev/null || true
+    mv "$_wb_spool/base.tar.gz" "${_wb_dir}/apexmail-wal-base-${_wb_ts}.tar.gz"
+    if [ -f "$_wb_spool/pg_wal.tar.gz" ]; then
+        mv "$_wb_spool/pg_wal.tar.gz" "${_wb_dir}/apexmail-wal-base-${_wb_ts}.pg_wal.tar.gz"
+    fi
+    rmdir "$_wb_spool" 2>/dev/null || rm -rf "$_wb_spool"
+    log "wal-base: physical base backup complete: $(du -h "${_wb_dir}/apexmail-wal-base-${_wb_ts}.tar.gz" 2>/dev/null | cut -f1) apexmail-wal-base-${_wb_ts}.tar.gz"
+
+    # Offsite mirror — mandatory like the nightly dumps. The cadence stamp
+    # is only written after this succeeds, so a failed mirror retries.
+    if [ -z "$BACKUP_TARGET" ]; then
+        err "BACKUP_TARGET is not set — wal-base artifact apexmail-wal-base-${_wb_ts}.tar.gz exists only on this host; NOT stamped (will retry)"
+        return 1
+    fi
+    if rsync -a "$_wb_dir/" "$BACKUP_TARGET/wal-base/"; then
+        log "wal-base: offsite mirror OK -> ${BACKUP_TARGET}/wal-base/"
+    else
+        rc=$?
+        err "wal-base offsite rsync to ${BACKUP_TARGET}/wal-base/ failed (exit ${rc}) — apexmail-wal-base-${_wb_ts}.tar.gz is LOCAL-ONLY; NOT stamped (will retry)"
+        return 1
+    fi
+
+    # Full success: stamp the cadence (mtime is what wal_base_due reads)
+    # and bound the local generations.
+    : > "${_wb_dir}/.last_base_backup"
+    cleanup_wal_base
+    return 0
+}
+
+# maybe_wal_base_backup — the scheduler entry point: gate + cadence, then one
+# weekly attempt. Never fatal for the caller (the nightly dumps continue).
+maybe_wal_base_backup() {
+    if ! wal_base_due "$(date -u +%s)"; then
+        return 0
+    fi
+    if ! run_wal_base_backup "$(date -u +%s)"; then
+        err "weekly physical base backup FAILED — nightly dumps continue unaffected; PITR anchor is stale until this succeeds"
+        return 1
+    fi
+    return 0
+}
+
+# ── Physical-base-backup self-test (--self-test-wal-base) ────────────────────
+# Proves the gate (OFF by default), the cadence decision against a pinned
+# clock, the artifact naming/pairing + offsite mirror + retention using a
+# STUB pg_basebackup on PATH (real pg_basebackup runs only against a live
+# server — production or a drill; stated honestly in the output), and that
+# the nightly logical retention planner is untouched by all of it.
+wal_base_self_test() {
+    _st_fail=0
+    _st_tmp=$(mktemp -d "${TMPDIR:-/tmp}/apexmail-wal-base-test.XXXXXX") || return 1
+    _sv_dir=$BACKUP_DIR _sv_target=$BACKUP_TARGET _sv_gate=$WAL_BASE_BACKUP_ENABLED
+    _sv_path=$PATH _sv_keep=$WAL_BASE_KEEP_GENERATIONS _sv_int=$WAL_BASE_INTERVAL_SECS
+
+    # 1. Default OFF: gate closed, run is a no-op even without any stamp.
+    BACKUP_DIR=$_st_tmp BACKUP_TARGET=$_st_tmp/offsite WAL_BASE_BACKUP_ENABLED=
+    if wal_base_due 1000000000; then
+        echo "[wal-base] self-test FAILED: gate must be CLOSED by default" >&2
+        _st_fail=1
+    fi
+
+    # 2. Enabled + no stamp: due. A stub pg_basebackup "takes" the backup;
+    #    artifacts must appear (named + pg_wal sibling), the offsite mirror
+    #    must receive them, and the cadence stamp must be written.
+    WAL_BASE_BACKUP_ENABLED=1
+    mkdir -p "$_st_tmp/offsite" "$_st_tmp/bin"
+    { printf '#!/bin/sh\n'
+      printf 'dir=""\n'
+      printf 'while [ $# -gt 0 ]; do case $1 in -D) dir=$2; shift 2;; *) shift;; esac; done\n'
+      printf 'printf fake-base > "$dir/base.tar.gz"\n'
+      printf 'printf fake-wal > "$dir/pg_wal.tar.gz"\n' ; } > "$_st_tmp/bin/pg_basebackup"
+    chmod +x "$_st_tmp/bin/pg_basebackup"
+    PATH="$_st_tmp/bin:$PATH"
+    export PATH
+    if ! wal_base_due 1000000000; then
+        echo "[wal-base] self-test FAILED: enabled + no stamp must be DUE" >&2
+        _st_fail=1
+    fi
+    if ! run_wal_base_backup 1000000000; then
+        echo "[wal-base] self-test FAILED: run_wal_base_backup with a stub pg_basebackup errored" >&2
+        _st_fail=1
+    else
+        _st_base=$(wal_base_artifacts | head -n 1)
+        [ -n "$_st_base" ] || { echo "[wal-base] self-test FAILED: no base artifact produced" >&2; _st_fail=1; }
+        [ -f "${_st_base%.tar.gz}.pg_wal.tar.gz" ] || { echo "[wal-base] self-test FAILED: pg_wal sibling missing" >&2; _st_fail=1; }
+        _st_base_name=${_st_base##*/}
+        [ -f "$_st_tmp/offsite/wal-base/$_st_base_name" ] || { echo "[wal-base] self-test FAILED: base artifact not mirrored offsite" >&2; _st_fail=1; }
+        [ -f "$_st_tmp/wal-base/.last_base_backup" ] || { echo "[wal-base] self-test FAILED: cadence stamp not written on success" >&2; _st_fail=1; }
+    fi
+
+    # 3. Fresh stamp: NOT due (cadence honored) — the stamp written by the
+    #    successful run in step 2 carries a current mtime, and the decision
+    #    clock is the same real clock.
+    if wal_base_due "$(date -u +%s)"; then
+        echo "[wal-base] self-test FAILED: fresh stamp must not be due" >&2
+        _st_fail=1
+    fi
+    #    ... but due again once the interval has elapsed: pin the stamp to a
+    #    week-old mtime and keep the default 7d interval.
+    WAL_BASE_INTERVAL_SECS=$_sv_int
+    touch -t 202601010000 "$_st_tmp/wal-base/.last_base_backup" 2>/dev/null || true
+    if ! wal_base_due "$(date -u +%s)"; then
+        echo "[wal-base] self-test FAILED: week-old stamp (past interval) must be due" >&2
+        _st_fail=1
+    fi
+
+    # 4. Retention keeps the newest WAL_BASE_KEEP_GENERATIONS and removes
+    #    each dropped generation's pg_wal sibling with it. Three fabricated
+    #    generations (+ the real one from step 2) with PINNED mtimes make
+    #    the newest-first ordering deterministic.
+    WAL_BASE_KEEP_GENERATIONS=2
+    for _st_gen in 20261001-000000 20260915-000000 20260801-000000; do
+        : > "$_st_tmp/wal-base/apexmail-wal-base-${_st_gen}.tar.gz"
+        : > "$_st_tmp/wal-base/apexmail-wal-base-${_st_gen}.pg_wal.tar.gz"
+        touch -t "${_st_gen%-*}0000" "$_st_tmp/wal-base/apexmail-wal-base-${_st_gen}.tar.gz" \
+            "$_st_tmp/wal-base/apexmail-wal-base-${_st_gen}.pg_wal.tar.gz" 2>/dev/null || true
+    done
+    cleanup_wal_base
+    _st_left=$(wal_base_artifacts | wc -l | tr -d ' ')
+    [ "$_st_left" -eq 2 ] || { echo "[wal-base] self-test FAILED: retention left $_st_left base generations, expected 2" >&2; _st_fail=1; }
+    [ -f "$_st_tmp/wal-base/apexmail-wal-base-20261001-000000.tar.gz" ] || { echo "[wal-base] self-test FAILED: retention dropped a generation it must keep" >&2; _st_fail=1; }
+    [ ! -f "$_st_tmp/wal-base/apexmail-wal-base-20260915-000000.tar.gz" ] || { echo "[wal-base] self-test FAILED: retention kept an over-age generation" >&2; _st_fail=1; }
+    [ ! -f "$_st_tmp/wal-base/apexmail-wal-base-20260801-000000.tar.gz" ] || { echo "[wal-base] self-test FAILED: retention kept an over-age generation" >&2; _st_fail=1; }
+    [ ! -f "$_st_tmp/wal-base/apexmail-wal-base-20260915-000000.pg_wal.tar.gz" ] || { echo "[wal-base] self-test FAILED: retention left the pg_wal sibling behind" >&2; _st_fail=1; }
+    [ ! -f "$_st_tmp/wal-base/apexmail-wal-base-20260801-000000.pg_wal.tar.gz" ] || { echo "[wal-base] self-test FAILED: retention left the pg_wal sibling behind" >&2; _st_fail=1; }
+
+    # 5. Failed mirror does NOT stamp (retries next pass): stub backup
+    #    against a broken target must keep the stamp untouched.
+    WAL_BASE_BACKUP_ENABLED=1
+    rm -f "$_st_tmp/wal-base/.last_base_backup"
+    BACKUP_TARGET=$_st_tmp/missing-parent/deeper
+    if run_wal_base_backup 1000000000; then
+        echo "[wal-base] self-test FAILED: broken offsite target must fail the run" >&2
+        _st_fail=1
+    fi
+    [ ! -f "$_st_tmp/wal-base/.last_base_backup" ] || { echo "[wal-base] self-test FAILED: failed mirror must not write the cadence stamp" >&2; _st_fail=1; }
+
+    BACKUP_DIR=$_sv_dir BACKUP_TARGET=$_sv_target WAL_BASE_BACKUP_ENABLED=$_sv_gate
+    WAL_BASE_KEEP_GENERATIONS=$_sv_keep WAL_BASE_INTERVAL_SECS=$_sv_int
+    PATH=$_sv_path
+    rm -rf "$_st_tmp"
+    if [ "$_st_fail" -ne 0 ]; then
+        echo "[wal-base] self-test FAILED" >&2
+        return 1
+    fi
+    echo "[wal-base] self-test OK: default-off gate, pinned-clock cadence, artifact naming + pg_wal pairing, offsite mirror, no-stamp-on-failure, ${WAL_BASE_KEEP_GENERATIONS}-generation retention (STUB pg_basebackup — the real binary is exercised only against a live server in production/drills)"
+    return 0
 }
 
 # Count-based retention: keep the newest BACKUP_KEEP_COUNT encrypted backups.
@@ -468,6 +751,10 @@ if [ "${1:-}" = "--self-test-retention" ]; then
     retention_self_test
     exit $?
 fi
+if [ "${1:-}" = "--self-test-wal-base" ]; then
+    wal_base_self_test
+    exit $?
+fi
 if [ "${1:-}" = "--dry-run" ] || [ "${1:-}" = "-n" ]; then
     dry_run_check
 fi
@@ -478,9 +765,13 @@ chmod 700 "$BACKUP_DIR"
 
 perform_backup
 cleanup_old_backups
+# Weekly physical base backup (PITR anchor): OFF until WAL_BASE_BACKUP_ENABLED
+# is set; a failure is loud but NEVER blocks or degrades the nightly dumps.
+maybe_wal_base_backup || err "continuing with the nightly logical schedule (wal-base retry on the next pass)"
 
 while true; do
     sleep 86400
     perform_backup
     cleanup_old_backups
+    maybe_wal_base_backup || err "continuing with the nightly logical schedule (wal-base retry on the next pass)"
 done

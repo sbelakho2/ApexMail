@@ -49,6 +49,10 @@ pub mod legal_policy;
 pub mod outcome_projector;
 pub mod personalization;
 pub mod policy_packs;
+/// Inbound purpose/risk/delivery-class taxonomy and the deterministic reply
+/// release policy (fourth external audit, Tier-1 item 6 and the P0 release
+/// semantics finding).
+pub mod purpose;
 pub mod reply_autosend;
 pub mod research;
 pub mod routes;

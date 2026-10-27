@@ -218,6 +218,13 @@ pub enum SendAdmissionError {
     /// marketing mail without a completed consent check.
     #[error("consent lookup unavailable: {0}")]
     ConsentUnavailable(String),
+
+    /// The recipient is on a canonical suppression store (the tenant
+    /// suppression list or the platform bounce/complaint list). Applies to
+    /// EVERY delivery class, preference-exempt included: a suppressed
+    /// recipient is never mailed, service correspondence included.
+    #[error("recipient is suppressed: {email}: {reason}")]
+    RecipientSuppressed { email: String, reason: String },
 }
 
 /// The metering layer this service orchestrates.
@@ -782,6 +789,62 @@ impl SendAdmissionService {
                 Some(SendDecision::Blocked(reason))
                 | Some(SendDecision::RequiresConfirmation(reason)) => {
                     return Err(SendAdmissionError::ConsentRefused {
+                        email,
+                        reason: reason.clone(),
+                    });
+                }
+                // A backend that returned no decision for a requested address
+                // must fail closed: silence is not consent.
+                None => {
+                    return Err(SendAdmissionError::ConsentUnavailable(format!(
+                        "no consent decision returned for {email}"
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Send admission for an EXPLICITLY CLASSIFIED delivery class (fourth
+    /// external audit, P0 release-semantics finding): preference-exempt
+    /// categories (service/transactional correspondence, a reply to an
+    /// inbound message) keep the FULL suppression probe, the same two
+    /// canonical stores (`suppressions` plus the platform bounce/complaint
+    /// `suppression_list`) the marketing path probes, and lose ONLY the
+    /// marketing-consent requirement; every other category runs
+    /// [`Self::enforce_consent`] unchanged. A suppressed recipient is refused
+    /// with [`SendAdmissionError::RecipientSuppressed`] whatever the class,
+    /// and an unavailable suppression/consent store fails closed.
+    ///
+    /// `category` must already be normalized (see [`normalize_category`]).
+    pub async fn enforce_consent_for_class(
+        &self,
+        tenant_id: &str,
+        recipients: &[String],
+        category: &str,
+    ) -> Result<(), SendAdmissionError> {
+        if !message_category::is_preference_exempt(category) {
+            return self.enforce_consent(tenant_id, recipients, category).await;
+        }
+
+        // Preference-exempt class: the transactional arm of the canonical
+        // decision skips the marketing-consent lookup and keeps the
+        // suppression verdicts (both stores, with their reasons).
+        let canonical: Vec<String> = recipients
+            .iter()
+            .map(|recipient| canonical_recipient(recipient))
+            .collect();
+        let decisions = self
+            .backend
+            .consent_decisions(tenant_id, &canonical, true)
+            .await
+            .map_err(SendAdmissionError::ConsentUnavailable)?;
+        for email in canonical {
+            match decisions.get(&email) {
+                Some(SendDecision::Allowed) => {}
+                Some(SendDecision::Blocked(reason))
+                | Some(SendDecision::RequiresConfirmation(reason)) => {
+                    return Err(SendAdmissionError::RecipientSuppressed {
                         email,
                         reason: reason.clone(),
                     });
@@ -1712,6 +1775,199 @@ mod tests {
             .enforce_consent(TENANT, &recipients, "newsletter")
             .await
             .is_err());
+    }
+
+    /// The explicitly-classified delivery class gate (fourth external audit,
+    /// P0): a preference-exempt class (an approved AI reply is SERVICE
+    /// correspondence) must NOT be gated on marketing consent, while the
+    /// marketing class keeps the consent gate exactly as before. Suppression
+    /// applies to BOTH.
+    #[tokio::test]
+    async fn service_class_skips_marketing_consent_but_marketing_does_not() {
+        let (service, backend) = service(10);
+        backend.enforce_consent();
+
+        // No consent record anywhere: the service class passes (the recipient
+        // emailed first), the marketing class is refused with the named
+        // reason. The fourth-audit release-semantics contract, pinned at the
+        // gate level.
+        let recipients = recipients(&["never-opted-in@example.com"]);
+        service
+            .enforce_consent_for_class(TENANT, &recipients, "service")
+            .await
+            .expect("service correspondence is not marketing-consent gated");
+        service
+            .enforce_consent_for_class(TENANT, &recipients, "transactional")
+            .await
+            .expect("transactional correspondence is not marketing-consent gated");
+        let error = service
+            .enforce_consent_for_class(TENANT, &recipients, "marketing")
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, SendAdmissionError::ConsentRefused { .. }),
+            "the marketing class keeps its consent gate: {error:?}"
+        );
+    }
+
+    /// A suppressed recipient is refused under a preference-exempt class with
+    /// the typed suppression error, through a backend that models the
+    /// production `consent_decisions` override (transactional arm skips the
+    /// consent lookup, the suppression stores still block).
+    #[tokio::test]
+    async fn suppressed_recipient_is_refused_under_a_service_class() {
+        struct SuppressionBackend {
+            suppressed: std::sync::Mutex<std::collections::HashSet<String>>,
+        }
+
+        impl SuppressionBackend {
+            fn suppress(&self, email: &str) {
+                self.suppressed
+                    .lock()
+                    .unwrap()
+                    .insert(email.to_ascii_lowercase());
+            }
+        }
+
+        #[async_trait]
+        impl SendAdmissionBackend for SuppressionBackend {
+            async fn record_send_usage(
+                &self,
+                _tenant_id: &str,
+                _quantity: i64,
+                _event_id: Uuid,
+            ) -> Result<QuotaRecordResult, UsageError> {
+                panic!("the class gate reserves no quota");
+            }
+
+            async fn rollback_send_usage(
+                &self,
+                _tenant_id: &str,
+                _quantity: i64,
+                _event_id: Uuid,
+                _recorded_at: DateTime<Utc>,
+            ) -> Result<(), UsageError> {
+                Ok(())
+            }
+
+            async fn suppressed_recipients(
+                &self,
+                _tenant_id: &str,
+                _canonical_recipients: &[String],
+            ) -> Result<Vec<String>, String> {
+                Ok(Vec::new())
+            }
+
+            /// The production override's shape: the transactional arm allows
+            /// without consent, then BOTH suppression stores block with their
+            /// reasons.
+            async fn consent_decisions(
+                &self,
+                _tenant_id: &str,
+                emails: &[String],
+                is_transactional: bool,
+            ) -> Result<std::collections::HashMap<String, SendDecision>, String> {
+                let suppressed = self.suppressed.lock().unwrap().clone();
+                let mut decisions = std::collections::HashMap::new();
+                for email in emails {
+                    let decision = if is_transactional {
+                        SendDecision::Allowed
+                    } else {
+                        SendDecision::Blocked("no marketing consent on file".into())
+                    };
+                    decisions.insert(email.clone(), decision);
+                }
+                for email in suppressed {
+                    decisions.insert(
+                        email.clone(),
+                        SendDecision::Blocked("hard bounce, recipient suppressed".into()),
+                    );
+                }
+                Ok(decisions)
+            }
+        }
+
+        let backend = std::sync::Arc::new(SuppressionBackend {
+            suppressed: std::sync::Mutex::new(std::collections::HashSet::new()),
+        });
+        let service = SendAdmissionService::new(backend.clone());
+
+        // Not suppressed: a service-class send passes without consent.
+        service
+            .enforce_consent_for_class(TENANT, &recipients(&["ok@example.com"]), "service")
+            .await
+            .expect("service send to a clean recipient");
+
+        // A bounce-suppressed recipient: refused with the reason, service
+        // class included (suppression applies to every class).
+        backend.suppress("bounced@example.com");
+        let error = service
+            .enforce_consent_for_class(TENANT, &recipients(&["Bounced@Example.com"]), "service")
+            .await
+            .unwrap_err();
+        match error {
+            SendAdmissionError::RecipientSuppressed { email, reason } => {
+                assert_eq!(email, "bounced@example.com", "canonical recipient");
+                assert!(reason.contains("hard bounce"), "{reason}");
+            }
+            other => panic!("expected RecipientSuppressed, got {other:?}"),
+        }
+    }
+
+    /// A suppression/consent store failure fails CLOSED under a
+    /// preference-exempt class, exactly as it does for marketing.
+    #[tokio::test]
+    async fn store_failure_fails_closed_under_a_service_class() {
+        struct FailingBackend;
+
+        #[async_trait]
+        impl SendAdmissionBackend for FailingBackend {
+            async fn record_send_usage(
+                &self,
+                _tenant_id: &str,
+                _quantity: i64,
+                _event_id: Uuid,
+            ) -> Result<QuotaRecordResult, UsageError> {
+                panic!("the class gate reserves no quota");
+            }
+
+            async fn rollback_send_usage(
+                &self,
+                _tenant_id: &str,
+                _quantity: i64,
+                _event_id: Uuid,
+                _recorded_at: DateTime<Utc>,
+            ) -> Result<(), UsageError> {
+                Ok(())
+            }
+
+            async fn suppressed_recipients(
+                &self,
+                _tenant_id: &str,
+                _canonical_recipients: &[String],
+            ) -> Result<Vec<String>, String> {
+                Ok(Vec::new())
+            }
+
+            async fn consent_decisions(
+                &self,
+                _tenant_id: &str,
+                _emails: &[String],
+                _is_transactional: bool,
+            ) -> Result<std::collections::HashMap<String, SendDecision>, String> {
+                Err("suppression store down".into())
+            }
+        }
+
+        let service = SendAdmissionService::new(std::sync::Arc::new(FailingBackend));
+        let error = service
+            .enforce_consent_for_class(TENANT, &recipients(&["a@example.com"]), "service")
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, SendAdmissionError::ConsentUnavailable(_)),
+            "an unavailable store is never permission to send: {error:?}"
+        );
     }
 
     #[tokio::test]

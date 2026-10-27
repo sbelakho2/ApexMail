@@ -170,6 +170,19 @@ fn classify_admission_refusal(error: SendAdmissionError, tenant_id: &str) -> Sal
             );
             SalesAdmissionRefusal::Skip(EnqueueOutcome::Suppressed)
         }
+        // A recipient on a canonical suppression store under an explicitly
+        // classified preference-exempt send (the reply-release gate): the
+        // same terminal skip as the tenant suppression arm, retrying cannot
+        // unsuppress.
+        SendAdmissionError::RecipientSuppressed { email, reason } => {
+            tracing::info!(
+                tenant_id = %tenant_id,
+                email = %email,
+                reason = %reason,
+                "sales send refused admission: recipient suppressed (non-retryable skip)"
+            );
+            SalesAdmissionRefusal::Skip(EnqueueOutcome::Suppressed)
+        }
         SendAdmissionError::ConsentUnavailable(error) => {
             tracing::error!(
                 error = %error,

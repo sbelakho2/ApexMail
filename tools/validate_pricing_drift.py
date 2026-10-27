@@ -621,11 +621,12 @@ def validate_marketing_data(catalog: dict[str, ParsedPlan], errors: list[str]) -
 
     check(data.get("currency_symbol") == "€", "marketing pricing data must use EUR '€'", errors)
     check(data.get("currency_code") == "EUR", "marketing pricing data must declare EUR", errors)
-    # `ip_cost` here is a dead legacy field (written by the retired €30/mo
-    # generation; no template reads it). The ONE pinned add-on ladder is the
-    # runtime first/additional pair checked against the calculator and
-    # docs/pricing.md in validate_pricing_reference/validate_marketing_source,
-    # so this table cannot pin a second contradictory price.
+    # The retired `ip_cost: 30` legacy field (dead €30/mo-generation price
+    # contradicting the €49/€69 ladder) was REMOVED 2026-10-27 after the
+    # external audit flagged a canonical source carrying dead contradictory
+    # prices. The ONE pinned add-on ladder is the runtime first/additional
+    # pair checked against the calculator and docs/pricing.md in
+    # validate_pricing_reference/validate_marketing_source.
     plans = data.get("plans")
     if not isinstance(plans, list):
         errors.append("marketing pricing data has no plans array")

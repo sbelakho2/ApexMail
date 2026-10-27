@@ -378,6 +378,52 @@ ci_pipeline_config_hash() {
 # the deploy host has no valid gate blessing for <head_sha> under the CURRENT
 # pipeline configuration, or nothing when the blessing is valid.
 # Exit status: 0 = refusal found, 1 = blessing valid.
+# ci_github_repo_slug — parse "owner/repo" from the origin remote URL
+# (https or ssh form). Empty when the remote is not GitHub.
+ci_github_repo_slug() {
+    _cgr_url=$(git -C "$REPO_ROOT" remote get-url origin 2>/dev/null) || return 0
+    case "$_cgr_url" in
+        *github.com*)
+            _cgr_slug=$(printf '%s' "$_cgr_url" | sed -e 's#.*github.com[:/]##' -e 's#\.git$##')
+            printf '%s' "$_cgr_slug"
+            ;;
+    esac
+}
+
+# ci_github_status_publish <stage> <status> — post a commit status for the
+# run's HEAD to GitHub (external audit 2026-10-27, item 5, fix-order step 1:
+# "first make your CI publish stable GitHub checks; then make them
+# required"). Contexts are the stable `apexmail/<lane>` names the future
+# required-status-checks list will pin. STRICTLY fail-open and silent under
+# absence: no token, no curl, non-GitHub remote, or any API error logs a
+# warning and returns 0 — CI must never break because GitHub hiccuped, and
+# the deploy boundary (blessing) stays the authoritative gate either way.
+# Token precedence: APEXMAIL_GITHUB_TOKEN, GH_TOKEN, GITHUB_TOKEN.
+ci_github_status_publish() {
+    _cgss_stage=$1
+    _cgss_status=$2
+    _cgss_token=${APEXMAIL_GITHUB_TOKEN:-${GH_TOKEN:-${GITHUB_TOKEN:-}}}
+    [ -n "$_cgss_token" ] || return 0
+    command -v curl >/dev/null 2>&1 || return 0
+    [ -n "${CI_SHA:-}" ] && [ "$CI_SHA" != unknown ] || return 0
+    _cgss_slug=$(ci_github_repo_slug)
+    [ -n "$_cgss_slug" ] || return 0
+    case "$_cgss_status" in
+        ok | skip | unchanged | advisory-pass) _cgss_state=success ;;
+        fail | advisory-fail | timeout) _cgss_state=failure ;;
+        *) _cgss_state=pending ;;
+    esac
+    _cgss_body=$(printf '{"state":"%s","context":"apexmail/%s","description":"lane %s (run %s)"}' \
+        "$_cgss_state" "$_cgss_stage" "$_cgss_status" "${CI_RUN_ID:-unknown}")
+    curl --max-time 10 -s -o /dev/null -X POST \
+        -H "Authorization: Bearer $_cgss_token" \
+        -H "Accept: application/vnd.github+json" \
+        "https://api.github.com/repos/$_cgss_slug/statuses/$CI_SHA" \
+        -d "$_cgss_body" \
+        || ci_warn "github status post failed (lane $_cgss_stage) — continuing"
+    return 0
+}
+
 gate_blessing_refusal() {
     _gbr_runs=$1
     _gbr_head=$2

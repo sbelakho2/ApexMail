@@ -14,7 +14,7 @@ surface (owner directive 2026-10-26).
 | 1c | WAF/IDS truth reconciliation (second audit found an UNDERclaim) | **DONE** | The managed baseline sets `MTA_IDS_ENABLED=true` / `MTA_IDS_REFUSE=true` and the IDS engine is wired into the MTA inbound path — the public page now says IDS is an ACTIVE inbound control in all 4 locales; WAF body inspection stays honestly roadmap. |
 | 2 | Durability: mandatory off-host mirror | **DONE** | `postgres-backup-encrypt.sh` fails non-zero without `BACKUP_TARGET` or on rsync failure and writes `.last_offsite_ok`; compose refuses an empty `${VAR:?}` and the healthcheck requires a fresh stamp. |
 | 2b | Durability: automated restore drill — producer/consumer contract repaired | **DONE** | Second audit caught the drill decoding with drifted PBKDF2 iterations (100k vs 600k), so no real backup could pass. Fixed at the root: `deploy/hardening/scripts/backup-envelope.sh` is the ONE canonical envelope (AES-256-CBC, PBKDF2 600k, SHA-256, gzip) sourced by BOTH producer and drill, baked into the image AND bind-mounted; the drill stages decrypt → gunzip → pg_restore; `--self-test` runs a real codec round trip plus a drifted-parameter rejection; validate stage runs it. Proven end-to-end with a real `pg_dump -Fc` archive through producer encode → drill decode → byte-identical → scratch restore. |
-| 2c | Durability: **WAL archiving → PITR → warm standby** | **OPEN** | Highest-value remaining infra item. Requires an off-host WAL transport validated on the production host (owner-gated deploy); the runbooks honestly state that PITR does not exist. RPO stays ~24h until this lands. |
+| 2c | Durability: **WAL archiving → PITR → warm standby** | **PARTIAL** | Repo-side enablement landed 2026-10-25: `pg-wal-archive.sh` (archive_command, exits 0 only when the segment left the host), `deploy/docker-compose.wal-archive.yml` (operator-included override, `${WAL_ARCHIVE_TARGET:?}`), weekly physical base backup (`WAL_BASE_BACKUP_ENABLED`, 2 generations), `pg-pitr-restore.sh` (replay to RFC3339/latest with drill-shaped evidence), `apexmail-wal-archive` alerts, all with self-tests in the validate stage; DR doc carries the operator enablement checklist. Still OPEN: production enablement itself (owner-gated: env + override + key on the deploy host) and the warm standby beyond it. RPO stays ≤24h logical until the operator flips it, then minutes. |
 | 2d | Backup encryption fail-closed | **DONE** | A missing key or openssl now FAILS the backup instead of silently storing plaintext; `ALLOW_UNENCRYPTED_BACKUPS=true` is the explicit development-only escape. |
 | 3 | Mailbot: purpose-aware multi-label purpose classifier feeding policy | **OPEN** | The 11-value sales disposition taxonomy is still the classification output. Keep the promotion-safety machinery; replace what feeds it. |
 | 4 | Mailbot: tenant-owned draft review UX | **OPEN** | `/v1/admin/ai/drafts` and `/web/admin/ai/drafts/*` remain operator-only; customers currently 403. Largest product blocker. |
@@ -55,6 +55,45 @@ surface (owner directive 2026-10-26).
 | E17 | Dormant AI corpus regression risk | **DONE** | Corpora scrubbed + the prompt_disclosure_scan gate covers training/RAG inputs, not just website files. |
 | E18 | Compliance templates carried provider/topology facts | **DONE** | The six non-annex templates (trust-center, data-locations, compliance, performance-methodology, responsible-disclosure, incident-response) were scrubbed — provider name, Nuremberg/Frankfurt facility claims, "single-host topology" x2, bootstrap script filename — and the render gate's disclosure scan now covers ALL eight templates (it caught two residuals the manual scrub missed). |
 
-Release posture (audits' read, accepted): controlled production launch of core
+## Fourth external audit (broad re-audit of 886e437b) — 2026-10-27
+
+Verdict shift accepted: disclosure containment **9/10 (major improvement, no longer a
+launch blocker)**; controlled paying-customer launch **YES**; 100-contract steady state
+**NO** until the five operational programs land. The remediation order below is the
+audit's Tier 0-4 list with landing status.
+
+| Tier | Program | Status |
+|---|---|---|
+| 0.1 | WAL archiving + PITR + weekly physical base backup (RPO minutes when enabled) | **DONE (repo-side)** — script (`pg-wal-archive.sh`), compose override (`deploy/docker-compose.wal-archive.yml`), backup-script weekly base backup (`WAL_BASE_BACKUP_ENABLED`), PITR restore with evidence (`pg-pitr-restore.sh`), archive-continuity alerts (`apexmail-wal-archive`), DR docs + operator checklist. Production enablement remains operator-gated (env + override + key); see also 2c. |
+| 0.2 | Warm standby / second failure domain | OPEN — depends on 0.1 landing in production first (owner-gated infra). |
+| 0.3 | Compilation/testing off the production machine | OPEN — owner infrastructure decision (separate CI host). Repo already supports it: the pipeline is host-agnostic, the deploy host verifies blessings and deploys only. |
+| 0.4 | CI publishes stable GitHub checks, then make them required on main | Status publishing landed this wave (`apexmail/<lane>` contexts per stage, fail-open, token-gated: APEXMAIL_GITHUB_TOKEN/GH_TOKEN). Operator next steps: set the token on the CI runner, verify contexts on a real commit, then pin `apexmail/fetch,apexmail/validate,apexmail/docs,apexmail/ui,apexmail/test,apexmail/security` as required status checks (NOT before — contexts must be observable first or the branch wedges). |
+| 0.5 | One clean full-workspace run from final HEAD | This wave (recorded in the release evidence; count reported honestly). |
+| 1.6 | Purpose/risk/delivery-class classification replacing marketing-default replies | This wave: deterministic classifier + policy table + release-path fix (approved replies to inbound mail are SERVICE correspondence — the marketing-consent gate never applies to conversation replies; suppression/kill-switch/autonomy gates unchanged). The 11-value sales disposition stays for sales analytics. |
+| 1.7 | Tenant-owned draft review UX | OPEN (the audit's remaining Mailbot GA blocker with 1.8). |
+| 1.8 | 500-1,000 real-model thread study | OPEN, owner-gated credentials (corpus + grading rubric committed). |
+| 1.9 | Empirical per-purpose autosend promotion | OPEN after 1.6 accumulates data. |
+| 2.10 | Console live read-only tools (resolve the prompt/tool mismatch) | This wave: bounded one-round read-only tool loop in the live chat path, prompt matched to reality. |
+| 2.11 | ~500-task real-model Assistant benchmark | OPEN, owner-gated credentials. |
+| 3.12 | Onboarding as a state machine | OPEN. |
+| 3.13 | Questionnaire/trust packages exception-only | PARTIAL: owner labels neutralized to "ApexMail" this wave; answer-bank truth-checking is the remaining build. |
+| 3.14 | Dedicated Tenant idempotent provisioner | OPEN (bundle generation exists; physical provisioning is operator action). |
+| 3.15 | Customer health/renewal/escalation queues | OPEN. |
+| 4.16 | Control-seed truth sweep | PARTIAL: CC5.2 (Terraform/Helm fiction) and CC6.8 (sandbox overclaim) rewritten this wave; the remaining seeds get the same line-by-line treatment before any observation period. |
+| 4.17 | Risk/assets/vendors/SoA/evidence-cadence core | OPEN (the real certification blocker). |
+| 4.18 | Automated recurring evidence collection + overdue alerts | OPEN. |
+| 4.19 | Operate the evidence core before starting Type II observation | OPEN — gated on 4.17/4.18. |
+
+Also this wave: pricing.json's dead contradictory `ip_cost: 30` removed (audit item 7);
+coverage gate gains CI_COVERAGE_DISK_REQUIRED=1 so a release run cannot silently skip
+coverage on an undersized machine (item 6); questionnaire owner labels neutralized to
+"ApexMail" (item 18 — no fictional teams, no solo disclosure).
+
+Release posture (audits' read, accepted): controlled paying-customer launch YES;
+100-contract steady state NO until 0.1-0.5, 1.6-1.9 and 3.x land; Mailbot internal/beta
+YES (5.8 GA: purpose classification, tenant review UX, real-model corpus are the
+non-waivables); Console Assistant controlled YES (8.0 capability / 6.3 practical until
+the tool mismatch and real-model benchmark land); SOC/ISO preparation YES, formal
+observation NO until the evidence core exists and has operated.: controlled production launch of core
 mail yes; Console Assistant controlled yes; Mailbot internal/beta only;
 SOC 2/ISO preparation yes, formal observation window not yet.

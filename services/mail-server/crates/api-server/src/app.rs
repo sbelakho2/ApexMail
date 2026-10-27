@@ -7852,7 +7852,7 @@ mod tests {
             "the logo must replace the wordmark: {html}"
         );
         assert!(
-            html.contains("<title>Dashboard, Acme Corp</title>"),
+            html.contains("<title>Dashboard | Acme Corp</title>"),
             "the title suffix must be the company name: {html}"
         );
         assert!(

@@ -1806,6 +1806,16 @@ ORDER BY a.campaign_id, a.arm_index";
                     ..TickReport::default()
                 });
             }
+            // A suppression-store hit under an explicitly classified
+            // preference-exempt send: the same terminal suppression shape.
+            Err(SendAdmissionError::RecipientSuppressed { .. }) => {
+                self.mark_recipient(recipient.id, "suppressed", "recipient is suppressed", None)
+                    .await?;
+                return Ok(TickReport {
+                    recipients_suppressed: 1,
+                    ..TickReport::default()
+                });
+            }
             Err(SendAdmissionError::InvalidCategory { .. }) => {
                 // Server-owned constant failed validation: a programming
                 // error. Terminal, loud, never a retry loop.
