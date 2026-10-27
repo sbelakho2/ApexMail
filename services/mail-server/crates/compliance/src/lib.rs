@@ -28,6 +28,11 @@ pub mod governance;
 pub mod hipaa;
 pub mod ledger_sweep;
 pub mod legal_archive;
+/// Legal-identity constants (entity name, registry code, addresses,
+/// contacts). Previously an orphan file with no `mod` declaration, so it
+/// never compiled; the disclosure render gate fills the compliance document
+/// templates with these values.
+pub mod legal_entity;
 pub mod legal_hold;
 pub mod obligations;
 /// Procurement document index (the package a US customer's procurement
@@ -48,6 +53,11 @@ pub mod statutory_calendar;
 pub mod statutory_routes;
 pub mod suppressions;
 pub mod tax_policy;
+/// The `{{VAR}}` template machinery the compliance documents render
+/// through. Also previously an orphan file; now compiled, and
+/// `tests/disclosure_render_gate.rs` renders every template under
+/// templates/compliance with it and scans the output.
+pub mod templates;
 pub mod trust_portal;
 pub mod tsd_ledger;
 pub mod types;

@@ -226,7 +226,7 @@
       // An exempt sale (customer certificate) says so — a silent $0.00 row
       // would not tell the reader why no tax was charged.
       ..if us-sales-tax == none { () } else if us-sales-tax.at("exempt", default: false) { (
-        [US sales tax (#us-sales-tax.state) — exempt#{
+        [US sales tax (#us-sales-tax.state), exempt#{
           let cert = us-sales-tax.at("certificate_id", default: none)
           if cert == none { "" } else { " (certificate " + cert + ")" }
         }],

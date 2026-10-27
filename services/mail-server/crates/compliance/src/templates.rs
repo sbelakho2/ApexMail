@@ -313,19 +313,28 @@ pub fn render_preview(
             .find(|l| l.locale.eq_ignore_ascii_case(loc));
     }
 
-    let resolved_html = match (localized.as_ref().and_then(|l| l.html_body.as_ref()), &version.html_body) {
+    let resolved_html = match (
+        localized.as_ref().and_then(|l| l.html_body.as_ref()),
+        &version.html_body,
+    ) {
         (Some(body), _) => Some(interpolate_variables(body, &effective)),
         (None, Some(body)) => Some(interpolate_variables(body, &effective)),
         _ => None,
     };
 
-    let resolved_text = match (localized.as_ref().and_then(|l| l.text_body.as_ref()), &version.text_body) {
+    let resolved_text = match (
+        localized.as_ref().and_then(|l| l.text_body.as_ref()),
+        &version.text_body,
+    ) {
         (Some(body), _) => Some(interpolate_variables(body, &effective)),
         (None, Some(body)) => Some(interpolate_variables(body, &effective)),
         _ => None,
     };
 
-    let resolved_subject = match (localized.as_ref().and_then(|l| l.subject.as_ref()), &version.subject_template) {
+    let resolved_subject = match (
+        localized.as_ref().and_then(|l| l.subject.as_ref()),
+        &version.subject_template,
+    ) {
         (Some(subj), _) => Some(interpolate_variables(subj, &effective)),
         (None, Some(subj)) => Some(interpolate_variables(subj, &effective)),
         _ => None,
@@ -426,9 +435,12 @@ impl Template {
             action: TemplateAction::RolledBack,
             user_id: user_id.to_string(),
             timestamp: Utc::now(),
-            detail: reason
-                .map(|r| r.to_string())
-                .unwrap_or_else(|| format!("Rolled back from v{} to v{}", previous_version_number, version_number)),
+            detail: reason.map(|r| r.to_string()).unwrap_or_else(|| {
+                format!(
+                    "Rolled back from v{} to v{}",
+                    previous_version_number, version_number
+                )
+            }),
             previous_state: None,
         });
 
@@ -517,16 +529,17 @@ impl Template {
             .find(|v| v.version_id == version_id)
             .ok_or_else(|| format!("Version {} not found", version_id))?;
 
-        version
-            .localizations
-            .retain(|l| l.locale != content.locale);
+        version.localizations.retain(|l| l.locale != content.locale);
         version.localizations.push(content);
         version.audit_events.push(TemplateAuditEvent {
             event_id: uuid::Uuid::new_v4().to_string(),
             action: TemplateAction::LocalizationAdded,
             user_id: user_id.to_string(),
             timestamp: Utc::now(),
-            detail: format!("Localization added for locale '{}'", version.locale.as_deref().unwrap_or("default")),
+            detail: format!(
+                "Localization added for locale '{}'",
+                version.locale.as_deref().unwrap_or("default")
+            ),
             previous_state: None,
         });
 

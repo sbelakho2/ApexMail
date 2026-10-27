@@ -264,13 +264,32 @@ fn honesty_claims_match_machinery() {
 #[test]
 fn brand_lockup_is_two_tone_across_auth_surfaces() {
     let login = ui_foundation::leptos_views::web_login_page("csrf");
+    // The ARK wordmark is two-tone through CLASSES whose colors come from
+    // the styling authority (ark.css token rules), not utility classes.
     assert!(
-        login.contains("text-brand-600\">Apex"),
-        "login wordmark Apex must be brand red: {login}"
+        login.contains("apex-wordmark__apex\">Apex"),
+        "login wordmark Apex must carry the brand-red class: {login}"
     );
     assert!(
-        login.contains("text-surface-950\">Mail"),
-        "login wordmark Mail must be ink: {login}"
+        login.contains("apex-wordmark__mail\">Mail"),
+        "login wordmark Mail must carry the ink class: {login}"
+    );
+    // And the authority really paints them differently.
+    let ark = include_str!("../../ui-foundation/assets/ark.css");
+    assert!(
+        ark.contains(".apex-wordmark__apex { color: rgb(var(--wordmark-apex)); }"),
+        "ark.css must paint the apex half from --wordmark-apex"
+    );
+    assert!(
+        ark.contains(".apex-wordmark__mail { color: rgb(var(--wordmark-mail)); }"),
+        "ark.css must paint the mail half from --wordmark-mail"
+    );
+    let apex_token = ark.split("--wordmark-apex:").nth(1).expect("token defined");
+    let mail_token = ark.split("--wordmark-mail:").nth(1).expect("token defined");
+    assert_ne!(
+        apex_token.split(';').next(),
+        mail_token.split(';').next(),
+        "two-tone means two distinct token values"
     );
     assert!(
         !login.contains("text-primary\">Apex"),
@@ -295,8 +314,14 @@ fn brand_lockup_is_two_tone_across_auth_surfaces() {
         branding: None,
     }
     .render_html();
-    assert!(shell.contains("text-brand-600\">Apex"), "{shell}");
-    assert!(shell.contains("text-surface-950\">Mail"), "{shell}");
+    assert!(
+        shell.contains("apex-wordmark__apex\">Apex"),
+        "shell wordmark must use the brand-red class: {shell}"
+    );
+    assert!(
+        shell.contains("apex-wordmark__mail\">Mail"),
+        "shell wordmark must use the ink class: {shell}"
+    );
 }
 
 /// Perfect security: native select option markup is escaped at the primitive

@@ -1407,7 +1407,7 @@ mod tests {
         let rows = compute_calculator(&f);
         let plan_row = rows
             .iter()
-            .find(|r| r.0.starts_with("Plan —"))
+            .find(|r| r.0.starts_with("Plan,"))
             .expect("plan row");
         assert!(
             plan_row.0.contains("Starter") || plan_row.0.contains("Free"),

@@ -31,6 +31,11 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 STATIC_DIR = REPO_ROOT / "apps" / "marketing-zola" / "static"
 PUBLIC_SPEC = STATIC_DIR / "specs" / "openapi.yaml"
 
+# The legal/contractual exception manifest (external audit 2026-10-26, item
+# 9): a disclosure permitted ONLY because law/contract requires it must be
+# listed with its exact allowed surface; unlisted disclosures are forbidden.
+EXCEPTIONS_MANIFEST = REPO_ROOT / "docs" / "operations" / "disclosure-exceptions.json"
+
 # Files that must NOT exist anywhere under static/ (deployment plumbing and
 # build metadata that leak routing/deployment detail).
 BANNED_BASENAMES = {".htaccess", "_headers", "_redirects"}
@@ -76,8 +81,55 @@ def check_public_spec(spec: Path) -> list[str]:
     return problems
 
 
-def run_checks(static_dir: Path = STATIC_DIR, spec: Path = PUBLIC_SPEC) -> list[str]:
-    return check_static_dir(static_dir) + check_public_spec(spec)
+def check_exceptions_manifest(manifest: Path = EXCEPTIONS_MANIFEST) -> list[str]:
+    import json
+
+    problems: list[str] = []
+    if not manifest.is_file():
+        return [f"disclosure-exceptions manifest missing: {manifest}"]
+    try:
+        data = json.loads(manifest.read_text(encoding="utf-8"))
+    except ValueError as error:
+        return [f"disclosure-exceptions manifest is not valid JSON: {error}"]
+    if data.get("version") != 1:
+        problems.append("manifest version must be 1")
+    if not str(data.get("policy", "")).strip():
+        problems.append("manifest must state the policy sentence")
+    exceptions = data.get("exceptions")
+    if not isinstance(exceptions, list) or not exceptions:
+        return problems + ["manifest must list at least one exception"]
+    seen_ids: set[str] = set()
+    required = {"id", "fact", "basis", "allowed_surface", "prohibited_surfaces"}
+    for entry in exceptions:
+        if not isinstance(entry, dict):
+            problems.append(f"exception entry is not an object: {entry!r}")
+            continue
+        missing = required - entry.keys()
+        if missing:
+            problems.append(f"exception {entry.get('id', '?')} misses keys: {sorted(missing)}")
+        eid = entry.get("id", "")
+        if eid in seen_ids:
+            problems.append(f"duplicate exception id: {eid}")
+        seen_ids.add(eid)
+        allowed = str(entry.get("allowed_surface", ""))
+        if not allowed.strip():
+            problems.append(f"exception {eid} must name an exact allowed surface")
+        prohibited = entry.get("prohibited_surfaces")
+        if not isinstance(prohibited, list) or not prohibited:
+            problems.append(f"exception {eid} must enumerate prohibited surfaces")
+        # The manifest itself must never spell the provider name: an
+        # exception document describing a withheld identity cannot contain it.
+        if "hetzner" in json.dumps(entry).lower():
+            problems.append(f"exception {eid} spells the withheld provider name")
+    return problems
+
+
+def run_checks(
+    static_dir: Path = STATIC_DIR,
+    spec: Path = PUBLIC_SPEC,
+    exceptions: Path = EXCEPTIONS_MANIFEST,
+) -> list[str]:
+    return check_static_dir(static_dir) + check_public_spec(spec) + check_exceptions_manifest(exceptions)
 
 
 def self_test() -> int:
@@ -118,6 +170,49 @@ def self_test() -> int:
             (static / "specs" / "openapi.yaml").write_text(f"paths:\n  {pattern}:\n")
             problems = run_checks(static_root_for(static), static / "specs" / "openapi.yaml")
             assert any("forbidden pattern" in p for p in problems), (pattern, problems)
+        (static / "specs" / "openapi.yaml").write_text("openapi: 3.0.0\npaths:\n  /v1/messages:\n")
+
+        # Exception manifest schema: clean passes; each broken shape fails.
+        good_manifest = {
+            "version": 1,
+            "policy": "Internal by default.",
+            "exceptions": [
+                {
+                    "id": "sample",
+                    "fact": "x",
+                    "basis": "law requires it",
+                    "allowed_surface": "signed DPA annex",
+                    "prohibited_surfaces": ["website"],
+                }
+            ],
+        }
+        import json as _json
+
+        manifest_path = root / "exceptions.json"
+        manifest_path.write_text(_json.dumps(good_manifest))
+        assert not check_exceptions_manifest(manifest_path), "clean manifest must pass"
+        for mutate, expected in [
+            (lambda m: m.update(version=2), "version"),
+            (lambda m: m.update(exceptions=[]), "at least one"),
+            (
+                lambda m: m["exceptions"][0].pop("allowed_surface"),
+                "allowed_surface",
+            ),
+            (
+                lambda m: m["exceptions"][0].update(prohibited_surfaces=[]),
+                "enumerate prohibited",
+            ),
+            (
+                lambda m: m["exceptions"][0].update(fact="runs on Hetzner"),
+                "provider name",
+            ),
+        ]:
+            broken = _json.loads(_json.dumps(good_manifest))
+            mutate(broken)
+            manifest_path.write_text(_json.dumps(broken))
+            problems = check_exceptions_manifest(manifest_path)
+            assert any(expected in p for p in problems), (expected, problems)
+        manifest_path.unlink()
 
     print("public-artifacts self-test: ok")
     return 0

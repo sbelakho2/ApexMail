@@ -14,12 +14,12 @@ This document describes the supplied EU/EEA-oriented deployment configuration; i
 
 | Service | Default Location | Provider |
 |---|---|---|
-| Primary infrastructure (compute, storage, networking) | Helsinki, Finland & Nuremberg, Germany | Hetzner Online GmbH |
-| Email delivery (primary MTA) | Helsinki, Finland & Nuremberg, Germany | Own MTA on Hetzner infrastructure |
+| Primary infrastructure (compute, storage, networking) | Finland (EU) | EU infrastructure provider (named in the DPA subprocessor annex) |
+| Email delivery (primary MTA) | Finland (EU) | ApexMail-managed MTA, EU/EEA |
 | Email delivery (AWS SES, when enabled) | Configured SES region | AWS SES |
-| Database storage | Helsinki, Finland & Nuremberg, Germany | Self-managed on Hetzner |
-| Analytics (ClickHouse) | Helsinki, Finland & Nuremberg, Germany | Self-managed on Hetzner |
-| Caching (Redis) | Helsinki, Finland & Nuremberg, Germany | Self-managed on Hetzner |
+| Database storage | Finland (EU) | Self-managed on ApexMail EU infrastructure |
+| Analytics (ClickHouse) | Finland (EU) | Self-managed on ApexMail EU infrastructure |
+| Caching (Redis) | Finland (EU) | Self-managed on ApexMail EU infrastructure |
 | Backups | Configurable object-store region (default: `us-east-1`), the backup region is set by deployment configuration and must be confirmed for the active environment | Self-managed encrypted backups with S3-compatible object storage |
 | Log storage (Loki) | Configurable object-store region (default: `eu-central-1`) | Self-managed Loki with S3-compatible object storage |
 | Trace storage (Tempo) | Configurable object-store region (default: `eu-central-1`) | Self-managed Tempo with S3-compatible object storage |
@@ -41,29 +41,29 @@ the active deployment before relying on a location for compliance purposes.
 
 | Data Category | Storage Location |
 |---|---|
-| Account information (names, emails, company) | Database, EU/EEA (Hetzner) |
-| Billing records (invoices, transactions) | Database, EU/EEA (Hetzner); Mollie B.V. (Netherlands, EU) |
+| Account information (names, emails, company) | Database, EU/EEA (ApexMail EU infrastructure) |
+| Billing records (invoices, transactions) | Database, EU/EEA (ApexMail EU infrastructure); Mollie B.V. (Netherlands, EU) |
 | Payment card details | Not stored by ApexMail, processed by Mollie B.V. |
-| API keys (hashed) | Database, EU/EEA (Hetzner) |
-| Audit logs | Database, EU/EEA (Hetzner) + log storage |
+| API keys (hashed) | Database, EU/EEA (ApexMail EU infrastructure) |
+| Audit logs | Database, EU/EEA (ApexMail EU infrastructure) + log storage |
 
 ### Email Content
 
 | Data Category | Storage Location |
 |---|---|
-| Email subject, body, headers | Transient processing on MTA infrastructure, EU/EEA (Hetzner); stored for configured retention period |
-| Email attachments | Transient processing on MTA infrastructure, EU/EEA (Hetzner); stored for configured retention period |
-| Email delivery metadata | Database + analytics store, EU/EEA (Hetzner) |
-| Delivery, open, click events | Database + analytics store, EU/EEA (Hetzner) |
+| Email subject, body, headers | Transient processing on MTA infrastructure, EU/EEA (ApexMail EU infrastructure); stored for configured retention period |
+| Email attachments | Transient processing on MTA infrastructure, EU/EEA (ApexMail EU infrastructure); stored for configured retention period |
+| Email delivery metadata | Database + analytics store, EU/EEA (ApexMail EU infrastructure) |
+| Delivery, open, click events | Database + analytics store, EU/EEA (ApexMail EU infrastructure) |
 
 ### Recipient Data
 
 | Data Category | Storage Location |
 |---|---|
-| Recipient email addresses | Database, EU/EEA (Hetzner) |
-| Recipient lists | Database, EU/EEA (Hetzner) |
-| Suppression lists | Database, EU/EEA (Hetzner) |
-| Open/click tracking data (IP, user agent) | Analytics store, EU/EEA (Hetzner) |
+| Recipient email addresses | Database, EU/EEA (ApexMail EU infrastructure) |
+| Recipient lists | Database, EU/EEA (ApexMail EU infrastructure) |
+| Suppression lists | Database, EU/EEA (ApexMail EU infrastructure) |
+| Open/click tracking data (IP, user agent) | Analytics store, EU/EEA (ApexMail EU infrastructure) |
 
 ### System Data
 
@@ -71,10 +71,10 @@ the active deployment before relying on a location for compliance purposes.
 |---|---|
 | Application logs | Loki object storage in the configured region (default: `eu-central-1`) |
 | Distributed traces | Tempo object storage in the configured region (default: `eu-central-1`) |
-| Metrics | Prometheus time-series database, EU/EEA (Hetzner) |
-| Monitoring data | Prometheus, EU/EEA (Hetzner) |
-| Session data | Redis cache, EU/EEA (Hetzner) |
-| Rate limit counters | Redis cache, EU/EEA (Hetzner) |
+| Metrics | Prometheus time-series database, EU/EEA (ApexMail EU infrastructure) |
+| Monitoring data | Prometheus, EU/EEA (ApexMail EU infrastructure) |
+| Session data | Redis cache, EU/EEA (ApexMail EU infrastructure) |
+| Rate limit counters | Redis cache, EU/EEA (ApexMail EU infrastructure) |
 
 ## Data Transfers
 

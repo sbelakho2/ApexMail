@@ -43,4 +43,3 @@ pub const RUNTIME_PRICING_AUTHORITY: &str =
 /// same sentence and scripts/consistency-test.sh pins the two together.
 pub const DATA_RESIDENCY_WORDING: &str =
     "Data-residency commitments depend on the active deployment and applicable agreement. The supplied production configuration defaults telemetry object storage to an EU/EEA region; confirm active storage locations and transfer safeguards with ApexMail.";
-

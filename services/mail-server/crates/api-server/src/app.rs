@@ -592,6 +592,11 @@ pub fn build_app(state: AppState) -> Router {
         .route("/legal/privacy", get(legal_privacy_redirect))
         .nest("/health", routes::health::router())
         .nest("/v1/ses", routes::ses_notifications::router())
+        // Opaque provider callback (audit item 14): new SNS subscriptions
+        // register /hooks/delivery/<hex>; the legacy /v1/ses path stays for
+        // subscriptions already created with AWS. Same handler, same SNS
+        // signature validation — only the path stops naming the provider.
+        .nest("/hooks", routes::ses_notifications::opaque_router())
         .merge(marketing_assets)
         .merge(rate_limited_public)
         // ── Grader public routes (conditionally added) ──────────

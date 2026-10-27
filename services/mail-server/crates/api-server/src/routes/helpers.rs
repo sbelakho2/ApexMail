@@ -357,15 +357,9 @@ fn classify_leaky_detail(detail: &str) -> &'static str {
     let lower = detail.to_lowercase();
     // Success first: a 2xx response that mentions internal machinery is
     // still a success, it must not read as a failure.
-    let starts_with_success_code =
-        lower
-            .split_whitespace()
-            .next()
-            .is_some_and(|first| {
-                (first.starts_with("25") && first.len() == 3)
-                    || first.starts_with("2.")
-                    || first == "200"
-            });
+    let starts_with_success_code = lower.split_whitespace().next().is_some_and(|first| {
+        (first.starts_with("25") && first.len() == 3) || first.starts_with("2.") || first == "200"
+    });
     if starts_with_success_code {
         return DETAIL_SUMMARY_SUCCESS;
     }

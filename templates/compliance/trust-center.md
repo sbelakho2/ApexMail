@@ -11,7 +11,7 @@ Every control statement on this page belongs to exactly one of five classes. Pre
 | Label | Meaning |
 |---|---|
 | **[Implemented in platform]** | Ships in the running ApexMail platform today and is verifiable in the tree (deployment facts: `docs/deployment-facts.json`; capability wiring: `docs/development/capability-registry.json`). |
-| **[Implemented by provider]** | A control delivered by the infrastructure provider (e.g., Hetzner) under the deployment configuration. |
+| **[Implemented by provider]** | A control delivered by the infrastructure provider (e.g., the EU infrastructure provider) under the deployment configuration. |
 | **[Operator policy]** | A commitment about how humans operate the platform; it is a policy, not a code-verified platform behavior. |
 | **[Roadmap]** | Planned; not live. Marked explicitly, never stated in the present tense. |
 | **[Not currently implemented]** | Named so it cannot be mistaken for a live control. |
@@ -29,7 +29,7 @@ Every control statement on this page belongs to exactly one of five classes. Pre
 
 ## Security Overview
 
-ApexMail provides transactional email infrastructure with EU/EEA-oriented deployment configurations and security designed for regulated industries. Active data and telemetry locations are deployment-specific and confirmed under the applicable agreement. The production topology is a single Hetzner host (Finland) running the full stack under Docker Compose; statements below are scoped to that reality.
+ApexMail provides transactional email infrastructure with EU/EEA-oriented deployment configurations and security designed for regulated industries. Active data and telemetry locations are deployment-specific and confirmed under the applicable agreement. The production deployment runs in Finland (EU) as a declarative container stack; statements below are scoped to the current deployment configuration.
 
 ### Encryption in Transit
 
@@ -75,13 +75,13 @@ ApexMail provides transactional email infrastructure with EU/EEA-oriented deploy
 - **[Operator policy]** Dependency updates: manual `cargo update` → full `ci/check-pr.sh` gate → push; the host pipeline deploys only green trees. There is **no Dependabot**, GitHub-based automation was retired with the self-hosted CI cutover, and no dependency-update PRs are auto-created.
 - **[Not implemented, not claimed]** Code-owner review enforcement: we do NOT claim required CODEOWNERS review, and no GitHub-side rule enforces it. This is a single-owner repository, so a required approving review from a code owner cannot be satisfied (the sole owner cannot approve their own change); branch protection on `main` was therefore removed on 2026-10-22 rather than left in place as a rule that only ever gets bypassed. `CODEOWNERS` remains as a review-routing document, not a gate. The enforced substitutes: the pre-push validate hook, `ci/check-pr.sh` for pre-merge verification, the pipeline's fail-closed stages, and the deploy-host blessing manifest that refuses a tree whose gates did not all pass.
 - **[Implemented in platform]** Deployment control: the pipeline builds, gates, migrates, deploys and verifies in one ordered run; a red stage stops the line before deploy. **[Not currently implemented]** Canary percentages and automatic canary rollback, rollback is the documented manual retag procedure (`deploy/rollback-plan.md`).
-- **[Implemented in platform]** Environment separation: production is a single Hetzner host under Docker Compose; development runs on developer machines against ephemeral containers. There are no separate staging clusters or environments, production data never leaves the production host, and CI test lanes use throwaway databases.
+- **[Implemented in platform]** Environment separation: production is the declarative container deployment in Finland (EU); development runs against ephemeral containers. There is no separate staging environment, production data never leaves the production environment, and CI test lanes use throwaway databases.
 
 ### Infrastructure Security
 
 - **[Implemented in platform]** Network boundaries: one production host; Docker networks segment frontend, backend and data-plane traffic; database services have no host port binding and are reachable only on the internal Docker networks.
 - **[Implemented in platform]** Firewalling: UFW default-deny incoming; inbound is limited to the service ports 25, 80, 443, 587 and 993 plus operator ports (22 SSH, 465 SMTPS, 2525/2526 bounce/FBL). Outbound is default-allow.
-- **[Implemented in platform]** Host hardening: `deploy/scripts/hetzner-bootstrap.sh` installs Docker, configures UFW, hardens sshd (key-only authentication, no password auth) and adds fail2ban.
+- **[Implemented in platform]** Host hardening: the deployment bootstrap installs Docker, configures the host firewall (default-deny inbound), hardens sshd (key-only authentication, no password auth) and adds fail2ban.
 - **[Operator policy]** Administrative access: SSH with key-based authentication to the single production host by named operators. **[Not currently implemented]** Bastion hosts and session recording, there is no bastion tier to record.
 - **[Implemented in platform]** Container isolation: services run as non-root users with dropped capabilities, `no-new-privileges`, read-only root filesystems plus tmpfs mounts where practical, and per-container CPU/memory limits (`docker-compose.prod.yml`).
 - **[Operator policy]** Patch management: OS packages are patched promptly after release (critical security patches urgently); container images are rebuilt and redeployed on every pipeline deploy of the changed services.
@@ -103,7 +103,7 @@ ApexMail provides transactional email infrastructure with EU/EEA-oriented deploy
 - **[Implemented in platform]** Restore verification: every backup is automatically decrypted and structurally validated (`pg_restore --list`, or the ClickHouse equivalent) before the plaintext is deleted, a backup that cannot be read is never counted as good, and each backup container's healthcheck requires a fresh artifact (< 25 h old).
 - **[Not currently implemented]** Fully automated restore DRILLS: full-restore exercises are manual, at the documented quarterly cadence (`docs/operations/disaster-recovery-testing.md`), on a scratch host.
 - **[Implemented in platform]** Recovery Point Objective (RPO): up to 24 hours, the last nightly backup. There is no near-real-time recovery point.
-- **[Operator policy]** Recovery Time Objective (RTO): hours, not minutes (host rebuild + backup restore); the real number is measured and recorded in the quarterly drill. [roadmap] Cross-region failover is a planned Dedicated Tenant capability, not live; recovery is restore-based on the current single-host topology.
+- **[Operator policy]** Recovery Time Objective (RTO): hours, not minutes (host rebuild + backup restore); the real number is measured and recorded in the quarterly drill. [roadmap] Cross-region failover is a planned Dedicated Tenant capability, not live; recovery is restore-based on the current deployment configuration.
 - **[Operator policy]** Geographic separation: backup locations follow the active deployment configuration and applicable agreement. Cross-region disaster recovery, where offered, is contract-specific and not a public-plan entitlement.
 
 ### Data Deletion
@@ -147,7 +147,7 @@ ApexMail operates a responsible disclosure program with safe harbor for security
   - Key fingerprint: `AB12 CD34 EF56 7890 1234 5678 90AB CDEF 1234 5678`
 - **Safe harbor**: We will not pursue legal action against researchers who follow our [Responsible Disclosure Policy](responsible-disclosure.md)
 - **Scope**: `*.apexmail.ee`, API endpoints (`api.apexmail.com`), dashboard (`app.apexmail.com`), SMTP infrastructure, support portal, status page
-- **Out of scope**: Third-party services (Mollie, Hetzner, Let's Encrypt), social media accounts, physical security
+- **Out of scope**: Third-party services (Mollie, the EU infrastructure provider, Let's Encrypt), social media accounts, physical security
 - **Prohibited**: DoS/DDoS testing, bulk/spam email, social engineering, data exfiltration, credential harvesting
 - **Response target**: Initial acknowledgment within 48 hours; triage within 5 business days; updates at least every 14 days
 - **Disclosure process**: Coordinate disclosure timeline with researcher; publish advisories after remediation; credit researchers in release notes
@@ -170,7 +170,7 @@ ApexMail operates a responsible disclosure program with safe harbor for security
 - **Backup frequency**: Nightly automated encrypted backups (PostgreSQL and ClickHouse) with the documented retention generations (14 days / 8 weeks / 6 months for PostgreSQL; 14 days for ClickHouse).
 - **Recovery Time Objective (RTO)**: hours, not minutes, measured in the quarterly rebuild drill (operator policy target).
 - **Recovery Point Objective (RPO)**: up to 24 hours for transactional data (the last nightly backup); point-in-time recovery is not implemented.
-- **Failover**: Service-level resilience on the current single-host topology, health-checked services with automatic restart; queue and message persistence to disk. [roadmap] Multi-AZ and cross-region failover are planned Dedicated Tenant capabilities, not live.
+- **Failover**: Service-level resilience on the current deployment configuration, health-checked services with automatic restart; queue and message persistence to disk. [roadmap] Multi-AZ and cross-region failover are planned Dedicated Tenant capabilities, not live.
 - **Testing**: Automated restorability validation on every backup (decrypt + structural check); full disaster-recovery drills are manual at the documented quarterly cadence.
 
 ### Incident Response

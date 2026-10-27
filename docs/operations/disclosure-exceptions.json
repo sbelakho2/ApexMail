@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "policy": "Facts are Internal by default (apexmail_lib::disclosure::DisclosureClass). A disclosure that exists ONLY because a legal or contractual obligation requires it must appear in this manifest with its exact allowed surface and its prohibited surfaces. Anything not listed here is forbidden on public and customer surfaces; tools/check_public_artifacts.py validates this manifest's schema so an exception can never be implied, only recorded.",
+  "exceptions": [
+    {
+      "id": "subprocessor-identity-to-contracting-customer",
+      "fact": "Legal identity of the EU infrastructure provider (subprocessor)",
+      "basis": "GDPR Article 28 processor transparency: the contracting customer needs enough subprocessor information to exercise its contractual rights (advance notice, objection). The provider name is withheld from every anonymous and customer-facing surface per the owner directive of 2026-10-26.",
+      "allowed_surface": "Subprocessor annex of the signed DPA, and contractual disclosure on request to a CONTRACTING customer",
+      "prohibited_surfaces": [
+        "marketing website in any language",
+        "AI assistant and mailbot answers",
+        "status page",
+        "customer API response bodies",
+        "SMTP/DNS/header artifacts",
+        "generated questionnaires unless the recipient is under contract or NDA"
+      ]
+    },
+    {
+      "id": "company-registry-identity",
+      "fact": "Legal entity name, registry code and domicile of the contracting party",
+      "basis": "Estonian registry and accounting law, and contracting-party identification: invoices, the DPA and registry filings must name the legal entity.",
+      "allowed_surface": "Invoices, DPA, public legal/imprint pages, statutory filings",
+      "prohibited_surfaces": [
+        "any framing of organisation size, staffing or ownership",
+        "infrastructure or operational context"
+      ]
+    }
+  ]
+}

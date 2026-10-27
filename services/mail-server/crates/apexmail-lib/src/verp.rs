@@ -533,10 +533,14 @@ mod tests {
             Err(VerpV2Error::BadSignature)
         );
         let token = mint_verp_v3_token(SECRET, &c);
-        let mut tampered = token.clone();
-        let flip = if tampered.ends_with('A') { 'B' } else { 'A' };
-        tampered.pop();
-        tampered.push(flip);
+        // Tamper a byte INSIDE the decoded body and re-encode: flipping a
+        // base64 CHARACTER (especially the last one, whose trailing bits can
+        // be non-canonical) intermittently yields Malformed instead of a
+        // cryptographic verdict — the tamper must always be valid encoding
+        // over WRONG ciphertext so the AEAD verdict is what is being tested.
+        let mut body = URL_SAFE_NO_PAD.decode(&token).expect("mint encodes");
+        body[4] ^= 0x5a;
+        let tampered = URL_SAFE_NO_PAD.encode(body);
         assert_eq!(
             verify_verp_v3_token(SECRET, &tampered, 1_000_000_000),
             Err(VerpV2Error::BadSignature),

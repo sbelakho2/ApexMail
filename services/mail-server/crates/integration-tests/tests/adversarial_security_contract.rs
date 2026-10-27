@@ -538,11 +538,32 @@ mod header_and_redirect_contract {
     }
 
     #[test]
-    fn open_redirect_shapes_fall_back_to_root() {
-        // Same-origin relative paths survive; every hop-away shape is "/".
-        assert_eq!(consent_safe_return_to(Some("/dashboard")), "/dashboard");
-        assert_eq!(consent_safe_return_to(None), "/");
-        assert_eq!(consent_safe_return_to(Some("")), "/");
+    fn open_redirect_shapes_fall_back_to_site_home() {
+        // The shipped contract (api-server consent_safe_return_to): safe
+        // values resolve to the SITE ORIGIN (the banner must return across
+        // the marketing/app host boundary), and every hop-away shape falls
+        // back to the absolute site home — never a bare root path.
+        const HOME: &str = "https://apexmail.ee/";
+        assert_eq!(
+            consent_safe_return_to(Some("/dashboard")),
+            "https://apexmail.ee/dashboard"
+        );
+        assert_eq!(consent_safe_return_to(None), HOME);
+        assert_eq!(consent_safe_return_to(Some("")), HOME);
+        // Positive shapes the normalizer accepts verbatim.
+        assert_eq!(
+            consent_safe_return_to(Some("https://apexmail.ee/upgrade")),
+            "https://apexmail.ee/upgrade"
+        );
+        assert_eq!(
+            consent_safe_return_to(Some("https://status.apexmail.ee/incident")),
+            "https://status.apexmail.ee/incident"
+        );
+        assert_eq!(
+            consent_safe_return_to(Some("http://127.0.0.1:8933/preview")),
+            "http://127.0.0.1:8933/preview",
+            "loopback previews return to themselves"
+        );
         for evil in [
             "//evil.com/steal",
             "/\\evil.com",
@@ -557,7 +578,7 @@ mod header_and_redirect_contract {
         ] {
             assert_eq!(
                 consent_safe_return_to(Some(evil)),
-                "/",
+                HOME,
                 "hostile return_to must fall back to / : {evil}"
             );
         }

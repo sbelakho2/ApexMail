@@ -1,0 +1,768 @@
+{
+  "_readme": "External route census (audit E16a). The nginx configs are the EXTERNAL boundary: every internet-reachable route exists because a server/location block declares it. The compliance service is deliberately NOT internet-routed (no published port; no public vhost proxies to it). tools/check_route_census.py fails on: a parsed route missing here (UNKNOWN), an entry whose route/action no longer parses (STALE), a forbidden pattern (/v1/admin, /cp/, /internal/, /claims) in a public anonymous/customer location, or a public vhost proxying to the compliance port. Classes: anonymous = unauthenticated public marketing/docs/status/health; customer = api/app/enterprise routes whose auth is enforced at the application (session/JWT/API-key); internal = loopback-only listeners and nginx-`internal` error-page locations (never directly reachable); security-review = staff-gated control plane (admin.apexmail.ee, operator auth at api-server).",
+  "forbidden_public_patterns": [
+    "/v1/admin",
+    "/cp/",
+    "/internal/",
+    "/claims"
+  ],
+  "compliance_service_port": 3011,
+  "routes": [
+    {
+      "config": "apps/marketing-zola/nginx.conf",
+      "listen": "127.0.0.1:8081",
+      "server_name": "marketing-static-internal",
+      "location": "/",
+      "action": "other",
+      "class": "internal",
+      "note": "loopback-only listener; not internet-routed"
+    },
+    {
+      "config": "apps/marketing-zola/nginx.conf",
+      "listen": "127.0.0.1:8081",
+      "server_name": "marketing-static-internal",
+      "location": "= /",
+      "action": "other",
+      "class": "internal",
+      "note": "loopback-only listener; not internet-routed"
+    },
+    {
+      "config": "apps/marketing-zola/nginx.conf",
+      "listen": "127.0.0.1:8081",
+      "server_name": "marketing-static-internal",
+      "location": "= /404.html",
+      "action": "internal",
+      "class": "internal",
+      "note": "loopback-only listener; not internet-routed"
+    },
+    {
+      "config": "apps/marketing-zola/nginx.conf",
+      "listen": "127.0.0.1:8081",
+      "server_name": "marketing-static-internal",
+      "location": "= /50x.html",
+      "action": "internal",
+      "class": "internal",
+      "note": "loopback-only listener; not internet-routed"
+    },
+    {
+      "config": "apps/marketing-zola/nginx.conf",
+      "listen": "127.0.0.1:8082",
+      "server_name": "marketing-consent-recorded-internal",
+      "location": "/",
+      "action": "proxy_pass http://127.0.0.1:8081",
+      "class": "internal",
+      "note": "loopback-only listener; not internet-routed"
+    },
+    {
+      "config": "apps/marketing-zola/nginx.conf",
+      "listen": "8080",
+      "server_name": "_",
+      "location": "/",
+      "action": "proxy_pass http://$marketing_upstream",
+      "class": "anonymous",
+      "note": "marketing HTML pages; banner-state map picks the internal upstream"
+    },
+    {
+      "config": "apps/marketing-zola/nginx.conf",
+      "listen": "8080",
+      "server_name": "_",
+      "location": "/pgp-key.asc",
+      "action": "static root /usr/share/nginx/html",
+      "class": "anonymous",
+      "note": "static marketing asset/metadata (container listener behind the edge vhost)"
+    },
+    {
+      "config": "apps/marketing-zola/nginx.conf",
+      "listen": "8080",
+      "server_name": "_",
+      "location": "/specs/",
+      "action": "static root /usr/share/nginx/html",
+      "class": "anonymous",
+      "note": "static marketing asset/metadata (container listener behind the edge vhost)"
+    },
+    {
+      "config": "apps/marketing-zola/nginx.conf",
+      "listen": "8080",
+      "server_name": "_",
+      "location": "= /.well-known/autoconfig/mail/config-v1.1.xml",
+      "action": "static root /usr/share/nginx/html",
+      "class": "anonymous",
+      "note": "static marketing asset/metadata (container listener behind the edge vhost)"
+    },
+    {
+      "config": "apps/marketing-zola/nginx.conf",
+      "listen": "8080",
+      "server_name": "_",
+      "location": "= /.well-known/security.txt",
+      "action": "static root /usr/share/nginx/html",
+      "class": "anonymous",
+      "note": "static marketing asset/metadata (container listener behind the edge vhost)"
+    },
+    {
+      "config": "apps/marketing-zola/nginx.conf",
+      "listen": "8080",
+      "server_name": "_",
+      "location": "= /404.html",
+      "action": "internal",
+      "class": "internal",
+      "note": "nginx `internal` directive; rendered only via error_page"
+    },
+    {
+      "config": "apps/marketing-zola/nginx.conf",
+      "listen": "8080",
+      "server_name": "_",
+      "location": "= /50x.html",
+      "action": "internal",
+      "class": "internal",
+      "note": "nginx `internal` directive; rendered only via error_page"
+    },
+    {
+      "config": "apps/marketing-zola/nginx.conf",
+      "listen": "8080",
+      "server_name": "_",
+      "location": "= /api-console",
+      "action": "return 301 /api-explorer/",
+      "class": "anonymous",
+      "note": "content-rename redirect preserving old links"
+    },
+    {
+      "config": "apps/marketing-zola/nginx.conf",
+      "listen": "8080",
+      "server_name": "_",
+      "location": "= /api-console/",
+      "action": "return 301 /api-explorer/",
+      "class": "anonymous",
+      "note": "content-rename redirect preserving old links"
+    },
+    {
+      "config": "apps/marketing-zola/nginx.conf",
+      "listen": "8080",
+      "server_name": "_",
+      "location": "= /app",
+      "action": "return 302 https://app.apexmail.ee",
+      "class": "anonymous",
+      "note": "console shortcut redirect (302 by design)"
+    },
+    {
+      "config": "apps/marketing-zola/nginx.conf",
+      "listen": "8080",
+      "server_name": "_",
+      "location": "= /cache-reset-20260515",
+      "action": "return 204",
+      "class": "anonymous",
+      "note": "cache-bust sentinel (204)"
+    },
+    {
+      "config": "apps/marketing-zola/nginx.conf",
+      "listen": "8080",
+      "server_name": "_",
+      "location": "= /case-studies",
+      "action": "return 301 /solutions/",
+      "class": "anonymous",
+      "note": "content-rename redirect preserving old links"
+    },
+    {
+      "config": "apps/marketing-zola/nginx.conf",
+      "listen": "8080",
+      "server_name": "_",
+      "location": "= /case-studies/",
+      "action": "return 301 /solutions/",
+      "class": "anonymous",
+      "note": "content-rename redirect preserving old links"
+    },
+    {
+      "config": "apps/marketing-zola/nginx.conf",
+      "listen": "8080",
+      "server_name": "_",
+      "location": "= /docs/inbox-placement",
+      "action": "return 302 /inbox-placement/",
+      "class": "anonymous",
+      "note": "content-rename redirect preserving old links"
+    },
+    {
+      "config": "apps/marketing-zola/nginx.conf",
+      "listen": "8080",
+      "server_name": "_",
+      "location": "= /favicon.ico",
+      "action": "static root /usr/share/nginx/html",
+      "class": "anonymous",
+      "note": "static marketing asset/metadata (container listener behind the edge vhost)"
+    },
+    {
+      "config": "apps/marketing-zola/nginx.conf",
+      "listen": "8080",
+      "server_name": "_",
+      "location": "= /forensic",
+      "action": "return 301 /email-logs/",
+      "class": "anonymous",
+      "note": "content-rename redirect preserving old links"
+    },
+    {
+      "config": "apps/marketing-zola/nginx.conf",
+      "listen": "8080",
+      "server_name": "_",
+      "location": "= /forensic/",
+      "action": "return 301 /email-logs/",
+      "class": "anonymous",
+      "note": "content-rename redirect preserving old links"
+    },
+    {
+      "config": "apps/marketing-zola/nginx.conf",
+      "listen": "8080",
+      "server_name": "_",
+      "location": "= /health",
+      "action": "return 200 OK",
+      "class": "anonymous",
+      "note": "marketing container health (reaches the internet only via the edge catch-all)"
+    },
+    {
+      "config": "apps/marketing-zola/nginx.conf",
+      "listen": "8080",
+      "server_name": "_",
+      "location": "= /icon.svg",
+      "action": "static root /usr/share/nginx/html",
+      "class": "anonymous",
+      "note": "static marketing asset/metadata (container listener behind the edge vhost)"
+    },
+    {
+      "config": "apps/marketing-zola/nginx.conf",
+      "listen": "8080",
+      "server_name": "_",
+      "location": "= /mail/config-v1.1.xml",
+      "action": "static root /usr/share/nginx/html",
+      "class": "anonymous",
+      "note": "static marketing asset/metadata (container listener behind the edge vhost)"
+    },
+    {
+      "config": "apps/marketing-zola/nginx.conf",
+      "listen": "8080",
+      "server_name": "_",
+      "location": "= /manifest.json",
+      "action": "static root /usr/share/nginx/html",
+      "class": "anonymous",
+      "note": "static marketing asset/metadata (container listener behind the edge vhost)"
+    },
+    {
+      "config": "apps/marketing-zola/nginx.conf",
+      "listen": "8080",
+      "server_name": "_",
+      "location": "= /pgp-key.txt",
+      "action": "static root /usr/share/nginx/html",
+      "class": "anonymous",
+      "note": "static marketing asset/metadata (container listener behind the edge vhost)"
+    },
+    {
+      "config": "apps/marketing-zola/nginx.conf",
+      "listen": "8080",
+      "server_name": "_",
+      "location": "= /robots.txt",
+      "action": "static root /usr/share/nginx/html",
+      "class": "anonymous",
+      "note": "static marketing asset/metadata (container listener behind the edge vhost)"
+    },
+    {
+      "config": "apps/marketing-zola/nginx.conf",
+      "listen": "8080",
+      "server_name": "_",
+      "location": "= /signup",
+      "action": "return 302 https://app.apexmail.ee/signup",
+      "class": "anonymous",
+      "note": "console shortcut redirect (302 by design)"
+    },
+    {
+      "config": "apps/marketing-zola/nginx.conf",
+      "listen": "8080",
+      "server_name": "_",
+      "location": "= /sitemap.xml",
+      "action": "static root /usr/share/nginx/html",
+      "class": "anonymous",
+      "note": "static marketing asset/metadata (container listener behind the edge vhost)"
+    },
+    {
+      "config": "apps/marketing-zola/nginx.conf",
+      "listen": "8080",
+      "server_name": "_",
+      "location": "~ ^/(de|fr|es)/case-studies/?$",
+      "action": "return 301 /$1/solutions/",
+      "class": "anonymous",
+      "note": "static marketing asset/metadata (container listener behind the edge vhost)"
+    },
+    {
+      "config": "apps/marketing-zola/nginx.conf",
+      "listen": "8080",
+      "server_name": "_",
+      "location": "~ ^/(de|fr|es)/forensic/?$",
+      "action": "return 301 /$1/email-logs/",
+      "class": "anonymous",
+      "note": "static marketing asset/metadata (container listener behind the edge vhost)"
+    },
+    {
+      "config": "apps/marketing-zola/nginx.conf",
+      "listen": "8080",
+      "server_name": "_",
+      "location": "~* \\.(js|css|png|jpg|jpeg|gif|ico|svg|webp|avif|woff|woff2|ttf|eot|otf)$",
+      "action": "static root /usr/share/nginx/html",
+      "class": "anonymous",
+      "note": "static marketing asset/metadata (container listener behind the edge vhost)"
+    },
+    {
+      "config": "deploy/nginx/nginx.conf",
+      "listen": "127.0.0.1:8080",
+      "server_name": "(default)",
+      "location": "/health",
+      "action": "return 200",
+      "class": "internal",
+      "note": "loopback-only listener; not internet-routed"
+    },
+    {
+      "config": "deploy/nginx/nginx.conf",
+      "listen": "127.0.0.1:8080",
+      "server_name": "(default)",
+      "location": "/nginx-health",
+      "action": "return 200",
+      "class": "internal",
+      "note": "loopback-only listener; not internet-routed"
+    },
+    {
+      "config": "deploy/nginx/nginx.conf",
+      "listen": "443 ssl",
+      "server_name": "admin.apexmail.ee control.apexmail.ee",
+      "location": "/",
+      "action": "proxy_pass http://apexmail_api",
+      "class": "security-review",
+      "note": "staff control plane; operator/admin auth at api-server (/v1/admin/* behind role checks), tighter admin rate zone"
+    },
+    {
+      "config": "deploy/nginx/nginx.conf",
+      "listen": "443 ssl",
+      "server_name": "admin.apexmail.ee control.apexmail.ee",
+      "location": "/api/kcaptcha/",
+      "action": "proxy_pass http://apexmail_api",
+      "class": "security-review",
+      "note": "staff control plane; operator/admin auth at api-server (/v1/admin/* behind role checks), tighter admin rate zone"
+    },
+    {
+      "config": "deploy/nginx/nginx.conf",
+      "listen": "443 ssl",
+      "server_name": "admin.apexmail.ee control.apexmail.ee",
+      "location": "/v1/",
+      "action": "proxy_pass http://apexmail_api",
+      "class": "security-review",
+      "note": "staff control plane; operator/admin auth at api-server (/v1/admin/* behind role checks), tighter admin rate zone"
+    },
+    {
+      "config": "deploy/nginx/nginx.conf",
+      "listen": "443 ssl",
+      "server_name": "admin.apexmail.ee control.apexmail.ee",
+      "location": "/v1/auth/login",
+      "action": "proxy_pass http://apexmail_api",
+      "class": "security-review",
+      "note": "staff control plane; operator/admin auth at api-server (/v1/admin/* behind role checks), tighter admin rate zone"
+    },
+    {
+      "config": "deploy/nginx/nginx.conf",
+      "listen": "443 ssl",
+      "server_name": "admin.apexmail.ee control.apexmail.ee",
+      "location": "/v1/auth/register",
+      "action": "proxy_pass http://apexmail_api",
+      "class": "security-review",
+      "note": "staff control plane; operator/admin auth at api-server (/v1/admin/* behind role checks), tighter admin rate zone"
+    },
+    {
+      "config": "deploy/nginx/nginx.conf",
+      "listen": "443 ssl",
+      "server_name": "admin.apexmail.ee control.apexmail.ee",
+      "location": "/v1/auth/signup",
+      "action": "proxy_pass http://apexmail_api",
+      "class": "security-review",
+      "note": "staff control plane; operator/admin auth at api-server (/v1/admin/* behind role checks), tighter admin rate zone"
+    },
+    {
+      "config": "deploy/nginx/nginx.conf",
+      "listen": "443 ssl",
+      "server_name": "apexmail.ee www.apexmail.ee",
+      "location": "/",
+      "action": "proxy_pass http://marketing:8080",
+      "class": "anonymous",
+      "note": "marketing site (edge -> marketing:8080)"
+    },
+    {
+      "config": "deploy/nginx/nginx.conf",
+      "listen": "443 ssl",
+      "server_name": "apexmail.ee www.apexmail.ee",
+      "location": "= /404.html",
+      "action": "internal",
+      "class": "internal",
+      "note": "nginx `internal` directive; served only via error_page"
+    },
+    {
+      "config": "deploy/nginx/nginx.conf",
+      "listen": "443 ssl",
+      "server_name": "apexmail.ee www.apexmail.ee",
+      "location": "= /50x.html",
+      "action": "internal",
+      "class": "internal",
+      "note": "nginx `internal` directive; served only via error_page"
+    },
+    {
+      "config": "deploy/nginx/nginx.conf",
+      "listen": "443 ssl",
+      "server_name": "apexmail.ee www.apexmail.ee",
+      "location": "^~ /api/status-data",
+      "action": "proxy_pass http://status-server:3000/status/api",
+      "class": "anonymous",
+      "note": "footer status-widget JSON (public status backend, no auth)"
+    },
+    {
+      "config": "deploy/nginx/nginx.conf",
+      "listen": "443 ssl",
+      "server_name": "apexmail.ee www.apexmail.ee",
+      "location": "~ ^/[a-z0-9-]+(/[a-z0-9-]+)*$",
+      "action": "return 301 $uri/$is_args$args",
+      "class": "anonymous",
+      "note": "trailing-slash canonicalisation 301 for extensionless marketing paths"
+    },
+    {
+      "config": "deploy/nginx/nginx.conf",
+      "listen": "443 ssl",
+      "server_name": "api.apexmail.ee",
+      "location": "/",
+      "action": "proxy_pass http://apexmail_api",
+      "class": "customer",
+      "note": "customer REST API; api-server enforces API-key/session auth per route"
+    },
+    {
+      "config": "deploy/nginx/nginx.conf",
+      "listen": "443 ssl",
+      "server_name": "api.apexmail.ee",
+      "location": "/api/kcaptcha/",
+      "action": "proxy_pass http://apexmail_api",
+      "class": "customer",
+      "note": "captcha challenge for login/signup; login rate zone"
+    },
+    {
+      "config": "deploy/nginx/nginx.conf",
+      "listen": "443 ssl",
+      "server_name": "api.apexmail.ee",
+      "location": "/email",
+      "action": "proxy_pass http://apexmail_api",
+      "class": "customer",
+      "note": "provider-compat send surface (SendGrid/Mailgun/Postmark/Resend shapes); API-key auth at api-server"
+    },
+    {
+      "config": "deploy/nginx/nginx.conf",
+      "listen": "443 ssl",
+      "server_name": "api.apexmail.ee",
+      "location": "/emails",
+      "action": "proxy_pass http://apexmail_api",
+      "class": "customer",
+      "note": "provider-compat send surface (SendGrid/Mailgun/Postmark/Resend shapes); API-key auth at api-server"
+    },
+    {
+      "config": "deploy/nginx/nginx.conf",
+      "listen": "443 ssl",
+      "server_name": "api.apexmail.ee",
+      "location": "/sales-api/",
+      "action": "return 404",
+      "class": "customer",
+      "note": "explicit 404 refusal of every non-unsubscribe sales-api path; never proxied"
+    },
+    {
+      "config": "deploy/nginx/nginx.conf",
+      "listen": "443 ssl",
+      "server_name": "api.apexmail.ee",
+      "location": "/sales-api/u/",
+      "action": "proxy_pass http://sales-autopilot:3010/u/",
+      "class": "anonymous",
+      "note": "RFC 8058 / CAN-SPAM one-click unsubscribe links in campaign mail; tokenised URL, no session"
+    },
+    {
+      "config": "deploy/nginx/nginx.conf",
+      "listen": "443 ssl",
+      "server_name": "api.apexmail.ee",
+      "location": "/v1/",
+      "action": "proxy_pass http://apexmail_api",
+      "class": "customer",
+      "note": "customer REST API; api-server enforces API-key/session auth per route"
+    },
+    {
+      "config": "deploy/nginx/nginx.conf",
+      "listen": "443 ssl",
+      "server_name": "api.apexmail.ee",
+      "location": "/v1/auth/login",
+      "action": "proxy_pass http://apexmail_api",
+      "class": "customer",
+      "note": "auth-acquisition endpoint; edge rate zone + api-server session auth"
+    },
+    {
+      "config": "deploy/nginx/nginx.conf",
+      "listen": "443 ssl",
+      "server_name": "api.apexmail.ee",
+      "location": "/v1/auth/register",
+      "action": "proxy_pass http://apexmail_api",
+      "class": "customer",
+      "note": "auth-acquisition endpoint; edge rate zone + api-server session auth"
+    },
+    {
+      "config": "deploy/nginx/nginx.conf",
+      "listen": "443 ssl",
+      "server_name": "api.apexmail.ee",
+      "location": "/v1/auth/signup",
+      "action": "proxy_pass http://apexmail_api",
+      "class": "customer",
+      "note": "auth-acquisition endpoint; edge rate zone + api-server session auth"
+    },
+    {
+      "config": "deploy/nginx/nginx.conf",
+      "listen": "443 ssl",
+      "server_name": "api.apexmail.ee",
+      "location": "/v3/",
+      "action": "proxy_pass http://apexmail_api",
+      "class": "customer",
+      "note": "provider-compat send surface (SendGrid/Mailgun/Postmark/Resend shapes); API-key auth at api-server"
+    },
+    {
+      "config": "deploy/nginx/nginx.conf",
+      "listen": "443 ssl",
+      "server_name": "app.apexmail.ee",
+      "location": "/",
+      "action": "proxy_pass http://apexmail_api",
+      "class": "customer",
+      "note": "customer console/API surface; api-server enforces session auth per route"
+    },
+    {
+      "config": "deploy/nginx/nginx.conf",
+      "listen": "443 ssl",
+      "server_name": "app.apexmail.ee",
+      "location": "/api/kcaptcha/",
+      "action": "proxy_pass http://apexmail_api",
+      "class": "customer",
+      "note": "captcha challenge for login/signup; login rate zone"
+    },
+    {
+      "config": "deploy/nginx/nginx.conf",
+      "listen": "443 ssl",
+      "server_name": "app.apexmail.ee",
+      "location": "/email",
+      "action": "proxy_pass http://apexmail_api",
+      "class": "customer",
+      "note": "customer console/API surface; api-server enforces session auth per route"
+    },
+    {
+      "config": "deploy/nginx/nginx.conf",
+      "listen": "443 ssl",
+      "server_name": "app.apexmail.ee",
+      "location": "/emails",
+      "action": "proxy_pass http://apexmail_api",
+      "class": "customer",
+      "note": "customer console/API surface; api-server enforces session auth per route"
+    },
+    {
+      "config": "deploy/nginx/nginx.conf",
+      "listen": "443 ssl",
+      "server_name": "app.apexmail.ee",
+      "location": "/v1/",
+      "action": "proxy_pass http://apexmail_api",
+      "class": "customer",
+      "note": "customer console/API surface; api-server enforces session auth per route"
+    },
+    {
+      "config": "deploy/nginx/nginx.conf",
+      "listen": "443 ssl",
+      "server_name": "app.apexmail.ee",
+      "location": "/v1/auth/login",
+      "action": "proxy_pass http://apexmail_api",
+      "class": "customer",
+      "note": "auth-acquisition endpoint on the customer console vhost; edge rate zone + api-server session auth"
+    },
+    {
+      "config": "deploy/nginx/nginx.conf",
+      "listen": "443 ssl",
+      "server_name": "app.apexmail.ee",
+      "location": "/v1/auth/register",
+      "action": "proxy_pass http://apexmail_api",
+      "class": "customer",
+      "note": "auth-acquisition endpoint on the customer console vhost; edge rate zone + api-server session auth"
+    },
+    {
+      "config": "deploy/nginx/nginx.conf",
+      "listen": "443 ssl",
+      "server_name": "app.apexmail.ee",
+      "location": "/v1/auth/signup",
+      "action": "proxy_pass http://apexmail_api",
+      "class": "customer",
+      "note": "auth-acquisition endpoint on the customer console vhost; edge rate zone + api-server session auth"
+    },
+    {
+      "config": "deploy/nginx/nginx.conf",
+      "listen": "443 ssl",
+      "server_name": "app.apexmail.ee",
+      "location": "/v3/",
+      "action": "proxy_pass http://apexmail_api",
+      "class": "customer",
+      "note": "customer console/API surface; api-server enforces session auth per route"
+    },
+    {
+      "config": "deploy/nginx/nginx.conf",
+      "listen": "443 ssl",
+      "server_name": "autoconfig.apexmail.ee",
+      "location": "/",
+      "action": "return 404",
+      "class": "anonymous",
+      "note": "catch-all 404 refusal"
+    },
+    {
+      "config": "deploy/nginx/nginx.conf",
+      "listen": "443 ssl",
+      "server_name": "autoconfig.apexmail.ee",
+      "location": "/.well-known/autoconfig/",
+      "action": "static root /var/www/certbot",
+      "class": "anonymous",
+      "note": "Thunderbird/Apple Mail autoconfig XML over HTTPS"
+    },
+    {
+      "config": "deploy/nginx/nginx.conf",
+      "listen": "443 ssl",
+      "server_name": "autoconfig.apexmail.ee",
+      "location": "/mail/config-v1.1.xml",
+      "action": "static root /var/www/certbot",
+      "class": "anonymous",
+      "note": "Thunderbird/Apple Mail autoconfig XML over HTTPS"
+    },
+    {
+      "config": "deploy/nginx/nginx.conf",
+      "listen": "443 ssl",
+      "server_name": "enterprise.apexmail.ee",
+      "location": "/",
+      "action": "proxy_pass http://enterprise:3008",
+      "class": "customer",
+      "note": "enterprise API; JWT auth_middleware at the enterprise service (/health,/readiness unauthenticated)"
+    },
+    {
+      "config": "deploy/nginx/nginx.conf",
+      "listen": "443 ssl",
+      "server_name": "enterprise.apexmail.ee",
+      "location": "/log-streams/",
+      "action": "proxy_pass http://enterprise:3008",
+      "class": "customer",
+      "note": "enterprise SSE log streaming; JWT auth_middleware at the enterprise service"
+    },
+    {
+      "config": "deploy/nginx/nginx.conf",
+      "listen": "443 ssl",
+      "server_name": "status.apexmail.ee",
+      "location": "/",
+      "action": "return 404",
+      "class": "anonymous",
+      "note": "catch-all 404 refusal; only exact status/health routes proxied"
+    },
+    {
+      "config": "deploy/nginx/nginx.conf",
+      "listen": "443 ssl",
+      "server_name": "status.apexmail.ee",
+      "location": "= /",
+      "action": "return 301 /status",
+      "class": "anonymous",
+      "note": "public status page/JSON/health (status backend)"
+    },
+    {
+      "config": "deploy/nginx/nginx.conf",
+      "listen": "443 ssl",
+      "server_name": "status.apexmail.ee",
+      "location": "= /api/status-data",
+      "action": "proxy_pass http://status-server:3000/status/api",
+      "class": "anonymous",
+      "note": "public status page/JSON/health (status backend)"
+    },
+    {
+      "config": "deploy/nginx/nginx.conf",
+      "listen": "443 ssl",
+      "server_name": "status.apexmail.ee",
+      "location": "= /status",
+      "action": "proxy_pass http://status-server:3000",
+      "class": "anonymous",
+      "note": "public status page/JSON/health (status backend)"
+    },
+    {
+      "config": "deploy/nginx/nginx.conf",
+      "listen": "443 ssl",
+      "server_name": "status.apexmail.ee",
+      "location": "= /status/",
+      "action": "return 301 /status",
+      "class": "anonymous",
+      "note": "public status page/JSON/health (status backend)"
+    },
+    {
+      "config": "deploy/nginx/nginx.conf",
+      "listen": "443 ssl",
+      "server_name": "status.apexmail.ee",
+      "location": "= /status/api",
+      "action": "proxy_pass http://status-server:3000",
+      "class": "anonymous",
+      "note": "public status page/JSON/health (status backend)"
+    },
+    {
+      "config": "deploy/nginx/nginx.conf",
+      "listen": "443 ssl",
+      "server_name": "status.apexmail.ee",
+      "location": "= /status/history",
+      "action": "proxy_pass http://status-server:3000",
+      "class": "anonymous",
+      "note": "public status page/JSON/health (status backend)"
+    },
+    {
+      "config": "deploy/nginx/nginx.conf",
+      "listen": "443 ssl",
+      "server_name": "status.apexmail.ee",
+      "location": "= /v1/health",
+      "action": "proxy_pass http://status-server:3000",
+      "class": "anonymous",
+      "note": "public status page/JSON/health (status backend)"
+    },
+    {
+      "config": "deploy/nginx/nginx.conf",
+      "listen": "443 ssl",
+      "server_name": "track.apexmail.ee",
+      "location": "/",
+      "action": "proxy_pass http://tracking:3001",
+      "class": "anonymous",
+      "note": "open/click tracking pixels; tokenised URLs hit by recipient mail clients, app-level rate limiting"
+    },
+    {
+      "config": "deploy/nginx/nginx.conf",
+      "listen": "80 default_server",
+      "server_name": "_",
+      "location": "/",
+      "action": "return 301 https://$host$request_uri",
+      "class": "internal",
+      "note": "unknown-Host catch-all; 421 Misdirected Request, no route exposed"
+    },
+    {
+      "config": "deploy/nginx/nginx.conf",
+      "listen": "80 default_server",
+      "server_name": "_",
+      "location": "/.well-known/acme-challenge/",
+      "action": "static root /var/www/certbot",
+      "class": "internal",
+      "note": "unknown-Host catch-all; 421 Misdirected Request, no route exposed"
+    },
+    {
+      "config": "deploy/nginx/nginx.conf",
+      "listen": "80 default_server",
+      "server_name": "_",
+      "location": "/.well-known/autoconfig/",
+      "action": "static root /var/www/certbot",
+      "class": "internal",
+      "note": "unknown-Host catch-all; 421 Misdirected Request, no route exposed"
+    },
+    {
+      "config": "deploy/nginx/nginx.conf",
+      "listen": "80 default_server",
+      "server_name": "_",
+      "location": "/mail/config-v1.1.xml",
+      "action": "static root /var/www/certbot",
+      "class": "internal",
+      "note": "unknown-Host catch-all; 421 Misdirected Request, no route exposed"
+    }
+  ]
+}

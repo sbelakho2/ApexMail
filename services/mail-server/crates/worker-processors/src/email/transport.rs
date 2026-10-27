@@ -2719,6 +2719,129 @@ mod tests {
         );
     }
 
+    /// E16d: the protocol-surface sweep (external audit 2026-10-26, item 8).
+    /// ONE test across every outbound artifact a recipient's infrastructure
+    /// can observe — recipient-facing MIME headers, click/open tracking
+    /// tokens, the unsubscribe token, and the VERP Return-Path — proving
+    /// none of them carries a raw internal identifier (tenant id, queue id,
+    /// recipient address, campaign id) in any decodable form. The platform
+    /// message id in the standard `Message-ID` header is deliberately NOT
+    /// flagged: it is the customer-visible message identity (the timeline
+    /// and messages APIs expose the same value by design).
+    #[test]
+    fn protocol_surface_sweep_hides_every_internal_identifier() {
+        use crate::test_support::ENV_LOCK;
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let tenant = "ten_sw9tqf2m8xk4v7c3n1b6h5j0d";
+        let queue_id = "0e2d1c34-9a56-4f18-8f0a-3f4c5d6e7a89";
+        let recipient = "prospect-9f3k2@buyer.ee";
+        let campaign = "camp_7f2a9c";
+        let secrets: &[(&str, &str)] = &[
+            (
+                "TRACKING_SECRET_KEY",
+                "tracking-secret-aaaaaaaaaaaaaaaaaaaaaaaa",
+            ),
+            ("VERP_HMAC_SECRET", "0123456789abcdef0123456789abcdef"),
+        ];
+        for (k, v) in secrets {
+            std::env::set_var(k, v);
+        }
+        let no_plain = |hay: &[u8], needle: &str, surface: &str| {
+            assert!(
+                !hay.windows(needle.len()).any(|w| w == needle.as_bytes()),
+                "raw `{needle}` leaked on {surface}"
+            );
+        };
+
+        // 1. Recipient-facing MIME: wire bytes after the SES adapter's strip.
+        let email = PreparedEmail {
+            send_unit: format!("email_queue:{queue_id}:{recipient}"),
+            from: "sender@example.com".into(),
+            from_name: None,
+            ses_configuration_set: None,
+            to: recipient.into(),
+            subject: "Protocol sweep".into(),
+            html: None,
+            text: Some("body".into()),
+            headers: vec![
+                ("Message-ID".to_string(), "<qm-1@apexmail.ee>".to_string()),
+                ("X-ApexMail-Message-ID".to_string(), queue_id.to_string()),
+                ("X-ApexMail-Tenant-ID".to_string(), tenant.to_string()),
+                ("X-ApexMail-Campaign-ID".to_string(), campaign.to_string()),
+            ],
+            attachments: vec![],
+            dkim: None,
+            mime_to: vec![],
+            mime_cc: vec![],
+            reply_to: None,
+            verp: None,
+        };
+        let wire = SesTransport::build_raw_mime(&email);
+        // The header section is everything before the first blank line.
+        let headers_bytes: &[u8] = &wire[..wire
+            .windows(4)
+            .position(|w| w == b"\r\n\r\n")
+            .expect("wire carries a header/body separator")];
+        let headers_text = String::from_utf8_lossy(headers_bytes).to_ascii_lowercase();
+        assert!(
+            !headers_text.contains("x-apexmail-"),
+            "reserved namespace survives"
+        );
+        for needle in [tenant, queue_id, campaign] {
+            no_plain(headers_bytes, needle, "recipient-facing MIME headers");
+        }
+
+        // 2. Click/open tracking token (AES-128-GCM envelope; base64url of
+        //    IV||tag||ciphertext must contain no raw identity).
+        let payload = crate::email::tracking::TrackingPayload {
+            message_id: queue_id.to_string(),
+            tenant_id: tenant.to_string(),
+            recipient_hash: recipient.to_string(),
+            link_id: Some("lnk_1".into()),
+            original_url: Some("https://buyer.ee/pricing".into()),
+            campaign_id: Some(campaign.to_string()),
+        };
+        let token = crate::email::tracking::encode_tracking_id(&payload).expect("tracking token");
+        let token_bytes = URL_SAFE_NO_PAD.decode(&token).expect("base64url token");
+        for needle in [tenant, queue_id, recipient, campaign] {
+            no_plain(&token_bytes, needle, "tracking URL token");
+        }
+
+        // 3. Unsubscribe token (the SAME codec the service verifies with).
+        let codec =
+            tracking_service::codec::TrackingCodec::new("tracking-secret-aaaaaaaaaaaaaaaaaaaaaaaa");
+        let unsub = codec
+            .generate_unsubscribe_token_with_message(tenant, recipient, queue_id)
+            .expect("unsubscribe token");
+        let unsub_bytes = URL_SAFE_NO_PAD.decode(&unsub).expect("base64url unsub");
+        for needle in [tenant, queue_id, recipient] {
+            no_plain(&unsub_bytes, needle, "unsubscribe URL token");
+        }
+
+        // 4. VERP Return-Path (v3 AEAD, pinned in apexmail-lib; re-assert
+        //    here that the full address exposes no identity either).
+        let return_path = apexmail_lib::verp::verp_v3_address(
+            b"0123456789abcdef0123456789abcdef",
+            &apexmail_lib::verp::VerpV2Claims {
+                queue_id: queue_id.into(),
+                tenant_id: tenant.into(),
+                recipient: recipient.into(),
+                expires_at: 2_000_000_000,
+            },
+            "bounces.apexmail.ee",
+        );
+        for needle in [tenant, queue_id, recipient] {
+            assert!(
+                !return_path.contains(needle),
+                "raw `{needle}` leaked in the Return-Path"
+            );
+        }
+    }
+
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use base64::Engine as _;
+
     /// In-flight compatibility: mail minted before the v3 switch carries a
     /// v2 token, and the MTA still verifies it until expiry.
     #[test]
@@ -2734,7 +2857,7 @@ mod tests {
             3600,
         )
         .expect("legacy v2 mint");
-        assert!(rp.starts_with("bounces+v3."));
+        assert!(rp.starts_with("bounces+v2."));
         let local = rp.split('@').next().unwrap();
         let claims =
             apexmail_lib::verp::verify_verp_v2_local(secret, local, 1_700_000_001).unwrap();

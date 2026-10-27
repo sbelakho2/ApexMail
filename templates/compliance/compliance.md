@@ -36,7 +36,7 @@ ApexMail uses the following categories of subprocessors. The full list with name
 
 | Category | Purpose | Data Accessed |
 |---|---|---|
-| Cloud Infrastructure (Hetzner) | Hosting and compute | Encrypted at rest |
+| EU infrastructure provider | Hosting and compute | Encrypted at rest |
 | Email Infrastructure | SMTP relay and delivery | Message content, sender/recipient |
 | Monitoring and Logging | Service health, error tracking | Metadata (not message body) |
 | Payment Processing (Mollie B.V.) | Billing | Payment information (not stored by ApexMail) |

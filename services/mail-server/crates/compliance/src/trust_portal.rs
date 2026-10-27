@@ -177,6 +177,15 @@ pub struct TrustPortalService {
 /// public /trust/overview route previously fabricated both.)
 pub const OWN_ATTESTATIONS: &[&str] = &["GDPR (Article 28 DPA)"];
 
+/// The disclosure class of ApexMail's own attestations: Public is correct
+/// today (the anonymous trust page renders them), and the value is a
+/// CONSTANT so the classification is reviewable in one place — reclassifying
+/// it to `Customer`/`SecurityReview`/`Internal` removes them from the
+/// anonymous overview automatically through
+/// [`apexmail_lib::disclosure::GovernedFact::visible_to`].
+pub const OWN_ATTESTATION_VISIBILITY: apexmail_lib::disclosure::DisclosureClass =
+    apexmail_lib::disclosure::DisclosureClass::Public;
+
 /// Refuse a self-attestation that claims an external attestation regime
 /// ApexMail does not hold. Used by the overview path and its tests.
 pub fn check_trust_claim(claim: &str) -> bool {
@@ -696,6 +705,13 @@ impl TrustPortalService {
         // check_trust_claim IS the runtime boundary: an attestation that
         // claims an external regime ApexMail does not hold fails the
         // overview itself instead of being published.
+        // Governed-fact path (E15, external audit 2026-10-26): every own
+        // attestation is classified BEFORE it can be read, and the public
+        // overview reads it only through `visible_to(Public)`. The runtime
+        // claim gate stays in front: an attestation ApexMail does not hold
+        // fails the endpoint itself, and a fact reclassified to Customer or
+        // Internal would silently drop from the anonymous view (covered by
+        // `attestations_visible_to`'s tests).
         let mut apexmail_attestations = Vec::with_capacity(OWN_ATTESTATIONS.len());
         for attestation in OWN_ATTESTATIONS {
             if !check_trust_claim(attestation) {
@@ -703,7 +719,15 @@ impl TrustPortalService {
                     "OWN_ATTESTATIONS entry {attestation:?} claims a certification ApexMail does not hold — fix the constant, not this gate"
                 ));
             }
-            apexmail_attestations.push((*attestation).to_string());
+            let fact = apexmail_lib::disclosure::GovernedFact::new(
+                (*attestation).to_string(),
+                OWN_ATTESTATION_VISIBILITY,
+                "own attestation under GDPR Art. 28",
+            );
+            if let Some(value) = fact.visible_to(apexmail_lib::disclosure::DisclosureClass::Public)
+            {
+                apexmail_attestations.push(value.clone());
+            }
         }
         Ok(TrustOverview {
             generated_at: Utc::now(),

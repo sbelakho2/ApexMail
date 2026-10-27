@@ -170,8 +170,7 @@ Uptime is measured per component, not as a single global number. Each component 
 
 | Location | Provider | Type |
 |---|---|---|
-| Helsinki, Finland | Hetzner | Primary, same region as production infrastructure |
-| Frankfurt, Germany | Hetzner | Secondary, independent region |
+| Finland (EU) | ApexMail-managed EU infrastructure | Primary, same location as production infrastructure |
 | Amsterdam, Netherlands | Independent VPS | Tertiary, fully independent infrastructure |
 
 ---

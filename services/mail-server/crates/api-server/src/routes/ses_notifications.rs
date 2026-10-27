@@ -22,7 +22,7 @@
 //! and Complaint).
 //! In SNS → Subscription → HTTPS → `https://api.apexmail.ee/v1/ses/notifications`.
 
-use axum::extract::State;
+use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::routing::post;
 use axum::Router;
@@ -50,6 +50,48 @@ use crate::state::AppState;
 /// Router for SES notification handling (public, no auth middleware).
 pub fn router() -> Router<AppState> {
     Router::new().route("/notifications", post(handle_sns_notification))
+}
+
+/// Opaque provider-callback router (external audit 2026-10-26, item 14):
+/// `POST /hooks/delivery/:hook_id` reaches the SAME SNS-validated handler as
+/// the legacy `/v1/ses/notifications` path, but the path itself carries no
+/// provider fingerprint for a passive observer to enumerate. New SNS
+/// subscriptions register the opaque form; the legacy path stays mounted
+/// for subscriptions already registered with AWS (the subscription URL is
+/// fixed at creation time — an existing topic cannot be re-pointed by a
+/// code change). Security is unchanged and deliberate: the SNS signature
+/// (pinned SigningCertURL + verification) authorizes the request; the hook
+/// id only shapes the URL and must be an opaque hex token so the path can
+/// never be used to spell a provider name.
+pub fn opaque_router() -> Router<AppState> {
+    Router::new().route("/delivery/:hook_id", post(handle_delivery_hook))
+}
+
+/// Minimum/maximum hook id length: 16 hex chars (64 bits of obscurity for a
+/// URL that must survive sharing with AWS) up to 64 hex chars.
+const HOOK_ID_MIN_HEX: usize = 16;
+const HOOK_ID_MAX_HEX: usize = 64;
+
+/// True when `hook_id` is pure lowercase/uppercase hex within the bounds.
+fn is_opaque_hook_id(hook_id: &str) -> bool {
+    (HOOK_ID_MIN_HEX..=HOOK_ID_MAX_HEX).contains(&hook_id.len())
+        && hook_id.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+async fn handle_delivery_hook(
+    Path(hook_id): Path<String>,
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: String,
+) -> Result<StatusCode, ApiError> {
+    if !is_opaque_hook_id(&hook_id) {
+        // Refuse non-opaque ids outright: a descriptive id ("ses", a
+        // region, a vendor word) must never be mintable into this path.
+        return Err(ApiError::Validation(vec![format!(
+            "delivery hook id must be {HOOK_ID_MIN_HEX}-{HOOK_ID_MAX_HEX} hex characters"
+        )]));
+    }
+    handle_sns_notification(State(state), headers, body).await
 }
 
 // ─── SNS envelope types ────────────────────────────────────────
@@ -2616,6 +2658,61 @@ mod adversarial_handler_tests {
             )
             .await
             .unwrap()
+    }
+
+    /// The opaque alias reaches the same handler (identical verdict for an
+    /// identical body) and refuses any id that is not an opaque hex token.
+    #[tokio::test]
+    async fn opaque_delivery_hook_delegates_and_refuses_descriptive_ids() {
+        let state = test_state_over_lazy().await;
+        let app = Router::new()
+            .nest("/v1/ses", router())
+            .nest("/hooks", opaque_router())
+            .with_state(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/hooks/delivery/not-hex")
+                    .header("content-type", "text/plain")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(app.status(), StatusCode::BAD_REQUEST);
+
+        let state = test_state_over_lazy().await;
+        let malformed_sns = "not-an-sns-envelope";
+        let legacy = post_notification(
+            &Router::new()
+                .nest("/v1/ses", router())
+                .with_state(state.clone()),
+            malformed_sns,
+        )
+        .await;
+        let opaque = Router::new()
+            .nest("/hooks", opaque_router())
+            .with_state(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/hooks/delivery/a1b2c3d4e5f60718")
+                    .header("content-type", "text/plain")
+                    .body(Body::from(malformed_sns))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            legacy.status(),
+            opaque.status(),
+            "the opaque alias must behave exactly like the legacy path"
+        );
+        assert_ne!(
+            legacy.status(),
+            StatusCode::OK,
+            "fixture must exercise the shared verdict"
+        );
     }
 
     // ── SNS message signing with a locally cached key ────────────

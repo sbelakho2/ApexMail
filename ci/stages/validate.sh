@@ -570,6 +570,26 @@ validate_repo_gates() {
             python3 "$REPO_ROOT/tools/check_public_artifacts.py"
         ci_check "public artifacts gate self-test" \
             python3 "$REPO_ROOT/tools/check_public_artifacts.py" --self-test
+        # External route census (audit E16a): the nginx configs ARE the
+        # external boundary; every parsed route must be classified in the
+        # committed manifest (docs/operations/route-census.json), no manifest
+        # entry may go stale, the forbidden patterns (/v1/admin, /cp/,
+        # /internal/, /claims) stay out of public locations, and no public
+        # vhost may proxy to the compliance service (deliberately NOT
+        # internet-routed). --self-test proves all four failure directions.
+        ci_check "external route census (nginx boundary)" \
+            python3 "$REPO_ROOT/tools/check_route_census.py"
+        ci_check "route census self-test" \
+            python3 "$REPO_ROOT/tools/check_route_census.py" --self-test
+        # Customer-DTO boundary (audit E16b): customer-facing API response
+        # structs must not carry raw serde_json::Value unless explicitly
+        # allowlisted with a per-field justification (a future producer could
+        # leak transport/source-ip/host/provider keys through them — the
+        # Events API finding). Request bodies (Deserialize) are exempt.
+        ci_check "customer DTO boundary" \
+            python3 "$REPO_ROOT/tools/check_customer_dtos.py"
+        ci_check "customer DTO boundary self-test" \
+            python3 "$REPO_ROOT/tools/check_customer_dtos.py" --self-test
     fi
 
     # (c2) migration SQL lint (enterprise conventions — NEW 2026-09-10):
