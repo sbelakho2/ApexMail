@@ -125,6 +125,10 @@ def pkg_kind_evidence(name: str, kind: str) -> bool:
         return False
     if kind == "lane":
         return True  # the group is itself a lane in ci/required-lanes.txt
+    if kind == "journey":
+        # ApexMail-owned journey drivers (tests/journeys since the KiwiCaptcha
+        # mirror slim; kind_evidence covers crates, this covers packages).
+        return any((pkg / p.name).is_file() for p in (REPO / "tests" / "journeys").glob("journey-*.mjs")) if (REPO / "tests" / "journeys").is_dir() else False
     return False
 
 
@@ -169,6 +173,13 @@ def collect(expect: dict, invariants: dict, crates: set[str], lanes_text: str) -
             continue
         if not entry.get("gates"):
             problems.append(f"{iid}: no gate named")
+            continue
+        for g in entry["gates"]:
+            if g not in WP_IDS:
+                problems.append(
+                    f"{iid}: gate {g!r} is not a known work-package id — the gate "
+                    "cannot be traced to the plan or a lane"
+                )
         plan = (entry.get("plan_test_today") or "").strip()
         if status == "planned":
             # Honest asymmetry (2026-10-25 HEAD audit): a planned invariant may

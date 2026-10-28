@@ -8,18 +8,21 @@
 # lowercased with every non-alphanumeric run collapsed to one dash — the same
 # algorithm ci/lib.sh ci_check_lane_id applies when a stage records its lanes
 # into the run manifest. tools/check_waivers.py --check-lanes (the
-# validate.waivers lane) proves every row here names a lane a stage actually
-# runs; a row with no producing check fails CI.
+# validate.lane-waivers lane) proves every row here names a REQUIRED-capable
+# lane a stage actually runs — advisory checks (ci_check_advisory, advisory
+# gate flags, forced-advisory validators, the coverage record) are excluded
+# because an advisory failure must never refuse a blessing; a row with no
+# producing check fails CI.
 #
 # Not listed here, deliberately:
-#   * test.coverage-ratchet — recorded every run, but CI_COVERAGE_CHECK is
-#     advisory by declared default, and an advisory lane cannot gate a blessing;
-#   * checks with DYNAMIC labels (per-image trivy scans, docs/ui gate loops) —
-#     their results are recorded in the run manifest but their ids vary per run;
-#   * deploy-line stages (images/migrate/deploy/verify/notify) — the deploy
-#     line is verified by .gate-blessing.json membership, not this ledger.
-# The former test.browsers / test.php rows retired with the PHP mirror
-# (2026-10-28); validate.kiwi-mirror-parity joined the same day.
+#   * test.coverage-ratchet and validate.claim-expiry — recorded every run,
+#     but advisory by declared default;
+#   * the ui stage's seven gates — CI_UI_* flags are advisory by default
+#     (recorded in the manifest, never blessing-gating);
+#   * checks with DYNAMIC labels (per-image trivy scans, the dogfood live
+#     battery) — recorded with their concrete per-run ids;
+#   * deploy-line stages (images/migrate/deploy/verify/notify) — verified by
+#     .gate-blessing.json membership, not this ledger.
 #
 # Stage lanes (ci/stages/*.sh — one row each, always required):
 fetch
@@ -32,23 +35,21 @@ security
 # Validate-stage gate lanes:
 
 validate.ark-authority-mirror
-validate.ark-console-artifact-cssgen-check
+validate.ark-console-artifact
 validate.ark-design-law
-validate.ark-marketing-artifact-cssgen-check
+validate.ark-marketing-artifact
 validate.ark-pdf-design-authority
 validate.ark-pdf-design-authority-self-test
 validate.asset-budget
 validate.asset-budget-self-test
 validate.capability-claims-vs-production-wiring
-validate.ci-tools-expose-a-self-test-invariant-i19-inventory
-validate.claim-expiry-warn-30d
 validate.customer-dto-boundary
 validate.customer-dto-boundary-self-test
 validate.deliverability-report-backed-by-its-artifact
 validate.docs-lint-integrity
 validate.docs-lint-ratchet
 validate.eval-corpora-vs-canonical-facts
-validate.external-route-census-nginx-boundary
+validate.external-route-census
 validate.forbidden-patterns
 validate.homepage-metrics-backed-by-their-artifact
 validate.image-pinning-checker-committed-fixtures
@@ -60,48 +61,62 @@ validate.knowledge-consistency-canonical-catalog
 validate.lane-waivers
 validate.legacy-processor
 validate.legacy-processor-self-test
-validate.legal-identity-built-html
-validate.marketing-page-content
+validate.legal-identity
+validate.marketing-broken-links
+validate.marketing-content-voice
+validate.marketing-font-optimization
+validate.marketing-html-validation
+validate.marketing-image-optimization
 validate.marketing-nginx-serving
+validate.marketing-page-content
+validate.marketing-pricing-freshness
+validate.marketing-seo-validation
 validate.marketing-serving-whitelist
-validate.marketing-pricing-comparison-freshness
-validate.migration-sql-lint-tools-migration-lint-py
+validate.marketing-wcag-contrast-heuristic
+validate.migration-sql-lint
 validate.no-generated-artifacts-tracked
 validate.outbound-delivery-contract
-validate.pg-pitr-restore-plumbing-self-test
-validate.pg-wal-archive-spool-offsite-self-test
+validate.pg-pitr-restore-self-test
+validate.pg-wal-archive-self-test
 validate.postgres-backup-retention-self-test
-validate.postgres-restore-drill-envelope-round-trip-self-test
+validate.postgres-restore-drill-self-test
 validate.postgres-wal-base-backup-self-test
 validate.pricing-drift
-validate.processor-legal-facts-mollie-nl-eu-amsterdam-dnb
+validate.processor-legal-facts
 validate.production-env-contract
 validate.production-env-contract-values
-validate.production-env-forwarding-f1-capability-wiring
+validate.production-env-forwarding
 validate.production-mollie-payment-wiring
-validate.public-artifacts-allowlist-openapi-boundary
+validate.public-artifacts-allowlist
 validate.public-artifacts-gate-self-test
 validate.repo-map-up-to-date
 validate.risk-lua-parity
 validate.rollback-plan-present
 validate.route-census-self-test
 validate.rust-panic-paths
-validate.sdk-version-lockstep-packages-check-versions-py
-validate.security-posture-managed-cloud-baseline
+validate.sdk-version-lockstep
+validate.security-posture-baseline
 validate.stub-ban
 validate.stub-ban-self-test
 validate.subprocessor-register-derived-from-deployment-config
-validate.template-leaks-marketing-public
-validate.tool-selftest-detector-self-test-i19
+validate.template-leaks
+validate.tool-selftest-detector-self-test
+validate.tool-selftest-inventory
 validate.topology-contracts
 validate.waiver-gate-self-test
 validate.web-error-honesty
 validate.web-error-honesty-self-test
 #
+# Docs-stage gate lanes:
+
+docs.docs-architecture-truth
+docs.docs-architecture-truth-selftest
+docs.repo-map-up-to-date
+#
 # Test-stage lanes:
 
-test.cargo-deny-advisories-bans-sources-licenses
-test.cargo-machete-unused-deps
+test.cargo-deny
+test.cargo-machete
 test.contrast-gate
 test.dogfood-harness-self-test
 test.dogfood-ledger
@@ -123,8 +138,6 @@ test.static-lint-py-compile
 test.static-lint-shellcheck
 test.tag-balance-gate
 test.workspace-dependency-cycles
-# The workspace suite records through ci_lane_record (it is not a ci_check
-# label): nextest --workspace --all-targets, or its cargo-test fallback.
 test.workspace-suite
 #
 # Security-stage lanes:

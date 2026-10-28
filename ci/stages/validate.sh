@@ -335,7 +335,7 @@ validate_repo_gates() {
         # — but nothing invoked it (CV-1). python3-only, so it runs here in
         # the cheap validate stage, before anything compiles. REQUIRED: a
         # drift fails the run.
-        ci_check "SDK version lockstep (packages/check_versions.py)" \
+        ci_check "SDK version lockstep" \
             python3 packages/check_versions.py
         ci_check "rust panic paths" python3 tools/check_rust_panic_paths.py
         # Plan "Tests & enforcement" rule 7 (WP T14): every package declares
@@ -356,7 +356,7 @@ validate_repo_gates() {
         ci_check "waiver gate self-test" python3 tools/check_waivers.py --self-test
         ci_check "outbound delivery contract" python3 tools/check_outbound_delivery_contract.py
         ci_check "topology contracts" python3 tools/check_topology_contracts.py
-        ci_check "security posture (managed-cloud baseline)" python3 tools/check_security_posture.py
+        ci_check "security posture baseline" python3 tools/check_security_posture.py
         # Web console outage honesty (outage-honesty audit #16): the SSR
         # console must never swallow a request-path DB failure into
         # "invalid credentials" / "not found" / zero counts — the swallow
@@ -375,14 +375,14 @@ validate_repo_gates() {
         ci_check "legacy processor self-test" python3 tools/check_legacy_processor.py --self-test
         ci_check "ARK design law" python3 tools/check_ark_law.py
         ci_check "ARK authority mirror" python3 tools/check_ark_mirror.py
-        ci_check "CI tools expose a self-test (invariant I19 inventory)" \
+        ci_check "tool selftest inventory" \
             python3 tools/check_tool_selftests.py --inventory
-        ci_check "tool selftest detector self-test (I19)" \
+        ci_check "tool selftest detector self-test" \
             python3 tools/check_tool_selftests.py --self-test
         ci_check "ARK PDF design authority" python3 tools/check_pdf_ark.py
         ci_check "ARK PDF design authority (self-test)" python3 tools/check_pdf_ark.py --self-test
-        ci_check "ARK console artifact (cssgen --check)" bash -c 'cd services/mail-server && cargo run -q -p ui-foundation --bin cssgen -- --ark crates/ui-foundation/assets/ark.css --include crates/ui-foundation/assets/globals.input.css --content "crates/ui-foundation/src/**/*.rs" --content "crates/api-server/src/**/*.rs" --content "crates/ui-foundation/assets/globals.input.css" --out crates/ui-foundation/assets/globals.css --check'
-        ci_check "ARK marketing artifact (cssgen --check)" bash -c 'cd services/mail-server && cargo run -q -p ui-foundation --bin cssgen -- --ark ../../apps/marketing-zola/static/css/ark.css --content "../../apps/marketing-zola/templates" --content "../../apps/marketing-zola/content" --out ../../apps/marketing-zola/static/css/styles.css --check'
+        ci_check "ARK console artifact" bash -c 'cd services/mail-server && cargo run -q -p ui-foundation --bin cssgen -- --ark crates/ui-foundation/assets/ark.css --include crates/ui-foundation/assets/globals.input.css --content "crates/ui-foundation/src/**/*.rs" --content "crates/api-server/src/**/*.rs" --content "crates/ui-foundation/assets/globals.input.css" --out crates/ui-foundation/assets/globals.css --check'
+        ci_check "ARK marketing artifact" bash -c 'cd services/mail-server && cargo run -q -p ui-foundation --bin cssgen -- --ark ../../apps/marketing-zola/static/css/ark.css --content "../../apps/marketing-zola/templates" --content "../../apps/marketing-zola/content" --out ../../apps/marketing-zola/static/css/styles.css --check'
         # Asset budget + the all-Rust serving law: the served CSS and font
         # payload stays inside its ceiling, and the marketing/console asset
         # trees carry no client JavaScript at all. Self-test included so the
@@ -455,7 +455,7 @@ validate_repo_gates() {
         # methodology's 30-day review cadence — the 2026-10-04 pass found the
         # log "overdue since 2026-08-28" with nothing enforcing it, which is
         # exactly the drift this gate prevents from re-landing.
-        ci_check "marketing pricing + comparison freshness" bash -c '
+        ci_check "marketing pricing freshness" bash -c '
             set -eu
             python3 docs/marketing/check_pricing_parity.py
             python3 docs/marketing/check_comparison_freshness.py
@@ -540,7 +540,7 @@ validate_repo_gates() {
         # supervised by De Nederlandsche Bank, processing in the Netherlands
         # (EU). --self-test proves the checker rejects an old processor, a
         # missing EU fact, a stale address and a missing supervisor fact.
-        ci_check "processor legal facts (Mollie = NL/EU, Amsterdam, DNB)" bash -c '
+        ci_check "processor legal facts" bash -c '
             set -eu
             python3 tools/check_processor_facts.py
             python3 tools/check_processor_facts.py --self-test
@@ -567,7 +567,7 @@ validate_repo_gates() {
         # SSO encryption, mailstore encryption-at-rest, AI flags and invoice
         # auto-pay settings; --self-test proves it rejects a removed
         # forwarding and an un-listed allowlisted-only key.
-        ci_check "production env forwarding (F1 capability wiring)" bash -c '
+        ci_check "production env forwarding" bash -c '
             set -eu
             python3 tools/check_prod_env_forwarding.py
             python3 tools/check_prod_env_forwarding.py --self-test
@@ -609,7 +609,7 @@ validate_repo_gates() {
         # canonical codec (backup-envelope.sh) plus a drifted-parameter
         # rejection — the defect class where the drill decrypted with wrong
         # PBKDF2 iterations and no real backup could ever pass.
-        ci_check "postgres restore-drill envelope round-trip self-test" \
+        ci_check "postgres restore drill self-test" \
             sh "$REPO_ROOT/deploy/hardening/scripts/postgres-restore-drill.sh" \
             --self-test
         # WAL-archiving / PITR enablement (external audit 2026-10-26 infra
@@ -618,18 +618,18 @@ validate_repo_gates() {
         # base-backup gate/cadence/retention in the backup scheduler (stub
         # pg_basebackup), and the PITR restore plumbing (fetch, recovery
         # config generation, drill-shaped evidence — no live postgres).
-        ci_check "pg-wal-archive spool/offsite self-test" \
+        ci_check "pg wal archive self-test" \
             sh "$REPO_ROOT/deploy/hardening/scripts/pg-wal-archive.sh" --self-test
-        ci_check "postgres wal-base backup self-test" \
+        ci_check "postgres wal base backup self-test" \
             sh "$REPO_ROOT/deploy/hardening/scripts/postgres-backup-encrypt.sh" \
             --self-test-wal-base
-        ci_check "pg-pitr-restore plumbing self-test" \
+        ci_check "pg pitr restore self-test" \
             sh "$REPO_ROOT/deploy/hardening/scripts/pg-pitr-restore.sh" --self-test
         # Public-artifact disclosure gates (external audit 2026-10-26
         # items 12+13): deployment plumbing must not ship in the static
         # build, and the SERVED OpenAPI spec must never grow admin or
         # provider surfaces. --self-test proves both detection directions.
-        ci_check "public artifacts allowlist + OpenAPI boundary" \
+        ci_check "public artifacts allowlist" \
             python3 "$REPO_ROOT/tools/check_public_artifacts.py"
         ci_check "public artifacts gate self-test" \
             python3 "$REPO_ROOT/tools/check_public_artifacts.py" --self-test
@@ -640,7 +640,7 @@ validate_repo_gates() {
         # /internal/, /claims) stay out of public locations, and no public
         # vhost may proxy to the compliance service (deliberately NOT
         # internet-routed). --self-test proves all four failure directions.
-        ci_check "external route census (nginx boundary)" \
+        ci_check "external route census" \
             python3 "$REPO_ROOT/tools/check_route_census.py"
         ci_check "route census self-test" \
             python3 "$REPO_ROOT/tools/check_route_census.py" --self-test
@@ -666,7 +666,7 @@ validate_repo_gates() {
     # downgrades to advisory for a triage window.
     if [ "$_vr_py" = 1 ]; then
         _ml_rc=0
-        (cd "$REPO_ROOT" && ci_check "migration SQL lint (tools/migration_lint.py)" \
+        (cd "$REPO_ROOT" && ci_check "migration SQL lint" \
             python3 tools/migration_lint.py) || _ml_rc=$?
         if [ "$_ml_rc" -ne 0 ] && [ "${CI_MIGRATION_LINT_CHECK:-required}" = advisory ]; then
             ci_warn "ADVISORY: migration SQL lint reported violations (CI_MIGRATION_LINT_CHECK=advisory)"
@@ -897,14 +897,14 @@ zola_gates() {
     ci_check "forbidden patterns" bash tools/check-forbidden-patterns.sh --require-build
 
     # template-leak gate over the committed/built output (deploy.yml pre-build)
-    ci_check "template leaks (marketing public/)" \
+    ci_check "template leaks" \
         bash deploy/scripts/check-template-leaks.sh apps/marketing-zola/public
 
     # pricing drift — REQUIRED (one of deploy.yml's pr-gate required checks).
     # python3 presence is guaranteed by validate_repo_gates' lane_tool_status
     # gate (audit P2), so there is no silent-skip path left here.
     ci_check "pricing drift" python3 tools/validate_pricing_drift.py
-    ci_check "legal identity (built HTML)" \
+    ci_check "legal identity" \
         python3 tools/validate_legal_identity.py --build-dir apps/marketing-zola/public
 
     # Site-quality validators (html-validation / accessibility / seo — F14,
@@ -949,13 +949,13 @@ zola_gates() {
         fi
         return "$_mvg_rc"
     }
-    [ -f deploy/tests/contrast-check.sh ] && { _mv_gate contrast-check.sh "WCAG contrast (heuristic)" .contrast-check-report.json || return "$CI_EXIT_FAIL"; }
-    [ -f deploy/tests/broken-links.sh ] && { _mv_gate broken-links.sh "Broken links (internal vs build, external live)" .broken-links-report.json || return "$CI_EXIT_FAIL"; }
-    [ -f deploy/tests/html-validate.sh ] && { _mv_gate html-validate.sh "HTML validation" .html-validation-report.json || return "$CI_EXIT_FAIL"; }
-    [ -f deploy/tests/seo-validate.sh ] && { _mv_gate seo-validate.sh "SEO validation" .seo-validation-report.json || return "$CI_EXIT_FAIL"; }
-    [ -f deploy/tests/content-voice-check.sh ] && { _mv_gate content-voice-check.sh "Content voice (vague SaaS language)" .content-voice-report.json || return "$CI_EXIT_FAIL"; }
-    [ -f deploy/tests/font-optimization-check.sh ] && { _mv_gate font-optimization-check.sh "Font optimization" .font-optimization-report.json || return "$CI_EXIT_FAIL"; }
-    [ -f deploy/tests/image-optimization-check.sh ] && { _mv_gate image-optimization-check.sh "Image optimization" .image-optimization-report.json || return "$CI_EXIT_FAIL"; }
+    [ -f deploy/tests/contrast-check.sh ] && { _mv_gate contrast-check.sh "marketing WCAG contrast heuristic" .contrast-check-report.json || return "$CI_EXIT_FAIL"; }
+    [ -f deploy/tests/broken-links.sh ] && { _mv_gate broken-links.sh "marketing broken links" .broken-links-report.json || return "$CI_EXIT_FAIL"; }
+    [ -f deploy/tests/html-validate.sh ] && { _mv_gate html-validate.sh "marketing HTML validation" .html-validation-report.json || return "$CI_EXIT_FAIL"; }
+    [ -f deploy/tests/seo-validate.sh ] && { _mv_gate seo-validate.sh "marketing SEO validation" .seo-validation-report.json || return "$CI_EXIT_FAIL"; }
+    [ -f deploy/tests/content-voice-check.sh ] && { _mv_gate content-voice-check.sh "marketing content voice" .content-voice-report.json || return "$CI_EXIT_FAIL"; }
+    [ -f deploy/tests/font-optimization-check.sh ] && { _mv_gate font-optimization-check.sh "marketing font optimization" .font-optimization-report.json || return "$CI_EXIT_FAIL"; }
+    [ -f deploy/tests/image-optimization-check.sh ] && { _mv_gate image-optimization-check.sh "marketing image optimization" .image-optimization-report.json || return "$CI_EXIT_FAIL"; }
     # performance-budget measures the LIVE site (BASE_URL=https://apexmail.ee,
     # the same read-only production GETs contrast-check makes above): TTFB,
     # per-class byte budgets and third-party counts from the page HTML —

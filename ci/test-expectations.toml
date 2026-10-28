@@ -422,6 +422,12 @@ role = "Pipeline shell"
 required_kinds = []
 plan_requires = "Lane-level, signed blessing cases (T1)"
 
+[package."tests/journeys"]
+tier = 3
+role = "ApexMail-owned live journey/sweep drivers (playwright + axe, own lockfile; ad-hoc dogfood runs, no CI lane)"
+required_kinds = ["journey"]
+plan_requires = """Wire the journey sweeps into a CI dogfood lane against the T6 stack (T6)"""
+
 [package."deploy"]
 tier = 3
 role = "Scripts and configs"

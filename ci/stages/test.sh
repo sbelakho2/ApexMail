@@ -87,7 +87,7 @@ provided — ui-foundation cannot compile (install zola or build the site once)"
 # SPDX allow list (see the 2026-09-10 sweep comments there).
 cargo_tool_gates() {
     if ci_have_tool cargo-machete; then
-        (cd "$WS" && ci_check "cargo machete (unused deps)" cargo machete) \
+        (cd "$WS" && ci_check "cargo machete" cargo machete) \
             || return "$CI_EXIT_FAIL"
     fi
     if ci_have_tool cargo-deny; then
@@ -95,7 +95,7 @@ cargo_tool_gates() {
             ci_err "cargo-deny config missing: $WS/deny.toml — licenses lane cannot run (fail closed)"
             return "$CI_EXIT_FAIL"
         fi
-        (cd "$WS" && ci_check "cargo deny (advisories bans sources licenses)" \
+        (cd "$WS" && ci_check "cargo deny" \
             cargo deny check advisories bans sources licenses) \
             || return "$CI_EXIT_FAIL"
     fi

@@ -30,6 +30,11 @@ WAIVERS = REPO / "ci" / "waivers.toml"
 LANES = REPO / "ci" / "required-lanes.txt"
 MAX_WAIVER_DAYS = 14
 
+# ci_lane_record ids that fail the stage when they fail (required-capable).
+# The coverage-ratchet record is deliberately absent: it lives inside the
+# advisory-default coverage gate and must never refuse a blessing.
+REQUIRED_LANE_RECORDS = {"workspace-suite"}
+
 
 def load_lanes(path: Path) -> set[str]:
     lanes: set[str] = set()
@@ -89,20 +94,48 @@ def slugify(label: str) -> str:
 
 
 def stage_slug_set(stage: str) -> set[str]:
-    """Every lane slug the stage can record: ci_check / ci_check_advisory
-    labels with no shell variable in them, plus explicit ci_lane_record ids."""
+    """Every REQUIRED-capable lane slug the stage can record.
+
+    Sources, classified by whether a failure actually fails the stage:
+      ci_check "label"                  -> required-capable
+      ci_check_advisory "label"         -> advisory-only (excluded: an
+                                          advisory failure must never be able
+                                          to refuse a blessing)
+      ci_lane_record <id> ...           -> explicit records; only the ids in
+                                          REQUIRED_LANE_RECORDS gate a blessing
+                                          (workspace-suite fails the stage;
+                                          coverage-ratchet lives inside the
+                                          advisory-default coverage gate)
+      docs_gate/ui_gate <flag> "label"  -> required-capable unless the flag
+                                          argument mentions advisory
+      _mv_gate <script> "label" [advisory] -> required-capable unless the
+                                          trailing `advisory` token is present
+    Labels containing shell variables are skipped: their ids vary per run.
+    """
     import re
 
     path = REPO / "ci" / "stages" / f"{stage}.sh"
     slugs: set[str] = set()
     if not path.exists():
         return slugs
-    text = path.read_text()
-    for label in re.findall(r'ci_check(?:_advisory)? "([^"]+)"', text):
+    # Join continuation lines so a call's arguments read as one logical line.
+    text = path.read_text().replace("\\\n", " ")
+    for label in re.findall(r'ci_check "([^"]+)"', text):
         if "$" not in label:
             slugs.add(slugify(label))
     for record in re.findall(r"ci_lane_record\s+([a-z0-9-]+)", text):
-        slugs.add(record)
+        if record in REQUIRED_LANE_RECORDS:
+            slugs.add(record)
+    for m in re.finditer(r"\b(?:docs_gate|ui_gate)\s+(\S+)\s+\"([^\"]+)\"", text):
+        flag, label = m.group(1), m.group(2)
+        if "$" in label or "advisory" in flag:
+            continue
+        slugs.add(slugify(label))
+    for m in re.finditer(r"\b_mv_gate\s+(\S+)\s+\"([^\"]+)\"([^|\n]*)", text):
+        label, rest = m.group(2), m.group(3)
+        if "$" in label or re.search(r"\badvisory\b", rest):
+            continue
+        slugs.add(slugify(label))
     return slugs
 
 
