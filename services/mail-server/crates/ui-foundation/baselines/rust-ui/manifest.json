@@ -2,7 +2,7 @@
   "asset_authority": "console: ui-foundation GLOBALS_CSS -> assets/globals.css; marketing: apps/marketing-zola/public -> css/, fonts/, images/, root files",
   "css_sha256": "881924ac9126e1b0286c7b17fb181de451937c977f507f88b5bc51a47156a99a",
   "marketing_sha256": "24185ec10526b24a833d05653560b9bb18d97021f7eb99bf4f3ec56f5a2cf4ae",
-  "renderer_sha256": "60d45d4ad093792b9d19a95a6b8aad7e8d55964d19eef572bb772418d7ace2fe",
+  "renderer_sha256": "590e50cf252e0e00761dd9d01ed67240730862baef515c619567fa0e9f23596f",
   "fixtures": [
     {
       "id": "web-home-desktop",
@@ -901,6 +901,28 @@
       "route": "/assistant",
       "htmlFile": "web-assistant.html",
       "snapshotFile": "web-assistant-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "web-ai-drafts-desktop",
+      "surface": "web",
+      "route": "/ai-drafts",
+      "htmlFile": "web-ai-drafts.html",
+      "snapshotFile": "web-ai-drafts-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "web-ai-drafts-mobile",
+      "surface": "web",
+      "route": "/ai-drafts",
+      "htmlFile": "web-ai-drafts.html",
+      "snapshotFile": "web-ai-drafts-mobile.png",
       "viewport": {
         "width": 390,
         "height": 844
