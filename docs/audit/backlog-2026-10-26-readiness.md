@@ -115,7 +115,7 @@ tier list with landing status this wave:
 | 2.13 | Mailbot `Other` human-review-only | DONE: other → Service / Medium / HumanReview, pinned by test. |
 | 2.14 | Multi-label purpose classification | DONE: `classify_all` returns every matched purpose + effective risk (MAX) + strictest autonomy + primary; monotonicity property test (17^3 sweep). |
 | 2.15 | Header/MIME-based OOO/DSN classification | DONE: automated requires structural evidence (Auto-Submitted, Precedence, DSN multipart/report, autoreply headers, null Return-Path) plus 7 documented subject-line templates; prose-only phrases can no longer mark a customer as machine mail (counterexample pinned). The claim SQL/DDL now carries `headers`. |
-| 2.16 | Tenant-owned Mailbot review UX | DONE: tenant-scoped `/v1/ai-drafts` list/get/approve/reject with structured reason and regenerate share the operator approval core (consent, claims, audit all enforced server-side), plus the console page with its goldens. |
+| 2.16 | Tenant-owned Mailbot review UX | DONE: tenant-scoped `/v1/ai/drafts` list/get/approve/reject with structured reason and regenerate share the operator approval core (consent, claims, audit all enforced server-side), plus the console page with its goldens. |
 | 2.17 | 500-1,000 real-model Mailbot corpus | OPEN, owner-gated credentials (corpus + grading committed). |
 | 2.18 | ~500-task real-model Console corpus | OPEN, owner-gated credentials. |
 | 3.19 | Separate CI machine + status publishing | PARTIAL: publisher implemented (apexmail/<lane>); operator must run CI with the token, observe contexts, then enable required checks. Host separation = owner infra decision. |
