@@ -707,6 +707,10 @@ fn refuse_empty_presentation(html_body: &str, text_body: &str) -> Result<(), Api
 
 /// Atomically persist the message audit row and worker queue row after proving
 /// that the system sender is currently authorized for the selected transport.
+///
+/// `category` is REQUIRED: fifth external audit (P1) removed the implicit
+/// `marketing` default. Every producer must classify its own send at compile
+/// time (see [`queue_system_email_in_transaction`]).
 pub(crate) async fn queue_system_email(
     db: &PgPool,
     recipient: &str,
@@ -714,6 +718,7 @@ pub(crate) async fn queue_system_email(
     html_body: &str,
     text_body: &str,
     tags: Vec<String>,
+    category: &str,
 ) -> Result<Uuid, ApiError> {
     queue_system_email_with_priority(
         db,
@@ -723,6 +728,7 @@ pub(crate) async fn queue_system_email(
         text_body,
         tags,
         QUEUE_PRIORITY_DEFAULT,
+        category,
     )
     .await
 }
@@ -736,7 +742,7 @@ pub(crate) const QUEUE_PRIORITY_DEFAULT: i32 = 5;
 /// `email_queue.priority` CHECK (0..=100).
 pub(crate) const QUEUE_PRIORITY_FIRST_RESPONSE: i32 = 100;
 
-/// [`queue_system_email`] with an explicit queue priority.
+/// [`queue_system_email`] with an explicit queue priority and delivery class.
 pub(crate) async fn queue_system_email_with_priority(
     db: &PgPool,
     recipient: &str,
@@ -745,10 +751,11 @@ pub(crate) async fn queue_system_email_with_priority(
     text_body: &str,
     tags: Vec<String>,
     priority: i32,
+    category: &str,
 ) -> Result<Uuid, ApiError> {
     let mut tx = db.begin().await?;
     let message_id = queue_system_email_in_transaction(
-        &mut tx, recipient, subject, html_body, text_body, tags, priority,
+        &mut tx, recipient, subject, html_body, text_body, tags, priority, category,
     )
     .await?;
     tx.commit().await?;
@@ -759,6 +766,13 @@ pub(crate) async fn queue_system_email_with_priority(
 /// mutate account state (such as issuing a password-reset token) must use this
 /// helper so the state transition and deliverable message either commit
 /// together or both roll back.
+///
+/// `category` is REQUIRED (fifth external audit, P1): the previous signature
+/// defaulted every caller to `marketing`, which made a password reset a
+/// marketing send. Each callsite now states its class explicitly:
+/// account/security/verification/receipt mail is `transactional`,
+/// platform product notices would be `service` or `marketing`, chosen at the
+/// call site.
 pub(crate) async fn queue_system_email_in_transaction(
     tx: &mut sqlx::Transaction<'_, Postgres>,
     recipient: &str,
@@ -767,22 +781,10 @@ pub(crate) async fn queue_system_email_in_transaction(
     text_body: &str,
     tags: Vec<String>,
     priority: i32,
+    category: &str,
 ) -> Result<Uuid, ApiError> {
     queue_system_email_in_transaction_with_category(
-        tx,
-        recipient,
-        subject,
-        html_body,
-        text_body,
-        tags,
-        priority,
-        // The documented legacy bucket: exactly what the
-        // `email_queue.message_category` schema default fills in today
-        // (migration 187), now written EXPLICITLY so no queue row's class is
-        // decided by a column default. Send paths with a narrower class (the
-        // AI-reply release: service correspondence) use
-        // [`queue_system_email_in_transaction_with_category`] directly.
-        apexmail_lib::email_headers::message_category::MARKETING,
+        tx, recipient, subject, html_body, text_body, tags, priority, category,
     )
     .await
 }
@@ -870,9 +872,9 @@ mod tests {
     use super::*;
 
     /// The queue write names the delivery class EXPLICITLY on BOTH rows
-    /// (fourth external audit, P0 release semantics): no platform-sent mail
-    /// may inherit `email_queue.message_category`'s 'marketing' schema
-    /// default, because the class decides the dispatch-time consent regime.
+    /// (fourth external audit, P0 release semantics), and every helper
+    /// REQUIRES the caller to choose it (fifth external audit, P1): there is
+    /// no implicit marketing default left to inherit.
     #[test]
     fn queue_statements_write_the_message_category_explicitly() {
         for sql in [QUEUE_MESSAGES_INSERT_SQL, QUEUE_EMAIL_QUEUE_INSERT_SQL] {
@@ -881,12 +883,36 @@ mod tests {
                 "queue statement must write the category explicitly: {sql}"
             );
         }
-        // The legacy path's default is the documented non-exempt bucket: the
-        // exact value the schema default fills in today, now explicit.
-        assert_eq!(
-            apexmail_lib::email_headers::message_category::MARKETING,
-            "marketing"
+
+        // Source pin: the legacy category-less shape is gone. Each helper
+        // takes `category: &str` and the old hardcoded MARKETING no longer
+        // appears in the non-test helper bodies.
+        let source = include_str!("system_sender.rs");
+        for signature in [
+            "pub(crate) async fn queue_system_email(",
+            "pub(crate) async fn queue_system_email_with_priority(",
+            "pub(crate) async fn queue_system_email_in_transaction(",
+        ] {
+            let start = source.find(signature).expect("helper must exist");
+            let end = source[start..]
+                .find(") -> Result<Uuid, ApiError>")
+                .map(|offset| start + offset)
+                .expect("helper signature must close");
+            assert!(
+                source[start..end].contains("category: &str"),
+                "{signature} must require an explicit category"
+            );
+        }
+        let (_, test_module) = source
+            .split_once("#[cfg(test)]\nmod tests")
+            .expect("the test module follows the helpers");
+        assert!(
+            !test_module.is_empty()
+                && !source[..source.len() - test_module.len()]
+                    .contains("message_category::MARKETING"),
+            "no helper may silently classify platform mail as marketing"
         );
+
         // The category parameter is validated through the shared helper: a
         // malformed category can never reach a queue row.
         assert!(apexmail_lib::email_headers::message_category::validate("service").is_some());

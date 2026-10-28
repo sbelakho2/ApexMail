@@ -136,7 +136,7 @@
 
 6. **Engage additional responders:**
    ```bash
-   # Page security team
+   # Page the responsible ApexMail operator
    /incident acknowledge SEV1 "Cryptographic key compromise — investigating scope"
    /incident tag crypto key-compromise
    ```
@@ -284,11 +284,11 @@ What We Are Doing:
 - Replacement keys are ready in your dashboard
 - {other mitigation measures}
 
-If you have any questions, please contact our security team at
+If you have any questions, please contact ApexMail at
 security@apexmail.ee referencing incident {incident_id}.
 
 Sincerely,
-ApexMail Security Team
+ApexMail ApexMail
 ```
 
 ### External: Regulatory Notification (72-hour GDPR)

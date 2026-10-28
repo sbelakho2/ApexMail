@@ -816,6 +816,21 @@ async fn build_questionnaire_context(
         None => false,
     };
 
+    // Latest evidence row per (control, type, period). The questionnaire
+    // answer gate consumes these rows; catalog entries are never evidence.
+    let control_ids: Vec<String> = controls
+        .iter()
+        .map(|control| control.control_id.clone())
+        .collect();
+    let evidence = state
+        .soc2
+        .list_latest_evidence_for_controls(&control_ids)
+        .await
+        .map_err(|e| {
+            error!("questionnaire list evidence: {e}");
+            err_json(StatusCode::INTERNAL_SERVER_ERROR, "evidence list failed")
+        })?;
+
     Ok(QuestionnaireContext {
         tenant_id: request.tenant_id.clone(),
         controls,
@@ -824,6 +839,8 @@ async fn build_questionnaire_context(
         incidents,
         hipaa_baa_active,
         generated_at: Utc::now(),
+        evidence,
+        freshness_days: state.soc2.attestation_period_days(),
     })
 }
 

@@ -122,6 +122,12 @@ pub enum ApiError {
     #[error("{0}")]
     ServiceUnavailable(String),
 
+    /// A named, honest "this capability is not available" answer (HTTP 501).
+    /// Used where a surface would otherwise have to fake an effect, e.g.
+    /// AI-draft regeneration before a re-draft engine exists.
+    #[error("{0}")]
+    NotAvailable(String),
+
     #[error("validation failed")]
     Validation(Vec<String>),
 }
@@ -159,6 +165,7 @@ impl ApiError {
             Self::Timeout => StatusCode::REQUEST_TIMEOUT,
             Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
             Self::ServiceUnavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
+            Self::NotAvailable(_) => StatusCode::NOT_IMPLEMENTED,
             Self::Validation(_) => StatusCode::BAD_REQUEST,
         }
     }
@@ -177,6 +184,7 @@ impl ApiError {
             Self::Timeout => "REQUEST_TIMEOUT",
             Self::Internal(_) => "INTERNAL_ERROR",
             Self::ServiceUnavailable(_) => "SERVICE_UNAVAILABLE",
+            Self::NotAvailable(_) => "NOT_AVAILABLE",
             Self::Validation(_) => "VALIDATION_ERROR",
         }
     }

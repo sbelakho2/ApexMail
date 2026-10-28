@@ -399,6 +399,16 @@ pub fn authenticated_router(state: AppState) -> Router<AppState> {
         )
         .route("/web/inbox-placement/tests", post(form_placement_create))
         .route("/web/assistant/message", post(form_assistant_message))
+        // Tenant-owned AI-draft review (`/ai-drafts`): PRG twins of the
+        // shared workflow core, pinned to the session's tenant.
+        .route(
+            "/web/ai/drafts/:id/approve",
+            post(form_tenant_ai_draft_approve),
+        )
+        .route(
+            "/web/ai/drafts/:id/reject",
+            post(form_tenant_ai_draft_reject),
+        )
         .route("/web/dedicated-ips", post(form_dedicated_ip_request))
         .route("/web/confirm", post(form_confirm_destructive))
         .layer(axum::middleware::from_fn_with_state(
@@ -3188,6 +3198,8 @@ async fn form_signup(
             &text_body,
             vec!["system".into(), "verification".into()],
             crate::routes::system_sender::QUEUE_PRIORITY_DEFAULT,
+            // Email-verification link: account access, transactional.
+            apexmail_lib::email_headers::message_category::TRANSACTIONAL,
         )
         .await
         .map_err(|error| {
@@ -3393,6 +3405,8 @@ async fn form_forgot_password(
                 &text_body,
                 vec!["system".into(), "password-reset".into()],
                 crate::routes::system_sender::QUEUE_PRIORITY_DEFAULT,
+                // Password reset: account access, transactional.
+                apexmail_lib::email_headers::message_category::TRANSACTIONAL,
             )
             .await?;
             tx.commit().await?;
@@ -3678,6 +3692,8 @@ async fn form_resend_verification(
                 &text_body,
                 vec!["system".into(), "verification".into()],
                 crate::routes::system_sender::QUEUE_PRIORITY_DEFAULT,
+                // Resent verification link: account access, transactional.
+                apexmail_lib::email_headers::message_category::TRANSACTIONAL,
             )
             .await?;
             tx.commit().await?;
@@ -4970,6 +4986,8 @@ async fn enqueue_team_invite_email(
         &text_body,
         vec!["system".into(), "team-invite".into()],
         crate::routes::system_sender::QUEUE_PRIORITY_DEFAULT,
+        // Invitation to a workspace: account access, transactional.
+        apexmail_lib::email_headers::message_category::TRANSACTIONAL,
     )
     .await
     .map(|_| ())
@@ -6643,6 +6661,152 @@ async fn form_ai_draft_reject(
             redirect_error(
                 "The draft could not be rejected. It is still pending.",
                 "/reviews/ai-drafts",
+                &state.config,
+            )
+        }
+    }
+}
+
+/// Approve one AI draft from the TENANT review page (`/ai-drafts`, PRG):
+/// the SAME shared transactional core the operator page uses
+/// (`approve_draft_core_scoped`), pinned to the session's tenant and
+/// attributed to the tenant review surface.
+async fn form_tenant_ai_draft_approve(
+    State(state): State<AppState>,
+    axum::Extension(user): axum::Extension<AuthUser>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    Form(form): Form<HashMap<String, String>>,
+) -> Response {
+    if let Err(message) = check_csrf(&form, &headers, &state.config) {
+        return redirect_error(message, "/ai-drafts", &state.config);
+    }
+    if crate::middleware::auth::require_scopes(
+        &user,
+        &[crate::routes::ai_drafts::AI_DRAFT_ADMIN_SCOPE],
+    )
+    .is_err()
+    {
+        return redirect_error(
+            "AI drafts is available to workspace administrators.",
+            "/ai-drafts",
+            &state.config,
+        );
+    }
+    let note = field(&form, "note");
+    let scope = crate::routes::admin::ai_drafts::DraftDecisionScope {
+        is_system_tenant: false,
+        tenant_id: user.tenant_id.clone(),
+    };
+    match crate::routes::admin::ai_drafts::approve_draft_core_scoped(
+        &state,
+        &user,
+        &scope,
+        &id,
+        &note,
+        crate::routes::admin::ai_drafts::DraftDecisionSurface::Tenant,
+        &json!({ "surface": "tenant" }),
+    )
+    .await
+    {
+        Ok(_) => redirect_success(
+            "Draft approved, the reply is queued.",
+            "/ai-drafts",
+            &state.config,
+        ),
+        Err(crate::error::ApiError::NotFound(_)) => redirect_error(
+            "That draft was already handled.",
+            "/ai-drafts",
+            &state.config,
+        ),
+        // The admission refusal names exactly what is missing; the review
+        // page must show the enforcer's named reason, not a generic failure.
+        Err(crate::error::ApiError::Validation(reasons)) => {
+            let message = if reasons.is_empty() {
+                "The draft could not be approved. It is still pending.".to_string()
+            } else {
+                reasons.join("; ")
+            };
+            redirect_error(&message, "/ai-drafts", &state.config)
+        }
+        Err(error) => {
+            tracing::warn!(error = %error, draft = %id, "tenant draft approval failed");
+            redirect_error(
+                "The draft could not be approved. It is still pending.",
+                "/ai-drafts",
+                &state.config,
+            )
+        }
+    }
+}
+
+/// Reject one AI draft from the TENANT review page (PRG), recording the
+/// STRUCTURED reason (plus the optional note) in the audit evidence through
+/// the same shared rejection core.
+async fn form_tenant_ai_draft_reject(
+    State(state): State<AppState>,
+    axum::Extension(user): axum::Extension<AuthUser>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    Form(form): Form<HashMap<String, String>>,
+) -> Response {
+    if let Err(message) = check_csrf(&form, &headers, &state.config) {
+        return redirect_error(message, "/ai-drafts", &state.config);
+    }
+    if crate::middleware::auth::require_scopes(
+        &user,
+        &[crate::routes::ai_drafts::AI_DRAFT_ADMIN_SCOPE],
+    )
+    .is_err()
+    {
+        return redirect_error(
+            "AI drafts is available to workspace administrators.",
+            "/ai-drafts",
+            &state.config,
+        );
+    }
+    let reason_label = field(&form, "reason");
+    let Some(reason) = crate::routes::ai_drafts::RejectionReason::parse(&reason_label) else {
+        return redirect_error(
+            "Choose a rejection reason. The draft is still pending.",
+            "/ai-drafts",
+            &state.config,
+        );
+    };
+    let note = field(&form, "note");
+    let scope = crate::routes::admin::ai_drafts::DraftDecisionScope {
+        is_system_tenant: false,
+        tenant_id: user.tenant_id.clone(),
+    };
+    let evidence = json!({
+        "surface": "tenant",
+        "rejectionReason": {
+            "category": reason.as_str(),
+            "note": note,
+        },
+    });
+    match crate::routes::admin::ai_drafts::reject_draft_core_scoped(
+        &state,
+        &user,
+        &scope,
+        &id,
+        &note,
+        crate::routes::admin::ai_drafts::DraftDecisionSurface::Tenant,
+        &evidence,
+    )
+    .await
+    {
+        Ok(_) => redirect_success("Draft rejected.", "/ai-drafts", &state.config),
+        Err(crate::error::ApiError::NotFound(_)) => redirect_error(
+            "That draft was already handled.",
+            "/ai-drafts",
+            &state.config,
+        ),
+        Err(error) => {
+            tracing::warn!(error = %error, draft = %id, "tenant draft rejection failed");
+            redirect_error(
+                "The draft could not be rejected. It is still pending.",
+                "/ai-drafts",
                 &state.config,
             )
         }
@@ -13052,6 +13216,15 @@ mod tests {
                     "/web/admin/ai/drafts/:id/reject",
                     post(form_ai_draft_reject),
                 )
+                // Tenant-owned AI-draft review twins (`/ai-drafts`).
+                .route(
+                    "/web/ai/drafts/:id/approve",
+                    post(form_tenant_ai_draft_approve),
+                )
+                .route(
+                    "/web/ai/drafts/:id/reject",
+                    post(form_tenant_ai_draft_reject),
+                )
                 .route("/web/auth/signup", post(form_signup))
                 .route("/web/auth/login", post(form_login))
                 .route("/web/auth/mfa/verify", post(form_mfa_verify))
@@ -13387,6 +13560,166 @@ mod tests {
 
             let _ = sqlx::query("DELETE FROM inbound_messages WHERE id = ANY($1)")
                 .bind(vec![approve_id, reject_id])
+                .execute(&state.db)
+                .await;
+        }
+
+        /// The TENANT review page's PRG twins (`/web/ai/drafts/*`): the same
+        /// shared workflow core, pinned to the session's tenant. Approve
+        /// queues the reply, reject records the STRUCTURED reason in the
+        /// audit evidence, and another tenant's draft id is refused as
+        /// "already handled" with nothing consumed (the core's 404).
+        #[tokio::test]
+        async fn tenant_ai_draft_review_page_approves_and_rejects_its_own_drafts() {
+            let Some(state) = web_test_state("tenant_ai_draft_review_page").await else {
+                return;
+            };
+            std::env::set_var(
+                apexmail_lib::dkim::DKIM_PRIVATE_KEY_ENCRYPTION_KEY_ENV,
+                "3f7a1c9e2b5d48f01a6c3e792d4b8f15a0c6e3917d2f4b8a5c1e7309d4f2b6a8",
+            );
+            seed_web_system_sender(&state.db).await;
+
+            let suffix = uuid::Uuid::new_v4().simple().to_string();
+            let tenant = format!("tnt{}", &suffix[..23]);
+            let other_tenant = format!("oth{}", &suffix[..23]);
+            let mk = |id: &str, owner: &str, from: &str, subject: &str| {
+                let db = state.db.clone();
+                let id = id.to_string();
+                let owner = owner.to_string();
+                let from = from.to_string();
+                let subject = subject.to_string();
+                async move {
+                    sqlx::query(
+                        "INSERT INTO inbound_messages
+                             (id, tenant_id, from_email, subject, ai_response, pending_approval,
+                              is_verp_reply, received_at)
+                         VALUES ($1, $2, $3, $4, 'grounded reply', true, false, NOW())
+                         ON CONFLICT (id) DO NOTHING",
+                    )
+                    .bind(&id)
+                    .bind(&owner)
+                    .bind(&from)
+                    .bind(&subject)
+                    .execute(&db)
+                    .await
+                    .expect("seed tenant draft");
+                }
+            };
+            let approve_id = format!("inb_{}", &suffix[..22]);
+            let reject_id = format!("inb_{}", &suffix[2..24]);
+            let foreign_id = format!("inb_{}", &suffix[4..26]);
+            let approve_from = format!("approve-{}@corp.example", &suffix[..8]);
+            let reject_from = format!("reject-{}@corp.example", &suffix[..8]);
+            mk(&approve_id, &tenant, &approve_from, "Re: tenant demo").await;
+            mk(&reject_id, &tenant, &reject_from, "Re: tenant plan").await;
+            mk(
+                &foreign_id,
+                &other_tenant,
+                "foreign@corp.example",
+                "Another tenant's draft",
+            )
+            .await;
+
+            let user = session_user(&tenant);
+            let app = web_handlers(state.clone(), user);
+
+            // Approve through the tenant page's form.
+            let body = csrf_body(&state, &[("note", "looks good")]);
+            let response = app
+                .clone()
+                .oneshot(post_form(
+                    &format!("/web/ai/drafts/{approve_id}/approve"),
+                    &body,
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::SEE_OTHER);
+            let pending: bool =
+                sqlx::query_scalar("SELECT pending_approval FROM inbound_messages WHERE id = $1")
+                    .bind(&approve_id)
+                    .fetch_one(&state.db)
+                    .await
+                    .expect("state");
+            assert!(!pending, "tenant approval consumed the draft");
+            let queued: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM email_queue WHERE \"to\" = $1")
+                    .bind(&approve_from)
+                    .fetch_one(&state.db)
+                    .await
+                    .expect("queue");
+            assert_eq!(queued, 1, "the approved reply is queued");
+            let approved_action: String = sqlx::query_scalar(
+                "SELECT action FROM audit_logs WHERE resource = 'ai_draft' AND resource_id = $1",
+            )
+            .bind(&approve_id)
+            .fetch_one(&state.db)
+            .await
+            .expect("approval evidence");
+            assert_eq!(
+                approved_action, "tenant.ai_draft.approved",
+                "the decision is attributed to the tenant review surface"
+            );
+
+            // Reject through the tenant page's form with the structured reason.
+            let body = csrf_body(&state, &[("reason", "wrong_tone"), ("note", "too casual")]);
+            let response = app
+                .clone()
+                .oneshot(post_form(
+                    &format!("/web/ai/drafts/{reject_id}/reject"),
+                    &body,
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::SEE_OTHER);
+            let pending: bool =
+                sqlx::query_scalar("SELECT pending_approval FROM inbound_messages WHERE id = $1")
+                    .bind(&reject_id)
+                    .fetch_one(&state.db)
+                    .await
+                    .expect("state");
+            assert!(!pending, "tenant rejection consumed the draft");
+            let (action, category, note): (String, String, String) = sqlx::query_as(
+                "SELECT action, details->'rejectionReason'->>'category', \
+                        details->'rejectionReason'->>'note' \
+                 FROM audit_logs WHERE resource = 'ai_draft' AND resource_id = $1",
+            )
+            .bind(&reject_id)
+            .fetch_one(&state.db)
+            .await
+            .expect("rejection evidence");
+            assert_eq!(action, "tenant.ai_draft.rejected");
+            assert_eq!(category, "wrong_tone");
+            assert_eq!(note, "too casual");
+
+            // Another tenant's draft is never touchable from this session.
+            let body = csrf_body(&state, &[("reason", "wrong_facts")]);
+            let response = app
+                .clone()
+                .oneshot(post_form(
+                    &format!("/web/ai/drafts/{foreign_id}/reject"),
+                    &body,
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::SEE_OTHER);
+            let flash = response_flash(&response, &state.config.csrf_secret);
+            assert!(
+                flash
+                    .iter()
+                    .any(|message| message.text.contains("already handled")),
+                "the foreign id is indistinguishable from a handled one: {flash:?}"
+            );
+            let foreign_pending: bool =
+                sqlx::query_scalar("SELECT pending_approval FROM inbound_messages WHERE id = $1")
+                    .bind(&foreign_id)
+                    .fetch_one(&state.db)
+                    .await
+                    .expect("foreign state");
+            assert!(foreign_pending, "another tenant's draft must stay pending");
+
+            let _ = sqlx::query("DELETE FROM inbound_messages WHERE id = ANY($1)")
+                .bind(vec![approve_id, reject_id, foreign_id])
                 .execute(&state.db)
                 .await;
         }
@@ -20026,6 +20359,19 @@ mod coverage_auth_admin_tests {
         assert_eq!(status, "active");
         assert_eq!(role, "owner");
 
+        let signup_category: String = sqlx::query_scalar(
+            "SELECT message_category FROM email_queue \
+             WHERE to_addresses = ARRAY[$1] AND subject = 'Verify your ApexMail account' LIMIT 1",
+        )
+        .bind(&email)
+        .fetch_one(&app.db)
+        .await
+        .expect("queued verification category");
+        assert_eq!(
+            signup_category, "transactional",
+            "the signup verification link is account-access mail, never marketing"
+        );
+
         // Duplicate signup is anti-enumerating: same generic success, no
         // second account.
         let (headers, form) = signed_form(
@@ -20076,6 +20422,18 @@ mod coverage_auth_admin_tests {
         assert!(
             token_hash_stored.is_some(),
             "reset token hash must be persisted"
+        );
+        let reset_category: String = sqlx::query_scalar(
+            "SELECT message_category FROM email_queue \
+             WHERE to_addresses = ARRAY[$1] AND subject = 'Reset your ApexMail password' LIMIT 1",
+        )
+        .bind(&email)
+        .fetch_one(&app.db)
+        .await
+        .expect("queued reset category");
+        assert_eq!(
+            reset_category, "transactional",
+            "a password reset is account-access mail, never marketing"
         );
 
         // Reset: mismatch, weak policy, unknown token, then the real token.
@@ -20906,6 +21264,20 @@ mod coverage_auth_admin_tests {
         assert_eq!(
             queued, 1,
             "the invitation email must be queued for delivery"
+        );
+        let invite_category: String = sqlx::query_scalar(
+            "SELECT message_category FROM messages \
+             WHERE to_emails::text LIKE '%' || $1 || '%' \
+               AND subject = 'You have been invited to the ApexMail control plane' \
+             ORDER BY created_at DESC LIMIT 1",
+        )
+        .bind(&op_email)
+        .fetch_one(&app.db)
+        .await
+        .unwrap();
+        assert_eq!(
+            invite_category, "transactional",
+            "an operator invitation is account-access mail, never marketing"
         );
 
         // Alerts: ack by id, replay honesty, bulk with invalid/valid ids.
@@ -29953,6 +30325,19 @@ mod deferred_feature_tests {
             before + 1,
             "a fresh verification email must be queued"
         );
+        let category: String = sqlx::query_scalar(
+            "SELECT message_category FROM messages \
+             WHERE to_emails->>0 = $1 AND subject = 'Verify your ApexMail account' \
+             ORDER BY created_at DESC LIMIT 1",
+        )
+        .bind(&email)
+        .fetch_one(&app.db)
+        .await
+        .expect("queued verification category");
+        assert_eq!(
+            category, "transactional",
+            "a verification link is account-access mail, never marketing"
+        );
         // The metadata now carries a NEW token hash (not the stale one) with
         // a future expiry.
         let (hash, expires): (String, String) = sqlx::query_as(
@@ -31200,12 +31585,15 @@ mod white_label_branding_tests {
     async fn queued_invitation(
         tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
         email: &str,
-    ) -> (String, String, String) {
-        sqlx::query_as("SELECT subject, html, text FROM email_queue WHERE $1 = ANY(to_addresses)")
-            .bind(email)
-            .fetch_one(&mut **tx)
-            .await
-            .expect("the invitation must be queued")
+    ) -> (String, String, String, String) {
+        sqlx::query_as(
+            "SELECT subject, html, text, message_category FROM email_queue \
+             WHERE $1 = ANY(to_addresses)",
+        )
+        .bind(email)
+        .fetch_one(&mut **tx)
+        .await
+        .expect("the invitation must be queued")
     }
 
     #[allow(clippy::await_holding_lock)]
@@ -31259,13 +31647,17 @@ mod white_label_branding_tests {
         )
         .await
         .expect("the invitation mail queues");
-        let (subject, html, text) = queued_invitation(&mut tx, &email).await;
+        let (subject, html, text, category) = queued_invitation(&mut tx, &email).await;
         tx.rollback().await.expect("rollback keeps the DB clean");
         if let Some(previous) = previous_key {
             std::env::set_var(DKIM_KEY_ENV, previous);
         } else {
             std::env::remove_var(DKIM_KEY_ENV);
         }
+        assert_eq!(
+            category, "transactional",
+            "a workspace invitation is account-access mail, never marketing"
+        );
 
         assert!(!subject.contains("ApexMail"), "subject was {subject}");
         assert!(subject.contains("Acme Corp"), "subject was {subject}");
@@ -31350,13 +31742,17 @@ mod white_label_branding_tests {
         )
         .await
         .expect("the invitation mail queues");
-        let (subject, html, text) = queued_invitation(&mut tx, &email).await;
+        let (subject, html, text, category) = queued_invitation(&mut tx, &email).await;
         tx.rollback().await.expect("rollback keeps the DB clean");
         if let Some(previous) = previous_key {
             std::env::set_var(DKIM_KEY_ENV, previous);
         } else {
             std::env::remove_var(DKIM_KEY_ENV);
         }
+        assert_eq!(
+            category, "transactional",
+            "a workspace invitation is account-access mail, never marketing"
+        );
 
         // Subject/plain text substitute raw values; HTML escapes them.
         assert_eq!(subject, "Join Acme & <Co> at Acme Workspace");

@@ -810,6 +810,46 @@ pub struct AiDraftsPageData {
     pub unavailable: bool,
 }
 
+/// One pending AI draft on the TENANT console page (`/ai-drafts`).
+///
+/// The operator view above is the platform-wide queue; this one is the
+/// workspace owner's own queue, carrying the deterministic purpose/risk
+/// verdict the review decision is made against.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct TenantAiDraftData {
+    pub id: String,
+    pub from_email: String,
+    pub subject: String,
+    /// The complete inbound message body, rendered inside the expandable
+    /// review block.
+    pub body_text: String,
+    /// The drafted reply the assistant wrote (never sent by itself).
+    pub draft_reply: String,
+    pub received_at: String,
+    /// Every matched purpose in the deterministic classifier's priority
+    /// order (wire spelling; the view renders display labels).
+    pub purposes: Vec<String>,
+    /// The wire spelling of the primary purpose.
+    pub primary_purpose: String,
+    /// `low` | `medium` | `high`.
+    pub risk: String,
+    /// `promotion_gate` | `human_review` | `no_autonomous_response`.
+    pub autonomy_requirement: String,
+    pub first_response: bool,
+}
+
+/// Tenant AI-drafts review page (`/ai-drafts`).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct TenantAiDraftsPageData {
+    pub drafts: Vec<TenantAiDraftData>,
+    /// The loader could not read the store (a service problem, never an
+    /// empty queue).
+    pub unavailable: bool,
+    /// The caller's role cannot review drafts (not a workspace admin): the
+    /// page renders the honest admin-only state and no action forms.
+    pub admin_only: bool,
+}
+
 /// The first-response KPI tile's data.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct FirstResponseKpiData {

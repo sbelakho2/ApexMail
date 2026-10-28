@@ -24,7 +24,12 @@
 #
 # Weekly PHYSICAL base backup (PITR enablement, external audit 2026-10-26):
 # when WAL_BASE_BACKUP_ENABLED is truthy the scheduler additionally takes a
-# plain `pg_basebackup -F tar -z` once a week into ${BACKUP_DIR}/wal-base/
+# `pg_basebackup -F tar -z` once a week into ${BACKUP_DIR}/wal-base/, then
+# seals it with the SAME canonical envelope as the nightly dumps
+# (backup-envelope.sh) before anything is mirrored offsite: a physical base
+# backup carries arbitrary page images incl. personal data, and an
+# unencrypted alternate backup channel would undermine the encrypted-backup
+# story (external audit 2026-10-28 P0)
 # (2-generation retention). This is deliberately NOT the logical envelope —
 # PITR replay needs a physical base plus the archived WAL segments (see
 # pg-wal-archive.sh + deploy/docker-compose.wal-archive.yml + pg-pitr-restore.sh).
@@ -206,10 +211,13 @@ offsite_copy() {
 
 # ── Weekly physical base backup (PITR) ───────────────────────────────────────
 # A physical base backup is the anchor PITR replays archived WAL against;
-# it is plain `pg_basebackup -F tar -z` output (base.tar.gz + pg_wal.tar.gz),
+# it starts as `pg_basebackup -F tar -z` output (base.tar.gz + pg_wal.tar.gz)
+# in a private spool and leaves that spool ONLY as envelope ciphertext,
 # NOT the logical envelope — pg_recovery cannot replay into a pg_dump.
-# Artifacts: ${BACKUP_DIR}/wal-base/apexmail-wal-base-<ts>.tar.gz and
-# apexmail-wal-base-<ts>.pg_wal.tar.gz (paired by the shared timestamp).
+# Artifacts: ${BACKUP_DIR}/wal-base/apexmail-wal-base-<ts>.tar.gz.enc and
+# apexmail-wal-base-<ts>.pg_wal.tar.gz.enc (AES-256-CBC/PBKDF2 envelope,
+# paired by the shared timestamp). A keyless run FAILS: the PITR channel is
+# encrypted or it does not exist.
 #
 # Cadence: WAL_BASE_INTERVAL_SECS (default 7d) measured against a stamp file
 # written ONLY after a fully successful run (artifact + offsite mirror), so
@@ -243,10 +251,10 @@ wal_base_due() {
 # ls|grep pipe: the static-lint gate runs shellcheck -S warning over this
 # file, and the loop keeps the gate clean while the glob stays simple).
 wal_base_artifacts() {
-    ls -1t "${BACKUP_DIR}"/wal-base/apexmail-wal-base-*.tar.gz 2>/dev/null \
+    ls -1t "${BACKUP_DIR}"/wal-base/apexmail-wal-base-*.tar.gz.enc 2>/dev/null \
         | while IFS= read -r _wba; do
             case $_wba in
-                *.pg_wal.tar.gz) ;;
+                *.pg_wal.tar.gz.enc) ;;
                 *) printf '%s\n' "$_wba" ;;
             esac
         done
@@ -263,7 +271,7 @@ plan_wal_base_retention() {
 cleanup_wal_base() {
     plan_wal_base_retention | while IFS= read -r _cwb_old; do
         [ -n "$_cwb_old" ] || continue
-        rm -f "$_cwb_old" "${_cwb_old%.tar.gz}.pg_wal.tar.gz"
+        rm -f "$_cwb_old" "${_cwb_old%.tar.gz.enc}.pg_wal.tar.gz.enc"
         log "wal-base retention: removed $(basename "$_cwb_old") (+ pg_wal sibling), keeping ${WAL_BASE_KEEP_GENERATIONS} generations"
     done
 }
@@ -314,24 +322,50 @@ run_wal_base_backup() {
 
     mkdir -p "$_wb_dir"
     chmod 700 "$_wb_dir" 2>/dev/null || true
-    mv "$_wb_spool/base.tar.gz" "${_wb_dir}/apexmail-wal-base-${_wb_ts}.tar.gz"
-    if [ -f "$_wb_spool/pg_wal.tar.gz" ]; then
-        mv "$_wb_spool/pg_wal.tar.gz" "${_wb_dir}/apexmail-wal-base-${_wb_ts}.pg_wal.tar.gz"
+    # Seal BEFORE the artifact leaves the private spool (P0, external audit
+    # 2026-10-28): the envelope is the same codec the nightly dumps use, and
+    # a missing key aborts the base backup rather than creating a plaintext
+    # PITR channel.
+    _wb_key_file=${WAL_ENCRYPTION_KEY_FILE:-${BACKUP_ENCRYPTION_KEY_FILE:-}}
+    if [ -n "$_wb_key_file" ] && [ -f "$_wb_key_file" ]; then
+        BACKUP_ENCRYPTION_KEY_FILE="$_wb_key_file"
     fi
+    if [ -n "${WAL_ENCRYPTION_KEY:-}" ]; then
+        BACKUP_ENCRYPTION_KEY="$WAL_ENCRYPTION_KEY"
+    fi
+    if ! backup_envelope_key; then
+        err "wal-base: no encryption key available (WAL_ENCRYPTION_KEY_FILE / BACKUP_ENCRYPTION_KEY_FILE) — REFUSING to publish a PLAINTEXT base backup; PITR stays disabled until the key exists"
+        rm -rf "$_wb_spool"
+        return 1
+    fi
+    for _wb_src_name in base.tar.gz pg_wal.tar.gz; do
+        [ -f "$_wb_spool/$_wb_src_name" ] || continue
+        # base.tar.gz -> <ts>.tar.gz.enc, pg_wal.tar.gz -> <ts>.pg_wal.tar.gz.enc
+        _wb_suffix=$_wb_src_name
+        [ "$_wb_src_name" = "base.tar.gz" ] && _wb_suffix="tar.gz"
+        _wb_out="${_wb_dir}/apexmail-wal-base-${_wb_ts}.${_wb_suffix}.enc"
+        if ! backup_envelope_encrypt "$_wb_spool/$_wb_src_name" "$_wb_out"; then
+            err "wal-base: encryption of $_wb_src_name failed — plaintext spool removed, base backup aborted"
+            rm -rf "$_wb_spool"
+            rm -f "${_wb_dir}/apexmail-wal-base-${_wb_ts}"*.enc
+            return 1
+        fi
+        rm -f "$_wb_spool/$_wb_src_name"
+    done
     rmdir "$_wb_spool" 2>/dev/null || rm -rf "$_wb_spool"
-    log "wal-base: physical base backup complete: $(du -h "${_wb_dir}/apexmail-wal-base-${_wb_ts}.tar.gz" 2>/dev/null | cut -f1) apexmail-wal-base-${_wb_ts}.tar.gz"
+    log "wal-base: physical base backup complete (encrypted): $(du -h "${_wb_dir}/apexmail-wal-base-${_wb_ts}.tar.gz.enc" 2>/dev/null | cut -f1) apexmail-wal-base-${_wb_ts}.tar.gz.enc"
 
     # Offsite mirror — mandatory like the nightly dumps. The cadence stamp
     # is only written after this succeeds, so a failed mirror retries.
     if [ -z "$BACKUP_TARGET" ]; then
-        err "BACKUP_TARGET is not set — wal-base artifact apexmail-wal-base-${_wb_ts}.tar.gz exists only on this host; NOT stamped (will retry)"
+        err "BACKUP_TARGET is not set — wal-base artifact apexmail-wal-base-${_wb_ts}.tar.gz.enc exists only on this host; NOT stamped (will retry)"
         return 1
     fi
     if rsync -a "$_wb_dir/" "$BACKUP_TARGET/wal-base/"; then
         log "wal-base: offsite mirror OK -> ${BACKUP_TARGET}/wal-base/"
     else
         rc=$?
-        err "wal-base offsite rsync to ${BACKUP_TARGET}/wal-base/ failed (exit ${rc}) — apexmail-wal-base-${_wb_ts}.tar.gz is LOCAL-ONLY; NOT stamped (will retry)"
+        err "wal-base offsite rsync to ${BACKUP_TARGET}/wal-base/ failed (exit ${rc}) — apexmail-wal-base-${_wb_ts}.tar.gz.enc is LOCAL-ONLY; NOT stamped (will retry)"
         return 1
     fi
 
@@ -375,8 +409,12 @@ wal_base_self_test() {
     fi
 
     # 2. Enabled + no stamp: due. A stub pg_basebackup "takes" the backup;
-    #    artifacts must appear (named + pg_wal sibling), the offsite mirror
-    #    must receive them, and the cadence stamp must be written.
+    #    the artifacts must appear ENCRYPTED (envelope ciphertext, never a
+    #    plaintext .tar.gz) with their pg_wal siblings, the offsite mirror
+    #    must receive them, and the cadence stamp must be written. A pinned
+    #    test key stands in for the operator's secret.
+    WAL_ENCRYPTION_KEY="wal-base-self-test-key-0123456789abcdef"
+    BACKUP_ENCRYPTION_KEY_FILE=/nonexistent
     WAL_BASE_BACKUP_ENABLED=1
     mkdir -p "$_st_tmp/offsite" "$_st_tmp/bin"
     { printf '#!/bin/sh\n'
@@ -397,7 +435,27 @@ wal_base_self_test() {
     else
         _st_base=$(wal_base_artifacts | head -n 1)
         [ -n "$_st_base" ] || { echo "[wal-base] self-test FAILED: no base artifact produced" >&2; _st_fail=1; }
-        [ -f "${_st_base%.tar.gz}.pg_wal.tar.gz" ] || { echo "[wal-base] self-test FAILED: pg_wal sibling missing" >&2; _st_fail=1; }
+        case "$_st_base" in
+            *.tar.gz.enc) : ;;
+            *) echo "[wal-base] self-test FAILED: artifact is not envelope ciphertext: $_st_base" >&2; _st_fail=1 ;;
+        esac
+        [ -f "${_st_base%.tar.gz.enc}.pg_wal.tar.gz.enc" ] || { echo "[wal-base] self-test FAILED: encrypted pg_wal sibling missing" >&2; _st_fail=1; }
+        # PLAINTEXT must not exist in the artifact dir.
+        if ls "$_st_tmp"/wal-base/*.tar.gz >/dev/null 2>&1; then
+            echo "[wal-base] self-test FAILED: a PLAINTEXT .tar.gz artifact exists in wal-base/" >&2
+            _st_fail=1
+        fi
+        # And the ciphertext decrypts back to the stub bytes. NB the base
+        # artifact is the ALREADY-gzipped pg_basebackup tar, encrypted whole —
+        # the decrypt output IS the .tar.gz; no extra gunzip stage here (the
+        # WAL helper gzips segments itself, the base tar is gzip already).
+        if backup_envelope_decrypt "$_st_base" "$_st_tmp/rt.tar.gz" 2>/dev/null \
+            && [ "$(cat "$_st_tmp/rt.tar.gz")" = "fake-base" ]; then
+            :
+        else
+            echo "[wal-base] self-test FAILED: base artifact does not decrypt to the stub bytes" >&2
+            _st_fail=1
+        fi
         _st_base_name=${_st_base##*/}
         [ -f "$_st_tmp/offsite/wal-base/$_st_base_name" ] || { echo "[wal-base] self-test FAILED: base artifact not mirrored offsite" >&2; _st_fail=1; }
         [ -f "$_st_tmp/wal-base/.last_base_backup" ] || { echo "[wal-base] self-test FAILED: cadence stamp not written on success" >&2; _st_fail=1; }
@@ -425,15 +483,15 @@ wal_base_self_test() {
     #    the newest-first ordering deterministic.
     WAL_BASE_KEEP_GENERATIONS=2
     for _st_gen in 20261001-000000 20260915-000000 20260801-000000; do
-        : > "$_st_tmp/wal-base/apexmail-wal-base-${_st_gen}.tar.gz"
-        : > "$_st_tmp/wal-base/apexmail-wal-base-${_st_gen}.pg_wal.tar.gz"
-        touch -t "${_st_gen%-*}0000" "$_st_tmp/wal-base/apexmail-wal-base-${_st_gen}.tar.gz" \
-            "$_st_tmp/wal-base/apexmail-wal-base-${_st_gen}.pg_wal.tar.gz" 2>/dev/null || true
+        : > "$_st_tmp/wal-base/apexmail-wal-base-${_st_gen}.tar.gz.enc"
+        : > "$_st_tmp/wal-base/apexmail-wal-base-${_st_gen}.pg_wal.tar.gz.enc"
+        touch -t "${_st_gen%-*}0000" "$_st_tmp/wal-base/apexmail-wal-base-${_st_gen}.tar.gz.enc" \
+            "$_st_tmp/wal-base/apexmail-wal-base-${_st_gen}.pg_wal.tar.gz.enc" 2>/dev/null || true
     done
     cleanup_wal_base
     _st_left=$(wal_base_artifacts | wc -l | tr -d ' ')
     [ "$_st_left" -eq 2 ] || { echo "[wal-base] self-test FAILED: retention left $_st_left base generations, expected 2" >&2; _st_fail=1; }
-    [ -f "$_st_tmp/wal-base/apexmail-wal-base-20261001-000000.tar.gz" ] || { echo "[wal-base] self-test FAILED: retention dropped a generation it must keep" >&2; _st_fail=1; }
+    [ -f "$_st_tmp/wal-base/apexmail-wal-base-20261001-000000.tar.gz.enc" ] || { echo "[wal-base] self-test FAILED: retention dropped a generation it must keep" >&2; _st_fail=1; }
     [ ! -f "$_st_tmp/wal-base/apexmail-wal-base-20260915-000000.tar.gz" ] || { echo "[wal-base] self-test FAILED: retention kept an over-age generation" >&2; _st_fail=1; }
     [ ! -f "$_st_tmp/wal-base/apexmail-wal-base-20260801-000000.tar.gz" ] || { echo "[wal-base] self-test FAILED: retention kept an over-age generation" >&2; _st_fail=1; }
     [ ! -f "$_st_tmp/wal-base/apexmail-wal-base-20260915-000000.pg_wal.tar.gz" ] || { echo "[wal-base] self-test FAILED: retention left the pg_wal sibling behind" >&2; _st_fail=1; }
@@ -450,6 +508,7 @@ wal_base_self_test() {
     fi
     [ ! -f "$_st_tmp/wal-base/.last_base_backup" ] || { echo "[wal-base] self-test FAILED: failed mirror must not write the cadence stamp" >&2; _st_fail=1; }
 
+    WAL_ENCRYPTION_KEY=""
     BACKUP_DIR=$_sv_dir BACKUP_TARGET=$_sv_target WAL_BASE_BACKUP_ENABLED=$_sv_gate
     WAL_BASE_KEEP_GENERATIONS=$_sv_keep WAL_BASE_INTERVAL_SECS=$_sv_int
     PATH=$_sv_path

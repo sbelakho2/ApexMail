@@ -308,7 +308,7 @@ What we learned and how to prevent recurrence.
 
 | Time Elapsed | Action |
 |--------------|--------|
-| 0 min | Alert triggered, page on-call |
+| 0 min | Alert triggered, page the responsible ApexMail operator |
 | 15 min | If SEV1 not acknowledged, page secondary |
 | 30 min | If unresolved, escalate to team lead |
 | 1 hour | If SEV1 unresolved, escalate to engineering manager |

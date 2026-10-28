@@ -234,6 +234,8 @@ async fn forgot_password(
             &text_body,
             vec!["system".into(), "password-reset".into()],
             crate::routes::system_sender::QUEUE_PRIORITY_DEFAULT,
+            // Account-access mail the recipient triggered: transactional.
+            apexmail_lib::email_headers::message_category::TRANSACTIONAL,
         )
         .await?;
 
@@ -562,14 +564,19 @@ mod adversarial_tests {
         assert!(token_hash.is_some(), "reset token hash stored");
         assert!(expires.is_some());
 
-        let (subject, html): (String, String) = sqlx::query_as(
-            "SELECT subject, html FROM email_queue WHERE to_addresses = ARRAY[$1] LIMIT 1",
+        let (subject, html, category): (String, String, String) = sqlx::query_as(
+            "SELECT subject, html, message_category FROM email_queue \
+             WHERE to_addresses = ARRAY[$1] LIMIT 1",
         )
         .bind(&email)
         .fetch_one(&pool)
         .await
         .expect("queued reset email");
         assert!(subject.contains("Reset your ApexMail password"));
+        assert_eq!(
+            category, "transactional",
+            "a password reset is account-access mail, never marketing"
+        );
         // CWE-598: the token rides the PATH, never the query string.
         assert!(html.contains("/reset-password/"), "{subject}");
         assert!(!html.contains("token="), "no query-string token leakage");

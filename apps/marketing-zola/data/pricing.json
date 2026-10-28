@@ -166,7 +166,7 @@
     },
     {
       "id": "mailbox_archive_journaling",
-      "name": "Mailbox archive and journaling",
+      "name": "Mailbox archive and journaling (in-platform)",
       "eur_cents": 200,
       "usd_cents": 200,
       "display": "+€2 per seat",

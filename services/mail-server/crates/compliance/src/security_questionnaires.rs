@@ -6,14 +6,14 @@
 //! SOC 2 control mappings, and Trust Portal evidence references that can be
 //! exported into a customer's preferred questionnaire format.
 
-use std::{collections::BTreeSet, fmt, str::FromStr};
+use std::{collections::BTreeSet, collections::HashMap, fmt, str::FromStr};
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::{
-    soc2::Control,
+    soc2::{required_evidence_types, Control, ControlEvidence, AUTOMATED_EVIDENCE_TYPES},
     trust_portal::{Document, Incident, Subprocessor},
 };
 
@@ -100,6 +100,20 @@ pub struct QuestionnaireContext {
     pub incidents: Vec<Incident>,
     pub hipaa_baa_active: bool,
     pub generated_at: DateTime<Utc>,
+    /// Latest evidence rows per `(control, evidence_type, period)`.
+    ///
+    /// A questionnaire answer is automated only from these rows: the SOC 2
+    /// control-catalog entry itself is a mapping, never evidence.
+    #[serde(default)]
+    pub evidence: Vec<ControlEvidence>,
+    /// Cadence (days) used to judge whether an evidence row is fresh. Set
+    /// from `Soc2Service::attestation_period_days`.
+    #[serde(default = "default_freshness_days")]
+    pub freshness_days: i64,
+}
+
+fn default_freshness_days() -> i64 {
+    90
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -311,13 +325,15 @@ fn specs_for(framework: QuestionnaireFramework) -> &'static [AnswerSpec] {
 
 fn build_answer(spec: &AnswerSpec, context: &QuestionnaireContext) -> QuestionnaireAnswer {
     let source_controls = present_controls(spec.controls, &context.controls);
-    let mut evidence = evidence_for(spec, context, &source_controls);
-    let status = answer_status(spec, context, &source_controls, &evidence);
+    let gate = assess_evidence_gate(spec, context);
+    let status = answer_status(spec, context, &gate);
+    // Confidence is derived from evidence coverage, never a fixed constant:
+    // fresh+valid required evidence divided by all required evidence.
     let confidence = match status {
-        AnswerStatus::Automated => 0.92,
-        AnswerStatus::NeedsReview => 0.55,
-        AnswerStatus::NotApplicable => 0.99,
+        AnswerStatus::NotApplicable => 1.0,
+        _ => gate.coverage().clamp(0.0, 1.0),
     };
+    let mut evidence = evidence_for(spec, context, &source_controls);
     let answer = render_answer(spec.kind, context, &source_controls, &evidence, status);
     if matches!(spec.kind, AnswerKind::Subprocessors) && context.subprocessors.is_empty() {
         evidence.push(EvidenceReference {
@@ -338,22 +354,219 @@ fn build_answer(spec: &AnswerSpec, context: &QuestionnaireContext) -> Questionna
         owner: owner_for(spec.kind).to_string(),
         source_controls,
         evidence,
-        notes: notes_for(status, spec.kind),
+        notes: notes_for(status, spec.kind, context, &gate),
     }
+}
+
+/// What a control's evidence set actually supports. Every answer must earn
+/// `Automated` from real evidence rows; the control-catalog entry is a
+/// mapping, not evidence.
+#[derive(Debug, Clone, Default)]
+struct EvidenceGate {
+    active_controls: Vec<String>,
+    missing_controls: Vec<String>,
+    inactive_controls: Vec<String>,
+    controls_without_requirements: Vec<String>,
+    required_total: usize,
+    fresh_total: usize,
+    missing_evidence: Vec<String>,
+    manual_missing: Vec<String>,
+    stale_evidence: Vec<String>,
+    invalid_evidence: Vec<String>,
+    legal_review_required: bool,
+}
+
+impl EvidenceGate {
+    /// Fraction of required evidence items that are present, valid and fresh.
+    fn coverage(&self) -> f32 {
+        if self.required_total == 0 {
+            0.0
+        } else {
+            self.fresh_total as f32 / self.required_total as f32
+        }
+    }
+
+    /// An answer is automatable only when its mapped controls are active, every
+    /// required evidence item exists (latest row), verifies against its hash,
+    /// is fresh for the cadence, no manual evidence is missing, and no
+    /// legal/contract judgment is required.
+    fn complete(&self) -> bool {
+        !self.legal_review_required
+            && self.required_total > 0
+            && !self.active_controls.is_empty()
+            && self.missing_controls.is_empty()
+            && self.inactive_controls.is_empty()
+            && self.controls_without_requirements.is_empty()
+            && self.missing_evidence.is_empty()
+            && self.manual_missing.is_empty()
+            && self.stale_evidence.is_empty()
+            && self.invalid_evidence.is_empty()
+            && self.fresh_total == self.required_total
+    }
+
+    fn describe(&self) -> String {
+        let mut parts = Vec::new();
+        if !self.missing_controls.is_empty() {
+            parts.push(format!(
+                "mapped controls absent from the catalog: {}",
+                self.missing_controls.join(", ")
+            ));
+        }
+        if !self.inactive_controls.is_empty() {
+            parts.push(format!(
+                "mapped controls not active: {}",
+                self.inactive_controls.join(", ")
+            ));
+        }
+        if !self.controls_without_requirements.is_empty() {
+            parts.push(format!(
+                "controls with no configured required evidence: {}",
+                self.controls_without_requirements.join(", ")
+            ));
+        }
+        if !self.missing_evidence.is_empty() {
+            parts.push(format!(
+                "missing required evidence: {}",
+                self.missing_evidence.join(", ")
+            ));
+        }
+        if !self.manual_missing.is_empty() {
+            parts.push(format!(
+                "required manual evidence missing: {}",
+                self.manual_missing.join(", ")
+            ));
+        }
+        if !self.stale_evidence.is_empty() {
+            parts.push(format!(
+                "stale evidence: {}",
+                self.stale_evidence.join(", ")
+            ));
+        }
+        if !self.invalid_evidence.is_empty() {
+            parts.push(format!(
+                "evidence failed hash verification: {}",
+                self.invalid_evidence.join(", ")
+            ));
+        }
+        if self.legal_review_required {
+            parts.push("legal/contract review required".to_string());
+        }
+        if parts.is_empty() {
+            "all required evidence is present, valid and fresh".to_string()
+        } else {
+            parts.join("; ")
+        }
+    }
+}
+
+fn latest_evidence(context: &QuestionnaireContext) -> HashMap<(String, String), &ControlEvidence> {
+    let mut latest: HashMap<(String, String), &ControlEvidence> = HashMap::new();
+    for row in &context.evidence {
+        let key = (row.control_id.clone(), row.evidence_type.clone());
+        match latest.get(&key) {
+            Some(existing) if evidence_is_newer(existing, row) => {}
+            _ => {
+                latest.insert(key, row);
+            }
+        }
+    }
+    latest
+}
+
+/// Latest-row tie-break: `collected_at DESC, id DESC`, matching the SQL
+/// readers. A later correction therefore supersedes an earlier row.
+fn evidence_is_newer(candidate: &ControlEvidence, current: &ControlEvidence) -> bool {
+    candidate.collected_at > current.collected_at
+        || (candidate.collected_at == current.collected_at && candidate.id > current.id)
+}
+
+fn assess_evidence_gate(spec: &AnswerSpec, context: &QuestionnaireContext) -> EvidenceGate {
+    let latest = latest_evidence(context);
+    let cutoff = context.generated_at - Duration::days(context.freshness_days.max(0));
+    let mut gate = EvidenceGate {
+        legal_review_required: requires_legal_review(spec.kind),
+        ..EvidenceGate::default()
+    };
+
+    for control_id in spec.controls {
+        let Some(control) = context
+            .controls
+            .iter()
+            .find(|control| control.control_id == *control_id)
+        else {
+            // An unavailable control contributes one unmet evidence basis so
+            // the derived coverage cannot read 1.0 for a blocked answer.
+            gate.required_total += 1;
+            gate.missing_controls.push((*control_id).to_string());
+            continue;
+        };
+        if control.status != "in_scope" {
+            gate.required_total += 1;
+            gate.inactive_controls
+                .push(format!("{} ({})", control.control_id, control.status));
+            continue;
+        }
+        gate.active_controls.push(control.control_id.clone());
+
+        let required = match required_evidence_types(control) {
+            Ok(required) if !required.is_empty() => required,
+            _ => {
+                gate.required_total += 1;
+                gate.controls_without_requirements
+                    .push(control.control_id.clone());
+                continue;
+            }
+        };
+
+        for evidence_type in required {
+            gate.required_total += 1;
+            let key = (control.control_id.clone(), evidence_type.clone());
+            let item = format!("{}:{}", control.control_id, evidence_type);
+            match latest.get(&key) {
+                None => {
+                    gate.missing_evidence.push(item.clone());
+                    if !AUTOMATED_EVIDENCE_TYPES.contains(&evidence_type.as_str()) {
+                        gate.manual_missing.push(item);
+                    }
+                }
+                Some(row) => {
+                    let valid = sha256_json(&row.payload) == row.sha256_hash;
+                    if !valid {
+                        gate.invalid_evidence.push(item.clone());
+                    }
+                    let fresh = row.collected_at >= cutoff;
+                    if !fresh {
+                        gate.stale_evidence.push(item.clone());
+                    }
+                    if valid && fresh {
+                        gate.fresh_total += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    gate
+}
+
+/// Contract/legal answers always need a human, even when operational
+/// evidence is complete: the HIPAA/BAA answer asserts a contractual position.
+fn requires_legal_review(kind: AnswerKind) -> bool {
+    matches!(kind, AnswerKind::HipaaBaa)
 }
 
 fn answer_status(
     spec: &AnswerSpec,
     context: &QuestionnaireContext,
-    source_controls: &[String],
-    evidence: &[EvidenceReference],
+    gate: &EvidenceGate,
 ) -> AnswerStatus {
-    match spec.kind {
-        AnswerKind::HipaaBaa if !context.hipaa_baa_active => AnswerStatus::NeedsReview,
-        AnswerKind::Subprocessors if context.subprocessors.is_empty() => AnswerStatus::Automated,
-        AnswerKind::VendorRisk if context.subprocessors.is_empty() => AnswerStatus::Automated,
-        _ if source_controls.is_empty() && evidence.is_empty() => AnswerStatus::NeedsReview,
-        _ => AnswerStatus::Automated,
+    if matches!(spec.kind, AnswerKind::HipaaBaa) && !context.hipaa_baa_active {
+        return AnswerStatus::NeedsReview;
+    }
+    if gate.complete() {
+        AnswerStatus::Automated
+    } else {
+        AnswerStatus::NeedsReview
     }
 }
 
@@ -375,21 +588,40 @@ fn evidence_for(
     source_controls: &[String],
 ) -> Vec<EvidenceReference> {
     let mut evidence = BTreeSet::new();
+    let latest = latest_evidence(context);
+
+    // Only captured evidence rows back an answer. The control-catalog entry
+    // is a mapping and is deliberately NOT added as evidence.
     for control_id in source_controls {
-        if let Some(control) = context
+        let Some(control) = context
             .controls
             .iter()
-            .find(|c| c.control_id == *control_id)
-        {
-            evidence.insert(EvidenceReference {
-                kind: "soc2_control".to_string(),
-                id: control.control_id.clone(),
-                title: control.title.clone(),
-                hash: None,
-                location: Some(format!("/v1/admin/soc2/controls/{}", control.control_id)),
-            });
+            .find(|control| control.control_id == *control_id)
+        else {
+            continue;
+        };
+        let Ok(required) = required_evidence_types(control) else {
+            continue;
+        };
+        for evidence_type in required {
+            if let Some(row) = latest.get(&(control.control_id.clone(), evidence_type.clone())) {
+                evidence.insert(EvidenceReference {
+                    kind: "soc2_evidence".to_string(),
+                    id: row.id.clone(),
+                    title: format!(
+                        "{} {} evidence collected {}",
+                        control.control_id, row.evidence_type, row.collected_at
+                    ),
+                    hash: Some(row.sha256_hash.clone()),
+                    location: Some(format!(
+                        "/v1/admin/soc2/controls/{}/evidence",
+                        control.control_id
+                    )),
+                });
+            }
         }
     }
+
     for keyword in spec.doc_keywords {
         let needle = keyword.to_ascii_lowercase();
         for doc in &context.documents {
@@ -437,6 +669,20 @@ fn evidence_for(
     evidence.into_iter().collect()
 }
 
+const HIPAA_INACTIVE_ANSWER: &str = "ApexMail does not currently offer HIPAA/BAA service. Do not represent the service as HIPAA-enabled.";
+
+fn hipaa_answer(context: &QuestionnaireContext) -> String {
+    if !context.hipaa_baa_active {
+        return HIPAA_INACTIVE_ANSWER.to_string();
+    }
+    match &context.tenant_id {
+        Some(tenant_id) => format!(
+            "A HIPAA BAA is active for the requested tenant ({tenant_id}). ApexMail tracks BAA request, customer signature, ApexMail countersignature, activation, termination, and hash-chained BAA events."
+        ),
+        None => "A HIPAA BAA is active for the requested tenant. ApexMail tracks BAA request, customer signature, ApexMail countersignature, activation, termination, and hash-chained BAA events.".to_string(),
+    }
+}
+
 fn render_answer(
     kind: AnswerKind,
     context: &QuestionnaireContext,
@@ -444,19 +690,26 @@ fn render_answer(
     evidence: &[EvidenceReference],
     status: AnswerStatus,
 ) -> String {
+    // The HIPAA answer is state-dependent, not review-state-dependent: an
+    // inactive deployment must never advertise an obtainable service.
+    if matches!(kind, AnswerKind::HipaaBaa) {
+        return hipaa_answer(context);
+    }
+
     if status == AnswerStatus::NeedsReview {
-        return match kind {
-            AnswerKind::HipaaBaa => "A HIPAA BAA workflow exists, but no active BAA was found for the requested tenant. Complete request, signature, countersignature, and activation before representing the tenant as HIPAA-active.".to_string(),
-            _ => format!(
-                "ApexMail has a configured review workflow for this domain, but this generated answer requires ApexMail review because the expected control or evidence source was not present in the current evidence set. Expected controls: {}.",
-                if source_controls.is_empty() { "not currently in scope".to_string() } else { source_controls.join(", ") }
-            ),
-        };
+        return format!(
+            "ApexMail has a configured review workflow for this domain, but this generated answer requires ApexMail review because the expected control or evidence source was not present in the current evidence set. Expected controls: {}.",
+            if source_controls.is_empty() {
+                "not currently in scope".to_string()
+            } else {
+                source_controls.join(", ")
+            }
+        );
     }
 
     match kind {
         AnswerKind::Governance => format!(
-            "ApexMail maintains a SOC 2 control catalog covering governance, oversight, roles, responsibilities, policy communication, and monitoring. This answer is backed by {} mapped controls and {} Trust Portal evidence items.",
+            "ApexMail maintains a SOC 2 control catalog covering governance, oversight, roles, responsibilities, policy communication, and monitoring. This answer is backed by {} mapped controls and {} evidence items.",
             source_controls.len(), evidence.len()
         ),
         AnswerKind::AccessControl => "Access control is enforced through SSO/SAML, SCIM provisioning where configured, role-based access, API keys, IP allowlisting, and audit logs for administrative actions. Access control evidence maps to the CC6 control family.".to_string(),
@@ -476,7 +729,8 @@ fn render_answer(
             context.subprocessors.len()
         ),
         AnswerKind::DataRetention => "Retention controls are plan-based and configurable for Enterprise review. GDPR erasure workflows and audit records support retention and disposal review.".to_string(),
-        AnswerKind::HipaaBaa => "A HIPAA BAA is active for the requested tenant. ApexMail tracks BAA request, customer signature, ApexMail countersignature, activation, termination, and hash-chained BAA events.".to_string(),
+        // The HIPAA branch returns above; this arm keeps the match total.
+        AnswerKind::HipaaBaa => hipaa_answer(context),
         AnswerKind::TrustPortal => "The Trust Portal exposes public documents, policy summaries, subprocessor records, incident history, and NDA-gated access requests for private security artifacts. Admin routes support document versioning and supersedence.".to_string(),
         AnswerKind::NetworkSecurity => "Network security answers map to SOC 2 logical access, transport security, provider throttling, WAF/IDS controls where enabled, and dedicated deployment architecture review for Enterprise customers.".to_string(),
         AnswerKind::SecurityTraining => "Security awareness and role training are tracked as governance controls in the SOC 2 catalog and included in questionnaire packs as ApexMail attestation items.".to_string(),
@@ -496,17 +750,31 @@ fn owner_for(kind: AnswerKind) -> &'static str {
     "ApexMail"
 }
 
-fn notes_for(status: AnswerStatus, kind: AnswerKind) -> Option<String> {
-    match (status, kind) {
-        (AnswerStatus::NeedsReview, _) => Some(
-            "Generated answer requires human review before it is sent to a customer or auditor."
-                .to_string(),
-        ),
-        (AnswerStatus::Automated, AnswerKind::HipaaBaa) => Some(
-            "Tenant-specific answer depends on the tenant_id supplied during generation."
-                .to_string(),
-        ),
-        _ => None,
+fn notes_for(
+    status: AnswerStatus,
+    kind: AnswerKind,
+    context: &QuestionnaireContext,
+    gate: &EvidenceGate,
+) -> Option<String> {
+    match status {
+        AnswerStatus::NeedsReview => {
+            if matches!(kind, AnswerKind::HipaaBaa) && !context.hipaa_baa_active {
+                Some(
+                    "HIPAA/BAA service is not offered; do not represent the service as HIPAA-enabled."
+                        .to_string(),
+                )
+            } else {
+                Some(format!("Requires ApexMail review: {}.", gate.describe()))
+            }
+        }
+        AnswerStatus::Automated => match kind {
+            AnswerKind::HipaaBaa => Some(
+                "Tenant-specific answer depends on the tenant_id supplied during generation."
+                    .to_string(),
+            ),
+            _ => None,
+        },
+        AnswerStatus::NotApplicable => None,
     }
 }
 
@@ -688,15 +956,19 @@ mod tests {
     use super::*;
 
     fn control(id: &str) -> Control {
+        control_with_requirements(id, &[])
+    }
+
+    fn control_with_requirements(id: &str, required: &[&str]) -> Control {
         Control {
             id: format!("control-{id}"),
             control_id: id.to_string(),
             category: "test".to_string(),
             title: format!("Control {id}"),
             description: "test".to_string(),
-            owner: "Security".to_string(),
+            owner: "Founder / System Operator".to_string(),
             status: "in_scope".to_string(),
-            evidence_required: serde_json::json!([]),
+            evidence_required: serde_json::json!(required),
             automation: "automated".to_string(),
             last_attested_at: None,
             next_attestation_at: None,
@@ -705,10 +977,50 @@ mod tests {
         }
     }
 
-    fn context() -> QuestionnaireContext {
+    fn evidence_row(
+        control_id: &str,
+        evidence_type: &str,
+        payload: serde_json::Value,
+        collected_at: DateTime<Utc>,
+    ) -> ControlEvidence {
+        ControlEvidence {
+            id: format!(
+                "ev-{control_id}-{evidence_type}-{}",
+                collected_at.timestamp_micros()
+            ),
+            control_id: control_id.to_string(),
+            evidence_type: evidence_type.to_string(),
+            source: "test".to_string(),
+            sha256_hash: sha256_json(&payload),
+            payload,
+            storage_url: None,
+            period_start: collected_at - Duration::days(1),
+            period_end: collected_at,
+            collected_at,
+            collected_by: "test".to_string(),
+        }
+    }
+
+    fn base_context(
+        controls: Vec<Control>,
+        evidence: Vec<ControlEvidence>,
+    ) -> QuestionnaireContext {
         QuestionnaireContext {
             tenant_id: Some("tenant-1".to_string()),
-            controls: [
+            controls,
+            documents: Vec::new(),
+            subprocessors: Vec::new(),
+            incidents: Vec::new(),
+            hipaa_baa_active: true,
+            generated_at: Utc::now(),
+            evidence,
+            freshness_days: 90,
+        }
+    }
+
+    fn context() -> QuestionnaireContext {
+        base_context(
+            [
                 "CC1.1", "CC1.2", "CC1.3", "CC2.1", "CC2.2", "CC3.1", "CC3.2", "CC4.1", "CC4.2",
                 "CC5.1", "CC6.1", "CC6.2", "CC6.3", "CC6.4", "CC6.6", "CC6.7", "CC6.8", "CC7.1",
                 "CC7.2", "CC7.3", "CC7.4", "CC7.5", "CC8.1", "CC9.2", "A1.1", "A1.2", "A1.3",
@@ -717,11 +1029,18 @@ mod tests {
             .into_iter()
             .map(control)
             .collect(),
-            documents: Vec::new(),
-            subprocessors: Vec::new(),
-            incidents: Vec::new(),
-            hipaa_baa_active: true,
-            generated_at: Utc::now(),
+            Vec::new(),
+        )
+    }
+
+    fn spec(kind: AnswerKind, controls: &'static [&'static str]) -> AnswerSpec {
+        AnswerSpec {
+            id: "TEST-01",
+            domain: "Test",
+            question: "test question",
+            kind,
+            controls,
+            doc_keywords: &[],
         }
     }
 
@@ -756,7 +1075,15 @@ mod tests {
                 context(),
             );
             assert!(!generated.answers.is_empty());
-            assert_eq!(generated.completion.needs_review, 0, "{framework:?}");
+            assert_eq!(
+                generated.completion.automated_answers, 0,
+                "{framework:?}: no evidence means no automated answers"
+            );
+            assert_eq!(
+                generated.completion.needs_review,
+                generated.answers.len(),
+                "{framework:?}"
+            );
             assert!(generated.questionnaire_hash.len() == 64);
             assert!(generated
                 .report_md
@@ -766,7 +1093,178 @@ mod tests {
     }
 
     #[test]
-    fn hipaa_answer_requires_tenant_active_baa() {
+    fn control_present_without_evidence_needs_review_naming_the_gap() {
+        let context = base_context(
+            vec![control_with_requirements(
+                "CC2.1",
+                &["audit_log_sample", "audit_chain_verification"],
+            )],
+            Vec::new(),
+        );
+        let answer = build_answer(&spec(AnswerKind::AuditLogging, &["CC2.1"]), &context);
+        assert_eq!(answer.status, AnswerStatus::NeedsReview);
+        assert_eq!(answer.confidence, 0.0);
+        let notes = answer.notes.expect("gap is explained");
+        assert!(notes.contains("missing required evidence"), "{notes}");
+        assert!(notes.contains("CC2.1:audit_log_sample"), "{notes}");
+        assert!(notes.contains("CC2.1:audit_chain_verification"), "{notes}");
+        assert!(
+            answer
+                .evidence
+                .iter()
+                .all(|item| item.kind != "soc2_control"),
+            "a catalog entry must never be presented as evidence"
+        );
+    }
+
+    #[test]
+    fn fresh_complete_evidence_automates_with_derived_confidence() {
+        let payload = serde_json::json!({"entries": 3, "window": "24h"});
+        let context = base_context(
+            vec![control_with_requirements("CC2.1", &["audit_log_sample"])],
+            vec![evidence_row(
+                "CC2.1",
+                "audit_log_sample",
+                payload.clone(),
+                Utc::now(),
+            )],
+        );
+        let answer = build_answer(&spec(AnswerKind::AuditLogging, &["CC2.1"]), &context);
+        assert_eq!(answer.status, AnswerStatus::Automated);
+        assert!(
+            (answer.confidence - 1.0).abs() < f32::EPSILON,
+            "confidence must equal the derived coverage, got {}",
+            answer.confidence
+        );
+        assert!(
+            answer
+                .evidence
+                .iter()
+                .any(|item| item.kind == "soc2_evidence"
+                    && item.hash.as_deref() == Some(sha256_json(&payload).as_str())),
+            "the captured evidence row is the reference"
+        );
+        assert!(answer
+            .evidence
+            .iter()
+            .all(|item| item.kind != "soc2_control"));
+        assert!(answer.notes.is_none());
+    }
+
+    #[test]
+    fn partial_evidence_coverage_derives_a_fractional_confidence() {
+        let context = base_context(
+            vec![control_with_requirements(
+                "CC2.1",
+                &["audit_log_sample", "audit_chain_verification"],
+            )],
+            vec![evidence_row(
+                "CC2.1",
+                "audit_log_sample",
+                serde_json::json!({"entries": 1}),
+                Utc::now(),
+            )],
+        );
+        let answer = build_answer(&spec(AnswerKind::AuditLogging, &["CC2.1"]), &context);
+        assert_eq!(answer.status, AnswerStatus::NeedsReview);
+        assert!(
+            (answer.confidence - 0.5).abs() < 0.001,
+            "one of two required items is fresh: got {}",
+            answer.confidence
+        );
+        let notes = answer.notes.expect("gap is explained");
+        assert!(notes.contains("audit_chain_verification"), "{notes}");
+    }
+
+    #[test]
+    fn stale_evidence_needs_review() {
+        let context = base_context(
+            vec![control_with_requirements("CC2.1", &["audit_log_sample"])],
+            vec![evidence_row(
+                "CC2.1",
+                "audit_log_sample",
+                serde_json::json!({"entries": 1}),
+                Utc::now() - Duration::days(120),
+            )],
+        );
+        let answer = build_answer(&spec(AnswerKind::AuditLogging, &["CC2.1"]), &context);
+        assert_eq!(answer.status, AnswerStatus::NeedsReview);
+        assert_eq!(answer.confidence, 0.0);
+        let notes = answer.notes.expect("gap is explained");
+        assert!(notes.contains("stale evidence"), "{notes}");
+        assert!(notes.contains("audit_log_sample"), "{notes}");
+    }
+
+    #[test]
+    fn tampered_evidence_fails_hash_verification_and_blocks_automation() {
+        let mut row = evidence_row(
+            "CC2.1",
+            "audit_log_sample",
+            serde_json::json!({"entries": 1}),
+            Utc::now(),
+        );
+        row.sha256_hash = "deadbeef".to_string();
+        let context = base_context(
+            vec![control_with_requirements("CC2.1", &["audit_log_sample"])],
+            vec![row],
+        );
+        let answer = build_answer(&spec(AnswerKind::AuditLogging, &["CC2.1"]), &context);
+        assert_eq!(answer.status, AnswerStatus::NeedsReview);
+        let notes = answer.notes.expect("gap is explained");
+        assert!(notes.contains("hash verification"), "{notes}");
+        assert!(notes.contains("audit_log_sample"), "{notes}");
+    }
+
+    #[test]
+    fn latest_evidence_row_wins_for_questionnaire_answers() {
+        let old = evidence_row(
+            "CC2.1",
+            "audit_log_sample",
+            serde_json::json!({"entries": 1, "generation": "old"}),
+            Utc::now() - Duration::days(2),
+        );
+        let new = evidence_row(
+            "CC2.1",
+            "audit_log_sample",
+            serde_json::json!({"entries": 2, "generation": "new"}),
+            Utc::now(),
+        );
+        let context = base_context(
+            vec![control_with_requirements("CC2.1", &["audit_log_sample"])],
+            vec![old.clone(), new.clone()],
+        );
+        let answer = build_answer(&spec(AnswerKind::AuditLogging, &["CC2.1"]), &context);
+        assert_eq!(answer.status, AnswerStatus::Automated);
+        let reference = answer
+            .evidence
+            .iter()
+            .find(|item| item.kind == "soc2_evidence")
+            .expect("evidence reference");
+        assert_eq!(reference.id, new.id, "a later correction supersedes");
+        assert_ne!(reference.id, old.id);
+    }
+
+    #[test]
+    fn inactive_mapped_control_blocks_automation() {
+        let mut inactive = control_with_requirements("CC2.1", &["audit_log_sample"]);
+        inactive.status = "not_applicable".to_string();
+        let context = base_context(
+            vec![inactive],
+            vec![evidence_row(
+                "CC2.1",
+                "audit_log_sample",
+                serde_json::json!({"entries": 1}),
+                Utc::now(),
+            )],
+        );
+        let answer = build_answer(&spec(AnswerKind::AuditLogging, &["CC2.1"]), &context);
+        assert_eq!(answer.status, AnswerStatus::NeedsReview);
+        let notes = answer.notes.expect("gap is explained");
+        assert!(notes.contains("not active"), "{notes}");
+    }
+
+    #[test]
+    fn hipaa_inactive_answer_is_exact_and_does_not_advertise_the_service() {
         let mut context = context();
         context.hipaa_baa_active = false;
         let generated = generate_questionnaire(
@@ -780,7 +1278,48 @@ mod tests {
             .find(|answer| answer.id == "HECVAT-HIPAA-01")
             .expect("HIPAA answer exists");
         assert_eq!(hipaa.status, AnswerStatus::NeedsReview);
-        assert!(hipaa.answer.contains("no active BAA"));
+        assert_eq!(hipaa.answer, HIPAA_INACTIVE_ANSWER);
+        assert!(hipaa.answer.contains("does not currently offer"));
+        assert!(!hipaa.answer.contains("Complete request"));
+        assert!(!hipaa.answer.contains("signature"));
+        assert!(!hipaa.answer.contains("activation"));
+    }
+
+    #[test]
+    fn hipaa_active_answer_keeps_tenant_specific_wording() {
+        let context = base_context(
+            vec![control_with_requirements(
+                "P1.1",
+                &["privacy_policy_version"],
+            )],
+            vec![evidence_row(
+                "P1.1",
+                "privacy_policy_version",
+                serde_json::json!({"version": "2026-10"}),
+                Utc::now(),
+            )],
+        );
+        let answer = build_answer(&spec(AnswerKind::HipaaBaa, &["P1.1"]), &context);
+        assert!(answer
+            .answer
+            .contains("A HIPAA BAA is active for the requested tenant"));
+        assert!(answer.answer.contains("tenant-1"));
+        assert!(!answer.answer.contains("does not currently offer"));
+        // Representing a tenant as HIPAA-active is a legal/contract judgment.
+        assert_eq!(answer.status, AnswerStatus::NeedsReview);
+        let notes = answer.notes.expect("legal review is named");
+        assert!(notes.contains("legal/contract review required"), "{notes}");
+    }
+
+    #[test]
+    fn automated_confidence_is_not_the_old_hardcoded_constant() {
+        let source = include_str!("security_questionnaires.rs");
+        // Split so this assertion's own text cannot satisfy the search.
+        let old_constant = concat!("0.", "92");
+        assert!(
+            !source.contains(old_constant),
+            "automated answers must derive confidence from evidence coverage"
+        );
     }
 
     #[test]

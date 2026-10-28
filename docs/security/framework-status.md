@@ -1,7 +1,7 @@
 # Framework Certification Status
 
 > **Last Updated:** 2026-07-29
-> **Owner:** Compliance Team (`compliance@apexmail.ee`)
+> **Owner:** ApexMail (`compliance@apexmail.ee`)
 > **Legal Entity:** Bel Consulting OÜ, Registry Code 16588745, Tallinn, Estonia
 
 ---
@@ -70,7 +70,7 @@ The following table provides the current status of ApexMail's alignment with ind
 ## Certification Expiry
 
 - Expired certifications are **removed immediately** from this page and any marketing references
-- Certification status is reviewed monthly by the Compliance Team
+- Certification status is reviewed monthly by the ApexMail
 - Any certification claim in marketing must reference this table or its equivalent status page
 
 ---

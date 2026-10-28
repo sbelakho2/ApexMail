@@ -546,6 +546,21 @@ groups:
           description: "{{ $value }} WAL segments failed to archive in 15m on {{ $labels.instance }}. Postgres retries automatically (pg_wal grows as backpressure); check the offsite target's reachability/SSH key and the postgres log's archive_command lines."
           runbook_url: "https://apexmail.ee/docs/alerts#postgres-wal-archive-failing"
 
+      - alert: PostgresWALArchiveLagExceeded
+        # The RPO bound is archive_timeout (default 300s: a quiet database
+        # still switches a segment every 5 minutes) plus one archive push.
+        # A last-archived_time older than ~4x the timeout means the
+        # deterministic bound is broken even while retries have not yet
+        # failed loudly — catch it before the 2h critical.
+        expr: (time() - pg_stat_archiver_last_archived_time{job="postgres"}) > 1200
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "PostgreSQL WAL archive lag exceeds the RPO bound (20m since last archived segment)"
+          description: "No WAL segment reached the offsite archive for {{ $value | humanizeDuration }} on {{ $labels.instance }}. With archive_timeout=300s a quiet database still archives every ~5 minutes; 20m+ means the documented RPO bound (minutes, deterministic) is not holding. Check PostgresWALArchiveFailing and the archive helper's log lines."
+          runbook_url: "https://apexmail.ee/docs/alerts#postgres-wal-archive-lag-exceeded"
+
       - alert: PostgresWALArchiveStalled
         # > 2h since the last segment reached the archive = the measured-
         # minutes RPO story is dead. CAUTION before paging: a fully idle

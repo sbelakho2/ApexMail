@@ -89,6 +89,44 @@ coverage gate gains CI_COVERAGE_DISK_REQUIRED=1 so a release run cannot silently
 coverage on an undersized machine (item 6); questionnaire owner labels neutralized to
 "ApexMail" (item 18 — no fictional teams, no solo disclosure).
 
+## Fifth external audit (broad re-audit of e6a7c8b8) — 2026-10-28
+
+Verdict accepted: controlled paying launch YES with exclusions (transactional SMTP,
+journaling claims, low-RPO/PITR commitments, unattended questionnaires, SOC/ISO
+representation); 100-contract steady state NO until the Tier-3 operations land. Its
+tier list with landing status this wave:
+
+| Tier | Item | Status |
+|---|---|---|
+| 0.1 | Encrypt WAL archives and physical base backups before offsite | DONE: `pg-wal-archive.sh` encrypts every segment (gzip + canonical envelope; NO KEY = NO ARCHIVE), `postgres-backup-encrypt.sh` seals the weekly `pg_basebackup` (`*.tar.gz.enc`), `pg-pitr-restore.sh` decrypts through a `--restore-command` mode and decrypts the base into its private scratch dir; the compose override mounts the envelope + key secret. Self-tests prove keyless refusal, encrypted-only artifacts, decrypt round trips, legacy plaintext reads. |
+| 0.2 | `archive_timeout` + archive-lag RPO alert | DONE: `-c archive_timeout=${WAL_ARCHIVE_TIMEOUT_SECS:-300}` in the override (deterministic minute-scale bound even on a write-idle DB) + `PostgresWALArchiveLagExceeded` warning at 20m beside the 2h critical. |
+| 0.3 | Mailbox "journaling" claim | RESOLVED AS A DOCUMENTATION-TRUTH DEFECT: the journal IS built (`mail_journal` migration 264 — worker copies outbound raw MIME, mailstore copies inbound, `/v1/journal` + `/settings/journal` tenant surface, retention purge). The audit quoted a STALE product_lines.rs comment ("nothing copies...") which also misled it; that comment is rewritten to the truth and the marketing/invoice label now says "in-platform" everywhere. Only the third-party/external journal connector does not exist and is not claimed; it stays open as a feature request. |
+| 0.4 | SMTP authenticated message class | DONE: migration 272 adds `users.message_class` (default `marketing`; CHECK marketing/transactional/service); submission auth carries the credential's class into the queue category (server-owned, customer MIME headers ignored and covered by a forged-header test); no customer-facing creation surface exposes the field (deliberate operator write). |
+| 0.5 | Platform/system emails off the implicit marketing default | DONE: `queue_system_email*` now REQUIRE an explicit category at compile time; all 9 callsites classified (password reset, verification, invites, email-MFA codes, billing/account lifecycle notices = transactional). |
+| 1.6 | SOC evidence false-success | DONE: collector failures on evidence persistence count failed, carry the error, and the run status is never success with zero persisted (aggregate success/partial/failed). |
+| 1.7 | Attestation from full required evidence | DONE: `recompute_attestation` requires every `evidence_required` type present + hash-valid + fresh (cadence), else clears both stamps; seeds start unattested. |
+| 1.8 | Evidence append-only | DONE: migration 274 drops the upsert identity, adds an append identity (+collected_at+id), a trigger rejects UPDATEs, and every reader uses latest-row (`DISTINCT ON ... ORDER BY collected_at DESC`). Old one-item attestations cleared. |
+| 1.9 | Questionnaire auto-answers from real evidence | DONE: Automated only when all mapped controls are in scope, every required evidence item exists latest-row and fresh, no manual evidence missing, no legal/contract judgment; confidence = fresh+valid / required (no more 0.92 constant); gaps named in notes. |
+| 1.10 | Fake 24/7 rotation/SRE/CTO/Legal control claims | DONE: trust-center on-call rotation/PagerDuty/SRE-lead/CTO escalation replaced with operator-routed monitoring wording; A1.1 autoscaling claim replaced with the real rate-limit/quota/capacity-review mechanism; `Legal` department owners replaced with Founder / System Operator; broad team-label sweep across docs, runbooks, PGP text and security.txt. |
+| 1.11 | Truth-sweep every SOC control | PARTIAL: twelve seeds rewritten this wave (autoscaling, SIEM, drift detection, BCP/DR, HIPAA key claims, logging redaction, subprocessors, privacy policy location, WAF/IDS data-lake, SEV targets...). The full line-by-line sweep continues before any observation period. |
+| 1.12 | HIPAA answer must say not offered | DONE: inactive HIPAA answers state ApexMail does not offer HIPAA/BAA service and must not be represented as HIPAA-enabled; the workflow invitation is gone. |
+| 2.13 | Mailbot `Other` human-review-only | DONE: other → Service / Medium / HumanReview, pinned by test. |
+| 2.14 | Multi-label purpose classification | DONE: `classify_all` returns every matched purpose + effective risk (MAX) + strictest autonomy + primary; monotonicity property test (17^3 sweep). |
+| 2.15 | Header/MIME-based OOO/DSN classification | DONE: automated requires structural evidence (Auto-Submitted, Precedence, DSN multipart/report, autoreply headers, null Return-Path) plus 7 documented subject-line templates; prose-only phrases can no longer mark a customer as machine mail (counterexample pinned). The claim SQL/DDL now carries `headers`. |
+| 2.16 | Tenant-owned Mailbot review UX | THIS WAVE (agent in flight): tenant-scoped draft list/get/approve/reject(+structured reason)/regenerate sharing the operator workflow core, plus the console page. |
+| 2.17 | 500-1,000 real-model Mailbot corpus | OPEN, owner-gated credentials (corpus + grading committed). |
+| 2.18 | ~500-task real-model Console corpus | OPEN, owner-gated credentials. |
+| 3.19 | Separate CI machine + status publishing | PARTIAL: publisher implemented (apexmail/<lane>); operator must run CI with the token, observe contexts, then enable required checks. Host separation = owner infra decision. |
+| 3.20 | Required GitHub status checks | OPEN until contexts are observed (explicit sequencing to avoid wedging main). |
+| 3.21 | Encrypted PITR enabled in production | OPEN, operator checklist step. |
+| 3.22 | Warm standby / second failure domain | OPEN. |
+| 3.23 | Dedicated Tenant billing line | THIS WAVE (agent in flight): dedicated_tenant becomes a contract line with catalog price + setup fee + minimum term through the existing invoice sweep. |
+| 3.24 | Dedicated Tenant host provisioning | OPEN (bundle lifecycle exists; physical provisioning is operator action). |
+| 3.25 | Risk/assets/vendors/SoA/evidence-cadence core | OPEN (real certification blocker). |
+| 3.26 | Onboarding state machine | OPEN. |
+
+Also this wave: the coverage strict-disk flag (`CI_COVERAGE_DISK_REQUIRED=1`) is documented; making the release gate set it automatically is recorded for the release-run work.
+
 Release posture (audits' read, accepted): controlled paying-customer launch YES;
 100-contract steady state NO until 0.1-0.5, 1.6-1.9 and 3.x land; Mailbot internal/beta
 YES (5.8 GA: purpose classification, tenant review UX, real-model corpus are the

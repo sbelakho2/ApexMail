@@ -1,5 +1,9 @@
 pub mod account;
 pub mod ai_chat;
+/// Tenant-owned AI-draft review (`/v1/ai/drafts`, `/ai-drafts`): the
+/// customer's own pending drafts, decided through the SAME workflow core as
+/// the control-plane operator queue.
+pub mod ai_drafts;
 pub mod ai_insights;
 pub mod analytics;
 pub mod audit;

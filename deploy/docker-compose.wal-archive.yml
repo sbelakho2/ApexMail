@@ -46,6 +46,18 @@
 #      WEEKLY physical base backup PITR replay needs (postgres-backup
 #      service, same env file).
 #
+# ENCRYPTION (external audit 2026-10-28 P0): archived segments and physical
+# base backups are envelope ciphertext (backup-envelope.sh). The postgres
+# container therefore gets the `backup_encryption_key` secret and the
+# envelope library; a missing key makes archive_command FAIL (postgres
+# retries) — plaintext WAL is never shipped. WAL_ENCRYPTION_KEY_FILE can
+# point at a DEDICATED key file instead of the backup key.
+#
+# RPO BOUND: `archive_timeout` (WAL_ARCHIVE_TIMEOUT_SECS, default 300s)
+# forces a segment switch on a quiet database, so the worst-case WAL lag is
+# the timeout plus one archive push — a deterministic bound, not
+# "minutes under normal write volume".
+#
 # Failure semantics: archive_command failures make postgres retry the
 # segment (built-in backpressure); pg_wal grows while retries fail and the
 # `apexmail-wal-archive` alerts in deploy/alerting-rules.yml fire. The
@@ -91,9 +103,17 @@ services:
           cp /root/.ssh/known_hosts /var/lib/postgresql/wal-ssh/known_hosts
           chown postgres:postgres /var/lib/postgresql/wal-ssh/known_hosts
         fi
-        exec docker-entrypoint.sh postgres -c archive_mode=on -c archive_command='/usr/local/bin/pg-wal-archive.sh %p %f'
+        exec docker-entrypoint.sh postgres \
+          -c archive_mode=on \
+          -c archive_command='/usr/local/bin/pg-wal-archive.sh %p %f' \
+          -c archive_timeout=${WAL_ARCHIVE_TIMEOUT_SECS:-300}
     volumes:
       - ./deploy/hardening/scripts/pg-wal-archive.sh:/usr/local/bin/pg-wal-archive.sh:ro
+      # The canonical envelope + the PITR restore tooling: archive_command
+      # encrypts with the envelope; an operator-run `--restore-command`
+      # invocation from THIS container decrypts segments during a drill.
+      - ./deploy/hardening/scripts/backup-envelope.sh:/usr/local/lib/backup-envelope.sh:ro
+      - ./deploy/hardening/scripts/pg-pitr-restore.sh:/usr/local/bin/pg-pitr-restore.sh:ro
       - wal_spool:/var/lib/postgresql/wal-spool
       - wal_ssh:/var/lib/postgresql/wal-ssh
       # SSH key + pinned known_hosts for the WAL rsync — the SAME host-path
@@ -113,6 +133,15 @@ services:
       WAL_SSH_KEY_FILE: /var/lib/postgresql/wal-ssh/id_ed25519
       WAL_SSH_KNOWN_HOSTS_FILE: /var/lib/postgresql/wal-ssh/known_hosts
       WAL_RSYNC_TIMEOUT: ${WAL_RSYNC_TIMEOUT:-120}
+      # Encryption material (see the header): the dedicated WAL key file
+      # first, falling back to the shared backup key secret.
+      WAL_ENCRYPTION_KEY_FILE: ${WAL_ENCRYPTION_KEY_FILE:-/run/secrets/backup_encryption_key}
+      # Deterministic RPO bound: force a WAL switch at most every N seconds.
+      WAL_ARCHIVE_TIMEOUT_SECS: ${WAL_ARCHIVE_TIMEOUT_SECS:-300}
+    secrets:
+      # Envelope key for WAL segment encryption (the same secret the backup
+      # service uses unless WAL_ENCRYPTION_KEY_FILE names a dedicated one).
+      - backup_encryption_key
     networks:
       # The WAL rsync needs real egress: apexmail_data_internal is
       # internal:true; this is the same dedicated bridge the backup

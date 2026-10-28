@@ -86,7 +86,7 @@ async fn list_drafts(
     auth: AuthUser,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     require_scopes(&auth, &["*"])?;
-    let (is_system_tenant, tenant_id) = draft_scope(&state, &auth).await?;
+    let scope = draft_scope(&state, &auth).await?;
 
     let rows: Vec<(
         String,
@@ -96,8 +96,8 @@ async fn list_drafts(
         Option<String>,
         chrono::DateTime<chrono::Utc>,
     )> = sqlx::query_as(LIST_DRAFTS_SQL)
-        .bind(is_system_tenant)
-        .bind(&tenant_id)
+        .bind(scope.is_system_tenant)
+        .bind(&scope.tenant_id)
         .fetch_all(&state.db)
         .await?;
 
@@ -118,13 +118,72 @@ async fn list_drafts(
     ))
 }
 
+/// The tenant pin every drafts statement binds: `is_system_tenant` preserves
+/// the control-plane operator's cross-tenant queue, while `tenant_id` is the
+/// SQL predicate that can only ever match the caller's own rows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DraftDecisionScope {
+    pub is_system_tenant: bool,
+    pub tenant_id: String,
+}
+
+/// Which surface a decision came from. The workflow core is SHARED (claim,
+/// admission, queueing, audit-in-tx); only the audit action names and the
+/// recorded surface differ, so the operator queue and a tenant owner's own
+/// queue leave distinguishable, equally durable evidence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DraftDecisionSurface {
+    /// `/v1/admin/ai/drafts` + the control-plane review page.
+    ControlPlane,
+    /// `/v1/ai/drafts` + the tenant console page (`/ai-drafts`).
+    Tenant,
+}
+
+impl DraftDecisionSurface {
+    fn approved_action(self) -> &'static str {
+        match self {
+            Self::ControlPlane => "control_plane.ai_draft.approved",
+            Self::Tenant => "tenant.ai_draft.approved",
+        }
+    }
+
+    fn rejected_action(self) -> &'static str {
+        match self {
+            Self::ControlPlane => "control_plane.ai_draft.rejected",
+            Self::Tenant => "tenant.ai_draft.rejected",
+        }
+    }
+
+    fn refused_action(self) -> &'static str {
+        match self {
+            Self::ControlPlane => "control_plane.ai_draft.approval_refused",
+            Self::Tenant => "tenant.ai_draft.approval_refused",
+        }
+    }
+}
+
+/// Merge one caller's evidence fields into the decision metadata. Extras are
+/// additive: the workflow's own fields (routed tenant, recipient, delivery
+/// class, purpose/risk) always stay present.
+fn merge_audit_metadata(
+    mut base: serde_json::Value,
+    extra: &serde_json::Value,
+) -> serde_json::Value {
+    if let (Some(base_map), Some(extra_map)) = (base.as_object_mut(), extra.as_object()) {
+        for (key, value) in extra_map {
+            base_map.insert(key.clone(), value.clone());
+        }
+    }
+    base
+}
+
 /// Defense-in-depth scope for every CP drafts statement: the system-tenant
 /// operator manages the platform queue across tenants; any other caller is
 /// pinned to its own tenant by the SQL predicate, so a future regression in
 /// the upstream gate cannot turn a tenant credential into a cross-tenant
 /// read or write. Mirrors `require_system_tenant`'s membership test (the
 /// literal `system` id, else `tenants.slug = 'system'`).
-async fn draft_scope(state: &AppState, auth: &AuthUser) -> Result<(bool, String), ApiError> {
+async fn draft_scope(state: &AppState, auth: &AuthUser) -> Result<DraftDecisionScope, ApiError> {
     let is_system = if auth.tenant_id == "system" {
         true
     } else {
@@ -135,7 +194,10 @@ async fn draft_scope(state: &AppState, auth: &AuthUser) -> Result<(bool, String)
                 ApiError::Internal("authentication error".into())
             })?
     };
-    Ok((is_system, auth.tenant_id.clone()))
+    Ok(DraftDecisionScope {
+        is_system_tenant: is_system,
+        tenant_id: auth.tenant_id.clone(),
+    })
 }
 
 #[derive(Debug, Deserialize)]
@@ -162,7 +224,8 @@ const CLAIM_DRAFT_FOR_APPROVAL_SQL: &str = r#"
     RETURNING tenant_id, from_email, subject, body_text, ai_response,
               (suggested_action->>'first_response') = 'true',
               received_at,
-              suggested_action->>'first_response_request_id'
+              suggested_action->>'first_response_request_id',
+              headers
 "#;
 
 /// Actor-attributed audit for AI-draft decisions (P1-4/P2-2 + external-audit
@@ -213,12 +276,44 @@ async fn approve_draft(
 /// The approval flow, shared by the JSON API and the control-plane review
 /// page's PRG handler: claim, enqueue on the (first-response aware) priority
 /// lane, close the request, write the actor-attributed audit, one
-/// transaction, exactly as the JSON contract documents.
+/// transaction, exactly as the JSON contract documents. The operator scope
+/// is resolved from the caller's system-tenant membership.
 pub(crate) async fn approve_draft_core(
     state: &AppState,
     auth: &AuthUser,
     id: &str,
     note: &str,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let scope = draft_scope(state, auth).await?;
+    approve_draft_core_scoped(
+        state,
+        auth,
+        &scope,
+        id,
+        note,
+        DraftDecisionSurface::ControlPlane,
+        &serde_json::json!({}),
+    )
+    .await
+}
+
+/// The SAME approval workflow with an explicit tenant pin and audit surface.
+///
+/// The tenant-owned API (`/v1/ai/drafts`) calls this with
+/// `is_system_tenant: false` and the AUTHENTICATED tenant id, so even a
+/// system-tenant credential on the tenant surface can only ever reach the
+/// tenant named in its own token: a draft id from anywhere else matches no
+/// row and is indistinguishable from a missing one (404). Admission,
+/// suppression, queueing and audit-in-tx are the single shared
+/// implementation, never a forked copy.
+pub(crate) async fn approve_draft_core_scoped(
+    state: &AppState,
+    auth: &AuthUser,
+    scope: &DraftDecisionScope,
+    id: &str,
+    note: &str,
+    surface: DraftDecisionSurface,
+    extra_metadata: &serde_json::Value,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let note = note.to_string();
     let id = id.to_string();
@@ -233,7 +328,8 @@ pub(crate) async fn approve_draft_core(
 
     // Defense-in-depth tenant scope (see `draft_scope`): the system-tenant
     // operator manages any tenant's draft; anyone else only their own.
-    let (is_system_tenant, caller_tenant) = draft_scope(state, auth).await?;
+    let is_system_tenant = scope.is_system_tenant;
+    let caller_tenant = &scope.tenant_id;
 
     // Claim the draft atomically: exactly one approve/reject wins.
     let row: Option<(
@@ -245,10 +341,11 @@ pub(crate) async fn approve_draft_core(
         Option<bool>,
         chrono::DateTime<chrono::Utc>,
         Option<String>,
+        Option<serde_json::Value>,
     )> = sqlx::query_as(CLAIM_DRAFT_FOR_APPROVAL_SQL)
         .bind(&id)
         .bind(is_system_tenant)
-        .bind(&caller_tenant)
+        .bind(caller_tenant)
         .fetch_optional(&mut *tx)
         .await?;
 
@@ -261,6 +358,7 @@ pub(crate) async fn approve_draft_core(
         is_first_response,
         accepted_at,
         first_response_request_id,
+        headers,
     )) = row
     else {
         // Dropping the transaction rolls the claim back, nothing consumed.
@@ -330,13 +428,16 @@ pub(crate) async fn approve_draft_core(
             state.config.environment.is_production(),
             Some(auth.tenant_id.as_str()),
             auth.user_id.as_deref(),
-            "control_plane.ai_draft.approval_refused",
+            surface.refused_action(),
             "ai_draft",
             Some(&id),
-            serde_json::json!({
-                "note": note,
-                "reason": "draft is missing tenant or sender; cannot route the reply",
-            }),
+            merge_audit_metadata(
+                serde_json::json!({
+                    "note": note,
+                    "reason": "draft is missing tenant or sender; cannot route the reply",
+                }),
+                extra_metadata,
+            ),
             None,
             None,
         )
@@ -360,12 +461,22 @@ pub(crate) async fn approve_draft_core(
     //     the purpose policy's autonomy requirement asks for);
     //   * everything downstream (system-sender readiness, the audit row
     //     committing atomically with the send).
-    // The inbound message is classified by the deterministic purpose
-    // taxonomy for the record and for the autonomous sweep's stricter veto
+    // The inbound message is classified by the deterministic multi-label
+    // purpose taxonomy (subject + body + stored headers) for the record and
+    // for the autonomous sweep's stricter veto
     // (`purpose::reply_release_decision`); on THIS human path the recorded
-    // classification is advisory, the operator has already reviewed.
-    let inbound_purpose = sales_autopilot::purpose::classify(&subject, &inbound_body_text);
+    // classification is advisory, the operator has already reviewed. The
+    // effective risk/autonomy are reduced over EVERY matched purpose (fifth
+    // external audit), so compound intents cannot hide behind their lightest
+    // label.
+    let inbound_purpose =
+        sales_autopilot::purpose::classify_all(&subject, &inbound_body_text, headers.as_ref());
     let release = sales_autopilot::purpose::reply_release_decision(&inbound_purpose);
+    let inbound_purposes: Vec<&str> = inbound_purpose
+        .purposes
+        .iter()
+        .map(|purpose| purpose.as_str())
+        .collect();
     let delivery_class = sales_autopilot::purpose::reply_class_for_ai_draft();
     let category = delivery_class.message_category().ok_or_else(|| {
         ApiError::Internal("a reply release requires a sendable delivery class".into())
@@ -399,17 +510,21 @@ pub(crate) async fn approve_draft_core(
                     state.config.environment.is_production(),
                     Some(auth.tenant_id.as_str()),
                     auth.user_id.as_deref(),
-                    "control_plane.ai_draft.approval_refused",
+                    surface.refused_action(),
                     "ai_draft",
                     Some(&id),
-                    serde_json::json!({
-                        "note": note,
-                        "reason": refusal,
-                        "routedTenantId": tenant_id,
-                        "recipient": email,
-                        "deliveryClass": delivery_class.as_str(),
-                        "inboundPurpose": inbound_purpose.purpose.as_str(),
-                    }),
+                    merge_audit_metadata(
+                        serde_json::json!({
+                            "note": note,
+                            "reason": refusal,
+                            "routedTenantId": tenant_id,
+                            "recipient": email,
+                            "deliveryClass": delivery_class.as_str(),
+                            "inboundPurpose": inbound_purpose.primary.as_str(),
+                            "inboundPurposes": inbound_purposes,
+                        }),
+                        extra_metadata,
+                    ),
                     None,
                     None,
                 )
@@ -430,17 +545,21 @@ pub(crate) async fn approve_draft_core(
                     state.config.environment.is_production(),
                     Some(auth.tenant_id.as_str()),
                     auth.user_id.as_deref(),
-                    "control_plane.ai_draft.approval_refused",
+                    surface.refused_action(),
                     "ai_draft",
                     Some(&id),
-                    serde_json::json!({
-                        "note": note,
-                        "reason": refusal,
-                        "routedTenantId": tenant_id,
-                        "recipient": email,
-                        "deliveryClass": delivery_class.as_str(),
-                        "inboundPurpose": inbound_purpose.purpose.as_str(),
-                    }),
+                    merge_audit_metadata(
+                        serde_json::json!({
+                            "note": note,
+                            "reason": refusal,
+                            "routedTenantId": tenant_id,
+                            "recipient": email,
+                            "deliveryClass": delivery_class.as_str(),
+                            "inboundPurpose": inbound_purpose.primary.as_str(),
+                            "inboundPurposes": inbound_purposes,
+                        }),
+                        extra_metadata,
+                    ),
                     None,
                     None,
                 )
@@ -577,33 +696,37 @@ pub(crate) async fn approve_draft_core(
         &mut tx,
         state.config.environment.is_production(),
         auth,
-        "control_plane.ai_draft.approved",
+        surface.approved_action(),
         &id,
-        serde_json::json!({
-            "note": note.clone(),
-            "routedTenantId": tenant_id.clone(),
-            "recipient": from_email.clone(),
-            "queuedMessageId": message_uuid.to_string(),
-            // Fourth external audit (P0): the SERVICE classification of this
-            // release, the deterministic purpose of the inbound message and
-            // its risk. The delivery class is the audit's durable answer to
-            // "what consent regime applied to this send".
-            "deliveryClass": delivery_class.as_str(),
-            "messageCategory": category,
-            "inboundPurpose": inbound_purpose.purpose.as_str(),
-            "purposeRisk": inbound_purpose.risk.as_str(),
-            "purposeAutonomy": release.autonomy.as_str(),
-            // WP F9, the promotion evidence reads this field: an approval of
-            // a LOW class counts toward that class's evidence bar.
-            "replyClass": approval_class
-                .as_ref()
-                .map(sales_autopilot::reply_autosend::ReplyRiskVerdict::class_string)
-                .unwrap_or_else(|| "high:empty_draft".to_string()),
-            "groundingFailures": approval_class
-                .as_ref()
-                .map(|verdict| verdict.grounding_failures.clone())
-                .unwrap_or_default(),
-        }),
+        merge_audit_metadata(
+            serde_json::json!({
+                "note": note.clone(),
+                "routedTenantId": tenant_id.clone(),
+                "recipient": from_email.clone(),
+                "queuedMessageId": message_uuid.to_string(),
+                // Fourth external audit (P0): the SERVICE classification of this
+                // release, the deterministic purpose of the inbound message and
+                // its risk. The delivery class is the audit's durable answer to
+                // "what consent regime applied to this send".
+                "deliveryClass": delivery_class.as_str(),
+                "messageCategory": category,
+                "inboundPurpose": inbound_purpose.primary.as_str(),
+                "inboundPurposes": inbound_purposes,
+                "purposeRisk": inbound_purpose.risk.as_str(),
+                "purposeAutonomy": release.autonomy.as_str(),
+                // WP F9, the promotion evidence reads this field: an approval of
+                // a LOW class counts toward that class's evidence bar.
+                "replyClass": approval_class
+                    .as_ref()
+                    .map(sales_autopilot::reply_autosend::ReplyRiskVerdict::class_string)
+                    .unwrap_or_else(|| "high:empty_draft".to_string()),
+                "groundingFailures": approval_class
+                    .as_ref()
+                    .map(|verdict| verdict.grounding_failures.clone())
+                    .unwrap_or_default(),
+            }),
+            extra_metadata,
+        ),
     )
     .await?;
 
@@ -649,12 +772,39 @@ async fn reject_draft(
 }
 
 /// The rejection flow, shared by the JSON API and the control-plane review
-/// page's PRG handler.
+/// page's PRG handler. The operator scope is resolved from the caller's
+/// system-tenant membership.
 pub(crate) async fn reject_draft_core(
     state: &AppState,
     auth: &AuthUser,
     id: &str,
     note: &str,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let scope = draft_scope(state, auth).await?;
+    reject_draft_core_scoped(
+        state,
+        auth,
+        &scope,
+        id,
+        note,
+        DraftDecisionSurface::ControlPlane,
+        &serde_json::json!({}),
+    )
+    .await
+}
+
+/// The SAME rejection workflow with an explicit tenant pin, audit surface
+/// and additive evidence (the tenant surface records its STRUCTURED
+/// rejection reason here, so correction reasons accumulate as evaluation
+/// evidence without forking the claim/audit logic).
+pub(crate) async fn reject_draft_core_scoped(
+    state: &AppState,
+    auth: &AuthUser,
+    scope: &DraftDecisionScope,
+    id: &str,
+    note: &str,
+    surface: DraftDecisionSurface,
+    extra_metadata: &serde_json::Value,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let note = note.to_string();
     let id = id.to_string();
@@ -666,12 +816,13 @@ pub(crate) async fn reject_draft_core(
     let mut tx = state.db.begin().await?;
 
     // Same defense-in-depth tenant scope as the approve claim.
-    let (is_system_tenant, caller_tenant) = draft_scope(state, auth).await?;
+    let is_system_tenant = scope.is_system_tenant;
+    let caller_tenant = &scope.tenant_id;
 
     let routed_tenant_id: Option<(Option<String>,)> = sqlx::query_as(REJECT_DRAFT_SQL)
         .bind(&id)
         .bind(is_system_tenant)
-        .bind(&caller_tenant)
+        .bind(caller_tenant)
         .fetch_optional(&mut *tx)
         .await?;
 
@@ -689,12 +840,15 @@ pub(crate) async fn reject_draft_core(
         &mut tx,
         state.config.environment.is_production(),
         auth,
-        "control_plane.ai_draft.rejected",
+        surface.rejected_action(),
         &id,
-        serde_json::json!({
-            "note": note.clone(),
-            "routedTenantId": routed_tenant_id,
-        }),
+        merge_audit_metadata(
+            serde_json::json!({
+                "note": note.clone(),
+                "routedTenantId": routed_tenant_id,
+            }),
+            extra_metadata,
+        ),
     )
     .await?;
 
@@ -775,7 +929,8 @@ const CLAIM_DRAFT_FOR_AUTO_SEND_SQL: &str = r#"
               classification, classification_confidence, suggested_action,
               (suggested_action->>'first_response') = 'true',
               received_at,
-              suggested_action->>'first_response_request_id'
+              suggested_action->>'first_response_request_id',
+              headers
 "#;
 
 /// One claimed draft, as the auto-send read it.
@@ -791,6 +946,7 @@ type ClaimedDraftRow = (
     Option<bool>,
     chrono::DateTime<chrono::Utc>,
     Option<String>,
+    Option<serde_json::Value>,
 );
 
 /// What one auto-send attempt did.
@@ -884,6 +1040,7 @@ pub async fn auto_send_one(state: &AppState, id: &str) -> Result<AutoSendOutcome
         is_first_response,
         accepted_at,
         first_response_request_id,
+        headers,
     )) = row
     else {
         tx.rollback().await?;
@@ -939,26 +1096,36 @@ pub async fn auto_send_one(state: &AppState, id: &str) -> Result<AutoSendOutcome
         return Ok(held(id, format!("classifier: {}", verdict.class_string())));
     };
 
-    // 1b. The purpose layer (fourth external audit, Tier-1 item 6). The
-    //     (purpose, risk) -> DeliveryClass/autonomy policy decides whether
+    // 1b. The purpose layer (fourth external audit, Tier-1 item 6; fifth
+    //     audit multi-label + machine-mail evidence). The multi-label
+    //     classification -> DeliveryClass/autonomy policy decides whether
     //     this reply may leave AUTONOMOUSLY at all: human-review purposes
-    //     (billing, refunds, privacy, legal, procurement, security),
-    //     no-autonomous-response purposes (abuse, phishing) and no-reply
-    //     sources (autoresponders, delivery status notifications, spam) are
-    //     HELD for a human whatever the promotion gate's evidence says, and
-    //     a high risk never auto-sends. This layer can only ever TIGHTEN
-    //     the gate below, never bypass it; the 11-value disposition
-    //     vocabulary above stays the sales-analytics and promotion-class
-    //     authority, untouched.
-    let inbound_purpose = sales_autopilot::purpose::classify(&subject, &inbound_body_text);
+    //     (billing, refunds, privacy, legal, procurement, security, and an
+    //     unclassifiable `other`), no-autonomous-response purposes (abuse,
+    //     phishing) and no-reply sources (autoresponders and delivery status
+    //     notifications identified by their headers, spam) are HELD for a
+    //     human whatever the promotion gate's evidence says, and a high risk
+    //     never auto-sends. The effective risk/autonomy are reduced over
+    //     EVERY matched purpose, so compound intents escalate. This layer can
+    //     only ever TIGHTEN the gate below, never bypass it; the 11-value
+    //     disposition vocabulary above stays the sales-analytics and
+    //     promotion-class authority, untouched.
+    let inbound_purpose =
+        sales_autopilot::purpose::classify_all(&subject, &inbound_body_text, headers.as_ref());
     let release = sales_autopilot::purpose::reply_release_decision(&inbound_purpose);
+    let inbound_purposes: Vec<&str> = inbound_purpose
+        .purposes
+        .iter()
+        .map(|purpose| purpose.as_str())
+        .collect();
     if !release.sweep_may_release {
         tx.rollback().await?;
         return Ok(held(
             id,
             format!(
-                "purpose policy: {} {} ({})",
-                inbound_purpose.purpose.as_str(),
+                "purpose policy: {} [{}] {} ({})",
+                inbound_purpose.primary.as_str(),
+                inbound_purposes.join(","),
                 inbound_purpose.risk.as_str(),
                 release.hold_reason
             ),
@@ -1128,7 +1295,8 @@ pub async fn auto_send_one(state: &AppState, id: &str) -> Result<AutoSendOutcome
             // policy layer derived from the inbound message.
             "deliveryClass": delivery_class.as_str(),
             "messageCategory": category,
-            "inboundPurpose": inbound_purpose.purpose.as_str(),
+            "inboundPurpose": inbound_purpose.primary.as_str(),
+            "inboundPurposes": inbound_purposes,
             "purposeRisk": inbound_purpose.risk.as_str(),
             "purposeAutonomy": release.autonomy.as_str(),
             "replyClass": verdict.class_string(),
@@ -1203,7 +1371,11 @@ mod approval_db_tests {
             processed_at     TIMESTAMPTZ,
             received_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             -- The first-response marker the claim reads (plan §5.4).
-            suggested_action JSONB
+            suggested_action JSONB,
+            -- Stored headers the automated-mail detector reads (fifth
+            -- external audit): the claim RETURNS this JSONB object, so the
+            -- fixture must carry it or every claim dies 42703.
+            headers          JSONB
         )"#;
 
     /// The claim and reject statements must never regain a `::uuid` cast:
@@ -1215,10 +1387,11 @@ mod approval_db_tests {
             assert!(!sql.contains("::uuid"), "regression: {sql}");
             assert!(sql.contains("id = $1"), "must bind the id as text: {sql}");
         }
-        // Fourth external audit (Tier-1 item 6): both claims return the
-        // inbound `body_text` (with the subject) the deterministic purpose
-        // classifier reads; without it the release decision would fall back
-        // to subject-only classification.
+        // Fourth external audit (Tier-1 item 6) + fifth audit (machine-mail
+        // evidence): both claims return the inbound `body_text` (with the
+        // subject and stored headers) the deterministic purpose classifier
+        // reads; without them the release decision would fall back to
+        // subject-only classification.
         for sql in [CLAIM_DRAFT_FOR_APPROVAL_SQL, CLAIM_DRAFT_FOR_AUTO_SEND_SQL] {
             assert!(
                 sql.contains("body_text"),
@@ -1227,6 +1400,10 @@ mod approval_db_tests {
             assert!(
                 sql.contains("subject"),
                 "the claim must return the subject: {sql}"
+            );
+            assert!(
+                sql.contains("headers"),
+                "the claim must return the stored headers: {sql}"
             );
         }
         // Fixture drift guard: every column the claims RETURN must exist in
@@ -1242,6 +1419,7 @@ mod approval_db_tests {
             "received_at",
             "tenant_id",
             "from_email",
+            "headers",
         ] {
             assert!(
                 INBOUND_MESSAGES_DDL.contains(column),
@@ -1339,6 +1517,7 @@ mod approval_db_tests {
                 Option<bool>,
                 chrono::DateTime<chrono::Utc>,
                 Option<String>,
+                Option<serde_json::Value>,
             )>,
         ),
         sqlx::Error,
@@ -1365,6 +1544,7 @@ mod approval_db_tests {
                 Option<bool>,
                 chrono::DateTime<chrono::Utc>,
                 Option<String>,
+                Option<serde_json::Value>,
             )>,
         ),
         sqlx::Error,
@@ -1381,6 +1561,7 @@ mod approval_db_tests {
                 Option<bool>,
                 chrono::DateTime<chrono::Utc>,
                 Option<String>,
+                Option<serde_json::Value>,
             ),
         >(CLAIM_DRAFT_FOR_APPROVAL_SQL)
         .bind(id)
@@ -1408,13 +1589,23 @@ mod approval_db_tests {
         let (tx, row) = claim(&pool, &id)
             .await
             .expect("claim must bind a varchar id");
-        let (tenant, from, subject, body, reply, first_response, _accepted_at, request_ref) =
-            row.expect("pending draft must be claimable");
+        let (
+            tenant,
+            from,
+            subject,
+            body,
+            reply,
+            first_response,
+            _accepted_at,
+            request_ref,
+            headers,
+        ) = row.expect("pending draft must be claimable");
         // SQL three-valued logic: a NULL suggested_action yields NULL here,
         // which the handler treats as not-a-first-response.
         assert_eq!(first_response, None, "an ordinary draft has no marker");
         assert_eq!(request_ref, None);
         assert_eq!(body, None, "the helper row carries no body_text");
+        assert_eq!(headers, None, "the helper row carries no headers");
         assert_eq!(tenant.as_deref(), Some("test-f11-tenant"));
         assert_eq!(from.as_deref(), Some("customer@x.ee"));
         assert_eq!(subject.as_deref(), Some("Re: invoice"));
@@ -2092,7 +2283,13 @@ mod approval_http_tests {
             assert_eq!(details["deliveryClass"], "service", "{details}");
             assert_eq!(details["messageCategory"], "service", "{details}");
             assert_eq!(details["inboundPurpose"], "technical_support", "{details}");
+            assert_eq!(
+                details["inboundPurposes"],
+                serde_json::json!(["technical_support"]),
+                "{details}"
+            );
             assert_eq!(details["purposeRisk"], "low", "{details}");
+            assert_eq!(details["purposeAutonomy"], "promotion_gate", "{details}");
 
             // The queue category is preference-exempt: the dispatch-time
             // gate will not demand a marketing preference for it, while
@@ -2776,8 +2973,11 @@ mod auto_send_tests {
                 DraftSeed {
                     tenant: &tenant,
                     recipient: &recipient,
-                    subject: "Re: your question",
-                    body_text: None,
+                    // Fifth external audit: `other` now requires human review,
+                    // so the auto-send fixture carries an autosend-capable
+                    // purpose (technical support) explicitly.
+                    subject: "The API integration stopped working",
+                    body_text: Some("The webhook integration stopped working, how do I rotate the API key?"),
                     classification: Some("meeting_request"),
                     confidence: 0.95,
                     reply: "Thursday 10:00 works for us, shall I send an invite?",
@@ -2918,15 +3118,21 @@ mod auto_send_tests {
             assert_eq!(row.3["automation"], "reply_autosend");
             assert_eq!(row.3["replyClass"], "scheduling");
             assert_eq!(row.3["riskClass"], "low");
-            // Fourth external audit (P0): the autonomous release is SERVICE
-            // correspondence with the explicit queue category, and the
-            // deterministic purpose layer's verdict rides the record (the
-            // fixture's inbound text matches no purpose rule: `other`).
+            // Fourth external audit (P0) + fifth audit (multi-label): the
+            // autonomous release is SERVICE correspondence with the explicit
+            // queue category, and the deterministic purpose layer's verdict
+            // rides the record (the fixture's inbound text is a technical
+            // support question).
             assert_eq!(row.3["deliveryClass"], "service");
             assert_eq!(row.3["messageCategory"], "service");
-            assert_eq!(row.3["inboundPurpose"], "other");
+            assert_eq!(row.3["inboundPurpose"], "technical_support");
             assert_eq!(row.3["purposeRisk"], "low");
             assert_eq!(row.3["purposeAutonomy"], "promotion_gate");
+            assert_eq!(
+                row.3["inboundPurposes"],
+                serde_json::json!(["technical_support"]),
+                "the full label set rides the audit record: {row:?}"
+            );
             assert_eq!(row.3["routedTenantId"], tenant.as_str());
             // The queued row carries the class explicitly, never the
             // 'marketing' schema default.
@@ -3344,6 +3550,7 @@ mod auto_send_tests {
     ///   * a refund dispute (human review, high risk),
     ///   * a reply aimed at an autoresponder (no reply: `automated`),
     ///   * an unsubscribe demand (no autonomous response: `abuse`),
+    ///   * an unclassifiable message (`other`: uncertainty is human review).
     ///
     /// and each names its policy reason. The same drafts are NOT lost: the
     /// human approval releases one as SERVICE mail with the purpose verdict
@@ -3376,7 +3583,7 @@ mod auto_send_tests {
                 promote(&pool, &tenant, class, 10, 30).await;
             }
 
-            // All three carry a promotion-eligible disposition and confidence,
+            // All four carry a promotion-eligible disposition and confidence,
             // so the OLD classifier alone would have released them.
             let mut cases: Vec<(&str, String, String, &str)> = Vec::new();
             for (label, subject, body, expected_reason) in [
@@ -3397,6 +3604,16 @@ mod auto_send_tests {
                     "Please unsubscribe me",
                     Some("take me off all your lists, stop sending"),
                     "purpose_policy_no_autonomous_response",
+                ),
+                (
+                    // Fifth external audit: `other` is uncertainty, and
+                    // uncertainty must never keep autonomy. An unmatched
+                    // inbound message is held for human review, never
+                    // auto-sent through the promotion gate.
+                    "other",
+                    "Re: notes",
+                    Some("Thanks for the context, noted."),
+                    "purpose_policy_human_review",
                 ),
             ] {
                 let recipient = format!(
@@ -3474,6 +3691,11 @@ mod auto_send_tests {
             assert_eq!(details["deliveryClass"], "service");
             assert_eq!(details["messageCategory"], "service");
             assert_eq!(details["inboundPurpose"], "refund");
+            assert_eq!(
+                details["inboundPurposes"],
+                serde_json::json!(["refund", "invoice"]),
+                "every matched purpose rides the record: {details}"
+            );
             assert_eq!(details["purposeRisk"], "high");
             assert_eq!(details["purposeAutonomy"], "human_review");
 

@@ -2388,6 +2388,9 @@ async fn check_quota(
 /// alias for `units` (the Mailboxes line speaks seats); the flat lines
 /// record 1 unit. `interval` is the purchase term (`monthly` | `yearly`);
 /// the sweep bills every line monthly (annual contracts are billed monthly).
+/// `setupFeeCents` / `minimumTermMonths` are Dedicated Tenant terms: the
+/// contracted one-time setup fee (validated against the catalog range) and
+/// the contracted minimum term (validated against the catalog minimum).
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ProductLinePurchaseBody {
@@ -2401,6 +2404,10 @@ struct ProductLinePurchaseBody {
     interval: Option<String>,
     #[serde(default)]
     idempotency_key: Option<String>,
+    #[serde(default)]
+    setup_fee_cents: Option<i64>,
+    #[serde(default)]
+    minimum_term_months: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2433,6 +2440,23 @@ fn product_line_write_error(error: crate::product_lines::ProductLineError) -> Re
             StatusCode::BAD_REQUEST,
             ErrorCode::ValidationError,
             "idempotency key must be at most 128 characters",
+        ),
+        Error::Currency(error) => error_response(
+            StatusCode::BAD_REQUEST,
+            ErrorCode::ValidationError,
+            error.to_string(),
+        ),
+        Error::DedicatedTenant(error) => error_response(
+            StatusCode::BAD_REQUEST,
+            ErrorCode::ValidationError,
+            error.to_string(),
+        ),
+        Error::TermsNotApplicable(line) => error_response(
+            StatusCode::BAD_REQUEST,
+            ErrorCode::ValidationError,
+            format!(
+                "setup fee and minimum term apply only to the dedicated_tenant line, not `{line}`"
+            ),
         ),
         Error::TenantNotFound(tenant_id) => error_response(
             StatusCode::NOT_FOUND,
@@ -2507,6 +2531,8 @@ async fn purchase_product_line_route(
         billing_interval: body.interval.unwrap_or_else(|| "monthly".to_string()),
         units,
         idempotency_key: body.idempotency_key.or(header_key),
+        setup_fee_cents: body.setup_fee_cents,
+        minimum_term_months: body.minimum_term_months,
     };
 
     match crate::product_lines::purchase_product_line(&state.db, input).await {

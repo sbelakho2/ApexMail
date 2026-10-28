@@ -22,7 +22,7 @@
 | PostgreSQL backups | Nightly `pg_dump`, encrypted, restore-verified (see below) |
 | ClickHouse backups | Nightly per-table dumps, encrypted, restore-verified |
 | Redis backups | **None.** Redis holds cache/queue/challenge state only; after a loss the queue contents and cached state are gone |
-| WAL archiving / PITR | **Enablement shipped, off in production.** Nothing archives until the operator sets `WAL_ARCHIVE_TARGET` and boots postgres with `deploy/docker-compose.wal-archive.yml` (checklist below). Until then the recovery point is the last nightly backup |
+| WAL archiving / PITR | **Enablement shipped, off in production.** Nothing archives until the operator sets `WAL_ARCHIVE_TARGET` and boots postgres with `deploy/docker-compose.wal-archive.yml` (checklist below). Until then the recovery point is the last nightly backup. When enabled: segments and the weekly physical base backup are **envelope-encrypted** before offsite transfer, and `archive_timeout` (default 300s) makes the RPO bound deterministic ("minutes") even on a write-idle database |
 | Failover automation | None — a host failure is an outage until the host is rebuilt or replaced |
 | Deployment | Self-hosted pipeline on the host (`ci/pipeline.sh`); see `deploy/DEPLOYMENT.md` |
 
@@ -71,7 +71,27 @@ backups have silently stopped — treat as SEV2.
 
 ## Point-in-time recovery (WAL archiving, operator-gated)
 
-Since 2026-10-25 the repository ships full WAL-archiving and point-in-time
+Encryption: archived WAL segments and the weekly physical base backup are
+sealed with the canonical backup envelope (the `backup-envelope.sh` codec,
+same as the nightly dumps) before anything is rsynced. SSH protects the
+wire, not the object at rest on the archive host, and raw WAL carries
+arbitrary page images including personal data. The postgres container
+receives the `backup_encryption_key` secret, or a dedicated key through
+`WAL_ENCRYPTION_KEY_FILE`. With no key the archiver and the base backup
+refuse to run. Recovery decrypts through the same envelope:
+`pg-pitr-restore.sh` decrypts the base artifact into its private scratch
+directory and runs a decrypting `restore_command`.
+
+Deterministic RPO bound: `archive_timeout` (`WAL_ARCHIVE_TIMEOUT_SECS`,
+default 300s) forces a WAL switch on a quiet database. The worst-case
+recovery point is then the timeout plus one archive push, a fixed minute
+scale rather than a figure that depends on write volume.
+`PostgresWALArchiveLagExceeded` warns after 20 minutes without an archived
+segment; `PostgresWALArchiveStalled` is critical at 2 hours.
+
+## Point-in-time recovery (WAL archiving, operator-gated)
+
+Since 2026-10-26 the repository ships full WAL-archiving and point-in-time
 recovery enablement. It is **off until the operator turns it on**, and the
 production deploy step is owner-gated on purpose. The nightly logical dumps
 above stay exactly as they are and remain the primary recovery path; WAL

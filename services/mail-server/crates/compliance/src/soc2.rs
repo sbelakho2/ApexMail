@@ -21,6 +21,7 @@ use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
+use std::collections::HashMap;
 use std::time::Instant;
 use tracing::{info, warn};
 use uuid::Uuid;
@@ -104,6 +105,115 @@ pub struct CollectionRunSummary {
     pub controls_failed: u32,
     pub items_collected: u32,
     pub failures: Vec<String>,
+    /// Aggregate outcome: `success` only when every attempted collector's
+    /// evidence was actually persisted, `failed` when none was, `partial`
+    /// when some persisted and some did not.
+    pub status: String,
+}
+
+impl CollectionRunSummary {
+    fn new(started_at: DateTime<Utc>) -> Self {
+        Self {
+            started_at,
+            finished_at: started_at,
+            controls_attempted: 0,
+            controls_succeeded: 0,
+            controls_failed: 0,
+            items_collected: 0,
+            failures: Vec::new(),
+            status: "failed".to_string(),
+        }
+    }
+
+    /// Count a collector whose evidence row was persisted. Items are only
+    /// counted here: collection that did not reach durable storage is not
+    /// "collected".
+    fn record_success(&mut self, items: u64) {
+        self.controls_succeeded += 1;
+        self.items_collected += items as u32;
+    }
+
+    /// Count a collector whose evidence was NOT persisted (or whose source
+    /// query failed). The error is retained in the summary and in the run
+    /// row, never swallowed.
+    fn record_failure(&mut self, control_id: &str, error: String) {
+        self.controls_failed += 1;
+        self.failures.push(format!("{control_id}: {error}"));
+    }
+
+    fn finish(&mut self) {
+        self.finished_at = Utc::now();
+        self.status = if self.controls_succeeded > 0 && self.controls_failed == 0 {
+            "success"
+        } else if self.controls_succeeded > 0 {
+            "partial"
+        } else {
+            // Nothing persisted (including the no-collectors case): never
+            // report success without evidence in durable storage.
+            "failed"
+        }
+        .to_string();
+    }
+}
+
+/// Result of re-evaluating a control's attestation against its FULL
+/// `evidence_required` set. Attestation is a derived state, not a flag set by
+/// writing any single evidence row.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttestationState {
+    pub control_id: String,
+    pub attested: bool,
+    pub last_attested_at: Option<DateTime<Utc>>,
+    pub next_attestation_at: Option<DateTime<Utc>>,
+    pub required: Vec<String>,
+    pub missing: Vec<String>,
+    pub stale: Vec<String>,
+    pub invalid: Vec<String>,
+}
+
+/// Evidence types produced by the automated collectors below. Anything else
+/// in a control's `evidence_required` list is manual evidence (a signed
+/// policy, a drill record, a vendor report) that automation cannot supply.
+pub const AUTOMATED_EVIDENCE_TYPES: &[&str] = &[
+    "audit_log_sample",
+    "secret_rotation_log",
+    "risk_profile_snapshot",
+    "scan_results_summary",
+    "consent_records_summary",
+    "gdpr_deletion_log",
+];
+
+/// Parse a control's `evidence_required` JSON array into evidence type tags.
+/// A malformed value is an error rather than an empty set, so a broken seed
+/// can never make a control look fully evidenced.
+pub fn required_evidence_types(control: &Control) -> Result<Vec<String>, String> {
+    let array = control.evidence_required.as_array().ok_or_else(|| {
+        format!(
+            "control {} evidence_required is not a JSON array",
+            control.control_id
+        )
+    })?;
+    let mut required = Vec::with_capacity(array.len());
+    for value in array {
+        let tag = value.as_str().ok_or_else(|| {
+            format!(
+                "control {} evidence_required contains a non-string tag",
+                control.control_id
+            )
+        })?;
+        if !required.iter().any(|existing| existing == tag) {
+            required.push(tag.to_string());
+        }
+    }
+    Ok(required)
+}
+
+/// Hash the canonical JSON serialisation of an evidence payload.
+fn payload_sha256(payload: &serde_json::Value) -> Result<String, String> {
+    let canonical = serde_json::to_string(payload).map_err(|e| format!("JSON: {e}"))?;
+    let mut hasher = Sha256::new();
+    hasher.update(canonical.as_bytes());
+    Ok(hex::encode(hasher.finalize()))
 }
 
 // ─── Default control catalog (TSP-100 mapping) ─────────────────────────────
@@ -261,7 +371,7 @@ const DEFAULT_CONTROLS: &[ControlSeed] = &[
         category: "Common Criteria, Control Activities",
         title: "Deploys control activities through policies and procedures",
         description:
-            "All security-relevant SOPs are versioned in the documentation portal and \
+            "All security-relevant SOPs are versioned in the repository under docs/ and \
              reviewed annually.",
         owner: "Founder / System Operator",
         evidence_required: &["policy_review_log"],
@@ -317,8 +427,10 @@ const DEFAULT_CONTROLS: &[ControlSeed] = &[
         category: "Common Criteria, Logical and Physical Access Controls",
         title: "Implements boundary protection",
         description:
-            "WAF, IDS, DDoS protection, and rate-limiting form the perimeter; events are \
-             ingested into the security data lake.",
+            "Request-boundary WAF middleware, the dedicated IDS engine, and the \
+             per-tenant rate limiter form the network/service perimeter; security \
+             events are recorded in service logs and routed through the Prometheus \
+             alerting rules.",
         owner: "Founder / System Operator",
         evidence_required: &["waf_event_summary", "ids_event_summary"],
         automation: AutomationLevel::Automated,
@@ -354,8 +466,10 @@ const DEFAULT_CONTROLS: &[ControlSeed] = &[
         category: "Common Criteria, System Operations",
         title: "Detects and monitors changes",
         description:
-            "Configuration drift detection runs hourly; unexpected changes alert the \
-             operator.",
+            "Production configuration is rendered from version-controlled Compose files \
+             and environment templates; the CI validate stage re-renders the merged \
+             configuration and fails when it drifts from the published register. \
+             Unexpected changes must go through the documented release path.",
         owner: "Founder / System Operator",
         evidence_required: &["drift_detection_log"],
         automation: AutomationLevel::Automated,
@@ -365,8 +479,9 @@ const DEFAULT_CONTROLS: &[ControlSeed] = &[
         category: "Common Criteria, System Operations",
         title: "Monitors operations to detect security events",
         description:
-            "SIEM rules trigger on anomalous patterns (failed-auth bursts, privilege \
-             escalations, suspicious queue volumes).",
+            "Prometheus alert rules (deploy/alerting-rules.yml) trigger on anomalous \
+             patterns such as failed-auth bursts, privilege escalations, and suspicious \
+             queue volumes; alerts route to the operator's alerting channel.",
         owner: "Founder / System Operator",
         evidence_required: &["siem_alert_summary"],
         automation: AutomationLevel::Automated,
@@ -387,7 +502,9 @@ const DEFAULT_CONTROLS: &[ControlSeed] = &[
         category: "Common Criteria, System Operations",
         title: "Responds to identified security events",
         description:
-            "Incident triage SLAs: SEV-1 acknowledge < 15min, mitigate < 1h; tracked in \
+            "Incident severity and response targets follow the documented incident \
+             policy (Critical: acknowledge within 15 minutes, first update within 30 \
+             minutes, resolution target 4 hours); status is tracked in \
              trust_portal_incidents.",
         owner: "Founder / System Operator",
         evidence_required: &["incident_metrics"],
@@ -444,8 +561,11 @@ const DEFAULT_CONTROLS: &[ControlSeed] = &[
         category: "Availability",
         title: "Maintains, monitors, and evaluates current processing capacity",
         description:
-            "Capacity dashboards monitor send-queue depth, database connection pool \
-             utilisation, and per-tenant rate-limiter state; auto-scaling configured.",
+            "Capacity is managed through per-tenant rate limits and sending quotas, \
+             send-queue depth and database connection-pool metrics on the \
+             Prometheus/Grafana dashboards, and a documented manual capacity review. \
+             The deployment is a fixed Compose topology on a single host; there is no \
+             autoscaler.",
         owner: "Founder / System Operator",
         evidence_required: &["capacity_metrics"],
         automation: AutomationLevel::Automated,
@@ -466,7 +586,9 @@ const DEFAULT_CONTROLS: &[ControlSeed] = &[
         category: "Availability",
         title: "Tests recovery plan procedures",
         description:
-            "Annual full-scale BCP/DR exercise with measured RTO and RPO.",
+            "Recovery procedures and targets are documented in deploy/rollback-plan.md; \
+             restore drills are recorded with measured RTO and RPO in the DR drill log, \
+             and a host-rebuild exercise is run quarterly per the operations runbook.",
         owner: "Founder / System Operator",
         evidence_required: &["dr_drill_log"],
         automation: AutomationLevel::Manual,
@@ -477,8 +599,10 @@ const DEFAULT_CONTROLS: &[ControlSeed] = &[
         category: "Confidentiality",
         title: "Identifies and maintains confidential information",
         description:
-            "Customer data classified by sensitivity; encryption at rest (AES-256) and \
-             in transit (TLS 1.2+); dedicated encryption keys per tenant for HIPAA.",
+            "Customer data is classified by sensitivity; encryption at rest (AES-256) \
+             and in transit (TLS 1.2+); service secrets are encrypted with the secret \
+             manager's AES-256-GCM key. HIPAA-mode per-tenant keys are not offered \
+             because ApexMail does not currently offer HIPAA/BAA service.",
         owner: "Founder / System Operator",
         evidence_required: &["encryption_config", "kms_audit_log"],
         automation: AutomationLevel::Automated,
@@ -512,9 +636,10 @@ const DEFAULT_CONTROLS: &[ControlSeed] = &[
         category: "Privacy",
         title: "Provides notice about its privacy practices",
         description:
-            "Privacy policy published at /trust/privacy; updates trigger customer \
-             notification.",
-        owner: "Legal",
+            "Privacy policy is published at /privacy on the marketing site and \
+             versioned in the repository; material changes are communicated through \
+             the published customer terms.",
+        owner: "Founder / System Operator",
         evidence_required: &["privacy_policy_version"],
         automation: AutomationLevel::Manual,
     },
@@ -534,8 +659,10 @@ const DEFAULT_CONTROLS: &[ControlSeed] = &[
         category: "Privacy",
         title: "Collects personal information consistent with the entity’s objectives",
         description:
-            "Subscriber-level metadata is limited to what is required for delivery; PHI \
-             is suppressed in audit logs when HIPAA mode is enabled.",
+            "Subscriber-level metadata is limited to what is required for delivery; \
+             email addresses and IP addresses are redacted at the logging boundary \
+             (mail-common::pii), and audit records store identifiers rather than \
+             message bodies.",
         owner: "Founder / System Operator",
         evidence_required: &["pii_minimisation_review"],
         automation: AutomationLevel::Manual,
@@ -567,9 +694,9 @@ const DEFAULT_CONTROLS: &[ControlSeed] = &[
         category: "Privacy",
         title: "Discloses personal information to third parties only with consent",
         description:
-            "Subprocessors disclosed in trust_portal_subprocessors; customer DPAs \
-             reference the live list.",
-        owner: "Legal",
+            "Subprocessors are disclosed in trust_portal_subprocessors; customer DPAs \
+             reference the live list and the published subprocessor register.",
+        owner: "Founder / System Operator",
         evidence_required: &["subprocessor_list"],
         automation: AutomationLevel::Automated,
     },
@@ -589,8 +716,10 @@ const DEFAULT_CONTROLS: &[ControlSeed] = &[
         category: "Privacy",
         title: "Monitors privacy compliance and handles complaints",
         description:
-            "Complaints intake form (privacy@apexmail) is monitored 24/7; SLAs tracked.",
-        owner: "Legal",
+            "Privacy complaints are received through the privacy@apexmail contact and \
+             the documented incident/contact process; the operator triages reports and \
+             tracks resolution SLAs in the complaint log.",
+        owner: "Founder / System Operator",
         evidence_required: &["privacy_complaint_log"],
         automation: AutomationLevel::Manual,
     },
@@ -622,9 +751,18 @@ impl Soc2Service {
         self
     }
 
+    /// The cadence used to judge whether evidence is fresh.
+    pub fn attestation_period_days(&self) -> i64 {
+        self.attestation_period_days
+    }
+
     /// Idempotently seed the default control catalog.  Existing controls are
     /// updated in-place if their description/owner has changed but their
     /// `last_attested_at` is preserved.
+    ///
+    /// A newly seeded control starts UNATTESTED: attestation is only granted
+    /// by `recompute_attestation` once every required evidence type exists,
+    /// is hash-valid and is fresh.
     pub async fn seed_default_controls(&self) -> Result<usize, String> {
         let mut inserted = 0usize;
         let now = Utc::now();
@@ -640,7 +778,7 @@ impl Soc2Service {
                    (id, control_id, category, title, description, owner, status,
                     evidence_required, automation, last_attested_at,
                     next_attestation_at, created_at, updated_at)
-                 VALUES ($1,$2,$3,$4,$5,$6,'in_scope',$7,$8,NULL,$9,$10,$10)
+                 VALUES ($1,$2,$3,$4,$5,$6,'in_scope',$7,$8,NULL,NULL,$9,$9)
                  ON CONFLICT (control_id) DO UPDATE SET
                    category = EXCLUDED.category,
                    title = EXCLUDED.title,
@@ -658,7 +796,6 @@ impl Soc2Service {
             .bind(seed.owner)
             .bind(&evidence_json)
             .bind(seed.automation.as_str())
-            .bind(now + Duration::days(self.attestation_period_days))
             .bind(now)
             .execute(&self.db)
             .await
@@ -711,8 +848,17 @@ impl Soc2Service {
         Ok(())
     }
 
-    /// Record an evidence item.  Caller computes the canonical payload; the
+    /// Append an evidence item. Caller computes the canonical payload; the
     /// SHA-256 is computed here from the JSON-serialised payload.
+    ///
+    /// Evidence is APPEND-ONLY: every collection writes a new row (migration
+    /// 274 dropped the former `(control, type, period)` upsert identity and a
+    /// trigger rejects updates to an existing row's payload/hash). A
+    /// correction is a new row that supersedes the older one for readers.
+    ///
+    /// Attestation is not granted by this write. After persisting, the
+    /// control's attestation is re-derived from its FULL required evidence
+    /// set; a single item can never attest a multi-evidence control.
     #[allow(clippy::too_many_arguments)]
     pub async fn record_evidence(
         &self,
@@ -725,23 +871,14 @@ impl Soc2Service {
         collected_by: &str,
     ) -> Result<ControlEvidence, String> {
         let id = Uuid::new_v4().to_string();
-        let canonical = serde_json::to_string(&payload).map_err(|e| format!("JSON: {e}"))?;
-        let mut hasher = Sha256::new();
-        hasher.update(canonical.as_bytes());
-        let sha256_hash = hex::encode(hasher.finalize());
+        let sha256_hash = payload_sha256(&payload)?;
         let collected_at = Utc::now();
 
         sqlx::query(
             "INSERT INTO soc2_control_evidence
                (id, control_id, evidence_type, source, payload, sha256_hash,
                 storage_url, period_start, period_end, collected_at, collected_by)
-             VALUES ($1,$2,$3,$4,$5,$6,NULL,$7,$8,$9,$10)
-             ON CONFLICT (control_id, evidence_type, period_start, period_end)
-             DO UPDATE SET
-               payload = EXCLUDED.payload,
-               sha256_hash = EXCLUDED.sha256_hash,
-               collected_at = EXCLUDED.collected_at,
-               collected_by = EXCLUDED.collected_by",
+             VALUES ($1,$2,$3,$4,$5,$6,NULL,$7,$8,$9,$10)",
         )
         .bind(&id)
         .bind(control_id)
@@ -757,20 +894,17 @@ impl Soc2Service {
         .await
         .map_err(|e| format!("DB error: {e}"))?;
 
-        // Mark the control as attested and schedule the next attestation.
-        sqlx::query(
-            "UPDATE soc2_controls
-             SET last_attested_at = $1,
-                 next_attestation_at = $2,
-                 updated_at = $1
-             WHERE control_id = $3",
-        )
-        .bind(collected_at)
-        .bind(collected_at + Duration::days(self.attestation_period_days))
-        .bind(control_id)
-        .execute(&self.db)
-        .await
-        .map_err(|e| format!("DB error: {e}"))?;
+        // Recompute from the full required set. A recompute failure must not
+        // turn a persisted evidence row into a false collector failure, but
+        // it is logged rather than hidden.
+        if let Err(e) = self.recompute_attestation(control_id).await {
+            warn!(
+                error = %e,
+                control = control_id,
+                evidence_type,
+                "attestation recompute failed after evidence append"
+            );
+        }
 
         Ok(ControlEvidence {
             id,
@@ -787,6 +921,108 @@ impl Soc2Service {
         })
     }
 
+    /// Re-derive a control's attestation from its FULL `evidence_required`
+    /// set using latest-row semantics:
+    ///
+    /// * every required evidence type must have at least one row,
+    /// * the LATEST row per type must re-hash to its stored `sha256_hash`,
+    /// * that row must be collected within the control's cadence,
+    ///
+    /// and only then are `last_attested_at`/`next_attestation_at` set.
+    /// Anything incomplete clears both timestamps.
+    pub async fn recompute_attestation(
+        &self,
+        control_id: &str,
+    ) -> Result<AttestationState, String> {
+        let control = self
+            .get_control(control_id)
+            .await?
+            .ok_or_else(|| format!("control not found: {control_id}"))?;
+        let required = required_evidence_types(&control)?;
+
+        let rows: Vec<EvidenceRow> = sqlx::query_as(
+            "SELECT id, control_id, evidence_type, source, payload, sha256_hash,
+                    storage_url, period_start, period_end, collected_at, collected_by
+             FROM (
+                 SELECT DISTINCT ON (evidence_type)
+                        id, control_id, evidence_type, source, payload, sha256_hash,
+                        storage_url, period_start, period_end, collected_at, collected_by
+                 FROM soc2_control_evidence
+                 WHERE control_id = $1
+                 ORDER BY evidence_type, collected_at DESC, id DESC
+             ) latest",
+        )
+        .bind(control_id)
+        .fetch_all(&self.db)
+        .await
+        .map_err(|e| format!("DB error: {e}"))?;
+
+        let by_type: HashMap<&str, &EvidenceRow> = rows
+            .iter()
+            .map(|row| (row.evidence_type.as_str(), row))
+            .collect();
+
+        let now = Utc::now();
+        let cutoff = now - Duration::days(self.attestation_period_days);
+        let mut missing = Vec::new();
+        let mut stale = Vec::new();
+        let mut invalid = Vec::new();
+
+        for evidence_type in &required {
+            match by_type.get(evidence_type.as_str()) {
+                None => missing.push(evidence_type.clone()),
+                Some(row) => {
+                    let recomputed = payload_sha256(&row.payload)?;
+                    if row.sha256_hash != recomputed {
+                        invalid.push(evidence_type.clone());
+                    }
+                    if row.collected_at < cutoff {
+                        stale.push(evidence_type.clone());
+                    }
+                }
+            }
+        }
+
+        let attested =
+            !required.is_empty() && missing.is_empty() && stale.is_empty() && invalid.is_empty();
+        let (last_attested_at, next_attestation_at) = if attested {
+            (
+                Some(now),
+                Some(now + Duration::days(self.attestation_period_days)),
+            )
+        } else {
+            (None, None)
+        };
+
+        sqlx::query(
+            "UPDATE soc2_controls
+             SET last_attested_at = $1,
+                 next_attestation_at = $2,
+                 updated_at = NOW()
+             WHERE control_id = $3",
+        )
+        .bind(last_attested_at)
+        .bind(next_attestation_at)
+        .bind(control_id)
+        .execute(&self.db)
+        .await
+        .map_err(|e| format!("DB error: {e}"))?;
+
+        Ok(AttestationState {
+            control_id: control_id.to_string(),
+            attested,
+            last_attested_at,
+            next_attestation_at,
+            required,
+            missing,
+            stale,
+            invalid,
+        })
+    }
+
+    /// Latest evidence row per `(evidence_type, period_start, period_end)`.
+    /// History stays in the table; this reader (the admin evidence view)
+    /// surfaces the current row only.
     pub async fn list_evidence_for_control(
         &self,
         control_id: &str,
@@ -795,9 +1031,16 @@ impl Soc2Service {
         let rows: Vec<EvidenceRow> = sqlx::query_as(
             "SELECT id, control_id, evidence_type, source, payload, sha256_hash,
                     storage_url, period_start, period_end, collected_at, collected_by
-             FROM soc2_control_evidence
-             WHERE control_id = $1
-             ORDER BY collected_at DESC
+             FROM (
+                 SELECT DISTINCT ON (evidence_type, period_start, period_end)
+                        id, control_id, evidence_type, source, payload, sha256_hash,
+                        storage_url, period_start, period_end, collected_at, collected_by
+                 FROM soc2_control_evidence
+                 WHERE control_id = $1
+                 ORDER BY evidence_type, period_start, period_end,
+                          collected_at DESC, id DESC
+             ) latest
+             ORDER BY collected_at DESC, id DESC
              LIMIT $2",
         )
         .bind(control_id)
@@ -808,23 +1051,52 @@ impl Soc2Service {
         Ok(rows.into_iter().map(Into::into).collect())
     }
 
+    /// Latest evidence rows for a set of controls, one row per
+    /// `(control, evidence_type, period)`. Used by evidence-driven readers
+    /// (the questionnaire generator) so a later correction supersedes an
+    /// earlier collection without rewriting history.
+    pub async fn list_latest_evidence_for_controls(
+        &self,
+        control_ids: &[String],
+    ) -> Result<Vec<ControlEvidence>, String> {
+        if control_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let rows: Vec<EvidenceRow> = sqlx::query_as(
+            "SELECT id, control_id, evidence_type, source, payload, sha256_hash,
+                    storage_url, period_start, period_end, collected_at, collected_by
+             FROM (
+                 SELECT DISTINCT ON (control_id, evidence_type, period_start, period_end)
+                        id, control_id, evidence_type, source, payload, sha256_hash,
+                        storage_url, period_start, period_end, collected_at, collected_by
+                 FROM soc2_control_evidence
+                 WHERE control_id = ANY($1::text[])
+                 ORDER BY control_id, evidence_type, period_start, period_end,
+                          collected_at DESC, id DESC
+             ) latest
+             ORDER BY collected_at DESC, id DESC",
+        )
+        .bind(control_ids)
+        .fetch_all(&self.db)
+        .await
+        .map_err(|e| format!("DB error: {e}"))?;
+        Ok(rows.into_iter().map(Into::into).collect())
+    }
+
     /// Run all configured automated collectors over the supplied period.
     /// Logs a row in `soc2_evidence_collection_runs` for each control attempted.
+    ///
+    /// A collector counts as succeeded ONLY after `record_evidence` persisted
+    /// its row. A collection that failed to persist is counted failed, its
+    /// error is stored in the run row, and the aggregate summary status is
+    /// never `success` in that case.
     pub async fn run_automated_collectors(
         &self,
         period_start: DateTime<Utc>,
         period_end: DateTime<Utc>,
     ) -> CollectionRunSummary {
         let started_at = Utc::now();
-        let mut summary = CollectionRunSummary {
-            started_at,
-            finished_at: started_at,
-            controls_attempted: 0,
-            controls_succeeded: 0,
-            controls_failed: 0,
-            items_collected: 0,
-            failures: Vec::new(),
-        };
+        let mut summary = CollectionRunSummary::new(started_at);
 
         let collectors: Vec<Box<dyn EvidenceCollector + Send + Sync>> = vec![
             Box::new(AuditLogEvidenceCollector),
@@ -840,7 +1112,7 @@ impl Soc2Service {
             let started = Instant::now();
             match collector.collect(&self.db, period_start, period_end).await {
                 Ok(item) => {
-                    let _ = self
+                    let persisted = self
                         .record_evidence(
                             collector.control_id(),
                             collector.evidence_type(),
@@ -850,32 +1122,48 @@ impl Soc2Service {
                             period_end,
                             "automated_collector",
                         )
-                        .await
-                        .map_err(|e| {
+                        .await;
+                    match persisted {
+                        Ok(_) => {
+                            // `record_evidence` has already recomputed the
+                            // control's attestation from its full required
+                            // evidence set.
+                            summary.record_success(item.items);
+                            let _ = sqlx::query(
+                                "INSERT INTO soc2_evidence_collection_runs
+                                   (control_id, evidence_type, run_at, status,
+                                    items_collected, duration_ms, error)
+                                 VALUES ($1,$2,$3,'success',$4,$5,NULL)",
+                            )
+                            .bind(collector.control_id())
+                            .bind(collector.evidence_type())
+                            .bind(Utc::now())
+                            .bind(item.items as i32)
+                            .bind(started.elapsed().as_millis() as i32)
+                            .execute(&self.db)
+                            .await;
+                        }
+                        Err(e) => {
                             warn!(error = %e, control = collector.control_id(), "evidence persist failed");
-                            e
-                        });
-                    summary.controls_succeeded += 1;
-                    summary.items_collected += item.items as u32;
-                    let _ = sqlx::query(
-                        "INSERT INTO soc2_evidence_collection_runs
-                           (control_id, evidence_type, run_at, status,
-                            items_collected, duration_ms, error)
-                         VALUES ($1,$2,$3,'success',$4,$5,NULL)",
-                    )
-                    .bind(collector.control_id())
-                    .bind(collector.evidence_type())
-                    .bind(Utc::now())
-                    .bind(item.items as i32)
-                    .bind(started.elapsed().as_millis() as i32)
-                    .execute(&self.db)
-                    .await;
+                            summary.record_failure(collector.control_id(), e.clone());
+                            let _ = sqlx::query(
+                                "INSERT INTO soc2_evidence_collection_runs
+                                   (control_id, evidence_type, run_at, status,
+                                    items_collected, duration_ms, error)
+                                 VALUES ($1,$2,$3,'failed',0,$4,$5)",
+                            )
+                            .bind(collector.control_id())
+                            .bind(collector.evidence_type())
+                            .bind(Utc::now())
+                            .bind(started.elapsed().as_millis() as i32)
+                            .bind(e)
+                            .execute(&self.db)
+                            .await;
+                        }
+                    }
                 }
                 Err(e) => {
-                    summary.controls_failed += 1;
-                    summary
-                        .failures
-                        .push(format!("{}: {e}", collector.control_id()));
+                    summary.record_failure(collector.control_id(), e.clone());
                     let _ = sqlx::query(
                         "INSERT INTO soc2_evidence_collection_runs
                            (control_id, evidence_type, run_at, status,
@@ -893,12 +1181,13 @@ impl Soc2Service {
             }
         }
 
-        summary.finished_at = Utc::now();
+        summary.finish();
         info!(
             attempted = summary.controls_attempted,
             succeeded = summary.controls_succeeded,
             failed = summary.controls_failed,
             items = summary.items_collected,
+            status = %summary.status,
             "SOC2 evidence collection run finished"
         );
         summary
@@ -1340,5 +1629,119 @@ mod tests {
         assert_eq!(ControlStatus::InScope.as_str(), "in_scope");
         assert_eq!(ControlStatus::NotApplicable.as_str(), "not_applicable");
         assert_eq!(ControlStatus::Deferred.as_str(), "deferred");
+    }
+
+    #[test]
+    fn unpersisted_evidence_is_never_counted_as_collector_success() {
+        let mut summary = CollectionRunSummary::new(Utc::now());
+        summary.controls_attempted = 1;
+        summary.record_failure("CC2.1", "evidence insert failed".to_string());
+        summary.finish();
+        assert_eq!(
+            summary.controls_succeeded, 0,
+            "failed persistence is not success"
+        );
+        assert_eq!(summary.controls_failed, 1);
+        assert_eq!(
+            summary.items_collected, 0,
+            "unpersisted items are not collected"
+        );
+        assert_eq!(summary.status, "failed");
+        assert!(summary.failures[0].contains("evidence insert failed"));
+    }
+
+    #[test]
+    fn collection_summary_status_never_reports_success_without_successes() {
+        let mut empty = CollectionRunSummary::new(Utc::now());
+        empty.finish();
+        assert_eq!(empty.status, "failed");
+
+        let mut partial = CollectionRunSummary::new(Utc::now());
+        partial.record_success(3);
+        partial.record_failure("CC6.3", "db down".to_string());
+        partial.finish();
+        assert_eq!(partial.status, "partial");
+
+        let mut success = CollectionRunSummary::new(Utc::now());
+        success.record_success(3);
+        success.finish();
+        assert_eq!(success.status, "success");
+    }
+
+    #[test]
+    fn control_seeds_do_not_claim_fictional_operations() {
+        for seed in DEFAULT_CONTROLS {
+            let description = seed.description.to_ascii_lowercase();
+            for forbidden in ["24/7", "auto-scaling", "autoscaling", "auto scaling"] {
+                assert!(
+                    !description.contains(forbidden),
+                    "{} still claims {forbidden}",
+                    seed.control_id
+                );
+            }
+            for department in ["legal", "security engineering", "compliance team", "sre"] {
+                assert_ne!(
+                    seed.owner.to_ascii_lowercase(),
+                    department,
+                    "{} names a fictional department as owner",
+                    seed.control_id
+                );
+            }
+        }
+
+        let capacity = DEFAULT_CONTROLS
+            .iter()
+            .find(|c| c.control_id == "A1.1")
+            .expect("A1.1 seeded");
+        let capacity = capacity.description.to_ascii_lowercase();
+        assert!(capacity.contains("rate limits"));
+        assert!(capacity.contains("quotas"));
+        assert!(capacity.contains("manual capacity review"));
+        assert!(capacity.contains("no autoscaler"));
+
+        let complaints = DEFAULT_CONTROLS
+            .iter()
+            .find(|c| c.control_id == "P8.1")
+            .expect("P8.1 seeded");
+        assert_eq!(complaints.owner, "Founder / System Operator");
+        assert!(!complaints.description.to_ascii_lowercase().contains("24/7"));
+        assert!(!complaints
+            .description
+            .to_ascii_lowercase()
+            .contains("monitored"));
+    }
+
+    #[test]
+    fn required_evidence_types_parses_tags_and_rejects_malformed_values() {
+        let mut control = Control {
+            id: "control-cc-test".to_string(),
+            control_id: "CC-TEST".to_string(),
+            category: "test".to_string(),
+            title: "test".to_string(),
+            description: "test".to_string(),
+            owner: "Founder / System Operator".to_string(),
+            status: "in_scope".to_string(),
+            evidence_required: serde_json::json!([
+                "audit_log_sample",
+                "audit_chain_verification",
+                "audit_log_sample"
+            ]),
+            automation: "automated".to_string(),
+            last_attested_at: None,
+            next_attestation_at: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        let parsed = required_evidence_types(&control).expect("array parses");
+        assert_eq!(
+            parsed,
+            vec!["audit_log_sample", "audit_chain_verification"],
+            "duplicate tags collapse to a single requirement"
+        );
+
+        control.evidence_required = serde_json::json!("audit_log_sample");
+        assert!(required_evidence_types(&control).is_err());
+        control.evidence_required = serde_json::json!([1, 2]);
+        assert!(required_evidence_types(&control).is_err());
     }
 }

@@ -31,9 +31,11 @@ pub mod overage;
 pub mod plan_billing;
 pub mod plans;
 /// Contract product-line billing: the Platform line (base + per-1K usage
-/// tier + active subaccounts above 100) and the Mailboxes seat line
-/// (10-seat minimum, per-seat, archive add-on), billed monthly through the
-/// shared period + invoice + collection machinery.
+/// tier + active subaccounts above 100), the Mailboxes seat line (10-seat
+/// minimum, per-seat, archive add-on), the flat compliance/placement/EU-only
+/// lines, and the Dedicated Tenant line (catalog monthly list + a one-time
+/// setup fee with the first billed period + the contracted minimum term),
+/// billed monthly through the shared period + invoice + collection machinery.
 pub mod product_lines;
 pub mod routes;
 pub mod send_admission;

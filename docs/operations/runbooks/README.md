@@ -6,7 +6,7 @@
 
 This is the central index of operational runbooks for the ApexMail platform. Runbooks provide step-by-step procedures for common operational tasks and incident response scenarios.
 
-Each runbook should be self-contained, actionable, and usable by any on-call engineer without deep system knowledge. See the [on-call guide](../on-call.md) for alert response context.
+Each runbook should be self-contained, actionable, and usable by the responsible ApexMail operator without deep system knowledge. See the [on-call guide](../on-call.md) for alert response context.
 
 ---
 

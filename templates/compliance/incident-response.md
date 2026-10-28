@@ -39,7 +39,7 @@ Incidents may be detected through:
 ### 4.1 Triage (0–15 minutes)
 
 1. Incident detected or reported.
-2. On-call engineer acknowledges and assesses severity.
+2. The responsible ApexMail operator acknowledges and assesses severity.
 3. Incident declared in incident management system.
 4. Status page updated for Severity 1 and 2 incidents.
 
@@ -132,7 +132,7 @@ The status page (`https://apexmail.ee/status`) is the authoritative source for s
 | Role | Responsibility |
 |---|---|
 | **Incident Commander** | Overall incident coordination, decision authority |
-| **On-Call Engineer** | Initial triage, technical investigation, remediation |
+| **Responsible ApexMail operator** | Initial triage, technical investigation, remediation |
 | **Communication Lead** | Status page updates, customer communication, internal updates |
 | **Data Protection Lead** | GDPR notification assessment, data breach compliance |
 | **Engineering Manager** | Resource allocation, escalation |

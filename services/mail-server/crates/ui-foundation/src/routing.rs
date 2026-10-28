@@ -195,7 +195,10 @@ mod tests {
         // Capability wave (2026-10-17): the Mailboxes archive + journaling
         // page joins the web manifest (data-backed /settings/journal, linked
         // from Settings), web 40 → 41, total 131 → 132.
-        assert_eq!(declared_route_count("web"), Some(41));
+        // Fifth external audit (Tier-2 item 16): the TENANT AI-draft review
+        // page joins the web manifest (data-backed /ai-drafts, linked from
+        // the sidebar next to the Assistant) — web 41 → 42, total 132 → 133.
+        assert_eq!(declared_route_count("web"), Some(42));
         // SalesCloser plan §5.6: the CP presenter (/cp/demos) and the public
         // demo viewer (/demo) join the baseline, control-plane 30 → 31,
         // marketing 18 → 19, total 122 → 124.
@@ -210,7 +213,7 @@ mod tests {
         assert_eq!(declared_route_count("control-plane"), Some(34));
         assert_eq!(declared_route_count("marketing"), Some(19));
         assert_eq!(declared_route_count("marketing-zola"), Some(38));
-        assert_eq!(total_route_count(), 132);
+        assert_eq!(total_route_count(), 133);
     }
 
     #[test]

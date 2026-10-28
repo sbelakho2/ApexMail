@@ -57,6 +57,10 @@ pub struct RouteData {
     pub demo_viewer: Option<crate::view_data::DemoViewerData>,
     /// Control-plane AI-drafts review data (`/reviews/ai-drafts`).
     pub ai_drafts: Option<crate::view_data::AiDraftsPageData>,
+    /// TENANT AI-drafts review data (`/ai-drafts`): the caller's own pending
+    /// drafts with their purpose/risk verdict, or the explicit unavailable /
+    /// admin-only state.
+    pub tenant_ai_drafts: Option<crate::view_data::TenantAiDraftsPageData>,
     /// Custom tracking-domain panel data (`/domains/{id}/tracking`, capability
     /// wave 2). Present means the loader produced the honest state (parent
     /// verification, entitlement, configured row); absent is the no-data
@@ -2630,6 +2634,12 @@ fn render_web(
             .unwrap_or_else(leptos_views::web_inbox_placement_page),
         "/assistant" => leptos_views::web_assistant_page(
             data.and_then(|route_data| route_data.assistant.as_ref()),
+        ),
+        // Tenant-owned AI-draft review. With data the real purpose/risk
+        // queue renders; without data (the route inventory sweep / an
+        // anonymous fallback) the same view renders its honest empty state.
+        "/ai-drafts" => leptos_views::web_tenant_ai_drafts_page(
+            data.and_then(|route_data| route_data.tenant_ai_drafts.as_ref()),
         ),
         "/inbox-placement/new" => leptos_views::web_inbox_placement_new_page(),
         "/events" => {
@@ -5378,5 +5388,54 @@ mod tests {
             html.contains(&format!("action=\"/web/domains/{id}/verify\"")),
             "{html}"
         );
+    }
+
+    /// The tenant AI-draft route (`/ai-drafts`) renders through the REAL web
+    /// route dispatch when its page data is present: the rows, the purpose/
+    /// risk badges and both decision forms, inside the console shell (the
+    /// sidebar links the page). Without data it renders the honest empty
+    /// state instead of fabricated rows.
+    #[test]
+    fn tenant_ai_drafts_route_renders_rows_and_empty_fallback() {
+        let data = RouteData {
+            tenant_ai_drafts: Some(crate::view_data::TenantAiDraftsPageData {
+                drafts: vec![crate::view_data::TenantAiDraftData {
+                    id: "inb_route_1".into(),
+                    from_email: "customer@corp.example".into(),
+                    subject: "Refund request".into(),
+                    body_text: "I want a refund.".into(),
+                    draft_reply: "We can help with that.".into(),
+                    received_at: "2026-10-28 09:30 UTC".into(),
+                    purposes: vec!["refund".into()],
+                    primary_purpose: "refund".into(),
+                    risk: "high".into(),
+                    autonomy_requirement: "human_review".into(),
+                    first_response: false,
+                }],
+                unavailable: false,
+                admin_only: false,
+            }),
+            ..RouteData::default()
+        };
+        let html = render_route_with_data("web", "/ai-drafts", None, None, &[], Some(&data))
+            .expect("/ai-drafts must be a routed web page");
+        assert!(html.contains("AI drafts"), "{html}");
+        assert!(html.contains("refund (primary)"), "{html}");
+        assert!(html.contains("risk: high"), "{html}");
+        assert!(
+            html.contains("action=\"/web/ai/drafts/inb_route_1/approve\""),
+            "{html}"
+        );
+        assert!(
+            html.contains("action=\"/web/ai/drafts/inb_route_1/reject\""),
+            "{html}"
+        );
+        // The sidebar reaches the page from every console render.
+        assert!(html.contains("href=\"/ai-drafts\""), "{html}");
+
+        let empty = render_route_with_data("web", "/ai-drafts", None, None, &[], None)
+            .expect("/ai-drafts must render its no-data fallback");
+        assert!(empty.contains("No drafts need review"), "{empty}");
+        assert!(!empty.contains("action=\"/web/ai/drafts/"), "{empty}");
     }
 }

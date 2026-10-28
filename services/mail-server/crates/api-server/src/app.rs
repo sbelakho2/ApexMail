@@ -847,7 +847,13 @@ pub fn build_app(state: AppState) -> Router {
         .nest("/v1/automations", routes::automations::router())
         .nest(
             "/v1/ai",
-            routes::ai_insights::router().merge(routes::ai_chat::router()),
+            routes::ai_insights::router()
+                .merge(routes::ai_chat::router())
+                // Tenant-owned AI-draft review (/v1/ai/drafts): the caller's
+                // OWN pending drafts, approve/reject through the SAME
+                // workflow core the operator queue uses, and an explicit
+                // NOT_AVAILABLE regeneration answer. See routes/ai_drafts.rs.
+                .merge(routes::ai_drafts::router()),
         )
         .nest("/v1/dedicated-ips", routes::dedicated_ips::router())
         .nest("/v1/account", routes::account::router())
@@ -1661,7 +1667,8 @@ fn auth_page_error_message(error: &crate::error::ApiError) -> String {
         | crate::error::ApiError::NotFound(message)
         | crate::error::ApiError::Conflict(message)
         | crate::error::ApiError::PayloadTooLarge(message)
-        | crate::error::ApiError::ServiceUnavailable(message) => message.clone(),
+        | crate::error::ApiError::ServiceUnavailable(message)
+        | crate::error::ApiError::NotAvailable(message) => message.clone(),
         crate::error::ApiError::Validation(details) => details.join(" "),
         crate::error::ApiError::RateLimited => {
             "Too many verification attempts. Please wait and try again.".into()

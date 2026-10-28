@@ -336,6 +336,10 @@ async fn deliver_one(db: &PgPool, row: &ClaimedNotification) -> Result<Uuid, Api
         &rendered.text,
         vec![format!("notification:{}", row.notification_type)],
         crate::routes::system_sender::QUEUE_PRIORITY_DEFAULT,
+        // Billing/account lifecycle notices (payment failure, suspension,
+        // trial end, purges, duplicate-charge safety): operational account
+        // mail, transactional. Never a marketing send.
+        apexmail_lib::email_headers::message_category::TRANSACTIONAL,
     )
     .await?;
 
@@ -628,16 +632,21 @@ mod tests {
             "subject must be the rendered notification, got {subject:?}"
         );
 
-        let (queued_to,): (Vec<String>,) =
-            sqlx::query_as("SELECT to_addresses FROM email_queue WHERE message_id = $1")
-                .bind(message_id)
-                .fetch_one(&db)
-                .await
-                .expect("email_queue row must exist");
+        let (queued_to, category): (Vec<String>, String) = sqlx::query_as(
+            "SELECT to_addresses, message_category FROM email_queue WHERE message_id = $1",
+        )
+        .bind(message_id)
+        .fetch_one(&db)
+        .await
+        .expect("email_queue row must exist");
         assert_eq!(
             queued_to,
             vec!["owner-sent@example.test".to_string()],
             "the owner address must be the recipient"
+        );
+        assert_eq!(
+            category, "transactional",
+            "billing/account notifications are operational account mail, never marketing"
         );
 
         db.close().await;

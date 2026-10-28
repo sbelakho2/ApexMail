@@ -3,7 +3,7 @@
   "surfaces": [
     {
       "id": "web",
-      "routeCount": 41,
+      "routeCount": 42,
       "routes": [
         {
           "path": "/",
@@ -256,6 +256,12 @@
         {
           "path": "/assistant",
           "name": "Assistant",
+          "category": "dashboard",
+          "authRequired": true
+        },
+        {
+          "path": "/ai-drafts",
+          "name": "AI Drafts",
           "category": "dashboard",
           "authRequired": true
         }

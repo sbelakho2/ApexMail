@@ -1,7 +1,7 @@
-//! Contract product-line billing: the **Platform** and **Mailboxes** lines
-//! plus the flat **Compliance**, **Inbox Placement Monitoring** and
-//! **EU-only Routing** lines (the owner's 2026-10-15 price table,
-//! `platform-catalog`).
+//! Contract product-line billing: the **Platform** and **Mailboxes** lines,
+//! the flat **Compliance**, **Inbox Placement Monitoring** and **EU-only
+//! Routing** lines, and the flagship **Dedicated Tenant** contract line
+//! (the owner's 2026-10-15 price table, `platform-catalog`).
 //!
 //! Before this module the two contract lines existed only as catalog rows:
 //! the `platform` contract line (base + per-1K overage + per-subaccount fee),
@@ -38,14 +38,16 @@
 //!   No proration exists: a month bills only when the contract covered it
 //!   IN FULL ([`contract_covers_period`]), a partially covered first or
 //!   final month is not billed, and that is stated, not prorated.
-//! * **Currency.** The tenant's billing currency (`settings.billingCurrency`),
-//!   normalized exactly like the api-server checkout resolver; the catalog
-//!   prices in EUR and USD, and the USD list applies when (and only when)
-//!   the tenant bills in USD, the same rule the self-serve checkout uses
-//!   (`routes/billing.rs` `resolve_tenant_billing_currency`). The resolved
-//!   currency (and the whole price set) is snapshotted onto the period row
-//!   at claim time (audit F32 discipline): a later settings change can never
-//!   reprice an existing month.
+//! * **Currency.** The tenant's billing currency (`settings.billingCurrency`)
+//!   is constrained to exactly EUR or USD at every entry point of this
+//!   contract path (contract creation, period creation, invoice generation,
+//!   catalog price lookup). The USD list applies when the tenant bills in
+//!   USD, the EUR list when it bills in EUR; any other code is a typed
+//!   refusal ([`ProductLineCurrencyError::UnsupportedCurrency`]), never an
+//!   EUR price list under a foreign label (fifth external audit, P1). The
+//!   resolved currency (and the whole price set) is snapshotted onto the
+//!   period row at claim time (audit F32 discipline): a later settings change
+//!   can never reprice an existing month.
 //! * **Freeze.** Per period, per line: the price set, the invoice identity
 //!   and the invoice itself are written under an advisory lock and one
 //!   transaction per phase, so a replay either finds the terminal state or
@@ -87,16 +89,58 @@
 //!   counted once, and the minimum-seat floor applies to seats, never to
 //!   the archive add-on (5 flagged seats bill 10 seats + 5 archive seats).
 //!
+//! # Dedicated Tenant line
+//!
+//! * The contract row is created by the deployment lifecycle
+//!   (`enterprise::dedicated_tenant::transition_dedicated`) when the
+//!   deployment moves `provisioned -> active`, through the SAME CP write
+//!   path a manual purchase uses ([`activate_dedicated_tenant_contract`]).
+//!   Billing is no longer manual: the row makes the tenant billable by the
+//!   monthly sweep like every other line.
+//! * The monthly list is the catalog `PRODUCT_LINES` row ("from
+//!   EUR 4,000/month", 400 000 euro cents). The plan's one-time setup fee
+//!   is contracted per deployment inside the catalog's EUR 10k-40k range
+//!   (`DEDICATED_TENANT_SETUP_MIN_CENTS` / `..._MAX_CENTS`); the contracted
+//!   figure (falling back to the published catalog floor when the contract
+//!   records none) is frozen into the FIRST billed period's snapshot and
+//!   billed as its own one-time line. Every later period carries the
+//!   monthly line only.
+//! * The contracted minimum term (`product_line_contracts.minimum_term_months`)
+//!   is validated against the catalog's 12-month minimum and recorded on the
+//!   contract; it is metadata, the sweep still bills completed calendar
+//!   months (the 12-month commitment is billed monthly, exactly like the
+//!   other contract lines).
+//! * "First billed period" is the first `dedicated_tenant` month the sweep
+//!   claims. `product_line_contracts.setup_fee_period_start` is the durable
+//!   exactly-once marker: the first period row to create claims it with a
+//!   conditional UPDATE on the contract row (row-level locking serializes
+//!   overlapping sweep runs), and every later period carries the monthly
+//!   line only. The sweep still walks the recent completed months OLDEST
+//!   FIRST so that, when two months are billable on the first run, the setup
+//!   fee normally rides the earlier month.
+//! * USD is a typed refusal ([`DedicatedTenantPricingError::NoUsdSetupFee`]):
+//!   the catalog publishes the monthly USD list ($4,500) but the one-time
+//!   setup range only in EUR, so a USD contract could only be priced by
+//!   converting or mislabelling the EUR cents. The contract is billed in
+//!   EUR; nothing is converted.
+//!
 //! # What is NOT built (named, not faked)
 //!
 //! * **Proration.** A contract month bills only when covered in full; there
 //!   is no partial-month charge or credit. Cancellation therefore stops the
 //!   NEXT period, not the current one.
-//! * **Mailbox journaling.** Nothing copies inbound/outbound messages to a
-//!   journal destination, and there is no third-party journal connector.
-//!   The billing flag and the mail-side retention marker (the account's
-//!   `Archive` folder + `archive_enabled_at`) are wired; the journaling
-//!   transport is not.
+//! * **External journal connector.** The IN-PLATFORM journal IS built
+//!   (`mail_journal`, migration 264): the worker copies outbound raw MIME,
+//!   the mailstore copies inbound messages at persist time for add-on
+//!   tenants, `GET /v1/journal` plus `/settings/journal` are the
+//!   tenant-facing browse/download surface, and the retention sweep purges
+//!   by `MAIL_JOURNAL_RETENTION_DAYS`. What is NOT offered is a
+//!   third-party journal destination (an external journal mailbox or a
+//!   compliance-archive connector): nothing forwards copies off-platform.
+//!   (An earlier version of this comment said journaling was not built at
+//!   all; external audit 2026-10-28 quoted it, so the stale claim is itself
+//!   the defect being fixed here — the marketing label matches the
+//!   in-platform feature, and must never imply an external connector.)
 //! * **Archive retrieval UI.** No tenant-facing archive browse/search
 //!   surface exists; archived messages are reachable through IMAP like any
 //!   other folder. `compliance::legal_archive` is the regulatory
@@ -128,6 +172,9 @@ pub const PLACEMENT_USAGE_KIND: &str = "placement";
 /// `billing_periods.usage_kind` for the EU-only Routing line.
 pub const EU_ONLY_ROUTING_USAGE_KIND: &str = "eu_only_routing";
 
+/// `billing_periods.usage_kind` for the Dedicated Tenant contract line.
+pub const DEDICATED_TENANT_USAGE_KIND: &str = "dedicated_tenant";
+
 /// The `product_line_contracts.product_line` values this module bills.
 pub const PLATFORM_PRODUCT_LINE: &str = "platform";
 /// The Mailboxes product line (also the provisioning entitlement record).
@@ -138,15 +185,23 @@ pub const COMPLIANCE_PRODUCT_LINE: &str = "compliance";
 pub const PLACEMENT_PRODUCT_LINE: &str = "placement";
 /// The self-serve EU-only Routing add-on line.
 pub const EU_ONLY_ROUTING_PRODUCT_LINE: &str = "eu_only_routing";
+/// The Dedicated Tenant contract line (the flagship deployment product).
+pub const DEDICATED_TENANT_PRODUCT_LINE: &str = "dedicated_tenant";
 
-/// Every product line this module records and bills. `dedicated_tenant` is
-/// deliberately absent: it is sold by the deployment flow, not this module.
+/// The invoice/display label for the Dedicated Tenant line.
+pub const DEDICATED_TENANT_DISPLAY_NAME: &str = "Dedicated Tenant";
+
+/// Every product line this module records and bills. Dedicated Tenant is
+/// included: its contract row is created by the deployment lifecycle at
+/// activation ([`activate_dedicated_tenant_contract`]) and billed by the
+/// same monthly sweep as the other lines, never invoiced manually.
 pub const BILLABLE_PRODUCT_LINES: &[&str] = &[
     PLATFORM_PRODUCT_LINE,
     MAILBOXES_PRODUCT_LINE,
     COMPLIANCE_PRODUCT_LINE,
     PLACEMENT_PRODUCT_LINE,
     EU_ONLY_ROUTING_PRODUCT_LINE,
+    DEDICATED_TENANT_PRODUCT_LINE,
 ];
 
 /// The flat monthly lines (no metered component, one unit per month). The
@@ -223,32 +278,56 @@ fn parse_invoicing_switch(raw: Option<&str>) -> bool {
 // Currency
 // ---------------------------------------------------------------------------
 
-/// Normalize a `settings.billingCurrency` value exactly like the api-server
-/// resolver (`routes::billing::resolve_tenant_billing_currency`): trim,
-/// uppercase, accept only a 3-letter ASCII code; anything else is EUR. Kept
-/// as a mirror (both are pinned by tests) because the billing service does
-/// not depend on the api-server crate.
-pub fn normalize_billing_currency(raw: Option<&str>) -> String {
-    let normalized = raw
-        .unwrap_or(DEFAULT_PRODUCT_LINE_CURRENCY)
-        .trim()
-        .to_uppercase();
-    if normalized.len() == 3 && normalized.chars().all(|c| c.is_ascii_uppercase()) {
-        normalized
+/// The only currencies the billing books are kept in. Every product-line
+/// entry point normalizes/validates against exactly this set; there is no
+/// "3-letter anything" acceptance anywhere on the contract path.
+pub const SUPPORTED_BILLING_CURRENCIES: &[&str] = &["EUR", "USD"];
+
+/// A billing currency outside the supported books (fifth external audit,
+/// P1): previously `GBP` passed normalization, kept its code on the period,
+/// and was invoiced with the EUR price numbers as GBP. Typed and named so
+/// every caller can surface it instead of minting a mislabelled invoice.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ProductLineCurrencyError {
+    #[error("unsupported billing currency `{0}`; the billing books are kept in EUR and USD only")]
+    UnsupportedCurrency(String),
+}
+
+/// Normalize a `settings.billingCurrency` value to exactly `EUR` or `USD`
+/// (fifth external audit, P1). Missing/blank settings keep the documented
+/// EUR default; any other value is REFUSED with a typed error instead of
+/// being carried onto a period and invoiced with the wrong price list.
+///
+/// The api-server checkout resolver (`routes::billing::resolve_tenant_billing_currency`)
+/// is the self-serve mirror; this function is the contract-billing
+/// authority and is deliberately STRICTER (it rejects, not defaults, a
+/// legacy 3-letter code).
+pub fn normalize_billing_currency(raw: Option<&str>) -> Result<String, ProductLineCurrencyError> {
+    let Some(raw) = raw.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(DEFAULT_PRODUCT_LINE_CURRENCY.to_string());
+    };
+    let normalized = raw.to_ascii_uppercase();
+    if SUPPORTED_BILLING_CURRENCIES.contains(&normalized.as_str()) {
+        Ok(normalized)
     } else {
-        DEFAULT_PRODUCT_LINE_CURRENCY.to_string()
+        Err(ProductLineCurrencyError::UnsupportedCurrency(
+            raw.to_string(),
+        ))
     }
 }
 
-/// The catalog price list a billing currency maps to: the USD list when the
-/// tenant bills in USD, the EUR list otherwise, the checkout's rule (the
-/// catalog carries exactly these two lists; a GBP-billing tenant is quoted
-/// the EUR list, exactly as self-serve checkout charges them).
-pub fn catalog_price_currency(billing_currency: &str) -> &'static str {
-    if billing_currency.trim().eq_ignore_ascii_case("USD") {
-        "USD"
-    } else {
-        "EUR"
+/// The catalog price list a billing currency maps to. EUR and USD exist;
+/// every other code is a typed refusal (no silent "anything else is EUR"
+/// fallback: that is exactly how GBP could be invoiced the EUR numbers).
+pub fn catalog_price_currency(
+    billing_currency: &str,
+) -> Result<&'static str, ProductLineCurrencyError> {
+    match billing_currency.trim().to_ascii_uppercase().as_str() {
+        "EUR" => Ok("EUR"),
+        "USD" => Ok("USD"),
+        _ => Err(ProductLineCurrencyError::UnsupportedCurrency(
+            billing_currency.trim().to_string(),
+        )),
     }
 }
 
@@ -292,10 +371,10 @@ impl PlatformPricing {
     }
 }
 
-/// The Platform price set for a catalog price currency ("EUR" or "USD";
-/// anything else reads as EUR through [`catalog_price_currency`]).
-pub fn platform_pricing(price_currency: &str) -> PlatformPricing {
-    let currency = catalog_price_currency(price_currency);
+/// The Platform price set for a catalog price currency (`EUR` or `USD`,
+/// case-insensitive; any other code is a typed refusal).
+pub fn platform_pricing(price_currency: &str) -> Result<PlatformPricing, ProductLineCurrencyError> {
+    let currency = catalog_price_currency(price_currency)?;
     let (base_cents, overage_rate_millicents, subaccount_cents) = if currency == "USD" {
         (
             platform_catalog::product_line_by_name(PLATFORM_PRODUCT_LINE)
@@ -313,14 +392,14 @@ pub fn platform_pricing(price_currency: &str) -> PlatformPricing {
             platform_catalog::PLATFORM_SUBACCOUNT_MONTHLY_CENTS,
         )
     };
-    PlatformPricing {
+    Ok(PlatformPricing {
         currency,
         base_cents,
         included_emails: platform_catalog::PLATFORM_INCLUDED_EMAILS,
         overage_rate_millicents,
         included_subaccounts: platform_catalog::PLATFORM_INCLUDED_SUBACCOUNTS,
         subaccount_cents,
-    }
+    })
 }
 
 /// One Platform charge for a period, every component in integer cents.
@@ -409,14 +488,14 @@ impl MailboxPricing {
     }
 }
 
-/// The Mailboxes price set for a catalog price currency.
-pub fn mailbox_pricing(price_currency: &str) -> MailboxPricing {
-    let currency = catalog_price_currency(price_currency);
+/// The Mailboxes price set for a catalog price currency (EUR/USD only).
+pub fn mailbox_pricing(price_currency: &str) -> Result<MailboxPricing, ProductLineCurrencyError> {
+    let currency = catalog_price_currency(price_currency)?;
     let in_usd = currency == "USD";
     let seats = platform_catalog::addon_by_name("mailboxes").expect("catalog add-on row");
     let archive =
         platform_catalog::addon_by_name("mailbox_archive_journaling").expect("catalog add-on row");
-    MailboxPricing {
+    Ok(MailboxPricing {
         currency,
         minimum_seats: platform_catalog::MAILBOX_MINIMUM_SEATS,
         seat_cents: if in_usd {
@@ -429,7 +508,7 @@ pub fn mailbox_pricing(price_currency: &str) -> MailboxPricing {
         } else {
             archive.price_cents
         },
-    }
+    })
 }
 
 /// One Mailboxes charge for a period, integer cents.
@@ -507,28 +586,38 @@ impl FlatPricing {
     }
 }
 
-/// The flat price set for a catalog price currency. `None` when the line is
-/// not a flat billable line (the callers surface that as `needs_review`,
-/// never as a guessed price).
-pub fn flat_pricing(product_line: &str, price_currency: &str) -> Option<FlatPricing> {
-    let currency = catalog_price_currency(price_currency);
+/// The flat price set for a catalog price currency. `Ok(None)` when the
+/// line is not a flat billable line (the callers surface that as
+/// `needs_review`, never as a guessed price); an unsupported currency is a
+/// typed error, never a silent EUR fallback.
+pub fn flat_pricing(
+    product_line: &str,
+    price_currency: &str,
+) -> Result<Option<FlatPricing>, ProductLineCurrencyError> {
+    let currency = catalog_price_currency(price_currency)?;
     let in_usd = currency == "USD";
     let (eur_cents, usd_cents): (i64, i64) = match product_line {
         COMPLIANCE_PRODUCT_LINE => {
-            let row = platform_catalog::product_line_by_name(COMPLIANCE_PRODUCT_LINE)?;
+            let Some(row) = platform_catalog::product_line_by_name(COMPLIANCE_PRODUCT_LINE) else {
+                return Ok(None);
+            };
             (row.price_monthly_cents, row.price_monthly_usd_cents)
         }
         PLACEMENT_PRODUCT_LINE => {
-            let row = platform_catalog::addon_by_name("inbox_placement_monitoring")?;
+            let Some(row) = platform_catalog::addon_by_name("inbox_placement_monitoring") else {
+                return Ok(None);
+            };
             (row.price_cents, row.price_usd_cents)
         }
         EU_ONLY_ROUTING_PRODUCT_LINE => {
-            let row = platform_catalog::addon_by_name("eu_only_routing")?;
+            let Some(row) = platform_catalog::addon_by_name("eu_only_routing") else {
+                return Ok(None);
+            };
             (row.price_cents, row.price_usd_cents)
         }
-        _ => return None,
+        _ => return Ok(None),
     };
-    Some(FlatPricing {
+    Ok(Some(FlatPricing {
         product_line: match product_line {
             COMPLIANCE_PRODUCT_LINE => COMPLIANCE_PRODUCT_LINE,
             PLACEMENT_PRODUCT_LINE => PLACEMENT_PRODUCT_LINE,
@@ -536,7 +625,7 @@ pub fn flat_pricing(product_line: &str, price_currency: &str) -> Option<FlatPric
         },
         currency,
         monthly_cents: if in_usd { usd_cents } else { eur_cents },
-    })
+    }))
 }
 
 /// One flat line for one period: exactly one invoice line at the monthly
@@ -551,6 +640,160 @@ pub fn flat_charge_lines(pricing: &FlatPricing, period_label: &str) -> Vec<Charg
         quantity: 1,
         unit_price: pricing.monthly_cents,
     }]
+}
+
+// ---------------------------------------------------------------------------
+// Dedicated Tenant line, pricing (pure, integer cents)
+// ---------------------------------------------------------------------------
+
+/// Why a Dedicated Tenant price set cannot be resolved. Named and typed so
+/// the contract write (CP purchase and deployment activation) refuses with
+/// the exact reason instead of recording a contract the sweep cannot bill.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum DedicatedTenantPricingError {
+    #[error(transparent)]
+    Currency(#[from] ProductLineCurrencyError),
+    /// The catalog publishes the monthly USD list but the one-time setup
+    /// range only in euro cents. A USD contract would have to convert (or
+    /// label EUR cents as USD), so it is refused by name.
+    #[error(
+        "Dedicated Tenant has no USD price book: the catalog publishes the monthly USD list \
+         but the one-time setup fee in EUR only; bill the contract in EUR \
+         (a setup fee is never converted)"
+    )]
+    NoUsdSetupFee,
+    #[error(
+        "Dedicated Tenant setup fee {cents} cents is outside the catalog range \
+         {min_cents}..={max_cents} cents"
+    )]
+    SetupFeeOutOfRange {
+        cents: i64,
+        min_cents: i64,
+        max_cents: i64,
+    },
+    #[error(
+        "Dedicated Tenant minimum term {months} months is below the catalog minimum of \
+         {minimum_months} months"
+    )]
+    MinimumTermBelowPlan { months: i64, minimum_months: i64 },
+}
+
+/// The Dedicated Tenant price set frozen onto one period. The monthly list
+/// and the minimum term come from the catalog `PRODUCT_LINES` row; the
+/// setup fee is the contracted figure (validated against the catalog's
+/// EUR 10k-40k range) and is non-zero only on the contract's FIRST billed
+/// period.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DedicatedTenantPricing {
+    pub currency: &'static str,
+    /// Catalog monthly list price, cents ("from EUR 4,000/month").
+    pub monthly_cents: i64,
+    /// One-time setup fee, cents; billed with the first billed period only.
+    pub setup_fee_cents: i64,
+    /// Contracted minimum term, months (never below the catalog minimum).
+    pub minimum_term_months: i64,
+}
+
+impl DedicatedTenantPricing {
+    /// The whole price set as the period's `pricing_snapshot` JSON (audit
+    /// F32: the period is priced from THIS, never from today's catalog).
+    pub fn snapshot_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "snapshotVersion": 1,
+            "usageKind": DEDICATED_TENANT_USAGE_KIND,
+            "currency": self.currency,
+            "monthlyCents": self.monthly_cents,
+            "setupFeeCents": self.setup_fee_cents,
+            "minimumTermMonths": self.minimum_term_months,
+            "source": "platform-catalog",
+        })
+    }
+
+    /// The period total: the monthly list plus the one-time setup fee when
+    /// this is the contract's first billed period.
+    pub fn total_cents(&self) -> i64 {
+        self.monthly_cents.saturating_add(self.setup_fee_cents)
+    }
+}
+
+/// The Dedicated Tenant price set for a catalog price currency.
+///
+/// * `contracted_setup_fee_cents`: the fee contracted for this deployment
+///   (already validated by `enterprise::dedicated_tenant` against the same
+///   catalog range). `None` keeps the published catalog FLOOR ("from
+///   EUR 10,000"); no number is invented.
+/// * `contracted_minimum_term_months`: the contracted term. `None` keeps
+///   the catalog minimum (12 months); a lower figure is refused.
+///
+/// EUR only: the catalog has no USD setup-fee figure, so USD is a typed
+/// refusal rather than a conversion (see
+/// [`DedicatedTenantPricingError::NoUsdSetupFee`]).
+pub fn dedicated_tenant_pricing(
+    price_currency: &str,
+    contracted_setup_fee_cents: Option<i64>,
+    contracted_minimum_term_months: Option<i64>,
+) -> Result<DedicatedTenantPricing, DedicatedTenantPricingError> {
+    let currency = catalog_price_currency(price_currency)?;
+    let line = platform_catalog::product_line_by_name(DEDICATED_TENANT_PRODUCT_LINE)
+        .expect("catalog carries the dedicated tenant line");
+    if currency == "USD" {
+        return Err(DedicatedTenantPricingError::NoUsdSetupFee);
+    }
+    let setup_fee_cents =
+        contracted_setup_fee_cents.unwrap_or(platform_catalog::DEDICATED_TENANT_SETUP_MIN_CENTS);
+    if !(platform_catalog::DEDICATED_TENANT_SETUP_MIN_CENTS
+        ..=platform_catalog::DEDICATED_TENANT_SETUP_MAX_CENTS)
+        .contains(&setup_fee_cents)
+    {
+        return Err(DedicatedTenantPricingError::SetupFeeOutOfRange {
+            cents: setup_fee_cents,
+            min_cents: platform_catalog::DEDICATED_TENANT_SETUP_MIN_CENTS,
+            max_cents: platform_catalog::DEDICATED_TENANT_SETUP_MAX_CENTS,
+        });
+    }
+    let minimum_term_months =
+        contracted_minimum_term_months.unwrap_or(line.minimum_contract_months);
+    if minimum_term_months < line.minimum_contract_months {
+        return Err(DedicatedTenantPricingError::MinimumTermBelowPlan {
+            months: minimum_term_months,
+            minimum_months: line.minimum_contract_months,
+        });
+    }
+    Ok(DedicatedTenantPricing {
+        currency,
+        monthly_cents: line.price_monthly_cents,
+        setup_fee_cents,
+        minimum_term_months,
+    })
+}
+
+/// The Dedicated Tenant invoice lines for one period: the monthly list
+/// always, the one-time setup fee only on the contract's first billed
+/// period (its own clearly-named line, quantity 1).
+pub fn dedicated_tenant_charge_lines(
+    pricing: &DedicatedTenantPricing,
+    period_label: &str,
+) -> Vec<ChargeLine> {
+    let mut lines = vec![ChargeLine {
+        description: format!(
+            "{DEDICATED_TENANT_DISPLAY_NAME} ({period_label}), {} per month",
+            format_cents(pricing.monthly_cents, pricing.currency)
+        ),
+        quantity: 1,
+        unit_price: pricing.monthly_cents,
+    }];
+    if pricing.setup_fee_cents > 0 {
+        lines.push(ChargeLine {
+            description: format!(
+                "{DEDICATED_TENANT_DISPLAY_NAME} one-time setup fee (billed once, with the \
+                 first contract month), {}",
+                format_cents(pricing.setup_fee_cents, pricing.currency)
+            ),
+            quantity: 1,
+            unit_price: pricing.setup_fee_cents,
+        });
+    }
+    lines
 }
 
 // ---------------------------------------------------------------------------
@@ -658,7 +901,7 @@ pub fn mailbox_charge_lines(charge: &MailboxCharge, period_label: &str) -> Vec<C
     if charge.archive_cents > 0 {
         lines.push(ChargeLine {
             description: format!(
-                "Mailbox archive + journaling ({period_label}), {} seats at {} per seat per month",
+                "Mailbox archive and in-platform journaling ({period_label}), {} seats at {} per seat per month",
                 charge.archive_seats,
                 format_cents(charge.pricing.archive_seat_cents, currency)
             ),
@@ -716,6 +959,10 @@ pub struct ProductLineSweepResult {
     pub periods_needs_review: u64,
     /// Tenant-months whose invoice failed, isolated, retried next sweep.
     pub failed_months: u64,
+    /// Tenants skipped because `settings.billingCurrency` is outside the
+    /// supported books (EUR/USD). Nothing is billed for them; the named
+    /// currency error is logged and retried after the setting is corrected.
+    pub tenants_currency_rejected: u64,
     /// Invoices settled from wallet balance by this run.
     pub wallet_paid: u64,
     /// Invoices handed to dunning by this run.
@@ -729,6 +976,11 @@ pub struct ProductLineContractRow {
     pub product_line: String,
     pub active_from: DateTime<Utc>,
     pub ended_at: Option<DateTime<Utc>>,
+    /// Dedicated Tenant contracted one-time setup fee (NULL on other lines)
+    /// and contracted minimum term (NULL on other lines). The sweep freezes
+    /// the setup fee into the first billed period only.
+    pub setup_fee_cents: Option<i64>,
+    pub minimum_term_months: Option<i64>,
 }
 
 /// One claimed (unbilled) `billing_periods` row plus its frozen pricing.
@@ -785,11 +1037,30 @@ pub async fn sweep_product_line_months(state: &AppState) -> Result<ProductLineSw
                 .get(tenant_id)
                 .map(Vec::as_slice)
                 .unwrap_or(&[]);
-            let currency = currencies_by_tenant
-                .get(tenant_id)
-                .cloned()
-                .unwrap_or_else(|| DEFAULT_PRODUCT_LINE_CURRENCY.to_string());
-            for &(month_start, month_end) in &months {
+            let currency = match currencies_by_tenant.get(tenant_id) {
+                Some(Ok(currency)) => currency.clone(),
+                Some(Err(error)) => {
+                    // Unsupported billing currency: refuse the tenant instead
+                    // of invoicing EUR numbers under a foreign code.
+                    result.tenants_currency_rejected += 1;
+                    warn!(
+                        tenant_id = %tenant_id,
+                        error = %error,
+                        "product-line sweep: unsupported billing currency, tenant skipped \
+                         (nothing billed, next sweep retries after the setting is fixed)"
+                    );
+                    continue;
+                }
+                None => DEFAULT_PRODUCT_LINE_CURRENCY.to_string(),
+            };
+            // OLDEST completed month first. The Dedicated Tenant one-time
+            // setup fee rides the FIRST month the sweep bills
+            // (`claim_dedicated_tenant_setup_fee`); walking oldest first makes
+            // that the earliest billable month when both are handled by one
+            // run. The claim itself is a conditional UPDATE on the contract
+            // row, so overlapping runs can never bill the fee twice regardless
+            // of order. For the other lines the order is immaterial.
+            for &(month_start, month_end) in months.iter().rev() {
                 if let Err(error) = process_tenant_month(
                     state,
                     tenant_id,
@@ -840,7 +1111,8 @@ async fn load_contracts_for_tenants(
     crate::test_support::query_count::bump("product_lines.contract_load");
     let rows: Vec<ProductLineContractRow> = sqlx::query_as(
         r#"
-        SELECT tenant_id, product_line, active_from, ended_at
+        SELECT tenant_id, product_line, active_from, ended_at,
+               setup_fee_cents, minimum_term_months
         FROM product_line_contracts
         WHERE tenant_id = ANY($1)
           AND (status = 'active' OR (status = 'terminated' AND ended_at IS NOT NULL))
@@ -861,13 +1133,14 @@ async fn load_contracts_for_tenants(
 }
 
 /// Resolve the billing currency for a whole PAGE of tenants in ONE query
-/// (P3 fix 3: this used to run once per tenant-month). Missing/invalid
-/// settings normalize to [`DEFAULT_PRODUCT_LINE_CURRENCY`] exactly like the
-/// single-tenant resolver did.
+/// (P3 fix 3: this used to run once per tenant-month). A tenant with no
+/// configured currency keeps the EUR default; a tenant whose setting is
+/// outside EUR/USD carries the typed refusal, so the sweep skips it instead
+/// of pricing a contract from the wrong list.
 async fn load_billing_currencies(
     db: &PgPool,
     tenant_ids: &[String],
-) -> Result<HashMap<String, String>, String> {
+) -> Result<HashMap<String, Result<String, ProductLineCurrencyError>>, String> {
     let mut currencies = HashMap::new();
     if tenant_ids.is_empty() {
         return Ok(currencies);
@@ -1006,11 +1279,40 @@ async fn process_tenant_month(
         }
     };
 
+    // Invoice generation is an entry point: every period about to be
+    // invoiced must freeze a supported currency. A legacy row in GBP (or any
+    // other code) is surfaced for review, never invoiced with the EUR price
+    // numbers under the wrong code.
+    for period in &claimed {
+        if let Err(error) = normalize_billing_currency(Some(&period.currency)) {
+            result.periods_needs_review += 1;
+            for pending in &claimed {
+                crate::overage::mark_period_needs_review(
+                    &mut tx,
+                    pending.id,
+                    &format!("unsupported period currency, refusing the invoice: {error}"),
+                )
+                .await?;
+            }
+            tx.commit()
+                .await
+                .map_err(|e| format!("product-line sweep: claim commit failed: {e}"))?;
+            warn!(
+                tenant_id = %tenant_id,
+                month = %period_start.format("%Y-%m"),
+                error = %error,
+                "product-line sweep: period carries an unsupported currency, month surfaced for review"
+            );
+            return Ok(());
+        }
+    }
+
     // Every line on ONE invoice must be in ONE currency: the periods carry
     // their own frozen currency, and a mismatch (e.g. an old unbilled row
     // frozen in EUR next to a fresh USD row after a settings change) must
     // never mint a mixed-currency invoice. Surface the month for review.
-    let period_currency = claimed[0].currency.clone();
+    let period_currency = normalize_billing_currency(Some(&claimed[0].currency))
+        .map_err(|error| format!("product-line sweep: invoice currency refused: {error}"))?;
     if let Some(mismatched) = claimed
         .iter()
         .find(|period| !period.currency.eq_ignore_ascii_case(&period_currency))
@@ -1066,6 +1368,18 @@ async fn process_tenant_month(
                     "{} for {period_label}",
                     flat_line_display_name(pricing.product_line).unwrap_or(pricing.product_line)
                 );
+            }
+            PeriodCharge::DedicatedTenant(pricing) => {
+                line_items.extend(dedicated_tenant_charge_lines(pricing, &period_label));
+                metered_watermarks.push((period.id, None));
+                description = if pricing.setup_fee_cents > 0 {
+                    format!(
+                        "{DEDICATED_TENANT_DISPLAY_NAME} contract line for {period_label}, \
+                         including the one-time setup fee"
+                    )
+                } else {
+                    format!("{DEDICATED_TENANT_DISPLAY_NAME} contract line for {period_label}")
+                };
             }
         }
     }
@@ -1277,7 +1591,12 @@ async fn ensure_period_records(
     lines: &[&ProductLineContractRow],
     currency: &str,
 ) -> Result<(), String> {
-    let price_currency = catalog_price_currency(currency);
+    // Period creation is an entry point: normalize/validate BEFORE the row
+    // exists, so the period can only freeze EUR or USD.
+    let currency = normalize_billing_currency(Some(currency))
+        .map_err(|error| format!("product-line sweep: period currency refused: {error}"))?;
+    let price_currency = catalog_price_currency(&currency)
+        .map_err(|error| format!("product-line sweep: price list refused: {error}"))?;
 
     let mut tx = state
         .db
@@ -1287,7 +1606,8 @@ async fn ensure_period_records(
     for line in lines {
         let (plan_name, rate_millicents, snapshot) = match line.product_line.as_str() {
             PLATFORM_PRODUCT_LINE => {
-                let pricing = platform_pricing(price_currency);
+                let pricing = platform_pricing(price_currency)
+                    .map_err(|error| format!("product-line sweep: {error}"))?;
                 (
                     PLATFORM_PRODUCT_LINE,
                     Some(pricing.overage_rate_millicents),
@@ -1299,6 +1619,7 @@ async fn ensure_period_records(
                 // catalog bug and the expect names the line instead of
                 // silently pricing it as something else.
                 let pricing = flat_pricing(line.product_line.as_str(), price_currency)
+                    .map_err(|error| format!("product-line sweep: {error}"))?
                     .unwrap_or_else(|| {
                         panic!(
                             "platform-catalog carries no price for flat product line {}",
@@ -1308,8 +1629,26 @@ async fn ensure_period_records(
                 (line.product_line.as_str(), None, pricing.snapshot_json())
             }
             MAILBOXES_PRODUCT_LINE => {
-                let pricing = mailbox_pricing(price_currency);
+                let pricing = mailbox_pricing(price_currency)
+                    .map_err(|error| format!("product-line sweep: {error}"))?;
                 (MAILBOXES_PRODUCT_LINE, None, pricing.snapshot_json())
+            }
+            DEDICATED_TENANT_PRODUCT_LINE => {
+                // The contracted setup fee comes from the contract row (a
+                // deployment-level negotiation inside the catalog range);
+                // the monthly list and the minimum-term floor come from the
+                // catalog. The one-time setup fee rides exactly one period:
+                // the first one to claim the contract's setup marker.
+                let mut pricing = dedicated_tenant_pricing(
+                    price_currency,
+                    line.setup_fee_cents,
+                    line.minimum_term_months,
+                )
+                .map_err(|error| format!("product-line sweep: {error}"))?;
+                if !claim_dedicated_tenant_setup_fee(&mut tx, tenant_id, period_start).await? {
+                    pricing.setup_fee_cents = 0;
+                }
+                (DEDICATED_TENANT_PRODUCT_LINE, None, pricing.snapshot_json())
             }
             other => {
                 return Err(format!(
@@ -1331,7 +1670,7 @@ async fn ensure_period_records(
         .bind(line.product_line.as_str())
         .bind(period_start)
         .bind(period_end)
-        .bind(currency)
+        .bind(&currency)
         .bind(plan_name)
         .bind(rate_millicents.map(|rate| rate as i32))
         .bind(snapshot.to_string())
@@ -1343,6 +1682,57 @@ async fn ensure_period_records(
         .await
         .map_err(|e| format!("product-line sweep: period claim commit failed: {e}"))?;
     Ok(())
+}
+
+/// Claim the Dedicated Tenant contract's ONE-TIME setup fee for
+/// `period_start`.
+///
+/// Exactly-once across overlapping sweep runs: the contract row carries
+/// `setup_fee_period_start`; the first period row to run this conditional
+/// UPDATE wins the marker (PostgreSQL row locking serializes concurrent
+/// sweeps), every later period gets `false` and bills the monthly line only.
+/// An already-created period row keeps its frozen snapshot and never claims
+/// the marker afterwards (its pricing was decided when it was written).
+async fn claim_dedicated_tenant_setup_fee(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tenant_id: &str,
+    period_start: DateTime<Utc>,
+) -> Result<bool, String> {
+    let period_exists: bool = sqlx::query_scalar(
+        r#"
+        SELECT EXISTS(
+            SELECT 1 FROM billing_periods
+            WHERE tenant_id = $1 AND usage_kind = $2 AND period_start = $3
+        )
+        "#,
+    )
+    .bind(tenant_id)
+    .bind(DEDICATED_TENANT_USAGE_KIND)
+    .bind(period_start)
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(|e| format!("product-line sweep: dedicated tenant period lookup failed: {e}"))?;
+    if period_exists {
+        return Ok(false);
+    }
+    let claimed: Option<Uuid> = sqlx::query_scalar(
+        r#"
+        UPDATE product_line_contracts
+           SET setup_fee_period_start = $3,
+               updated_at = NOW()
+         WHERE tenant_id = $1
+           AND product_line = $2
+           AND setup_fee_period_start IS NULL
+        RETURNING id
+        "#,
+    )
+    .bind(tenant_id)
+    .bind(DEDICATED_TENANT_PRODUCT_LINE)
+    .bind(period_start)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(|e| format!("product-line sweep: dedicated tenant setup-fee claim failed: {e}"))?;
+    Ok(claimed.is_some())
 }
 
 /// Claim one UNBILLED period row inside the caller's transaction. Returns
@@ -1383,6 +1773,7 @@ async fn claim_period(
         COMPLIANCE_USAGE_KIND => COMPLIANCE_USAGE_KIND,
         PLACEMENT_USAGE_KIND => PLACEMENT_USAGE_KIND,
         EU_ONLY_ROUTING_USAGE_KIND => EU_ONLY_ROUTING_USAGE_KIND,
+        DEDICATED_TENANT_USAGE_KIND => DEDICATED_TENANT_USAGE_KIND,
         other => {
             return Err(format!(
                 "product-line sweep: unsupported usage kind {other}"
@@ -1405,6 +1796,9 @@ enum PeriodCharge {
     /// Compliance / Inbox Placement Monitoring / EU-only Routing: one flat
     /// monthly amount, priced from the frozen snapshot.
     Flat(FlatPricing),
+    /// Dedicated Tenant: the monthly list plus the one-time setup fee on the
+    /// contract's first billed period, priced from the frozen snapshot.
+    DedicatedTenant(DedicatedTenantPricing),
 }
 
 #[derive(Debug)]
@@ -1474,6 +1868,15 @@ async fn build_charges(
                 })?;
                 charges.push(PeriodCharge::Flat(pricing));
             }
+            DEDICATED_TENANT_USAGE_KIND => {
+                let pricing = snapshot_dedicated_tenant_pricing(&period.pricing_snapshot)
+                    .ok_or_else(|| ChargeFailure::Unpriced {
+                        period_id: period.id,
+                        reason: "dedicated_tenant period has no usable pricing snapshot"
+                            .to_string(),
+                    })?;
+                charges.push(PeriodCharge::DedicatedTenant(pricing));
+            }
             other => {
                 return Err(ChargeFailure::Fatal(format!(
                     "product-line sweep: unsupported usage kind {other}"
@@ -1542,6 +1945,26 @@ fn snapshot_flat_pricing(snapshot: &serde_json::Value) -> Option<FlatPricing> {
         product_line,
         currency,
         monthly_cents: snapshot.get("monthlyCents").and_then(|v| v.as_i64())?,
+    })
+}
+
+/// Rebuild [`DedicatedTenantPricing`] from a period's snapshot JSON. `None`
+/// when the snapshot is missing/corrupt or carries a currency the line has
+/// no price book for (USD): the caller surfaces the period for review
+/// instead of pricing from today's catalog (audit F32) or mislabelling EUR
+/// cents as USD.
+fn snapshot_dedicated_tenant_pricing(
+    snapshot: &serde_json::Value,
+) -> Option<DedicatedTenantPricing> {
+    let currency: &'static str = match snapshot.get("currency").and_then(|v| v.as_str())? {
+        "EUR" => "EUR",
+        _ => return None,
+    };
+    Some(DedicatedTenantPricing {
+        currency,
+        monthly_cents: snapshot.get("monthlyCents").and_then(|v| v.as_i64())?,
+        setup_fee_cents: snapshot.get("setupFeeCents").and_then(|v| v.as_i64())?,
+        minimum_term_months: snapshot.get("minimumTermMonths").and_then(|v| v.as_i64())?,
     })
 }
 
@@ -1722,6 +2145,13 @@ pub async fn active_product_lines(
 /// One product-line purchase request. `units` is the purchased seat/unit
 /// count (1 for the flat lines; the Mailboxes line still bills the seats
 /// actually provisioned, so `units` is recorded, not billed).
+///
+/// `setup_fee_cents` and `minimum_term_months` are Dedicated Tenant terms
+/// only. The setup fee is validated against the catalog range (and
+/// defaulted to the published catalog floor when absent); the minimum term
+/// is validated against the catalog minimum and defaulted to it. Both are
+/// refused on every other line, so a caller can never believe a setup fee
+/// was recorded on the wrong contract.
 #[derive(Debug, Clone)]
 pub struct ProductLinePurchaseInput {
     pub tenant_id: String,
@@ -1729,6 +2159,8 @@ pub struct ProductLinePurchaseInput {
     pub billing_interval: String,
     pub units: i64,
     pub idempotency_key: Option<String>,
+    pub setup_fee_cents: Option<i64>,
+    pub minimum_term_months: Option<i64>,
 }
 
 /// The recorded contract row returned by the purchase/cancel/read paths.
@@ -1745,6 +2177,13 @@ pub struct ProductLineContractRecord {
     pub contracted_units: i32,
     pub purchase_key: Option<String>,
     pub notes: String,
+    /// Dedicated Tenant contracted one-time setup fee (cents) and minimum
+    /// term (months); `None` on every other line. `setup_fee_period_start`
+    /// is the month that claimed the one-time setup fee (the exactly-once
+    /// marker), `None` until the first billed month.
+    pub setup_fee_cents: Option<i64>,
+    pub minimum_term_months: Option<i64>,
+    pub setup_fee_period_start: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -1788,6 +2227,22 @@ pub enum ProductLineError {
     InvalidUnits(i64),
     #[error("idempotency key must be at most 128 characters")]
     InvalidIdempotencyKey,
+    /// The tenant's billing currency is outside the supported books
+    /// (EUR/USD). Named and typed so the CP write refuses the contract
+    /// instead of discovering the mispricing at invoice time.
+    #[error(transparent)]
+    Currency(#[from] ProductLineCurrencyError),
+    /// The Dedicated Tenant price set could not be resolved (missing USD
+    /// setup figure, setup fee outside the catalog range, minimum term below
+    /// the catalog minimum). Typed so the contract write names the exact
+    /// refusal instead of recording a contract the sweep cannot bill.
+    #[error(transparent)]
+    DedicatedTenant(#[from] DedicatedTenantPricingError),
+    /// Setup fee / minimum term were supplied for a line that does not sell
+    /// them. Refused rather than dropped: a caller must never believe a term
+    /// was recorded on the wrong contract.
+    #[error("setup fee and minimum term apply only to the dedicated_tenant line, not `{0}`")]
+    TermsNotApplicable(String),
     #[error("tenant `{0}` not found")]
     TenantNotFound(String),
     #[error("no product-line contract for tenant `{tenant_id}` and line `{product_line}`")]
@@ -1807,7 +2262,8 @@ pub enum ProductLineError {
 }
 
 const CONTRACT_COLUMNS: &str = "id, tenant_id, product_line, status, active_from, ended_at, \
-     billing_interval, contracted_units, purchase_key, notes, created_at, updated_at";
+     billing_interval, contracted_units, purchase_key, notes, setup_fee_cents, \
+     minimum_term_months, setup_fee_period_start, created_at, updated_at";
 
 fn normalize_product_line(raw: &str) -> Result<&'static str, ProductLineError> {
     let normalized = raw.trim().to_ascii_lowercase();
@@ -1818,7 +2274,7 @@ fn normalize_product_line(raw: &str) -> Result<&'static str, ProductLineError> {
         .ok_or_else(|| {
             ProductLineError::UnknownLine(
                 raw.trim().to_string(),
-                "platform, mailboxes, compliance, placement, eu_only_routing",
+                "platform, mailboxes, compliance, placement, eu_only_routing, dedicated_tenant",
             )
         })
 }
@@ -1904,14 +2360,19 @@ pub async fn purchase_product_line(
         .execute(&mut *tx)
         .await?;
 
-    let tenant_exists: bool =
-        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM tenants WHERE id = $1)")
+    // Contract creation is an entry point for the currency contract: the
+    // tenant is billed in `settings.billingCurrency`, so an unsupported value
+    // must be refused HERE, at the commercial write, with the named typed
+    // error, not discovered months later by the sweep.
+    let tenant_currency: Option<Option<String>> =
+        sqlx::query_scalar("SELECT settings->>'billingCurrency' FROM tenants WHERE id = $1")
             .bind(&input.tenant_id)
-            .fetch_one(&mut *tx)
+            .fetch_optional(&mut *tx)
             .await?;
-    if !tenant_exists {
+    let Some(tenant_currency) = tenant_currency else {
         return Err(ProductLineError::TenantNotFound(input.tenant_id));
-    }
+    };
+    let tenant_currency = normalize_billing_currency(tenant_currency.as_deref())?;
 
     if let Some(key) = idempotency_key {
         let existing: Option<ProductLineContractRecord> = sqlx::query_as(&format!(
@@ -1948,13 +2409,21 @@ pub async fn purchase_product_line(
         ProductLinePurchaseOutcome::Created
     };
 
+    // Dedicated Tenant terms: resolved (and validated) BEFORE the row is
+    // written, so a contract the sweep cannot bill is never recorded. The
+    // catalog floor / minimum is the documented default when the caller
+    // records no negotiated term; nothing is invented.
+    let (setup_fee_cents, minimum_term_months) =
+        resolve_purchase_terms(product_line, &tenant_currency, &input)?;
+
     let record: ProductLineContractRecord = sqlx::query_as(&format!(
         r#"
         INSERT INTO product_line_contracts (
             tenant_id, product_line, status, active_from, ended_at,
-            billing_interval, contracted_units, purchase_key
+            billing_interval, contracted_units, purchase_key,
+            setup_fee_cents, minimum_term_months
         )
-        VALUES ($1, $2, 'active', NOW(), NULL, $3, $4, $5)
+        VALUES ($1, $2, 'active', NOW(), NULL, $3, $4, $5, $6, $7)
         ON CONFLICT (tenant_id, product_line) DO UPDATE SET
             status = 'active',
             active_from = CASE WHEN product_line_contracts.status = 'active'
@@ -1964,6 +2433,10 @@ pub async fn purchase_product_line(
             billing_interval = EXCLUDED.billing_interval,
             contracted_units = EXCLUDED.contracted_units,
             purchase_key = COALESCE(EXCLUDED.purchase_key, product_line_contracts.purchase_key),
+            setup_fee_cents = COALESCE(EXCLUDED.setup_fee_cents,
+                                       product_line_contracts.setup_fee_cents),
+            minimum_term_months = COALESCE(EXCLUDED.minimum_term_months,
+                                           product_line_contracts.minimum_term_months),
             updated_at = NOW()
         RETURNING {CONTRACT_COLUMNS}
         "#
@@ -1973,6 +2446,8 @@ pub async fn purchase_product_line(
     .bind(billing_interval)
     .bind(input.units)
     .bind(idempotency_key)
+    .bind(setup_fee_cents)
+    .bind(minimum_term_months)
     .fetch_one(&mut *tx)
     .await?;
 
@@ -1991,6 +2466,8 @@ pub async fn purchase_product_line(
             "billingInterval": billing_interval,
             "units": input.units,
             "idempotencyKey": idempotency_key,
+            "setupFeeCents": setup_fee_cents,
+            "minimumTermMonths": minimum_term_months,
             "outcome": outcome.as_str(),
         }),
         Utc::now(),
@@ -2000,6 +2477,63 @@ pub async fn purchase_product_line(
 
     tx.commit().await?;
     Ok((record, outcome))
+}
+
+/// Resolve the purchase's Dedicated Tenant terms:
+/// `(setup_fee_cents, minimum_term_months)`, both `None` for every other
+/// line. Refuses terms on a line that does not sell them, so a caller can
+/// never believe a setup fee was recorded on the wrong contract.
+fn resolve_purchase_terms(
+    product_line: &str,
+    billing_currency: &str,
+    input: &ProductLinePurchaseInput,
+) -> Result<(Option<i64>, Option<i64>), ProductLineError> {
+    if product_line != DEDICATED_TENANT_PRODUCT_LINE {
+        if input.setup_fee_cents.is_some() || input.minimum_term_months.is_some() {
+            return Err(ProductLineError::TermsNotApplicable(
+                product_line.to_string(),
+            ));
+        }
+        return Ok((None, None));
+    }
+    let pricing = dedicated_tenant_pricing(
+        billing_currency,
+        input.setup_fee_cents,
+        input.minimum_term_months,
+    )?;
+    Ok((
+        Some(pricing.setup_fee_cents),
+        Some(pricing.minimum_term_months),
+    ))
+}
+
+/// Record (or renew) the Dedicated Tenant contract row when the deployment
+/// lifecycle activates it (`enterprise::dedicated_tenant::transition_dedicated`,
+/// the `provisioned -> active` transition). The deployment's validated setup
+/// fee and minimum term are the contracted figures; when either is absent the
+/// catalog floor / catalog minimum is recorded. This is the SAME CP write
+/// path as a manual purchase ([`purchase_product_line`]), so activation and
+/// ops cannot drift.
+pub async fn activate_dedicated_tenant_contract(
+    db: &PgPool,
+    tenant_id: &str,
+    setup_fee_cents: Option<i64>,
+    minimum_term_months: Option<i64>,
+) -> Result<ProductLineContractRecord, ProductLineError> {
+    let (record, _outcome) = purchase_product_line(
+        db,
+        ProductLinePurchaseInput {
+            tenant_id: tenant_id.to_string(),
+            product_line: DEDICATED_TENANT_PRODUCT_LINE.to_string(),
+            billing_interval: "monthly".to_string(),
+            units: 1,
+            idempotency_key: None,
+            setup_fee_cents,
+            minimum_term_months,
+        },
+    )
+    .await?;
+    Ok(record)
 }
 
 /// Terminate a product-line contract. The first cancellation instant is
@@ -2091,11 +2625,11 @@ mod tests {
     }
 
     fn eur() -> PlatformPricing {
-        platform_pricing("EUR")
+        platform_pricing("EUR").expect("EUR is a supported book")
     }
 
     fn usd() -> PlatformPricing {
-        platform_pricing("USD")
+        platform_pricing("USD").expect("USD is a supported book")
     }
 
     /// The catalog IS the price table: the ProductLine row and the per-1K /
@@ -2211,7 +2745,7 @@ mod tests {
     /// Mailboxes: 10-seat minimum, per-seat price, archive per flagged seat.
     #[test]
     fn mailbox_seats_floor_at_ten_and_archive_prices_per_flagged_seat() {
-        let pricing = mailbox_pricing("EUR");
+        let pricing = mailbox_pricing("EUR").expect("EUR is a supported book");
         assert_eq!(pricing.minimum_seats, 10);
         assert_eq!(pricing.seat_cents, 600, "€6 per seat");
         assert_eq!(pricing.archive_seat_cents, 200, "€2 per archived seat");
@@ -2243,7 +2777,7 @@ mod tests {
         assert_eq!(twelve_four.total_cents(), 12 * 600 + 4 * 200);
 
         // USD ladder: $7 per seat, $2 archive.
-        let usd = mailbox_pricing("USD");
+        let usd = mailbox_pricing("USD").expect("USD is a supported book");
         assert_eq!(usd.seat_cents, 700);
         assert_eq!(usd.archive_seat_cents, 200);
         let usd_charge = mailbox_charge(15, 3, &usd);
@@ -2256,56 +2790,280 @@ mod tests {
         let seats = platform_catalog::addon_by_name("mailboxes").expect("add-on row");
         let archive =
             platform_catalog::addon_by_name("mailbox_archive_journaling").expect("add-on row");
-        let eur = mailbox_pricing("EUR");
+        let eur = mailbox_pricing("EUR").expect("EUR is a supported book");
         assert_eq!(eur.seat_cents, seats.price_cents);
         assert_eq!(eur.seat_cents, 600);
         assert_eq!(eur.archive_seat_cents, archive.price_cents);
         assert_eq!(eur.archive_seat_cents, 200);
         assert_eq!(eur.minimum_seats, platform_catalog::MAILBOX_MINIMUM_SEATS);
 
-        let usd = mailbox_pricing("USD");
+        let usd = mailbox_pricing("USD").expect("USD is a supported book");
         assert_eq!(usd.seat_cents, seats.price_usd_cents);
         assert_eq!(usd.seat_cents, 700);
         assert_eq!(usd.archive_seat_cents, archive.price_usd_cents);
         assert_eq!(usd.archive_seat_cents, 200);
     }
 
-    /// Currency selection mirrors the checkout rule: USD only for a
-    /// USD-billing tenant, EUR otherwise.
+    /// Currency selection is constrained to the two supported books (fifth
+    /// external audit, P1): USD only for a USD-billing tenant, EUR only for
+    /// EUR, and GBP is a typed refusal, never an EUR price list under a GBP
+    /// label.
     #[test]
     fn currency_selection_follows_the_tenant_billing_currency() {
-        assert_eq!(catalog_price_currency("USD"), "USD");
-        assert_eq!(catalog_price_currency("usd"), "USD");
-        assert_eq!(catalog_price_currency(" usd "), "USD");
-        assert_eq!(catalog_price_currency("EUR"), "EUR");
-        assert_eq!(catalog_price_currency("GBP"), "EUR");
-        assert_eq!(catalog_price_currency(""), "EUR");
+        assert_eq!(catalog_price_currency("USD").expect("USD"), "USD");
+        assert_eq!(
+            catalog_price_currency("usd").expect("usd normalizes"),
+            "USD"
+        );
+        assert_eq!(catalog_price_currency(" usd ").expect("trimmed usd"), "USD");
+        assert_eq!(catalog_price_currency("EUR").expect("EUR"), "EUR");
+        assert_eq!(
+            catalog_price_currency("GBP"),
+            Err(ProductLineCurrencyError::UnsupportedCurrency(
+                "GBP".to_string()
+            )),
+            "GBP must be rejected, not silently priced from the EUR list"
+        );
+        assert!(catalog_price_currency("").is_err());
 
-        // A USD tenant's whole price set is the USD list.
-        let usd = platform_pricing(catalog_price_currency("USD"));
+        // A USD tenant's whole price set is the USD list; EUR uses EUR.
+        let price_currency = catalog_price_currency("USD").expect("USD");
+        let usd = platform_pricing(price_currency).expect("USD platform prices");
         assert_eq!(usd.currency, "USD");
         assert_eq!(usd.base_cents, 109_000);
-        let usd_seats = mailbox_pricing(catalog_price_currency("USD"));
+        let usd_seats = mailbox_pricing(price_currency).expect("USD mailbox prices");
         assert_eq!(usd_seats.currency, "USD");
         assert_eq!(usd_seats.seat_cents, 700);
+        let eur =
+            platform_pricing(catalog_price_currency("EUR").expect("EUR")).expect("EUR prices");
+        assert_eq!(eur.currency, "EUR");
+        assert_eq!(eur.base_cents, 99_000);
+        // Every catalog lookup refuses the unsupported book.
+        assert!(platform_pricing("GBP").is_err());
+        assert!(mailbox_pricing("GBP").is_err());
+        assert!(flat_pricing(COMPLIANCE_PRODUCT_LINE, "GBP").is_err());
     }
 
-    /// `normalize_billing_currency` mirrors the api-server resolver exactly
-    /// (trim, uppercase, 3-letter ASCII only, else EUR).
+    /// Normalization is exactly EUR|USD (trimmed, case-insensitive), missing
+    /// settings keep EUR, and every other code is a named typed error.
     #[test]
-    fn billing_currency_normalization_matches_the_resolver() {
-        assert_eq!(normalize_billing_currency(Some("usd")), "USD");
-        assert_eq!(normalize_billing_currency(Some(" eur ")), "EUR");
-        assert_eq!(normalize_billing_currency(Some("gbp")), "GBP");
-        assert_eq!(normalize_billing_currency(Some("US")), "EUR");
-        assert_eq!(normalize_billing_currency(Some("EURO")), "EUR");
-        assert_eq!(normalize_billing_currency(Some("")), "EUR");
-        assert_eq!(normalize_billing_currency(Some("e1r")), "EUR");
-        assert_eq!(normalize_billing_currency(None), "EUR");
+    fn billing_currency_normalization_is_eur_usd_only() {
+        assert_eq!(normalize_billing_currency(Some("usd")).expect("USD"), "USD");
         assert_eq!(
-            normalize_billing_currency(None),
+            normalize_billing_currency(Some(" eur ")).expect("EUR"),
+            "EUR"
+        );
+        assert_eq!(
+            normalize_billing_currency(Some("gbp")),
+            Err(ProductLineCurrencyError::UnsupportedCurrency(
+                "gbp".to_string()
+            ))
+        );
+        assert!(normalize_billing_currency(Some("US")).is_err());
+        assert!(normalize_billing_currency(Some("EURO")).is_err());
+        assert!(normalize_billing_currency(Some("e1r")).is_err());
+        assert_eq!(
+            normalize_billing_currency(Some("")).expect("default"),
+            "EUR"
+        );
+        assert_eq!(normalize_billing_currency(None).expect("default"), "EUR");
+        assert_eq!(
+            normalize_billing_currency(None).expect("default"),
             DEFAULT_PRODUCT_LINE_CURRENCY
         );
+    }
+
+    /// The Dedicated Tenant price set comes from the catalog row and the
+    /// catalog setup range; nothing here is a second price table.
+    #[test]
+    fn dedicated_tenant_prices_come_from_the_catalog_row() {
+        let line = platform_catalog::product_line_by_name("dedicated_tenant")
+            .expect("catalog carries the dedicated tenant row");
+        assert_eq!(line.price_monthly_cents, 400_000, "from EUR 4,000/month");
+        assert_eq!(line.price_monthly_usd_cents, 450_000, "from $4,500/month");
+        assert_eq!(line.minimum_contract_months, 12, "12-month minimum");
+
+        let pricing = dedicated_tenant_pricing("EUR", None, None).expect("EUR price set");
+        assert_eq!(pricing.currency, "EUR");
+        assert_eq!(pricing.monthly_cents, line.price_monthly_cents);
+        assert_eq!(pricing.monthly_cents, 400_000);
+        assert_eq!(
+            pricing.setup_fee_cents,
+            platform_catalog::DEDICATED_TENANT_SETUP_MIN_CENTS,
+            "no contracted figure keeps the published floor (EUR 10k)"
+        );
+        assert_eq!(pricing.setup_fee_cents, 1_000_000);
+        assert_eq!(pricing.minimum_term_months, 12);
+        assert_eq!(pricing.total_cents(), 1_400_000);
+
+        // A contracted fee inside the range and a longer term are recorded
+        // exactly as negotiated.
+        let negotiated =
+            dedicated_tenant_pricing("EUR", Some(2_500_000), Some(24)).expect("negotiated");
+        assert_eq!(negotiated.setup_fee_cents, 2_500_000);
+        assert_eq!(negotiated.minimum_term_months, 24);
+        assert_eq!(negotiated.monthly_cents, 400_000);
+    }
+
+    /// The setup fee must sit inside the catalog's published range
+    /// (EUR 10k-40k); the bounds themselves are valid.
+    #[test]
+    fn dedicated_tenant_setup_fee_is_validated_against_the_catalog_range() {
+        assert_eq!(
+            dedicated_tenant_pricing("EUR", Some(1_000_000), None)
+                .expect("floor is valid")
+                .setup_fee_cents,
+            1_000_000
+        );
+        assert_eq!(
+            dedicated_tenant_pricing("EUR", Some(4_000_000), None)
+                .expect("ceiling is valid")
+                .setup_fee_cents,
+            4_000_000
+        );
+        for cents in [0, 999_999, 4_000_001] {
+            assert_eq!(
+                dedicated_tenant_pricing("EUR", Some(cents), None),
+                Err(DedicatedTenantPricingError::SetupFeeOutOfRange {
+                    cents,
+                    min_cents: 1_000_000,
+                    max_cents: 4_000_000,
+                }),
+                "setup fee {cents} is outside the catalog range"
+            );
+        }
+    }
+
+    /// The contracted term may exceed the catalog minimum but never undercut
+    /// it (the plan's 12-month minimum).
+    #[test]
+    fn dedicated_tenant_minimum_term_cannot_go_below_the_plan() {
+        assert_eq!(
+            dedicated_tenant_pricing("EUR", None, Some(6)),
+            Err(DedicatedTenantPricingError::MinimumTermBelowPlan {
+                months: 6,
+                minimum_months: 12,
+            })
+        );
+        assert_eq!(
+            dedicated_tenant_pricing("EUR", None, Some(11)),
+            Err(DedicatedTenantPricingError::MinimumTermBelowPlan {
+                months: 11,
+                minimum_months: 12,
+            })
+        );
+        assert_eq!(
+            dedicated_tenant_pricing("EUR", None, Some(12))
+                .expect("the catalog minimum itself is valid")
+                .minimum_term_months,
+            12
+        );
+        assert_eq!(
+            dedicated_tenant_pricing("EUR", None, Some(36))
+                .expect("a longer commitment is valid")
+                .minimum_term_months,
+            36
+        );
+    }
+
+    /// Dedicated Tenant is EUR-only in the books: the catalog publishes the
+    /// monthly USD list but no USD setup-fee figure, so USD is a TYPED
+    /// refusal, never a conversion or EUR cents under a USD label. Any other
+    /// currency is the shared typed currency refusal.
+    #[test]
+    fn dedicated_tenant_usd_is_refused_with_a_typed_error() {
+        assert_eq!(
+            dedicated_tenant_pricing("USD", Some(1_000_000), Some(12)),
+            Err(DedicatedTenantPricingError::NoUsdSetupFee)
+        );
+        assert_eq!(
+            dedicated_tenant_pricing("usd", None, None),
+            Err(DedicatedTenantPricingError::NoUsdSetupFee)
+        );
+        assert_eq!(
+            dedicated_tenant_pricing("GBP", None, None),
+            Err(DedicatedTenantPricingError::Currency(
+                ProductLineCurrencyError::UnsupportedCurrency("GBP".to_string())
+            ))
+        );
+    }
+
+    /// Line shapes: the first billed period carries the monthly list AND the
+    /// one-time setup fee as its own line; later periods carry the month
+    /// only.
+    #[test]
+    fn dedicated_tenant_invoice_lines_carry_setup_once_then_month_only() {
+        let first = dedicated_tenant_pricing("EUR", Some(2_000_000), None).expect("first period");
+        let lines = dedicated_tenant_charge_lines(&first, "2026-05");
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].quantity, 1);
+        assert_eq!(lines[0].unit_price, 400_000);
+        assert!(lines[0].description.contains("Dedicated Tenant"));
+        assert!(lines[0].description.contains("4000.00 EUR per month"));
+        assert_eq!(lines[1].quantity, 1);
+        assert_eq!(lines[1].unit_price, 2_000_000);
+        assert!(lines[1].description.contains("one-time setup fee"));
+        assert!(lines[1].description.contains("20000.00 EUR"));
+        let subtotal: i64 = lines.iter().map(|line| line.amount_cents()).sum();
+        assert_eq!(subtotal, first.total_cents());
+        assert_eq!(subtotal, 2_400_000);
+
+        let later = DedicatedTenantPricing {
+            setup_fee_cents: 0,
+            ..first
+        };
+        let lines = dedicated_tenant_charge_lines(&later, "2026-06");
+        assert_eq!(lines.len(), 1, "no second setup line");
+        assert_eq!(lines[0].unit_price, 400_000);
+        assert_eq!(later.total_cents(), 400_000);
+    }
+
+    /// The frozen price set round-trips through the snapshot JSON; a USD or
+    /// corrupt snapshot is never repriced.
+    #[test]
+    fn dedicated_tenant_snapshot_round_trips() {
+        let first = dedicated_tenant_pricing("EUR", Some(3_000_000), Some(24)).expect("EUR");
+        assert_eq!(
+            snapshot_dedicated_tenant_pricing(&first.snapshot_json()),
+            Some(first)
+        );
+        let later = DedicatedTenantPricing {
+            setup_fee_cents: 0,
+            ..first
+        };
+        assert_eq!(
+            snapshot_dedicated_tenant_pricing(&later.snapshot_json()),
+            Some(later)
+        );
+        assert_eq!(
+            snapshot_dedicated_tenant_pricing(&serde_json::Value::Null),
+            None
+        );
+        assert_eq!(
+            snapshot_dedicated_tenant_pricing(&serde_json::json!({
+                "currency": "USD", "monthlyCents": 450_000, "setupFeeCents": 1_000_000,
+                "minimumTermMonths": 12
+            })),
+            None,
+            "a USD snapshot is surfaced, never billed as EUR"
+        );
+        assert_eq!(
+            snapshot_dedicated_tenant_pricing(&serde_json::json!({"currency": "EUR"})),
+            None
+        );
+    }
+
+    /// Dedicated Tenant is in the billable vocabulary and is NOT a flat
+    /// line (it carries a one-time setup fee and a minimum term).
+    #[test]
+    fn dedicated_tenant_is_a_billable_product_line() {
+        assert!(BILLABLE_PRODUCT_LINES.contains(&DEDICATED_TENANT_PRODUCT_LINE));
+        assert_eq!(
+            normalize_product_line(" Dedicated_Tenant ").expect("normalized"),
+            DEDICATED_TENANT_PRODUCT_LINE
+        );
+        assert!(!is_flat_product_line(DEDICATED_TENANT_PRODUCT_LINE));
+        assert_eq!(DEDICATED_TENANT_USAGE_KIND, DEDICATED_TENANT_PRODUCT_LINE);
     }
 
     /// Contract coverage is full-month only, no proration.
@@ -2380,7 +3138,7 @@ mod tests {
     /// when flagged seats exist.
     #[test]
     fn mailbox_invoice_line_shapes_are_exact() {
-        let charge = mailbox_charge(5, 2, &mailbox_pricing("EUR"));
+        let charge = mailbox_charge(5, 2, &mailbox_pricing("EUR").expect("EUR supported"));
         let lines = mailbox_charge_lines(&charge, "2026-05");
         assert_eq!(lines.len(), 2);
         assert_eq!(lines[0].quantity, 10, "floored at the 10-seat minimum");
@@ -2392,8 +3150,10 @@ mod tests {
         assert_eq!(subtotal, 6_000 + 400);
         assert_eq!(subtotal, charge.total_cents());
 
-        let no_archive =
-            mailbox_charge_lines(&mailbox_charge(10, 0, &mailbox_pricing("EUR")), "2026-05");
+        let no_archive = mailbox_charge_lines(
+            &mailbox_charge(10, 0, &mailbox_pricing("EUR").expect("EUR supported")),
+            "2026-05",
+        );
         assert_eq!(no_archive.len(), 1);
     }
 
@@ -2406,7 +3166,7 @@ mod tests {
             snapshot_platform_pricing(&platform.snapshot_json()),
             Some(platform)
         );
-        let seats = mailbox_pricing("USD");
+        let seats = mailbox_pricing("USD").expect("USD supported");
         assert_eq!(
             snapshot_mailbox_pricing(&seats.snapshot_json()),
             Some(seats)
@@ -3214,7 +3974,9 @@ mod coverage_adversarial {
                 .expect("batch currencies");
             assert_eq!(query_count::count("product_lines.currency_load"), 1);
             assert_eq!(currencies.len(), 3);
-            assert!(currencies.values().all(|currency| currency == "USD"));
+            assert!(currencies
+                .values()
+                .all(|currency| currency.as_deref().expect("supported currency") == "USD"));
 
             // Sweep level: the same two statements drive all three tenants
             // (no addresses: the months are surfaced as needs_review, which is
@@ -3353,11 +4115,38 @@ mod coverage_adversarial {
                 billing_interval: "monthly".to_string(),
                 units: 1,
                 idempotency_key: key.map(str::to_string),
+                setup_fee_cents: None,
+                minimum_term_months: None,
             },
         )
         .await
         .expect("purchase product line");
         assert_eq!(outcome, ProductLinePurchaseOutcome::Created, "{line}");
+        record
+    }
+
+    /// Purchase the Dedicated Tenant line with explicit contracted terms.
+    async fn purchase_dedicated_tenant(
+        env: &Env,
+        tenant: &str,
+        setup_fee_cents: Option<i64>,
+        minimum_term_months: Option<i64>,
+    ) -> ProductLineContractRecord {
+        let (record, outcome) = purchase_product_line(
+            &env.pool,
+            ProductLinePurchaseInput {
+                tenant_id: tenant.to_string(),
+                product_line: "dedicated_tenant".to_string(),
+                billing_interval: "monthly".to_string(),
+                units: 1,
+                idempotency_key: None,
+                setup_fee_cents,
+                minimum_term_months,
+            },
+        )
+        .await
+        .expect("purchase dedicated tenant line");
+        assert_eq!(outcome, ProductLinePurchaseOutcome::Created);
         record
     }
 
@@ -3583,6 +4372,8 @@ mod coverage_adversarial {
                 billing_interval: "monthly".to_string(),
                 units: 1,
                 idempotency_key: Some("same-key".to_string()),
+                setup_fee_cents: None,
+                minimum_term_months: None,
             },
         )
         .await
@@ -3597,6 +4388,8 @@ mod coverage_adversarial {
                 billing_interval: "monthly".to_string(),
                 units: 1,
                 idempotency_key: Some("same-key".to_string()),
+                setup_fee_cents: None,
+                minimum_term_months: None,
             },
         )
         .await
@@ -3625,6 +4418,8 @@ mod coverage_adversarial {
                 billing_interval: "monthly".to_string(),
                 units: 1,
                 idempotency_key: Some("same-key".to_string()),
+                setup_fee_cents: None,
+                minimum_term_months: None,
             },
         )
         .await
@@ -3633,6 +4428,77 @@ mod coverage_adversarial {
             conflict,
             ProductLineError::IdempotencyConflict { .. }
         ));
+    });
+
+    // Fifth external audit (P1): contract creation refuses a tenant whose
+    // billing currency is outside the supported books. The error is the
+    // typed, named currency refusal and NO contract is written.
+    env_test!(
+        unsupported_billing_currency_is_refused_at_contract_creation,
+        |env| {
+            let tenant = "plcov_ccy_gbp_purchase";
+            seed_tenant(env, tenant, Some("gbp")).await;
+
+            let error = purchase_product_line(
+                &env.pool,
+                ProductLinePurchaseInput {
+                    tenant_id: tenant.to_string(),
+                    product_line: "platform".to_string(),
+                    billing_interval: "monthly".to_string(),
+                    units: 1,
+                    idempotency_key: None,
+                    setup_fee_cents: None,
+                    minimum_term_months: None,
+                },
+            )
+            .await
+            .expect_err("GBP must be refused at contract creation");
+            assert!(matches!(
+                error,
+                ProductLineError::Currency(ProductLineCurrencyError::UnsupportedCurrency(ref raw))
+                    if raw == "gbp"
+            ));
+
+            let rows: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*)::bigint FROM product_line_contracts WHERE tenant_id = $1",
+            )
+            .bind(tenant)
+            .fetch_one(&env.pool)
+            .await
+            .expect("contract count");
+            assert_eq!(rows, 0, "a refused currency writes no contract");
+        }
+    );
+
+    // Fifth external audit (P1): the sweep never prices a contract from the
+    // wrong list. A GBP tenant is skipped, nothing is billed, and no period
+    // row is created under the unsupported code.
+    env_test!(unsupported_billing_currency_is_never_invoiced, |env| {
+        let tenant = "plcov_ccy_gbp_sweep";
+        let (start, _end) = target_month();
+        seed_tenant(env, tenant, Some("GBP")).await;
+        seed_address(env, tenant).await;
+        seed_contract(
+            env,
+            tenant,
+            "platform",
+            "active",
+            start - chrono::Duration::days(60),
+            None,
+        )
+        .await;
+
+        let result = sweep_product_line_months(&env.state).await.expect("sweep");
+        assert_eq!(
+            result.tenants_currency_rejected, 1,
+            "the GBP tenant must be refused, not invoiced"
+        );
+        assert_eq!(result.invoices_created, 0);
+        assert!(invoice_rows(env, tenant).await.is_empty());
+        assert!(
+            period_row(env, tenant, "platform").await.is_none(),
+            "no billing period is created for an unsupported currency"
+        );
     });
 
     // Tenant isolation: a purchase for one tenant never touches another
@@ -3704,4 +4570,286 @@ mod coverage_adversarial {
         assert!(prices.contains(&10_900));
         assert!(prices.contains(&16_500));
     });
+
+    // ------------------------------------------------------------------
+    // Dedicated Tenant line (external audit item 14)
+    // ------------------------------------------------------------------
+
+    // The contract write records the catalog price set: the contracted
+    // setup fee and minimum term when given, the catalog floor / catalog
+    // minimum when omitted. Terms on any other line are refused.
+    env_test!(dedicated_tenant_contract_records_catalog_terms, |env| {
+        let tenant = "plcov_dt_terms";
+        seed_tenant(env, tenant, None).await;
+
+        let negotiated = purchase_dedicated_tenant(env, tenant, Some(2_500_000), Some(24)).await;
+        assert_eq!(negotiated.product_line, "dedicated_tenant");
+        assert_eq!(negotiated.status, "active");
+        assert_eq!(negotiated.setup_fee_cents, Some(2_500_000));
+        assert_eq!(negotiated.minimum_term_months, Some(24));
+
+        let defaults_tenant = "plcov_dt_defaults";
+        seed_tenant(env, defaults_tenant, None).await;
+        let defaults = purchase_dedicated_tenant(env, defaults_tenant, None, None).await;
+        assert_eq!(
+            defaults.setup_fee_cents,
+            Some(platform_catalog::DEDICATED_TENANT_SETUP_MIN_CENTS),
+            "the published catalog floor is the default, never an invented figure"
+        );
+        assert_eq!(defaults.minimum_term_months, Some(12));
+
+        // Terms on a line that does not sell them are a typed refusal
+        // and write nothing.
+        let error = purchase_product_line(
+            &env.pool,
+            ProductLinePurchaseInput {
+                tenant_id: defaults_tenant.to_string(),
+                product_line: "platform".to_string(),
+                billing_interval: "monthly".to_string(),
+                units: 1,
+                idempotency_key: None,
+                setup_fee_cents: Some(2_000_000),
+                minimum_term_months: Some(12),
+            },
+        )
+        .await
+        .expect_err("terms on the platform line must be refused");
+        assert!(
+            matches!(error, ProductLineError::TermsNotApplicable(ref line) if line == "platform")
+        );
+        let platform_rows: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)::bigint FROM product_line_contracts \
+                 WHERE tenant_id = $1 AND product_line = 'platform'",
+        )
+        .bind(defaults_tenant)
+        .fetch_one(&env.pool)
+        .await
+        .expect("platform contract count");
+        assert_eq!(platform_rows, 0);
+    });
+
+    // USD Dedicated Tenant contracts are refused with the named typed
+    // error (the catalog has no USD setup-fee figure); no contract row is
+    // written.
+    env_test!(usd_dedicated_tenant_contract_is_refused, |env| {
+        let tenant = "plcov_dt_usd";
+        seed_tenant(env, tenant, Some("usd")).await;
+
+        let error = purchase_product_line(
+            &env.pool,
+            ProductLinePurchaseInput {
+                tenant_id: tenant.to_string(),
+                product_line: "dedicated_tenant".to_string(),
+                billing_interval: "monthly".to_string(),
+                units: 1,
+                idempotency_key: None,
+                setup_fee_cents: Some(1_000_000),
+                minimum_term_months: Some(12),
+            },
+        )
+        .await
+        .expect_err("USD dedicated tenant must be refused, never converted");
+        assert!(matches!(
+            error,
+            ProductLineError::DedicatedTenant(DedicatedTenantPricingError::NoUsdSetupFee)
+        ));
+        let rows: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)::bigint FROM product_line_contracts WHERE tenant_id = $1",
+        )
+        .bind(tenant)
+        .fetch_one(&env.pool)
+        .await
+        .expect("contract count");
+        assert_eq!(rows, 0, "a refused price set writes no contract");
+    });
+
+    // The first billed month carries the monthly list AND the one-time
+    // setup fee as its own line; a replay never bills a second setup.
+    env_test!(dedicated_tenant_first_month_bills_the_setup_fee, |env| {
+        let tenant = "plcov_dt_first";
+        let (start, _end) = target_month();
+        seed_tenant(env, tenant, None).await;
+        seed_address(env, tenant).await;
+        purchase_dedicated_tenant(env, tenant, Some(2_000_000), Some(12)).await;
+        backdate_contract(
+            env,
+            tenant,
+            "dedicated_tenant",
+            start - chrono::Duration::days(30),
+        )
+        .await;
+
+        let result = sweep_product_line_months(&env.state).await.expect("sweep");
+        assert_eq!(result.invoices_created, 1);
+        assert_eq!(result.periods_invoiced, 1);
+
+        let rows = invoice_rows(env, tenant).await;
+        assert_eq!(rows.len(), 1);
+        let (invoice_id, subtotal, _total, currency, _status) = rows[0].clone();
+        assert_eq!(currency, "eur");
+        assert_eq!(
+            subtotal, 2_400_000,
+            "EUR 4,000/month + EUR 20,000 one-time setup"
+        );
+        let items = line_items(env, invoice_id).await;
+        assert_eq!(items.len(), 2, "monthly line + setup line");
+        assert_eq!(items[0]["quantity"], 1);
+        assert_eq!(items[0]["unit_price"], 400_000);
+        assert_eq!(items[1]["quantity"], 1);
+        assert_eq!(items[1]["unit_price"], 2_000_000);
+        assert!(items[1]["description"]
+            .as_str()
+            .expect("description")
+            .contains("one-time setup fee"));
+
+        let (state, metered, invoice_link, period_currency) =
+            period_row(env, tenant, "dedicated_tenant")
+                .await
+                .expect("dedicated tenant period");
+        assert_eq!(state, "invoiced");
+        assert_eq!(metered, None, "no email watermark on the DT line");
+        assert_eq!(invoice_link, Some(invoice_id));
+        assert_eq!(period_currency, "EUR");
+
+        // Replay: the period is terminal, no second invoice, no second
+        // setup fee.
+        let replay = sweep_product_line_months(&env.state).await.expect("replay");
+        assert_eq!(replay.invoices_created, 0);
+        assert_eq!(replay.periods_already_terminal, 1);
+        assert_eq!(invoice_rows(env, tenant).await.len(), 1);
+    });
+
+    // A contract whose one-time setup fee was already claimed by an earlier
+    // billed month carries the month only on the next invoice (the marker
+    // on the contract is the durable exactly-once record).
+    env_test!(dedicated_tenant_later_period_bills_the_month_only, |env| {
+        let tenant = "plcov_dt_later";
+        let (start, _end) = target_month();
+        seed_tenant(env, tenant, None).await;
+        seed_address(env, tenant).await;
+
+        purchase_dedicated_tenant(env, tenant, Some(2_000_000), Some(12)).await;
+        // An earlier month already claimed the one-time setup fee.
+        sqlx::query(
+            "UPDATE product_line_contracts
+                    SET setup_fee_period_start = $3
+                  WHERE tenant_id = $1 AND product_line = $2",
+        )
+        .bind(tenant)
+        .bind("dedicated_tenant")
+        .bind(start - chrono::Duration::days(30))
+        .execute(&env.pool)
+        .await
+        .expect("mark setup fee as claimed");
+        backdate_contract(
+            env,
+            tenant,
+            "dedicated_tenant",
+            start - chrono::Duration::days(30),
+        )
+        .await;
+
+        let result = sweep_product_line_months(&env.state).await.expect("sweep");
+        assert_eq!(result.invoices_created, 1);
+        let rows = invoice_rows(env, tenant).await;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].1, 400_000, "monthly list only, no setup fee");
+        let items = line_items(env, rows[0].0).await;
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["unit_price"], 400_000);
+        // The claim is untouched: a later period never moves or re-bills
+        // the one-time marker.
+        let marker: Option<DateTime<Utc>> = sqlx::query_scalar(
+            "SELECT setup_fee_period_start FROM product_line_contracts
+                 WHERE tenant_id = $1 AND product_line = 'dedicated_tenant'",
+        )
+        .bind(tenant)
+        .fetch_one(&env.pool)
+        .await
+        .expect("setup marker");
+        assert_eq!(
+            marker,
+            Some(start - chrono::Duration::days(30)),
+            "the original claim stays the one-time record"
+        );
+    });
+
+    // When the first sweep run sees TWO billable months, the setup fee
+    // rides the EARLIER month exactly once: the sweep walks completed
+    // months oldest first and the contract's setup marker makes the claim
+    // exactly-once. Soft-skips when the metering TTL window carries only
+    // one completed month (early in a month).
+    env_test!(
+        dedicated_tenant_bills_setup_once_across_two_billable_months,
+        |env| {
+            let months = crate::overage::recent_completed_calendar_months(Utc::now());
+            if months.len() < 2 {
+                eprintln!("skipping: the TTL window carries only one completed month");
+                return;
+            }
+            let (first_start, _) = months[1];
+            let (second_start, _) = months[0];
+            let tenant = "plcov_dt_two_months";
+            seed_tenant(env, tenant, None).await;
+            seed_address(env, tenant).await;
+            purchase_dedicated_tenant(env, tenant, Some(2_000_000), Some(12)).await;
+            backdate_contract(
+                env,
+                tenant,
+                "dedicated_tenant",
+                first_start - chrono::Duration::days(30),
+            )
+            .await;
+
+            let result = sweep_product_line_months(&env.state).await.expect("sweep");
+            assert_eq!(result.invoices_created, 2, "one invoice per month");
+
+            let first_invoice: (Uuid, i64) = sqlx::query_as(
+                "SELECT id, subtotal FROM invoices
+                 WHERE tenant_id = $1 AND product_lines_period = $2",
+            )
+            .bind(tenant)
+            .bind(first_start)
+            .fetch_one(&env.pool)
+            .await
+            .expect("earlier month invoice");
+            assert_eq!(
+                first_invoice.1, 2_400_000,
+                "the earlier month carries the one-time setup fee"
+            );
+            let first_items = line_items(env, first_invoice.0).await;
+            assert_eq!(first_items.len(), 2);
+
+            let second_invoice: (Uuid, i64) = sqlx::query_as(
+                "SELECT id, subtotal FROM invoices
+                 WHERE tenant_id = $1 AND product_lines_period = $2",
+            )
+            .bind(tenant)
+            .bind(second_start)
+            .fetch_one(&env.pool)
+            .await
+            .expect("later month invoice");
+            assert_eq!(
+                second_invoice.1, 400_000,
+                "the later month carries the monthly list only"
+            );
+            let second_items = line_items(env, second_invoice.0).await;
+            assert_eq!(second_items.len(), 1);
+            assert_eq!(second_items[0]["unit_price"], 400_000);
+
+            let marker: Option<DateTime<Utc>> = sqlx::query_scalar(
+                "SELECT setup_fee_period_start FROM product_line_contracts
+                 WHERE tenant_id = $1 AND product_line = 'dedicated_tenant'",
+            )
+            .bind(tenant)
+            .fetch_one(&env.pool)
+            .await
+            .expect("setup marker");
+            assert_eq!(
+                marker,
+                Some(first_start),
+                "the earlier month claimed the exactly-once setup fee"
+            );
+        }
+    );
 }

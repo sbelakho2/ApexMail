@@ -727,6 +727,14 @@ async fn web_route_data(
     } else {
         None
     };
+    // The tenant-owned AI-draft review queue: rows and the purpose/risk
+    // verdict for THIS workspace. The admin-only / unavailable states are
+    // explicit page data, never a silently empty queue.
+    let tenant_ai_drafts = if path == "/ai-drafts" {
+        Some(load_tenant_ai_drafts_page(state, &tenant, user).await)
+    } else {
+        None
+    };
     RouteData {
         list,
         campaign_edit,
@@ -740,6 +748,7 @@ async fn web_route_data(
         demos: None,
         demo_viewer: None,
         ai_drafts: None,
+        tenant_ai_drafts,
         // The shell identity + impersonation banner are attached by the
         // api-server render pipeline (they need request headers, which this
         // loader does not receive).
@@ -967,6 +976,103 @@ pub(crate) async fn load_ai_drafts_page(
     AiDraftsPageData {
         drafts,
         unavailable: false,
+    }
+}
+
+/// The TENANT AI-drafts review page's data (`/ai-drafts`): the caller's own
+/// pending drafts, newest first, each with the deterministic purpose/risk
+/// verdict the review decision is made against. This is the customer-owned
+/// counterpart of `load_ai_drafts_page` (the operator queue), scoped by
+/// `tenant_id` in the query itself.
+///
+/// A non-admin role gets the explicit `admin_only` state (no rows, no action
+/// forms, the `/settings/journal` house pattern), and a read failure is
+/// `unavailable`, never an empty queue.
+pub(crate) async fn load_tenant_ai_drafts_page(
+    state: &AppState,
+    tenant: &str,
+    user: &AuthUser,
+) -> ui_foundation::view_data::TenantAiDraftsPageData {
+    use ui_foundation::view_data::{TenantAiDraftData, TenantAiDraftsPageData};
+
+    let is_tenant_admin = user.scopes.iter().any(|scope| scope == "*");
+    if !is_tenant_admin {
+        return TenantAiDraftsPageData {
+            admin_only: true,
+            ..Default::default()
+        };
+    }
+
+    let rows: Result<
+        Vec<(
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<serde_json::Value>,
+            chrono::DateTime<chrono::Utc>,
+            Option<serde_json::Value>,
+        )>,
+        sqlx::Error,
+    > = sqlx::query_as(
+        "SELECT id, from_email, subject, body_text, ai_response, suggested_action, \
+                received_at, headers \
+         FROM inbound_messages \
+         WHERE tenant_id = $1 AND pending_approval = true AND ai_response IS NOT NULL \
+         ORDER BY received_at DESC, id DESC \
+         LIMIT 100",
+    )
+    .bind(tenant)
+    .fetch_all(&state.db)
+    .await;
+    let drafts = match rows {
+        Ok(rows) => rows
+            .into_iter()
+            .map(
+                |(id, from, subject, body, reply, suggested_action, received_at, headers)| {
+                    let subject = subject.unwrap_or_default();
+                    let body = body.unwrap_or_default();
+                    let classification = crate::routes::ai_drafts::classify_draft_for_review(
+                        &subject,
+                        &body,
+                        headers.as_ref(),
+                    );
+                    TenantAiDraftData {
+                        id,
+                        from_email: from.unwrap_or_default(),
+                        subject,
+                        body_text: body,
+                        draft_reply: reply.unwrap_or_default(),
+                        received_at: received_at.format("%Y-%m-%d %H:%M UTC").to_string(),
+                        purposes: classification.purposes,
+                        primary_purpose: classification.primary,
+                        risk: classification.risk,
+                        autonomy_requirement: classification.autonomy_requirement,
+                        first_response: crate::routes::ai_drafts::first_response_marker(
+                            suggested_action.as_ref(),
+                        ),
+                    }
+                },
+            )
+            .collect(),
+        Err(error) => {
+            tracing::error!(
+                error = %error,
+                tenant = %tenant,
+                "tenant ai drafts review lookup failed"
+            );
+            return TenantAiDraftsPageData {
+                unavailable: true,
+                ..Default::default()
+            };
+        }
+    };
+
+    TenantAiDraftsPageData {
+        drafts,
+        unavailable: false,
+        admin_only: false,
     }
 }
 
@@ -9303,6 +9409,75 @@ mod coverage_loader_tests {
             "non-admin copy must name the restriction: {}",
             data.empty_title
         );
+    }
+
+    /// `/ai-drafts` (fifth external audit, Tier-2 item 16): the tenant's own
+    /// pending drafts only, carrying the deterministic purpose/risk verdict
+    /// the page renders as badges. A non-admin role gets the explicit
+    /// admin-only state (no rows, no action forms).
+    #[tokio::test]
+    async fn web_tenant_ai_drafts_loader_is_admin_gated_and_tenant_scoped() {
+        let Some(app) = state("cov_web_tenant_ai_drafts").await else {
+            eprintln!(
+                "skipping web_tenant_ai_drafts_loader_is_admin_gated_and_tenant_scoped: \
+                 no TEST_DATABASE_URL"
+            );
+            return;
+        };
+        let (tenant_a, tag_a) = tenant_pair("tada");
+        let (tenant_b, tag_b) = tenant_pair("tadb");
+        for (tenant, tag) in [(&tenant_a, &tag_a), (&tenant_b, &tag_b)] {
+            sqlx::query(
+                "INSERT INTO inbound_messages
+                     (id, tenant_id, from_email, subject, body_text, ai_response,
+                      pending_approval, is_verp_reply, received_at)
+                 VALUES ($1, $2, 'customer@corp.example', $3,
+                         'I want a refund for the last invoice.',
+                         'We can help with that.', true, false, NOW())",
+            )
+            .bind(format!(
+                "inb_{}",
+                &uuid::Uuid::new_v4().simple().to_string()[..22]
+            ))
+            .bind(tenant)
+            .bind(format!("Refund request {tag}"))
+            .execute(&app.db)
+            .await
+            .expect("seed tenant draft");
+        }
+
+        let mut admin = user(&tenant_a);
+        admin.scopes = vec!["*".into()];
+        let data = load_tenant_ai_drafts_page(&app, &tenant_a, &admin).await;
+        assert!(!data.unavailable, "the queue must be readable");
+        assert!(!data.admin_only);
+        assert_eq!(data.drafts.len(), 1, "only this tenant's draft");
+        assert!(
+            data.drafts[0].subject.contains(&tag_a),
+            "own draft visible: {:?}",
+            data.drafts[0].subject
+        );
+        assert!(
+            !data.drafts[0].subject.contains(&tag_b),
+            "another tenant's draft must not leak"
+        );
+        assert!(
+            data.drafts[0].purposes.contains(&"refund".to_string()),
+            "the purpose classification is exposed: {:?}",
+            data.drafts[0].purposes
+        );
+        assert_eq!(data.drafts[0].primary_purpose, "refund");
+        assert_eq!(data.drafts[0].risk, "high");
+        assert_eq!(data.drafts[0].autonomy_requirement, "human_review");
+        assert_eq!(data.drafts[0].draft_reply, "We can help with that.");
+        assert_eq!(data.drafts[0].from_email, "customer@corp.example");
+
+        // A non-admin role sees the explicit admin-only state, never rows.
+        let member = user(&tenant_a);
+        let data = load_tenant_ai_drafts_page(&app, &tenant_a, &member).await;
+        assert!(data.admin_only);
+        assert!(data.drafts.is_empty());
+        assert!(!data.unavailable, "admin-only is not an outage");
     }
 }
 

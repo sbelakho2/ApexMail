@@ -1947,6 +1947,8 @@ pub(crate) async fn enqueue_verification_email_with_branding(
         &text_body,
         vec!["system".into(), "verification".into()],
         crate::routes::system_sender::QUEUE_PRIORITY_DEFAULT,
+        // Signup verification link: account access, transactional.
+        apexmail_lib::email_headers::message_category::TRANSACTIONAL,
     )
     .await
     .map(|_| ())
@@ -2058,6 +2060,9 @@ pub(crate) async fn enqueue_operator_invite_email(
         &text_body,
         vec!["system".into(), "operator-invite".into()],
         crate::routes::system_sender::QUEUE_PRIORITY_DEFAULT,
+        // Operator invitation (password setup + verification): account
+        // access, transactional.
+        apexmail_lib::email_headers::message_category::TRANSACTIONAL,
     )
     .await
     .map(|_| ())
@@ -2893,6 +2898,8 @@ async fn login(
                         &html_body,
                         &text_body,
                         vec!["system".into(), "mfa".into()],
+                        // One-time 2FA code: security mail, transactional.
+                        apexmail_lib::email_headers::message_category::TRANSACTIONAL,
                     )
                     .await
                     {
@@ -7442,15 +7449,22 @@ mod tests {
             "signup must persist the tenant row"
         );
 
-        // The verification email was queued through the system sender.
-        let queued: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM email_queue WHERE to_addresses = ARRAY[$1]::text[]",
+        // The verification email was queued through the system sender as
+        // TRANSACTIONAL account-access mail, never the legacy marketing
+        // default.
+        let queued: Option<(String,)> = sqlx::query_as(
+            "SELECT message_category FROM email_queue \
+             WHERE to_addresses = ARRAY[$1]::text[] ORDER BY created_at DESC LIMIT 1",
         )
         .bind(&email)
-        .fetch_one(&pool)
+        .fetch_optional(&pool)
         .await
         .expect("email_queue lookup must not error");
-        assert!(queued >= 1, "verification email must be queued for {email}");
+        assert_eq!(
+            queued.as_ref().map(|(category,)| category.as_str()),
+            Some("transactional"),
+            "verification email must be queued for {email} as transactional"
+        );
 
         restore_dkim_env(had_dkim_key);
         pool.close().await;
@@ -13052,14 +13066,18 @@ mod transactional_email_contracts {
             String::from_utf8_lossy(&bytes)
         );
 
-        let row: (String, String, String) = sqlx::query_as(
-            "SELECT subject, html, text FROM email_queue \
+        let row: (String, String, String, String) = sqlx::query_as(
+            "SELECT subject, html, text, message_category FROM email_queue \
              WHERE $1 = ANY(to_addresses) AND subject = 'Your ApexMail MFA Code'",
         )
         .bind(&email)
         .fetch_one(&pool)
         .await
         .expect("queued MFA email");
+        assert_eq!(
+            row.3, "transactional",
+            "a one-time 2FA code is security mail, never marketing"
+        );
         let queued = QueuedEmail {
             subject: row.0,
             html: row.1,

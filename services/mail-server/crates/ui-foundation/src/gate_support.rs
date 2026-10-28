@@ -395,6 +395,11 @@ pub(crate) const REGISTERED_BROWSER_POST_ROUTES: &[&str] = &[
     "/web/dedicated-ips",
     // SalesCloser plan §5.2: the console assistant's message form (PRG).
     "/web/assistant/message",
+    // Fifth external audit (Tier-2 item 16): the TENANT AI-draft review
+    // queue's approve/reject forms (PRG), the customer-owned twins of the
+    // control-plane queue's handlers.
+    "/web/ai/drafts/:id/approve",
+    "/web/ai/drafts/:id/reject",
     // Plan §5.6: the CP demo presenter's create + advance forms (PRG).
     "/web/admin/demos",
     "/web/admin/demos/:id/advance",

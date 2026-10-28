@@ -263,6 +263,7 @@ impl From<ApiError> for ScimError {
             ApiError::Timeout => StatusCode::REQUEST_TIMEOUT,
             ApiError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
             ApiError::ServiceUnavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
+            ApiError::NotAvailable(_) => StatusCode::NOT_IMPLEMENTED,
         };
         let detail = match &error {
             ApiError::Internal(message) => {

@@ -818,6 +818,11 @@ fn render_web_sidebar(
         // SalesCloser plan §5.2: the console assistant lives with the
         // account surfaces (it answers questions about this workspace).
         ("Assistant", "/assistant", "message-square"),
+        // Fifth external audit (Tier-2 item 16): the tenant owner's OWN
+        // AI-draft review queue, next to the assistant that writes drafts.
+        // The operator queue (/reviews/ai-drafts) is not the customer's
+        // surface; at real customer counts it cannot be the approval channel.
+        ("AI Drafts", "/ai-drafts", "sparkles"),
         ("Billing", "/settings/billing", "credit-card"),
         ("Settings", "/settings", "settings"),
     ];
@@ -1775,6 +1780,7 @@ mod tests {
             "/settings/billing",
             "/settings",
             "/assistant",
+            "/ai-drafts",
         ] {
             assert!(
                 html.contains(&format!("href=\"{href}\"")),

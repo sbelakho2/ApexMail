@@ -3,7 +3,7 @@
 # https://apexmail.ee/.well-known/security.txt). Values below are the shipped
 # production values. Per RFC 9116, refresh `Expires` (under one year) and
 # clear-sign before publication; signing needs the security key held by the
-# security team (fingerprint B30B 9531 6B44 4E38 2803 19A5 5183 FF3B C9A6 9386):
+# ApexMail (fingerprint B30B 9531 6B44 4E38 2803 19A5 5183 FF3B C9A6 9386):
 #   gpg --clear-sign --local-user security@apexmail.ee --output security.txt.asc security.txt
 Contact: mailto:security@apexmail.ee
 Expires: 2027-10-06T00:00:00Z

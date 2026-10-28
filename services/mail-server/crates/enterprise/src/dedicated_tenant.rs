@@ -1326,6 +1326,44 @@ impl PrivateDeployService {
             return Ok(ApiResult::err(refusal.message, refusal.code));
         }
 
+        // Billing contract at activation (external audit item 14): Dedicated
+        // Tenant is a first-class contract line in the SAME billing control
+        // plane, so the `provisioned -> active` transition records the
+        // product-line contract with the deployment's validated setup fee
+        // and minimum term (catalog defaults when the config records none).
+        // A refused billing write refuses the activation: a live dedicated
+        // tenant must never exist outside the billing books. The write is
+        // idempotent per (tenant, line), so a retried transition can never
+        // mint a second contract; the sweep bills it monthly from the next
+        // fully covered calendar month.
+        if target == DedicatedLifecycleState::Active {
+            let config: DedicatedTenantConfig = match &record.config {
+                None | Some(serde_json::Value::Null) => DedicatedTenantConfig::default(),
+                Some(value) => match serde_json::from_value(value.clone()) {
+                    Ok(config) => config,
+                    Err(error) => {
+                        return Ok(ApiResult::err(
+                            format!("deployment config is not a Dedicated Tenant config: {error}"),
+                            "VALIDATION",
+                        ))
+                    }
+                },
+            };
+            if let Err(error) = billing_service::product_lines::activate_dedicated_tenant_contract(
+                self.db(),
+                &record.tenant_id,
+                config.setup_fee_cents,
+                config.minimum_term_months,
+            )
+            .await
+            {
+                return Ok(ApiResult::err(
+                    format!("the Dedicated Tenant billing contract could not be recorded: {error}"),
+                    "BILLING",
+                ));
+            }
+        }
+
         // CAS on the stored spelling: a concurrent transition loses cleanly.
         let updated = sqlx::query_as::<_, PrivateDeploymentDbRow>(
             "UPDATE ent_private_deployments SET status = $3, updated_at = NOW()
@@ -2017,9 +2055,9 @@ pub async fn collect_monthly_review(
     });
     if contract.is_none() {
         gaps.push(
-            "no dedicated_tenant contract row can exist yet: product_line_contracts CHECK admits \
-             platform|mailboxes only (migration 256); the billing summary states the catalog list \
-             figures instead of a contracted period"
+            "no dedicated_tenant contract row is recorded for this tenant: the lifecycle creates \
+             it at activation (provisioned -> active); a deployment that never reached active, or \
+             whose billing write was refused, has no contracted billing period yet"
                 .to_string(),
         );
     }
@@ -2835,6 +2873,90 @@ mod tests {
         assert_eq!(
             ReviewPeriod::current(Utc.with_ymd_and_hms(2026, 10, 16, 9, 0, 0).unwrap()).label,
             "2026-10"
+        );
+    }
+
+    // ── Activation -> billing contract (DB-gated, external audit item 14) ──
+
+    /// `provisioned -> active` records the Dedicated Tenant product-line
+    /// contract in the SAME billing control plane, with the deployment's
+    /// validated setup fee and minimum term. Soft-skips without
+    /// `TEST_DATABASE_URL`.
+    #[tokio::test]
+    async fn activation_records_the_dedicated_tenant_contract() {
+        let Some(pool) = migrator::test_support::fresh_canonical_pool(
+            "dedicated_tenant_activation_contract",
+            "dt_activation_contract",
+        )
+        .await
+        .expect("provision") else {
+            eprintln!("skipping: TEST_DATABASE_URL unset");
+            return;
+        };
+        let tenant = "dttestactivation000000001";
+        sqlx::query(
+            "INSERT INTO tenants (id, name, plan, status)
+             VALUES ($1, 'DT activation', 'growth', 'active')
+             ON CONFLICT (id) DO UPDATE SET status = 'active'",
+        )
+        .bind(tenant)
+        .execute(&pool)
+        .await
+        .expect("seed tenant");
+
+        let config = serde_json::json!({
+            "managed_ips": ["203.0.113.10", "203.0.113.11"],
+            "sender_domains": ["mail.acme.example"],
+            "named_owner": "ops@acme.example",
+            "setup_fee_cents": 2_000_000,
+            "minimum_term_months": 24,
+            "monthly_fee_cents": 400_000,
+        });
+        let deployment_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO ent_private_deployments
+                 (tenant_id, name, deployment_type, status, config,
+                  bundle_sha256, validation_report)
+             VALUES ($1, 'dedicated activation', 'dedicated', 'provisioned', $2::jsonb,
+                     repeat('a', 64), '{\"passed\": true}'::jsonb)
+             RETURNING id",
+        )
+        .bind(tenant)
+        .bind(config.to_string())
+        .fetch_one(&pool)
+        .await
+        .expect("seed deployment");
+
+        let service = PrivateDeployService::new(pool.clone());
+        let outcome = service
+            .transition_dedicated(deployment_id, "active", None)
+            .await
+            .expect("transition");
+        assert!(
+            outcome.success,
+            "activation must succeed and record billing: {:?}",
+            outcome.error
+        );
+
+        let (line, status, setup, term): (String, String, Option<i64>, Option<i64>) =
+            sqlx::query_as(
+                "SELECT product_line, status, setup_fee_cents, minimum_term_months
+                 FROM product_line_contracts WHERE tenant_id = $1",
+            )
+            .bind(tenant)
+            .fetch_one(&pool)
+            .await
+            .expect("the activation recorded a dedicated_tenant contract");
+        assert_eq!(line, "dedicated_tenant");
+        assert_eq!(status, "active");
+        assert_eq!(
+            setup,
+            Some(2_000_000),
+            "the deployment's contracted setup fee is recorded"
+        );
+        assert_eq!(
+            term,
+            Some(24),
+            "the deployment's contracted minimum term is recorded"
         );
     }
 }

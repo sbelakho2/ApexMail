@@ -1,7 +1,7 @@
 # PGP Key Distribution
 
 > **Last Updated:** 2026-10-07
-> **Status:** PGP public key shipped; private key held by the security team
+> **Status:** PGP public key shipped; private key held by ApexMail
 
 ## Key Information
 
@@ -18,7 +18,7 @@ reports and for signing security advisories.
 | **Public key** | [`apps/marketing-zola/static/pgp-key.asc`](../../apps/marketing-zola/static/pgp-key.asc) (`https://apexmail.ee/pgp-key.asc`) |
 | **Repository copy** | [`docs/security/pgp-public-key.asc`](pgp-public-key.asc) |
 
-The private key is held by the security team and is not in the repository.
+The private key is held by ApexMail and is not in the repository.
 Verify the shipped public key with:
 
 ```bash
@@ -45,7 +45,7 @@ page and the served `.asc` as the publication record.
 
 ## Key Generation (operator step)
 
-The private key is held only by the security team. To generate a replacement
+The private key is held only by ApexMail. To generate a replacement
 (with the same algorithm profile) on a trusted machine:
 
 ```bash

@@ -27,10 +27,45 @@
 //!   requirement) table, per the audit's policy table;
 //! * [`reply_class_for_ai_draft`], the explicit release class of an approved
 //!   AI reply: SERVICE, never the queue schema default;
-//! * [`classify`], a first-pass keyword/phrase classifier over the inbound
-//!   subject + body. The deterministic layer is the policy AUTHORITY: a
-//!   future model may refine the purpose label WITHIN these policy bounds
-//!   (it may never widen a class beyond what the table grants).
+//! * [`classify_all`], the multi-label classifier over the inbound subject +
+//!   body + stored headers. Every matched purpose contributes its policy row;
+//!   the effective risk is the MAXIMUM over the matched rows and the
+//!   effective autonomy requirement is the STRICTEST. Adding a label can only
+//!   escalate the decision, never relax it. [`classify`] is a thin
+//!   single-label wrapper for callers that only need the primary purpose.
+//!   The deterministic layer is the policy AUTHORITY: a future model may
+//!   refine the purpose labels WITHIN these policy bounds (it may never widen
+//!   a class beyond what the table grants).
+//!
+//! # Multi-label reduction (fifth external audit)
+//!
+//! The first classifier was single-label, first-match-wins. Real mail
+//! compounds intents ("billing + cancellation + complaint", "security + legal
+//! + refund"), and a first-match rule can hide the heavier intent behind the
+//! lighter one. [`classify_all`] therefore returns ALL matched purposes in
+//! priority order, with `primary` (the first/strongest hit) kept for the
+//! audit record and the effective `risk`/`autonomy` reduced over the full
+//! set. The reduction is monotone by construction: [`RiskLevel::max`] and
+//! [`AutonomyRequirement::strictest`] only ever move upward, so adding a
+//! label cannot lower the risk or relax the autonomy requirement. A
+//! no-reply purpose anywhere in the set (automated or spam) makes the whole
+//! decision no-reply.
+//!
+//! # Automated detection requires machine evidence (fifth external audit)
+//!
+//! Autoresponders and DSNs are identified primarily by MACHINE-MAIL
+//! EVIDENCE in the stored headers: `Auto-Submitted` (RFC 3834),
+//! `Precedence: bulk|junk|list`, `X-Autoreply`/`X-Autorespond`/
+//! `X-Autoresponder`/`Auto-Reply`, a null (`<>`) `Return-Path`, and the
+//! DSN `Content-Type: multipart/report; report-type=delivery-status`.
+//! Prose alone is NOT evidence: a customer writing "we have a delivery
+//! failure and the address was not found, can you help?" is a deliverability
+//! conversation, not machine mail. Body phrases that used to trigger
+//! `automated` are now deliverability vocabulary. The only text-only
+//! evidence kept is the small subject-line template set
+//! (`rules::AUTOMATED_SUBJECT_PREFIXES`); the module documents there why an
+//! exact machine prefix on the SUBJECT line is structural rather than free
+//! prose.
 //!
 //! # Relationship to the 11-value sales disposition taxonomy
 //!
@@ -57,7 +92,7 @@
 //! | deliverability | service | promotion gate (autosend capable) | low |
 //! | dns_auth | service | promotion gate (autosend capable) | low |
 //! | sales | service | promotion gate (see note) | low |
-//! | other | service | promotion gate | low |
+//! | other | service | human review | medium |
 //! | billing | service | human review | medium |
 //! | invoice | service | human review | medium |
 //! | privacy | service | human review (mandatory) | medium |
@@ -87,6 +122,13 @@
 //! * "OOO/bounce -> none": an autoresponder or a delivery status notification
 //!   has no human reader; the reply decision for it is NO REPLY
 //!   ([`DeliveryClass::None`]).
+//! * "Other" is the classifier's uncertainty state, not a judgement that the
+//!   message is harmless. The audit's original table let `other` ride the
+//!   promotion gate at low risk, which made an unproven classifier's silence
+//!   an autonomy grant. Fifth external audit reversed that: `other` is
+//!   service/medium/HUMAN REVIEW. Uncertainty must never keep autonomy; the
+//!   promotion gate can only be reached when the classifier positively
+//!   places the message in a known, autosend-capable purpose.
 
 use serde::{Deserialize, Serialize};
 
@@ -219,6 +261,26 @@ impl RiskLevel {
             Self::High => "high",
         }
     }
+
+    /// Ordering rank: LOW < MEDIUM < HIGH. Used by the multi-label reduction,
+    /// which takes the MAXIMUM over the matched purposes.
+    fn severity(self) -> u8 {
+        match self {
+            Self::Low => 0,
+            Self::Medium => 1,
+            Self::High => 2,
+        }
+    }
+
+    /// The higher of two risks. Monotone: `a.max(b)` is never below `a`.
+    #[must_use]
+    pub fn max(self, other: Self) -> Self {
+        if other.severity() > self.severity() {
+            other
+        } else {
+            self
+        }
+    }
 }
 
 impl std::fmt::Display for RiskLevel {
@@ -309,6 +371,28 @@ impl AutonomyRequirement {
             Self::NoAutonomousResponse => "no_autonomous_response",
         }
     }
+
+    /// Ordering rank: promotion gate < human review < no autonomous
+    /// response. Used by the multi-label reduction, which takes the
+    /// STRICTEST over the matched purposes.
+    fn strictness(self) -> u8 {
+        match self {
+            Self::PromotionGate => 0,
+            Self::HumanReview => 1,
+            Self::NoAutonomousResponse => 2,
+        }
+    }
+
+    /// The stricter of two requirements. Monotone: `a.strictest(b)` is never
+    /// looser than `a`.
+    #[must_use]
+    pub fn strictest(self, other: Self) -> Self {
+        if other.strictness() > self.strictness() {
+            other
+        } else {
+            self
+        }
+    }
 }
 
 impl std::fmt::Display for AutonomyRequirement {
@@ -358,8 +442,8 @@ pub fn policy_for(purpose: InboundPurpose) -> PurposePolicy {
         },
         InboundPurpose::Other => PurposePolicy {
             delivery_class: Service,
-            autonomy: PromotionGate,
-            default_risk: Low,
+            autonomy: HumanReview,
+            default_risk: Medium,
         },
         InboundPurpose::Billing => PurposePolicy {
             delivery_class: Service,
@@ -449,17 +533,61 @@ pub fn reply_class_for_ai_draft() -> DeliveryClass {
 // The deterministic first-pass classifier
 // ---------------------------------------------------------------------------
 
-/// The classification verdict: purpose plus the policy's risk for it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct InboundClassification {
-    pub purpose: InboundPurpose,
+/// The multi-label classification verdict (fifth external audit).
+///
+/// `purposes` is every matched purpose in priority order, deduplicated;
+/// `primary` is the first/strongest hit (what the audit record's
+/// `inboundPurpose` carries); `risk` and `autonomy` are the EFFECTIVE values
+/// reduced over every matched purpose's [`policy_for`] row (MAX risk,
+/// STRICTEST autonomy). The reduction is monotone: adding a purpose can only
+/// escalate these fields.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Classification {
+    /// Every matched purpose, in priority order, no duplicates.
+    pub purposes: Vec<InboundPurpose>,
+    /// Effective risk: the maximum over the matched purposes' policy risk.
     pub risk: RiskLevel,
+    /// Effective autonomy: the strictest over the matched purposes.
+    pub autonomy: AutonomyRequirement,
+    /// The first/strongest matched purpose (the audit record's label).
+    pub primary: InboundPurpose,
 }
 
-/// Keyword/phrase rules, checked in a documented priority order, first match
-/// wins. Order IS policy: an autoresponder mentioning "support" is still
-/// automated; a legal threat wrapped in an unsubscribe demand takes the
-/// safer autonomy requirement either way.
+impl Classification {
+    /// Reduce a non-empty purpose set through the policy table. The
+    /// constructor keeps the monotonicity invariant in ONE place: risk is
+    /// the max, autonomy the strictest, and an empty set is the classifier's
+    /// uncertainty state ([`InboundPurpose::Other`], never "no constraint").
+    fn from_purposes(purposes: Vec<InboundPurpose>) -> Self {
+        let purposes = if purposes.is_empty() {
+            vec![InboundPurpose::Other]
+        } else {
+            purposes
+        };
+        let primary = purposes[0];
+        let mut risk = RiskLevel::Low;
+        let mut autonomy = AutonomyRequirement::PromotionGate;
+        for purpose in &purposes {
+            let policy = policy_for(*purpose);
+            risk = risk.max(policy.default_risk);
+            autonomy = autonomy.strictest(policy.autonomy);
+        }
+        Self {
+            purposes,
+            risk,
+            autonomy,
+            primary,
+        }
+    }
+}
+
+/// Keyword/phrase rules, checked in a documented priority order. EVERY
+/// matching rule contributes a label (multi-label, fifth external audit);
+/// the order only decides which hit is `primary`, never whether a later hit
+/// is dropped. Order IS policy: an autoresponder mentioning "support" still
+/// has `automated` as its primary label, and a legal threat wrapped in an
+/// unsubscribe demand carries BOTH labels, so the reduction takes the safer
+/// risk/autonomy either way.
 ///
 /// Substring match over the lowercased subject + body. Deliberately
 /// over-inclusive toward review: a false positive sends the draft to a human,
@@ -467,33 +595,27 @@ pub struct InboundClassification {
 /// from service for a reply.
 ///
 /// The deterministic layer is the policy AUTHORITY (see the module doc): a
-/// future model may refine the purpose label within [`policy_for`]'s bounds.
+/// future model may refine the purpose labels within [`policy_for`]'s bounds.
 mod rules {
-    /// Out-of-office autoresponders and delivery status notifications. No
-    /// human reader, no reply. Precise DSN phrases only: a customer asking
-    /// "why do my emails bounce" must reach the deliverability rule.
-    pub const AUTOMATED: [&str; 21] = [
-        "out of office",
-        "out-of-office",
-        "automatic reply",
-        "auto-reply",
-        "autoreply",
-        "automated response",
-        "away from the office",
-        "on vacation",
-        "on annual leave",
-        "on parental leave",
-        "on maternity leave",
-        "on sick leave",
-        "undeliverable",
-        "delivery status notification",
-        "delivery failure",
-        "delivery has failed",
-        "returned mail",
-        "mailer-daemon",
-        "mail delivery subsystem",
-        "could not be delivered",
-        "address not found",
+    /// Subject-line templates that identify a machine-generated autoresponder
+    /// WITHOUT any header evidence. These are matched against the SUBJECT
+    /// line only, as an exact prefix (case-insensitive), never as a body
+    /// substring. Why this is structural enough: the dominant autoresponder
+    /// implementations emit these prefixes verbatim at the start of the
+    /// subject ("Automatic reply:" from Exchange/Outlook, "Auto-Reply:" and
+    /// "Out of Office:" from other gateways); a human writing to support
+    /// would have to impersonate the exact machine shape. The failure mode is
+    /// also bounded: `automated` means "the AI does not reply", the message
+    /// still reaches a human, so the worst case is a human answering a
+    /// customer, never a customer being answered by a machine.
+    pub const AUTOMATED_SUBJECT_PREFIXES: [&str; 7] = [
+        "automatic reply:",
+        "auto-reply:",
+        "auto reply:",
+        "autoreply:",
+        "automated response:",
+        "out of office:",
+        "out-of-office:",
     ];
 
     /// Unsolicited bulk mail. No reply.
@@ -656,8 +778,12 @@ mod rules {
         "verify my domain",
     ];
 
-    /// Delivery problems of the customer's own mail.
-    pub const DELIVERABILITY: [&str; 13] = [
+    /// Delivery problems of the customer's own mail. Includes the DSN /
+    /// bounce vocabulary that the first classifier treated as automated-mail
+    /// evidence: without machine-mail headers those words are a customer
+    /// describing a delivery problem (fifth external audit), so they now
+    /// classify as deliverability, never `automated`.
+    pub const DELIVERABILITY: [&str; 23] = [
         "spam folder",
         "junk folder",
         "promotions tab",
@@ -671,6 +797,16 @@ mod rules {
         "bounces",
         "bounced",
         "blacklist",
+        "undeliverable",
+        "delivery status notification",
+        "delivery failure",
+        "delivery has failed",
+        "delivery failed",
+        "returned mail",
+        "mailer-daemon",
+        "mail delivery subsystem",
+        "could not be delivered",
+        "address not found",
     ];
 
     /// Invoice copies, VAT/tax details, charge questions.
@@ -732,8 +868,9 @@ mod rules {
     ];
 
     /// Product/API usage help. Checked late on purpose: anything here that
-    /// slipped past the more specific rules is still support, and the
-    /// fallback ([`super::InboundPurpose::Other`]) carries the same policy.
+    /// slipped past the more specific rules is still support; unmatched text
+    /// falls back to [`super::InboundPurpose::Other`], which requires human
+    /// review (uncertainty never keeps autonomy).
     pub const TECHNICAL_SUPPORT: [&str; 16] = [
         "api key",
         "apikey",
@@ -754,10 +891,11 @@ mod rules {
     ];
 }
 
-/// The rule order. First match wins; the order is documented policy (see the
-/// `rules` module doc and the module doc's priority discussion).
-const RULE_ORDER: [(InboundPurpose, &[&str]); 16] = [
-    (InboundPurpose::Automated, &rules::AUTOMATED),
+/// The rule order for the text rules. EVERY match contributes a label; the
+/// order only determines which hit is `primary` (see the `rules` module doc
+/// and the module doc's priority discussion). `automated` is not a text rule:
+/// it is decided by machine-mail evidence (see [`classify_all`]).
+const RULE_ORDER: [(InboundPurpose, &[&str]); 15] = [
     (InboundPurpose::Spam, &rules::SPAM),
     (InboundPurpose::Abuse, &rules::ABUSE),
     (InboundPurpose::Legal, &rules::LEGAL),
@@ -775,32 +913,166 @@ const RULE_ORDER: [(InboundPurpose, &[&str]); 16] = [
     (InboundPurpose::TechnicalSupport, &rules::TECHNICAL_SUPPORT),
 ];
 
-/// The deterministic first-pass classifier over the inbound subject and body.
-/// Same text in, same classification out; no I/O, no model. Unmatched text
-/// classifies as [`InboundPurpose::Other`] with the policy's default risk.
-pub fn classify(subject: &str, body: &str) -> InboundClassification {
-    let combined = format!(
-        "{}\n{}",
-        subject.trim().to_lowercase(),
-        body.trim().to_lowercase()
-    );
-    let purpose = RULE_ORDER
-        .into_iter()
-        .find(|(_, markers)| markers.iter().any(|marker| combined.contains(marker)))
-        .map(|(purpose, _)| purpose)
-        .unwrap_or(InboundPurpose::Other);
-    let risk = policy_for(purpose).default_risk;
-    InboundClassification { purpose, risk }
+/// Read one stored header case-insensitively (the MTA mirror writes lowercase
+/// names into the JSONB object, but fixtures and other writers may not).
+/// Repeated headers were joined with ", " by the mirror; an array value is
+/// joined the same way for robustness. Non-string scalars are ignored.
+fn header_value(headers: Option<&serde_json::Value>, name: &str) -> Option<String> {
+    let object = headers?.as_object()?;
+    let (_, value) = object
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case(name))?;
+    match value {
+        serde_json::Value::String(text) => Some(text.clone()),
+        serde_json::Value::Array(items) => {
+            let joined = items
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .collect::<Vec<_>>()
+                .join(", ");
+            (!joined.is_empty()).then_some(joined)
+        }
+        _ => None,
+    }
+}
+
+/// A DSN content type: `multipart/report` whose `report-type` parameter is
+/// `delivery-status` (RFC 3462/3464). Parameters may be quoted.
+fn is_dsn_content_type(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    let mut parts = lower.split(';');
+    if parts.next().unwrap_or("").trim() != "multipart/report" {
+        return false;
+    }
+    parts.any(|parameter| {
+        parameter
+            .trim()
+            .strip_prefix("report-type=")
+            .map(|value| value.trim().trim_matches('"') == "delivery-status")
+            .unwrap_or(false)
+    })
+}
+
+/// The null sender a DSN carries (`Return-Path: <>`). The mirror excludes
+/// Return-Path today, so this only fires if a writer stores it; it is
+/// defensive, never required.
+fn is_null_sender(value: &str) -> bool {
+    let trimmed = value.trim();
+    trimmed.is_empty() || trimmed == "<>"
+}
+
+/// Deterministic machine-mail evidence from the stored headers. This is the
+/// PRIMARY automated-mail signal (fifth external audit): prose alone is never
+/// enough. Returns the evidence kind for documentation/debugging.
+fn machine_mail_evidence(headers: Option<&serde_json::Value>) -> Option<&'static str> {
+    if let Some(value) = header_value(headers, "auto-submitted") {
+        // RFC 3834: the parameter list may follow the keyword
+        // (`auto-replied; owner-email=...`); `no` is a human message.
+        let token = value
+            .split(';')
+            .next()
+            .unwrap_or("")
+            .trim()
+            .to_ascii_lowercase();
+        if matches!(
+            token.as_str(),
+            "auto-generated" | "auto-replied" | "auto-notified"
+        ) {
+            return Some("auto_submitted");
+        }
+    }
+    if let Some(value) = header_value(headers, "precedence") {
+        let token = value
+            .split([',', ';'])
+            .next()
+            .unwrap_or("")
+            .trim()
+            .to_ascii_lowercase();
+        if matches!(token.as_str(), "bulk" | "junk" | "list") {
+            return Some("precedence");
+        }
+    }
+    for name in [
+        "x-autoreply",
+        "x-autorespond",
+        "x-autoresponder",
+        "auto-reply",
+    ] {
+        if header_value(headers, name).is_some_and(|value| !value.trim().is_empty()) {
+            return Some("autoreply_header");
+        }
+    }
+    if header_value(headers, "return-path").is_some_and(|value| is_null_sender(&value)) {
+        return Some("null_return_path");
+    }
+    if header_value(headers, "content-type").is_some_and(|value| is_dsn_content_type(&value)) {
+        return Some("dsn_content_type");
+    }
+    None
+}
+
+/// An exact, documented machine template at the START of the subject line.
+/// See [`rules::AUTOMATED_SUBJECT_PREFIXES`] for why this text is structural.
+fn has_automated_subject_prefix(lower_subject: &str) -> bool {
+    let subject = lower_subject.trim_start();
+    rules::AUTOMATED_SUBJECT_PREFIXES
+        .iter()
+        .any(|prefix| subject.starts_with(prefix))
+}
+
+/// The multi-label classifier over the inbound subject, body, and stored
+/// headers. Same input in, same [`Classification`] out; no I/O, no model.
+///
+/// `automated` is added only on machine-mail evidence (a header signal or the
+/// subject-line template set), never on body prose. Every text rule that
+/// matches contributes its purpose, so compound intents ("billing +
+/// cancellation") keep both labels and the effective risk/autonomy escalate
+/// to the strictest of them. Unmatched text classifies as
+/// [`InboundPurpose::Other`] (service/medium/HUMAN REVIEW: uncertainty never
+/// keeps autonomy).
+///
+/// `headers` is the stored `inbound_messages.headers` JSONB object: header
+/// name -> value, as the MTA mirror writes it. `None` (no stored headers) is
+/// exactly the no-header path.
+pub fn classify_all(
+    subject: &str,
+    body: &str,
+    headers: Option<&serde_json::Value>,
+) -> Classification {
+    let lower_subject = subject.trim().to_lowercase();
+    let lower_body = body.trim().to_lowercase();
+    let combined = format!("{lower_subject}\n{lower_body}");
+
+    let mut purposes = Vec::new();
+    if machine_mail_evidence(headers).is_some() || has_automated_subject_prefix(&lower_subject) {
+        purposes.push(InboundPurpose::Automated);
+    }
+    for (purpose, markers) in RULE_ORDER {
+        if markers.iter().any(|marker| combined.contains(marker)) && !purposes.contains(&purpose) {
+            purposes.push(purpose);
+        }
+    }
+    Classification::from_purposes(purposes)
+}
+
+/// Thin single-label wrapper for callers that only need the primary purpose
+/// and the effective risk. It is exactly [`classify_all`] with no stored
+/// headers; release decisions must consume [`classify_all`] directly so the
+/// full label set and its stricter reduction are never dropped.
+pub fn classify(subject: &str, body: &str) -> (InboundPurpose, RiskLevel) {
+    let classification = classify_all(subject, body, None);
+    (classification.primary, classification.risk)
 }
 
 // ---------------------------------------------------------------------------
-// The release decision: (purpose, risk) -> DeliveryClass + autonomy
+// The release decision: Classification -> DeliveryClass + autonomy
 // ---------------------------------------------------------------------------
 
-/// The reply-handling decision the release points consume, derived from
-/// (purpose, risk) through the policy table. This is what replaced the
-/// everything-is-marketing default: the delivery class is a typed table
-/// lookup, and the autonomous sweep can only ever be TIGHTENED by it.
+/// The reply-handling decision the release points consume, derived from a
+/// multi-label [`Classification`] through the policy table. This is what
+/// replaced the everything-is-marketing default: the delivery class is a
+/// typed table lookup, and the autonomous sweep can only ever be TIGHTENED
+/// by it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ReplyReleaseDecision {
     /// The send class of the approved AI reply. Always
@@ -820,13 +1092,20 @@ pub struct ReplyReleaseDecision {
     pub hold_reason: &'static str,
 }
 
-/// Derive the release decision from a classification. Deterministic.
-pub fn reply_release_decision(classification: &InboundClassification) -> ReplyReleaseDecision {
-    let policy = policy_for(classification.purpose);
-    let (sweep_may_release, hold_reason) = if policy.delivery_class == DeliveryClass::None {
+/// Derive the release decision from a multi-label classification.
+/// Deterministic. The decision consumes the EFFECTIVE risk and autonomy
+/// (reduced over every matched purpose), and a no-reply purpose anywhere in
+/// the set (automated, spam) makes the whole decision no-reply: adding labels
+/// can only tighten this answer.
+pub fn reply_release_decision(classification: &Classification) -> ReplyReleaseDecision {
+    let no_reply = classification
+        .purposes
+        .iter()
+        .any(|purpose| policy_for(*purpose).delivery_class == DeliveryClass::None);
+    let (sweep_may_release, hold_reason) = if no_reply {
         (false, "purpose_policy_no_reply")
     } else {
-        match policy.autonomy {
+        match classification.autonomy {
             AutonomyRequirement::NoAutonomousResponse => {
                 (false, "purpose_policy_no_autonomous_response")
             }
@@ -839,7 +1118,7 @@ pub fn reply_release_decision(classification: &InboundClassification) -> ReplyRe
     };
     ReplyReleaseDecision {
         delivery_class: reply_class_for_ai_draft(),
-        autonomy: policy.autonomy,
+        autonomy: classification.autonomy,
         sweep_may_release,
         hold_reason,
     }
@@ -852,6 +1131,11 @@ pub fn reply_release_decision(classification: &InboundClassification) -> ReplyRe
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+
+    fn decision_for(purpose: InboundPurpose) -> ReplyReleaseDecision {
+        reply_release_decision(&Classification::from_purposes(vec![purpose]))
+    }
 
     /// The audit's representative inbound texts, table-driven.
     #[test]
@@ -897,7 +1181,7 @@ mod tests {
                 false,
             ),
             (
-                "Out of office",
+                "Automatic reply: Out of office",
                 "I am out of office until Monday with limited access to email.",
                 InboundPurpose::Automated,
                 RiskLevel::Low,
@@ -927,15 +1211,21 @@ mod tests {
             ),
         ];
         for (subject, body, purpose, risk, sweep) in cases {
-            let classification = classify(subject, body);
+            let classification = classify_all(subject, body, None);
             assert_eq!(
-                classification.purpose, purpose,
-                "subject {subject:?} must classify {purpose}, got {}",
-                classification.purpose
+                classification.primary, purpose,
+                "subject {subject:?} must classify {purpose} as its primary label, got {:?}",
+                classification.purposes
+            );
+            assert!(
+                classification.purposes.contains(&purpose),
+                "subject {subject:?} must carry {purpose}, got {:?}",
+                classification.purposes
             );
             assert_eq!(
                 classification.risk, risk,
-                "subject {subject:?} must carry risk {risk}"
+                "subject {subject:?} must carry effective risk {risk}, got {:?}",
+                classification.purposes
             );
             let decision = reply_release_decision(&classification);
             assert_eq!(
@@ -978,12 +1268,10 @@ mod tests {
         // account_security requires human review, and both hold the draft for
         // a human either way.
         for purpose in [InboundPurpose::Abuse, InboundPurpose::AccountSecurity] {
-            let policy = policy_for(purpose);
-            let decision = reply_release_decision(&InboundClassification {
-                purpose,
-                risk: policy.default_risk,
-            });
-            assert!(!decision.sweep_may_release, "{purpose} must not auto-send");
+            assert!(
+                !decision_for(purpose).sweep_may_release,
+                "{purpose} must not auto-send"
+            );
         }
         assert_eq!(
             policy_for(InboundPurpose::Abuse).autonomy,
@@ -994,17 +1282,23 @@ mod tests {
             AutonomyRequirement::HumanReview
         );
 
+        // Fifth external audit, the reversal: `other` is uncertainty, and
+        // uncertainty must never keep autonomy. It is service/medium/HUMAN
+        // REVIEW (the audit's original low-risk promotion-gate row let an
+        // unproven classifier's silence grant autonomy).
+        let other = policy_for(InboundPurpose::Other);
+        assert_eq!(other.delivery_class, DeliveryClass::Service);
+        assert_eq!(other.default_risk, RiskLevel::Medium);
+        assert_eq!(other.autonomy, AutonomyRequirement::HumanReview);
+        let other_decision = decision_for(InboundPurpose::Other);
+        assert!(!other_decision.sweep_may_release);
+        assert_eq!(other_decision.hold_reason, "purpose_policy_human_review");
+
         // OOO/bounce and spam: no reply at all.
         for purpose in [InboundPurpose::Automated, InboundPurpose::Spam] {
             let policy = policy_for(purpose);
             assert_eq!(policy.delivery_class, DeliveryClass::None);
-            assert!(
-                !reply_release_decision(&InboundClassification {
-                    purpose,
-                    risk: RiskLevel::Low,
-                })
-                .sweep_may_release
-            );
+            assert!(!decision_for(purpose).sweep_may_release);
         }
     }
 
@@ -1026,10 +1320,7 @@ mod tests {
                     || policy.delivery_class == DeliveryClass::None,
                 "purpose {purpose} carries an unexpected class {policy:?}"
             );
-            let decision = reply_release_decision(&InboundClassification {
-                purpose,
-                risk: policy.default_risk,
-            });
+            let decision = decision_for(purpose);
             assert_eq!(
                 decision.delivery_class,
                 reply_class_for_ai_draft(),
@@ -1103,56 +1394,389 @@ mod tests {
         }
         assert_eq!(DeliveryClass::None.to_string(), "none");
 
-        let classification = classify("Thursday works", "Shall I send the invite?");
+        let classification = classify_all("Thursday works", "Shall I send the invite?", None);
         for _ in 0..8 {
             assert_eq!(
-                classify("Thursday works", "Shall I send the invite?"),
+                classify_all("Thursday works", "Shall I send the invite?", None),
                 classification
+            );
+        }
+        // The thin wrapper carries the primary label and effective risk.
+        assert_eq!(
+            classify("Thursday works", "Shall I send the invite?"),
+            (classification.primary, classification.risk)
+        );
+    }
+
+    /// Rule-order pins: a customer quoting a DSN phrase is deliverability,
+    /// not automated; an autoresponder's subject template stays the primary
+    /// label; a legal threat wrapped in an unsubscribe demand carries BOTH
+    /// labels and takes the strictest autonomy; ordinary text falls back to
+    /// other (service/medium/HUMAN REVIEW).
+    #[test]
+    fn rule_order_is_pinned() {
+        // A customer asking about their own bounces: NOT an autoresponder.
+        let classification = classify_all(
+            "why do my emails bounce",
+            "Our sends to gmail bounces with no DSN we can find.",
+            None,
+        );
+        assert_eq!(classification.primary, InboundPurpose::Deliverability);
+        assert!(!classification.purposes.contains(&InboundPurpose::Automated));
+
+        // An autoresponder that mentions the support address: still
+        // automated (the subject template is structural evidence).
+        let classification = classify_all(
+            "Automatic reply: out of office",
+            "I am away. For urgent matters contact support@.example.",
+            None,
+        );
+        assert_eq!(classification.primary, InboundPurpose::Automated);
+        assert!(!reply_release_decision(&classification).sweep_may_release);
+
+        // An unsubscribe demand wrapped around a threat: both abuse and
+        // legal are labels; abuse is primary (rule order) and the effective
+        // autonomy is the strictest (no autonomous response), suppression
+        // path upstream unchanged.
+        let classification = classify_all(
+            "unsubscribe and delete everything",
+            "If you ever email me again I will see you in court with my lawyer.",
+            None,
+        );
+        assert_eq!(classification.primary, InboundPurpose::Abuse);
+        assert!(classification.purposes.contains(&InboundPurpose::Legal));
+        assert_eq!(classification.risk, RiskLevel::High);
+        assert_eq!(
+            classification.autonomy,
+            AutonomyRequirement::NoAutonomousResponse
+        );
+        assert!(!reply_release_decision(&classification).sweep_may_release);
+
+        // A real DSN is automated only with machine-mail evidence. WITHOUT
+        // headers the same text is a delivery-problem description, never
+        // machine mail (fifth external audit).
+        let dsn_headers = json!({
+            "auto-submitted": "auto-generated",
+            "content-type": "multipart/report; report-type=delivery-status",
+        });
+        let classification = classify_all(
+            "Delivery Status Notification",
+            "This message could not be delivered to the recipient address.",
+            Some(&dsn_headers),
+        );
+        assert_eq!(classification.primary, InboundPurpose::Automated);
+        assert!(!reply_release_decision(&classification).sweep_may_release);
+        let headerless = classify_all(
+            "Delivery Status Notification",
+            "This message could not be delivered to the recipient address.",
+            None,
+        );
+        assert!(!headerless.purposes.contains(&InboundPurpose::Automated));
+        assert!(headerless
+            .purposes
+            .contains(&InboundPurpose::Deliverability));
+
+        // Unmatched text: other, medium risk, human review. Uncertainty never
+        // keeps autonomy.
+        let classification = classify_all("Re: notes", "Thanks for the context, noted.", None);
+        assert_eq!(classification.purposes, vec![InboundPurpose::Other]);
+        assert_eq!(classification.risk, RiskLevel::Medium);
+        assert_eq!(classification.autonomy, AutonomyRequirement::HumanReview);
+        assert!(!reply_release_decision(&classification).sweep_may_release);
+    }
+
+    /// Fifth external audit: compound intents keep every matched label and the
+    /// reduction takes the strictest policy. Single-purpose rows are
+    /// unchanged.
+    #[test]
+    fn compound_intents_take_the_strictest_policy() {
+        // billing + cancellation: both service, cancellation is the high-risk
+        // human-review label.
+        let billing_cancellation = classify_all(
+            "Cancel my subscription and fix the billing",
+            "Please cancel my subscription today, the billing is also wrong.",
+            None,
+        );
+        assert!(billing_cancellation
+            .purposes
+            .contains(&InboundPurpose::Billing));
+        assert!(billing_cancellation
+            .purposes
+            .contains(&InboundPurpose::Cancellation));
+        assert_eq!(
+            billing_cancellation.primary,
+            InboundPurpose::Cancellation,
+            "cancellation precedes billing in the documented rule order"
+        );
+        assert_eq!(billing_cancellation.risk, RiskLevel::High);
+        assert_eq!(
+            billing_cancellation.autonomy,
+            AutonomyRequirement::HumanReview
+        );
+        assert!(!reply_release_decision(&billing_cancellation).sweep_may_release);
+
+        // security + legal: high risk under either label.
+        let security_legal = classify_all(
+            "Hacked account and lawyer involved",
+            "Our account was compromised and the attorney will file a lawsuit.",
+            None,
+        );
+        assert!(security_legal
+            .purposes
+            .contains(&InboundPurpose::AccountSecurity));
+        assert!(security_legal.purposes.contains(&InboundPurpose::Legal));
+        assert_eq!(security_legal.risk, RiskLevel::High);
+        assert_eq!(security_legal.autonomy, AutonomyRequirement::HumanReview);
+        assert!(!reply_release_decision(&security_legal).sweep_may_release);
+
+        // technical + procurement: the procurement label alone turns an
+        // autosend-capable support question into human review (medium risk).
+        let technical_procurement = classify_all(
+            "Security questionnaire and API integration",
+            "Our procurement team needs the vendor form; the integration stopped working.",
+            None,
+        );
+        assert!(technical_procurement
+            .purposes
+            .contains(&InboundPurpose::TechnicalSupport));
+        assert!(technical_procurement
+            .purposes
+            .contains(&InboundPurpose::Procurement));
+        assert_eq!(
+            technical_procurement.primary,
+            InboundPurpose::Procurement,
+            "procurement precedes technical support in the documented rule order"
+        );
+        assert_eq!(technical_procurement.risk, RiskLevel::Medium);
+        assert_eq!(
+            technical_procurement.autonomy,
+            AutonomyRequirement::HumanReview
+        );
+        assert!(!reply_release_decision(&technical_procurement).sweep_may_release);
+
+        // Single-purpose rows keep their policy exactly.
+        let support = classify_all("API key broken", "the integration stopped working.", None);
+        assert_eq!(support.purposes, vec![InboundPurpose::TechnicalSupport]);
+        assert_eq!(support.risk, RiskLevel::Low);
+        assert_eq!(support.autonomy, AutonomyRequirement::PromotionGate);
+        let support_decision = reply_release_decision(&support);
+        assert!(support_decision.sweep_may_release);
+        assert_eq!(support_decision.hold_reason, "");
+    }
+
+    /// Reduction monotonicity (property): adding a label can only escalate
+    /// risk and autonomy, never relax them, and never changes the primary
+    /// label (the first/strongest hit).
+    #[test]
+    fn adding_labels_never_lowers_risk_or_autonomy() {
+        let risk_rank = |risk: RiskLevel| risk.severity();
+        let autonomy_rank = |autonomy: AutonomyRequirement| autonomy.strictness();
+
+        for base in InboundPurpose::ALL {
+            let single = Classification::from_purposes(vec![base]);
+            for extra in InboundPurpose::ALL {
+                let pair = Classification::from_purposes(vec![base, extra]);
+                assert!(
+                    risk_rank(pair.risk) >= risk_rank(single.risk),
+                    "adding {extra} to {base} lowered the risk: {} -> {}",
+                    single.risk,
+                    pair.risk
+                );
+                assert!(
+                    autonomy_rank(pair.autonomy) >= autonomy_rank(single.autonomy),
+                    "adding {extra} to {base} relaxed autonomy: {} -> {}",
+                    single.autonomy,
+                    pair.autonomy
+                );
+                assert_eq!(pair.primary, base, "the first label stays primary");
+
+                for third in InboundPurpose::ALL {
+                    let triple = Classification::from_purposes(vec![base, extra, third]);
+                    assert!(
+                        risk_rank(triple.risk) >= risk_rank(pair.risk),
+                        "adding {third} to {base}+{extra} lowered the risk"
+                    );
+                    assert!(
+                        autonomy_rank(triple.autonomy) >= autonomy_rank(pair.autonomy),
+                        "adding {third} to {base}+{extra} relaxed autonomy"
+                    );
+                }
+            }
+        }
+
+        // The empty set is the classifier's uncertainty state, never an
+        // autonomy grant.
+        let empty = Classification::from_purposes(Vec::new());
+        assert_eq!(empty.purposes, vec![InboundPurpose::Other]);
+        assert_eq!(empty.risk, RiskLevel::Medium);
+        assert_eq!(empty.autonomy, AutonomyRequirement::HumanReview);
+    }
+
+    /// Fifth external audit: automated mail requires MACHINE evidence, never
+    /// prose. The audit's customer counterexample must stay a real
+    /// deliverability conversation.
+    #[test]
+    fn customer_delivery_prose_without_headers_is_not_automated() {
+        let classification = classify_all(
+            "We have a delivery failure",
+            "we have a delivery failure and the address was not found, can you help?",
+            None,
+        );
+        assert!(!classification.purposes.contains(&InboundPurpose::Automated));
+        assert!(
+            classification
+                .purposes
+                .contains(&InboundPurpose::Deliverability),
+            "the customer's delivery problem must classify deliverability, got {:?}",
+            classification.purposes
+        );
+        assert_eq!(classification.primary, InboundPurpose::Deliverability);
+        assert_eq!(classification.risk, RiskLevel::Low);
+        assert_eq!(classification.autonomy, AutonomyRequirement::PromotionGate);
+        assert!(reply_release_decision(&classification).sweep_may_release);
+    }
+
+    /// A real DSN carries the structural headers: automated and no reply.
+    #[test]
+    fn real_dsn_headers_classify_as_automated_and_no_reply() {
+        let dsn_headers = json!({
+            "auto-submitted": "auto-generated",
+            "content-type": "multipart/report; report-type=delivery-status; boundary=\"x\"",
+            "return-path": "<>",
+        });
+        let classification = classify_all(
+            "Delivery Status Notification",
+            "This message could not be delivered to the recipient address.",
+            Some(&dsn_headers),
+        );
+        assert_eq!(classification.primary, InboundPurpose::Automated);
+        assert!(classification.purposes.contains(&InboundPurpose::Automated));
+        let decision = reply_release_decision(&classification);
+        assert!(!decision.sweep_may_release);
+        assert_eq!(decision.hold_reason, "purpose_policy_no_reply");
+        assert_eq!(
+            policy_for(InboundPurpose::Automated).delivery_class,
+            DeliveryClass::None
+        );
+    }
+
+    /// Each structural machine-mail signal is sufficient on its own.
+    #[test]
+    fn structural_header_signals_each_classify_as_automated() {
+        for headers in [
+            json!({"auto-submitted": "auto-generated"}),
+            json!({"auto-submitted": "auto-replied"}),
+            json!({"auto-submitted": "auto-notified"}),
+            json!({"auto-submitted": "auto-replied; owner-email=\"owner@example.com\""}),
+            json!({"precedence": "bulk"}),
+            json!({"precedence": "junk"}),
+            json!({"precedence": "list"}),
+            json!({"x-autoreply": "yes"}),
+            json!({"x-autorespond": "yes"}),
+            json!({"x-autoresponder": "yes"}),
+            json!({"auto-reply": "yes"}),
+            json!({"return-path": "<>"}),
+            json!({"content-type": "multipart/report; report-type=\"delivery-status\""}),
+            // The MTA mirror writes lowercase names, but the lookup is
+            // case-insensitive for the fixture/other-writer path.
+            json!({"Auto-Submitted": "auto-generated"}),
+        ] {
+            let classification = classify_all(
+                "Re: project update",
+                "Sounds good, talk tomorrow.",
+                Some(&headers),
+            );
+            assert!(
+                classification.purposes.contains(&InboundPurpose::Automated),
+                "headers {headers} must classify automated, got {:?}",
+                classification.purposes
+            );
+            assert_eq!(
+                classification.primary,
+                InboundPurpose::Automated,
+                "headers {headers}"
             );
         }
     }
 
-    /// Rule-order pins: a customer quoting a DSN phrase is deliverability,
-    /// not automated; an autoresponder mentioning support stays automated; a
-    /// legal threat wrapped in an unsubscribe demand takes the abuse rule
-    /// (no autonomous response either way); ordinary text falls back to
-    /// other with the service class.
+    /// Values that are NOT machine-mail evidence, including the RFC 3834
+    /// `no` value and non-DSN report types.
     #[test]
-    fn rule_order_is_pinned() {
-        // A customer asking about their own bounces: NOT an autoresponder.
-        let classification = classify(
-            "why do my emails bounce",
-            "Our sends to gmail bounces with no DSN we can find.",
-        );
-        assert_eq!(classification.purpose, InboundPurpose::Deliverability);
+    fn non_machine_header_values_are_not_automated_evidence() {
+        for headers in [
+            json!({"auto-submitted": "no"}),
+            json!({"precedence": "first-class"}),
+            json!({"content-type": "multipart/report; report-type=disposition-notification"}),
+            json!({"content-type": "text/plain; charset=utf-8"}),
+            json!({"return-path": "<customer@example.com>"}),
+            json!({}),
+        ] {
+            let classification = classify_all(
+                "Re: project update",
+                "Sounds good, talk tomorrow.",
+                Some(&headers),
+            );
+            assert!(
+                !classification.purposes.contains(&InboundPurpose::Automated),
+                "headers {headers} must not classify automated, got {:?}",
+                classification.purposes
+            );
+        }
+    }
 
-        // An autoresponder that mentions the support address: still automated.
-        let classification = classify(
-            "Automatic reply: out of office",
-            "I am away. For urgent matters contact support@.example.",
+    /// The documented subject-line template set is the ONLY text-only
+    /// automated evidence: exact prefix on the subject, never body prose and
+    /// never a mid-subject occurrence.
+    #[test]
+    fn subject_line_templates_are_the_only_textual_automated_evidence() {
+        for subject in [
+            "Automatic reply: away",
+            "Auto-Reply: away",
+            "Auto Reply: away",
+            "Out of Office: away",
+            "out-of-office: away",
+            "Automated response: away",
+        ] {
+            let classification = classify_all(subject, "I am away until Monday.", None);
+            assert_eq!(
+                classification.primary,
+                InboundPurpose::Automated,
+                "subject {subject:?} is a documented machine template"
+            );
+        }
+        // Body prose alone is not evidence.
+        let classification = classify_all(
+            "Re: notes",
+            "Automatic reply: the system sent this yesterday.",
+            None,
         );
-        assert_eq!(classification.purpose, InboundPurpose::Automated);
-        assert!(!reply_release_decision(&classification).sweep_may_release);
+        assert!(!classification.purposes.contains(&InboundPurpose::Automated));
+        // A mid-subject occurrence is not a template prefix.
+        let classification =
+            classify_all("Re: Automatic reply: away", "I am away until Monday.", None);
+        assert!(!classification.purposes.contains(&InboundPurpose::Automated));
+    }
 
-        // An unsubscribe demand wrapped around a threat: abuse (the safe
-        // autonomy outcome), suppression path upstream unchanged.
-        let classification = classify(
-            "unsubscribe and delete everything",
-            "If you ever email me again I will see you in court with my lawyer.",
+    /// Missing headers (`None`), an empty JSON object, and a JSON null all
+    /// behave like the no-header path.
+    #[test]
+    fn missing_headers_behave_like_the_no_header_path() {
+        let no_headers = classify_all("Why do my emails bounce?", "our sends bounce", None);
+        let empty_headers = classify_all(
+            "Why do my emails bounce?",
+            "our sends bounce",
+            Some(&json!({})),
         );
-        assert_eq!(classification.purpose, InboundPurpose::Abuse);
-        assert!(!reply_release_decision(&classification).sweep_may_release);
-
-        // A real DSN: automated, no reply.
-        let classification = classify(
-            "Delivery Status Notification",
-            "This message could not be delivered to the recipient address.",
+        let null_headers = classify_all(
+            "Why do my emails bounce?",
+            "our sends bounce",
+            Some(&serde_json::Value::Null),
         );
-        assert_eq!(classification.purpose, InboundPurpose::Automated);
-
-        // Unmatched text: other, service class, promotion gate.
-        let classification = classify("Re: notes", "Thanks for the context, noted.");
-        assert_eq!(classification.purpose, InboundPurpose::Other);
-        assert!(reply_release_decision(&classification).sweep_may_release);
+        assert_eq!(no_headers, empty_headers);
+        assert_eq!(no_headers, null_headers);
+        assert_eq!(
+            classify("Why do my emails bounce?", "our sends bounce"),
+            (no_headers.primary, no_headers.risk)
+        );
     }
 }

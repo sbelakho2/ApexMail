@@ -158,10 +158,13 @@ impl QueueWriteFailure {
 /// `log_smtp_reject`, a brute-forcer hammering AUTH disconnects after
 /// MAX_SESSION_ERRORS attempts exactly like any other error source.
 enum AuthOutcome {
-    /// (authenticated email, tenant id). The tenant comes from the same
-    /// authenticated row the admission gate meters against, so the SMTP
-    /// path cannot reserve quota for a different tenant than it queues for.
-    Success(String, String),
+    /// (authenticated email, tenant id, credential message class). The
+    /// tenant comes from the same authenticated row the admission gate
+    /// meters against, so the SMTP path cannot reserve quota for a different
+    /// tenant than it queues for. The message class is the SERVER-OWNED
+    /// attribute of that same credential row (`users.message_class`,
+    /// migration 272), never anything read from the submitted message.
+    Success(String, String, String),
     /// Terminal reply (already CRLF-terminated), to be emitted via `reply!`.
     Reply(&'static str),
     /// The transport died mid-exchange; no reply can be delivered.
@@ -348,6 +351,11 @@ impl SubmissionServer {
         // Tenant of the authenticated identity, the admission gate and the
         // queue row MUST use this exact tenant (finding P0).
         let mut auth_tenant = String::new();
+        // Message class of the authenticated credential (migration 272).
+        // `None` only before AUTH, every DATA path is gated on
+        // `authenticated` and therefore has the row's value here. Never read
+        // from message headers or the envelope.
+        let mut auth_message_class: Option<String> = None;
         let mut helo_seen = false;
         // Validated EHLO/HELO argument ("unknown" when it failed validation) —
         // used for the Received trace header (F-01).
@@ -573,9 +581,10 @@ impl SubmissionServer {
                     reply!("503 5.5.1 Already authenticated\r\n");
                 } else if mech == "LOGIN" {
                     match self.handle_auth_login(stream, initial_response, ip).await {
-                        AuthOutcome::Success(_email, tenant_id) => {
+                        AuthOutcome::Success(_email, tenant_id, message_class) => {
                             authenticated = true;
                             auth_tenant = tenant_id;
+                            auth_message_class = Some(message_class);
                         }
                         AuthOutcome::Reply(reply) => {
                             log_smtp_reject("submission", ip, &session_id, reply.trim_end());
@@ -585,9 +594,10 @@ impl SubmissionServer {
                     }
                 } else if mech == "PLAIN" {
                     match self.handle_auth_plain(stream, initial_response, ip).await {
-                        AuthOutcome::Success(_email, tenant_id) => {
+                        AuthOutcome::Success(_email, tenant_id, message_class) => {
                             authenticated = true;
                             auth_tenant = tenant_id;
+                            auth_message_class = Some(message_class);
                         }
                         AuthOutcome::Reply(reply) => {
                             log_smtp_reject("submission", ip, &session_id, reply.trim_end());
@@ -777,7 +787,9 @@ impl SubmissionServer {
                                     meter: AdmissionMeter::FilteredRecipients(&rcpt_to),
                                     idempotency_key: Some(&idempotency_key),
                                     idempotency_item: None,
-                                    category: submission_credential_category(),
+                                    category: Some(submission_credential_category(
+                                        auth_message_class.as_deref(),
+                                    )),
                                 })
                                 .await
                             {
@@ -1126,9 +1138,9 @@ impl SubmissionServer {
                 let user_str = String::from_utf8_lossy(&user);
                 let pass_str = String::from_utf8_lossy(&pass);
                 match self.authenticate_user(&user_str, &pass_str, ip).await {
-                    Ok((email, tenant_id)) => {
+                    Ok((email, tenant_id, message_class)) => {
                         let _ = write_line(stream, "235 2.7.0 Authentication successful\r\n").await;
-                        AuthOutcome::Success(email, tenant_id)
+                        AuthOutcome::Success(email, tenant_id, message_class)
                     }
                     Err(AuthError::LockedOut) => AuthOutcome::Reply(AUTH_LOCKED_OUT),
                     Err(AuthError::Failed) => AuthOutcome::Reply(AUTH_FAILED),
@@ -1171,10 +1183,10 @@ impl SubmissionServer {
                 let parts: Vec<&str> = s.splitn(3, '\0').collect();
                 if parts.len() >= 3 {
                     match self.authenticate_user(parts[1], parts[2], ip).await {
-                        Ok((email, tenant_id)) => {
+                        Ok((email, tenant_id, message_class)) => {
                             let _ =
                                 write_line(stream, "235 2.7.0 Authentication successful\r\n").await;
-                            AuthOutcome::Success(email, tenant_id)
+                            AuthOutcome::Success(email, tenant_id, message_class)
                         }
                         Err(AuthError::LockedOut) => AuthOutcome::Reply(AUTH_LOCKED_OUT),
                         Err(AuthError::Failed) => AuthOutcome::Reply(AUTH_FAILED),
@@ -1219,15 +1231,19 @@ impl SubmissionServer {
 
     // ── Auth helper ──────────────────────────────────────────────────────
 
-    /// Returns `(email, tenant_id)`, the tenant rides along so the
-    /// admission gate and the queue row use the SAME tenant as the
-    /// authenticated credential.
+    /// Returns `(email, tenant_id, message_class)`, the tenant rides along
+    /// so the admission gate and the queue row use the SAME tenant as the
+    /// authenticated credential, and the message class rides along because
+    /// it is a SERVER-OWNED attribute of that credential row
+    /// (`users.message_class`, migration 272). It is selected from the same
+    /// row the password is verified against, so there is no way for a
+    /// message header to influence it.
     async fn authenticate_user(
         &self,
         email: &str,
         password: &str,
         ip: std::net::IpAddr,
-    ) -> Result<(String, String), AuthError> {
+    ) -> Result<(String, String, String), AuthError> {
         // FIX-3: lockout short-circuit BEFORE any work. Once an (IP,
         // account) pair, or an IP across all accounts, has accumulated
         // enough recent failures, further attempts are rejected without
@@ -1244,30 +1260,32 @@ impl SubmissionServer {
         // path. The tenant join enforces tenants.status here too (F18): a
         // suspended tenant's SMTP credentials must stop accepting
         // submission, same as the API/SSR gates in api-server.
-        let user = sqlx::query_as::<_, (String, Uuid, String, String, String, String)>(
-            "SELECT u.email, u.id, u.password_hash, u.status, t.status, u.tenant_id::text \
-             FROM users u JOIN tenants t ON t.id = u.tenant_id \
-             WHERE LOWER(u.email) = LOWER($1)",
+        let user = sqlx::query_as::<_, (String, Uuid, String, String, String, String, String)>(
+            "SELECT u.email, u.id, u.password_hash, u.status, t.status, u.tenant_id::text, \
+                        u.message_class \
+                 FROM users u JOIN tenants t ON t.id = u.tenant_id \
+                 WHERE LOWER(u.email) = LOWER($1)",
         )
         .bind(email)
         .fetch_optional(&self.pool)
         .await
         .map_err(|_| AuthError::Failed)?;
 
-        let (user_email, _user_id, password_hash, status, tenant_status, tenant_id) = match user {
-            Some(u) => u,
-            None => {
-                // FIX-3: unknown-account attempts count toward the
-                // lockout (no brute-force bypass via nonexistent users).
-                self.auth_fail_tracker.record_failure(ip, email).await;
-                // FIX-5: spend the same verification time as a real
-                // account so the response cannot reveal whether the
-                // account exists (user-enumeration side channel).
-                let _ = verify_against_dummy(password);
-                metrics::counter!("mta.auth.failure").increment(1);
-                return Err(AuthError::Failed);
-            }
-        };
+        let (user_email, _user_id, password_hash, status, tenant_status, tenant_id, message_class) =
+            match user {
+                Some(u) => u,
+                None => {
+                    // FIX-3: unknown-account attempts count toward the
+                    // lockout (no brute-force bypass via nonexistent users).
+                    self.auth_fail_tracker.record_failure(ip, email).await;
+                    // FIX-5: spend the same verification time as a real
+                    // account so the response cannot reveal whether the
+                    // account exists (user-enumeration side channel).
+                    let _ = verify_against_dummy(password);
+                    metrics::counter!("mta.auth.failure").increment(1);
+                    return Err(AuthError::Failed);
+                }
+            };
 
         // The failure shape stays identical for user- and tenant-level
         // refusals so the SMTP dialogue cannot distinguish them.
@@ -1294,7 +1312,8 @@ impl SubmissionServer {
                     .execute(&self.pool)
                     .await;
                 }
-                Ok((user_email, tenant_id))
+                let message_class = canonical_credential_message_class(&message_class);
+                Ok((user_email, tenant_id, message_class))
             }
             _ => {
                 self.auth_fail_tracker.record_failure(ip, email).await;
@@ -1591,30 +1610,47 @@ fn compose_stored_message(received: &str, data: &[u8]) -> Vec<u8> {
 
 // ── Submission admission policy (findings P0/P1) ────────────────────────
 
+/// Canonicalize the message class read from the authenticated credential
+/// row (`users.message_class`, migration 272).
+///
+/// The migration constrains the column to the existing
+/// `message_category` vocabulary (`marketing`, `transactional`, `service`)
+/// and defaults every legacy credential to `marketing`. This function
+/// re-validates through the shared helper anyway and fails CONSERVATIVE (to
+/// `marketing`, the non-preference-exempt class) on an unexpected value: a
+/// bad credential attribute must never silently grant a consent exemption.
+fn canonical_credential_message_class(raw: &str) -> String {
+    use apexmail_lib::email_headers::message_category;
+
+    let normalized =
+        message_category::validate(raw).unwrap_or_else(|| message_category::MARKETING.to_string());
+    if matches!(
+        normalized.as_str(),
+        message_category::MARKETING | message_category::TRANSACTIONAL | message_category::SERVICE
+    ) {
+        normalized
+    } else {
+        message_category::MARKETING.to_string()
+    }
+}
+
 /// Category policy for an authenticated submission (finding P1).
 ///
-/// The category must come from authenticated, server-owned state, never
-/// from the message (headers, envelope, body) and never from the
-/// `email_queue.message_category` schema default. The deployed SMTP
-/// credential (the `users` row checked by AUTH) carries no category
-/// attribute yet, so this returns `None` and the shared admission service
-/// applies its documented policy default
-/// ([`billing_service::send_admission::DEFAULT_MESSAGE_CATEGORY`] —
-/// `marketing`, the NON-preference-exempt category, so a missing attribute
-/// can never silently grant a legal opt-out exemption). The normalized value
-/// is returned on the admission handle and written explicitly by
-/// [`SubmissionServer::queue_message`].
+/// The category comes EXCLUSIVELY from authenticated, server-owned state:
+/// the message class of the credential row AUTH verified
+/// (`users.message_class`, migration 272). It is never read from the
+/// message (headers, envelope, body) and never from the
+/// `email_queue.message_category` schema default. [`SubmissionServer::queue_message`]
+/// writes the value the shared admission service normalized onto the
+/// admission handle.
 ///
-/// MINIMAL CREDENTIAL ATTRIBUTE (proposed; NOT added here because schema
-/// changes are outside this change's scope): add
-/// `message_category VARCHAR(100) NOT NULL DEFAULT 'marketing'` to the SMTP
-/// credential record (`users`, or a dedicated `smtp_credentials` table if
-/// one is introduced), populated at credential creation/rotation and read
-/// back on AUTH. This function then returns that attribute, and the shared
-/// service validates it with the SAME helper the REST path uses. No other
-/// plumbing changes.
-fn submission_credential_category() -> Option<&'static str> {
-    None
+/// `None` is reachable only before AUTH (every DATA path is gated on
+/// `authenticated`); the fallback is the same documented default the
+/// admission service uses (`marketing`, the NON-preference-exempt
+/// category), so an impossible absence can never silently grant a legal
+/// opt-out exemption.
+fn submission_credential_category(message_class: Option<&str>) -> &str {
+    message_class.unwrap_or(billing_service::send_admission::DEFAULT_MESSAGE_CATEGORY)
 }
 
 /// Idempotency identity for one SMTP submission (finding P0).
@@ -2776,21 +2812,39 @@ mod tests {
 
     #[test]
     fn submission_category_policy_is_server_owned_and_never_the_schema_default() {
-        // The deployed SMTP credential carries no category attribute, so the
-        // documented policy default applies, explicitly, through the shared
-        // helper. `marketing` is the NON-preference-exempt category, so a
-        // missing attribute can never silently grant a legal opt-out
-        // exemption, and the `email_queue.message_category` schema default is
-        // never consulted.
-        assert_eq!(submission_credential_category(), None);
-        let category =
-            billing_service::send_admission::normalize_category(submission_credential_category())
-                .expect("the documented policy default always validates");
+        // The category is the authenticated credential's `users.message_class`
+        // row value: a transactional credential is transactional, a marketing
+        // one stays marketing.
         assert_eq!(
-            category,
+            submission_credential_category(Some("transactional")),
+            "transactional"
+        );
+        assert_eq!(submission_credential_category(Some("service")), "service");
+        assert_eq!(
+            submission_credential_category(Some("marketing")),
+            "marketing"
+        );
+        // `None` is unreachable after AUTH (every DATA path is gated on
+        // `authenticated`); the fallback is the documented NON-exempt policy
+        // default, never a silent opt-out exemption.
+        assert_eq!(
+            submission_credential_category(None),
             billing_service::send_admission::DEFAULT_MESSAGE_CATEGORY
         );
-        assert_eq!(category, "marketing");
+        assert_eq!(submission_credential_category(None), "marketing");
+
+        // The row value is canonicalized through the SAME shared helper the
+        // REST path uses; an unexpected value fails conservative.
+        assert_eq!(
+            canonical_credential_message_class("Transactional"),
+            "transactional"
+        );
+        assert_eq!(canonical_credential_message_class("  SERVICE "), "service");
+        assert_eq!(
+            canonical_credential_message_class("promotional"),
+            "marketing"
+        );
+        assert_eq!(canonical_credential_message_class(""), "marketing");
 
         // The queue write names the column and binds the admission-validated
         // value, the schema default is not in the statement at all.
@@ -2800,8 +2854,7 @@ mod tests {
             .expect("submission must insert queue rows");
         // Scope the check to the INSERT statement itself (the module docs
         // mention the schema default when describing the credential
-        // attribute proposal, and this test's own source text must not
-        // match either).
+        // attribute, and this test's own source text must not match either).
         let insert_end = source[insert..]
             .find(".execute(&mut *tx)")
             .map(|offset| insert + offset)
@@ -4040,14 +4093,15 @@ mod adversarial_db_tests {
 
     /// Grant an ACTIVE marketing consent record for `recipient`.
     ///
-    /// SMTP submissions carry the server-owned `marketing` category (never the
-    /// schema default, see [`submission_credential_category`]), so the shared
-    /// send admission's F4 consent gate requires a live consent record for
-    /// every recipient it queues. The suites below exercise admission's LATER
-    /// arms (durability pin, insert failure, suppression, budget, domain
-    /// readiness), so the fixture grants consent for the addresses they submit
-    /// to; the gate's own refusal arms are covered by its billing/compliance
-    /// suites.
+    /// These reliability suites authenticate the default `marketing`
+    /// credential (`users.message_class` defaults to marketing, migration
+    /// 272), so the shared send admission's F4 consent gate requires a live
+    /// consent record for every recipient it queues. The suites below
+    /// exercise admission's LATER arms (durability pin, insert failure,
+    /// suppression, budget, domain readiness), so the fixture grants consent
+    /// for the addresses they submit to; the gate's own refusal arms are
+    /// covered by its billing/compliance suites. The transactional-credential
+    /// test deliberately does NOT call this helper.
     async fn grant_marketing_consent(pool: &PgPool, tenant_id: &str, recipient: &str) {
         sqlx::query(
             "INSERT INTO consent_records \
@@ -4069,7 +4123,21 @@ mod adversarial_db_tests {
     }
 
     /// Seed a tenant/user/verified-domain triple the submission path accepts.
+    /// The credential carries the conservative `marketing` class (migration
+    /// 272 default).
     async fn seed_fixture(pool: &PgPool, suffix: &str, domain_ready: bool) -> Fixture {
+        seed_fixture_with_message_class(pool, suffix, domain_ready, "marketing").await
+    }
+
+    /// [`seed_fixture`] with an explicit, server-owned credential message
+    /// class (`users.message_class`); transactional credentials are created
+    /// deliberately, never from a request or message header.
+    async fn seed_fixture_with_message_class(
+        pool: &PgPool,
+        suffix: &str,
+        domain_ready: bool,
+        message_class: &str,
+    ) -> Fixture {
         let tenant = format!("sub-{}", &Uuid::new_v4().simple().to_string()[..21]);
         let user_email = format!("submitter-{suffix}@example.test");
         let domain = format!("{suffix}.submission.test");
@@ -4089,13 +4157,14 @@ mod adversarial_db_tests {
 
         let password_hash = apexmail_lib::crypto::hash_password(&password).expect("hash password");
         sqlx::query(
-            "INSERT INTO users (id, tenant_id, email, password_hash, status)
-             VALUES ($1, $2, $3, $4, 'active')",
+            "INSERT INTO users (id, tenant_id, email, password_hash, status, message_class)
+             VALUES ($1, $2, $3, $4, 'active', $5)",
         )
         .bind(Uuid::new_v4())
         .bind(&tenant)
         .bind(&user_email)
         .bind(password_hash)
+        .bind(message_class)
         .execute(pool)
         .await
         .expect("insert user");
@@ -4310,9 +4379,13 @@ mod adversarial_db_tests {
             let mut reader = tokio::io::BufReader::new(&mut tls);
             assert!(read_reply(&mut reader).await.starts_with("354"));
         }
-        tls.write_all(b"Message-ID: <golden-1@submission.test>\r\nSubject: golden\r\n\r\nbody\r\n")
-            .await
-            .unwrap();
+        // A CUSTOMER-SET category header is inert: the class comes from the
+        // authenticated credential row, never from MIME headers.
+        tls.write_all(
+            b"X-Message-Category: transactional\r\nMessage-ID: <golden-1@submission.test>\r\nSubject: golden\r\n\r\nbody\r\n",
+        )
+        .await
+        .unwrap();
         tls.flush().await.unwrap();
         tls.write_all(b".\r\n").await.unwrap();
         tls.flush().await.unwrap();
@@ -4346,7 +4419,8 @@ mod adversarial_db_tests {
         assert_eq!(to, vec!["recipient@example.test".to_string()]);
         assert_eq!(
             category, "marketing",
-            "the schema default must never be relied on"
+            "the credential's default class must win over a forged header, \
+             and the schema default must never be relied on"
         );
         let headers = headers.expect("raw headers stored");
         assert!(
@@ -4368,6 +4442,84 @@ mod adversarial_db_tests {
         assert_eq!(
             usage, 1,
             "a queued submission must keep its quota reservation"
+        );
+    }
+
+    /// P0: a TRANSACTIONAL credential is admitted for a recipient with NO
+    /// marketing consent and queues as `transactional`, and a forged MIME
+    /// category header cannot flip the class in either direction.
+    #[tokio::test]
+    async fn transactional_credential_queues_as_transactional_without_marketing_consent() {
+        let Some(pool) = test_pool("submission_transactional_class").await else {
+            return;
+        };
+        let fixture =
+            seed_fixture_with_message_class(&pool, "transactional", true, "transactional").await;
+        // Deliberately NO consent record for this recipient: a marketing
+        // submission would be refused 550 by the shared admission gate.
+        let recipient = format!("no-consent+{}@example.test", fixture.tenant);
+        let server = test_server(pool.clone(), Some(fixture_acceptor()));
+        let (addr, task) = spawn_session(server);
+
+        let mut tls = connect_authenticated(addr, &fixture).await;
+        tls.write_all(format!("MAIL FROM:<{}>\r\n", fixture.sender).as_bytes())
+            .await
+            .unwrap();
+        tls.flush().await.unwrap();
+        {
+            let mut reader = tokio::io::BufReader::new(&mut tls);
+            assert_eq!(read_reply(&mut reader).await, "250 2.0.0 Ok\r\n");
+        }
+        tls.write_all(format!("RCPT TO:<{recipient}>\r\n").as_bytes())
+            .await
+            .unwrap();
+        tls.flush().await.unwrap();
+        {
+            let mut reader = tokio::io::BufReader::new(&mut tls);
+            assert_eq!(read_reply(&mut reader).await, "250 2.0.0 Ok\r\n");
+        }
+        tls.write_all(b"DATA\r\n").await.unwrap();
+        tls.flush().await.unwrap();
+        {
+            let mut reader = tokio::io::BufReader::new(&mut tls);
+            assert!(read_reply(&mut reader).await.starts_with("354"));
+        }
+        // The customer claims marketing in a header; the authenticated
+        // credential's class must win.
+        tls.write_all(
+            b"X-Message-Category: marketing\r\nMessage-ID: <txn-1@submission.test>\r\nSubject: reset\r\n\r\nbody\r\n",
+        )
+        .await
+        .unwrap();
+        tls.flush().await.unwrap();
+        tls.write_all(b".\r\n").await.unwrap();
+        tls.flush().await.unwrap();
+        let accepted = {
+            let mut reader = tokio::io::BufReader::new(&mut tls);
+            read_reply(&mut reader).await
+        };
+        assert!(
+            accepted.starts_with("250 2.0.0 Ok id="),
+            "a transactional credential must be admitted without marketing consent: {accepted:?}"
+        );
+        finish_session(&mut tls).await;
+        tokio::time::timeout(Duration::from_secs(10), task)
+            .await
+            .expect("session must finish")
+            .expect("session must not panic");
+
+        let category: String = sqlx::query_scalar(
+            "SELECT message_category FROM email_queue \
+             WHERE tenant_id = $1 AND to_addresses = ARRAY[$2]",
+        )
+        .bind(&fixture.tenant)
+        .bind(&recipient)
+        .fetch_one(&pool)
+        .await
+        .expect("queued transactional row");
+        assert_eq!(
+            category, "transactional",
+            "the credential row's class is the queue row's class"
         );
     }
 

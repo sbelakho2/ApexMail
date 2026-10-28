@@ -162,8 +162,8 @@ Uptime is measured per component, not as a single global number. Each component 
 |---|---|---|
 | Blackbox Exporter | External HTTP, HTTPS, SMTP, and DNS probes from multiple geographic locations | Status page data source |
 | Prometheus | Internal metrics collection (all services, host metrics, database metrics) | Not publicly accessible |
-| Alertmanager | Alert routing to on-call engineers | Not publicly accessible |
-| Grafana | Internal dashboards for engineering and SRE | Not publicly accessible |
+| Alertmanager | Alert routing to the responsible ApexMail operator | Not publicly accessible |
+| Grafana | Internal dashboards for ApexMail operations | Not publicly accessible |
 | compose healthchecks | Per-service health probes in `docker-compose.prod.yml` | Source available in repository |
 
 ### Probe Location Details

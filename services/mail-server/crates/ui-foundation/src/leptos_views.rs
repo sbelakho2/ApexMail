@@ -11,7 +11,7 @@ use crate::shell::*;
 use crate::view_data::{
     render_data_cell, AiDraftsPageData, AlertRulesPageData, AssistantPageData, AssistantTurnData,
     DemoViewerData, DemosPageData, ListPageData, SalesAutonomyData, SalesDeadLetterData,
-    SalesDecisionData, SalesOverviewData, SalesPageData,
+    SalesDecisionData, SalesOverviewData, SalesPageData, TenantAiDraftData, TenantAiDraftsPageData,
 };
 
 // ─── Root layouts ───────────────────────────────────────────
@@ -5021,6 +5021,191 @@ pub fn web_ai_drafts_page(data: Option<&AiDraftsPageData>) -> String {
 <div class=\"space-y-4\">{cards}</div>\
 </div>",
         cards = cards,
+    )
+}
+
+/// The TENANT-owned AI-drafts review page (`/ai-drafts`).
+///
+/// The operator queue (`/reviews/ai-drafts`) is the platform-wide surface; a
+/// customer workspace's owners review their OWN pending drafts here. Every
+/// row carries the deterministic purpose/risk verdict (`purposes`,
+/// `primary`, `risk`, autonomy requirement), the inbound message and the
+/// drafted reply (expandable, no JavaScript), and the two decisions:
+/// Approve and send (optionally with a note) or Reject with a STRUCTURED
+/// reason. A non-admin role sees the honest admin-only state and no action
+/// forms, mirroring the `/settings/journal` house pattern.
+pub fn web_tenant_ai_drafts_page(data: Option<&TenantAiDraftsPageData>) -> String {
+    let unavailable = data.is_some_and(|d| d.unavailable);
+    let admin_only = data.is_some_and(|d| d.admin_only);
+    let drafts = data.map(|d| d.drafts.as_slice()).unwrap_or(&[]);
+
+    let mut cards = String::new();
+    if admin_only {
+        cards.push_str(
+            "<div class=\"apex-notice apex-notice--warn\" role=\"status\">\
+             <strong>AI drafts is available to workspace administrators</strong>\
+             <span>Your role can use this workspace but cannot review AI-drafted replies. Ask a workspace owner or admin for access.</span></div>",
+        );
+    } else if unavailable {
+        cards.push_str(
+            "<div class=\"apex-notice apex-notice--warn\" role=\"status\">\
+             <strong>The AI draft queue is unavailable</strong>\
+             <span>The draft store could not be read just now. This is a service problem, not an empty queue, reload to try again.</span></div>",
+        );
+    } else if drafts.is_empty() {
+        cards.push_str(
+            "<div class=\"apex-panel\" role=\"status\">\
+             <p class=\"apex-panel-title\">No drafts need review</p>\
+             <p class=\"mt-1\">When the assistant answers an inbound message, its drafted reply waits here for a workspace administrator to approve or reject it. Nothing sends itself.</p></div>",
+        );
+    } else {
+        for draft in drafts {
+            cards.push_str(&tenant_ai_draft_html(draft));
+        }
+    }
+
+    format!(
+        "<div class=\"max-w-4xl space-y-6\">
+<h1 class=\"apex-page-title\">AI drafts</h1>\
+<p class=\"\">Drafted replies the assistant wrote for inbound messages in this workspace. Each one waits for a workspace administrator to approve and send it, or to reject it with a reason the assistant can learn from. Nothing sends itself.</p>\
+<section data-view-state=\"ready\" class=\"space-y-4\">{cards}</section>\
+</div>",
+        cards = cards,
+    )
+}
+
+/// The structured rejection vocabulary the console selector offers. The
+/// values are the API's wire enum (`wrong_facts`, ...); the api-server test
+/// `rejection_selector_matches_the_api_enum` keeps the two lists identical.
+pub const AI_DRAFT_REJECTION_REASONS: [(&str, &str); 5] = [
+    ("wrong_facts", "Wrong facts"),
+    ("wrong_tone", "Wrong tone"),
+    ("missing_info", "Missing information"),
+    ("wrong_action", "Wrong action"),
+    ("other", "Other"),
+];
+
+/// A display label for the wire vocabulary (`technical_support` →
+/// `technical support`).
+fn review_label(value: &str) -> String {
+    value.replace('_', " ")
+}
+
+fn tenant_ai_draft_html(draft: &TenantAiDraftData) -> String {
+    let mut purpose_badges = String::new();
+    for purpose in &draft.purposes {
+        let label = review_label(purpose);
+        let text = if purpose == &draft.primary_purpose {
+            format!("{label} (primary)")
+        } else {
+            label
+        };
+        purpose_badges.push_str(
+            &Badge {
+                text: &text,
+                variant: "outline",
+                size: "sm",
+                icon: None,
+            }
+            .render_html(),
+        );
+    }
+    let risk_variant = match draft.risk.as_str() {
+        "high" => "destructive",
+        "medium" => "warning",
+        _ => "success",
+    };
+    let risk_text = format!("risk: {}", review_label(&draft.risk));
+    let risk_badge = Badge {
+        text: &risk_text,
+        variant: risk_variant,
+        size: "sm",
+        icon: None,
+    }
+    .render_html();
+    let autonomy_text = format!("autonomy: {}", review_label(&draft.autonomy_requirement));
+    let autonomy_badge = Badge {
+        text: &autonomy_text,
+        variant: "outline",
+        size: "sm",
+        icon: None,
+    }
+    .render_html();
+    let first_response_badge = if draft.first_response {
+        Badge {
+            text: "first response",
+            variant: "warning",
+            size: "sm",
+            icon: None,
+        }
+        .render_html()
+    } else {
+        String::new()
+    };
+
+    let body = if draft.body_text.trim().is_empty() {
+        "(no message body was captured)".to_string()
+    } else {
+        html_escape(&draft.body_text)
+    };
+
+    // A deliberate choice: no reason is preselected, so a rejection always
+    // carries a reason the reviewer actually chose (the API/form handler
+    // refuses an empty one and the draft stays pending).
+    let mut reason_options =
+        String::from("<option value=\"\" selected disabled>Choose a reason</option>");
+    for (value, label) in AI_DRAFT_REJECTION_REASONS {
+        reason_options.push_str(&format!(
+            "<option value=\"{}\">{}</option>",
+            html_escape(value),
+            html_escape(label),
+        ));
+    }
+
+    format!(
+        "<article class=\"apex-panel\" data-draft-id=\"{id}\">\
+         <div class=\"flex flex-wrap items-baseline justify-between gap-3\">\
+         <h2 class=\"apex-panel-title\">{subject}</h2>\
+         <span class=\"apex-em\">{received_at}</span>\
+         </div>\
+         <p class=\"mt-1 break-words\">From {from}</p>\
+         <div class=\"mt-3 flex flex-wrap items-center gap-2\" data-role=\"draft-badges\">\
+         {purpose_badges}{risk_badge}{autonomy_badge}{first_response_badge}\
+         </div>\
+         <details class=\"mt-3\"><summary class=\"\">Message and drafted reply</summary>\
+         <div class=\"mt-2 space-y-3\">\
+         <div><p class=\"apex-em\">Inbound message</p>\
+         <pre class=\"mt-1 whitespace-pre-wrap break-words p-3\">{body}</pre></div>\
+         <div><p class=\"apex-em\">Drafted reply</p>\
+         <pre class=\"mt-1 whitespace-pre-wrap break-words p-3\">{reply}</pre></div>\
+         <p class=\"apex-em\">Written by the assistant. It is never sent without your decision.</p>\
+         </div></details>\
+         <div class=\"mt-4 grid gap-4 md:grid-cols-2\">\
+         <form class=\"flex flex-col gap-2 lg:flex-row lg:items-end\" method=\"post\" action=\"/web/ai/drafts/{id}/approve\">\
+         <div class=\"apex-field flex-1\"><label for=\"approve-note-{id}\">Approval note (optional)</label>\
+         <input id=\"approve-note-{id}\" name=\"note\" type=\"text\" /></div>\
+         <button type=\"submit\" class=\"apex-btn\">Approve and send</button>\
+         </form>\
+         <form class=\"flex flex-col gap-2 lg:flex-row lg:items-end\" method=\"post\" action=\"/web/ai/drafts/{id}/reject\">\
+         <div class=\"apex-field\"><label for=\"reject-reason-{id}\">Rejection reason</label>\
+         <select id=\"reject-reason-{id}\" name=\"reason\">{reason_options}</select></div>\
+         <div class=\"apex-field flex-1\"><label for=\"reject-note-{id}\">Note (optional)</label>\
+         <input id=\"reject-note-{id}\" name=\"note\" type=\"text\" /></div>\
+         <button type=\"submit\" class=\"apex-btn apex-btn--secondary\">Reject</button>\
+         </form>\
+         </div>\
+         </article>",
+        id = html_escape(&draft.id),
+        subject = html_escape(display_subject(&draft.subject)),
+        received_at = html_escape(&draft.received_at),
+        from = html_escape(display_or(&draft.from_email, "(unknown sender)")),
+        purpose_badges = purpose_badges,
+        risk_badge = risk_badge,
+        autonomy_badge = autonomy_badge,
+        first_response_badge = first_response_badge,
+        body = body,
+        reply = html_escape(&draft.draft_reply),
+        reason_options = reason_options,
     )
 }
 
@@ -10951,6 +11136,167 @@ mod deferred_feature_view_tests {
         let html = web_assistant_page(Some(&unavailable));
         assert!(html.contains("Conversation unavailable"), "{html}");
         assert!(html.contains("action=\"/web/assistant/message\""), "{html}");
+    }
+
+    // ── Tenant AI-draft review page (`/ai-drafts`) ─────────────────
+
+    fn tenant_draft_fixture(id: &str, subject: &str, risk: &str) -> TenantAiDraftData {
+        TenantAiDraftData {
+            id: id.into(),
+            from_email: "customer@corp.example".into(),
+            subject: subject.into(),
+            body_text: "I want a refund for the last invoice.".into(),
+            draft_reply: "Thanks for reaching out, we are on it.".into(),
+            received_at: "2026-10-28 09:30 UTC".into(),
+            purposes: vec!["refund".into(), "invoice".into()],
+            primary_purpose: "refund".into(),
+            risk: risk.into(),
+            autonomy_requirement: "human_review".into(),
+            first_response: false,
+        }
+    }
+
+    /// The tenant queue renders its rows with the deterministic verdict
+    /// badges, the expandable message + draft, and BOTH decision forms
+    /// (approve; reject with the structured selector).
+    #[test]
+    fn tenant_ai_drafts_page_renders_rows_with_purpose_risk_badges_and_actions() {
+        let data = TenantAiDraftsPageData {
+            drafts: vec![
+                tenant_draft_fixture("inb_refund_1", "Refund request", "high"),
+                TenantAiDraftData {
+                    id: "inb_support_2".into(),
+                    subject: "The dashboard errors on import".into(),
+                    body_text: "every CSV import fails".into(),
+                    purposes: vec!["technical_support".into()],
+                    primary_purpose: "technical_support".into(),
+                    risk: "low".into(),
+                    autonomy_requirement: "promotion_gate".into(),
+                    first_response: true,
+                    ..tenant_draft_fixture("inb_support_2", "The dashboard errors on import", "low")
+                },
+            ],
+            unavailable: false,
+            admin_only: false,
+        };
+        let html = web_tenant_ai_drafts_page(Some(&data));
+
+        assert!(html.contains("AI drafts"), "{html}");
+        assert!(html.contains("Refund request"), "{html}");
+        assert!(html.contains("From customer@corp.example"), "{html}");
+        // Purpose badges: primary first, display labels.
+        assert!(html.contains("refund (primary)"), "{html}");
+        assert!(html.contains("invoice"), "{html}");
+        assert!(html.contains("technical support (primary)"), "{html}");
+        // Risk + autonomy badges.
+        assert!(html.contains("risk: high"), "{html}");
+        assert!(html.contains("risk: low"), "{html}");
+        assert!(html.contains("autonomy: human review"), "{html}");
+        assert!(html.contains("autonomy: promotion gate"), "{html}");
+        assert!(html.contains("first response"), "{html}");
+        // Expandable message + drafted reply.
+        assert!(html.contains("Message and drafted reply"), "{html}");
+        assert!(
+            html.contains("I want a refund for the last invoice."),
+            "{html}"
+        );
+        assert!(
+            html.contains("Thanks for reaching out, we are on it."),
+            "{html}"
+        );
+        // Both decision forms, with the structured rejection selector.
+        assert!(
+            html.contains("action=\"/web/ai/drafts/inb_refund_1/approve\""),
+            "{html}"
+        );
+        assert!(
+            html.contains("action=\"/web/ai/drafts/inb_refund_1/reject\""),
+            "{html}"
+        );
+        assert!(html.contains("Approve and send"), "{html}");
+        assert!(html.contains("name=\"reason\""), "{html}");
+        assert!(
+            html.contains("Choose a reason"),
+            "no rejection reason is preselected: {html}"
+        );
+        for (value, label) in AI_DRAFT_REJECTION_REASONS {
+            assert!(html.contains(&format!("value=\"{value}\"")), "{html}");
+            assert!(html.contains(label), "{html}");
+        }
+        // Labels are wired to their controls (form hygiene).
+        assert!(
+            html.contains("for=\"reject-reason-inb_refund_1\""),
+            "{html}"
+        );
+        assert!(html.contains("id=\"reject-reason-inb_refund_1\""), "{html}");
+    }
+
+    /// The empty state, the admin-only state and the unavailable state never
+    /// render decision forms: a form whose every submission is refused is
+    /// not an honest state.
+    #[test]
+    fn tenant_ai_drafts_page_renders_empty_admin_only_and_unavailable_states() {
+        let empty = web_tenant_ai_drafts_page(Some(&TenantAiDraftsPageData::default()));
+        assert!(empty.contains("No drafts need review"), "{empty}");
+        assert!(!empty.contains("action=\"/web/ai/drafts/"), "{empty}");
+
+        let admin_only = web_tenant_ai_drafts_page(Some(&TenantAiDraftsPageData {
+            admin_only: true,
+            drafts: vec![tenant_draft_fixture(
+                "inb_hidden",
+                "Should not render",
+                "low",
+            )],
+            ..Default::default()
+        }));
+        assert!(
+            admin_only.contains("available to workspace administrators"),
+            "{admin_only}"
+        );
+        assert!(!admin_only.contains("Should not render"), "{admin_only}");
+        assert!(
+            !admin_only.contains("action=\"/web/ai/drafts/"),
+            "{admin_only}"
+        );
+
+        let unavailable = web_tenant_ai_drafts_page(Some(&TenantAiDraftsPageData {
+            unavailable: true,
+            ..Default::default()
+        }));
+        assert!(
+            unavailable.contains("queue is unavailable"),
+            "{unavailable}"
+        );
+        assert!(
+            !unavailable.contains("action=\"/web/ai/drafts/"),
+            "{unavailable}"
+        );
+    }
+
+    /// User-supplied message content is escaped in every slot (subject,
+    /// sender, body, draft), so a hostile inbound message cannot inject
+    /// markup into the review page.
+    #[test]
+    fn tenant_ai_drafts_page_escapes_message_content() {
+        let hostile = TenantAiDraftData {
+            id: "inb_xss".into(),
+            from_email: "<script>alert(1)</script>@corp.example".into(),
+            subject: "<img src=x onerror=alert(1)>".into(),
+            body_text: "<script>alert(2)</script>".into(),
+            draft_reply: "<b>bold</b>".into(),
+            ..Default::default()
+        };
+        let html = web_tenant_ai_drafts_page(Some(&TenantAiDraftsPageData {
+            drafts: vec![hostile],
+            ..Default::default()
+        }));
+        assert!(!html.contains("<script>alert"), "{html}");
+        assert!(!html.contains("<img src=x"), "{html}");
+        assert!(!html.contains("<b>bold</b>"), "{html}");
+        assert!(
+            html.contains("&lt;script&gt;alert(2)&lt;/script&gt;"),
+            "{html}"
+        );
     }
 
     // ── Feature 8: favicon ─────────────────────────────────────────
