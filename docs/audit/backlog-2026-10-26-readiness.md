@@ -127,7 +127,7 @@ tier list with landing status this wave:
 | 3.25 | Risk/assets/vendors/SoA/evidence-cadence core | OPEN (real certification blocker). |
 | 3.26 | Onboarding state machine | OPEN. |
 
-Also this wave: the coverage strict-disk flag (`CI_COVERAGE_DISK_REQUIRED=1`) is documented; making the release gate set it automatically is recorded for the release-run work.
+Also this wave: the coverage strict-disk flag (`CI_COVERAGE_DISK_REQUIRED=1`) is documented and now DEFAULTS ON for the canonical gate line (`ci/pipeline.sh run`), so a release run cannot silently skip coverage; standalone stage runs keep the skip-loud default.
 
 Release posture (audits' read, accepted): controlled paying-customer launch YES;
 100-contract steady state NO until the Tier-3 operations land; Mailbot internal/beta

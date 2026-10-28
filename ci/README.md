@@ -396,6 +396,11 @@ both required since the first-host triage window ended (2026-10-13).
    scratch-tree precondition and has always been skipped ahead of it), so no
    measured value exists to raise against; the flip to required belongs to
    the PR that first records a host measurement at/above the baseline.
+   On the gate line (`ci/pipeline.sh run`) the disk precondition is hard:
+   `CI_COVERAGE_DISK_REQUIRED` defaults to `1` there, so a runner without
+   the headroom fails the test lane instead of silently omitting coverage.
+   Standalone stage runs keep the skip-loud default; export `=0` to opt a
+   pipeline run out deliberately.
 5. **Migration SQL lint** (validate stage, `tools/migration_lint.py`) —
    enterprise conventions over the canonical chain: destructive ops
    guarded, idempotent CREATE TABLE/INDEX, `-- Migration N:` headers, no
