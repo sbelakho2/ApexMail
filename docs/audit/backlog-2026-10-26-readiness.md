@@ -91,6 +91,8 @@ coverage on an undersized machine (item 6); questionnaire owner labels neutraliz
 
 ## Fifth external audit (broad re-audit of e6a7c8b8) — 2026-10-28
 
+Landed in `0acdc9fa` (code) and `974f2e7e` (console goldens).
+
 Verdict accepted: controlled paying launch YES with exclusions (transactional SMTP,
 journaling claims, low-RPO/PITR commitments, unattended questionnaires, SOC/ISO
 representation); 100-contract steady state NO until the Tier-3 operations land. Its
@@ -113,14 +115,14 @@ tier list with landing status this wave:
 | 2.13 | Mailbot `Other` human-review-only | DONE: other → Service / Medium / HumanReview, pinned by test. |
 | 2.14 | Multi-label purpose classification | DONE: `classify_all` returns every matched purpose + effective risk (MAX) + strictest autonomy + primary; monotonicity property test (17^3 sweep). |
 | 2.15 | Header/MIME-based OOO/DSN classification | DONE: automated requires structural evidence (Auto-Submitted, Precedence, DSN multipart/report, autoreply headers, null Return-Path) plus 7 documented subject-line templates; prose-only phrases can no longer mark a customer as machine mail (counterexample pinned). The claim SQL/DDL now carries `headers`. |
-| 2.16 | Tenant-owned Mailbot review UX | THIS WAVE (agent in flight): tenant-scoped draft list/get/approve/reject(+structured reason)/regenerate sharing the operator workflow core, plus the console page. |
+| 2.16 | Tenant-owned Mailbot review UX | DONE: tenant-scoped `/v1/ai-drafts` list/get/approve/reject with structured reason and regenerate share the operator approval core (consent, claims, audit all enforced server-side), plus the console page with its goldens. |
 | 2.17 | 500-1,000 real-model Mailbot corpus | OPEN, owner-gated credentials (corpus + grading committed). |
 | 2.18 | ~500-task real-model Console corpus | OPEN, owner-gated credentials. |
 | 3.19 | Separate CI machine + status publishing | PARTIAL: publisher implemented (apexmail/<lane>); operator must run CI with the token, observe contexts, then enable required checks. Host separation = owner infra decision. |
 | 3.20 | Required GitHub status checks | OPEN until contexts are observed (explicit sequencing to avoid wedging main). |
 | 3.21 | Encrypted PITR enabled in production | OPEN, operator checklist step. |
 | 3.22 | Warm standby / second failure domain | OPEN. |
-| 3.23 | Dedicated Tenant billing line | THIS WAVE (agent in flight): dedicated_tenant becomes a contract line with catalog price + setup fee + minimum term through the existing invoice sweep. |
+| 3.23 | Dedicated Tenant billing line | DONE: `dedicated_tenant` is a contract line priced from the catalog with a one-time setup fee and minimum term (migration 275), flowing through the same invoice sweep under row locking. |
 | 3.24 | Dedicated Tenant host provisioning | OPEN (bundle lifecycle exists; physical provisioning is operator action). |
 | 3.25 | Risk/assets/vendors/SoA/evidence-cadence core | OPEN (real certification blocker). |
 | 3.26 | Onboarding state machine | OPEN. |
@@ -128,10 +130,15 @@ tier list with landing status this wave:
 Also this wave: the coverage strict-disk flag (`CI_COVERAGE_DISK_REQUIRED=1`) is documented; making the release gate set it automatically is recorded for the release-run work.
 
 Release posture (audits' read, accepted): controlled paying-customer launch YES;
-100-contract steady state NO until 0.1-0.5, 1.6-1.9 and 3.x land; Mailbot internal/beta
+100-contract steady state NO until the Tier-3 operations land; Mailbot internal/beta
 YES (5.8 GA: purpose classification, tenant review UX, real-model corpus are the
 non-waivables); Console Assistant controlled YES (8.0 capability / 6.3 practical until
-the tool mismatch and real-model benchmark land); SOC/ISO preparation YES, formal
-observation NO until the evidence core exists and has operated.: controlled production launch of core
-mail yes; Console Assistant controlled yes; Mailbot internal/beta only;
-SOC 2/ISO preparation yes, formal observation window not yet.
+the real-model benchmark lands); SOC/ISO preparation YES, formal observation NO until
+the evidence core exists and has operated.
+
+Release verification at `974f2e7e` (the one sanctioned full-workspace run): 13,303
+tests run through nextest; 166 failures, all in `worker-processors` and `migrator`
+during the final minutes of a ~40-minute parallel run. An isolated rerun of exactly
+those two crates against a fresh ephemeral Postgres and Redis at the same HEAD ran
+871 tests: 871 passed, 0 skipped, exit 0. The full-run failures were load-induced
+(late-run cluster), not defects.
