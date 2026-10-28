@@ -48,12 +48,12 @@ validate_env_file() {
         return "$CI_EXIT_OK"
     fi
     if ci_on_deploy_host; then
-        ci_check "validate-prod-env $_envf" \
+        ci_check "production env contract" \
             sh "$REPO_ROOT/tools/validate-prod-env.sh" "$_envf"
     else
         # The PROD_*_FILE targets live on the HOST; off-host only the values
         # are checked (same SKIP_FILE_CHECK=1 the GitHub runner used).
-        ci_check "validate-prod-env $_envf (values only)" \
+        ci_check "production env contract values" \
             env SKIP_FILE_CHECK=1 sh "$REPO_ROOT/tools/validate-prod-env.sh" "$_envf"
     fi
 }
@@ -308,6 +308,24 @@ validate_repo_gates() {
     # Risk-WAF Lua parity + trust-neutrality: a real invariant gate that
     # regressed silently before and was never wired (2026-10-07 review).
     ci_check "risk lua parity" bash tools/check-risk-lua-parity.sh
+    # KiwiCaptcha mirror parity: the carried Rust-only surface must be
+    # blob-identical to the standalone repo's committed tree
+    # (tools/kiwi_mirror_advance.py --check). Fail-closed when the sibling
+    # clone exists; when it does NOT, the gate refuses to silently pass —
+    # the gate machine clones the sibling (github.com/Bel-Consulting-OU/
+    # kiwicaptcha) and /etc/apexmail/pipeline.conf sets
+    # CI_KIWI_PARITY_UPSTREAM=<path>; CI_KIWI_PARITY_CHECK=advisory is a
+    # bounded triage-window override that records the loud skip.
+    _kp_upstream="${CI_KIWI_PARITY_UPSTREAM:-$REPO_ROOT/../kiwicaptcha-standalone}"
+    if [ -d "$_kp_upstream/.git" ] && [ "${CI_KIWI_PARITY_CHECK:-required}" != advisory ]; then
+        ci_check "kiwi mirror parity" python3 tools/kiwi_mirror_advance.py --check --upstream "$_kp_upstream" \
+            || return "$CI_EXIT_FAIL"
+    elif [ "${CI_KIWI_PARITY_CHECK:-required}" != advisory ]; then
+        ci_err "kiwi mirror parity: upstream clone not found at $_kp_upstream — clone it or set CI_KIWI_PARITY_UPSTREAM; CI_KIWI_PARITY_CHECK=advisory only for a bounded triage window"
+        return "$CI_EXIT_FAIL"
+    else
+        ci_warn "ADVISORY: kiwi mirror parity skipped (upstream clone absent or CI_KIWI_PARITY_CHECK=advisory) — the mirror's byte-parity is UNVERIFIED this run"
+    fi
 
     # (c) panic-path guardrails (rust-panic-paths.yml).
     if [ "$_vr_py" = 1 ]; then
@@ -331,7 +349,7 @@ validate_repo_gates() {
         ci_check "stub ban" python3 tools/check_no_stubs.py
         # Plan rule 3 (WP T1): an advisory lane needs a dated waiver; an
         # expired one fails the run.
-        ci_check "lane waivers" python3 tools/check_waivers.py
+        ci_check "lane waivers" python3 tools/check_waivers.py --check-lanes
         # T10: every gate proves it can fail on known-bad input.
         ci_check "stub ban self-test" python3 tools/check_no_stubs.py --self-test
         ci_check "invariant registry self-test" python3 tools/check_invariants.py --self-test
@@ -371,6 +389,26 @@ validate_repo_gates() {
         # plant-a-script arm can fail.
         # Every built page renders its real body (h1 + non-stub main).
         ci_check "marketing page content" python3 tools/check_marketing_pages.py
+        # The serving side of the same law (was orphaned since the
+        # site-sovereignty wave — wired 2026-10-28): every built locale page
+        # and root artifact must map to an explicit api-server serving arm
+        # (include_str! whitelist + assets router); a built page with no arm
+        # is a live 404.
+        ci_check "marketing serving whitelist" python3 tools/check_marketing_serving.py
+        # The OTHER serving path — the marketing container's nginx — proven
+        # live: the committed nginx.conf runs for real against the build
+        # output (headers, consent proxy, ARK assets). Tool-gated fail-closed.
+        _mn_st=$(lane_tool_status nginx marketing-nginx "${CI_MARKETING_NGINX_CHECK:-required}")
+        case $_mn_st in
+            run)
+                ci_check "marketing nginx serving" python3 tools/check_marketing_nginx.py \
+                    || return "$CI_EXIT_FAIL"
+                ;;
+            fail) return "$CI_EXIT_FAIL" ;;
+            skip) [ "${CI_MARKETING_NGINX_CHECK:-required}" = advisory ] \
+                && ci_warn "ADVISORY: marketing nginx serving skipped — nginx absent (triage window)" \
+                || return "$CI_EXIT_FAIL" ;;
+        esac
         ci_check "asset budget" python3 tools/check_asset_budget.py
         ci_check "asset budget self-test" python3 tools/check_asset_budget.py --self-test
         # The meta-proof (2026-10-07 gates review): the gate's own masker

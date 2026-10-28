@@ -322,6 +322,7 @@ run_cargo_tests() {
         if ! (cd "$WS" && _cargo_run_capture "$_nx_log" env $_TEST_ENV CARGO_TERM_COLOR=never \
                 cargo nextest run --workspace --all-targets --test-threads "$_nx_jobs" --no-fail-fast $_nx_args); then
             ci_err "cargo nextest run FAILED — see the output above"
+            ci_lane_record workspace-suite fail
             soft_skip_log_gate "$_nx_log" || return "$CI_EXIT_FAIL"
             return "$CI_EXIT_FAIL"
         fi
@@ -329,6 +330,7 @@ run_cargo_tests() {
         # skip-FREE run. A test that panicked in release mode already failed
         # the run above; this gate catches the helpers the panic sweep missed.
         soft_skip_log_gate "$_nx_log" || return "$CI_EXIT_FAIL"
+        ci_lane_record workspace-suite ok
     elif [ "${CI_MISSING_TOOLS:-auto}" = fail ]; then
         # Hermetic CI (the Woodpecker image): no fallback. A nextest-less
         # environment means the image is broken — prove that, don't degrade
@@ -342,10 +344,12 @@ run_cargo_tests() {
         if ! (cd "$WS" && _cargo_run_capture "$_ct_log" env $_TEST_ENV CARGO_TERM_COLOR=never \
                 cargo test --workspace); then
             ci_err "cargo test --workspace FAILED — see the output above"
+            ci_lane_record workspace-suite fail
             soft_skip_log_gate "$_ct_log" || return "$CI_EXIT_FAIL"
             return "$CI_EXIT_FAIL"
         fi
         soft_skip_log_gate "$_ct_log" || return "$CI_EXIT_FAIL"
+        ci_lane_record workspace-suite ok
     fi
 }
 
@@ -414,6 +418,7 @@ run_coverage_gate() {
             cargo llvm-cov nextest --workspace \
             --ignore-filename-regex '/(target|\.cargo|\.rustup)/' \
             --lcov --output-path "$_cov_lcov"); then
+        ci_lane_record coverage-ratchet fail
         if [ "${CI_COVERAGE_CHECK:-required}" = advisory ]; then
             ci_warn "ADVISORY: instrumented test run FAILED (CI_COVERAGE_CHECK=advisory)"
             return "$CI_EXIT_OK"
@@ -440,10 +445,12 @@ run_coverage_gate() {
         ''|*[!0-9.]*) ci_err "invalid baseline '$_cov_base' in $_cov_baseline (expected a single float)"; return "$CI_EXIT_FAIL" ;;
     esac
     if awk -v a="$_cov_pct" -v b="$_cov_base" 'BEGIN { exit !(a + 0 >= b + 0) }'; then
+        ci_lane_record coverage-ratchet ok
         ci_info "PASS: workspace line coverage $_cov_pct% (baseline $_cov_base%) — lcov artifact: $_cov_lcov"
         ci_info "ratchet: if this is above the baseline, raise ci/coverage-baseline.txt to $_cov_pct in the SAME PR — that is a PR-positive action, not a concession"
         return "$CI_EXIT_OK"
     fi
+    ci_lane_record coverage-ratchet fail
     if [ "${CI_COVERAGE_CHECK:-required}" = advisory ]; then
         ci_warn "ADVISORY: line coverage $_cov_pct% fell below baseline $_cov_base% (CI_COVERAGE_CHECK=advisory)"
         return "$CI_EXIT_OK"
@@ -618,7 +625,7 @@ run_sdk_tests() {
         run)
             provision_sdk_python_venv "$_py_venv" || return "$CI_EXIT_FAIL"
             (cd "$REPO_ROOT/packages/sdk-python" && \
-                ci_check "sdk-python (pytest, venv $_py_venv)" \
+                ci_check "sdk-python" \
                 env PYTHONPATH=src "$_py_venv/bin/python" -m pytest -q) \
                 || return "$CI_EXIT_FAIL"
             ;;
@@ -629,7 +636,7 @@ run_sdk_tests() {
         fail) return "$CI_EXIT_FAIL" ;;
         run)
             # go.mod has zero external requires — no module downloads.
-            (cd "$REPO_ROOT/packages/sdk-go" && ci_check "sdk-go (go test ./...)" \
+            (cd "$REPO_ROOT/packages/sdk-go" && ci_check "sdk-go" \
                 go test ./...) || return "$CI_EXIT_FAIL"
             ;;
     esac
@@ -640,7 +647,7 @@ run_sdk_tests() {
         run)
             # First run downloads the jackson/jupiter deps into ~/.m2 (~minutes);
             # every later run is cached. -B: no color/progress spam in stage logs.
-            (cd "$REPO_ROOT/packages/sdk-java" && ci_check "sdk-java (mvn -B test)" \
+            (cd "$REPO_ROOT/packages/sdk-java" && ci_check "sdk-java" \
                 mvn -q -B test) || return "$CI_EXIT_FAIL"
             ;;
     esac
@@ -651,7 +658,7 @@ run_sdk_tests() {
         run)
             # The contract suite is stdlib-only (F48 wave: 46 checks).
             (cd "$REPO_ROOT/packages/sdk-ruby" && \
-                ci_check "sdk-ruby (payload contract suite)" \
+                ci_check "sdk-ruby" \
                 ruby test/payload_contract_test.rb) || return "$CI_EXIT_FAIL"
             ;;
     esac
@@ -665,7 +672,7 @@ run_sdk_tests() {
                 fail) return "$CI_EXIT_FAIL" ;;
                 run)
                     provision_composer_vendor packages/sdk-php || return "$CI_EXIT_FAIL"
-                    (cd "$REPO_ROOT/packages/sdk-php" && ci_check "sdk-php (phpunit)" \
+                    (cd "$REPO_ROOT/packages/sdk-php" && ci_check "sdk-php" \
                         ./vendor/bin/phpunit) || return "$CI_EXIT_FAIL"
                     ;;
             esac
@@ -692,7 +699,7 @@ lane cannot provision deterministically (commit the lockfile)"
                         return "$CI_EXIT_FAIL"
                     fi
                     (cd "$REPO_ROOT/packages/sdk-typescript" && \
-                        ci_check "sdk-typescript (npm ci + node:test)" \
+                        ci_check "sdk-typescript" \
                         sh -c 'npm ci --no-audit --no-fund && npm test') \
                         || return "$CI_EXIT_FAIL"
                     ;;
@@ -745,7 +752,7 @@ run_satellite_crates() {
     # smtp-auth-proxy path-depends on services/mail-server/crates/apexmail-lib
     # (first build compiles that slice of the graph).
     (cd "$REPO_ROOT/packages/smtp-auth-proxy" && \
-        ci_check "cargo test packages/smtp-auth-proxy" cargo test --quiet) \
+        ci_check "satellite smtp-auth-proxy" cargo test --quiet) \
         || { [ "${CI_SATELLITE_CHECK:-required}" = advisory ] \
             && ci_warn "ADVISORY: smtp-auth-proxy suite failed (CI_SATELLITE_CHECK=advisory triage window)" \
             || return "$CI_EXIT_FAIL"; }
@@ -757,7 +764,7 @@ run_satellite_crates() {
     # for the HOST target (the wasm32 target is only needed for the cdylib
     # release build, which build.sh owns).
     (cd "$REPO_ROOT/packages/kiwicaptcha-wasm" && \
-        ci_check "cargo test packages/kiwicaptcha-wasm" cargo test --quiet) \
+        ci_check "satellite kiwicaptcha-wasm" cargo test --quiet) \
         || { [ "${CI_SATELLITE_CHECK:-required}" = advisory ] \
             && ci_warn "ADVISORY: kiwicaptcha-wasm suite failed (CI_SATELLITE_CHECK=advisory triage window)" \
             || return "$CI_EXIT_FAIL"; }
@@ -792,7 +799,7 @@ run_static_lint_gates() {
         run)
             # -S warning: error+warning findings fail; style/info stay visible
             # but advisory. -z/-0 pairing keeps paths with spaces safe.
-            (cd "$REPO_ROOT" && ci_check "shellcheck -S warning (all tracked *.sh, mirror surface excluded — see lane comment)" \
+            (cd "$REPO_ROOT" && ci_check "static lint shellcheck" \
                 sh -c 'git ls-files -z -- "*.sh" ":(exclude)packages/kiwicaptcha/**" ":(exclude)packages/kiwicaptcha-risk/**" ":(exclude)packages/kiwicaptcha-wasm/**" ":(exclude)protocol/**" | xargs -0 shellcheck -S warning') \
                 || { [ "${CI_STATIC_LINT_CHECK:-required}" = advisory ] \
                     && ci_warn "ADVISORY: shellcheck findings (CI_STATIC_LINT_CHECK=advisory triage window)" \
@@ -815,7 +822,7 @@ run_static_lint_gates() {
     case $_sl_st in
         run)
             _sl_hadolint=${_sl_hadolint:-hadolint}
-            (cd "$REPO_ROOT" && ci_check "hadolint (all tracked Dockerfiles, .hadolint.yaml)" \
+            (cd "$REPO_ROOT" && ci_check "static lint hadolint" \
                 sh -c "git ls-files -z -- '*Dockerfile*' | xargs -0 '$_sl_hadolint' --config .hadolint.yaml") \
                 || { [ "${CI_STATIC_LINT_CHECK:-required}" = advisory ] \
                     && ci_warn "ADVISORY: hadolint findings (CI_STATIC_LINT_CHECK=advisory triage window)" \
@@ -831,7 +838,7 @@ run_static_lint_gates() {
             # (tools/, apps/ai/). PYTHONPYCACHEPREFIX keeps __pycache__ out of
             # the checkout; the rc accumulates across the while loop (which is
             # NOT in a pipeline subshell, so the status survives).
-            (cd "$REPO_ROOT" && ci_check "python compile gate (tools/*.py apps/ai/**/*.py)" \
+            (cd "$REPO_ROOT" && ci_check "static lint py-compile" \
                 sh -c '_pc_tmp=$(mktemp -d "${TMPDIR:-/tmp}/apexmail-pyc.XXXXXX") || exit 1
 export PYTHONPYCACHEPREFIX=$_pc_tmp
 _pc_lst=$_pc_tmp/files
@@ -901,7 +908,7 @@ run_pre_commit_lane() {
     fi
     ci_info "pre-commit run --all-files (developer-side config, CI-enforced since audit SM14 F12)"
     _pc_rc=0
-    (cd "$REPO_ROOT" && ci_check "pre-commit (all files, committed config)" \
+    (cd "$REPO_ROOT" && ci_check "pre-commit parity" \
         pre-commit run --all-files) || _pc_rc=$?
     if [ "$_pc_rc" -ne 0 ]; then
         # Restore the lane's OWN fixer-hook mutations (tracked files only —
@@ -1036,7 +1043,7 @@ run_contrast_gate() {
         _contrast_gate_record failed "$_cg_missing"
         return "$CI_EXIT_FAIL"
     fi
-    (cd "$REPO_ROOT" && ci_check "WCAG AA contrast gate (tools/contrast-audit/gate.sh)" \
+    (cd "$REPO_ROOT" && ci_check "contrast gate" \
         sh tools/contrast-audit/gate.sh) || { [ "${CI_CONTRAST_GATE_CHECK:-required}" = advisory ] \
         && ci_warn "ADVISORY: contrast gate FAILED (CI_CONTRAST_GATE_CHECK=advisory triage window) — see tools/contrast-audit/reports/gate-report.json" \
         || { ci_err "contrast gate FAILED — see tools/contrast-audit/reports/gate-report.json"; return "$CI_EXIT_FAIL"; }; }
@@ -1067,7 +1074,7 @@ run_layout_gates() {
     # so no browser-toolchain prerequisite can ever skip it (and a
     # layout-spill failure cannot mask it).
     if command -v python3 >/dev/null 2>&1; then
-        (cd "$REPO_ROOT" && ci_check "tag-balance gate (tag-balance.py)" \
+        (cd "$REPO_ROOT" && ci_check "tag-balance gate" \
             python3 tools/contrast-audit/tag-balance.py) || { ci_err "tag-balance gate FAILED — see per-page output above"; return "$CI_EXIT_FAIL"; }
     elif [ "${CI_LAYOUT_GATE_CHECK:-required}" = required ]; then
         ci_err "python3 missing — tag-balance gate REQUIRED \
@@ -1090,7 +1097,7 @@ run_layout_gates() {
 (npm ci from the committed lockfile) should have run first (audit SM14 F2)"
     fi
     if [ -z "$_lg_missing" ]; then
-        (cd "$REPO_ROOT" && ci_check "layout-spill gate (tools/contrast-audit/layout-gate.sh)" \
+        (cd "$REPO_ROOT" && ci_check "layout gate" \
             sh tools/contrast-audit/layout-gate.sh) || { [ "${CI_CONTRAST_GATE_CHECK:-required}" = advisory ] \
             && ci_warn "ADVISORY: layout-spill gate FAILED (CI_CONTRAST_GATE_CHECK=advisory triage window) — see tools/contrast-audit/reports/layout/violations.json" \
             || { ci_err "layout gate FAILED — see tools/contrast-audit/reports/layout/violations.json"; return "$CI_EXIT_FAIL"; }; }
@@ -1132,7 +1139,7 @@ run_i18n_gate() {
         (cd "$REPO_ROOT/apps/marketing-zola" && "$_i18n_zola" build >/dev/null 2>&1) \
             || { ci_err "zola build failed for i18n gate"; return "$CI_EXIT_FAIL"; }
     fi
-    (cd "$REPO_ROOT" && ci_check "i18n completeness gate (tools/i18n-audit.py)" \
+    (cd "$REPO_ROOT" && ci_check "i18n gate" \
         python3 tools/i18n-audit.py) || { ci_err "i18n gate FAILED — see output above"; return "$CI_EXIT_FAIL"; }
 }
 
@@ -1215,12 +1222,12 @@ run_dogfood_lane() {
         fail) return "$CI_EXIT_FAIL" ;;
         skip) return "$CI_EXIT_OK" ;;
     esac
-    (cd "$REPO_ROOT" && ci_check "dogfood ledger (every enumerated surface probed)" \
+    (cd "$REPO_ROOT" && ci_check "dogfood ledger" \
         python3 tools/dogfood-v2/run.py --ledger-only) \
         || { [ "${CI_DOGFOOD_CHECK:-required}" = advisory ] \
             && ci_warn "ADVISORY: dogfood ledger reports unprobed surfaces (exit 3 — CI_DOGFOOD_CHECK=advisory triage window); unprobed list above" \
             || { ci_err "dogfood ledger coverage FAILED — unprobed surface list above (exit 3 = ledger coverage violation)"; return "$CI_EXIT_FAIL"; }; }
-    (cd "$REPO_ROOT" && ci_check "dogfood harness self-test (whole battery vs fixture server)" \
+    (cd "$REPO_ROOT" && ci_check "dogfood harness self-test" \
         python3 tools/dogfood-v2/run.py --self-test) \
         || { [ "${CI_DOGFOOD_CHECK:-required}" = advisory ] \
             && ci_warn "ADVISORY: dogfood harness self-test FAILED (CI_DOGFOOD_CHECK=advisory triage window) — the harness contract is unproven" \

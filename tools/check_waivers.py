@@ -79,6 +79,75 @@ def check(waivers_path: Path, lanes_path: Path, *, today: dt.date | None = None)
     return problems
 
 
+
+def slugify(label: str) -> str:
+    """The ci_check label -> lane-id slug. MUST stay identical to
+    ci/lib.sh ci_check_lane_id (lowercase, non-alphanumeric runs -> one dash)."""
+    import re
+
+    return re.sub(r"[^a-z0-9]+", "-", label.lower()).strip("-")
+
+
+def stage_slug_set(stage: str) -> set[str]:
+    """Every lane slug the stage can record: ci_check / ci_check_advisory
+    labels with no shell variable in them, plus explicit ci_lane_record ids."""
+    import re
+
+    path = REPO / "ci" / "stages" / f"{stage}.sh"
+    slugs: set[str] = set()
+    if not path.exists():
+        return slugs
+    text = path.read_text()
+    for label in re.findall(r'ci_check(?:_advisory)? "([^"]+)"', text):
+        if "$" not in label:
+            slugs.add(slugify(label))
+    for record in re.findall(r"ci_lane_record\s+([a-z0-9-]+)", text):
+        slugs.add(record)
+    return slugs
+
+
+def default_stages() -> list[str]:
+    """The CI_STAGES default from ci/pipeline.conf (the gate line)."""
+    import re
+
+    conf = (REPO / "ci" / "pipeline.conf").read_text()
+    m = re.search(r':\s*"\$\{CI_STAGES:=([^}]+)\}"', conf)
+    return [s.strip() for s in m.group(1).split(",")] if m else []
+
+
+def check_lanes(lanes_path: Path) -> list[str]:
+    """Every required-lanes row must be a lane a stage actually runs: a bare
+    stage on the CI_STAGES default line, or <stage>.<slug> where the stage's
+    sources produce that slug. A row naming nothing real fails CI — "required
+    means recorded" cannot point at a lane that no longer exists (this bit
+    2026-10-28: test.browsers/test.php outlived their lanes)."""
+    stages = set(default_stages())
+    slug_cache: dict[str, set[str]] = {}
+    problems: list[str] = []
+    seen: set[str] = set()
+    for line in lanes_path.read_text().splitlines():
+        row = line.strip()
+        if not row or row.startswith("#"):
+            continue
+        if row in seen:
+            problems.append(f"{row}: duplicate row")
+        seen.add(row)
+        if row in stages:
+            continue
+        if "." not in row:
+            problems.append(f"{row}: not a stage on the CI_STAGES line ({', '.join(sorted(stages))}) and not <stage>.<lane>")
+            continue
+        stage, _, slug = row.partition(".")
+        if stage not in stages and f"{stage}.sh" not in {p.name for p in (REPO / "ci" / "stages").glob("*.sh")}:
+            problems.append(f"{row}: unknown stage {stage!r}")
+            continue
+        if stage not in slug_cache:
+            slug_cache[stage] = stage_slug_set(stage)
+        if slug not in slug_cache[stage]:
+            problems.append(f"{row}: no ci_check label or ci_lane_record in ci/stages/{stage}.sh produces slug {slug!r}")
+    return problems
+
+
 def self_test(tmp: Path) -> int:
     """Prove the gate fails on known-bad fixtures and passes a clean one."""
     lanes = tmp / "lanes.txt"
@@ -106,8 +175,39 @@ def self_test(tmp: Path) -> int:
         if needle not in kinds:
             print(f"self-test FAIL: expected a {needle!r} problem, got:\n{kinds}", file=sys.stderr)
             return 1
+    # --check-lanes teeth: a row with no producing check fails; real rows pass.
+    # check_lanes reads stage sources and pipeline.conf under the module's REPO,
+    # so the fixture re-points REPO at a throwaway repo tree and restores it.
+    global REPO
+    saved_repo = REPO
+    try:
+        mod_dir = tmp / "repo"
+        (mod_dir / "ci" / "stages").mkdir(parents=True)
+        (mod_dir / "ci" / "stages" / "demo.sh").write_text(
+            'ci_check "stub ban" true\nci_lane_record workspace-suite ok\n'
+        )
+        (mod_dir / "ci" / "pipeline.conf").write_text(': "${CI_STAGES:=fetch,demo}"\n')
+        REPO = mod_dir
+        good = mod_dir / "lanes.txt"
+        good.write_text("fetch\ndemo\ndemo.stub-ban\ndemo.workspace-suite\n")
+        if check_lanes(good):
+            print("self-test FAIL: real lane rows were rejected", file=sys.stderr)
+            return 1
+        bad_rows = mod_dir / "lanes-bad.txt"
+        bad_rows.write_text("demo\ndemo.gone-lane\ndemo.nope\n")
+        problems = check_lanes(bad_rows)
+        if len(problems) != 2 or not any("gone-lane" in p for p in problems):
+            print(
+                "self-test FAIL: expected exactly the two bogus rows rejected, got:\n"
+                + "\n".join(problems),
+                file=sys.stderr,
+            )
+            return 1
+    finally:
+        REPO = saved_repo
     print("self-test: ok (valid waiver accepted; over-long, unknown-lane and "
-          "expired waivers rejected)")
+          "expired waivers rejected; required-lane rows proven against their "
+          "stage sources)")
     return 0
 
 
@@ -115,6 +215,7 @@ def main(argv: list[str]) -> int:
     waivers = WAIVERS
     lanes_path = LANES
     do_self_test = "--self-test" in argv
+    check_lanes_mode = "--check-lanes" in argv
     args = list(argv)
     if "--waivers" in args:
         waivers = Path(args[args.index("--waivers") + 1])
@@ -125,10 +226,20 @@ def main(argv: list[str]) -> int:
 
         with tempfile.TemporaryDirectory() as tmp:
             return self_test(Path(tmp))
-    if not waivers.exists():
+    lane_problems = check_lanes(lanes_path) if check_lanes_mode else []
+    if not waivers.exists() and not lane_problems:
         # An empty (or absent) waiver file is the clean state: every lane is
         # required. Nothing to check, nothing waived.
-        print("waivers: none (ci/waivers.toml absent — every lane required)")
+        print("waivers: none (ci/waivers.toml absent — every lane required)"
+              + ("; required lanes all resolve" if check_lanes_mode else ""))
+        return 0
+    if lane_problems:
+        print("required-lane gate FAILED:", file=sys.stderr)
+        for p in lane_problems:
+            print(f"  - {p}", file=sys.stderr)
+        print(f"see {lanes_path} — a required row must name a lane a stage runs", file=sys.stderr)
+        return 1
+    if not waivers.exists():
         return 0
     problems = check(waivers, lanes_path)
     if problems:

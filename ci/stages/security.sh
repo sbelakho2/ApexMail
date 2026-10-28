@@ -122,7 +122,7 @@ cargo_vet() {
         return "$CI_EXIT_FAIL"
     fi
     ci_have_tool cargo-vet || return "$CI_EXIT_OK"
-    (cd "$WS" && ci_check "cargo vet --locked" cargo vet --locked)
+    (cd "$WS" && ci_check "cargo vet" cargo vet --locked)
 }
 
 # --- Semgrep SAST (rust-check.yml SAST job — now REQUIRED) ------------------------------
@@ -143,7 +143,7 @@ cargo_vet() {
 semgrep_sast() {
     ci_have_tool semgrep || return "$CI_EXIT_OK"
     _sg_rc=0
-    (cd "$REPO_ROOT" && ci_check "semgrep SAST (p/default, p/rust)" \
+    (cd "$REPO_ROOT" && ci_check "semgrep SAST" \
         semgrep scan --config p/default --config p/rust --error --quiet \
             --exclude apps/marketing-zola/public \
             --exclude node_modules --exclude target --exclude vendor \
@@ -176,7 +176,7 @@ semgrep_sast() {
 trivy_fs_scan() {
     ci_have_tool trivy || return "$CI_EXIT_OK"
     _tf_rc=0
-    (cd "$REPO_ROOT" && ci_check "trivy fs (vuln+secret, $CI_TRIVY_SEVERITY)" \
+    (cd "$REPO_ROOT" && ci_check "trivy fs" \
         trivy fs --severity "$CI_TRIVY_SEVERITY" --scanners vuln,secret \
             --skip-dirs node_modules,target,public,vendor,.git,secrets,certs,backups \
             --skip-dirs .venv,venv,.tox,__pycache__ \
@@ -310,7 +310,7 @@ and CI_MISSING_TOOLS=fail — the REQUIRED fresh-DB migration gate cannot silent
 
     # (1) embedded migration set lists cleanly (touch: see the F7 note above)
     touch "$WS/crates/migrator/src/main.rs"
-    (cd "$WS" && ci_check "migrator --dry-run" cargo run --locked -p migrator -- --dry-run) \
+    (cd "$WS" && ci_check "migrator dry-run" cargo run --locked -p migrator -- --dry-run) \
         || return "$CI_EXIT_FAIL"
 
     # (2) apply the chain to the fresh database, twice. The retry loop
@@ -336,10 +336,10 @@ and CI_MISSING_TOOLS=fail — the REQUIRED fresh-DB migration gate cannot silent
         ci_err "sqlx migrate run could not connect after 3 attempts — see $CI_STAGE_LOG"
         _mv_rc=1
     elif command -v sqlx >/dev/null 2>&1; then
-        (cd "$WS" && DATABASE_URL="$_mv_url" ci_check "sqlx migrate run (clean DB)" \
+        (cd "$WS" && DATABASE_URL="$_mv_url" ci_check "sqlx migrate clean db" \
             sqlx migrate run --source migrations) || _mv_rc=1
         [ "$_mv_rc" -ne 0 ] || {
-            (cd "$WS" && DATABASE_URL="$_mv_url" ci_check "sqlx migrate run (idempotency)" \
+            (cd "$WS" && DATABASE_URL="$_mv_url" ci_check "sqlx migrate idempotency" \
                 sqlx migrate run --source migrations) || _mv_rc=1
         }
     else
@@ -347,11 +347,11 @@ and CI_MISSING_TOOLS=fail — the REQUIRED fresh-DB migration gate cannot silent
 (fresh-DB NULL-decode bug applies; install sqlx-cli via ci/install.sh)"
         # touch again before EACH cargo run (see the F7 note above)
         touch "$WS/crates/migrator/src/main.rs"
-        (cd "$WS" && DATABASE_URL="$_mv_url" ci_check "migrator apply (clean DB)" \
+        (cd "$WS" && DATABASE_URL="$_mv_url" ci_check "migrator apply clean db" \
             cargo run --locked -p migrator) || _mv_rc=1
         [ "$_mv_rc" -ne 0 ] || {
             touch "$WS/crates/migrator/src/main.rs"
-            (cd "$WS" && DATABASE_URL="$_mv_url" ci_check "migrator apply (idempotency)" \
+            (cd "$WS" && DATABASE_URL="$_mv_url" ci_check "migrator apply idempotency" \
                 cargo run --locked -p migrator) || _mv_rc=1
         }
     fi

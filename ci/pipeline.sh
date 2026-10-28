@@ -146,6 +146,37 @@ blessing_refused_reason() {
     [ "$_br_found" -gt 0 ]
 }
 
+# blessing_lanes_statuses <manifest.json> — "<lane>=<status>,..." for every
+# sub-lane row in ci/required-lanes.txt, sourced from the run manifest's
+# recorded per-check lanes (ci_check / ci_lane_record write them). Stage rows
+# in the file are skipped: their statuses travel in gateStagesStatuses.
+# Lanes that never ran record as not-run — gate_blessing_refusal refuses them.
+blessing_lanes_statuses() {
+    _bls_manifest=$1
+    _bls_file=$CI_ROOT/required-lanes.txt
+    [ -f "$_bls_file" ] || return 0
+    _bls_out=''
+    for _bls_row in $(grep -v '^#' "$_bls_file" | grep -v '^$'); do
+        case $_bls_row in
+            *.*) ;;
+            *) continue ;;
+        esac
+        _bls_val=not-run
+        if command -v jq >/dev/null 2>&1 && [ -f "$_bls_manifest" ]; then
+            _bls_val=$(jq -r --arg id "$_bls_row" \
+                '[.stages[].lanes[]? | select(.id == $id) | .status] | last // "not-run"' \
+                "$_bls_manifest" 2>/dev/null)
+            [ -n "$_bls_val" ] || _bls_val=not-run
+        fi
+        if [ -n "$_bls_out" ]; then
+            _bls_out="$_bls_out,$_bls_row=$_bls_val"
+        else
+            _bls_out="$_bls_row=$_bls_val"
+        fi
+    done
+    printf '%s' "$_bls_out"
+}
+
 # blessing_passed_json <"stage=status" ...> — the passedStages JSON array of
 # the required stages that genuinely finished ok (audit SM14 F3: derived
 # from the run's ACTUAL per-stage statuses, never a hardcoded list).
@@ -460,12 +491,14 @@ cmd_run() {
                             _gb_statuses="$_gb_st=$_gb_val"
                         fi
                     done
-                    printf '{"sha":"%s","pipelineConfigHash":"%s","gateStagesStatuses":"%s","machine":"%s","completedAt":"%s"}\n' \
-                        "$CI_SHA" "$_pipeline_hash" "$_gb_statuses" \
+                    _gb_lanes=$(blessing_lanes_statuses "$RUN_DIR/manifest.json")
+                    printf '{"sha":"%s","pipelineConfigHash":"%s","gateStagesStatuses":"%s","requiredLanesStatuses":"%s","machine":"%s","completedAt":"%s"}\n' \
+                        "$CI_SHA" "$_pipeline_hash" "$_gb_statuses" "$_gb_lanes" \
                         "$(hostname 2>/dev/null || printf 'ci-machine')" \
                         "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
                         >"$RUNS_DIR/.gate-blessing.json"
                     ci_info "gate blessing recorded: $RUNS_DIR/.gate-blessing.json ($_gb_statuses)"
+                    [ -z "$_gb_lanes" ] || ci_info "required lanes: $_gb_lanes"
                     ci_info "push it to the deploy host with: ci/pipeline.sh push-blessing <ssh-target>"
                     ;;
             esac
@@ -761,12 +794,17 @@ list vs CI_CARGO_AUDIT_IGNORES (pipeline.conf) — restore EXACT lockstep"
     # must all refuse; a fresh, complete blessing for HEAD under the CURRENT
     # config must allow. Exercised against the real gate_blessing_refusal.
     _gbb_tmp=$(mktemp -d "${TMPDIR:-/tmp}/apexmail-gate-bless.XXXXXX")
+    # Every sub-lane row of required-lanes.txt recorded ok — what a real
+    # green run's blessing carries (built from the file, so this fixture
+    # tracks the ledger instead of drifting from it).
+    _gbb_all_ok=$(sed -e '/^#/d' -e '/^$/d' "$CI_DIR/required-lanes.txt" |
+        grep '\.' | sed 's/$/=ok/' | paste -sd, -)
     if ! gate_blessing_refusal "$_gbb_tmp" deadbeef >/dev/null; then
         ci_err "gate blessing: an EMPTY runs dir was accepted"
         _sf_fail=1
     fi
     _gbb_hash=$(ci_pipeline_config_hash)
-    printf '{"sha":"deadbeef","pipelineConfigHash":"%s","gateStagesStatuses":"fetch=ok,validate=ok,docs=ok,ui=ok,test=ok,security=ok"}\n' "$_gbb_hash" >"$_gbb_tmp/.gate-blessing.json"
+    printf '{"sha":"deadbeef","pipelineConfigHash":"%s","gateStagesStatuses":"fetch=ok,validate=ok,docs=ok,ui=ok,test=ok,security=ok","requiredLanesStatuses":"%s"}\n' "$_gbb_hash" "$_gbb_all_ok" >"$_gbb_tmp/.gate-blessing.json"
     if gate_blessing_refusal "$_gbb_tmp" deadbeef >/dev/null; then
         ci_err "gate blessing: a fresh, complete blessing for HEAD was refused"
         _sf_fail=1
@@ -775,14 +813,28 @@ list vs CI_CARGO_AUDIT_IGNORES (pipeline.conf) — restore EXACT lockstep"
         ci_err "gate blessing: a blessing for ANOTHER sha was accepted for HEAD"
         _sf_fail=1
     fi
-    printf '{"sha":"deadbeef","pipelineConfigHash":"stale","gateStagesStatuses":"fetch=ok,validate=ok,docs=ok,ui=ok,test=ok,security=ok"}\n' >"$_gbb_tmp/.gate-blessing.json"
+    printf '{"sha":"deadbeef","pipelineConfigHash":"stale","gateStagesStatuses":"fetch=ok,validate=ok,docs=ok,ui=ok,test=ok,security=ok","requiredLanesStatuses":"%s"}\n' "$_gbb_all_ok" >"$_gbb_tmp/.gate-blessing.json"
     if ! gate_blessing_refusal "$_gbb_tmp" deadbeef >/dev/null; then
         ci_err "gate blessing: a blessing under a STALE pipeline config was accepted"
         _sf_fail=1
     fi
-    printf '{"sha":"deadbeef","pipelineConfigHash":"%s","gateStagesStatuses":"fetch=ok,validate=ok,docs=ok,ui=ok,test=advisory-fail,security=ok"}\n' "$_gbb_hash" >"$_gbb_tmp/.gate-blessing.json"
+    printf '{"sha":"deadbeef","pipelineConfigHash":"%s","gateStagesStatuses":"fetch=ok,validate=ok,docs=ok,ui=ok,test=advisory-fail,security=ok","requiredLanesStatuses":"%s"}\n' "$_gbb_hash" "$_gbb_all_ok" >"$_gbb_tmp/.gate-blessing.json"
     if ! gate_blessing_refusal "$_gbb_tmp" deadbeef >/dev/null; then
         ci_err "gate blessing: a blessing with test=advisory-fail was accepted"
+        _sf_fail=1
+    fi
+    # Required-lane teeth (2026-10-28 wiring): a blessing whose stages are all
+    # ok but with ONE required lane failed, or missing the lane field entirely
+    # (pre-lane-recording blessing), must be refused.
+    printf '{"sha":"deadbeef","pipelineConfigHash":"%s","gateStagesStatuses":"fetch=ok,validate=ok,docs=ok,ui=ok,test=ok,security=ok","requiredLanesStatuses":"%s"}\n' \
+        "$_gbb_hash" "$(printf '%s' "$_gbb_all_ok" | sed 's/validate.stub-ban=ok/validate.stub-ban=fail/')" >"$_gbb_tmp/.gate-blessing.json"
+    if ! gate_blessing_refusal "$_gbb_tmp" deadbeef >/dev/null; then
+        ci_err "gate blessing: a blessing with validate.stub-ban=fail was accepted"
+        _sf_fail=1
+    fi
+    printf '{"sha":"deadbeef","pipelineConfigHash":"%s","gateStagesStatuses":"fetch=ok,validate=ok,docs=ok,ui=ok,test=ok,security=ok"}\n' "$_gbb_hash" >"$_gbb_tmp/.gate-blessing.json"
+    if ! gate_blessing_refusal "$_gbb_tmp" deadbeef >/dev/null; then
+        ci_err "gate blessing: a blessing WITHOUT requiredLanesStatuses was accepted"
         _sf_fail=1
     fi
     rm -rf "$_gbb_tmp"

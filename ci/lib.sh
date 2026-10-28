@@ -315,11 +315,19 @@ manifest_init() {
 manifest_stage() {
     _ms_name=$1 _ms_status=$2 _ms_exit=$3 _ms_start=$4 _ms_end=$5
     _ms_dur=$(( _ms_end - _ms_start ))
+    _ms_lanes='[]'
+    if [ -n "${RUN_DIR:-}" ] && [ -f "$RUN_DIR/lanes.tsv" ]; then
+        # Only THIS stage's rows (a stage writes its lanes before manifest_stage).
+        _ms_lane_json=$(awk -F'\t' -v st="$_ms_name" \
+            '$1 == st {printf "{\"id\":\"%s\",\"status\":\"%s\"},", $2, $3}' \
+            "$RUN_DIR/lanes.tsv" | sed 's/,$//')
+        _ms_lanes="[$_ms_lane_json]"
+    fi
     if command -v jq >/dev/null 2>&1 && [ -f "$MANIFEST" ]; then
         _ms_tmp=$(mktemp "${TMPDIR:-/tmp}/apexmail-ci.XXXXXX")
         jq --arg n "$_ms_name" --arg s "$_ms_status" --argjson e "$_ms_exit" \
-           --argjson d "$_ms_dur" \
-           '.stages += [{name:$n,status:$s,exit_code:$e,duration_s:$d}]' \
+           --argjson d "$_ms_dur" --argjson l "$_ms_lanes" \
+           '.stages += [{name:$n,status:$s,exit_code:$e,duration_s:$d,lanes:$l}]' \
            "$MANIFEST" >"$_ms_tmp" && mv "$_ms_tmp" "$MANIFEST"
         rm -f "$_ms_tmp"
     else
@@ -456,6 +464,25 @@ gate_blessing_refusal() {
                 ;;
         esac
     done
+    # "Required means recorded" down to the gate level: the blessing must
+    # carry EVERY sub-lane row of ci/required-lanes.txt as ok. A blessing
+    # from before lane recording (no requiredLanesStatuses field) is refused —
+    # it cannot prove the lanes ran.
+    _gbr_lanes=$(sed -n 's/.*"requiredLanesStatuses":"\([^"]*\)".*/\1/p' "$_gbr_file" | head -n1)
+    if [ -z "$_gbr_lanes" ]; then
+        printf '%s' "the blessing predates required-lane recording — the CI machine must re-run the gate line for $_gbr_head"
+        return 0
+    fi
+    for _gbr_pair in $(printf '%s' "$_gbr_lanes" | tr ',' ' '); do
+        case $_gbr_pair in
+            *=ok) ;;
+            *)
+                printf 'required lane %s did not pass on the CI machine (recorded: %s)' \
+                    "${_gbr_pair%%=*}" "$_gbr_pair"
+                return 0
+                ;;
+        esac
+    done
     return 1
 }
 
@@ -573,6 +600,24 @@ ci_on_deploy_host() {
 # ci_check <label> <cmd...> — run one named check, log PASS/FAIL with the
 # command's real exit code preserved (output capped into $CI_STAGE_LOG).
 # In dry-run mode the command is not executed (logged as a dry-run skip).
+# ci_check_lane_id <label> — the deterministic lane id for a check label:
+# lowercased, every non-alphanumeric run collapsed to one dash, trimmed.
+# The SAME algorithm lives in tools/check_waivers.py (--check-lanes), which
+# proves every ci/required-lanes.txt row is a lane some stage actually runs.
+ci_check_lane_id() {
+    printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | sed -e 's/[^a-z0-9]\+/-/g' -e 's/^-//' -e 's/-$//'
+}
+
+# ci_lane_record <id> <ok|fail> — record a lane result for lanes that do not
+# go through ci_check (the workspace suite, the coverage ratchet). No-op in
+# dry-run (selftest) and when no run dir exists.
+ci_lane_record() {
+    _clr_id=$1 _clr_status=$2
+    [ "${CI_DRY_RUN:-0}" = "1" ] && return 0
+    [ -n "${RUN_DIR:-}" ] && [ -d "$RUN_DIR" ] || return 0
+    printf '%s\t%s\t%s\n' "${CI_STAGE_NAME:-?}" "$_clr_id" "$_clr_status" >>"$RUN_DIR/lanes.tsv"
+}
+
 ci_check() {
     _ck_label=$1
     shift
@@ -587,6 +632,11 @@ ci_check() {
         ci_info "PASS: $_ck_label"
     else
         ci_err "FAIL: $_ck_label (exit $_ck_rc)"
+    fi
+    if [ "${CI_DRY_RUN:-0}" != "1" ] && [ -n "${RUN_DIR:-}" ] && [ -d "$RUN_DIR" ]; then
+        printf '%s\t%s\t%s\n' "${CI_STAGE_NAME:-?}" \
+            "$(ci_check_lane_id "$_ck_label")" \
+            "$([ "$_ck_rc" -eq 0 ] && printf ok || printf fail)" >>"$RUN_DIR/lanes.tsv"
     fi
     return "$_ck_rc"
 }

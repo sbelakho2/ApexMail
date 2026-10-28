@@ -817,8 +817,15 @@ stage (`ci/install.sh` installs gh as a convenience only).
 2. every stage is fail-closed on the deploy host, and a red stage stops the
    line before images or deploy;
 3. the blessing manifest (`.gate-blessing.json`: sha + pipeline-config hash +
-   the stages that passed) is what the deploy host accepts — a partial lane
-   or a different pipeline configuration cannot bless;
+   the stages that passed, and since 2026-10-28 `requiredLanesStatuses` — one
+   `lane=ok` row for EVERY sub-lane in `ci/required-lanes.txt`) is what the
+   deploy host accepts — a partial lane, a different pipeline configuration,
+   or a required sub-lane that did not finish ok cannot bless. The lane ids
+   are mechanical (`<stage>.<slug-of-the-ci_check-label>`, recorded by every
+   stage into the run manifest), and `tools/check_waivers.py --check-lanes`
+   (the `validate.waivers` lane) proves every required row names a lane a
+   stage actually runs — a stale row like the retired `test.browsers` fails
+   CI instead of silently gating nothing;
 4. `tools/post_github_status.sh` still posts an **advisory** commit status
    when a token happens to be present, so a commit page shows the pipeline
    verdict; it skips loudly when there is no token and never fails a run.
