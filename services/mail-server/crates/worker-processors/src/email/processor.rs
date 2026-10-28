@@ -4148,7 +4148,19 @@ impl EmailProcessor {
         // campaign ladder writes (`track_opens` / `track_clicks` in the job
         // metadata; absent = both on). The unsubscribe affordance is
         // applied separately below and is NEVER toggled off.
-        if self.config.tracking.enabled {
+        //
+        // External qualification (2026-10-28) + the category law: open/click
+        // tracking, link rewriting and the unsubscribe affordance are
+        // MARKETING-mail behaviors — consent obligations and engagement
+        // measurement ride the marketing class. A transactional or service
+        // message must arrive as the DECLARED bytes (the exact HTML the
+        // caller sent, no pixel, no List-Unsubscribe headers: RFC 8058
+        // itself says one-click headers belong on marketing mail). The
+        // missing category arm keeps the queue's marketing default
+        // (migration 187/272) for legacy rows.
+        let is_marketing =
+            apexmail_lib::email_headers::message_category::is_marketing_class(&job.message_category);
+        if is_marketing && self.config.tracking.enabled {
             let flag = |key: &str| {
                 job.metadata
                     .as_ref()
@@ -4175,7 +4187,11 @@ impl EmailProcessor {
         // in the caller's HTML/text. Best-effort by design: suppression
         // NEVER depends on attribution success, a missing token leaves
         // the body untouched and the send proceeds.
-        let unsubscribe = unsubscribe_link(job, &self.config.tracking);
+        let unsubscribe = if is_marketing {
+            unsubscribe_link(job, &self.config.tracking)
+        } else {
+            None
+        };
         let mut headers: Vec<(String, String)> = Vec::new();
         if let Some((_token, url)) = &unsubscribe {
             // RFC 2369 angle-bracketed https URL + RFC 8058 one-click POST.
@@ -11221,6 +11237,66 @@ mod tests {
             prepared.send_unit, "sa-send:step-9",
             "sales mail keys on the dispatcher idempotency key"
         );
+    }
+
+    /// External qualification (2026-10-28) + the category law: a
+    /// TRANSACTIONAL send must arrive as the declared bytes — no tracking
+    /// pixel, no link rewriting, no List-Unsubscribe headers (RFC 8058
+    /// reserves those for marketing mail) — while the SAME job shape with
+    /// the marketing category keeps every affordance.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn transactional_mail_preserves_declared_bytes_and_marketing_tracks() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("TRACKING_SECRET_KEY", "k".repeat(40));
+        let processor = make_processor_with_tracking(crate::common::TrackingConfig {
+            enabled: true,
+            base_url: "https://track.example.com".to_string(),
+            open_pixel_path: "/o".to_string(),
+            click_redirect_path: "/c".to_string(),
+            unsubscribe_path: "/u".to_string(),
+            secret_key: Some(zeroize::Zeroizing::new("k".repeat(40))),
+        })
+        .await;
+
+        let declared_html =
+            r#"<html><body><p>declared body</p><a href="https://example.com/x">x</a></body></html>"#;
+
+        let mut transactional = tracking_gate_job();
+        transactional.message_category = "transactional".into();
+        transactional.html = Some(declared_html.into());
+        let prepared = processor
+            .prepare_email(&transactional, &tracking_gate_domain(), &DeliveryRoute::SesShared)
+            .expect("transactional mail prepared");
+        assert_eq!(
+            prepared.html.as_deref(),
+            Some(declared_html),
+            "transactional HTML must be byte-identical to the declaration"
+        );
+        assert!(
+            !prepared
+                .headers
+                .iter()
+                .any(|(name, _)| name.eq_ignore_ascii_case("List-Unsubscribe")),
+            "transactional mail carries no unsubscribe affordance: {:?}",
+            prepared.headers
+        );
+
+        let mut marketing = tracking_gate_job();
+        marketing.message_category = "marketing".into();
+        marketing.html = Some(declared_html.into());
+        let prepared = processor
+            .prepare_email(&marketing, &tracking_gate_domain(), &DeliveryRoute::SesShared)
+            .expect("marketing mail prepared");
+        assert_ne!(
+            prepared.html.as_deref(),
+            Some(declared_html),
+            "marketing mail is tracked (pixel/rewrite) — the affordance is intact"
+        );
+        assert!(prepared
+            .headers
+            .iter()
+            .any(|(name, _)| name.eq_ignore_ascii_case("List-Unsubscribe")));
     }
 
     /// P0 ownership proof (real relay over the fake SMTP server): the worker

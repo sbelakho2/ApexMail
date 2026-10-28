@@ -58,22 +58,57 @@ impl InboxPlacementService {
         // same identity the events table carries, bound as text.
         let since = Utc::now() - chrono::Duration::days(days.max(0));
 
-        // Measured placement from the seed workflow's result model.
+        // Measured placement from the seed workflow's result model, ONE row
+        // per planned (test, seed_account) unit: DISTINCT ON keeps each
+        // unit's LATEST observation, so repeated polls of the same seed
+        // mailbox never inflate the counts (report 2026-10-28 p.11:
+        // "repeated observations must not inflate the number of mails").
         let measured_rows: Vec<(String, Option<String>, i64)> = sqlx::query_as(
-            "SELECT COALESCE(sp.name, 'other') AS provider, \
-                    lower(pr.inbox_type) AS inbox_type, \
-                    COUNT(*)::bigint AS cnt \
-             FROM placement_results pr \
-             JOIN placement_tests pt ON pt.id = pr.test_id \
-             JOIN seed_accounts sa ON sa.id = pr.seed_account_id \
-             LEFT JOIN seed_providers sp ON sp.id = sa.provider_id \
-             WHERE pt.tenant_id = $1 AND pr.checked_at >= $2 \
-             GROUP BY 1, 2",
+            "SELECT provider, inbox_type, COUNT(*)::bigint AS cnt FROM ( \
+                SELECT DISTINCT ON (pr.test_id, pr.seed_account_id) \
+                       COALESCE(sp.name, 'other') AS provider, \
+                       lower(pr.inbox_type) AS inbox_type, \
+                       pr.checked_at \
+                FROM placement_results pr \
+                JOIN placement_tests pt ON pt.id = pr.test_id \
+                JOIN seed_accounts sa ON sa.id = pr.seed_account_id \
+                LEFT JOIN seed_providers sp ON sp.id = sa.provider_id \
+                WHERE pt.tenant_id = $1 AND pr.checked_at >= $2 \
+                ORDER BY pr.test_id, pr.seed_account_id, pr.checked_at DESC \
+             ) latest_per_unit GROUP BY 1, 2",
         )
         .bind(tenant_id)
         .bind(since)
         .fetch_all(&self.pool)
         .await?;
+
+        // The FROZEN planned cohort (report 2026-10-28 p.11): every
+        // seed-recipient unit of every non-cancelled test planned in the
+        // window (placement_tests.seed_accounts_used is the planned unit
+        // list written at dispatch). Missing units are counted EXPLICITLY —
+        // a seed that was never observed stays in the denominator instead
+        // of silently disappearing from the placement story.
+        // Two INDEPENDENT aggregates: joining observations onto the planned
+        // array would multiply SUM(cardinality(...)) by the observation
+        // count (one planned unit polled three times summed to 3 — caught
+        // by repeated_observations_deduplicate_to_one_unit).
+        let (planned_units, observed_units): (i64, i64) = sqlx::query_as(
+            "SELECT \
+                (SELECT COALESCE(SUM(cardinality(pt.seed_accounts_used)), 0)::bigint \
+                   FROM placement_tests pt \
+                  WHERE pt.tenant_id = $1 AND pt.status <> 'cancelled' \
+                    AND pt.created_at >= $2), \
+                (SELECT COUNT(DISTINCT (pr.test_id, pr.seed_account_id))::bigint \
+                   FROM placement_results pr \
+                   JOIN placement_tests pt ON pt.id = pr.test_id \
+                  WHERE pt.tenant_id = $1 AND pr.checked_at >= $2 \
+                    AND pr.seed_account_id = ANY (pt.seed_accounts_used))",
+        )
+        .bind(tenant_id)
+        .bind(since)
+        .fetch_one(&self.pool)
+        .await?;
+        let missing_units = (planned_units - observed_units).max(0);
 
         // Distinct SMTP-level metrics from canonical events (no placement
         // claim). Provider grouping derives from the recipient's domain —
@@ -205,11 +240,25 @@ impl InboxPlacementService {
                 .then_with(|| a.provider.cmp(&b.provider))
         });
 
+        let cohort = PlacementCohort {
+            planned_units,
+            observed_units,
+            missing_units,
+        };
+        // The identifying missing-data bound (report p.11): with I units
+        // conclusively inbox-classified and U unresolved, the honest claim
+        // is I/N <= inbox fraction <= (I+U)/N — a bound, never a binomial
+        // confidence interval. None when no cohort was planned.
+        let inbox_fraction_bounds =
+            inbox_fraction_bounds(measured.inbox, missing_units, planned_units);
+
         let recommendations = generate_recommendations(overall_inbox_rate, &providers);
 
         Ok(PlacementSummary {
             measured,
             delivery,
+            cohort,
+            inbox_fraction_bounds,
             overall_inbox_rate,
             by_provider: providers,
             recommendations,
@@ -477,6 +526,12 @@ mod tests {
                 unknown: 5,
                 measured_total: 100,
             },
+            cohort: PlacementCohort {
+                planned_units: 0,
+                observed_units: 0,
+                missing_units: 0,
+            },
+            inbox_fraction_bounds: None,
             delivery: DeliveryMetrics {
                 delivered: 10_000,
                 complained: 3,
@@ -490,5 +545,62 @@ mod tests {
         assert_eq!(summary.overall_inbox_rate, Some(0.8));
         assert_eq!(summary.delivery.delivered, 10_000);
         assert_eq!(summary.measured.unknown, 5);
+    }
+}
+
+/// The identifying missing-data bound on the cohort inbox fraction
+/// (external report 2026-10-28, p.11): for a frozen cohort of N planned
+/// seed-recipient units with I conclusively inbox-classified units and U
+/// unresolved units (never observed, or observed without a usable folder),
+/// the honest claim is `I/N <= inbox fraction <= (I+U)/N` — after
+/// alias/move adjudication makes the categories exclusive. This is a
+/// missing-data BOUND, not a binomial confidence interval, and it is None
+/// when nothing was planned (no cohort, no claim).
+pub fn inbox_fraction_bounds(
+    inbox_classified: i64,
+    unresolved: i64,
+    planned_units: i64,
+) -> Option<(f64, f64)> {
+    if planned_units <= 0 {
+        return None;
+    }
+    let n = planned_units as f64;
+    let lower = inbox_classified.max(0).min(planned_units) as f64 / n;
+    let upper = (inbox_classified.max(0) + unresolved.max(0)).min(planned_units) as f64 / n;
+    Some((lower, upper))
+}
+
+#[cfg(test)]
+mod cohort_bounds_tests {
+    use super::inbox_fraction_bounds;
+
+    #[test]
+    fn no_cohort_makes_no_claim() {
+        assert_eq!(inbox_fraction_bounds(0, 0, 0), None);
+        assert_eq!(inbox_fraction_bounds(3, 0, -1), None);
+    }
+
+    #[test]
+    fn fully_resolved_cohort_is_a_point_interval() {
+        // 10 planned, 7 inbox, 3 spam-resolved: U=0 -> [0.7, 0.7].
+        assert_eq!(inbox_fraction_bounds(7, 0, 10), Some((0.7, 0.7)));
+    }
+
+    #[test]
+    fn missing_units_widen_only_the_upper_bound() {
+        // 10 planned, 5 observed inbox, 4 never observed: [0.5, 0.9].
+        assert_eq!(inbox_fraction_bounds(5, 4, 10), Some((0.5, 0.9)));
+    }
+
+    #[test]
+    fn nothing_observed_is_honestly_unbounded() {
+        assert_eq!(inbox_fraction_bounds(0, 10, 10), Some((0.0, 1.0)));
+    }
+
+    #[test]
+    fn inputs_are_clamped_to_the_cohort() {
+        // Corrupt counts can never push a bound outside [0, 1].
+        assert_eq!(inbox_fraction_bounds(12, 9, 10), Some((1.0, 1.0)));
+        assert_eq!(inbox_fraction_bounds(2, 99, 10), Some((0.2, 1.0)));
     }
 }

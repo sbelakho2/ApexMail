@@ -874,7 +874,35 @@ pub mod test_support {
     }
 
     impl MemoryLedger {
-        pub fn new() -> Self {
+            /// Shift a row's created_at back by `age` AND make it due now —
+        /// the deadline tests use this to park a unit past
+        /// OUTBOUND_THROTTLE_DEFER_DEADLINE_SECS and have the next submit
+        /// claim it again, without waiting for wall-clock time.
+        /// Every DSN send unit currently in the ledger (deadline tests
+        /// assert the expiry DSNs were really enqueued).
+        pub fn dsn_send_units(&self) -> Vec<String> {
+            self.with_entries::<Vec<String>>(|entries| {
+                entries
+                    .keys()
+                    .filter(|unit| unit.contains(":dsn:"))
+                    .cloned()
+                    .collect()
+            })
+        }
+
+        pub fn age_row(&self, send_unit: &str, age: chrono::Duration) {
+            let now = chrono::Utc::now();
+            self.with_entries::<()>(|entries| {
+                for (_, row) in entries.iter_mut() {
+                    if row.send_unit == send_unit {
+                        row.created_at -= age;
+                        row.next_attempt_at = now;
+                    }
+                }
+            })
+        }
+
+    pub fn new() -> Self {
             Self::default()
         }
 

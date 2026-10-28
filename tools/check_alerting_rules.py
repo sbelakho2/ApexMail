@@ -79,7 +79,13 @@ def _parse_block(lines: list[tuple[int, str]], i: int, indent: int):
             key, val = entry
             item: dict = {}
             child_indent = indent + 2
-            if val:
+            if val in ("|", "|-", "|+", ">", ">-", ">+"):
+                _block = []
+                while i < len(lines) and lines[i][0] > indent + 2:
+                    _block.append(lines[i][1])
+                    i += 1
+                item[key] = "\n".join(_block)
+            elif val:
                 item[key] = _scalar(val)
             elif i < len(lines) and lines[i][0] >= child_indent:
                 item[key], i = _parse_block(lines, i, lines[i][0])
@@ -91,7 +97,13 @@ def _parse_block(lines: list[tuple[int, str]], i: int, indent: int):
                     break
                 k2, v2 = nxt
                 i += 1
-                if v2:
+                if v2 in ("|", "|-", "|+", ">", ">-", ">+"):
+                    _block = []
+                    while i < len(lines) and lines[i][0] > child_indent:
+                        _block.append(lines[i][1])
+                        i += 1
+                    item[k2] = "\n".join(_block)
+                elif v2:
                     item[k2] = _scalar(v2)
                 elif i < len(lines) and lines[i][0] > child_indent:
                     item[k2], i = _parse_block(lines, i, lines[i][0])
@@ -108,7 +120,13 @@ def _parse_block(lines: list[tuple[int, str]], i: int, indent: int):
             continue
         key, val = entry
         i += 1
-        if val:
+        if val in ("|", "|-", "|+", ">", ">-", ">+"):
+            _block = []
+            while i < len(lines) and lines[i][0] > indent:
+                _block.append(lines[i][1])
+                i += 1
+            mapping[key] = "\n".join(_block)
+        elif val:
             mapping[key] = _scalar(val)
         elif i < len(lines) and lines[i][0] > indent:
             mapping[key], i = _parse_block(lines, i, lines[i][0])

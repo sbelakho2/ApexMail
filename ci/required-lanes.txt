@@ -134,6 +134,7 @@ test.dogfood-ledger
 test.feature-entitlement-classification
 test.i18n-gate
 test.journey-lane-live-stack
+test.canary-lane-real-mail-qualification
 test.layout-gate
 test.pre-commit-parity
 test.satellite-kiwicaptcha-wasm

@@ -366,6 +366,7 @@ fn enforce_api_key_tenant_binding(user: &AuthUser, request_path: &str) -> Result
                 request_path = %request_path,
                 "rejected API key request for a different tenant"
             );
+            auth_metric("tenant_mismatch");
             return Err(ApiError::Forbidden("API key tenant mismatch".into()));
         }
     }
@@ -456,6 +457,20 @@ pub(crate) async fn authenticate_compat_api_key(
     authenticate_api_key(key, &Method::POST, request_path, false, state).await
 }
 
+/// SLA auth-denominator instrumentation (external report 2026-10-28 P1):
+/// the published /v1/auth 2xx share cannot measure "valid credential
+/// attempts" — these counters CAN. `mechanism="api_key"`; outcomes:
+/// `authenticated` (the valid-credential denominator), `invalid`,
+/// `expired`, `revoked_or_restricted`, `tenant_mismatch`, `error`.
+fn auth_metric(outcome: &str) {
+    metrics::counter!(
+        "apexmail_auth_credential_attempts_total",
+        "mechanism" => "api_key",
+        "outcome" => outcome.to_string(),
+    )
+    .increment(1);
+}
+
 async fn authenticate_api_key(
     key: &str,
     request_method: &Method,
@@ -472,6 +487,7 @@ async fn authenticate_api_key(
                     control_plane_host = on_control_plane_host,
                     "rejected control-plane static API key outside control-plane admin surface"
                 );
+                auth_metric("invalid");
                 return Err(ApiError::Unauthorized("invalid API key".into()));
             }
 
@@ -501,6 +517,7 @@ async fn authenticate_api_key(
         if let Some(api_key_id) = cached.api_key_id.as_deref() {
             touch_api_key_last_used(api_key_id, &hmac_hash, state).await?;
         }
+        auth_metric("authenticated");
         return Ok(cached);
     }
 
@@ -512,6 +529,7 @@ async fn authenticate_api_key(
             if let Some(api_key_id) = cached.api_key_id.as_deref() {
                 touch_api_key_last_used(api_key_id, &legacy_hash, state).await?;
             }
+            auth_metric("authenticated");
             return Ok(cached);
         }
     }
@@ -569,6 +587,7 @@ async fn authenticate_api_key(
     // Check expiry
     if let Some(exp) = row.expires_at {
         if exp < Utc::now() {
+            auth_metric("expired");
             return Err(ApiError::Unauthorized("API key expired".into()));
         }
     }

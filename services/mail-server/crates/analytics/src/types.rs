@@ -347,6 +347,14 @@ pub struct PlacementSummary {
     /// Placement MEASURED by the inbox-placement workflow's seed results
     /// (placement_results joined through the seed model).
     pub measured: MeasuredPlacement,
+    /// The FROZEN planned cohort (report 2026-10-28 p.11): planned
+    /// seed-recipient units, units with at least one observation (latest
+    /// wins), and the EXPLICIT missing count. A missing row never
+    /// disappears from the cohort.
+    pub cohort: PlacementCohort,
+    /// The identifying missing-data bound on the cohort inbox fraction:
+    /// (lower, upper) = (I/N, (I+U)/N). None when nothing was planned.
+    pub inbox_fraction_bounds: Option<(f64, f64)>,
     /// SMTP-level delivery/complaint/bounce counts from canonical events —
     /// distinct metrics that make no placement claim.
     pub delivery: DeliveryMetrics,
@@ -355,6 +363,20 @@ pub struct PlacementSummary {
     pub overall_inbox_rate: Option<f64>,
     pub by_provider: Vec<crate::inbox_placement::ProviderPlacement>,
     pub recommendations: Vec<String>,
+}
+
+/// The frozen planned/admitted seed-recipient cohort behind a placement
+/// summary (report 2026-10-28 p.11): missing units are counted explicitly
+/// and stay in the denominator of every honest claim.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlacementCohort {
+    /// Planned seed-recipient units across the window's non-cancelled
+    /// tests (sum of placement_tests.seed_accounts_used cardinality).
+    pub planned_units: i64,
+    /// Units with at least one placement observation (latest wins).
+    pub observed_units: i64,
+    /// Planned units with NO observation — explicitly unresolved.
+    pub missing_units: i64,
 }
 
 /// Measured seed placements by folder.

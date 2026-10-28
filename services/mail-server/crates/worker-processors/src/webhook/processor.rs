@@ -121,6 +121,12 @@ const FETCH_WEBHOOK_JOBS_SQL: &str = r#"
                     SELECT wq2.id
                     FROM webhook_queue wq2
                     JOIN webhooks w ON w.id = wq2.webhook_id
+                      -- Tenant guard: a queue row is claimable only for the
+                      -- webhook's OWN tenant. A row whose tenant_id disagrees
+                      -- with its webhook (misrouted or corrupted enqueue)
+                      -- must never be claimed or delivered cross-tenant; it
+                      -- stays pending and visible for reconciliation.
+                      AND w.tenant_id = wq2.tenant_id
                     WHERE wq2.status = 'pending'
                       AND (wq2.scheduled_at IS NULL OR wq2.scheduled_at <= NOW())
                       AND (wq2.locked_until IS NULL OR wq2.locked_until < NOW())
@@ -1295,7 +1301,7 @@ mod adversarial_tests {
         (deletes, inserts)
     }
 
-    fn test_config() -> WebhookConfig {
+    pub(super) fn test_config() -> WebhookConfig {
         WebhookConfig {
             request_timeout: Duration::from_millis(300),
             base: crate::common::ProcessorConfig {
@@ -1427,7 +1433,7 @@ mod adversarial_tests {
     }
 
     impl StubResponse {
-        fn new(status: u16, body: &str) -> Self {
+        pub(super) fn new(status: u16, body: &str) -> Self {
             Self {
                 status,
                 headers: Vec::new(),
@@ -1435,21 +1441,21 @@ mod adversarial_tests {
             }
         }
 
-        fn with_header(mut self, key: &str, value: &str) -> Self {
+        pub(super) fn with_header(mut self, key: &str, value: &str) -> Self {
             self.headers.push((key.to_string(), value.to_string()));
             self
         }
     }
 
     #[derive(Clone, Debug)]
-    struct RecordedRequest {
-        head: String,
-        body: Vec<u8>,
+    pub(super) struct RecordedRequest {
+        pub(super) head: String,
+        pub(super) body: Vec<u8>,
     }
 
     pub(super) struct Stub {
-        addr: SocketAddr,
-        requests: Arc<Mutex<Vec<RecordedRequest>>>,
+        pub(super) addr: SocketAddr,
+        pub(super) requests: Arc<Mutex<Vec<RecordedRequest>>>,
     }
 
     pub(super) fn spawn_stub(responses: Vec<StubResponse>) -> Stub {
@@ -4451,5 +4457,426 @@ mod residual_arms {
         );
 
         pool.close().await;
+    }
+    // ---------------------------------------------------------------------
+    // External-report patch 1: claim-SQL tenant guard
+    // ---------------------------------------------------------------------
+
+    /// A queue row whose `tenant_id` disagrees with its webhook's tenant must
+    /// NEVER be claimed or delivered: the claim's join re-checks
+    /// `w.tenant_id = wq2.tenant_id`, so the row stays `pending`, untouched
+    /// and visible for reconciliation, while a well-formed sibling row for
+    /// the same webhook delivers normally.
+    #[tokio::test]
+    async fn claim_never_claims_a_queue_row_from_another_tenant()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let Some(pool) = test_pool("wh_tenant_guard").await else {
+            return Ok(());
+        };
+        let tenant = unique_tenant();
+        let other_tenant = unique_tenant();
+        let stub = spawn_stub(vec![StubResponse::new(200, "{}")]);
+        let url = format!("http://{}/hook", stub.addr);
+        let webhook_id = insert_webhook(&pool, &tenant, &url, true).await;
+
+        // The mismatched row: due and unlocked on every other axis, ONLY its
+        // tenant disagrees with the webhook's.
+        let mismatched = insert_queue_row(
+            &pool,
+            &webhook_id,
+            &other_tenant,
+            serde_json::json!({"e": "wrong-tenant"}),
+            1,
+            "tok-mismatch",
+            ClaimOffsets::default(),
+        )
+        .await;
+        let matching = insert_queue_row(
+            &pool,
+            &webhook_id,
+            &tenant,
+            serde_json::json!({"e": "right-tenant"}),
+            1,
+            "tok-match",
+            ClaimOffsets::default(),
+        )
+        .await;
+
+        let processor = processor(pool.clone(), orch_config());
+        let jobs = processor.fetch_jobs(50).await.expect("claim pass");
+        assert_eq!(jobs.len(), 1, "only the tenant-matching row is claimable");
+        assert_eq!(jobs[0].id, matching);
+        assert_eq!(jobs[0].tenant_id, tenant);
+
+        // The mismatched row was never claimed: still pending, attempt
+        // untouched, no lease, and no minted owner token (it keeps the token
+        // it was seeded with). It remains fully visible for reconciliation.
+        let (status, attempt, token): (String, i32, Option<String>) =
+            sqlx::query_as("SELECT status, attempt, claim_token FROM webhook_queue WHERE id = $1")
+                .bind(&mismatched)
+                .fetch_one(&pool)
+                .await?;
+        assert_eq!(status, "pending", "a cross-tenant row is never claimed");
+        assert_eq!(attempt, 1, "a cross-tenant row never consumes an attempt");
+        assert_eq!(
+            token.as_deref(),
+            Some("tok-mismatch"),
+            "the claim must not mint an owner token for a cross-tenant row"
+        );
+
+        // The matching row delivers normally through the real path.
+        let job = &jobs[0];
+        let serialized =
+            serde_json::to_string(&job.payload).expect("serialize the matching payload");
+        let result = processor
+            .deliver_webhook(job, &serialized, &ip_target(&stub))
+            .await;
+        assert!(result.success, "the matching row delivers: {result:?}");
+        let breaker = processor.get_circuit_breaker(&webhook_id);
+        let mut conn = processor.redis.get().await.expect("redis conn");
+        let dedup_key = processor.dedup_key(job);
+        processor
+            .record_delivery_outcome(job, &dedup_key, &mut conn, breaker.as_ref(), result)
+            .await
+            .expect("record the matching delivery");
+        processor.flush_pending_successes().await;
+
+        let requests = stub
+            .requests
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        assert_eq!(requests.len(), 1, "only the matching row reaches the wire");
+        assert_eq!(delivery_rows(&pool, &webhook_id).await, 1);
+        let (delivered_tenant, delivered_payload): (String, serde_json::Value) =
+            sqlx::query_as("SELECT tenant_id, payload FROM webhook_deliveries WHERE webhook_id = $1")
+                .bind(&webhook_id)
+                .fetch_one(&pool)
+                .await?;
+        assert_eq!(
+            delivered_tenant, tenant,
+            "only the webhook's own tenant is ever recorded as delivered"
+        );
+        assert_eq!(delivered_payload, serde_json::json!({"e": "right-tenant"}));
+
+        // A second claim pass still refuses the mismatched row.
+        let again = processor.fetch_jobs(50).await.expect("second claim pass");
+        assert!(
+            again.is_empty(),
+            "the cross-tenant row must never become claimable"
+        );
+        redis::cmd("DEL")
+            .arg(&dedup_key)
+            .query_async::<()>(&mut *conn)
+            .await
+            .expect("cleanup dedup key");
+        pool.close().await;
+        Ok(())
+    }
+
+    // ---------------------------------------------------------------------
+    // External-report patch 2: pin the retry ladder
+    // ---------------------------------------------------------------------
+
+    /// The retry ladder is a FIXED public schedule: attempts 1..=9 map
+    /// EXACTLY to 30s, 2m, 10m, 30m, 1h, 3h, 6h, 12h, 24h. The 10th attempt
+    /// is exhaustion, not a scheduling rung. The schema-compat
+    /// `retryDelay` / `backoffMultiplier` fields must not bend the curve.
+    #[test]
+    fn next_retry_delay_ms_is_the_fixed_ladder_exactly() {
+        let ladder: [(i32, i64); 9] = [
+            (1, 30_000),      // 30s
+            (2, 120_000),     // 2m
+            (3, 600_000),     // 10m
+            (4, 1_800_000),   // 30m
+            (5, 3_600_000),   // 1h
+            (6, 10_800_000),  // 3h
+            (7, 21_600_000),  // 6h
+            (8, 43_200_000),  // 12h
+            (9, 86_400_000),  // 24h
+        ];
+        for (attempt, expected_ms) in ladder {
+            let job = WebhookJob {
+                attempt,
+                max_retries: 10,
+                ..job_for("whk-ladder", "t-ladder", "https://example.test/hook")
+            };
+            assert_eq!(
+                job.next_retry_delay_ms(),
+                expected_ms,
+                "attempt {attempt} must sit on its exact fixed rung"
+            );
+        }
+
+        // The stored tuning fields are dead: wildly different
+        // retryDelay/backoffMultiplier values yield the identical rung.
+        let mut tuned = job_for("whk-ladder", "t-ladder", "https://example.test/hook");
+        tuned.attempt = 4;
+        tuned.retry_delay = 1;
+        tuned.backoff_multiplier = 2.0;
+        let mut untuned = tuned.clone();
+        untuned.retry_delay = 900;
+        untuned.backoff_multiplier = 7.5;
+        assert_eq!(
+            tuned.next_retry_delay_ms(),
+            untuned.next_retry_delay_ms(),
+            "retryDelay/backoffMultiplier must not shape the curve"
+        );
+
+        // Attempt 10 is exhaustion: the delay fn clamps to the final rung
+        // only so out-of-range inputs stay total, but `handle_failure`
+        // dead-letters at attempt >= maxRetries instead of scheduling it
+        // (proven DB-backed below).
+        let mut tenth = job_for("whk-ladder", "t-ladder", "https://example.test/hook");
+        tenth.attempt = 10;
+        tenth.max_retries = 10;
+        assert_eq!(tenth.next_retry_delay_ms(), 86_400_000);
+        assert!(
+            tenth.attempt >= tenth.max_retries,
+            "the 10th attempt is exhaustion, not a 10th rung"
+        );
+    }
+
+    /// The 10th attempt does not retry: with the ladder-consistent policy
+    /// (maxRetries = 10, the schema default since the ladder migration) a
+    /// retryable failure at attempt 10 dead-letters the row instead of
+    /// scheduling the clamped final rung yet again.
+    #[tokio::test]
+    async fn tenth_attempt_exhaustion_dead_letters_instead_of_scheduling()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let Some(pool) = test_pool("wh_ladder_exhaustion").await else {
+            return Ok(());
+        };
+        let tenant = unique_tenant();
+        let webhook_id = insert_webhook(&pool, &tenant, "https://example.test/hook", true).await;
+        sqlx::query(
+            "UPDATE webhooks SET retry_policy = '{\"maxRetries\":10,\"retryDelay\":30,\"backoffMultiplier\":2.0}'::jsonb WHERE id = $1",
+        )
+        .bind(&webhook_id)
+        .execute(&pool)
+        .await?;
+        let row = insert_queue_row(
+            &pool,
+            &webhook_id,
+            &tenant,
+            serde_json::json!({"e": "last-rung"}),
+            10,
+            "tok-ladder-10",
+            ClaimOffsets::default(),
+        )
+        .await;
+        let job = WebhookJob {
+            attempt: 10,
+            max_retries: 10,
+            id: row.clone(),
+            claim_token: Some("tok-ladder-10".to_string()),
+            ..job_for(&webhook_id, &tenant, "https://example.test/hook")
+        };
+        let processor = processor(pool.clone(), orch_config());
+        processor
+            .handle_failure(&job, WebhookDeliveryResult::failure(
+                None,
+                5,
+                "connect timeout".to_string(),
+                None,
+                None,
+            ))
+            .await
+            .expect("handle the final failure");
+
+        assert_eq!(
+            queue_state(&pool, &row).await,
+            None,
+            "the 10th attempt is consumed, never rescheduled"
+        );
+        let (recorded_attempt, error): (i32, Option<String>) = sqlx::query_as(
+            "SELECT attempt, error FROM webhook_deliveries WHERE webhook_id = $1",
+        )
+        .bind(&webhook_id)
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(recorded_attempt, 10, "exhaustion dead-letters at attempt 10");
+        assert_eq!(error.as_deref(), Some("connect timeout"));
+        pool.close().await;
+        Ok(())
+    }
+
+    /// A `Retry-After` on a 429/503 overrides the ladder rung, but BOTH
+    /// forms (delta-seconds and HTTP-date) are capped at 1 hour: an endpoint
+    /// asking for 2 hours gets exactly 3_600_000 ms.
+    #[tokio::test]
+    async fn retry_after_overrides_are_capped_at_one_hour() {
+        // Deliberately dead pool with a tiny acquire timeout, the same recipe
+        // as the status-matrix test: the best-effort legacy-secret migration
+        // write must not stall the delivery.
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .acquire_timeout(std::time::Duration::from_millis(100))
+            .connect_lazy("postgres://localhost/unused")
+            .unwrap();
+        let processor = processor(pool, test_config());
+        let stub = spawn_stub(vec![
+            StubResponse::new(429, "slow down").with_header("Retry-After", "7200"),
+            StubResponse::new(503, "unavailable").with_header(
+                "Retry-After",
+                &(Utc::now() + chrono::Duration::hours(2)).to_rfc2822(),
+            ),
+        ]);
+        let job = job_for(
+            "whk1",
+            "t1",
+            &format!("http://127.0.0.1:{}/hook", stub.addr.port()),
+        );
+
+        let numeric = processor
+            .deliver_webhook(&job, "{}", &ip_target(&stub))
+            .await;
+        assert!(numeric.is_retryable());
+        assert_eq!(
+            numeric.retry_after_ms,
+            Some(3_600_000),
+            "a numeric Retry-After over 1h must clamp to the 1h cap"
+        );
+
+        let http_date = processor
+            .deliver_webhook(&job, "{}", &ip_target(&stub))
+            .await;
+        assert!(http_date.is_retryable());
+        assert_eq!(
+            http_date.retry_after_ms,
+            Some(3_600_000),
+            "an HTTP-date Retry-After over 1h must clamp to the 1h cap"
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // External-report patch 3: reordered events for one message
+    // ---------------------------------------------------------------------
+
+    /// Two events for the SAME message, same webhook, enqueued with
+    /// `message.delivered` created BEFORE `message.accepted` (the platform
+    /// observed delivery first). One claim pass takes BOTH, oldest first,
+    /// and BOTH are delivered independently in created_at order: no
+    /// per-message state machine drops the older event.
+    #[tokio::test]
+    async fn reordered_events_both_deliver_independently_in_created_at_order()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let Some(pool) = test_pool("wh_reorder").await else {
+            return Ok(());
+        };
+        let tenant = unique_tenant();
+        let stub = spawn_stub(vec![
+            StubResponse::new(200, "{}"),
+            StubResponse::new(200, "{}"),
+        ]);
+        let url = format!("http://{}/hook", stub.addr);
+        let webhook_id = insert_webhook(&pool, &tenant, &url, true).await;
+
+        // delivered (the OLDER row), then accepted 1s later on the wall
+        // clock; the claim's ORDER BY created_at ASC must return them in
+        // exactly that order.
+        let delivered = insert_queue_row(
+            &pool,
+            &webhook_id,
+            &tenant,
+            serde_json::json!({"messageId": "msg-reorder", "state": "delivered"}),
+            1,
+            "tok-delivered",
+            ClaimOffsets::default(),
+        )
+        .await;
+        let accepted = insert_queue_row(
+            &pool,
+            &webhook_id,
+            &tenant,
+            serde_json::json!({"messageId": "msg-reorder", "state": "accepted"}),
+            1,
+            "tok-accepted",
+            ClaimOffsets::default(),
+        )
+        .await;
+        sqlx::query(
+            "UPDATE webhook_queue SET event_type = 'message.delivered', created_at = NOW() - INTERVAL '2 seconds' WHERE id = $1",
+        )
+        .bind(&delivered)
+        .execute(&pool)
+        .await?;
+        sqlx::query(
+            "UPDATE webhook_queue SET event_type = 'message.accepted', created_at = NOW() - INTERVAL '1 second' WHERE id = $1",
+        )
+        .bind(&accepted)
+        .execute(&pool)
+        .await?;
+
+        let processor = processor(pool.clone(), orch_config());
+
+        // ONE claim pass takes both rows, in created_at order.
+        let jobs = processor.fetch_jobs(10).await.expect("claim both");
+        assert_eq!(jobs.len(), 2, "both events are claimable in one pass");
+        assert_eq!(jobs[0].id, delivered, "the older row claims first");
+        assert_eq!(jobs[1].id, accepted);
+        assert_eq!(jobs[0].event_type, "message.delivered");
+        assert_eq!(jobs[1].event_type, "message.accepted");
+        assert!(jobs[0].created_at < jobs[1].created_at);
+
+        // Deliver both in claim order through the real delivery+record path.
+        let breaker = processor.get_circuit_breaker(&webhook_id);
+        let mut conn = processor.redis.get().await.expect("redis conn");
+        let mut dedup_keys = Vec::new();
+        for job in &jobs {
+            let serialized =
+                serde_json::to_string(&job.payload).expect("serialize the event payload");
+            let result = processor
+                .deliver_webhook(job, &serialized, &ip_target(&stub))
+                .await;
+            assert!(result.success, "each event delivers independently: {result:?}");
+            let dedup_key = processor.dedup_key(job);
+            processor
+                .record_delivery_outcome(job, &dedup_key, &mut conn, breaker.as_ref(), result)
+                .await
+                .expect("record the event delivery");
+            dedup_keys.push(dedup_key);
+        }
+        processor.flush_pending_successes().await;
+
+        // The wire saw BOTH, as two separate requests, older first.
+        let requests = stub
+            .requests
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        assert_eq!(requests.len(), 2, "no event is dropped by a state machine");
+        let wire: Vec<String> = requests
+            .iter()
+            .map(|request| String::from_utf8_lossy(&request.body).to_string())
+            .collect();
+        assert!(wire[0].contains("delivered"), "the older event goes first: {wire:?}");
+        assert!(wire[1].contains("accepted"), "the newer event follows: {wire:?}");
+
+        // Both queue rows are consumed and both events are recorded
+        // independently (two delivery rows, one per event).
+        assert_eq!(queue_state(&pool, &delivered).await, None);
+        assert_eq!(queue_state(&pool, &accepted).await, None);
+        let mut states: Vec<String> = sqlx::query_scalar(
+            "SELECT payload->>'state' FROM webhook_deliveries WHERE webhook_id = $1",
+        )
+        .bind(&webhook_id)
+        .fetch_all(&pool)
+        .await?;
+        states.sort();
+        assert_eq!(
+            states,
+            vec!["accepted".to_string(), "delivered".to_string()],
+            "each event gets its own delivery record"
+        );
+
+        for dedup_key in dedup_keys {
+            redis::cmd("DEL")
+                .arg(&dedup_key)
+                .query_async::<()>(&mut *conn)
+                .await
+                .expect("cleanup dedup key");
+        }
+        pool.close().await;
+        Ok(())
     }
 }

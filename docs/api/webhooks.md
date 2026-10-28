@@ -408,7 +408,7 @@ def webhook():
 
 ## Retry Policy
 
-Retry timing is driven by each webhook's stored retry policy, not by a single fixed public schedule.
+Retries follow one fixed schedule shared by every webhook. There is no per-webhook exponential backoff.
 
 Retryable failures are:
 - Network errors
@@ -416,9 +416,83 @@ Retryable failures are:
 - HTTP `429`
 - HTTP `5xx`
 
-The worker schedules retries with exponential backoff using the webhook's `retryDelay`, `backoffMultiplier`, and `maxRetries` settings. When a receiving endpoint returns `429` or `503` with a `Retry-After` header, ApexMail honors that delay instead of the computed backoff. Individual retry delays are capped at 1 hour.
+### Fixed Retry Ladder
 
-At the worker layer, the default processor configuration uses a 30-second base delay and 3 retries unless a webhook-specific retry policy overrides those values. After the retry budget is exhausted, the failed delivery is recorded and removed from the pending queue.
+The first attempt delivers immediately. Each retryable failure waits on a
+fixed ladder before the next attempt:
+
+| Retry after attempt | Wait before next attempt |
+|---------------------|--------------------------|
+| 1st                 | 30 seconds               |
+| 2nd                 | 2 minutes                |
+| 3rd                 | 10 minutes               |
+| 4th                 | 30 minutes               |
+| 5th                 | 1 hour                   |
+| 6th                 | 3 hours                  |
+| 7th                 | 6 hours                  |
+| 8th                 | 12 hours                 |
+| 9th                 | 24 hours                 |
+
+That is 10 total attempts: the initial delivery plus 9 retries. After the
+10th failed attempt the delivery is dead-lettered (recorded as failed and
+removed from the pending queue) and is never rescheduled.
+
+The `retryDelay` and `backoffMultiplier` fields of a webhook's stored retry
+policy are kept for schema compatibility only; they no longer influence
+timing. `maxRetries` still sets the total attempt count (default 10).
+
+### `Retry-After` Override
+
+When your endpoint responds `429` or `503` with a `Retry-After` header,
+ApexMail schedules the next attempt at the delay you asked for instead of
+the ladder rung. Both forms are honored: delay-seconds
+(`Retry-After: 120`) and HTTP-date
+(`Retry-After: Wed, 21 Oct 2026 07:28:00 GMT`). The override is capped at
+1 hour; a value asking for a longer wait schedules exactly 1 hour out.
+
+### Retry Budget
+
+Each webhook endpoint also has a retry budget tracked in Redis: by default
+at most 50 retries within any 3600 second (1 hour) window. When the budget
+is exhausted, the next failure is moved straight to the dead letter queue
+instead of being scheduled. The budget resets when the window elapses.
+
+### Circuit Breaker
+
+Failing deliveries feed a per-endpoint circuit breaker: 5 failures within
+60 seconds open the circuit for 30 seconds. While the circuit is open,
+deliveries to that endpoint are deferred (rescheduled a short time later)
+without consuming an attempt, so a struggling endpoint does not burn
+through the ladder. After the open period the breaker half-opens and two
+successful deliveries close it again.
+
+### Terminal Failures
+
+Not every failure retries. HTTP `3xx` and `4xx` responses are terminal:
+the delivery is dead-lettered immediately, with no further attempts.
+Redirects are never followed (a `3xx` is treated as a refused delivery,
+because the redirect target has not been validated), so a `3xx` is always
+terminal.
+
+### Delivery Signature Contract
+
+Every delivery, first attempt or retry, carries the same two headers:
+
+- `X-ApexMail-Timestamp`: the delivery time as a 13-digit unix timestamp in
+  milliseconds, for example `1791139155214`.
+- `X-ApexMail-Signature`: the literal prefix `sha256=` followed by the
+  lowercase hex HMAC-SHA256 of the exact string
+  `{timestamp}.{raw_request_body}`, where `{timestamp}` is the ASCII value
+  of the `X-ApexMail-Timestamp` header, `.` is a single dot, and
+  `{raw_request_body}` is the exact raw request body bytes. The key is your
+  webhook signing secret exactly as issued.
+
+Receivers should recompute the digest over the raw body (before any JSON
+parsing) and compare it in constant time against the header value (without
+the `sha256=` prefix). Reject deliveries whose timestamp differs from the
+receiver's clock by more than 300 seconds (5 minutes). See
+[Signature Verification](#signature-verification) for worked examples in
+each SDK.
 
 ### Failure Handling
 

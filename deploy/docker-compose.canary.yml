@@ -1,0 +1,90 @@
+# =============================================================================
+# docker-compose.canary.yml — the real-mail canary lane's receiver overlay
+# =============================================================================
+# Included ONLY by tools/run_canary_lane.sh (isolated project, never a
+# developer stack and never production):
+#
+#   docker compose -p apexmail-canary-lane \
+#     -f docker-compose.yml -f deploy/docker-compose.canary.yml up -d
+#
+# What it does:
+#   * adds `canary-greenmail` — a controlled SMTP+IMAP receiver. The product
+#     stack's worker delivers REAL mail to it over SMTP, and the external
+#     qualification runner observes it over IMAP (EXAMINE/BODY.PEEK/UID
+#     SEARCH HEADER — probed against greenmail/standalone:2.1.0 before this
+#     overlay was written). It is the report's "controlled receiver" role:
+#     per-recipient truth without any external provider.
+#   * points the worker's email transport at it (EMAIL_TRANSPORT_TYPE=smtp,
+#     SMTP_HOST=canary-greenmail:3025, no TLS — loopback-only internal
+#     network) and satisfies the SMTP-transports-must-sign gate
+#     (DKIM_ENABLED=true; per-domain keys come from the domains table, which
+#     the canary seeder creates through the product's own POST /v1/domains).
+#
+# GreenMail auto-provisions any LOGIN identity, so the observer credentials
+# are arbitrary lane-local values. Ports are bound to 127.0.0.1 ONLY.
+# =============================================================================
+
+services:
+  canary-greenmail:
+    image: greenmail/standalone:2.1.0
+    restart: "no"
+    environment:
+      # All protocols; no auth enforcement on SMTP, auto-provisioned IMAP.
+      # The image's documented minimal form: exactly the two servers this
+      # lane needs. With NO -Dgreenmail.users property the standalone image
+      # auth is explicitly DISABLED (-Dgreenmail.auth.disabled: any password
+      # works and users are auto-provisioned) — the documented lane-local
+      # posture for this controlled receiver.
+      # lane needs, bound to every interface so compose networking reaches
+      # them, on the offset ports this overlay publishes (3025 SMTP,
+      # 3143 IMAP). -Dgreenmail.setup.all would bind the STANDARD ports
+      # (25/143) instead and the published 3025/3143 would connect nowhere.
+      GREENMAIL_OPTS: "-Dgreenmail.smtp.hostname=0.0.0.0 -Dgreenmail.smtp.port=3025 -Dgreenmail.imap.hostname=0.0.0.0 -Dgreenmail.imap.port=3143 -Dgreenmail.auth.disabled"
+    ports:
+      - "127.0.0.1:${CANARY_GREENMAIL_SMTP_PORT:-13025}:3025"
+      - "127.0.0.1:${CANARY_GREENMAIL_IMAP_PORT:-13143}:3143"
+    networks:
+      - apexmail_backend
+    security_opt:
+      - no-new-privileges:true
+
+  worker:
+    environment:
+      EMAIL_TRANSPORT_TYPE: smtp
+      SMTP_HOST: canary-greenmail
+      SMTP_PORT: "3025"
+      SMTP_TLS: "false"
+      SMTP_USERNAME: ""
+      SMTP_PASSWORD: ""
+      DKIM_ENABLED: "true"
+
+  # The one-shot schema migration for the canary stack (the dev compose has
+  # no migrator service; the canary database starts EMPTY). Mirrors the prod
+  # migrate-profile shape but BUILDS the migrator target from this tree and
+  # rides the dev stack's secret files.
+  migrator:
+    build:
+      context: .
+      dockerfile: services/mail-server/Dockerfile
+      target: migrator
+    profiles:
+      - migrate
+    restart: "no"
+    entrypoint: ["/bin/sh", "/opt/apexmail/entrypoint-wrapper.sh", "migrator"]
+    volumes:
+      - ./deploy/scripts/entrypoint-wrapper.sh:/opt/apexmail/entrypoint-wrapper.sh:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      RUST_LOG: info
+      DATABASE_URL: ""
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_USER: ${POSTGRES_USER:-apexmail}
+      DB_PASSWORD_FILE: /run/secrets/postgres_password
+      DB_NAME: ${POSTGRES_DB:-apexmail}
+    secrets:
+      - postgres_password
+    networks:
+      - apexmail_data_internal

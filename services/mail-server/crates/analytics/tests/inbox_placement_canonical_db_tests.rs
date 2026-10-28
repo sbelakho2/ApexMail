@@ -211,3 +211,144 @@ async fn measurements_are_tenant_scoped() {
 
     pool.close().await;
 }
+
+/// Report 2026-10-28 p.11 contract: repeated observations of the SAME
+/// planned unit (re-polls of one seed mailbox) must not inflate counts —
+/// the unit's LATEST observation is its one classification.
+#[tokio::test]
+async fn repeated_observations_deduplicate_to_one_unit() {
+    let Some(pool) = canonical_pool("dedupe_units").await else {
+        eprintln!("skipping: set TEST_DATABASE_URL to run DB-backed test");
+        return;
+    };
+    let simple = Uuid::new_v4().simple().to_string();
+    let tenant = format!("t{}", &simple[..25]);
+    let (provider_id,): (Uuid,) = sqlx::query_as(
+        "SELECT id FROM seed_providers WHERE name = 'gmail'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let (account_id,): (Uuid,) = sqlx::query_as(
+        "INSERT INTO seed_accounts (provider_id, email) VALUES ($1, $2) RETURNING id",
+    )
+    .bind(provider_id)
+    .bind(format!("{}@seed.example", Uuid::new_v4().simple()))
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let (test_id,): (Uuid,) = sqlx::query_as(
+        "INSERT INTO placement_tests (tenant_id, name, from_email, subject, seed_accounts_used) \
+         VALUES ($1, 'dedupe', 'sender@apex.example', 'seed', $2) RETURNING id",
+    )
+    .bind(&tenant)
+    .bind(vec![account_id])
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    // Three polls of the SAME unit: earlier polls said inbox, the LATEST
+    // says spam (the message moved). One unit, one classification: spam.
+    for (folder, seconds_ago) in [("inbox", 300), ("inbox", 200), ("spam", 0)] {
+        sqlx::query(
+            "INSERT INTO placement_results \
+                (test_id, seed_account_id, inbox_type, checked_at) \
+             VALUES ($1, $2, $3, NOW() - make_interval(secs => $4))",
+        )
+        .bind(test_id)
+        .bind(account_id)
+        .bind(folder)
+        .bind(seconds_ago)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+
+    let summary = InboxPlacementService::new(pool.clone())
+        .get_placement_summary(&tenant, 30)
+        .await
+        .expect("summary");
+
+    assert_eq!(summary.measured.measured_total, 1, "one unit, not three polls");
+    assert_eq!(summary.measured.inbox, 0, "the LATEST observation wins");
+    assert_eq!(summary.measured.spam, 1);
+    assert_eq!(summary.cohort.planned_units, 1);
+    assert_eq!(summary.cohort.observed_units, 1);
+    assert_eq!(summary.cohort.missing_units, 0);
+
+    pool.close().await;
+}
+
+/// Report 2026-10-28 p.11 contract: a planned seed-recipient unit that was
+/// never observed stays EXPLICITLY in the cohort (missing_units), and the
+/// summary's inbox-fraction claim is the identifying bound
+/// I/N <= fraction <= (I+U)/N — never a silently narrowed rate.
+#[tokio::test]
+async fn missing_planned_units_stay_explicit_and_bound_the_rate() {
+    let Some(pool) = canonical_pool("cohort_bounds").await else {
+        eprintln!("skipping: set TEST_DATABASE_URL to run DB-backed test");
+        return;
+    };
+    let simple = Uuid::new_v4().simple().to_string();
+    let tenant = format!("t{}", &simple[..25]);
+    let (provider_id,): (Uuid,) = sqlx::query_as(
+        "SELECT id FROM seed_providers WHERE name = 'gmail'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    let mut planned: Vec<Uuid> = Vec::new();
+    for _ in 0..4 {
+        let (account_id,): (Uuid,) = sqlx::query_as(
+            "INSERT INTO seed_accounts (provider_id, email) VALUES ($1, $2) RETURNING id",
+        )
+        .bind(provider_id)
+        .bind(format!("{}@seed.example", Uuid::new_v4().simple()))
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        planned.push(account_id);
+    }
+    let (test_id,): (Uuid,) = sqlx::query_as(
+        "INSERT INTO placement_tests (tenant_id, name, from_email, subject, seed_accounts_used) \
+         VALUES ($1, 'cohort', 'sender@apex.example', 'seed', $2) RETURNING id",
+    )
+    .bind(&tenant)
+    .bind(&planned)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    // Two units observed inbox, one observed spam, ONE PLANNED UNIT NEVER
+    // OBSERVED: N=4, I=2, U=1 -> bound [0.5, 0.75].
+    for (unit, folder) in [(planned[0], "inbox"), (planned[1], "inbox"), (planned[2], "spam")] {
+        sqlx::query(
+            "INSERT INTO placement_results \
+                (test_id, seed_account_id, inbox_type, checked_at) \
+             VALUES ($1, $2, $3, NOW())",
+        )
+        .bind(test_id)
+        .bind(unit)
+        .bind(folder)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+
+    let summary = InboxPlacementService::new(pool.clone())
+        .get_placement_summary(&tenant, 30)
+        .await
+        .expect("summary");
+
+    assert_eq!(summary.cohort.planned_units, 4);
+    assert_eq!(summary.cohort.observed_units, 3);
+    assert_eq!(summary.cohort.missing_units, 1, "the unobserved unit must not vanish");
+    let (lower, upper) = summary
+        .inbox_fraction_bounds
+        .expect("a planned cohort carries the bound");
+    assert!(
+        (lower - 0.5).abs() < 1e-9 && (upper - 0.75).abs() < 1e-9,
+        "bound must be [0.5, 0.75], got [{lower}, {upper}]"
+    );
+
+    pool.close().await;
+}

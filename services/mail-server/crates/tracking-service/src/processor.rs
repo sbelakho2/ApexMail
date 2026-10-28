@@ -2267,6 +2267,33 @@ struct WebhookQueueRow {
     payload: serde_json::Value,
 }
 
+/// `webhook_queue` payload for one deliverable open/click event.
+///
+/// Correlation contract (external report finding 5): webhook consumers
+/// correlate on the camelCase `data.messageId`, so it is emitted ALONGSIDE
+/// the legacy snake_case `data.message_id` with the SAME value — purely
+/// additive, neither key is renamed or removed, and no existing consumer
+/// breaks.
+fn tracking_webhook_event_payload(
+    tenant_id: &str,
+    event_type: &str,
+    event_id: &str,
+    message_id: &Option<String>,
+    recipient: &Option<String>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "id": format!("evt_{event_id}"),
+        "type": format!("message.{event_type}"),
+        "tenantId": tenant_id,
+        "timestamp": chrono::Utc::now().to_rfc3339(),
+        "data": {
+            "message_id": message_id,
+            "messageId": message_id,
+            "recipient": recipient,
+        },
+    })
+}
+
 /// delivery; a genuine event always does. Best-effort: a failure logs and
 /// the events remain the source of truth.
 ///
@@ -2349,16 +2376,16 @@ async fn enqueue_tracking_event_webhooks(db: &sqlx::PgPool, events: &[Deliverabl
                     Uuid::new_v5(&NAMESPACE, format!("{event_id}:{webhook_id}").as_bytes())
                         .simple()
                 );
-                let payload = serde_json::json!({
-                    "id": format!("evt_{event_id}"),
-                    "type": format!("message.{event_type}"),
-                    "tenantId": event.1,
-                    "timestamp": chrono::Utc::now().to_rfc3339(),
-                    "data": {
-                        "message_id": message_id,
-                        "recipient": recipient,
-                    },
-                });
+                // Finding 5 (webhook correlation): the payload carries BOTH
+                // the legacy snake_case `message_id` and the camelCase
+                // `messageId` with the same value (see the helper).
+                let payload = tracking_webhook_event_payload(
+                    tenant_id,
+                    event_type,
+                    event_id,
+                    message_id,
+                    recipient,
+                );
                 rows.push(WebhookQueueRow {
                     id: queue_id,
                     webhook_id: webhook_id.clone(),
@@ -2442,6 +2469,47 @@ mod tests {
         assert_eq!(k1, k2);
         let k3 = dedup_key("open", "msg_2", "a@b.com", None);
         assert_ne!(k1, k3);
+    }
+
+    /// Finding 5 (webhook correlation): open/click webhook payloads must
+    /// carry BOTH the legacy snake_case `message_id` and the camelCase
+    /// `messageId` with the SAME value, so consumers correlating on
+    /// `data.messageId` work without breaking anyone reading the old key.
+    #[test]
+    fn webhook_payload_carries_snake_and_camel_message_id_with_equal_values() {
+        let payload = tracking_webhook_event_payload(
+            "t1",
+            "opened",
+            "abc123",
+            &Some("msg_platform_1".to_string()),
+            &Some("a@b.com".to_string()),
+        );
+        assert_eq!(payload["type"], "message.opened");
+        assert_eq!(payload["id"], "evt_abc123");
+        assert_eq!(payload["tenantId"], "t1");
+        let data = payload.get("data").expect("data object");
+        assert_eq!(
+            data["message_id"].as_str(),
+            Some("msg_platform_1"),
+            "legacy snake_case key is unchanged"
+        );
+        assert_eq!(
+            data["messageId"].as_str(),
+            Some("msg_platform_1"),
+            "camelCase messageId carries the same value"
+        );
+        assert_eq!(
+            data["message_id"], data["messageId"],
+            "both keys must stay equal"
+        );
+        assert_eq!(data["recipient"].as_str(), Some("a@b.com"));
+
+        // Events without a message id serialize BOTH keys as null — the two
+        // correlation keys can never diverge.
+        let null_payload = tracking_webhook_event_payload("t1", "clicked", "def456", &None, &None);
+        assert_eq!(null_payload["type"], "message.clicked");
+        assert!(null_payload["data"]["message_id"].is_null());
+        assert!(null_payload["data"]["messageId"].is_null());
     }
 
     #[test]

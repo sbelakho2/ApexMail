@@ -561,6 +561,30 @@ groups:
           description: "No WAL segment reached the offsite archive for {{ $value | humanizeDuration }} on {{ $labels.instance }}. With archive_timeout=300s a quiet database still archives every ~5 minutes; 20m+ means the documented RPO bound (minutes, deterministic) is not holding. Check PostgresWALArchiveFailing and the archive helper's log lines."
           runbook_url: "https://apexmail.ee/docs/alerts#postgres-wal-archive-lag-exceeded"
 
+      - alert: ApiAuthValidCredentialFailureRate
+        expr: |
+          sum(rate(apexmail_auth_credential_attempts_total{job="apexmail-api",outcome!="authenticated"}[30m]))
+          /
+          clamp_min(sum(rate(apexmail_auth_credential_attempts_total{job="apexmail-api",outcome="authenticated"}[30m])), 0.001)
+          > 0.05
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Valid API-key authentication is failing above 5 percent"
+          description: "The SLA auth denominator (apexmail_auth_credential_attempts_total, mechanism=api_key) shows non-authenticated outcomes exceeding 5 percent of authenticated attempts for 15 minutes. Inspect the outcome labels for the failure class before assuming an incident."
+          runbook_url: "https://apexmail.ee/docs/alerts#api-auth-valid-credential-failure-rate"
+
+      - alert: OutboundThrottleDeferralAgeHigh
+        expr: apexmail_outbound_mta_throttle_deferred_age_seconds > 3600
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Outbound mail parked under provider throttle deferral for over an hour"
+          description: "The average age of accepted-but-deferred send units (by throttle reason) exceeds one hour. Reputation protection is preserved by design; this fires so a sustained-red provider state is SEEN, and units terminalize honestly at the deferral deadline."
+          runbook_url: "https://apexmail.ee/docs/alerts#outbound-throttle-deferral-age-high"
+
       - alert: PostgresWALArchiveStalled
         # > 2h since the last segment reached the archive = the measured-
         # minutes RPO story is dead. CAUTION before paging: a fully idle

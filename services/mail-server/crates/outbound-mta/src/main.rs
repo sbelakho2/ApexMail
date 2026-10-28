@@ -203,6 +203,14 @@ async fn healthz(State(state): State<AppState>) -> impl IntoResponse {
 async fn metrics(State(state): State<AppState>) -> impl IntoResponse {
     let counters = state.counters.snapshot();
     let mut body = String::new();
+    for (reason, deferrals, avg_age_s, max_age_s) in
+        outbound_mta::relay::throttle_defer_age_snapshot()
+    {
+        let safe = reason.replace('\n', " ").replace('"', "'");
+        body.push_str(&format!(
+            "# HELP apexmail_outbound_mta_throttle_deferred_age_seconds Throttle deferral age (avg) by reason since ledger admission.\n# TYPE apexmail_outbound_mta_throttle_deferred_age_seconds gauge\napexmail_outbound_mta_throttle_deferred_age_seconds{{reason=\"{safe}\"}} {avg_age_s}\n# HELP apexmail_outbound_mta_throttle_deferred_age_max_seconds Throttle deferral age (max) by reason.\n# TYPE apexmail_outbound_mta_throttle_deferred_age_max_seconds gauge\napexmail_outbound_mta_throttle_deferred_age_max_seconds{{reason=\"{safe}\"}} {max_age_s}\n# HELP apexmail_outbound_mta_throttle_deferrals_total Throttle deferral decisions by reason.\n# TYPE apexmail_outbound_mta_throttle_deferrals_total counter\napexmail_outbound_mta_throttle_deferrals_total{{reason=\"{safe}\"}} {deferrals}\n"
+        ));
+    }
     fn metric_line(body: &mut String, kind: &str, name: &str, help: &str, value: i64) {
         body.push_str(&format!(
             "# HELP {name} {help}\n# TYPE {name} {kind}\n{name} {value}\n"

@@ -660,7 +660,7 @@ impl BounceServer {
         //    the row changed underneath the token (or the minting context was
         //    wrong) and must not poison suppression.
         self.record_verp_token_observation(&claims).await;
-        let Some((tenant_id, queued_recipient)) =
+        let Some((tenant_id, queued_recipient, platform_message_id)) =
             self.lookup_sent_message(&claims.queue_id).await?
         else {
             warn!(
@@ -717,16 +717,17 @@ impl BounceServer {
         } else {
             Some(suppression_recipient.clone())
         };
-        let payload = serde_json::json!({
-            "bounce_id": bounce_id,
-            "original_message_id": claims.queue_id,
-            "original_recipient": webhook_recipient,
-            "bounce_type": format!("{:?}", bounce_info.bounce_type),
-            "subtype": bounce_info.bounce_subtype,
-            "authoritative": true,
-            "verp_version": "v2",
-            "timestamp": chrono::Utc::now().to_rfc3339(),
-        });
+        // Finding 5 (webhook correlation): the camelCase `messageId` (the
+        // PLATFORM messages.id resolved from the queue row above) is emitted
+        // ALONGSIDE the legacy `original_message_id` (the email_queue row id
+        // the VERP token carries) — additive only, no consumer may break.
+        let payload = verp_bounce_webhook_payload(
+            &bounce_id,
+            &bounce_info,
+            &claims.queue_id,
+            &platform_message_id,
+            webhook_recipient.as_deref(),
+        );
 
         // The bounce is durable (suppression written above); enqueue the
         // `message.bounced` event into the canonical queue. The identity is
@@ -790,19 +791,24 @@ impl BounceServer {
     /// Resolve the tenant and recipient of a message this system sent.
     ///
     /// Looks up `email_queue` by its id or message_id. Returns `None` when the
-    /// message is unknown to this system (attacker-forged reference).
+    /// message is unknown to this system (attacker-forged reference). The
+    /// third element is the PLATFORM message id (`messages.id`) that webhook
+    /// consumers correlate on: `COALESCE(message_id, id)`, the same semantics
+    /// as the email processor's enqueue projection, so queue rows minted
+    /// before the platform link existed fall back to the queue row id.
     async fn lookup_sent_message(
         &self,
         message_id: &str,
-    ) -> anyhow::Result<Option<(String, String)>> {
-        let row: Option<(String, String)> = sqlx::query_as(
+    ) -> anyhow::Result<Option<(String, String, String)>> {
+        let row: Option<(String, String, String)> = sqlx::query_as(
             // Typed comparisons keep the PK (id) and message_id index usable.
             // The previous `id::text = $1 OR message_id::text = $1` cast both
             // sides to text, forcing a sequential scan of the partitioned
             // high-volume table on every inbound VERP reply, an
             // attacker-influenceable path.
             r#"SELECT COALESCE(tenant_id, '') AS tenant_id,
-                      COALESCE(to_addresses[1], "to", '') AS recipient
+                      COALESCE(to_addresses[1], "to", '') AS recipient,
+                      COALESCE(message_id::text, id::text) AS platform_message_id
                FROM email_queue
                WHERE id = $1::uuid OR message_id = $1::uuid
                LIMIT 1"#,
@@ -811,7 +817,8 @@ impl BounceServer {
         .fetch_optional(&self.pool)
         .await?;
 
-        Ok(row.filter(|(tenant, recipient)| !tenant.is_empty() && !recipient.is_empty()))
+        Ok(row
+            .filter(|(tenant, recipient, _platform)| !tenant.is_empty() && !recipient.is_empty()))
     }
 
     /// Clean up old unmatched bounces.
@@ -1096,6 +1103,36 @@ pub(crate) fn append_data_line(message: &mut BytesMut, content: &[u8], max_size:
 /// `suppressions.id VARCHAR(26)` column).
 pub(crate) fn suppression_row_id() -> String {
     format!("sup_{}", &uuid::Uuid::new_v4().simple().to_string()[..18])
+}
+
+/// `data` object of the `message.bounced` webhook enqueued for an
+/// authoritative, queue-verified VERP bounce.
+///
+/// Correlation contract (external report finding 5): webhook consumers
+/// correlate on the camelCase `messageId` = the PLATFORM `messages.id`, while
+/// the legacy `original_message_id` stays the `email_queue` ROW id carried by
+/// the VERP token. Both keys are emitted — purely additive, neither is
+/// renamed or removed — and `platform_message_id` mirrors the email
+/// processor's `COALESCE(message_id, id)` semantics (queue rows minted before
+/// the platform link existed fall back to the row id).
+fn verp_bounce_webhook_payload(
+    bounce_id: &Uuid,
+    bounce_info: &BounceInfo,
+    queue_row_id: &str,
+    platform_message_id: &str,
+    original_recipient: Option<&str>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "bounce_id": bounce_id,
+        "original_message_id": queue_row_id,
+        "messageId": platform_message_id,
+        "original_recipient": original_recipient,
+        "bounce_type": format!("{:?}", bounce_info.bounce_type),
+        "subtype": bounce_info.bounce_subtype,
+        "authoritative": true,
+        "verp_version": "v2",
+        "timestamp": chrono::Utc::now().to_rfc3339(),
+    })
 }
 
 /// Resolution of a bounce recipient's VERP local part.
@@ -2087,6 +2124,58 @@ mod tests {
         let id = suppression_row_id();
         assert!(id.starts_with("sup_"));
         assert_eq!(id.len(), 22);
+    }
+
+    /// Finding 5 (webhook correlation): the `message.bounced` payload for an
+    /// authoritative VERP bounce must carry BOTH `original_message_id`
+    /// (unchanged — the email_queue ROW id the VERP token carries) and the
+    /// camelCase `messageId` (the PLATFORM messages.id), so consumers that
+    /// correlate on `data.messageId` work without breaking anyone reading the
+    /// legacy key.
+    #[test]
+    fn verp_bounce_webhook_payload_carries_both_message_id_keys() {
+        let bounce_id = Uuid::new_v4();
+        let bounce_info = BounceInfo {
+            original_message_id: None,
+            original_recipient: None,
+            bounce_type: BounceType::Hard,
+            bounce_subtype: "no-mailbox".into(),
+            diagnostic_code: Some("smtp; 550 5.1.1 User unknown".into()),
+            action: "failed".into(),
+            status: "5.1.1".into(),
+        };
+        // The two ids are genuinely different: the queue ROW id vs the
+        // platform messages.id linked from the queue row.
+        let queue_row_id = "11111111-1111-4111-8111-111111111111";
+        let platform_message_id = "22222222-2222-4222-8222-222222222222";
+        assert_ne!(queue_row_id, platform_message_id);
+
+        let payload = verp_bounce_webhook_payload(
+            &bounce_id,
+            &bounce_info,
+            queue_row_id,
+            platform_message_id,
+            Some("user@example.test"),
+        );
+
+        assert_eq!(
+            payload["original_message_id"].as_str(),
+            Some(queue_row_id),
+            "original_message_id stays the email_queue row id (unchanged)"
+        );
+        assert_eq!(
+            payload["messageId"].as_str(),
+            Some(platform_message_id),
+            "messageId is the platform messages.id"
+        );
+        // Every pre-existing key is still present and unchanged.
+        assert_eq!(payload["bounce_id"].as_str(), Some(bounce_id.to_string().as_str()));
+        assert_eq!(payload["original_recipient"].as_str(), Some("user@example.test"));
+        assert_eq!(payload["bounce_type"], "Hard");
+        assert_eq!(payload["subtype"], "no-mailbox");
+        assert_eq!(payload["authoritative"], true);
+        assert_eq!(payload["verp_version"], "v2");
+        assert!(payload["timestamp"].is_string());
     }
 
     #[test]
@@ -3218,13 +3307,13 @@ mod adversarial_db_tests {
         let recipient = "gone@example.test";
         let (queue_id, _) = seed_sent_message(&pool, &tenant, recipient).await;
         subscribe_webhook(&pool, &tenant, "message.bounced").await;
-        let claims = claims(
+        let correlation_claims = claims(
             &queue_id,
             &tenant,
             recipient,
             chrono::Utc::now().timestamp() + 3600,
         );
-        let rcpt = vec![verp_address(&claims)];
+        let rcpt = vec![verp_address(&correlation_claims)];
         let raw = dsn("5.1.1", "smtp; 550 5.1.1 User unknown");
 
         let id = server
@@ -3269,6 +3358,100 @@ mod adversarial_db_tests {
                 .await
                 .unwrap();
         assert_eq!(count, 1, "replays dedupe on the natural key");
+    }
+
+    /// Finding 5 (webhook correlation): the queued `message.bounced` payload
+    /// must carry BOTH the legacy `original_message_id` (unchanged — the
+    /// email_queue ROW id carried by the VERP token) and the camelCase
+    /// `messageId` = the PLATFORM messages.id linked from the queue row.
+    /// A queue row without the platform link (NULL message_id) falls back to
+    /// the queue row id, mirroring the email processor's COALESCE semantics.
+    #[tokio::test]
+    async fn authoritative_bounce_webhook_carries_queue_and_platform_message_ids() {
+        let Some(pool) = test_pool("bounce_platform_ids").await else {
+            return;
+        };
+        let server = test_server(pool.clone());
+        let tenant = unique_tenant();
+        let recipient = "correlate@example.test";
+        let (queue_id, platform_message_id) = seed_sent_message(&pool, &tenant, recipient).await;
+        subscribe_webhook(&pool, &tenant, "message.bounced").await;
+        let correlation_claims = claims(
+            &queue_id,
+            &tenant,
+            recipient,
+            chrono::Utc::now().timestamp() + 3600,
+        );
+
+        server
+            .process_bounce(
+                &[verp_address(&correlation_claims)],
+                &dsn("5.1.1", "smtp; 550 5.1.1 User unknown"),
+            )
+            .await
+            .expect("hard bounce processed");
+
+        let queued = queued_webhook_events(&pool, &tenant).await;
+        assert_eq!(queued.len(), 1, "exactly one queued event: {queued:?}");
+        let data = &queued[0].1["data"];
+        assert_eq!(
+            data["original_message_id"].as_str(),
+            Some(queue_id.as_str()),
+            "original_message_id stays the email_queue row id (unchanged)"
+        );
+        assert_eq!(
+            data["messageId"].as_str(),
+            Some(platform_message_id.as_str()),
+            "messageId is the platform messages.id from the queue row"
+        );
+        assert_ne!(queue_id, platform_message_id);
+
+        // COALESCE fallback: a queue row minted without the platform link
+        // emits the queue row id as `messageId` (never null), matching the
+        // email processor's `COALESCE(message_id, id)` projection.
+        let legacy_recipient = "legacy@example.test";
+        let legacy_queue_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO email_queue
+                 (id, from_address, to_addresses, subject, tenant_id, status)
+             VALUES ($1, 'sender@apexmail.test', ARRAY[$2]::text[], 'legacy fixture',
+                     $3, 'sent')",
+        )
+        .bind(legacy_queue_id)
+        .bind(legacy_recipient)
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .expect("insert legacy queue row");
+        let legacy_claims = claims(
+            &legacy_queue_id.to_string(),
+            &tenant,
+            legacy_recipient,
+            chrono::Utc::now().timestamp() + 3600,
+        );
+        server
+            .process_bounce(
+                &[verp_address(&legacy_claims)],
+                &dsn("5.1.1", "smtp; 550 5.1.1 User unknown"),
+            )
+            .await
+            .expect("legacy bounce processed");
+
+        let queued = queued_webhook_events(&pool, &tenant).await;
+        assert_eq!(queued.len(), 2, "one queued event per bounce: {queued:?}");
+        let legacy_queue_id_str = legacy_queue_id.to_string();
+        let legacy = queued
+            .iter()
+            .map(|(_, payload)| &payload["data"])
+            .find(|data| {
+                data["original_message_id"].as_str() == Some(legacy_queue_id_str.as_str())
+            })
+            .expect("legacy bounce event queued");
+        assert_eq!(
+            legacy["messageId"].as_str(),
+            Some(legacy_queue_id_str.as_str()),
+            "a NULL message_id falls back to the queue row id"
+        );
     }
 
     #[tokio::test]

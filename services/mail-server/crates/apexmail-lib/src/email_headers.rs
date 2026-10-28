@@ -245,6 +245,18 @@ pub mod message_category {
     pub fn is_preference_exempt(category: &str) -> bool {
         PREFERENCE_EXEMPT.contains(&category)
     }
+
+    /// True when `category` carries MARKETING-class engagement behavior
+    /// (open/click tracking, link rewriting, the unsubscribe affordance
+    /// and its List-Unsubscribe headers). Transactional/service mail is
+    /// preference-EXEMPT precisely because it is not marketing: it must
+    /// arrive as the declared bytes with no pixel and no one-click headers
+    /// (RFC 8058 reserves those for marketing mail). An unrecognized
+    /// category keeps the marketing default so unknown classes can never
+    /// silently dodge consent obligations.
+    pub fn is_marketing_class(category: &str) -> bool {
+        !is_preference_exempt(category)
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

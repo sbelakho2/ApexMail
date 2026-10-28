@@ -330,6 +330,79 @@ pub struct ProcessReport {
 }
 
 /// The recipient-facing outbound relay.
+// ── Throttle deferral age evidence (external report 2026-10-28, P1) ─────────
+// "age metrics by reason" for accepted-but-deferred mail: every Defer
+// decision observes how long the unit has been parked since ledger
+// admission. The daemon's /metrics exports count/avg/max per reason; the
+// OutboundThrottleDeferralAgeHigh alert fires on sustained parking.
+fn throttle_deferral_deadline_secs() -> i64 {
+    static DEADLINE: std::sync::OnceLock<i64> = std::sync::OnceLock::new();
+    *DEADLINE.get_or_init(|| {
+        std::env::var("OUTBOUND_THROTTLE_DEFER_DEADLINE_SECS")
+            .ok()
+            .and_then(|raw| raw.trim().parse::<i64>().ok())
+            .filter(|secs| *secs > 0)
+            .unwrap_or(21_600) // 6 h under sustained deferral, then honest expiry
+    })
+}
+
+#[derive(Debug, Clone)]
+struct DeferralAgeAccumulator {
+    deferrals: u64,
+    age_sum_secs: i64,
+    age_max_secs: i64,
+}
+
+fn defer_age_registry() -> &'static std::sync::Mutex<std::collections::HashMap<String, DeferralAgeAccumulator>> {
+    static REGISTRY: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, DeferralAgeAccumulator>>,
+    > = std::sync::OnceLock::new();
+    REGISTRY.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+fn observe_throttle_deferral_age(reason: &str, age_secs: i64) {
+    use std::collections::hash_map::Entry;
+    let key = reason.split('(').next().unwrap_or(reason).trim().to_string();
+    let mut registry = defer_age_registry().lock().unwrap_or_else(|poisoned| {
+        poisoned.into_inner()
+    });
+    match registry.entry(key) {
+        Entry::Occupied(mut slot) => {
+            slot.get_mut().deferrals += 1;
+            slot.get_mut().age_sum_secs += age_secs;
+            slot.get_mut().age_max_secs = slot.get_mut().age_max_secs.max(age_secs);
+        }
+        Entry::Vacant(slot) => {
+            slot.insert(DeferralAgeAccumulator {
+                deferrals: 1,
+                age_sum_secs: age_secs,
+                age_max_secs: age_secs,
+            });
+        }
+    }
+}
+
+/// Snapshot of the deferral-age evidence: (reason, deferrals, avg_age_secs,
+/// max_age_secs), sorted by reason. Exported through the daemon's /metrics.
+pub fn throttle_defer_age_snapshot() -> Vec<(String, u64, i64, i64)> {
+    let registry = defer_age_registry().lock().unwrap_or_else(|poisoned| {
+        poisoned.into_inner()
+    });
+    let mut rows: Vec<(String, u64, i64, i64)> = registry
+        .iter()
+        .map(|(reason, acc)| {
+            let avg = if acc.deferrals == 0 {
+                0
+            } else {
+                acc.age_sum_secs / acc.deferrals as i64
+            };
+            (reason.clone(), acc.deferrals, avg, acc.age_max_secs)
+        })
+        .collect();
+    rows.sort_by(|a, b| a.0.cmp(&b.0));
+    rows
+}
+
 pub struct Relay {
     ledger: Arc<dyn RelayLedger>,
     resolver: Arc<dyn MxResolver>,
@@ -612,9 +685,40 @@ impl Relay {
                     )
                     .await
                 {
-                    let next_attempt_at = Utc::now()
-                        + chrono::Duration::from_std(crate::throttle::THROTTLE_RETRY_DELAY)
-                            .unwrap_or_else(|_| chrono::Duration::minutes(5));
+                    // External report 2026-10-28 (P1): an accepted-but-deferred
+                    // unit has a DEADLINE, not an infinite park. The age since
+                    // ledger admission is observed for /metrics; past the
+                    // deadline the unit terminalizes honestly (expiry DSN +
+                    // permanent reason) exactly like retry-ceiling exhaustion,
+                    // and below it the bounded throttle window is CAPPED at
+                    // the deadline so the next attempt resolves it.
+                    let now = Utc::now();
+                    let age_secs = (now - row.created_at).num_seconds().max(0);
+                    observe_throttle_deferral_age(&reason, age_secs);
+                    let deadline_secs = throttle_deferral_deadline_secs();
+                    let deadline_at =
+                        row.created_at + chrono::Duration::seconds(deadline_secs);
+                    if now >= deadline_at {
+                        let dsn_units = self.enqueue_expired_dsns(&row, arrival).await;
+                        let full_reason = format!(
+                            "throttle deferral deadline expired ({deadline_secs}s under \
+                             sustained provider deferral): {reason}"
+                        );
+                        self.ledger
+                            .record_permanent(&row.send_unit, attempt, &full_reason)
+                            .await?;
+                        return Err(RelayError::Permanent {
+                            send_unit: row.send_unit,
+                            attempt,
+                            reason: full_reason,
+                            dsn_send_units: dsn_units,
+                        });
+                    }
+                    let throttle_window = chrono::Duration::from_std(
+                        crate::throttle::THROTTLE_RETRY_DELAY,
+                    )
+                    .unwrap_or_else(|_| chrono::Duration::minutes(5));
+                    let next_attempt_at = (now + throttle_window).min(deadline_at);
                     self.ledger
                         .record_retry(&row.send_unit, attempt, next_attempt_at, &reason)
                         .await?;

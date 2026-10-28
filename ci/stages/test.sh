@@ -1333,6 +1333,31 @@ stage_main() {
             || return "$CI_EXIT_FAIL"
     fi
 
+    # Real-mail canary lane (external report 2026-10-28 P0-4): the
+    # byte-pinned external runner (tests/qualification) drives its real
+    # plan→prepare→execute pipeline against THIS stack — authenticated
+    # /v1/messages admission, DKIM-signed SMTP to the controlled GreenMail
+    # receiver, independent IMAP observation, six-case oracles. The external
+    # provider panel runs only under CI_CANARY_CONFIG; otherwise the lane
+    # records canary-external.json = NOT EXECUTED (never a healthy result).
+    _cn_flag="${CI_CANARY_CHECK:-required}"
+    _cn_st=$(lane_tool_status docker canary-lane "$_cn_flag")
+    case $_cn_st in
+        fail) return "$CI_EXIT_FAIL" ;;
+        skip) return "$CI_EXIT_OK" ;;
+    esac
+    _cn_st=$(lane_tool_status python3 canary-lane "$_cn_flag")
+    case $_cn_st in
+        fail) return "$CI_EXIT_FAIL" ;;
+        skip) return "$CI_EXIT_OK" ;;
+    esac
+    if ci_dry; then
+        ci_info "dry-run: canary lane (stack + external qualification runner)"
+    else
+        ci_check "canary lane (real mail qualification)" bash tools/run_canary_lane.sh --out "$RUN_DIR/canary" \
+            || return "$CI_EXIT_FAIL"
+    fi
+
     ci_ephem_cleanup
     ci_info "test: all suites green"
     return "$CI_EXIT_OK"

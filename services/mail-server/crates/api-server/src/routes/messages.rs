@@ -6918,6 +6918,101 @@ Bcc: victim@example.com"@example.com"#
         id
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    /// External report 2026-10-28 (p.10/p.17 P0): CONCURRENT identical sends
+    /// under one Idempotency-Key — every existing arm simulates the race by
+    /// pre-seeding rows; this one runs two requests through the handler at
+    /// the same instant and proves the DB evidence: exactly ONE message,
+    /// ONE queue set, ONE usage reservation, and both callers leaving with
+    /// the SAME platform id (202) or one 202 + one honest 409.
+    async fn concurrent_identical_sends_collapse_to_one_message() {
+        let Some(fixture) = msg_fixture("adv_send_concurrent").await else {
+            return;
+        };
+        let app = fixture.router();
+        let key = &fixture.key_both;
+        let recipient = "race@example.com";
+        grant_marketing_consent(&fixture.pool, &fixture.tenant, recipient).await;
+        let payload = serde_json::json!({
+            "from": format!("sender@{}", fixture.domain),
+            "to": [recipient],
+            "subject": "Concurrent identical send",
+            "text": "one logical message",
+            "category": "transactional",
+        });
+
+        let (left, right) = tokio::join!(
+            msg_call(
+                &app,
+                key,
+                Method::POST,
+                "/",
+                Some(payload.clone()),
+                &[("idempotency-key", "adv-concurrent-1")],
+            ),
+            msg_call(
+                &app,
+                key,
+                Method::POST,
+                "/",
+                Some(payload.clone()),
+                &[("idempotency-key", "adv-concurrent-1")],
+            ),
+        );
+        let (l_status, _, l_body) = left;
+        let (r_status, _, r_body) = right;
+
+        // Exactly one of the two may lose the race with an honest 409
+        // ("in flight"); never two independent sends, never two ids.
+        let statuses = [l_status, r_status];
+        let accepted = statuses.iter().filter(|s| **s == StatusCode::ACCEPTED).count();
+        let conflicted = statuses.iter().filter(|s| **s == StatusCode::CONFLICT).count();
+        assert!(
+            (accepted, conflicted) == (2, 0) || (accepted, conflicted) == (1, 1),
+            "both callers must succeed or one must conflict honestly: {l_status}/{r_status}              bodies: {l_body} / {r_body}"
+        );
+        if accepted == 2 {
+            assert_eq!(
+                l_body["data"]["id"], r_body["data"]["id"],
+                "both accepted responses must carry the SAME platform id"
+            );
+        }
+
+        // DB evidence: one message, one queue row, one reservation.
+        let messages: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE tenant_id = $1")
+                .bind(&fixture.tenant)
+                .fetch_one(&fixture.pool)
+                .await
+                .unwrap();
+        let queued: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM email_queue WHERE tenant_id = $1")
+                .bind(&fixture.tenant)
+                .fetch_one(&fixture.pool)
+                .await
+                .unwrap();
+        let metered: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM metering_events WHERE tenant_id = $1",
+        )
+        .bind(&fixture.tenant)
+        .fetch_one(&fixture.pool)
+        .await
+        .unwrap();
+        let ledger: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM idempotency_records WHERE tenant_id = $1",
+        )
+        .bind(&fixture.tenant)
+        .fetch_one(&fixture.pool)
+        .await
+        .unwrap();
+        assert_eq!(messages, 1, "the race must admit exactly ONE logical message");
+        assert_eq!(queued, 1);
+        assert_eq!(metered, 1, "usage is charged for one logical send, never two");
+        assert_eq!(ledger, 1);
+
+        fixture.cleanup().await;
+    }
+
     #[tokio::test]
     async fn send_endpoint_persists_queue_and_replays_idempotently() {
         let Some(fixture) = msg_fixture("adv_send_idempotency").await else {
