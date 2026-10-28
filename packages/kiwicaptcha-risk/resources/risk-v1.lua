@@ -2,14 +2,19 @@
 --
 -- SCRIPT BOUNDS — all bounded constants, no attacker-sized
 -- collections anywhere in this script:
---   max keys touched:     10 (KEYS[1..10])
---   max Redis calls:      21 (1 TIME + 9 HMGET + 5 HSET + 4 EXPIRE +
---                           1 GET + 1 SET — every call is fixed-cost;
+--   max keys touched:     11 (KEYS[1..10] plus the per-event effect
+--                          completion key derived below as
+--                          KEYS[10] .. ':fxdone', same hash tag)
+--   max Redis calls:      33 (10 TYPE + 1 TIME + 9 HMGET + 5 HSET +
+--                           4 EXPIRE + 2 GET/EXISTS + 2 SET — every call
+--                           is fixed-cost;
 --                           no KEYS/SCAN/EVAL nesting, no iteration over
 --                           attacker-sized collections)
---   max collection cardinality: 12 flat fields per state hash (the
---                           HMGET reply of STATE_FIELDS); the sum3/max3/
---                           max4 aggregation touches at most 4 elements.
+--   max collection cardinality: 13 flat fields per state hash (the
+--                           HMGET reply of STATE_FIELDS, which carries
+--                           the 12 state fields plus the per-event `fx`
+--                           effect marker); the sum3/max3/max4
+--                           aggregation touches at most 4 elements.
 -- The script's runtime is therefore O(1) in the state size and bounded
 -- by the constants above regardless of traffic volume.
 --
@@ -111,10 +116,53 @@
 --   trust_credit covers source+session trust; principal_credit is the
 --   principal's own trust (no double subtraction).
 
-local function num(v)
-    if not v then return 0 end
-    return tonumber(v) or 0
+-- BEGIN KIWI PERSISTED-STATE DECODER
+-- Shared decoder block: keep byte-identical across the risk scripts.
+-- Missing values keep their documented defaults; a present value must be
+-- a finite number of the required shape. Anything else is storage
+-- corruption and fails closed before the first mutation.
+local function kiwi_decode_number(raw, label)
+    if raw == nil or raw == false then
+        return nil
+    end
+    local n = tonumber(raw)
+    if n == nil or n ~= n or n == math.huge or n == -math.huge then
+        error('storage-corruption: ' .. label .. ' is not a finite number')
+    end
+    return n
 end
+
+local function kiwi_decode_integer(raw, label)
+    local n = kiwi_decode_number(raw, label)
+    if n ~= nil and n ~= math.floor(n) then
+        error('storage-corruption: ' .. label .. ' is not an integer')
+    end
+    return n
+end
+
+local function kiwi_assert_type(key, expected)
+    local actual = redis.call('TYPE', key).ok
+    if actual ~= 'none' and actual ~= expected then
+        error('storage-corruption: ' .. key .. ' holds ' .. actual .. ', expected ' .. expected)
+    end
+end
+
+local function kiwi_effect_marker(event_id, now_ms, ttl_seconds)
+    return event_id .. ':' .. (now_ms + ttl_seconds * 1000)
+end
+
+local function kiwi_effect_matches(raw, event_id, now_ms)
+    if raw == nil or raw == false then
+        return false
+    end
+    local id, expiry = string.match(raw, '^(.*):(%d+)$')
+    if id == nil then
+        return raw == event_id
+    end
+    local expires = tonumber(expiry)
+    return id == event_id and expires ~= nil and now_ms <= expires
+end
+-- END KIWI PERSISTED-STATE DECODER
 
 -- Distributed clock authority: Redis TIME, not the application clock.
 -- App-node skew can otherwise make pressure decay faster or slower on
@@ -155,35 +203,42 @@ local function max4(a, b, c, d)
     return m
 end
 
-local STATE_FIELDS = { 'ts','rf','rs','iss','bad','mal','rep','af','sw','trust','scope','cool' }
+local STATE_FIELDS = { 'ts','rf','rs','iss','bad','mal','rep','af','sw','trust','scope','cool','fx' }
 
 local function read_state(key, now)
     local v = redis.call('HMGET', key, unpack(STATE_FIELDS))
-    local ts = num(v[1])
-    if ts == 0 then ts = now end
+    local ts = kiwi_decode_integer(v[1], key .. ':ts')
+    if ts == nil or ts == 0 then ts = now end
     local elapsed = now - ts
     if elapsed < 0 then elapsed = 0 end
     return {
         ts = now,
-        rf    = leak(num(v[2]),  elapsed, 250),
-        rs    = leak(num(v[3]),  elapsed, 20),
-        iss   = leak(num(v[4]),  elapsed, 40),
-        bad   = leak(num(v[5]),  elapsed, 10),
-        mal   = leak(num(v[6]),  elapsed, 5),
-        rep   = leak(num(v[7]),  elapsed, 5),
-        af    = leak(num(v[8]),  elapsed, 5),
-        sw    = leak(num(v[9]),  elapsed, 10),
-        trust = leak(num(v[10]), elapsed, 2),
-        scope = num(v[11]),
-        cool  = num(v[12])
+        rf    = leak(kiwi_decode_integer(v[2], key .. ':rf') or 0, elapsed, 250),
+        rs    = leak(kiwi_decode_integer(v[3], key .. ':rs') or 0, elapsed, 20),
+        iss   = leak(kiwi_decode_integer(v[4], key .. ':iss') or 0, elapsed, 40),
+        bad   = leak(kiwi_decode_integer(v[5], key .. ':bad') or 0, elapsed, 10),
+        mal   = leak(kiwi_decode_integer(v[6], key .. ':mal') or 0, elapsed, 5),
+        rep   = leak(kiwi_decode_integer(v[7], key .. ':rep') or 0, elapsed, 5),
+        af    = leak(kiwi_decode_integer(v[8], key .. ':af') or 0, elapsed, 5),
+        sw    = leak(kiwi_decode_integer(v[9], key .. ':sw') or 0, elapsed, 10),
+        trust = leak(kiwi_decode_integer(v[10], key .. ':trust') or 0, elapsed, 2),
+        scope = kiwi_decode_integer(v[11], key .. ':scope') or 0,
+        cool  = kiwi_decode_integer(v[12], key .. ':cool') or 0,
+        fx    = v[13]
     }
 end
 
-local function save(key, s, ttl)
-    redis.call('HSET', key,
+local function save(key, s, ttl, effect_id)
+    local fields = {
         'ts', s.ts, 'rf', s.rf, 'rs', s.rs, 'iss', s.iss,
         'bad', s.bad, 'mal', s.mal, 'rep', s.rep, 'af', s.af,
-        'sw', s.sw, 'trust', s.trust, 'scope', s.scope, 'cool', s.cool)
+        'sw', s.sw, 'trust', s.trust, 'scope', s.scope, 'cool', s.cool
+    }
+    if effect_id ~= '' then
+        fields[#fields + 1] = 'fx'
+        fields[#fields + 1] = effect_id
+    end
+    redis.call('HSET', key, unpack(fields))
     if ttl > 0 then
         redis.call('EXPIRE', key, ttl)
     end
@@ -328,72 +383,146 @@ end
 -- first and parsed the numeric arguments afterwards, so a missing or
 -- non-numeric saturation ARGV errored (nil comparison) AFTER the event
 -- was marked seen. The event was silently lost and an identical retry
--- was refused as a duplicate. Every numeric argument is validated here,
--- before the first write.
+-- was refused as a duplicate. A value that passes a bare tonumber()
+-- check but is NaN or infinite can corrupt a state field or abort a
+-- later operation after the first write, so every numeric argument is
+-- validated as a FINITE number here, before the first write.
+local function finite_number(value)
+    local n = tonumber(value)
+    if n == nil or n ~= n or n == math.huge or n == -math.huge then
+        return nil
+    end
+    return n
+end
+
 for _, i in ipairs({1, 2, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20}) do
-    if tonumber(ARGV[i]) == nil then
-        return redis.error_reply('risk-v1: ARGV['..i..'] must be numeric')
+    if finite_number(ARGV[i]) == nil then
+        return redis.error_reply('risk-v1: ARGV['..i..'] must be a finite number')
     end
 end
+local event_arg = finite_number(ARGV[1])
+if event_arg ~= math.floor(event_arg) or event_arg < 1 or event_arg > 22 then
+    return redis.error_reply('risk-v1: event must be an integer within 1..22')
+end
+local scope_arg = finite_number(ARGV[2])
+if scope_arg ~= math.floor(scope_arg) then
+    return redis.error_reply('risk-v1: scope must be an integer')
+end
+local hysteresis_arg = finite_number(ARGV[7])
+if hysteresis_arg < 1 or hysteresis_arg ~= math.floor(hysteresis_arg) then
+    return redis.error_reply('risk-v1: hysteresis_ms must be a positive integer')
+end
+for _, i in ipairs({8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18}) do
+    local saturation = finite_number(ARGV[i])
+    if saturation < 1 or saturation ~= math.floor(saturation) then
+        return redis.error_reply('risk-v1: ARGV['..i..'] must be a positive integer saturation')
+    end
+end
+if ARGV[19] ~= '0' and ARGV[19] ~= '1' then
+    return redis.error_reply('risk-v1: has_session must be 0 or 1')
+end
+if ARGV[20] ~= '0' and ARGV[20] ~= '1' then
+    return redis.error_reply('risk-v1: has_principal must be 0 or 1')
+end
 
--- ── Dedupe: identical event_id must not double-increment state. On a
--- duplicate, SKIP the event application but still decay/read/return the
--- current signals (shared risk-v1 semantics across Rust and PHP).
+-- ── Persisted-state preflight: every participating key is type-checked
+-- BEFORE the first mutation. A collision (a restored backup, a legacy
+-- writer or an operator mistake) must fail with no write at all, so a
+-- retry can never observe a marker for an event whose state was lost.
+-- The per-key effect marker (`fx`, written atomically with the state
+-- HSET below) is what makes a retried invocation finish exactly the
+-- dimensions a failed attempt left unwritten.
+for _, i in ipairs({1, 2, 3, 4, 5, 6, 7, 8, 9}) do
+    kiwi_assert_type(KEYS[i], 'hash')
+end
+kiwi_assert_type(KEYS[10], 'string')
+
+-- ── Dedupe: identical event_id must not double-increment state. The
+-- marker is written LAST, after every state effect. A script that aborts
+-- does not roll back, so a marker written first would turn a partial
+-- application into an event that a retry refuses as a duplicate. With
+-- the marker last, a retry re-enters; each dimension's own `fx` marker
+-- makes the already-applied dimensions a no-op.
+--
+-- The per-event effect completion key (`fxdone`, derived from the
+-- dedupe key's own event-id namespace and expiring with the same dedupe
+-- TTL as the `fx` marker values) closes the one interleaving the
+-- per-key markers cannot: A applies its effects (fx = A everywhere),
+-- aborts before its claim; B then runs to completion (fx = B
+-- everywhere); A retries — fx no longer says A, so the effects would
+-- apply twice. The completion key is written in the same invocation,
+-- immediately after the guarded effects and before the claim, and the
+-- guards below accept "fx == me OR the completion key exists", so the
+-- retry skips the effects and converges by (re)writing the claim.
+local event_id = ARGV[4] or ''
+local effect_marker = event_id ~= '' and kiwi_effect_marker(event_id, now, dedupe_ttl) or ''
+local effect_done_key = event_id ~= '' and KEYS[10] .. ':fxdone' or ''
 local is_duplicate = false
-if ARGV[4] ~= '' then
-    if redis.call('GET', KEYS[10]) then
-        is_duplicate = true
-    else
-        redis.call('SET', KEYS[10], '1', 'EX', dedupe_ttl)
-    end
+if event_id ~= '' and redis.call('GET', KEYS[10]) then
+    is_duplicate = true
 end
+-- The completion record of THIS event id: when it exists, every guarded
+-- effect of the event has already landed (it is written only after the
+-- last of them), whatever later events did to the per-key markers.
+local event_done = event_id ~= ''
+    and redis.call('EXISTS', effect_done_key) == 1
+    or false
 
-local event = tonumber(ARGV[1])
-local scope = tonumber(ARGV[2])
-local has_session = tonumber(ARGV[19]) == 1
-local has_principal = tonumber(ARGV[20]) == 1
+local event = event_arg
+local scope = scope_arg
+local has_session = ARGV[19] == '1'
+local has_principal = ARGV[20] == '1'
 
 -- The zero-skip in save() stays intentional for the GLOBAL rolling state
 -- (KEYS[9], the one no-expiry record, written with ttl 0 below). The
 -- ephemeral per-identity TTLs were already validated above, before the
 -- first write.
 
--- ── Source: update current epoch, read ±1 for boundary continuity. ──
+-- ── Every participating hash is read and strictly decoded BEFORE the
+-- first write. An interleaved read-write order would let a corrupt later
+-- key abort after an earlier dimension had already been saved.
 local src = read_state(KEYS[1], now)
-if not is_duplicate then
+local src_prev = read_state(KEYS[2], now)
+local src_next = read_state(KEYS[3], now)
+local net = read_state(KEYS[4], now)
+local net_prev = read_state(KEYS[5], now)
+local net_next = read_state(KEYS[6], now)
+local sess = read_state(KEYS[7], now)
+local prin = read_state(KEYS[8], now)
+local g = read_state(KEYS[9], now)
+
+-- ── Source: update current epoch; the ±1 keys above are boundary reads.
+local src_done = event_done or kiwi_effect_matches(src.fx, event_id, now)
+if not is_duplicate and not src_done then
     apply_event(src, event, scope)
     if event == 15 then
         -- SourceRateLimitHit: per-source limit — source/session ONLY.
         src.bad = src.bad + 3000
     end
-    save(KEYS[1], src, state_ttl)
+    save(KEYS[1], src, state_ttl, effect_marker)
 end
-local src_prev = read_state(KEYS[2], now)
-local src_next = read_state(KEYS[3], now)
 
--- ── Subnet: same pattern. ──
-local net = read_state(KEYS[4], now)
-if not is_duplicate then
+-- ── Subnet: same pattern.
+local net_done = event_done or kiwi_effect_matches(net.fx, event_id, now)
+if not is_duplicate and not net_done then
     apply_event(net, event, scope)
-    save(KEYS[4], net, state_ttl)
+    save(KEYS[4], net, state_ttl, effect_marker)
 end
-local net_prev = read_state(KEYS[5], now)
-local net_next = read_state(KEYS[6], now)
 
--- ── Session (continuity) and principal (authenticated reputation). ──
-local sess = read_state(KEYS[7], now)
-if has_session and not is_duplicate then
+-- ── Session (continuity) and principal (authenticated reputation).
+local sess_done = event_done or kiwi_effect_matches(sess.fx, event_id, now)
+if has_session and not is_duplicate and not sess_done then
     apply_session_event(sess, event, scope)
     if event == 15 then
         -- SourceRateLimitHit: session half of the source/session-only rule.
         sess.bad = sess.bad + 3000
     end
-    save(KEYS[7], sess, session_ttl)
+    save(KEYS[7], sess, session_ttl, effect_marker)
 end
-local prin = read_state(KEYS[8], now)
-if has_principal and not is_duplicate then
+local prin_done = event_done or kiwi_effect_matches(prin.fx, event_id, now)
+if has_principal and not is_duplicate and not prin_done then
     apply_principal_event(prin, event, scope)
-    save(KEYS[8], prin, principal_ttl)
+    save(KEYS[8], prin, principal_ttl, effect_marker)
 end
 
 -- ── Global: rolling (no expiry). The global hash's `scope` field carries
@@ -404,15 +533,15 @@ end
 -- persists the final level, cooldown and channels in one HSET (a save
 -- inside the non-duplicate branch here would be a strict subset of it:
 -- the same fields one HSET earlier, doubled for no effect).
-local g = read_state(KEYS[9], now)
+-- (The global hash was read with the other dimensions above.)
 -- Corrupt or tampered stored levels above the hysteresis table are
 -- clamped into range (the Rust core applies the same .min(4)); a nil
--- exit entry would otherwise error mid-transition after the dedupe
--- marker was written. The floor stays 0: a fresh state legitimately
--- starts at level 0, and forcing a minimum of 1 here would raise every
--- namespace's baseline pressure.
-local prev_level = math.min(4, tonumber(g.scope) or 0)
-if not is_duplicate then
+-- exit entry would otherwise error mid-transition. The floor stays 0: a
+-- fresh state legitimately starts at level 0, and forcing a minimum of
+-- 1 here would raise every namespace's baseline pressure.
+local prev_level = math.min(4, g.scope)
+local g_done = event_done or kiwi_effect_matches(g.fx, event_id, now)
+if not is_duplicate and not g_done then
     apply_event(g, event, scope)
     if event == 16 then
         -- GlobalCapacityHit: deployment overload raises the global
@@ -422,30 +551,49 @@ if not is_duplicate then
     end
 end
 
--- ── Global pressure level with hysteresis (normalized thresholds). ──
 local gp = g.rf + g.rs + g.iss + g.bad + g.mal + g.rep + g.af
-local gnorm = normalize(gp, tonumber(ARGV[16]))
-local enter = { 300, 550, 750, 900 }
-local exit = { 250, 450, 650, 850 }
-local target = 0
-for i = 4, 1, -1 do
-    if gnorm >= enter[i] then
-        target = i
-        break
-    end
-end
 local level = prev_level
-if target > level then
-    level = target
-    g.cool = now + tonumber(ARGV[7])
-elseif target < level and gnorm < exit[math.max(1, level)] then
-    if now >= g.cool then
-        level = target
-        g.cool = 0
+-- The ratchet and the decayed save run even for a duplicate or an
+-- already-applied retry: a repeated probe still advances the global
+-- clock and may lower the level after the cooldown.
+do
+    -- ── Global pressure level with hysteresis (normalized thresholds). ──
+    local gnorm = normalize(gp, tonumber(ARGV[16]))
+    local enter = { 300, 550, 750, 900 }
+    local exit = { 250, 450, 650, 850 }
+    local target = 0
+    for i = 4, 1, -1 do
+        if gnorm >= enter[i] then
+            target = i
+            break
+        end
     end
+    if target > level then
+        level = target
+        g.cool = now + tonumber(ARGV[7])
+    elseif target < level and gnorm < exit[math.max(1, level)] then
+        if now >= g.cool then
+            level = target
+            g.cool = 0
+        end
+    end
+    g.scope = level
+    -- A duplicate or a converged retry never claims the current event
+    -- id: the former already carries whichever effect marker the first
+    -- delivery wrote, the latter holds its completion key instead.
+    save(KEYS[9], g, 0, (is_duplicate or event_done) and '' or effect_marker)
 end
-g.scope = level
-save(KEYS[9], g, 0)
+
+-- The effect completion key lands immediately after the guarded effects
+-- and BEFORE the dedupe claim: an attempt that stops anywhere short of
+-- the claim is finished by a retry that finds this key (or its own fx
+-- markers) and rewrites the claim instead of re-applying the effects.
+-- It expires with the same dedupe TTL as the fx marker values, so it
+-- cannot outlive the claims and markers it complements.
+if event_id ~= '' and not is_duplicate then
+    redis.call('SET', effect_done_key, '1', 'EX', dedupe_ttl)
+    redis.call('SET', KEYS[10], '1', 'EX', dedupe_ttl)
+end
 
 -- ── Aggregate (v3) + normalize (SignalVector order). ──
 -- Rotated-epoch pseudonyms of one identity SUM (decay already applied);

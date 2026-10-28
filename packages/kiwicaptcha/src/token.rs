@@ -134,6 +134,14 @@ pub struct SolutionToken {
 /// Hard ceiling for the client-reported duration (telemetry only): 1 hour.
 pub const MAX_DURATION_MS: u64 = 3_600_000;
 
+/// Maximum nesting depth of the telemetry object, the
+/// protocol/limits.json `token_max_telemetry_depth` register row. A
+/// deeper object is outside the wire language, so its token is
+/// malformed. The scalar/leaf level is zero; one object or array is
+/// depth one, so the 32nd nested container is accepted and the 33rd
+/// is refused.
+pub const MAX_TELEMETRY_DEPTH: usize = 32;
+
 /// Hard ceiling on the RAW token length (bytes) accepted by
 /// [`SolutionToken::decode`]. The canonical wire form of a
 /// legitimate token is a few hundred bytes (32-byte nonce + counter +
@@ -347,6 +355,13 @@ impl SolutionToken {
         if !telemetry.is_object() {
             return Err(DecodeError::Malformed);
         }
+        // The depth ceiling is part of the wire language. serde_json's
+        // own recursion limit (128) is host-specific slack: the
+        // register value is the contract, so a deeper object is
+        // malformed on every implementation.
+        if json_depth_exceeds(&telemetry, MAX_TELEMETRY_DEPTH) {
+            return Err(DecodeError::Malformed);
+        }
 
         Ok(Self {
             nonce: nonce.to_string(),
@@ -358,6 +373,32 @@ impl SolutionToken {
             rsw_proof,
         })
     }
+}
+
+/// True when the parsed telemetry tree nests deeper than `max`
+/// containers. The walk is iterative so a hostile token cannot turn the
+/// depth check itself into a stack overflow; serde_json's parse limit
+/// already bounds the input well below the raw 32 KiB token cap.
+fn json_depth_exceeds(value: &serde_json::Value, max: usize) -> bool {
+    let mut stack: Vec<(&serde_json::Value, usize)> = vec![(value, 1)];
+    while let Some((node, depth)) = stack.pop() {
+        match node {
+            serde_json::Value::Object(map) => {
+                if depth > max {
+                    return true;
+                }
+                stack.extend(map.values().map(|child| (child, depth + 1)));
+            }
+            serde_json::Value::Array(items) => {
+                if depth > max {
+                    return true;
+                }
+                stack.extend(items.iter().map(|child| (child, depth + 1)));
+            }
+            _ => {}
+        }
+    }
+    false
 }
 
 /// True when `trace` is the canonical unpadded base64url encoding of

@@ -54,15 +54,6 @@ ARG GO_VERSION=1.23.4
 # tools/contrast-audit/package-lock.json (the executor npm-ci's the WORKSPACE
 # playwright and runs it against the browser binaries baked in below).
 ARG PLAYWRIGHT_VERSION=1.63.0
-# The test stage's browser suite (tests/browser, the mirrored KiwiCaptcha
-# Playwright suite) locks a DIFFERENT playwright minor than contrast-audit;
-# each playwright version demands its own chromium build revision, and the
-# revision directories coexist under ~/.cache/ms-playwright — so the image
-# bakes BOTH. MUST equal the version resolved by the committed
-# tests/browser/package-lock.json; when a mirror advance moves that lock, bump
-# this pin in the same PR (the lane fails closed with the missing-runtime
-# message otherwise).
-ARG PLAYWRIGHT_BROWSER_SUITE_VERSION=1.62.1
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -185,26 +176,17 @@ RUN cargo install --locked cargo-nextest@${NEXTEST_VERSION}
 
 # Playwright chromium for the contrast/layout pixel gates AND the browser
 # suite: provisioned at image build so CI never downloads browsers mid-run.
-# The playwright versions MUST equal the committed pins they serve:
-# tools/contrast-audit/package-lock.json (the contrast/layout lanes) and
-# tests/browser/package-lock.json (the browser suite) — a skew makes
-# playwright demand a browser build the image does not carry. Two revisions
-# coexist under ~/.cache/ms-playwright, so both installs are cheap after the
-# apt-deps layer the first one pulls.
+# The playwright version MUST equal the committed pin it serves:
+# tools/contrast-audit/package-lock.json (the contrast/layout lanes) — a skew
+# makes playwright demand a browser build the image does not carry. (The
+# KiwiCaptcha browser suite and its second chromium revision left with the
+# PHP mirror on 2026-10-28.)
 WORKDIR /tmp
-# PLAYWRIGHT_SKIP_BROWSER_GC (2026-10-19): playwright's install prunes browser
-# revisions it does not reference — the 1.62.1 install DELETED the 1.63.0
-# chromium (assert caught "only 1 chromium revision"). Both pins must coexist.
 ENV PLAYWRIGHT_SKIP_BROWSER_GC=1
 RUN npm init -y >/dev/null 2>&1 \
     && npm install "playwright@${PLAYWRIGHT_VERSION}" >/dev/null 2>&1 \
     && npx playwright install --with-deps chromium \
     && echo "browsers after ${PLAYWRIGHT_VERSION}: $(ls ${HOME}/.cache/ms-playwright 2>/dev/null | tr '\n' ' ')" \
-    && rm -rf /tmp/node_modules /tmp/package*.json \
-    && npm init -y >/dev/null 2>&1 \
-    && npm install "playwright@${PLAYWRIGHT_BROWSER_SUITE_VERSION}" >/dev/null 2>&1 \
-    && npx playwright install chromium \
-    && echo "browsers after ${PLAYWRIGHT_BROWSER_SUITE_VERSION}: $(ls ${HOME}/.cache/ms-playwright 2>/dev/null | tr '\n' ' ')" \
     && rm -rf /tmp/node_modules /tmp/package*.json
 WORKDIR /
 

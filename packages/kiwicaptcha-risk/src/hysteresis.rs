@@ -140,9 +140,9 @@ impl ScopeActionHysteresis {
     /// this multiple of the shard capacity, bounding its memory.
     const TICKET_LIMIT: usize = Self::SHARD_CAPACITY * 4;
 
-    /// The hysteresis ladder (ranks 0..6): StepUp and Deny are hard actions
+    /// The hysteresis ladder (ranks 0..7): StepUp and Deny are hard actions
     /// and never participate in the hold logic.
-    const LADDER: [RiskAction; 7] = [
+    const LADDER: [RiskAction; 8] = [
         RiskAction::Allow,
         RiskAction::Sha16,
         RiskAction::Sha18,
@@ -150,11 +150,12 @@ impl ScopeActionHysteresis {
         RiskAction::Argon16,
         RiskAction::Argon32,
         RiskAction::Argon64,
+        RiskAction::Rsw,
     ];
 
     /// Plain band boundaries `(lower, upper)` per ladder rank, mirroring
     /// [`RiskAction::action_for_score`] (pinned by a parity test).
-    const BANDS: [(u16, u16); 7] = [
+    const BANDS: [(u16, u16); 8] = [
         (0, 150),
         (150, 300),
         (300, 450),
@@ -162,6 +163,7 @@ impl ScopeActionHysteresis {
         (600, 750),
         (750, 850),
         (850, 930),
+        (930, 955),
     ];
 
     pub fn new() -> Self {

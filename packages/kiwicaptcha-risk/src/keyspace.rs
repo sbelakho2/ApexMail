@@ -132,12 +132,19 @@ impl ShardedDimension {
     }
 }
 
-/// The two hex characters of the identifier's first byte: the family
-/// prefix that disperses one dimension over 256 slots. Identifiers are
-/// lowercase hex pseudonyms per the store's validation contract, so the
-/// prefix is always ASCII and the byte slice is always even.
+/// The family prefix that disperses one dimension over its slots: the
+/// first two UTF-8 characters of the identifier, which are the first two
+/// bytes for the lowercase hex pseudonyms the validation contract
+/// requires. Character-based truncation keeps a multi-byte character
+/// whole, so both cores derive the same family tag for every valid UTF-8
+/// identifier instead of splitting a code point at byte two.
 pub fn id_prefix(hex_id: &str) -> &str {
-    &hex_id[..hex_id.len().min(2)]
+    let mut chars = hex_id.char_indices();
+    let _ = chars.next();
+    match chars.next() {
+        Some((index, ch)) => &hex_id[..index + ch.len_utf8()],
+        None => hex_id,
+    }
 }
 
 /// FNV-1a 32-bit over the event id bytes: `hash = (hash ^ byte) * prime`
@@ -261,15 +268,36 @@ pub fn target_state_tag(encoded_namespace: &str, hex_id: &str) -> String {
 /// carries a 24 h TTL, so a namespace that later moves to the sharded
 /// layout drains the legacy-family records naturally.
 pub fn target_state_keys(encoded_namespace: &str, hex_id: &str, mode: KeyspaceMode) -> [String; 3] {
-    let tag = match mode {
-        KeyspaceMode::Sharded => target_state_tag(encoded_namespace, hex_id),
-        KeyspaceMode::Legacy => format!("{{kiwi:{encoded_namespace}}}"),
-    };
+    let tag = target_key_tag(encoded_namespace, hex_id, mode);
     [
         format!("{tag}:risk:tgt:{hex_id}"),
         format!("{tag}:risk:tgt:src:{hex_id}"),
         format!("{tag}:risk:tgt:asn:{hex_id}"),
     ]
+}
+
+/// The per-report dedupe marker of one target failure, on the target
+/// family's own slot (the same tag the target state keys carry), so the
+/// claim and the counter increment run as one atomic script on one
+/// cluster slot. One report event id books one failure.
+pub fn target_failure_marker_key(
+    encoded_namespace: &str,
+    hex_id: &str,
+    event_id: &str,
+    mode: KeyspaceMode,
+) -> String {
+    format!(
+        "{}:risk:tgt:dd:{event_id}",
+        target_key_tag(encoded_namespace, hex_id, mode)
+    )
+}
+
+/// The hash tag of one target pseudonym's state family.
+fn target_key_tag(encoded_namespace: &str, hex_id: &str, mode: KeyspaceMode) -> String {
+    match mode {
+        KeyspaceMode::Sharded => target_state_tag(encoded_namespace, hex_id),
+        KeyspaceMode::Legacy => format!("{{kiwi:{encoded_namespace}}}"),
+    }
 }
 
 /// The scope aggregate shard hash of one aggregate id and shard:
@@ -522,6 +550,14 @@ mod tests {
         );
         assert_eq!(mark_dedupe_key(ns, "cd"), "mark:{kiwi:n1}:dd:cd");
         assert_eq!(target_state_tag(ns, "5e2a"), "{kiwi:n1:target:5e}");
+        assert_eq!(
+            target_failure_marker_key(ns, "5e2a", "ab", KeyspaceMode::Sharded),
+            "{kiwi:n1:target:5e}:risk:tgt:dd:ab"
+        );
+        assert_eq!(
+            target_failure_marker_key(ns, "5e2a", "ab", KeyspaceMode::Legacy),
+            "{kiwi:n1}:risk:tgt:dd:ab"
+        );
         assert_eq!(
             target_state_keys(ns, "5e2a", KeyspaceMode::Sharded),
             [

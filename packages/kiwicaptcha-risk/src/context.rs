@@ -161,3 +161,70 @@ impl RiskV2Context {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn solve_facts_require_both_halves() {
+        // The pair rides together or not at all: a half-present pair is
+        // the neutral-absent input here (the engine's validation rejects
+        // it before this method on the real paths).
+        let mut v2 = RiskV2Context::default();
+        assert_eq!(v2.solve_facts(), None);
+
+        v2.solve_ms = Some(4200);
+        assert_eq!(v2.solve_facts(), None);
+        v2.solve_rung = Some("argon32".to_string());
+        assert_eq!(v2.solve_facts(), Some((4200, "argon32")));
+
+        v2.solve_ms = None;
+        assert_eq!(v2.solve_facts(), None);
+
+        // A measured zero is a present value, not absence.
+        let zero = RiskV2Context {
+            solve_ms: Some(0),
+            solve_rung: Some("sha18".to_string()),
+            ..RiskV2Context::default()
+        };
+        assert_eq!(zero.solve_facts(), Some((0, "sha18")));
+    }
+
+    #[test]
+    fn v2_context_is_empty_only_when_every_evidence_slot_is_neutral() {
+        assert!(RiskV2Context::default().is_empty());
+        for context in [
+            RiskV2Context {
+                honeypot_hit: true,
+                ..RiskV2Context::default()
+            },
+            RiskV2Context {
+                client_context_tag: Some("t".into()),
+                ..RiskV2Context::default()
+            },
+            RiskV2Context {
+                tls_tag: Some("t".into()),
+                ..RiskV2Context::default()
+            },
+            RiskV2Context {
+                telemetry_payload: Some("{}".into()),
+                ..RiskV2Context::default()
+            },
+            RiskV2Context {
+                solve_ms: Some(1),
+                ..RiskV2Context::default()
+            },
+            RiskV2Context {
+                solve_rung: Some("sha18".into()),
+                ..RiskV2Context::default()
+            },
+            RiskV2Context {
+                breached_credential: true,
+                ..RiskV2Context::default()
+            },
+        ] {
+            assert!(!context.is_empty());
+        }
+    }
+}

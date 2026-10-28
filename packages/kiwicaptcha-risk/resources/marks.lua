@@ -1,11 +1,13 @@
 -- Long-memory outcome marks: one atomic mark write.
 --
 -- SCRIPT BOUNDS — all bounded constants:
---   max keys touched:     2 (mark hash + its event-id dedupe marker;
---                          both carry the {kiwi:<ns>} hash tag, one slot)
---   max Redis calls:      6 (1 TIME + 1 GET + 1 SET + 1 HGET + 1 HSET +
---                           1 PEXPIRE on the counted path; strictly
---                           fewer on the duplicate path)
+--   max keys touched:     3 (mark hash + its event-id dedupe marker
+--                          plus the per-event effect completion key
+--                          derived below as KEYS[2] .. ':fxdone'; all
+--                          carry the {kiwi:<ns>} hash tag, one slot)
+--   max Redis calls:      10 (2 TYPE + 1 TIME + 2 GET/EXISTS + 2 SET +
+--                           1 HGETALL + 1 HSET + 1 PEXPIRE on the counted
+--                           path; strictly fewer on the duplicate path)
 --   max collection cardinality: 5 hash fields
 --
 -- KEYS[1] mark; KEYS[2] event-id dedupe marker (same slot).
@@ -48,6 +50,54 @@ local EXPIRY_CEILING_MS = 2147483647 * 1000
 -- The mark hash keeps its own (much longer) ttl_ms.
 local RETRY_HORIZON_MS = 86400000
 
+-- BEGIN KIWI PERSISTED-STATE DECODER
+-- Shared decoder block: keep byte-identical across the risk scripts.
+-- Missing values keep their documented defaults; a present value must be
+-- a finite number of the required shape. Anything else is storage
+-- corruption and fails closed before the first mutation.
+local function kiwi_decode_number(raw, label)
+    if raw == nil or raw == false then
+        return nil
+    end
+    local n = tonumber(raw)
+    if n == nil or n ~= n or n == math.huge or n == -math.huge then
+        error('storage-corruption: ' .. label .. ' is not a finite number')
+    end
+    return n
+end
+
+local function kiwi_decode_integer(raw, label)
+    local n = kiwi_decode_number(raw, label)
+    if n ~= nil and n ~= math.floor(n) then
+        error('storage-corruption: ' .. label .. ' is not an integer')
+    end
+    return n
+end
+
+local function kiwi_assert_type(key, expected)
+    local actual = redis.call('TYPE', key).ok
+    if actual ~= 'none' and actual ~= expected then
+        error('storage-corruption: ' .. key .. ' holds ' .. actual .. ', expected ' .. expected)
+    end
+end
+
+local function kiwi_effect_marker(event_id, now_ms, ttl_seconds)
+    return event_id .. ':' .. (now_ms + ttl_seconds * 1000)
+end
+
+local function kiwi_effect_matches(raw, event_id, now_ms)
+    if raw == nil or raw == false then
+        return false
+    end
+    local id, expiry = string.match(raw, '^(.*):(%d+)$')
+    if id == nil then
+        return raw == event_id
+    end
+    local expires = tonumber(expiry)
+    return id == event_id and expires ~= nil and now_ms <= expires
+end
+-- END KIWI PERSISTED-STATE DECODER
+
 if ARGV[1] == nil or ARGV[1] == '' or #ARGV[1] > 64 then
     return redis.error_reply('marks: kind must be a non-empty value of at most 64 bytes')
 end
@@ -69,6 +119,10 @@ end
 -- Distributed clock authority: Redis TIME, not the application clock.
 local time = redis.call('TIME')
 local now_ms = tonumber(time[1]) * 1000 + math.floor(tonumber(time[2]) / 1000)
+local effect_marker = ''
+if event_id ~= '' then
+    effect_marker = kiwi_effect_marker(event_id, now_ms, RETRY_HORIZON_MS / 1000)
+end
 
 local SEVERITY = {
     spamReported = 1,
@@ -77,16 +131,62 @@ local SEVERITY = {
     chargeback = 4,
 }
 
+-- ── Persisted-state preflight: the mark hash and its dedupe marker are
+-- type-checked BEFORE the first mutation.
+kiwi_assert_type(KEYS[1], 'hash')
 if event_id ~= '' then
-    if redis.call('GET', KEYS[2]) then
-        local count = redis.call('HGET', KEYS[1], 'count')
-        return tonumber(count) or 0
+    kiwi_assert_type(KEYS[2], 'string')
+end
+
+local function read_count()
+    return kiwi_decode_integer(redis.call('HGET', KEYS[1], 'count'), KEYS[1] .. ':count') or 0
+end
+
+-- The per-event effect completion key (`fxdone`, derived from the
+-- dedupe marker's own event-id namespace and expiring with the same
+-- retry-horizon TTL as the marker and the `fx` marker value) closes the
+-- one interleaving the `fx` marker cannot: A writes its mark (fx = A),
+-- aborts before its claim; B then writes its own (fx = B); A retries —
+-- fx no longer says A, so the report would be counted twice. The
+-- completion key is written in the same invocation, immediately after
+-- the mark effect and before the claim, and the guard below accepts
+-- "fx == me OR the completion key exists", so the retry skips the count
+-- and converges by (re)writing the claim.
+local effect_done_key = event_id ~= '' and KEYS[2] .. ':fxdone' or ''
+
+-- The dedupe claim is a completion record: when it exists the delivery
+-- is already fully applied, so the stored count answers unchanged.
+if event_id ~= '' and redis.call('GET', KEYS[2]) then
+    return read_count()
+end
+
+local all = redis.call('HGETALL', KEYS[1])
+local stored = {}
+for i = 1, #all, 2 do
+    stored[all[i]] = all[i + 1]
+end
+local current_kind = stored.kind
+local count = kiwi_decode_integer(stored.count, KEYS[1] .. ':count') or 0
+local first_ms = kiwi_decode_integer(stored.first_ms, KEYS[1] .. ':first_ms') or 0
+local last_ms = kiwi_decode_integer(stored.last_ms, KEYS[1] .. ':last_ms') or 0
+local fx = stored.fx or false
+local event_done = effect_done_key ~= ''
+    and redis.call('EXISTS', effect_done_key) == 1
+    or false
+local effect_done = event_done or kiwi_effect_matches(fx, event_id, now_ms)
+
+if effect_done then
+    -- A retry after an abort: the mark write already landed. Complete
+    -- the delivery — the completion key and the claim — without
+    -- counting the report twice.
+    if effect_done_key ~= '' then
+        redis.call('SET', effect_done_key, '1', 'PX', RETRY_HORIZON_MS)
     end
     redis.call('SET', KEYS[2], '1', 'PX', RETRY_HORIZON_MS)
+    return count
 end
 
 local new_rank = SEVERITY[ARGV[1]] or 0
-local current_kind = redis.call('HGET', KEYS[1], 'kind')
 local current_rank = 0
 if current_kind then
     current_rank = SEVERITY[current_kind] or 0
@@ -96,11 +196,28 @@ if kept_kind == nil or kept_kind == false or new_rank > current_rank then
     kept_kind = ARGV[1]
 end
 
-redis.call('HSET', KEYS[1],
+count = count + 1
+if first_ms == 0 then
+    first_ms = now_ms
+end
+last_ms = now_ms
+local fields = {
     'kind', kept_kind,
     'last_kind', ARGV[1],
-    'last_ms', now_ms)
-redis.call('HSETNX', KEYS[1], 'first_ms', now_ms)
-local count = redis.call('HINCRBY', KEYS[1], 'count', 1)
+    'last_ms', last_ms,
+    'first_ms', first_ms,
+    'count', count
+}
+if effect_marker ~= '' then
+    fields[#fields + 1] = 'fx'
+    fields[#fields + 1] = effect_marker
+end
+redis.call('HSET', KEYS[1], unpack(fields))
 redis.call('PEXPIRE', KEYS[1], ttl_ms)
+-- The completion key and the claim are written after the mark effect
+-- they guard.
+if event_id ~= '' then
+    redis.call('SET', effect_done_key, '1', 'PX', RETRY_HORIZON_MS)
+    redis.call('SET', KEYS[2], '1', 'PX', RETRY_HORIZON_MS)
+end
 return count

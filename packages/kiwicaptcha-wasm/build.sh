@@ -228,8 +228,8 @@ echo "assets/kiwicaptcha-wasm.js regenerated"
 # resources/ directory (cargo package verification builds the tarball in
 # isolation and cannot reach outside the crate) — keep the copies
 # byte-identical; CI enforces it (widget-assets parity job).
-cp assets/widget-driver.js assets/widget-risk.js assets/widget-telemetry.js assets/widget-locales.js assets/widget-compat.js assets/widget-shims.js assets/widget.css assets/kiwicaptcha-wasm.js assets/kiwi-worker.js assets/execution-interpreter.js ../kiwicaptcha/resources/
-cp assets/widget-driver.js assets/widget-risk.js assets/widget-telemetry.js assets/widget-locales.js assets/widget-compat.js assets/widget-shims.js assets/widget.css assets/kiwicaptcha-wasm.js assets/kiwi-worker.js assets/execution-interpreter.js ../kiwicaptcha/integrations/symfony/Resources/public/
+cp assets/widget-driver.js assets/widget-risk.js assets/widget-telemetry.js assets/widget-locales.js assets/widget-compat.js assets/widget-shims.js assets/widget.css assets/kiwicaptcha-wasm.js assets/kiwi-worker.js assets/execution-interpreter.js assets/webauthn-ceremony.js ../kiwicaptcha/resources/
+cp assets/widget-driver.js assets/widget-risk.js assets/widget-telemetry.js assets/widget-locales.js assets/widget-compat.js assets/widget-shims.js assets/widget.css assets/kiwicaptcha-wasm.js assets/kiwi-worker.js assets/execution-interpreter.js assets/webauthn-ceremony.js ../kiwicaptcha/integrations/symfony/Resources/public/
 echo "kiwicaptcha core + symfony public resources synced"
 
 # Byte-parity enforcement: every mirrored destination must be byte-identical
@@ -237,7 +237,7 @@ echo "kiwicaptcha core + symfony public resources synced"
 # released bytes on every installation path. CI enforces the same parity.
 MIRROR_FAILED=0
 for mirror in ../kiwicaptcha/resources ../kiwicaptcha/integrations/symfony/Resources/public; do
-  for f in widget-driver.js widget-risk.js widget-telemetry.js widget-locales.js widget-compat.js widget-shims.js widget.css kiwicaptcha-wasm.js kiwi-worker.js execution-interpreter.js; do
+  for f in widget-driver.js widget-risk.js widget-telemetry.js widget-locales.js widget-compat.js widget-shims.js widget.css kiwicaptcha-wasm.js kiwi-worker.js execution-interpreter.js webauthn-ceremony.js; do
     if ! cmp -s "assets/$f" "$mirror/$f"; then
       echo "ASSET PARITY FAILED: $mirror/$f differs from assets/$f" >&2
       MIRROR_FAILED=1

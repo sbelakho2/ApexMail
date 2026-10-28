@@ -52,6 +52,16 @@ declare(strict_types=1);
  * topology that never reaches acked sync prints a loud note and exits
  * 0.
  *
+ * Flags. --json-out <path> writes the run's provenance record with the
+ * shared schema kiwicaptcha.perf-run/1. The record carries the tool
+ * name, the timestamp, the configuration and the measured master and
+ * replica targets. It also carries every measured distribution with
+ * its n and the printed percentiles, the p95 deltas, the environment
+ * and the source commit. The fixture applies no ratchet, so each
+ * measurement carries a null ratchet and the baseline file is null.
+ * The record is written before the optional --baseline-out merge, and
+ * an unwritable path fails the run.
+ *
  * Teardown is unconditional: both redis-server child processes are
  * terminated (SIGTERM first, a forced kill after a grace period) and
  * the scratch directory is removed. Teardown also runs on failure and
@@ -73,6 +83,7 @@ if (!is_file($autoload)) {
 }
 require $autoload;
 require __DIR__.'/perf-baseline-emit.php';
+require __DIR__.'/perf-record.php';
 
 use KiwiCaptcha\Config;
 use KiwiCaptcha\Issuer;
@@ -405,12 +416,16 @@ function teardown(array &$procs, string &$tmpDir, int $masterPid, int $replicaPi
 
 $iterations = ITERATIONS;
 $baselineOut = null;
+$jsonOut = null;
 foreach ($argv as $i => $arg) {
     if ($arg === '--iterations' && isset($argv[$i + 1])) {
         $iterations = max(1, (int) $argv[$i + 1]);
     }
     if ($arg === '--baseline-out' && isset($argv[$i + 1])) {
         $baselineOut = $argv[$i + 1];
+    }
+    if ($arg === '--json-out' && isset($argv[$i + 1])) {
+        $jsonOut = $argv[$i + 1];
     }
 }
 
@@ -605,8 +620,8 @@ if ($shortfallOps['raises'] + $shortfallIssueRaised !== $expectedRaises) {
 
 $measured = fn (array $samples): array => [percentile($samples, 50), percentile($samples, 95)];
 
-printf("perf-wait-replica: baseline issuance p50 %.3f ms p95 %.3f ms (n=%d)\n", ...array_merge($measured($baseIssue['samples']), [$count]));
-printf("perf-wait-replica: ack issuance p50 %.3f ms p95 %.3f ms (n=%d; every write acked 1 replica)\n", ...array_merge($measured($ackIssue['samples']), [$count]));
+printf("perf-wait-replica: baseline issuance p50 %.3f ms p95 %.3f ms (n=%d)\n", ...array_merge($measured($baseIssue['samples']), [count($baseIssue['samples'])]));
+printf("perf-wait-replica: ack issuance p50 %.3f ms p95 %.3f ms (n=%d; every write acked 1 replica)\n", ...array_merge($measured($ackIssue['samples']), [count($ackIssue['samples'])]));
 foreach (['consume', 'commit'] as $op) {
     $bp50 = percentile($baseOps['samples'][$op], 50);
     $bp95 = percentile($baseOps['samples'][$op], 95);
@@ -637,6 +652,37 @@ $shortP50 = percentile($shortfallOps['samples']['commit'], 50);
 $shortP95 = percentile($shortfallOps['samples']['commit'], 95);
 printf("perf-wait-replica: shortfall commit p50 %.3f ms p95 %.3f ms (n=%d; every write raised ReplicaWaitException)\n", $shortP50, $shortP95, count($shortfallOps['samples']['commit']));
 printf("perf-wait-replica: shortfall issuance raised ReplicaWaitException after the replica was stopped\n");
+
+$masterUrl = 'tcp://127.0.0.1:'.$masterPort;
+if ($jsonOut !== null) {
+    $recordSample = static fn (array $samples): array => perf_record_sample(count($samples), percentile($samples, 50), null, percentile($samples, 95), null, null);
+    perf_record_write($jsonOut, perf_record_envelope('perf-wait-replica', $argv, null, $masterUrl) + [
+        'configuration' => ['warmup' => WARMUP, 'iterations' => $iterations, 'wait_timeout_ms' => WAIT_TIMEOUT_MS],
+        'topology' => ['master' => $masterUrl, 'replica' => 'tcp://127.0.0.1:'.$replicaPort],
+        'measurements' => [
+            'baseline' => [
+                'issuance' => $recordSample($baseIssue['samples']),
+                'consume' => $recordSample($baseOps['samples']['consume']),
+                'commit' => $recordSample($baseOps['samples']['commit']),
+            ],
+            'ack' => [
+                'issuance' => $recordSample($ackIssue['samples']),
+                'consume' => $recordSample($ackOps['samples']['consume']),
+                'commit' => $recordSample($ackOps['samples']['commit']),
+            ],
+            'lag' => [
+                'wait_ack' => $recordSample($waitAckSamples),
+                'replica_visible' => $recordSample($visibleSamples),
+            ],
+            'shortfall' => [
+                'consume' => $recordSample($shortfallOps['samples']['consume']),
+                'commit' => $recordSample($shortfallOps['samples']['commit']),
+            ],
+        ],
+        'p95_delta_ms' => ['issuance' => round($issueDelta, 3), 'consume' => round($consumeDelta, 3), 'commit' => round($commitDelta, 3)],
+        'verdict' => 'ok',
+    ]);
+}
 
 if ($baselineOut !== null) {
     $fmtSamples = static fn (array $samples): array => ['p50_ms' => percentile($samples, 50), 'p95_ms' => percentile($samples, 95), 'n' => count($samples)];

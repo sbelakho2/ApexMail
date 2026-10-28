@@ -1,10 +1,13 @@
 # KiwiCaptcha brand and widget
 
-`brand-preview.html` is the current design reference. It loads the real
-widget stylesheet and locale packs. The states are simulated; it does
-not issue a challenge or a token. The controls cover light/dark themes,
-240–352 px host containers, English, German, French, Portuguese, Polish
-and Arabic, and 100%/200% component text sizes.
+The current widget system is edition 6 (23 October 2026) and lives in
+`packages/kiwicaptcha-widget-system/`. Edition 6 governs the widgets:
+any older interface, progress track or completion wording is superseded.
+Canonical logo geometry and the outlined wordmark masters are unchanged.
+
+`brand-preview.html` is the earlier design reference for the previous
+widget skin. It loads the real widget stylesheet and locale packs. The
+states are simulated; it does not issue a challenge or a token.
 
 Open it locally, or serve the repository with `python3 -m http.server 8080`
 and visit `/packages/kiwicaptcha/design/brand-preview.html`.

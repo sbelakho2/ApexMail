@@ -277,7 +277,6 @@ fn engine_path_composes_the_stages_when_wired() {
     use kiwicaptcha_risk::context::RiskV2Context;
     use kiwicaptcha_risk::event::{RiskEventKind, RiskObservation};
     use kiwicaptcha_risk::keys::RiskKeys;
-    use kiwicaptcha_risk::network::CidrNetworkClassifier;
     use kiwicaptcha_risk::store::{Observed, RiskStateStore, RiskStoreError};
     use kiwicaptcha_risk::RiskEngine;
     use std::net::IpAddr;
@@ -341,10 +340,9 @@ fn engine_path_composes_the_stages_when_wired() {
         }
     }
 
-    fn engine(wired: bool) -> RiskEngine<ZeroStore, CidrNetworkClassifier> {
+    fn engine(wired: bool) -> RiskEngine<ZeroStore> {
         let mut engine = RiskEngine::new(
             ZeroStore,
-            CidrNetworkClassifier::from_entries(vec![]),
             std::sync::Arc::new(policy()),
             RiskKeys::from_master(&[0x42; 32]),
         );
@@ -354,9 +352,7 @@ fn engine_path_composes_the_stages_when_wired() {
         engine
     }
 
-    fn assess(
-        engine: &RiskEngine<ZeroStore, CidrNetworkClassifier>,
-    ) -> kiwicaptcha_risk::RiskDecision {
+    fn assess(engine: &RiskEngine<ZeroStore>) -> kiwicaptcha_risk::RiskDecision {
         engine
             .assess_pre_issue_v2(
                 RiskContext {

@@ -147,8 +147,7 @@ semgrep_sast() {
         semgrep scan --config p/default --config p/rust --error --quiet \
             --exclude apps/marketing-zola/public \
             --exclude node_modules --exclude target --exclude vendor \
-            --exclude packages/kiwicaptcha --exclude packages/kiwicaptcha-php \
-            --exclude packages/kiwicaptcha-risk --exclude packages/kiwicaptcha-risk-php \
+            --exclude packages/kiwicaptcha --exclude packages/kiwicaptcha-risk \
             --exclude packages/kiwicaptcha-wasm \
             --exclude docs/audit \
             --exclude services/mail-server/crates/billing-service/src/test_fixtures) || _sg_rc=$?

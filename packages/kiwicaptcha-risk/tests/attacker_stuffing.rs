@@ -34,7 +34,6 @@ use kiwicaptcha_risk::context::{RiskContext, RiskV2Context};
 use kiwicaptcha_risk::event::{RiskEventKind, RiskObservation};
 use kiwicaptcha_risk::keys::RiskKeys;
 use kiwicaptcha_risk::marks::{MarksView, TARGET_ATTACK_THRESHOLD};
-use kiwicaptcha_risk::network::CidrNetworkClassifier;
 use kiwicaptcha_risk::network::NetworkFlags;
 use kiwicaptcha_risk::outcomes::{
     KiwiOutcomes, MarkDimension, MarkRecord, Outcome, OutcomeHandle, OutcomeMarksStore,
@@ -284,7 +283,6 @@ fn first_attempt_valid_stuffing_gets_step_up_not_allow() {
     let networks = Arc::new(SimNetworks::default());
     let engine = kiwicaptcha_risk::RiskEngine::new(
         store.clone(),
-        CidrNetworkClassifier::from_entries(vec![]),
         policy(),
         RiskKeys::from_master(&[0x42; 32]),
     )
@@ -297,7 +295,10 @@ fn first_attempt_valid_stuffing_gets_step_up_not_allow() {
         kiwicaptcha_risk::identity::RiskIdentityFactory::new(RiskKeys::from_master(&[0x42; 32]));
     let principal_hex = hex::encode(identity.principal_id(&principal_bytes));
     let home_ip = "198.51.100.23".parse().unwrap();
+    // The legacy bucket spelling and the stable engine tag: evidence
+    // gathering must write neither.
     let home_bucket = hex::encode(kiwicaptcha_risk::identity::masked_network(home_ip, 32, 64));
+    let home_tag = kiwicaptcha_risk::network_tag(&RiskKeys::from_master(&[0x42; 32]), home_ip);
     let fresh_ip = "203.0.113.99".parse().unwrap();
 
     let ctx_for = |ip| {
@@ -336,9 +337,14 @@ fn first_attempt_valid_stuffing_gets_step_up_not_allow() {
     // must stay stepped up — the attacker's network is never bound
     // under the victim's principal by a mere evaluation.
     assert_eq!(
+        networks.principal_network_seen(&principal_hex, &home_tag),
+        Ok(Some(false)),
+        "the engine must not write the stable network tag during evidence gathering"
+    );
+    assert_eq!(
         networks.principal_network_seen(&principal_hex, &home_bucket),
         Ok(Some(false)),
-        "the engine must not write the network tag during evidence gathering"
+        "the engine must not write the legacy bucket spelling either"
     );
 
     // Attempt 2 from the same network: still novel — the engine never
@@ -409,10 +415,9 @@ impl PrincipalNetworkTagStore for FailingNetworks {
 fn first_attempt_engine(
     networks: Arc<dyn PrincipalNetworkTagStore>,
     novelty: kiwicaptcha_risk::NoveltyEnforcement,
-) -> kiwicaptcha_risk::RiskEngine<SimStore, CidrNetworkClassifier> {
+) -> kiwicaptcha_risk::RiskEngine<SimStore> {
     kiwicaptcha_risk::RiskEngine::new(
         SimStore::default(),
-        CidrNetworkClassifier::from_entries(vec![]),
         policy(),
         RiskKeys::from_master(&[0x42; 32]),
     )
@@ -807,7 +812,6 @@ fn failed_target_read_reads_saturated_and_steps_up() {
 
     let engine = kiwicaptcha_risk::RiskEngine::new(
         ThrowingTargetStore::default(),
-        CidrNetworkClassifier::from_entries(vec![]),
         policy(),
         RiskKeys::from_master(&[0x42; 32]),
     )
@@ -835,7 +839,6 @@ fn failed_target_read_reads_saturated_and_steps_up() {
 
     let healthy_engine = kiwicaptcha_risk::RiskEngine::new(
         SimStore::default(),
-        CidrNetworkClassifier::from_entries(vec![]),
         policy(),
         RiskKeys::from_master(&[0x42; 32]),
     )
@@ -871,7 +874,6 @@ fn stuffing_storm_denies_attackers_and_saves_the_victim() {
     let store = SimStore::default();
     let engine = kiwicaptcha_risk::RiskEngine::new(
         store.clone(),
-        CidrNetworkClassifier::from_entries(vec![]),
         policy(),
         RiskKeys::from_master(&[0x42; 32]),
     );
@@ -945,7 +947,6 @@ fn stuffing_storm_over_real_redis_marks() {
 
     let engine = kiwicaptcha_risk::RiskEngine::new(
         engine_store,
-        CidrNetworkClassifier::from_entries(vec![]),
         policy(),
         RiskKeys::from_master(&[0x42; 32]),
     );

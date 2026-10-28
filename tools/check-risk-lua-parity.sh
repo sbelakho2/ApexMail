@@ -7,7 +7,10 @@
 # invariants were asserted ONLY in prose comments. This gate enforces them:
 #
 #   1. Every canonical script in protocol/risk-v1/ has byte-identical copies
-#      in BOTH packages' resources/ directories (the sync invariant).
+#      in the Rust package's resources/ directory (the sync invariant). The
+#      PHP packages are NOT carried since 2026-10-28 (owner directive: the
+#      KiwiCaptcha mirror is Rust-only), so their copies are no longer
+#      compared here.
 #   2. SolveSuccess (event 3) is TRUST-NEUTRAL in every script that has an
 #      event-3 arm: the block between 'event == 3' and the next 'elseif'/
 #      'end' must not write s.trust. A valid PoW proves expenditure, never
@@ -22,7 +25,6 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 CANONICAL="$ROOT/protocol/risk-v1"
 COPIES=(
   "$ROOT/packages/kiwicaptcha-risk/resources"
-  "$ROOT/packages/kiwicaptcha-risk-php/resources"
 )
 
 failures=0
@@ -48,14 +50,6 @@ for script in "$CANONICAL"/*.lua; do
   done
 done
 
-# assess_v2.lua must itself be byte-identical between the two packages.
-if ! cmp -s \
-  "$ROOT/packages/kiwicaptcha-risk/resources/assess_v2.lua" \
-  "$ROOT/packages/kiwicaptcha-risk-php/resources/assess_v2.lua"; then
-  echo "PARITY FAIL: the two packaged assess_v2.lua copies differ from each other" >&2
-  failures=$((failures + 1))
-fi
-
 # ── 2. SolveSuccess trust-neutrality ─────────────────────────────────────────
 check_script() {
   local file="$1"
@@ -77,8 +71,7 @@ check_script() {
 }
 
 for script in "$CANONICAL"/*.lua \
-  "$ROOT/packages/kiwicaptcha-risk/resources"/*.lua \
-  "$ROOT/packages/kiwicaptcha-risk-php/resources"/*.lua; do
+  "$ROOT/packages/kiwicaptcha-risk/resources"/*.lua; do
   check_script "$script"
 done
 

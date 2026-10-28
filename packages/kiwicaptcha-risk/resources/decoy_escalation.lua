@@ -25,6 +25,54 @@
 -- roll back).
 local EXPIRY_CEILING_MS = 2147483647 * 1000
 
+-- BEGIN KIWI PERSISTED-STATE DECODER
+-- Shared decoder block: keep byte-identical across the risk scripts.
+-- Missing values keep their documented defaults; a present value must be
+-- a finite number of the required shape. Anything else is storage
+-- corruption and fails closed before the first mutation.
+local function kiwi_decode_number(raw, label)
+    if raw == nil or raw == false then
+        return nil
+    end
+    local n = tonumber(raw)
+    if n == nil or n ~= n or n == math.huge or n == -math.huge then
+        error('storage-corruption: ' .. label .. ' is not a finite number')
+    end
+    return n
+end
+
+local function kiwi_decode_integer(raw, label)
+    local n = kiwi_decode_number(raw, label)
+    if n ~= nil and n ~= math.floor(n) then
+        error('storage-corruption: ' .. label .. ' is not an integer')
+    end
+    return n
+end
+
+local function kiwi_assert_type(key, expected)
+    local actual = redis.call('TYPE', key).ok
+    if actual ~= 'none' and actual ~= expected then
+        error('storage-corruption: ' .. key .. ' holds ' .. actual .. ', expected ' .. expected)
+    end
+end
+
+local function kiwi_effect_marker(event_id, now_ms, ttl_seconds)
+    return event_id .. ':' .. (now_ms + ttl_seconds * 1000)
+end
+
+local function kiwi_effect_matches(raw, event_id, now_ms)
+    if raw == nil or raw == false then
+        return false
+    end
+    local id, expiry = string.match(raw, '^(.*):(%d+)$')
+    if id == nil then
+        return raw == event_id
+    end
+    local expires = tonumber(expiry)
+    return id == event_id and expires ~= nil and now_ms <= expires
+end
+-- END KIWI PERSISTED-STATE DECODER
+
 local op = ARGV[1]
 if op ~= 'record' and op ~= 'read' then
     return redis.error_reply('decoy_escalation: op must be "record" or "read"')
@@ -48,8 +96,12 @@ end
 
 -- The read op never writes: a live record answers 1, anything else 0.
 -- The window check is the belt to the key expiry for stores without one.
+kiwi_assert_type(KEYS[1], 'hash')
 if op == 'read' then
-    local last_ms = tonumber(redis.call('HGET', KEYS[1], 'last_ms'))
+    local last_ms = kiwi_decode_integer(
+        redis.call('HGET', KEYS[1], 'last_ms'),
+        KEYS[1] .. ':last_ms'
+    )
     if last_ms == nil then
         return 0
     end
@@ -65,8 +117,15 @@ if gate ~= '1' or confirmed ~= '1' then
     return 0
 end
 
-redis.call('HSET', KEYS[1], 'last_ms', now_ms)
-redis.call('HSETNX', KEYS[1], 'first_ms', now_ms)
-local count = redis.call('HINCRBY', KEYS[1], 'count', 1)
+local stored = redis.call('HMGET', KEYS[1], 'count', 'first_ms')
+local count = kiwi_decode_integer(stored[1], KEYS[1] .. ':count') or 0
+local first_ms = kiwi_decode_integer(stored[2], KEYS[1] .. ':first_ms') or 0
+if first_ms == 0 then
+    first_ms = now_ms
+end
+count = count + 1
+-- One HSET applies the whole record atomically.
+redis.call('HSET', KEYS[1],
+    'last_ms', now_ms, 'first_ms', first_ms, 'count', count)
 redis.call('PEXPIRE', KEYS[1], ttl_ms)
 return count

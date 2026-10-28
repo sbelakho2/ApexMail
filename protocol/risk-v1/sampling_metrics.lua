@@ -3,7 +3,7 @@
 --
 -- SCRIPT BOUNDS — all bounded constants:
 --   max keys touched:     24
---   max Redis calls:      24 (HGETALL)
+--   max Redis calls:      48 (24 TYPE + 24 HGETALL)
 --   max collection cardinality: 16 flat fields per bucket hash (8 fields
 --                           as flat HGETALL pairs) — no attacker-sized
 --                           collections.
@@ -28,17 +28,69 @@
 -- unresolvable receipts.
 
 local MAX_SAMPLE_COUNTER = 1000000000
+
+-- BEGIN KIWI PERSISTED-STATE DECODER
+-- Shared decoder block: keep byte-identical across the risk scripts.
+-- Missing values keep their documented defaults; a present value must be
+-- a finite number of the required shape. Anything else is storage
+-- corruption and fails closed before the first mutation.
+local function kiwi_decode_number(raw, label)
+    if raw == nil or raw == false then
+        return nil
+    end
+    local n = tonumber(raw)
+    if n == nil or n ~= n or n == math.huge or n == -math.huge then
+        error('storage-corruption: ' .. label .. ' is not a finite number')
+    end
+    return n
+end
+
+local function kiwi_decode_integer(raw, label)
+    local n = kiwi_decode_number(raw, label)
+    if n ~= nil and n ~= math.floor(n) then
+        error('storage-corruption: ' .. label .. ' is not an integer')
+    end
+    return n
+end
+
+local function kiwi_assert_type(key, expected)
+    local actual = redis.call('TYPE', key).ok
+    if actual ~= 'none' and actual ~= expected then
+        error('storage-corruption: ' .. key .. ' holds ' .. actual .. ', expected ' .. expected)
+    end
+end
+
+local function kiwi_effect_marker(event_id, now_ms, ttl_seconds)
+    return event_id .. ':' .. (now_ms + ttl_seconds * 1000)
+end
+
+local function kiwi_effect_matches(raw, event_id, now_ms)
+    if raw == nil or raw == false then
+        return false
+    end
+    local id, expiry = string.match(raw, '^(.*):(%d+)$')
+    if id == nil then
+        return raw == event_id
+    end
+    local expires = tonumber(expiry)
+    return id == event_id and expires ~= nil and now_ms <= expires
+end
+-- END KIWI PERSISTED-STATE DECODER
+
 local sample_total = 0
 local sample_resolved = 0
 for i = 1, 24 do
+    kiwi_assert_type(KEYS[i], 'hash')
     local b = redis.call('HGETALL', KEYS[i])
     for j = 1, #b, 2 do
         local field = b[j]
-        local value = tonumber(b[j + 1]) or 0
-        if field == 'sample_total' then
-            sample_total = sample_total + value
-        elseif field == 'sample_resolved' then
-            sample_resolved = sample_resolved + value
+        if field == 'sample_total' or field == 'sample_resolved' then
+            local value = kiwi_decode_integer(b[j + 1], KEYS[i] .. ':' .. field) or 0
+            if field == 'sample_total' then
+                sample_total = sample_total + value
+            else
+                sample_resolved = sample_resolved + value
+            end
         end
     end
 end

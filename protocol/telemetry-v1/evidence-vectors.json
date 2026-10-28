@@ -577,14 +577,20 @@
         "expected_action": "argon16"
       },
       {
-        "name": "argon64-raises-to-step-up",
+        "name": "argon64-raises-to-rsw",
         "score": 900,
         "plain_action": "argon64",
+        "expected_action": "rsw"
+      },
+      {
+        "name": "rsw-raises-to-step-up",
+        "score": 940,
+        "plain_action": "rsw",
         "expected_action": "step_up"
       },
       {
         "name": "step-up-stays-step-up",
-        "score": 950,
+        "score": 965,
         "plain_action": "step_up",
         "expected_action": "step_up"
       },

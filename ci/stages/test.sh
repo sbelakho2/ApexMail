@@ -31,14 +31,15 @@
 #   6b. coverage ratchet: cargo llvm-cov nextest --workspace →
 #      $RUN_DIR/coverage.lcov; OVERALL line coverage compared against
 #      ci/coverage-baseline.txt (below = FAIL, CI_COVERAGE_CHECK)
-#   7. PHP: three phpunit suites (REQUIRED; composer install when the
-#      checkout has no vendor/ yet)
-#   8. the six SDK lanes (python/go/java/ruby/php/typescript — CI_SDK_CHECK)
-#   9. the satellite Rust crates (CI_SATELLITE_CHECK)
-#  10. static lint gates: shellcheck/hadolint/py_compile
+#   7. the six SDK lanes (python/go/java/ruby/php/typescript — CI_SDK_CHECK)
+#   8. the satellite Rust crates (CI_SATELLITE_CHECK)
+#   9. static lint gates: shellcheck/hadolint/py_compile
 #      (CI_STATIC_LINT_CHECK)
-#  11. browser suite: tests/browser Playwright specs against the PHP port
-#      (php -S), chromium lane (CI_BROWSER_SUITE_CHECK; BR-1)
+#
+# The former PHP-suites and browser-suite lanes ended 2026-10-28, when the
+# KiwiCaptcha mirror was slimmed to the Rust-only surface ApexMail consumes
+# (owner directive): the PHP packages, the Symfony bundle and the upstream
+# Playwright harness under tests/browser are no longer carried.
 #
 # DB/Redis policy (audit P3 — this header used to claim GitHub-parity
 # defaults while ci/pipeline.conf has shipped the real thing since the
@@ -540,67 +541,6 @@ apply_test_schema() {
 # testing nothing. Now php+composer are ci_have_tool-gated (fail closed on
 # the deploy host) and composer install provisions vendor/ when missing
 # (one-time ~30 s per package, then cached in the checkout).
-# php_suite_prefix — the suites' chmod-based closed-behavior tests cannot
-# pass for ROOT (root writes to "unwritable" directories), and the pipeline
-# runs as root on the deploy host: drop to an unprivileged identity for the
-# phpunit invocations. Non-root runners (dev machines) execute directly.
-php_suite_prefix() {
-    if [ "$(id -u)" = "0" ] && command -v setpriv >/dev/null 2>&1 \
-        && id nobody >/dev/null 2>&1; then
-        printf 'setpriv --reuid nobody --regid nogroup --clear-groups env HOME=/tmp TMPDIR=/tmp'
-    else
-        printf ''
-    fi
-}
-
-run_php_tests() {
-    _pt_st=$(lane_tool_status php php-suites "${CI_PHP_CHECK:-required}")
-    case $_pt_st in
-        fail) return "$CI_EXIT_FAIL" ;;
-        skip) return "$CI_EXIT_OK" ;;
-    esac
-    _pt_st=$(lane_tool_status composer php-suites "${CI_PHP_CHECK:-required}")
-    case $_pt_st in
-        fail) return "$CI_EXIT_FAIL" ;;
-        skip) return "$CI_EXIT_OK" ;;
-    esac
-    _php_prefix=$(php_suite_prefix)
-    for _pkg in packages/kiwicaptcha-php \
-                packages/kiwicaptcha-risk-php \
-                packages/kiwicaptcha/integrations/symfony; do
-        provision_composer_vendor "$_pkg" || return "$CI_EXIT_FAIL"
-        refresh_path_package_vendor_copies "$_pkg" || return "$CI_EXIT_FAIL"
-        # One bounded retry per suite. The symfony suite carries a known
-        # rare flake: on 2026-09-11 one of its 1545 tests
-        # (ExecutionChallengeDimensionTest's armed-issuance solve) failed
-        # once in ~15 otherwise-green full runs with the stored record
-        # fully consistent, and never in 150 isolated runs; that test's
-        # assertion now reports the VerifyError code plus the
-        # payload-vs-record identity so the next occurrence names its
-        # own cause. A deterministic regression fails both attempts and
-        # still fails the lane; the first attempt's captured output
-        # stays in the stage log either way.
-        # shellcheck disable=SC2086  # the privilege-drop prefix word-splits
-        if ! (cd "$REPO_ROOT/$_pkg" && ci_check "phpunit $_pkg" \
-                $_php_prefix ./vendor/bin/phpunit); then
-            ci_warn "phpunit $_pkg failed attempt 1 — retrying once (bounded \
-flake policy: a deterministic failure fails both attempts; the first-attempt \
-output above is retained for diagnosis)"
-            # shellcheck disable=SC2086
-            if (cd "$REPO_ROOT/$_pkg" && ci_check "phpunit $_pkg (retry)" \
-                    $_php_prefix ./vendor/bin/phpunit); then
-                continue
-            fi
-            if [ "${CI_PHP_CHECK:-required}" = advisory ]; then
-                ci_warn "ADVISORY: phpunit $_pkg failed (CI_PHP_CHECK=advisory \
-triage window) — result recorded, lane continues"
-                continue
-            fi
-            return "$CI_EXIT_FAIL"
-        fi
-    done
-    return "$CI_EXIT_OK"
-}
 
 # provision_composer_vendor <pkg-rel-path> — composer install when the
 # checkout carries no vendor/ yet, or when the committed composer.lock has
@@ -615,8 +555,8 @@ triage window) — result recorded, lane continues"
 # vendor/composer/installed.json and reinstall on any drift.
 _composer_vendor_stale() {
     _cvs_dir=$1
-    # No lock (kiwicaptcha-risk-php ships none) or no installed.json → nothing
-    # to compare: report "not stale" so the caller skips, never reinstalls.
+    # No lock or no installed.json → nothing to compare: report "not stale"
+    # so the caller skips, never reinstalls.
     [ -f "$_cvs_dir/composer.lock" ] || return 0
     [ -f "$_cvs_dir/vendor/composer/installed.json" ] || return 0
     python3 - "$_cvs_dir/composer.lock" "$_cvs_dir/vendor/composer/installed.json" <<'PY'
@@ -656,69 +596,6 @@ provision_composer_vendor() {
     ci_info "$_cv_dir: $_cv_why — composer install (cached in the checkout after the first run)"
     (cd "$REPO_ROOT/$_cv_dir" && composer install --quiet --no-interaction) >>"$CI_STAGE_LOG" 2>&1 \
         || { ci_err "composer install failed in $_cv_dir"; return "$CI_EXIT_FAIL"; }
-}
-
-# refresh_path_package_vendor_copies <bundle-rel-path> — composer "path"
-# repositories with "symlink": false install REAL FILE COPIES under vendor/;
-# a mirror advance updates the source packages while composer install (when
-# the lock itself did not move) leaves those copies stale — the suite and
-# the tests/browser PHP fixture then exercise the PREVIOUS mirror (K1-A2:
-# the 2026-10-09 advance left MAX_EXECUTION_VERSION=5 in the vendored copy
-# and three browser specs failed until it was re-synced). Re-sync every
-# path-repo source over its vendor copy when they differ; vendor/ is
-# git-ignored, so this writes no tracked byte. No-op when vendor/ is absent
-# (the fixture falls back to its own loader in that case).
-refresh_path_package_vendor_copies() {
-    _pv_dir=$REPO_ROOT/$1
-    [ -f "$_pv_dir/composer.json" ] || return "$CI_EXIT_OK"
-    [ -d "$_pv_dir/vendor" ] || return "$CI_EXIT_OK"
-    _pv_pairs=$(python3 - "$_pv_dir" <<'PY'
-import json, os, sys
-bundle = sys.argv[1]
-try:
-    cfg = json.load(open(os.path.join(bundle, "composer.json")))
-except Exception:
-    sys.exit(0)
-for repo in cfg.get("repositories", []):
-    if not isinstance(repo, dict) or repo.get("type") != "path":
-        continue
-    src = os.path.normpath(os.path.join(bundle, repo.get("url", "")))
-    if not os.path.isdir(src):
-        continue
-    name = None
-    versions = (repo.get("options") or {}).get("versions") or {}
-    if versions:
-        name = sorted(versions)[0]
-    if name is None:
-        try:
-            name = json.load(open(os.path.join(src, "composer.json"))).get("name")
-        except Exception:
-            continue
-    dst = os.path.join(bundle, "vendor", *str(name).split("/"))
-    if name and os.path.isdir(dst):
-        print("{}\t{}".format(src, dst))
-PY
-    ) || return "$CI_EXIT_FAIL"
-    [ -n "$_pv_pairs" ] || return "$CI_EXIT_OK"
-    _pv_tmp=$(mktemp "${TMPDIR:-/tmp}/apexmail-pv.XXXXXX") || return "$CI_EXIT_FAIL"
-    printf '%s\n' "$_pv_pairs" >"$_pv_tmp"
-    _pv_tab=$(printf '\t')
-    _pv_rc=$CI_EXIT_OK
-    while IFS="$_pv_tab" read -r _pv_src _pv_dst; do
-        [ -n "$_pv_src" ] || continue
-        if ! diff -rq --exclude=vendor --exclude=target --exclude=node_modules --exclude=.phpunit.result.cache \
-                "$_pv_src" "$_pv_dst" >/dev/null 2>&1; then
-            ci_info "$1: vendored copy of $(basename "$_pv_src") predates the mirror — re-syncing vendor copy"
-            if ! rsync -a --delete --exclude=vendor --exclude=target --exclude=node_modules --exclude=.phpunit.result.cache \
-                    "$_pv_src/" "$_pv_dst/" >>"$CI_STAGE_LOG" 2>&1; then
-                ci_err "path-package vendor refresh failed for $_pv_src"
-                _pv_rc=$CI_EXIT_FAIL
-                break
-            fi
-        fi
-    done <"$_pv_tmp"
-    rm -f "$_pv_tmp"
-    return "$_pv_rc"
 }
 
 # --- 8. SDK lanes (python / go / java / ruby / php) ------------------------------------
@@ -897,12 +774,14 @@ run_satellite_crates() {
 # way.
 #
 # The mirror-surface exclusion is a scope boundary, not a suppression: the
-# KiwiCaptcha mirror (packages/kiwicaptcha/**, tests/browser/**, protocol/**)
-# is synced byte-for-byte from the upstream repo (byte-parity 1257/1257,
-# commit 3c022fb2) and edits here are forbidden — the next advance would
-# clobber any local fix and break the parity proof. Upstream owns their lint
-# policy; the currently-known findings that this exclusion leaves to upstream
-# are six warnings in packages/kiwicaptcha/tools/{check-psr4.sh,
+# KiwiCaptcha mirror (packages/kiwicaptcha/**, packages/kiwicaptcha-risk/**,
+# packages/kiwicaptcha-wasm/**, protocol/** — Rust-only since 2026-10-28, the
+# PHP packages and tests/browser are no longer carried) is synced byte-for-byte
+# from the upstream repo (parity proven by tools/kiwi_mirror_advance.py --check)
+# and edits here are forbidden — the next advance would clobber any local fix
+# and break the parity proof. Upstream owns their lint policy; the
+# currently-known findings that this exclusion leaves to upstream are six
+# warnings in packages/kiwicaptcha/tools/{check-psr4.sh,
 # docs-lint-one-shot-test.sh, docs-lint.sh, verify-error-code-parity.sh}
 # (SC1007/SC2209; identical at 25f0d05e and 6fdffee0 — pre-existing upstream
 # style, not a regression) and they are listed here so they stay visible
@@ -914,7 +793,7 @@ run_static_lint_gates() {
             # -S warning: error+warning findings fail; style/info stay visible
             # but advisory. -z/-0 pairing keeps paths with spaces safe.
             (cd "$REPO_ROOT" && ci_check "shellcheck -S warning (all tracked *.sh, mirror surface excluded — see lane comment)" \
-                sh -c 'git ls-files -z -- "*.sh" ":(exclude)packages/kiwicaptcha/**" ":(exclude)tests/browser/**" ":(exclude)protocol/**" | xargs -0 shellcheck -S warning') \
+                sh -c 'git ls-files -z -- "*.sh" ":(exclude)packages/kiwicaptcha/**" ":(exclude)packages/kiwicaptcha-risk/**" ":(exclude)packages/kiwicaptcha-wasm/**" ":(exclude)protocol/**" | xargs -0 shellcheck -S warning') \
                 || { [ "${CI_STATIC_LINT_CHECK:-required}" = advisory ] \
                     && ci_warn "ADVISORY: shellcheck findings (CI_STATIC_LINT_CHECK=advisory triage window)" \
                     || return "$CI_EXIT_FAIL"; }
@@ -1257,85 +1136,6 @@ run_i18n_gate() {
         python3 tools/i18n-audit.py) || { ci_err "i18n gate FAILED — see output above"; return "$CI_EXIT_FAIL"; }
 }
 
-# --- 8d. browser suite (Playwright against the PHP port) -------------------------------
-# tests/browser/** is the KiwiCaptcha browser suite (18 specs; 220 tests on the
-# default chromium lane, 481 across all lanes). It is a black-box harness that
-# boots the PHP port (packages/kiwicaptcha-php + router.php) through the
-# config's own webServer block (`php -S 127.0.0.1:8085`) and drives the widget,
-# security/adversarial and a11y spec set in a real browser. BR-1: the suite
-# previously had NO CI lane at all — the only in-repo Playwright usage was
-# tools/contrast-audit, so the "Playwright suite used by CI" claim was false.
-#
-# Wired here behind CI_BROWSER_SUITE_CHECK (default `required`, matching the
-# UI-gate convention). Prerequisites are fail-closed: node, php, and the
-# chromium executable the workspace's LOCKED @playwright/test expects (the CI
-# image bakes that browser in at build time — the lock pins the exact version
-# the image carries, like tools/contrast-audit). A missing runtime FAILS the
-# lane; `advisory` is a bounded triage-window override that logs a clear
-# skipped-by-config message instead.
-provision_browser_node_modules() {
-    _bn_dir=$REPO_ROOT/tests/browser
-    [ -x "$_bn_dir/node_modules/.bin/playwright" ] && return "$CI_EXIT_OK"
-    if ci_dry; then
-        ci_info "dry-run: npm ci in tests/browser (@playwright/test from the committed lockfile)"
-        return "$CI_EXIT_OK"
-    fi
-    if [ ! -f "$_bn_dir/package-lock.json" ]; then
-        ci_err "tests/browser/package-lock.json missing — the browser suite cannot be provisioned deterministically (commit the lockfile)"
-        return "$CI_EXIT_FAIL"
-    fi
-    ci_info "tests/browser: node_modules absent — npm ci from the committed lockfile (BR-1)"
-    (cd "$_bn_dir" && npm ci --no-audit --no-fund) >>"$CI_STAGE_LOG" 2>&1 \
-        || { ci_err "npm ci failed in tests/browser — the REQUIRED browser suite cannot run"; return "$CI_EXIT_FAIL"; }
-    return "$CI_EXIT_OK"
-}
-
-run_browser_suite() {
-    _bs_st=$(lane_tool_status node browser-suite "${CI_BROWSER_SUITE_CHECK:-required}")
-    case $_bs_st in
-        fail) return "$CI_EXIT_FAIL" ;;
-        skip) return "$CI_EXIT_OK" ;;
-    esac
-    _bs_st=$(lane_tool_status php browser-suite "${CI_BROWSER_SUITE_CHECK:-required}")
-    case $_bs_st in
-        fail) return "$CI_EXIT_FAIL" ;;
-        skip) return "$CI_EXIT_OK" ;;
-    esac
-    provision_browser_node_modules || return "$CI_EXIT_FAIL"
-    # The fixture boots the symfony bundle when its vendor/ is present, so a
-    # stale vendored path-package copy must be re-synced here too (no-op when
-    # vendor/ is absent — the fixture then falls back to its own loader).
-    refresh_path_package_vendor_copies packages/kiwicaptcha/integrations/symfony || return "$CI_EXIT_FAIL"
-    if ci_dry; then
-        ci_info "check (dry-run): browser suite (tests/browser, PHP port + locked chromium)"
-        return "$CI_EXIT_OK"
-    fi
-
-    # Runtime precondition (BR-1): the chromium build the workspace's locked
-    # Playwright resolves must exist. Asking Playwright itself (instead of a
-    # hardcoded path) means a lock/image skew surfaces as a missing executable
-    # here, not as a mid-suite launch failure.
-    _bs_chromium=''
-    _bs_chromium=$(cd "$REPO_ROOT/tests/browser" \
-        && node -e 'process.stdout.write(require("@playwright/test").chromium.executablePath())' 2>/dev/null) \
-        || _bs_chromium=''
-    if [ -z "$_bs_chromium" ] || [ ! -x "$_bs_chromium" ]; then
-        if [ "${CI_BROWSER_SUITE_CHECK:-required}" = advisory ]; then
-            ci_warn "ADVISORY: browser suite skipped — the Playwright chromium runtime for tests/browser is missing \
-(run 'npx playwright install chromium' locally, or use the CI image which bakes it in). CI_BROWSER_SUITE_CHECK=advisory is a triage-window override only."
-            return "$CI_EXIT_OK"
-        fi
-        ci_err "browser-suite runtime missing: the locked @playwright/test chromium executable is not installed \
-(run 'npx playwright install chromium' in tests/browser, or build/use the CI image that bakes it in; audit BR-1). Lane is REQUIRED — \
-set CI_BROWSER_SUITE_CHECK=advisory only for a bounded triage window."
-        return "$CI_EXIT_FAIL"
-    fi
-
-    (cd "$REPO_ROOT/tests/browser" && ci_check "browser suite (tests/browser, PHP port + chromium)" \
-        ./node_modules/.bin/playwright test) || return "$CI_EXIT_FAIL"
-    return "$CI_EXIT_OK"
-}
-
 # --- formatting gate ------------------------------------------------------------
 # cargo fmt --check (NEW compared to rust-check.yml, which never ran it).
 # REQUIRED by default: CI_FMT_CHECK:=required in ci/pipeline.conf since the
@@ -1491,7 +1291,6 @@ stage_main() {
     cargo_tool_gates
     run_cargo_tests
     run_coverage_gate
-    run_php_tests
     run_static_lint_gates
     run_pre_commit_lane
     run_sdk_tests
@@ -1503,7 +1302,6 @@ stage_main() {
     run_contrast_gate
     run_layout_gates
     run_i18n_gate
-    run_browser_suite
 
     ci_ephem_cleanup
     ci_info "test: all suites green"

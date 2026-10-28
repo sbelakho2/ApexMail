@@ -428,12 +428,6 @@ role = "Scripts and configs"
 required_kinds = []
 plan_requires = "Restore drill; a test for secret-file bridging in entrypoint-wrapper.sh (T13)"
 
-[package."tests/browser"]
-tier = 3
-role = "Playwright specs"
-required_kinds = []
-plan_requires = "ApexMail journey specs on the T6 stack (T6)"
-
 # Planned kinds by work package (plan rule 7). Each entry moves up into
 # required_kinds when its WP lands; check_invariants.py verifies the WP id
 # exists in the plan's index so an entry cannot silently rot.

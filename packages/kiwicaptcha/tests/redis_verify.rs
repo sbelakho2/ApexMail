@@ -7831,3 +7831,240 @@ fn the_rsw_keyring_builder_refuses_an_invalid_pair() {
     );
     assert!(valid.is_ok(), "the valid rotated pair configures");
 }
+
+// ── the legacy-v1 migration window and the terminal-cleanup seam ─────
+
+/// A protocol-v1 record minted from a fresh v2 issuance: the legacy
+/// canonical signs only `nonce|scope|ip_hash|issued_at`, so the record is
+/// re-signed over that payload and the v2-only server MAC is cleared
+/// (a v1 record cannot carry one). The proof-of-work fields are
+/// untouched, so the same test solver applies.
+fn issue_v1_record() -> kiwicaptcha::challenge::Issued {
+    use kiwicaptcha::challenge::{hash_ip, sign_payload, ChallengePayload};
+    let issued = issue_challenge(
+        &sha_config(4),
+        "login",
+        IP,
+        now_unix(),
+        now_micros(),
+        0,
+        None,
+    )
+    .expect("v1-base issuance");
+    let mut record = issued.record.clone();
+    let payload = ChallengePayload {
+        nonce: record.nonce.clone(),
+        scope: record.scope.clone(),
+        ip_hash: hash_ip(IP, SECRET),
+        issued_at: record.issued_at,
+    };
+    // The documented v1 canonical input: nonce|scope|ip_hash|issued_at.
+    let canonical = format!(
+        "{}|{}|{}|{}",
+        payload.nonce, payload.scope, payload.ip_hash, payload.issued_at
+    );
+    let signature = sign_payload(&payload, SECRET).expect("the v1 signature");
+    record.challenge = format!("{}.{}", B64.encode(canonical.as_bytes()), signature);
+    record.prefix = format!("{}|{}|", record.challenge, record.salt);
+    record.binding_tag = payload.ip_hash;
+    record.protocol_version = 1;
+    // A v1 record has no authenticated canonical MAC marker; clearing it
+    // also moves the minimum-duration gate onto its explicit-zero path.
+    record.server_mac = None;
+    record.min_duration_ms = 0;
+    kiwicaptcha::challenge::Issued {
+        challenge: issued.challenge,
+        record,
+    }
+}
+
+#[test]
+fn v1_records_are_refused_by_default_and_verify_in_the_migration_window() {
+    let Some(url) = redis_url() else { return };
+    let prefix = prefix("v1-migration");
+    let issued = issue_v1_record();
+    let counter = solve_for_test(&issued.record).expect("4-bit sha solves");
+    let token = encode_token(&issued.record.nonce, counter);
+    let store = store_for(&url, &prefix);
+
+    // Default posture: the v1 gate refuses as a malformed record before
+    // any consume; the pending record is cleaned up (terminally) and no
+    // verdict is committed.
+    store.store(&issued.record).expect("the v1 record stores");
+    let default_verifier = verifier_for(&url, &prefix);
+    assert_eq!(
+        verify_at(&default_verifier, &token, issued.record.issued_at_ns),
+        VerifyOutcome::Invalid(VerifyError::MalformedRecord),
+        "a v1 record is refused while the migration window is closed"
+    );
+
+    // Explicit migration window: the same record verifies, exactly once.
+    store
+        .store(&issued.record)
+        .expect("the v1 record re-stores");
+    let accepting = verifier_for(&url, &prefix).with_accept_legacy_v1(true);
+    assert!(
+        matches!(
+            verify_at(&accepting, &token, issued.record.issued_at_ns),
+            VerifyOutcome::Valid { .. }
+        ),
+        "the v1 record verifies with with_accept_legacy_v1(true)"
+    );
+    assert_eq!(
+        verify_at(&accepting, &token, issued.record.issued_at_ns),
+        VerifyOutcome::Invalid(VerifyError::AlreadyConsumed),
+        "the accepted v1 record keeps the one-shot contract"
+    );
+}
+
+#[test]
+fn best_effort_delete_cleans_a_terminal_record_after_a_failed_commit() {
+    let Some(url) = redis_url() else { return };
+    let prefix = prefix("terminal-cleanup");
+    let issued = issue_challenge(
+        &sha_config(4),
+        "login",
+        IP,
+        now_unix(),
+        now_micros(),
+        0,
+        None,
+    )
+    .expect("issuance");
+    let store = store_for(&url, &prefix);
+    store.store(&issued.record).expect("the record stores");
+
+    // A commit before the pending→consumed transition is the failed
+    // commit the verifier ignores: nothing is retained.
+    assert!(
+        !store
+            .commit_result(&issued.record.nonce, false, None)
+            .expect("the commit answers"),
+        "an unconsumed record never accepts a result"
+    );
+
+    // Best-effort terminal cleanup removes the dead pending record; a
+    // second call is a no-op (never a panic, never an error surface).
+    store.best_effort_delete(&issued.record.nonce);
+    assert!(
+        matches!(
+            store
+                .runtime_state(&issued.record.nonce)
+                .expect("state read"),
+            RuntimeState::Missing
+        ),
+        "the terminal record is deleted"
+    );
+    store.best_effort_delete(&issued.record.nonce);
+}
+
+// ── the rsw legacy-identity migration window ─────────────────────────
+
+/// Re-sign a mutated record under the v2 canonical (the legacy
+/// pre-identity rule wrote this shape), including the record-metadata
+/// MAC over the new challenge.
+fn resign_v2_record(record: &mut ChallengeRecord) {
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+    let keys = kiwicaptcha::DerivedKeys::from_master(SECRET, None);
+    let canonical = kiwicaptcha::challenge::canonical_signing_input_v2(record);
+    let mut mac = Hmac::<Sha256>::new_from_slice(keys.challenge_key()).expect("hmac key");
+    mac.update(canonical.as_bytes());
+    let signature = hex::encode(mac.finalize().into_bytes());
+    record.challenge = format!("{}.{}", B64.encode(canonical.as_bytes()), signature);
+    record.prefix = format!("{}|{}|", record.challenge, record.salt);
+    record.server_mac = Some(kiwicaptcha::challenge::record_meta_mac(
+        &keys,
+        &record.challenge,
+        record.issued_at_ns,
+        record.hostname.as_deref(),
+    ));
+}
+
+#[test]
+fn rsw_legacy_identity_resolves_only_inside_the_migration_window() {
+    let Some(url) = redis_url() else { return };
+    let fixture: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../protocol/rsw-identity-v1/fixtures.json"
+        ))
+        .expect("the fixture readable"),
+    )
+    .expect("the fixture is JSON");
+    let modulus = fixture["modulus_n_b64"].as_str().expect("modulus");
+    let lambda = fixture["lambda_b64"].as_str().expect("lambda");
+    let legacy_identity = fixture["legacy_base64_text_sha256"]
+        .as_str()
+        .expect("legacy identity");
+    let secondary = fixture["secondary"]["modulus_n_b64"]
+        .as_str()
+        .expect("secondary modulus");
+    let secondary_lambda = fixture["secondary"]["lambda_b64"]
+        .as_str()
+        .expect("secondary lambda");
+
+    // Issue under the fixture pair, then rewrite the record into the
+    // pre-v5 legacy shape: protocol v2 carrying the legacy base64-text
+    // alias as its authenticated identity.
+    let mut config = sha_config(4);
+    config.algorithm = PoWAlgorithm::Rsw;
+    config.rsw_modulus_n = Some(modulus.into());
+    config.rsw_lambda = Some(lambda.into());
+    config.rsw_t = kiwicaptcha::challenge::MIN_RSW_T;
+    let issued = issue_challenge(&config, "login", IP, now_unix(), now_micros(), 0, None)
+        .expect("rsw issuance");
+    let mut record = issued.record.clone();
+    record.protocol_version = 2;
+    record.rsw_modulus_sha256 = Some(legacy_identity.to_string());
+    resign_v2_record(&mut record);
+    // The rsw base derivation folds the signed challenge into the
+    // prefix, so the sequential proof must be computed over the rewritten
+    // record exactly as a client would solve it.
+    let proof = kiwicaptcha::rsw::fixtures::sequential_proof(
+        &record.prefix,
+        &record.nonce,
+        record.t as u64,
+    );
+    let token = SolutionToken {
+        nonce: record.nonce.clone(),
+        counter: 0,
+        duration_ms: 5000,
+        telemetry: serde_json::json!({}),
+        execution_digest: None,
+        execution_trace: None,
+        rsw_proof: Some(proof),
+    }
+    .encode();
+
+    let prefix = prefix("rsw-legacy-identity");
+    let store = store_for(&url, &prefix);
+
+    // The migration posture: the active pair rotated to the secondary
+    // pair, the historical fixture pair registered under its legacy
+    // alias with the bounded alias window explicitly enabled.
+    let migration = verifier_for(&url, &prefix)
+        .with_rsw_trapdoor(secondary, secondary_lambda)
+        .with_rsw_legacy_identity(true)
+        .with_rsw_verification_key(legacy_identity, modulus, lambda)
+        .expect("the legacy-alias keyring entry configures");
+    store.store(&record).expect("the legacy record stores");
+    assert!(
+        matches!(
+            verify_at(&migration, &token, record.issued_at_ns),
+            VerifyOutcome::Valid { .. }
+        ),
+        "the legacy identity resolves through the migration keyring"
+    );
+
+    // Without the legacy window the same record's identity names the
+    // active fixture pair in neither form, so it is authentic but
+    // unsupported (never a fall-through to the active pair).
+    let strict = verifier_for(&url, &prefix).with_rsw_trapdoor(modulus, lambda);
+    store.store(&record).expect("the legacy record re-stores");
+    assert_eq!(
+        verify_at(&strict, &token, record.issued_at_ns),
+        VerifyOutcome::Invalid(VerifyError::UnsupportedRswParams),
+        "the legacy alias is dead outside the explicit migration window"
+    );
+}

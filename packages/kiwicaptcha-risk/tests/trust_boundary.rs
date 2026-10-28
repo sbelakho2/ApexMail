@@ -170,18 +170,8 @@ fn client_supplied_identity_fields_never_lower_the_score() {
             RedisRiskStateStore::new(client.clone(), &common::unique_namespace("propb"));
         let varied_store =
             RedisRiskStateStore::new(client.clone(), &common::unique_namespace("propv"));
-        let baseline_engine = RiskEngine::new(
-            baseline_store,
-            kiwicaptcha_risk::network::CidrNetworkClassifier::from_entries(Vec::new()),
-            policy(),
-            keys(),
-        );
-        let varied_engine = RiskEngine::new(
-            varied_store,
-            kiwicaptcha_risk::network::CidrNetworkClassifier::from_entries(Vec::new()),
-            policy(),
-            keys(),
-        );
+        let baseline_engine = RiskEngine::new(baseline_store, policy(), keys());
+        let varied_engine = RiskEngine::new(varied_store, policy(), keys());
 
         let baseline = baseline_engine
             .assess_pre_issue(context(scope, ip, None, None), None)

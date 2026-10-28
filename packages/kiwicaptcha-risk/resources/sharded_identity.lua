@@ -10,14 +10,18 @@
 --
 -- SCRIPT BOUNDS — all bounded constants, no attacker-sized
 -- collections anywhere in this script:
---   max keys touched:     2 (KEYS[1] state hash, KEYS[2] dedupe marker;
---                          both carry the family hash tag, one slot)
---   max Redis calls:      6 (1 TIME + 1 HMGET + 1 GET + 1 SET + 1 HSET +
---                           1 EXPIRE — every call is fixed-cost; no
+--   max keys touched:     3 (KEYS[1] state hash, KEYS[2] dedupe marker
+--                          plus the per-event effect completion key
+--                          derived below as KEYS[2] .. ':fxdone'; all
+--                          carry the family hash tag, one slot)
+--   max Redis calls:      10 (2 TYPE + 1 TIME + 1 HMGET + 2 GET/EXISTS +
+--                           2 SET + 1 HSET + 1 EXPIRE — every call is
+--                           fixed-cost; no
 --                           KEYS/SCAN/EVAL nesting, no iteration over
 --                           attacker-sized collections)
---   max collection cardinality: 12 flat fields per state hash (the
---                           HMGET reply of STATE_FIELDS)
+--   max collection cardinality: 13 flat fields per state hash (the
+--                           HMGET reply of STATE_FIELDS: 12 state fields
+--                           plus the per-event `fx` effect marker)
 -- The script's runtime is O(1) in the state size and bounded by the
 -- constants above regardless of traffic volume.
 --
@@ -54,10 +58,53 @@
 -- agent dimensions are reputation/failure dimensions like the
 -- principal).
 
-local function num(v)
-    if not v then return 0 end
-    return tonumber(v) or 0
+-- BEGIN KIWI PERSISTED-STATE DECODER
+-- Shared decoder block: keep byte-identical across the risk scripts.
+-- Missing values keep their documented defaults; a present value must be
+-- a finite number of the required shape. Anything else is storage
+-- corruption and fails closed before the first mutation.
+local function kiwi_decode_number(raw, label)
+    if raw == nil or raw == false then
+        return nil
+    end
+    local n = tonumber(raw)
+    if n == nil or n ~= n or n == math.huge or n == -math.huge then
+        error('storage-corruption: ' .. label .. ' is not a finite number')
+    end
+    return n
 end
+
+local function kiwi_decode_integer(raw, label)
+    local n = kiwi_decode_number(raw, label)
+    if n ~= nil and n ~= math.floor(n) then
+        error('storage-corruption: ' .. label .. ' is not an integer')
+    end
+    return n
+end
+
+local function kiwi_assert_type(key, expected)
+    local actual = redis.call('TYPE', key).ok
+    if actual ~= 'none' and actual ~= expected then
+        error('storage-corruption: ' .. key .. ' holds ' .. actual .. ', expected ' .. expected)
+    end
+end
+
+local function kiwi_effect_marker(event_id, now_ms, ttl_seconds)
+    return event_id .. ':' .. (now_ms + ttl_seconds * 1000)
+end
+
+local function kiwi_effect_matches(raw, event_id, now_ms)
+    if raw == nil or raw == false then
+        return false
+    end
+    local id, expiry = string.match(raw, '^(.*):(%d+)$')
+    if id == nil then
+        return raw == event_id
+    end
+    local expires = tonumber(expiry)
+    return id == event_id and expires ~= nil and now_ms <= expires
+end
+-- END KIWI PERSISTED-STATE DECODER
 
 -- Distributed clock authority: Redis TIME, not the application clock.
 local time = redis.call('TIME')
@@ -70,35 +117,42 @@ local function leak(value, elapsed_ms, leak_per_sec)
     return next
 end
 
-local STATE_FIELDS = { 'ts','rf','rs','iss','bad','mal','rep','af','sw','trust','scope','cool' }
+local STATE_FIELDS = { 'ts','rf','rs','iss','bad','mal','rep','af','sw','trust','scope','cool','fx' }
 
 local function read_state(key, now)
     local v = redis.call('HMGET', key, unpack(STATE_FIELDS))
-    local ts = num(v[1])
-    if ts == 0 then ts = now end
+    local ts = kiwi_decode_integer(v[1], key .. ':ts')
+    if ts == nil or ts == 0 then ts = now end
     local elapsed = now - ts
     if elapsed < 0 then elapsed = 0 end
     return {
         ts = now,
-        rf    = leak(num(v[2]),  elapsed, 250),
-        rs    = leak(num(v[3]),  elapsed, 20),
-        iss   = leak(num(v[4]),  elapsed, 40),
-        bad   = leak(num(v[5]),  elapsed, 10),
-        mal   = leak(num(v[6]),  elapsed, 5),
-        rep   = leak(num(v[7]),  elapsed, 5),
-        af    = leak(num(v[8]),  elapsed, 5),
-        sw    = leak(num(v[9]),  elapsed, 10),
-        trust = leak(num(v[10]), elapsed, 2),
-        scope = num(v[11]),
-        cool  = num(v[12])
+        rf    = leak(kiwi_decode_integer(v[2], key .. ':rf') or 0, elapsed, 250),
+        rs    = leak(kiwi_decode_integer(v[3], key .. ':rs') or 0, elapsed, 20),
+        iss   = leak(kiwi_decode_integer(v[4], key .. ':iss') or 0, elapsed, 40),
+        bad   = leak(kiwi_decode_integer(v[5], key .. ':bad') or 0, elapsed, 10),
+        mal   = leak(kiwi_decode_integer(v[6], key .. ':mal') or 0, elapsed, 5),
+        rep   = leak(kiwi_decode_integer(v[7], key .. ':rep') or 0, elapsed, 5),
+        af    = leak(kiwi_decode_integer(v[8], key .. ':af') or 0, elapsed, 5),
+        sw    = leak(kiwi_decode_integer(v[9], key .. ':sw') or 0, elapsed, 10),
+        trust = leak(kiwi_decode_integer(v[10], key .. ':trust') or 0, elapsed, 2),
+        scope = kiwi_decode_integer(v[11], key .. ':scope') or 0,
+        cool  = kiwi_decode_integer(v[12], key .. ':cool') or 0,
+        fx    = v[13]
     }
 end
 
-local function save(key, s, ttl)
-    redis.call('HSET', key,
+local function save(key, s, ttl, effect_id)
+    local fields = {
         'ts', s.ts, 'rf', s.rf, 'rs', s.rs, 'iss', s.iss,
         'bad', s.bad, 'mal', s.mal, 'rep', s.rep, 'af', s.af,
-        'sw', s.sw, 'trust', s.trust, 'scope', s.scope, 'cool', s.cool)
+        'sw', s.sw, 'trust', s.trust, 'scope', s.scope, 'cool', s.cool
+    }
+    if effect_id ~= '' then
+        fields[#fields + 1] = 'fx'
+        fields[#fields + 1] = effect_id
+    end
+    redis.call('HSET', key, unpack(fields))
     if ttl > 0 then
         redis.call('EXPIRE', key, ttl)
     end
@@ -117,7 +171,10 @@ local function apply_feedback(s, event, scope)
         s.iss = s.iss + 300
     elseif event == 7 then
         s.rep = s.rep + 3000
-    elseif event == 8 then
+    elseif event == 8 or event == 22 then
+        -- ProtectedActionSuccess (8) / StepUpCompleted (22): both are
+        -- server-confirmed trust with the same credit, exactly as the
+        -- aggregate shard table applies them.
         s.trust = s.trust + 800
     elseif event == 9 then
         s.af = s.af + 1200
@@ -185,13 +242,21 @@ local function ttl_out_of_bounds(value)
     return value ~= math.floor(value)
 end
 
-local dimension = tonumber(ARGV[3])
+local function finite_number(value)
+    local n = tonumber(value)
+    if n == nil or n ~= n or n == math.huge or n == -math.huge then
+        return nil
+    end
+    return n
+end
+
+local dimension = finite_number(ARGV[3])
 local has_write_arg = ARGV[4]
-local dedupe_ttl = tonumber(ARGV[5])
+local dedupe_ttl = finite_number(ARGV[5])
 local event_id = ARGV[6] or ''
-local state_ttl = tonumber(ARGV[7])
-if dimension == nil or dimension < 1 or dimension > 7 then
-    return redis.error_reply('risk-v1-sharded: dimension must be 1..7')
+local state_ttl = finite_number(ARGV[7])
+if dimension == nil or dimension ~= math.floor(dimension) or dimension < 1 or dimension > 7 then
+    return redis.error_reply('risk-v1-sharded: dimension must be an integer within 1..7')
 end
 -- Fail closed on a malformed has_write: a garbage flag that silently
 -- coerced to read-only would drop the event instead of refusing it.
@@ -206,31 +271,58 @@ if has_write and ttl_out_of_bounds(state_ttl) then
     return redis.error_reply('risk-v1-sharded: state_ttl_s must be a positive integer no greater than 2147483647')
 end
 for _, i in ipairs({1, 2}) do
-    if tonumber(ARGV[i]) == nil then
-        return redis.error_reply('risk-v1-sharded: ARGV['..i..'] must be numeric')
+    if finite_number(ARGV[i]) == nil then
+        return redis.error_reply('risk-v1-sharded: ARGV['..i..'] must be a finite number')
     end
 end
 
-local event = tonumber(ARGV[1])
-local scope = tonumber(ARGV[2])
-if event ~= math.floor(event) or event < 1 or event > 21 then
+local event = finite_number(ARGV[1])
+local scope = finite_number(ARGV[2])
+if event ~= math.floor(event) or event < 1 or event > 22 then
     return redis.error_reply('risk-v1-sharded: event must be an integer within 1..22')
 end
-
--- ── Per-dimension dedupe: the marker is SET NX inside this script, so
--- the increment is exactly once per event id even when the assessment
--- batch is retried after a dropped reply.
-local is_duplicate = false
-if has_write and event_id ~= '' then
-    if redis.call('GET', KEYS[2]) then
-        is_duplicate = true
-    else
-        redis.call('SET', KEYS[2], '1', 'EX', dedupe_ttl)
-    end
+if scope ~= math.floor(scope) then
+    return redis.error_reply('risk-v1-sharded: scope must be an integer')
 end
 
+-- ── Persisted-state preflight: the state hash and the dedupe marker are
+-- type-checked BEFORE the first mutation. The state HSET carries this
+-- invocation's `fx` marker, so a retry of an interrupted invocation
+-- skips an increment that already landed.
+kiwi_assert_type(KEYS[1], 'hash')
+kiwi_assert_type(KEYS[2], 'string')
+
+-- ── Per-dimension dedupe: the marker is written LAST, after the state
+-- effect. A marker written first would survive a mid-script abort and
+-- make every retry look like a duplicate, permanently dropping an event
+-- whose increment never landed. With the marker last, a retry re-enters
+-- and the state hash's own `fx` marker makes the completed increment a
+-- no-op.
+--
+-- The per-event effect completion key (`fxdone`, derived from the
+-- marker's own event-id namespace and expiring with the same dedupe TTL
+-- as the `fx` marker value) closes the one interleaving the `fx` marker
+-- cannot: A applies its effect (fx = A), aborts before its claim; B
+-- then runs to completion (fx = B); A retries — fx no longer says A, so
+-- the increment would apply twice. The completion key is written in the
+-- same invocation, immediately after the effect and before the claim,
+-- and the guard below accepts "fx == me OR the completion key exists",
+-- so the retry skips the effect and converges by (re)writing the claim.
+local is_duplicate = false
+if has_write and event_id ~= '' and redis.call('GET', KEYS[2]) then
+    is_duplicate = true
+end
+
+local effect_marker = event_id ~= '' and kiwi_effect_marker(event_id, now, dedupe_ttl) or ''
+local effect_done_key = has_write and event_id ~= ''
+    and KEYS[2] .. ':fxdone'
+    or ''
 local s = read_state(KEYS[1], now)
-if has_write and not is_duplicate then
+local event_done = effect_done_key ~= ''
+    and redis.call('EXISTS', effect_done_key) == 1
+    or false
+local effect_done = event_done or kiwi_effect_matches(s.fx, event_id, now)
+if has_write and not is_duplicate and not effect_done then
     if dimension == 1 or dimension == 5 then
         apply_event(s, event, scope)
         if event == 15 and dimension == 1 then
@@ -247,7 +339,12 @@ if has_write and not is_duplicate then
     else
         apply_principal_event(s, event, scope)
     end
-    save(KEYS[1], s, state_ttl)
+    save(KEYS[1], s, state_ttl, effect_marker)
+end
+
+if has_write and event_id ~= '' and not is_duplicate then
+    redis.call('SET', effect_done_key, '1', 'EX', dedupe_ttl)
+    redis.call('SET', KEYS[2], '1', 'EX', dedupe_ttl)
 end
 
 return {

@@ -1,0 +1,161 @@
+{
+  "$schema": "kiwicaptcha.decision-v1/1",
+  "format_version": 1,
+  "description": "The shared decision and middleware authority register. Every server SDK maps a verification outcome onto exactly one disposition and every framework integration maps that disposition onto one HTTP status. The register also fixes the token authority rule: all non-empty token sources are collected and must agree. A request carrying distinct values in more than one source is refused with token_source_conflict, never verified against one of them. Read this file from the SDK suites and from the D3.17 cross-SDK campaign.",
+  "dispositions": ["allow", "deny", "retry"],
+  "retry_codes": [
+    "storage_unavailable",
+    "capacity_exceeded",
+    "admission_unavailable",
+    "consume_indeterminate"
+  ],
+  "codes": {
+    "bad_signature": "deny",
+    "expired": "deny",
+    "wrong_scope": "deny",
+    "required_scope": "deny",
+    "ip_mismatch": "deny",
+    "missing_client_ip": "deny",
+    "wrong_region": "deny",
+    "wrong_issuer": "deny",
+    "wrong_policy_version": "deny",
+    "unknown_kid": "deny",
+    "too_fast": "deny",
+    "insufficient_work": "deny",
+    "malformed_record": "deny",
+    "record_not_found": "deny",
+    "malformed_token": "deny",
+    "unsupported_argon2_params": "deny",
+    "too_many_attempts": "deny",
+    "telemetry_rejected": "deny",
+    "capacity_exceeded": "retry",
+    "admission_unavailable": "retry",
+    "storage_unavailable": "retry",
+    "consume_indeterminate": "retry",
+    "already_consumed": "deny",
+    "request_binding_mismatch": "deny",
+    "execution_mismatch": "deny",
+    "unsupported_rsw_params": "deny",
+    "token_source_conflict": "deny"
+  },
+  "http": {
+    "allow_status": 200,
+    "retry_status": 503,
+    "deny_status": {
+      "node": 422,
+      "python": 403,
+      "go": 403,
+      "jvm": 403,
+      "dotnet": 403,
+      "ruby": 422,
+      "elixir": 422
+    },
+    "note": "PHP ships no bundled framework integration; its Symfony gate is a separate package and is out of this register's HTTP rows. The PHP core carries the retry classification only."
+  },
+  "authority": {
+    "rule": "reject-on-conflict",
+    "sources": ["header", "form", "query"],
+    "missing_code": "malformed_token",
+    "conflict_code": "token_source_conflict",
+    "note": "Values are collected from every source, repeated values included. An empty set is malformed_token. One distinct value verifies, however many sources carry it. Two or more distinct values refuse the request before any token is verified.",
+    "matrix": [
+      {
+        "case": "header_only",
+        "header": ["A"],
+        "form": [],
+        "query": [],
+        "verdict": "verify",
+        "token": "A"
+      },
+      {
+        "case": "form_only",
+        "header": [],
+        "form": ["A"],
+        "query": [],
+        "verdict": "verify",
+        "token": "A"
+      },
+      {
+        "case": "query_only",
+        "header": [],
+        "form": [],
+        "query": ["A"],
+        "verdict": "verify",
+        "token": "A"
+      },
+      {
+        "case": "header_a_form_b",
+        "header": ["A"],
+        "form": ["B"],
+        "query": [],
+        "verdict": "conflict"
+      },
+      {
+        "case": "header_a_query_b",
+        "header": ["A"],
+        "form": [],
+        "query": ["B"],
+        "verdict": "conflict"
+      },
+      {
+        "case": "form_a_query_b",
+        "header": [],
+        "form": ["A"],
+        "query": ["B"],
+        "verdict": "conflict"
+      },
+      {
+        "case": "two_header_values",
+        "header": ["A", "B"],
+        "form": [],
+        "query": [],
+        "verdict": "conflict"
+      },
+      {
+        "case": "repeated_form_values",
+        "header": [],
+        "form": ["A", "B"],
+        "query": [],
+        "verdict": "conflict"
+      },
+      {
+        "case": "repeated_query_values",
+        "header": [],
+        "form": [],
+        "query": ["A", "B"],
+        "verdict": "conflict"
+      },
+      {
+        "case": "same_token_every_source",
+        "header": ["A"],
+        "form": ["A"],
+        "query": ["A"],
+        "verdict": "verify",
+        "token": "A"
+      },
+      {
+        "case": "same_repeated_form_values",
+        "header": [],
+        "form": ["A", "A"],
+        "query": [],
+        "verdict": "verify",
+        "token": "A"
+      },
+      {
+        "case": "same_repeated_query_values",
+        "header": [],
+        "form": [],
+        "query": ["A", "A"],
+        "verdict": "verify",
+        "token": "A"
+      },
+      {
+        "case": "empty_sources",
+        "header": [],
+        "form": [],
+        "query": [],
+        "verdict": "missing"
+      }
+    ]
+  }
+}

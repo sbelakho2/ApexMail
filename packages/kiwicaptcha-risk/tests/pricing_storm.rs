@@ -24,7 +24,7 @@ use kiwicaptcha_risk::action::RiskAction;
 use kiwicaptcha_risk::context::RiskContext;
 use kiwicaptcha_risk::event::{RiskEventKind, RiskObservation};
 use kiwicaptcha_risk::keys::RiskKeys;
-use kiwicaptcha_risk::network::{CidrNetworkClassifier, NetworkFlags};
+use kiwicaptcha_risk::network::NetworkFlags;
 use kiwicaptcha_risk::policy::{RiskPolicy, RiskReason};
 use kiwicaptcha_risk::pricing::{
     PriceContextSource, PriceInputs, PriceModel, PriceRequest, ValueClass,
@@ -165,16 +165,8 @@ fn keys() -> RiskKeys {
     RiskKeys::from_master(&[0x6bu8; 32])
 }
 
-fn engine(
-    store: ScenarioStore,
-    source: Option<Arc<FixedSource>>,
-) -> RiskEngine<ScenarioStore, CidrNetworkClassifier> {
-    let mut engine = RiskEngine::new(
-        store,
-        CidrNetworkClassifier::from_entries(Vec::new()),
-        policy(),
-        keys(),
-    );
+fn engine(store: ScenarioStore, source: Option<Arc<FixedSource>>) -> RiskEngine<ScenarioStore> {
+    let mut engine = RiskEngine::new(store, policy(), keys());
     if let Some(source) = source {
         engine = engine.with_price_context(source);
     }
@@ -306,8 +298,8 @@ fn l4_storm_prices_trusted_within_one_rung_and_escalates_untrusted() {
         bot_decision.action
     );
     // 605 + the full 914-pressure ramp = 902 work: the priced rung is the
-    // interactive step-up, past the whole argon regime.
-    assert_eq!(bot_decision.action, RiskAction::StepUp);
+    // rsw time-lock rung, past the whole argon regime.
+    assert_eq!(bot_decision.action, RiskAction::Rsw);
     assert!(bot_decision.has_reason(RiskReason::PricedEscalation));
 }
 
@@ -367,7 +359,6 @@ fn price_context_wiring_is_opt_in_and_fail_closed() {
             vector: pressured,
             level: 0,
         },
-        CidrNetworkClassifier::from_entries(Vec::new()),
         policy(),
         keys(),
     )

@@ -1,0 +1,9 @@
+{
+  "name": "apexmail-journeys",
+  "private": true,
+  "description": "ApexMail-owned live journey and sweep drivers (moved out of tests/browser/ when the KiwiCaptcha mirror was slimmed to ApexMail's consumed paths — that directory is upstream bytes). Run from this directory after `npm ci`: every script drives a locally running stack with Playwright chromium and writes screenshots + findings.json to --out (default ./journey-out).",
+  "devDependencies": {
+    "@axe-core/playwright": "4.13.0",
+    "playwright": "1.62.1"
+  }
+}

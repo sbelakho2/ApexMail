@@ -1,14 +1,15 @@
 //! Ordered risk actions, fixed by the cross-language risk-v1 contract.
 //!
 //! The ordering (Allow < Sha16 < Sha18 < Sha20 < Argon16 < Argon32 <
-//! Argon64 < StepUp < Deny) is the escalation ladder; `rank()` is strictly
-//! monotonic and is the only comparison that may be used to combine actions
-//! (score bands, scope minima, global floors).
+//! Argon64 < Rsw < StepUp < Deny) is the escalation ladder; `rank()` is
+//! strictly monotonic and is the only comparison that may be used to
+//! combine actions (score bands, scope minima, global floors).
 
 use serde::{Deserialize, Serialize};
 
 /// The risk action ladder. JSON values are lowercase strings matching the
-/// PHP enum values (`step_up` for the StepUp case).
+/// PHP enum values (`step_up` for the StepUp case, `rsw` for the Rsw
+/// time-lock rung).
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize, Deserialize,
 )]
@@ -22,12 +23,13 @@ pub enum RiskAction {
     Argon16,
     Argon32,
     Argon64,
+    Rsw,
     StepUp,
     Deny,
 }
 
 impl RiskAction {
-    /// Strictly monotonic escalation rank: Allow = 0 … Deny = 8.
+    /// Strictly monotonic escalation rank: Allow = 0 … Deny = 9.
     pub fn rank(self) -> u8 {
         match self {
             RiskAction::Allow => 0,
@@ -37,8 +39,9 @@ impl RiskAction {
             RiskAction::Argon16 => 4,
             RiskAction::Argon32 => 5,
             RiskAction::Argon64 => 6,
-            RiskAction::StepUp => 7,
-            RiskAction::Deny => 8,
+            RiskAction::Rsw => 7,
+            RiskAction::StepUp => 8,
+            RiskAction::Deny => 9,
         }
     }
 
@@ -52,6 +55,7 @@ impl RiskAction {
             RiskAction::Argon16 => "argon16",
             RiskAction::Argon32 => "argon32",
             RiskAction::Argon64 => "argon64",
+            RiskAction::Rsw => "rsw",
             RiskAction::StepUp => "step_up",
             RiskAction::Deny => "deny",
         }
@@ -65,6 +69,16 @@ impl RiskAction {
         )
     }
 
+    /// True for the rungs the argon-capacity checks re-escalate to the
+    /// interactive step-up under a saturated backend: the three
+    /// memory-hard actions plus the sequential rsw rung. The capacity
+    /// floor must never leave a decision demanding work the backend
+    /// cannot serve — an rsw decision under argon saturation therefore
+    /// escalates to StepUp exactly like an argon rung, never weakens.
+    pub fn is_capacity_gated(self) -> bool {
+        self.is_argon() || self == RiskAction::Rsw
+    }
+
     /// The decision boundary between the last SHA band and the first
     /// Argon band: the score where the default ladder leaves sha20
     /// (450..=599) and enters argon16 (600..=749). The calibration error
@@ -75,7 +89,9 @@ impl RiskAction {
     pub const DECISION_BOUNDARY_SCORE: u16 = 600;
 
     /// Default score bands (configurable in policy; hard floors apply on
-    /// top).
+    /// top). The rsw band splits the former step-up band: 930..=954 is
+    /// the sequential time-lock rung, 955..=979 stays the interactive
+    /// step-up.
     pub fn action_for_score(score: u16) -> RiskAction {
         match score {
             0..=149 => RiskAction::Allow,
@@ -85,7 +101,8 @@ impl RiskAction {
             600..=749 => RiskAction::Argon16,
             750..=849 => RiskAction::Argon32,
             850..=929 => RiskAction::Argon64,
-            930..=979 => RiskAction::StepUp,
+            930..=954 => RiskAction::Rsw,
+            955..=979 => RiskAction::StepUp,
             _ => RiskAction::Deny,
         }
     }
@@ -103,6 +120,7 @@ impl std::str::FromStr for RiskAction {
             "argon16" => Ok(RiskAction::Argon16),
             "argon32" => Ok(RiskAction::Argon32),
             "argon64" => Ok(RiskAction::Argon64),
+            "rsw" => Ok(RiskAction::Rsw),
             "step_up" => Ok(RiskAction::StepUp),
             "deny" => Ok(RiskAction::Deny),
             _ => Err(()),
@@ -143,7 +161,9 @@ mod tests {
             (849, RiskAction::Argon32),
             (850, RiskAction::Argon64),
             (929, RiskAction::Argon64),
-            (930, RiskAction::StepUp),
+            (930, RiskAction::Rsw),
+            (954, RiskAction::Rsw),
+            (955, RiskAction::StepUp),
             (979, RiskAction::StepUp),
             (980, RiskAction::Deny),
             (1000, RiskAction::Deny),
@@ -167,6 +187,7 @@ mod tests {
             RiskAction::Argon16,
             RiskAction::Argon32,
             RiskAction::Argon64,
+            RiskAction::Rsw,
             RiskAction::StepUp,
             RiskAction::Deny,
         ];
@@ -181,12 +202,19 @@ mod tests {
         assert_eq!(RiskAction::Sha16.as_str(), "sha16");
         assert_eq!(RiskAction::Sha20.as_str(), "sha20");
         assert_eq!(RiskAction::Argon16.as_str(), "argon16");
+        assert_eq!(RiskAction::Argon64.as_str(), "argon64");
+        assert_eq!(RiskAction::Rsw.as_str(), "rsw");
         assert_eq!(RiskAction::StepUp.as_str(), "step_up");
         assert_eq!(RiskAction::Deny.as_str(), "deny");
         assert_eq!(
             serde_json::to_value(RiskAction::StepUp).unwrap(),
             serde_json::json!("step_up")
         );
+        assert_eq!(
+            serde_json::to_value(RiskAction::Rsw).unwrap(),
+            serde_json::json!("rsw")
+        );
+        assert_eq!("rsw".parse::<RiskAction>(), Ok(RiskAction::Rsw));
     }
 
     #[test]
@@ -195,6 +223,32 @@ mod tests {
         assert!(RiskAction::Argon32.is_argon());
         assert!(RiskAction::Argon64.is_argon());
         assert!(!RiskAction::Sha20.is_argon());
+        assert!(!RiskAction::Rsw.is_argon());
         assert!(!RiskAction::Deny.is_argon());
+    }
+
+    /// The capacity gate covers exactly the rungs a saturated backend
+    /// must not be asked to serve: the three argon rungs and the rsw
+    /// time-lock rung, never the interactive step-up or deny.
+    #[test]
+    fn capacity_gate_covers_argon_and_rsw() {
+        for action in [
+            RiskAction::Argon16,
+            RiskAction::Argon32,
+            RiskAction::Argon64,
+            RiskAction::Rsw,
+        ] {
+            assert!(action.is_capacity_gated(), "{action:?}");
+        }
+        for action in [
+            RiskAction::Allow,
+            RiskAction::Sha16,
+            RiskAction::Sha18,
+            RiskAction::Sha20,
+            RiskAction::StepUp,
+            RiskAction::Deny,
+        ] {
+            assert!(!action.is_capacity_gated(), "{action:?}");
+        }
     }
 }

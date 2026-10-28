@@ -42,9 +42,9 @@ GitHub Actions workflows were removed from the tree (2026-09-13); the
    │ 03 test       fmt, clippy -D, machete + deny (advisories/bans/    │
    │               sources/licenses), cargo test --workspace           │
    │               (+ephemeral DB/Redis), coverage ratchet             │
-   │               (llvm-cov → baseline), PHP suites (required),       │
-   │               six SDK lanes, satellite crates, shellcheck/       │
-   │               hadolint/py-compile, dogfood ledger + self-test     │
+   │               (llvm-cov → baseline), six SDK lanes, satellite    │
+   │               crates, shellcheck/hadolint/py-compile, dogfood    │
+   │               ledger + self-test                                  │
    │ 04 security   gitleaks, cargo audit (+RUSTSEC ignores), cargo vet,│
    │               semgrep SAST (REQUIRED), fresh-DB migration         │
    │               validation, Trivy images + Trivy fs (+SBOM)         │
@@ -179,7 +179,7 @@ via `CI_MARKETING_VALIDATION` (§2a).
 | 1 | fetch | 180 s | 2 s (HTTPS fetch + pushed-HEAD check) |
 | 2 | validate | 1800 s | 45–150 s + ~3 min marketing validation (zola build, pricing/legal gates, then the 9 required site-quality validators; broken-links alone walks 7,370 links in ~70 s) |
 | 2.5 | docs | 300 s | <1 s — documentation architecture-truth gates (`tools/check_docs_architecture_truth.py`, CI_DOCS_TRUTH_CHECK): production runbooks/operational docs must not teach Kubernetes operations (kubectl/helm/k9s/…) — the deployment is a single Hetzner host with Docker Compose; genuinely historical/roadmap docs carry an `ARCHITECTURE-TRUTH:` marker (audit EXT-E #11, 2026-10-02) |
-| 3 | test | 64800 s | **247 s** pre-extension (fmt+clippy ~25 s, nextest 5410 tests 200 s, 3 PHP suites ~35 s, WCAG contrast gate ~2.5 min); the SDK/satellite/static-lint lanes add ~30–60 s warm (mvn/java and first-ever composer installs download deps on first run; see §8b), and the dogfood ledger + self-test add ~1.5 s + ~2.5 min (§8c). 2026-10-11: raised 5400 s → 18000 s → 64800 s (5 h): the workspace suite is now ~12.6k tests and runs 3.5–4 h at `--test-threads 4` on the deploy host, always to completion (`--no-fail-fast`), so 5 h is that worst case with margin |
+| 3 | test | 64800 s | **247 s** pre-extension (fmt+clippy ~25 s, nextest 5410 tests 200 s, WCAG contrast gate ~2.5 min); the SDK/satellite/static-lint lanes add ~30–60 s warm (mvn/java and first-ever composer installs download deps on first run; see §8b), and the dogfood ledger + self-test add ~1.5 s + ~2.5 min (§8c). 2026-10-11: raised 5400 s → 18000 s → 64800 s (5 h): the workspace suite is now ~12.6k tests and runs 3.5–4 h at `--test-threads 4` on the deploy host, always to completion (`--no-fail-fast`), so 5 h is that worst case with margin |
 | 4 | security | 2700 s | **172 s**: gitleaks ~10 s (full-history first scan ~3.5 min), cargo audit ~10 s, fresh-DB migration validation ~60 s |
 | 5 | images | 21600 s | host-only (full Rust docker build, cold cache; `deploy.sh --build-only` timing) |
 | 6 | migrate | 600 s | host-only (migrator one-shot, seconds) |
@@ -446,15 +446,6 @@ set the lane flag to `advisory` only for a bounded triage window. In
 `--dry-run`/selftest mode the lanes are assumed runnable (presence is a
 real-run concern; selftest machines need not carry every toolchain).
 
-### PHP suites (`CI_PHP_CHECK=required`)
-
-`phpunit` over `packages/kiwicaptcha-php`, `packages/kiwicaptcha-risk-php`
-and `packages/kiwicaptcha/integrations/symfony`. These used to *silently
-skip* when `vendor/bin/phpunit` was absent — and on the deploy host it was
-absent, so nothing ran. Now `php` + `composer` are required tools and
-`composer install --quiet --no-interaction` provisions `vendor/` when the
-checkout has none (one-time ~30 s per package, then cached in the tree).
-
 ### SDK lanes (`CI_SDK_CHECK=required`)
 
 The six first-party SDKs previously had **no CI lane at all**:
@@ -465,7 +456,7 @@ The six first-party SDKs previously had **no CI lane at all**:
 | sdk-go | `go test ./...` | `go.mod` has zero external requires — no module downloads. |
 | sdk-java | `mvn -q -B test` | First run downloads the jackson/jupiter deps into `~/.m2` (minutes); later runs are cached. |
 | sdk-ruby | `ruby test/payload_contract_test.rb` | Stdlib-only contract suite (46 checks). |
-| sdk-php | `composer install` + `vendor/bin/phpunit` | Same provisioning pattern as the PHP suites. |
+| sdk-php | `composer install` + `vendor/bin/phpunit` | Composer-provisioned vendor/ (one-time install, then cached). |
 
 ### Satellite crates (`CI_SATELLITE_CHECK=required`)
 

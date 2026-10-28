@@ -109,6 +109,20 @@ pub struct RiskV2Weights {
     pub target_spread: u16,
 }
 
+impl RiskV2Weights {
+    /// Every factor weighted zero: the effective weights of a risk-v1
+    /// assessment, which applies no v2 evidence factor at all. The
+    /// consolidated ledger registration carries them, so the ledger score
+    /// equals the score the returned decision was judged by.
+    pub const ZERO: RiskV2Weights = RiskV2Weights {
+        honeypot: 0,
+        session_inconsistency: 0,
+        tls: 0,
+        target_failure_pressure: 0,
+        target_spread: 0,
+    };
+}
+
 impl Default for RiskV2Weights {
     fn default() -> RiskV2Weights {
         RiskV2Weights {

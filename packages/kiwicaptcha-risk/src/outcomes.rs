@@ -15,7 +15,6 @@
 
 use crate::context::RiskContext;
 use crate::event::RiskEventKind;
-use crate::network::NetworkClassifier;
 use crate::redis::RedisRiskStateStore;
 use crate::store::{RiskStateStore, RiskStoreError, SessionContextTagStore, SessionTlsTagStore};
 use crate::{EventReceipt, RiskEngine, RiskError};
@@ -580,22 +579,20 @@ impl OutcomeMarksStore for RedisRiskStateStore {
 /// channels alone. When a context is given, the mapped reputation event
 /// is booked with the caller's idempotency key, deduped by the engine's
 /// event id.
-pub struct KiwiOutcomes<'a, S, N>
+pub struct KiwiOutcomes<'a, S>
 where
     S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore,
-    N: NetworkClassifier,
 {
-    engine: &'a RiskEngine<S, N>,
+    engine: &'a RiskEngine<S>,
     marks: &'a dyn OutcomeMarksStore,
 }
 
-impl<'a, S, N> KiwiOutcomes<'a, S, N>
+impl<'a, S> KiwiOutcomes<'a, S>
 where
     S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore,
-    N: NetworkClassifier,
 {
     /// Builds the facade over one engine and one marks-capable store.
-    pub fn new(engine: &'a RiskEngine<S, N>, marks: &'a dyn OutcomeMarksStore) -> Self {
+    pub fn new(engine: &'a RiskEngine<S>, marks: &'a dyn OutcomeMarksStore) -> Self {
         KiwiOutcomes { engine, marks }
     }
 
@@ -668,8 +665,24 @@ where
                         let (source, asn) = self
                             .engine
                             .target_spread_elements(&handle.id, context.as_ref());
-                        self.engine
-                            .register_target_failure(&handle.id, &source, &asn)?;
+                        // The failure counter books one failure per
+                        // report event id, the same id the mark and the
+                        // channel dedupe on, so a redelivered report
+                        // never inflates the target's failure pressure.
+                        // A report with no idempotency key derives no id
+                        // and books one failure per call, exactly like
+                        // the mark contract.
+                        let failure_event_id = self.engine.derive_outcome_event_id(
+                            idempotency_key.as_deref(),
+                            context.as_ref().map(|ctx| ctx.scope).unwrap_or(0),
+                            map.channel,
+                        )?;
+                        self.engine.register_target_failure(
+                            &handle.id,
+                            &source,
+                            &asn,
+                            &failure_event_id,
+                        )?;
                     }
                     Outcome::StepUpCompleted
                         if idempotency_key
@@ -756,7 +769,7 @@ where
 mod tests {
     use super::*;
     use crate::event::RiskObservation;
-    use crate::network::{CidrNetworkClassifier, NetworkFlags};
+    use crate::network::NetworkFlags;
     use crate::resources::ResourcePressure;
     use crate::signals::SignalVector;
     use crate::store::Observed;
@@ -981,14 +994,9 @@ mod tests {
         }
     }
 
-    fn classifier() -> CidrNetworkClassifier {
-        CidrNetworkClassifier::from_entries(vec![])
-    }
-
-    fn engine(store: StubStore) -> RiskEngine<StubStore, CidrNetworkClassifier> {
+    fn engine(store: StubStore) -> RiskEngine<StubStore> {
         RiskEngine::new(
             store,
-            classifier(),
             std::sync::Arc::new(
                 crate::policy::RiskPolicy::from_config(
                     3,
@@ -1059,6 +1067,45 @@ mod tests {
         assert_eq!(OUTCOME_MAP_VERSION, 1);
         assert_eq!(ledger_dimensions().len(), 2);
         assert_eq!(identity_dimensions().len(), 4);
+    }
+
+    #[test]
+    fn handle_dimension_identity_classification_is_the_complement_of_the_ledger() {
+        // `is_identity` gates feedback + marks writes; the ledger
+        // dimensions must never take that path. Pin the classification
+        // to the dimension groups so a future fifth dimension cannot
+        // silently join one side.
+        assert_eq!(
+            identity_dimensions(),
+            [
+                HandleDimension::Principal,
+                HandleDimension::Target,
+                HandleDimension::Session,
+                HandleDimension::Agent,
+            ]
+        );
+        assert_eq!(
+            ledger_dimensions(),
+            [HandleDimension::Nonce, HandleDimension::DecisionId]
+        );
+        for dimension in HandleDimension::ALL {
+            assert_eq!(dimension.is_identity(), !dimension.is_ledger());
+            assert_eq!(
+                dimension.is_identity(),
+                dimension.mark_dimension().is_some()
+            );
+        }
+        for dimension in [
+            HandleDimension::Principal,
+            HandleDimension::Target,
+            HandleDimension::Session,
+            HandleDimension::Agent,
+        ] {
+            assert!(dimension.is_identity());
+        }
+        for dimension in [HandleDimension::Nonce, HandleDimension::DecisionId] {
+            assert!(!dimension.is_identity());
+        }
     }
 
     #[test]
@@ -1743,7 +1790,6 @@ mod tests {
 
         let engine = RiskEngine::new(
             engine_store,
-            classifier(),
             std::sync::Arc::new(
                 crate::policy::RiskPolicy::from_config(
                     3,

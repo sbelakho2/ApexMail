@@ -24,6 +24,39 @@
   if (typeof window !== "undefined") window[KIWI_BOOT] = true;
   var encoder = new TextEncoder();
 
+  // ── CSP nonce propagation ──
+  // The page may load the driver under a nonce-only script-src. The lazy
+  // module loader injects <script> elements, and those elements need the
+  // same nonce or CSP refuses them. Capture the executing script's nonce
+  // once, here: document.currentScript is null later (after this turn),
+  // and the compat loader can execute the source from a fetch
+  // (currentScript null) — in that case the page's own driver script
+  // element is the source. A page without a nonce leaves the captured
+  // value null and the loader adds no attribute.
+  function kiwiCaptureScriptNonce() {
+    try {
+      var current = document.currentScript;
+      if (current) {
+        var own = current.nonce || (current.getAttribute && current.getAttribute("nonce"));
+        if (own) return own;
+      }
+      // The compat loader (/api.js) evaluates this source asynchronously,
+      // where currentScript is null. The page's driver tag is the script
+      // whose src names the driver asset (or the compat loader itself);
+      // it carries the page nonce.
+      var scripts = document.scripts || [];
+      for (var i = 0; i < scripts.length; i++) {
+        var candidate = scripts[i];
+        var nonce = candidate.nonce || (candidate.getAttribute && candidate.getAttribute("nonce"));
+        if (!nonce) continue;
+        var src = candidate.src || "";
+        if (/(?:^|\/)(?:widget-driver|driver|api)[^\/]*\.js(?:\?|#|$)/.test(src)) return nonce;
+      }
+    } catch (e) {}
+    return null;
+  }
+  var kiwiScriptNonce = kiwiCaptureScriptNonce();
+
   // ── Solver PROTOCOL id ──
   // Bumped when the worker protocol changes. The worker reports the same
   // id and verifies the glue's protocol version before ready; the driver
@@ -491,6 +524,10 @@
       }
     }
     if (data.ttlSecs !== undefined && (typeof data.ttlSecs !== "number" || !isFinite(data.ttlSecs) || Math.floor(data.ttlSecs) !== data.ttlSecs || data.ttlSecs < 1 || data.ttlSecs > 300)) throw new Error("Challenge malformed");
+    // The Interactive-Client Lifecycle v1 delivery floor: an integer
+    // 0..(ttl*1000) when a TTL pins the ceiling (the same bound the RN
+    // validator applies).
+    if (data.minDurationMs !== undefined && (typeof data.minDurationMs !== "number" || !isFinite(data.minDurationMs) || Math.floor(data.minDurationMs) !== data.minDurationMs || data.minDurationMs < 0 || (data.ttlSecs !== undefined && data.minDurationMs >= data.ttlSecs * 1000))) throw new Error("Challenge malformed");
     // The optional ExecutionChallengeV1 program (base64): bounded,
     // non-empty, standard base64. When present the driver must run it —
     // a malformed program is a challenge-content failure, never a solve.
@@ -1705,6 +1742,11 @@
           if (!kiwiGenerationCurrent(widgetId, gen)) return;
         }
         if (riskApi && riskApi.renderDecoy) riskApi.renderDecoy(data, decoyState, tokenEl);
+        // The lifecycle clock anchors at receipt — the instant the
+        // challenge document is in hand — for BOTH the expiry deadline
+        // and the minimum-duration delivery floor (the shared
+        // contract's receivedAtMs).
+        var receivedAtMs = performance.now();
         // Receipt-anchored expiry (server TTL started at issuance).
         if (data.ttlSecs) {
           // The margin is capped at a quarter of the TTL so very short
@@ -1780,6 +1822,28 @@
         if (result && result.deadline) throw new Error("Expired");
         if (!result) throw new Error("Exhausted");
         if (!kiwiGenerationCurrent(widgetId, gen)) return;
+        // Interactive-Client Lifecycle v1: the delivery floor. A solve
+        // that finished before the challenge's minimum duration waits
+        // the floor out before the token is packed (the wait aborts on
+        // a newer generation and re-checks the expiry deadline); a
+        // floor that would land at/after the deadline is an expiry,
+        // never a wait. The browser fixture mints minDurationMs 0, so
+        // this gate is a no-op under the qualification suites and only
+        // engages where a real deployment derives a floor.
+        if (data.minDurationMs > 0) {
+          var minSubmitAtMs = receivedAtMs + data.minDurationMs;
+          if (expiryDeadlineAt !== null && minSubmitAtMs >= expiryDeadlineAt) {
+            throw new Error("Expired");
+          }
+          while (performance.now() < minSubmitAtMs) {
+            if (!kiwiGenerationCurrent(widgetId, gen)) return;
+            if (expiryDeadlineAt !== null && performance.now() >= expiryDeadlineAt) {
+              throw new Error("Expired");
+            }
+            var floorWaitMs = minSubmitAtMs - performance.now();
+            await new Promise(function (resolve) { setTimeout(resolve, Math.min(50, floorWaitMs)); });
+          }
+        }
         var executionDigest = null;
         var executionTrace = null;
         if (data.execution_program) {
@@ -2246,6 +2310,14 @@
         script = document.createElement("script");
         script.src = attrs.src;
         script.integrity = attrs.integrity;
+        // The captured page nonce: a nonce-only script-src would refuse
+        // this injected module without it. Setting both the reflected
+        // property and the attribute keeps older engines on the same
+        // value.
+        if (kiwiScriptNonce) {
+          script.setAttribute("nonce", kiwiScriptNonce);
+          script.nonce = kiwiScriptNonce;
+        }
         script.setAttribute("data-kiwi-module", kind);
         kiwiModuleScriptKinds.set(script, kind);
         script.onload = function () {
@@ -2378,6 +2450,10 @@
       }
     },
     protocolId: KIWI_SOLVER_PROTOCOL_ID,
+    // The page-issued CSP nonce captured from the driver's script tag.
+    // Lazy modules that build child documents (the execution iframe)
+    // copy it onto their own script tags; null on a page without one.
+    scriptNonce: kiwiScriptNonce,
     compatGlue: null,
     core: {
       render: kiwiRender,

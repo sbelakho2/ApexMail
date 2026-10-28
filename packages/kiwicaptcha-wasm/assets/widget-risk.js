@@ -1,6 +1,29 @@
 (function () {
   var encoder = new TextEncoder();
   var decoder = new TextDecoder();
+  // The page CSP nonce the loader copied onto this module's script tag
+  // (files tier) or onto the inline module block (inline tier). The
+  // execution iframe's interpreter tag must carry the same nonce because
+  // a srcdoc document inherits the parent's policy; the eager core
+  // bridge is the fallback when this module runs from a script element
+  // without its own nonce.
+  var kiwiRiskNonce = (function () {
+    try {
+      var current = document.currentScript;
+      if (current) {
+        var own = current.nonce || (current.getAttribute && current.getAttribute("nonce"));
+        if (own) return own;
+      }
+    } catch (e) {}
+    return null;
+  })();
+  function kiwiExecutionNonce() {
+    if (kiwiRiskNonce) return kiwiRiskNonce;
+    var bridge = (typeof window !== "undefined" && window.__kiwiCaptchaCore) || null;
+    return bridge && typeof bridge.scriptNonce === "string" && bridge.scriptNonce
+      ? bridge.scriptNonce
+      : null;
+  }
   function kiwiRiskConfigValue(W, container, name) {
     // The eager core exposes the one configuration reader (widget element
     // wins over the container); fall back to the same order when the
@@ -81,7 +104,17 @@
       // untrusted code. The iframe is created per armed challenge and
       // removed after the run (a fresh document keeps the state machine
       // deterministic).
-      iframe.srcdoc = "<!doctype html><html><head><meta charset=\"utf-8\"></head><body><script src=\"" +
+      // The interpreter tag carries the parent page's nonce: a srcdoc
+      // document inherits the embedding page's CSP, so a nonce-only
+      // script-src would otherwise refuse this same-origin asset. The
+      // value is base64-shaped; anything else is dropped rather than
+      // escaped into the markup.
+      var executionNonce = kiwiExecutionNonce();
+      var nonceAttr = executionNonce && /^[A-Za-z0-9+/=_-]+$/.test(executionNonce)
+        ? " nonce=\"" + executionNonce + "\""
+        : "";
+      iframe.srcdoc = "<!doctype html><html><head><meta charset=\"utf-8\"></head><body><script" +
+        nonceAttr + " src=\"" +
         executionSrc.replace(/&/g, "&amp;").replace(/"/g, "&quot;") +
         "\" integrity=\"" + executionIntegrity.replace(/"/g, "&quot;") + "\"><\/script><\/body><\/html>";
       // The run message targets the iframe's same-origin window (never a

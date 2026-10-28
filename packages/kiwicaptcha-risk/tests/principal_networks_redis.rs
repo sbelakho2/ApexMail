@@ -3,9 +3,14 @@ use kiwicaptcha_risk::store::PrincipalNetworkTagStore;
 
 #[test]
 fn redis_principal_networks_full_surface_on_real_redis() {
-    let Ok(url) = std::env::var("KC_REDIS_URL") else {
+    let Ok(raw_url) = std::env::var("RISK_REDIS_URL") else {
+        eprintln!("skipping: RISK_REDIS_URL not set");
         return;
     };
+    let url = raw_url
+        .strip_prefix("tcp://")
+        .map(|rest| format!("redis://{rest}"))
+        .unwrap_or(raw_url);
     let Ok(client) = redis::Client::open(url) else {
         return;
     };
@@ -19,9 +24,12 @@ fn redis_principal_networks_full_surface_on_real_redis() {
     let principal = "ab".repeat(16);
 
     // record + seen + trust
-    assert!(store
-        .record_principal_network_tag(&principal, "net:00ff", true)
-        .unwrap());
+    assert!(
+        store
+            .record_principal_network_tag(&principal, "net:00ff", true)
+            .unwrap(),
+        "the first record of a tag creates it"
+    );
     assert_eq!(
         store
             .principal_network_seen(&principal, "net:00ff")
@@ -65,11 +73,18 @@ fn redis_principal_networks_full_surface_on_real_redis() {
     assert!(store
         .record_principal_network_tag(&principal, "device:abcd", true)
         .unwrap());
-    // a trusted network minted under the old credentials re-arms at
+    // a trusted network minted under earlier credentials re-arms at
     // the revocation: the trust mirrors go, the bare seen-ness stays
-    assert!(store
-        .record_principal_network_tag(&principal, "net:00ff", true)
-        .unwrap());
+    // The tag is already recorded, so this touch-upsert answers false:
+    // the reply marks a newly created tag, and only a new tag answers
+    // true. The record still refreshes the last-use ms and mints the
+    // trust flag.
+    assert!(
+        !store
+            .record_principal_network_tag(&principal, "net:00ff", true)
+            .unwrap(),
+        "the second record of an existing tag is not a new tag"
+    );
     assert_eq!(
         store.principal_has_trusted_network(&principal).unwrap(),
         Some(true)

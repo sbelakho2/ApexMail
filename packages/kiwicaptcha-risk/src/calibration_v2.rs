@@ -755,7 +755,7 @@ impl CalibrationStore for RedisCalibrationStoreV2 {
 mod tests {
     use super::*;
     use crate::event::RiskEventKind;
-    use crate::network::{CidrNetworkClassifier, NetworkFlags};
+    use crate::network::NetworkFlags;
     use crate::outcomes::{KiwiOutcomes, Outcome, OutcomeHandle};
     use crate::policy::RiskPolicy;
     use crate::redis::RedisRiskStateStore;
@@ -1539,7 +1539,6 @@ mod tests {
         let marks_store = RedisRiskStateStore::new(client(), &ns).with_io_timeouts(2_000, 2_000);
         let engine = crate::RiskEngine::new(
             engine_store,
-            CidrNetworkClassifier::from_entries(vec![]),
             Arc::new(test_policy()),
             crate::RiskKeys::from_master(&[0x42; 32]),
         )

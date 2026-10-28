@@ -181,6 +181,8 @@ apps/ai/training/**/*.pt
 /data/
 /test_output.txt
 tools/contrast-audit/node_modules/
+tests/journeys/node_modules/
+tests/journeys/journey-out/
 dump.rdb
 
 # Coverage artifacts — never track (accidentally committed 290 MiB once)

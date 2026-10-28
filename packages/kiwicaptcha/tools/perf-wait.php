@@ -53,6 +53,15 @@ declare(strict_types=1);
  * that does not raise ReplicaWaitException proves the barrier was
  * silently downgraded and fails the run.
  *
+ * Flags. --json-out <path> writes the run's provenance record with the
+ * shared schema kiwicaptcha.perf-run/1: the tool name, the timestamp,
+ * the configuration, every measured distribution with its n and the
+ * printed percentiles, the p95 deltas, the environment and the source
+ * commit. The fixture applies no ratchet, so each measurement carries
+ * a null ratchet and the baseline file is null. The record is written
+ * before the optional --baseline-out merge, and an unwritable path
+ * fails the run.
+ *
  * The recorded values live in tools/perf-baselines.json, the single
  * machine-readable record for the performance-analysis document.
  * After a deliberate change, run with
@@ -67,6 +76,7 @@ if (!is_file($autoload)) {
 }
 require $autoload;
 require __DIR__.'/perf-baseline-emit.php';
+require __DIR__.'/perf-record.php';
 
 use KiwiCaptcha\Config;
 use KiwiCaptcha\Issuer;
@@ -250,12 +260,16 @@ function runRawWait(\Predis\Client $client, int $count, int $replicas): array
 
 $iterations = ITERATIONS;
 $baselineOut = null;
+$jsonOut = null;
 foreach ($argv as $i => $arg) {
     if ($arg === '--iterations' && isset($argv[$i + 1])) {
         $iterations = max(1, (int) $argv[$i + 1]);
     }
     if ($arg === '--baseline-out' && isset($argv[$i + 1])) {
         $baselineOut = $argv[$i + 1];
+    }
+    if ($arg === '--json-out' && isset($argv[$i + 1])) {
+        $jsonOut = $argv[$i + 1];
     }
 }
 
@@ -318,6 +332,28 @@ foreach (['consume', 'commit'] as $op) {
     $deltas[$op] = $wp95 - $bp95;
 }
 printf("perf-wait: p95 delta consume %+.3f ms, commit %+.3f ms (single authority; a real replica topology is the full production fixture)\n", $deltas['consume'], $deltas['commit']);
+
+$waitSample = static fn (array $samples): array => perf_record_sample(count($samples), percentile($samples, 50), null, percentile($samples, 95), null, null);
+if ($jsonOut !== null) {
+    perf_record_write($jsonOut, perf_record_envelope('perf-wait', $argv, null, $url) + [
+        'configuration' => ['warmup' => WARMUP, 'iterations' => $iterations, 'wait_timeout_ms' => WAIT_TIMEOUT_MS],
+        'measurements' => [
+            'pre_issue' => perf_record_sample(count($preIssue['samples']), $issueP50, null, $issueP95, null, null),
+            'baseline' => [
+                'consume' => $waitSample($base['samples']['consume']),
+                'commit' => $waitSample($base['samples']['commit']),
+            ],
+            'barrier' => [
+                'consume' => $waitSample($barr['samples']['consume']),
+                'commit' => $waitSample($barr['samples']['commit']),
+            ],
+            'raw_wait0' => perf_record_sample($raw0['n'], $raw0['p50'], null, $raw0['p95'], null, null),
+            'raw_wait1' => perf_record_sample($raw1['n'], $raw1['p50'], null, $raw1['p95'], null, null),
+        ],
+        'p95_delta_ms' => ['consume' => round($deltas['consume'], 3), 'commit' => round($deltas['commit'], 3)],
+        'verdict' => 'ok',
+    ]);
+}
 
 if ($baselineOut !== null) {
     $fmtSamples = static fn (array $samples): array => ['p50_ms' => percentile($samples, 50), 'p95_ms' => percentile($samples, 95), 'n' => count($samples)];

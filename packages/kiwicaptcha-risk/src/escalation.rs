@@ -21,9 +21,11 @@
 //! password manager can never trip the escalation on a real user.
 
 use std::net::IpAddr;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::action::RiskAction;
 use crate::policy::RiskReason;
+use crate::store::RiskStoreError;
 use crate::RiskDecision;
 
 /// The canonical decoy-escalation script (byte-identical across the
@@ -43,6 +45,157 @@ pub trait DecoyEscalationReader: Send + Sync {
     /// True when the session carries a live escalation record. `None`
     /// session (no session dimension on the request) answers false.
     fn escalation_live(&self, session: Option<&str>) -> bool;
+}
+
+/// The Redis-backed decoy-escalation store: the Rust mirror of the PHP
+/// `DecoyEscalationStore`, running the canonical [`DECOY_ESCALATION_LUA`]
+/// over the same key grammar (`decoy_esc:{namespace}:{session}`) and the
+/// same hash record (`count`, `first_ms`, `last_ms` with a whole-key
+/// TTL). It implements [`DecoyEscalationReader`], so an engine is wired
+/// through [`crate::RiskEngine::with_decoy_escalation`].
+///
+/// Build it from an existing state store with
+/// [`crate::redis::RedisRiskStateStore::decoy_escalation_reader`], which
+/// shares the store's Redis client and encoded deployment namespace, so
+/// the reader and the risk state live in one keyspace.
+///
+/// The write is gated exactly like the PHP store: `gate_open` is the
+/// autofill-qualification decision, and a closed gate makes the script
+/// refuse the record (and write nothing) before any mutation. A caller
+/// that evaluates the qualification matrix per request constructs the
+/// reader with the current decision.
+pub struct RedisDecoyEscalationStore {
+    client: ::redis::Client,
+    /// The encoded deployment namespace (the same value the state store
+    /// interpolates inside its keys).
+    namespace: String,
+    ttl_ms: u64,
+    gate_open: bool,
+    script: ::redis::Script,
+}
+
+impl RedisDecoyEscalationStore {
+    /// Builds the reader over one Redis client and an already-encoded
+    /// deployment namespace. Prefer
+    /// [`crate::redis::RedisRiskStateStore::decoy_escalation_reader`] so
+    /// the namespace derivation stays in one place.
+    pub fn new(
+        client: ::redis::Client,
+        namespace: impl Into<String>,
+        gate_open: bool,
+    ) -> Result<Self, String> {
+        let namespace = namespace.into();
+        if namespace.is_empty() || namespace.contains(['{', '}', ':']) {
+            return Err(
+                "the decoy escalation namespace must be non-empty and free of '{', '}' and ':'"
+                    .to_string(),
+            );
+        }
+        Ok(RedisDecoyEscalationStore {
+            client,
+            namespace,
+            ttl_ms: ESCALATION_TTL_MS,
+            gate_open,
+            script: ::redis::Script::new(DECOY_ESCALATION_LUA),
+        })
+    }
+
+    /// Overrides the escalation window (the record's TTL). The script
+    /// enforces the positive-integer bound.
+    pub fn with_ttl_ms(mut self, ttl_ms: u64) -> Result<Self, String> {
+        if ttl_ms < 1 {
+            return Err("the decoy escalation TTL must be at least one millisecond".to_string());
+        }
+        self.ttl_ms = ttl_ms;
+        Ok(self)
+    }
+
+    fn key(&self, session: &str) -> Result<String, RiskStoreError> {
+        if session.is_empty() || session.contains(['{', '}', ':']) {
+            return Err(RiskStoreError::InvalidIdentifier(
+                "the session identifier must be a non-empty safe key component".to_string(),
+            ));
+        }
+        Ok(format!("decoy_esc:{}:{}", self.namespace, session))
+    }
+
+    fn connection(&self) -> Result<::redis::Connection, RiskStoreError> {
+        // Bounded liveness first: the setup pipeline has no reply bound
+        // after TCP connect, so a silent acceptor would park this path.
+        kiwicaptcha::redis_verify::probe_connection_info(self.client.get_connection_info())
+            .map_err(|e| {
+                RiskStoreError::BackendUnavailable(format!(
+                    "redis probe before escalation connect: {e}"
+                ))
+            })?;
+        let conn = self
+            .client
+            .get_connection_with_timeout(std::time::Duration::from_millis(
+                crate::redis::RedisRiskStateStore::CONNECTION_TIMEOUT_MS,
+            ))
+            .map_err(crate::redis::map_redis_error)?;
+        conn.set_read_timeout(Some(std::time::Duration::from_millis(
+            crate::redis::RedisRiskStateStore::COMMAND_TIMEOUT_MS,
+        )))
+        .map_err(crate::redis::map_redis_error)?;
+        conn.set_write_timeout(Some(std::time::Duration::from_millis(
+            crate::redis::RedisRiskStateStore::COMMAND_TIMEOUT_MS,
+        )))
+        .map_err(crate::redis::map_redis_error)?;
+        Ok(conn)
+    }
+
+    /// Records one server-confirmed decoy hit for `session` and returns
+    /// the record's hit count (0 when the qualification gate is closed:
+    /// the script refuses the write before touching the key).
+    pub fn record_confirmed_hit(&self, session: &str, now_ms: u64) -> Result<i64, RiskStoreError> {
+        let key = self.key(session)?;
+        let mut conn = self.connection()?;
+        self.script
+            .key(key)
+            .arg("record")
+            .arg("1")
+            .arg(if self.gate_open { "1" } else { "0" })
+            .arg(now_ms)
+            .arg(self.ttl_ms)
+            .invoke::<i64>(&mut conn)
+            .map_err(crate::redis::map_redis_error)
+    }
+
+    /// True when `session` carries a live escalation record at `now_ms`
+    /// (inside the window and before the key's TTL). The explicit clock
+    /// keeps the check deterministic for tests and callers with a
+    /// server-authoritative time source.
+    pub fn is_live_at(&self, session: &str, now_ms: u64) -> Result<bool, RiskStoreError> {
+        let key = self.key(session)?;
+        let mut conn = self.connection()?;
+        let live: i64 = self
+            .script
+            .key(key)
+            .arg("read")
+            .arg("0")
+            .arg("0")
+            .arg(now_ms)
+            .arg(self.ttl_ms)
+            .invoke(&mut conn)
+            .map_err(crate::redis::map_redis_error)?;
+        Ok(live == 1)
+    }
+}
+
+impl DecoyEscalationReader for RedisDecoyEscalationStore {
+    fn escalation_live(&self, session: Option<&str>) -> bool {
+        let Some(session) = session.filter(|s| !s.is_empty()) else {
+            return false;
+        };
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        // A backend miss never escalates anyone (the stage is a
+        // temporary price raise; the PHP mirror degrades identically).
+        self.is_live_at(session, now_ms).unwrap_or(false)
+    }
 }
 
 /// The request identity picture the engine hands the reader (the same
@@ -99,7 +252,8 @@ fn rung_at_rank(rank: u8) -> RiskAction {
         4 => RiskAction::Argon16,
         5 => RiskAction::Argon32,
         6 => RiskAction::Argon64,
-        7 => RiskAction::StepUp,
+        7 => RiskAction::Rsw,
+        8 => RiskAction::StepUp,
         _ => RiskAction::Deny,
     }
 }
@@ -175,6 +329,8 @@ mod tests {
         let out = apply(plain(500), true);
         assert_eq!(out.action, RiskAction::Argon16);
         let out = apply(plain(900), true);
+        assert_eq!(out.action, RiskAction::Rsw);
+        let out = apply(plain(940), true);
         assert_eq!(out.action, RiskAction::StepUp);
     }
 
@@ -182,7 +338,7 @@ mod tests {
     fn escalation_never_blocks() {
         // StepUp stays StepUp and Deny never deepens: the raise caps at
         // the interactive step-up.
-        let out = apply(plain(950), true);
+        let out = apply(plain(965), true);
         assert_eq!(out.action, RiskAction::StepUp);
         let deny = plain(990);
         let out = apply(deny.clone(), true);
@@ -205,5 +361,100 @@ mod tests {
     #[test]
     fn ttl_constant_is_the_ten_minute_window() {
         assert_eq!(ESCALATION_TTL_MS, 600_000);
+    }
+
+    #[test]
+    fn the_php_copy_is_byte_identical_too() {
+        // The PHP package ships its own resources copy; the Rust reader
+        // executes the embedded script against the same PHP key grammar,
+        // so a divergence in either copy would silently split the two
+        // languages' escalation state.
+        let php = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../kiwicaptcha-risk-php/resources/decoy_escalation.lua"
+        );
+        let raw = std::fs::read_to_string(php).expect("PHP resources copy readable");
+        assert_eq!(raw, DECOY_ESCALATION_LUA);
+    }
+
+    fn redis_url() -> Option<String> {
+        match std::env::var("RISK_REDIS_URL") {
+            Ok(url) if !url.is_empty() => Some(if let Some(rest) = url.strip_prefix("tcp://") {
+                format!("redis://{rest}")
+            } else {
+                url
+            }),
+            _ => {
+                eprintln!("skipping Redis decoy-escalation test: RISK_REDIS_URL not set");
+                None
+            }
+        }
+    }
+
+    fn unique_namespace(label: &str) -> String {
+        let mut suffix = [0u8; 4];
+        rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut suffix);
+        format!("{label}{}", hex::encode(suffix))
+    }
+
+    #[test]
+    fn redis_reader_records_reads_and_expires_like_the_canonical_script() {
+        let Some(url) = redis_url() else { return };
+        let client = ::redis::Client::open(url.clone()).expect("url parses");
+        let namespace = unique_namespace("dectest");
+        let session = "a1b2c3d4e5f60718293a4b5c6d7e8f90";
+        let reader = RedisDecoyEscalationStore::new(client.clone(), namespace.clone(), true)
+            .expect("reader builds");
+
+        // A confirmed hit records and increments the count.
+        assert_eq!(reader.record_confirmed_hit(session, T0).expect("record"), 1);
+        assert_eq!(
+            reader
+                .record_confirmed_hit(session, T0 + 1)
+                .expect("record"),
+            2
+        );
+
+        // The record is live inside the window and dead at its boundary
+        // (the script's explicit window check anchored on the last hit,
+        // independent of key TTL).
+        assert!(reader.is_live_at(session, T0 + 2).expect("read"));
+        assert!(!reader
+            .is_live_at(session, T0 + 1 + ESCALATION_TTL_MS)
+            .expect("read"));
+
+        // The trait degrades unknown/missing sessions to not-live.
+        assert!(!reader.escalation_live(None));
+        assert!(!reader.escalation_live(Some("")));
+        assert!(!reader.escalation_live(Some("not-a-session:with-colon")));
+        assert!(!reader.escalation_live(Some("f".repeat(32).as_str())));
+
+        // A closed qualification gate refuses the write before any
+        // mutation: the key never exists, so no reader can escalate.
+        let closed_ns = unique_namespace("decclosed");
+        let closed = RedisDecoyEscalationStore::new(client.clone(), closed_ns.clone(), false)
+            .expect("reader builds");
+        assert_eq!(closed.record_confirmed_hit(session, T0).expect("record"), 0);
+        assert!(!closed.is_live_at(session, T0 + 1).expect("read"));
+
+        let mut conn = client.get_connection().expect("connection");
+        let _: () = ::redis::cmd("DEL")
+            .arg(format!("decoy_esc:{namespace}:{session}"))
+            .arg(format!("decoy_esc:{closed_ns}:{session}"))
+            .query(&mut conn)
+            .expect("cleanup");
+    }
+
+    #[test]
+    fn redis_reader_rejects_unsafe_key_components() {
+        let client = ::redis::Client::open("redis://127.0.0.1:1").expect("url parses lazily");
+        assert!(RedisDecoyEscalationStore::new(client.clone(), "bad:ns", true).is_err());
+        assert!(RedisDecoyEscalationStore::new(client.clone(), "", true).is_err());
+        let reader = RedisDecoyEscalationStore::new(client, "ns1", true).expect("reader builds");
+        let error = match reader.with_ttl_ms(0) {
+            Ok(_) => panic!("a zero TTL is refused"),
+            Err(error) => error,
+        };
+        assert!(error.contains("at least one millisecond"));
     }
 }

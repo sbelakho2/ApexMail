@@ -8,10 +8,11 @@
 //!
 //! 1. A mark on one of the requesting identity's own dimensions (session,
 //!    principal, agent or the ASN bucket) escalates the chosen action to
-//!    at least the ladder's maximum challenge rung (Argon64). StepUp and
-//!    Deny keep their rank. A saturated argon backend re-escalates the
-//!    rung to the interactive step-up exactly like the policy's own
-//!    capacity check.
+//!    at least the ladder's maximum challenge rung (Rsw, the sequential
+//!    time-lock rung of change.md 1.4 and 3.3.3). Rsw, StepUp and Deny
+//!    keep their rank. A saturated argon backend re-escalates the rung to
+//!    the interactive step-up exactly like the policy's own capacity
+//!    check.
 //! 2. A mark combined with corroborating attacker evidence on the same
 //!    request denies for the remaining mark TTL. Corroborating evidence
 //!    means bad-proof, replay or malformed traffic at the policy's
@@ -26,7 +27,7 @@
 //!
 //! Victim-protection invariant (property-tested): when only target-side
 //! evidence fires, the final action equals the plain action or StepUp,
-//! never Argon64 and never Deny.
+//! never beyond the interactive step-up and never Deny.
 //!
 //! A mark outside its TTL window is inert: the stage treats it as absent
 //! for both the rung and the deny rule, the belt to the store's own key
@@ -39,7 +40,7 @@
 //! a plain Allow decision quarantines instead of escalating: the action
 //! stays Allow (wire identical to allow end to end, same rung and
 //! pricing), the decision carries the quarantine disposition and the
-//! spam_mark_quarantine reason. A spam mark never runs the Argon64
+//! spam_mark_quarantine reason. A spam mark never runs the Rsw
 //! floor: above the Allow band the plain action stands (severity wins)
 //! with the ordinary marked_identity reason, and the deny, target and
 //! non-spam-mark rules keep their precedence over quarantine. The
@@ -91,8 +92,11 @@ pub const SCOPE_PRESSURE_FLOOR: u16 = 300;
 /// scope failure ratio is running hot).
 pub const SCOPE_PRESSURE_LEVEL: u8 = 1;
 
-/// Below this argon capacity the strongest rung re-escalates to StepUp
-/// (the policy's own capacity check, applied to the mark rung too).
+/// The argon-capacity floor of the mark rung: below this capacity the
+/// maximum challenge rung re-escalates to StepUp (the policy's own
+/// capacity check, applied to the mark rung too). The Rsw rung is
+/// capacity-gated like the argon rungs, so a saturated backend never
+/// has an unservable maximum rung demanded of it.
 const ARGON_CAPACITY_FLOOR: u16 = 300;
 
 /// The marks view of one request: the marks found on the requesting
@@ -446,14 +450,14 @@ pub fn apply(
             stage_reasons.push(RiskReason::SpamMarkQuarantine);
         } else {
             stage_reasons.push(RiskReason::MarkedIdentity);
-            // The Argon64 floor belongs to the non-spam marks: a
+            // The Rsw floor belongs to the non-spam marks: a
             // spam-only identity is the quarantine plane's subject, so
             // above the Allow band its plain action stands (severity
             // wins) and the stage adds no rung of its own.
             let floor_applies =
                 !quarantine_spam_marks || !crate::quarantine::spam_only(view, now_ms, mark_ttl_ms);
-            if floor_applies && decision.action.rank() < RiskAction::Argon64.rank() {
-                decision.action = RiskAction::Argon64;
+            if floor_applies && decision.action.rank() < RiskAction::Rsw.rank() {
+                decision.action = RiskAction::Rsw;
                 if resources.argon_capacity < ARGON_CAPACITY_FLOOR {
                     decision.action = RiskAction::StepUp;
                     stage_reasons.push(RiskReason::CapacityPressure);
@@ -617,6 +621,31 @@ mod tests {
     }
 
     #[test]
+    fn with_target_replaces_and_clears_the_target_record() {
+        // The builder is the deployment's shape for a reader-derived
+        // target record (the evidence plane compiles it when no target
+        // mark was written): it must replace, not append, and clearing
+        // must remove the target entirely.
+        let view = MarksView::from_parts(
+            vec![(MarkDimension::Session, mark("accountBanned", T0 as i64))],
+            None,
+        );
+        assert!(view.target_in_ttl(T0, TTL).is_none());
+
+        let view = view.with_target(Some(mark("targetUnderAttack", T0 as i64)));
+        let target = view
+            .target_in_ttl(T0, TTL)
+            .expect("the injected target is visible");
+        assert_eq!(target.kind, "targetUnderAttack");
+        assert_eq!(target.count, 1);
+
+        let cleared = view.with_target(None);
+        assert!(cleared.target_in_ttl(T0, TTL).is_none());
+        // The own-dimension entries are untouched by the target builder.
+        assert_eq!(cleared.own_in_ttl(T0, TTL).len(), 1);
+    }
+
+    #[test]
     fn unmarked_view_keeps_the_plain_decision() {
         let plain = plain(500);
         let out = apply(
@@ -645,7 +674,7 @@ mod tests {
                 &healthy(),
                 false,
             );
-            assert_eq!(out.action, RiskAction::Argon64, "score {score}");
+            assert_eq!(out.action, RiskAction::Rsw, "score {score}");
             assert!(out.has_reason(RiskReason::MarkedIdentity));
             assert_eq!(out.retry_after_ms, None);
         }
@@ -653,8 +682,19 @@ mod tests {
 
     #[test]
     fn marked_identity_never_downgrades_step_up_or_deny() {
+        // A plain rsw band decision sits exactly at the mark floor.
+        let rsw = apply(
+            plain(940),
+            &session_view(T0 as i64),
+            false,
+            T0,
+            TTL,
+            &healthy(),
+            false,
+        );
+        assert_eq!(rsw.action, RiskAction::Rsw);
         let step = apply(
-            plain(950),
+            plain(965),
             &session_view(T0 as i64),
             false,
             T0,
@@ -904,7 +944,7 @@ mod tests {
                     MarksView::from_parts(vec![(dimension, mark("spamReported", T0 as i64))], None);
                 let out = apply(base, &view, false, T0, TTL, &healthy(), false);
                 assert!(
-                    out.action.rank() >= RiskAction::Argon64.rank(),
+                    out.action.rank() >= RiskAction::Rsw.rank(),
                     "{dimension:?} score {score}: {:?}",
                     out.action
                 );
@@ -915,7 +955,7 @@ mod tests {
     #[test]
     fn unreadable_marks_floor_fail_closed_without_fabricating_a_deny() {
         let out = apply_unreadable(plain(100), T0, &healthy());
-        assert_eq!(out.action, RiskAction::Argon64);
+        assert_eq!(out.action, RiskAction::Rsw);
         assert!(out.has_reason(RiskReason::MarkedIdentity));
         assert_eq!(out.retry_after_ms, None);
         let saturated = ResourcePressure {

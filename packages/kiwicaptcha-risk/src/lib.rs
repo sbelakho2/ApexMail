@@ -70,7 +70,6 @@ use crate::explanation::ExplainedDecision;
 use crate::identity::RiskIdentityFactory;
 use crate::keys::RiskKeys;
 use crate::metrics::{FixedMetric, Metrics};
-use crate::network::NetworkClassifier;
 use crate::policy::{RiskPolicy, RiskReason};
 use crate::score::score as compute_score;
 use crate::score::RiskV2Weights;
@@ -161,12 +160,13 @@ fn reject_out_of_range_ppm(ppm: Option<u32>) -> Result<(), RiskError> {
 
 /// The risk model generation implemented by this package.
 ///
-/// Monotonically increasing (never reset). 17 is the current model
-/// generation: 16 prior generations covered the fixed-point score
+/// Monotonically increasing (never reset). 19 is the current model
+/// generation: the prior generations covered the fixed-point score
 /// contract, class-normalized calibration, the random-sample resolution
-/// gate, the outcome ledger and the rate-of-change clamp; this revision
-/// adds the non-finite guards and the local-limiter warm-up
-/// ramp to the model's behavior surface.
+/// gate, the outcome ledger, the rate-of-change clamp, the non-finite
+/// guards and the local-limiter warm-up ramp; this revision adds the
+/// first-class rsw rung to the decision ladder (between argon64 and
+/// step-up: the default bands, the marks floor, the priced band table).
 ///
 /// Every [`RiskDecision`] carries the revision it was computed under
 /// (`model_revision`, exposed in the decision's public JSON — bounded,
@@ -174,7 +174,7 @@ fn reject_out_of_range_ppm(ppm: Option<u32>) -> Result<(), RiskError> {
 /// fleets during a rollout. A model revision that materially affects
 /// security requires a `policy_version` bump in the operator policy
 /// snapshot (see [`crate::policy::RiskPolicy`]).
-pub const RISK_MODEL_REVISION: u32 = 18;
+pub const RISK_MODEL_REVISION: u32 = 19;
 
 /// Immutable risk decision produced by the engine.
 ///
@@ -477,10 +477,12 @@ impl ProcessEmergencyCap {
 
 /// The adaptive risk engine.
 ///
-/// `classifier` and `keys` are retained as owned configuration (the
-/// classifier is passed by the caller for its observation pipeline; the
-/// keys feed the identity factory) — the engine itself uses the derived
-/// [`RiskIdentityFactory`].
+/// The network classification that feeds the `network_risk` observation
+/// slot is supplied by the caller on [`RiskContext::network_flags`]: the
+/// caller owns its [`crate::network::NetworkClassifier`] (configured from
+/// the deployment's CIDR file) and classifies the source before the
+/// assessment. The engine does not hold a second, unread classifier: the
+/// context's flags are the one authoritative input.
 ///
 /// The store bounds include the optional risk-v2 capability traits
 /// [`SessionContextTagStore`] + [`SessionTlsTagStore`]: their default
@@ -609,15 +611,9 @@ impl RiskTimingConfig {
     }
 }
 
-pub struct RiskEngine<
-    S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore,
-    N: NetworkClassifier,
-> {
+pub struct RiskEngine<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore> {
     store: S,
-    #[allow(dead_code)]
-    classifier: N,
     policy: Arc<RiskPolicy>,
-    #[allow(dead_code)]
     keys: RiskKeys,
     identity: RiskIdentityFactory,
     breaker: breaker::CircuitBreaker,
@@ -680,23 +676,15 @@ pub struct RiskEngine<
     principal_networks: Option<Arc<dyn crate::store::PrincipalNetworkTagStore>>,
 }
 
-impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: NetworkClassifier>
-    RiskEngine<S, N>
-{
+impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore> RiskEngine<S> {
     /// Builds an engine with the contract defaults (900 s epochs, 1800 s
     /// session TTL, 86400 s principal TTL, 60 s dedupe TTL, default
     /// saturations, 2-failure/1000 ms breaker, 10000 req/s process cap).
     /// No calibration store (optional via [`RiskEngine::with_calibration`]).
     /// Global pressure is enabled (see [`RiskEngine::with_global_pressure`]).
-    pub fn new(
-        store: S,
-        classifier: N,
-        policy: Arc<RiskPolicy>,
-        keys: RiskKeys,
-    ) -> RiskEngine<S, N> {
+    pub fn new(store: S, policy: Arc<RiskPolicy>, keys: RiskKeys) -> RiskEngine<S> {
         RiskEngine {
             store,
-            classifier,
             policy,
             identity: RiskIdentityFactory::new(keys.clone()),
             keys,
@@ -723,13 +711,12 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
     /// Builds an engine with explicit breaker and process cap (tests).
     pub fn with_components(
         store: S,
-        classifier: N,
         policy: Arc<RiskPolicy>,
         keys: RiskKeys,
         breaker: breaker::CircuitBreaker,
         limiter: ProcessEmergencyCap,
-    ) -> RiskEngine<S, N> {
-        let mut engine = RiskEngine::new(store, classifier, policy, keys);
+    ) -> RiskEngine<S> {
+        let mut engine = RiskEngine::new(store, policy, keys);
         engine.breaker = breaker;
         engine.limiter = limiter;
         engine
@@ -741,7 +728,7 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
     /// returned vector and reports level 0 / no cooldown to the policy —
     /// the global-pressure channel and its floors/cooldown are entirely
     /// inert, while per-source signals keep working.
-    pub fn with_global_pressure(mut self, enable: bool) -> RiskEngine<S, N> {
+    pub fn with_global_pressure(mut self, enable: bool) -> RiskEngine<S> {
         self.enable_global_pressure = enable;
         self
     }
@@ -750,7 +737,7 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
     /// `AdaptiveRiskEngine`'s `$noveltyEnforcement`). `Learn` (default)
     /// records without escalating; `Enforce` demands step-up on a
     /// genuinely novel network.
-    pub fn with_novelty_enforcement(mut self, mode: NoveltyEnforcement) -> RiskEngine<S, N> {
+    pub fn with_novelty_enforcement(mut self, mode: NoveltyEnforcement) -> RiskEngine<S> {
         self.novelty_enforcement = mode;
         self
     }
@@ -782,7 +769,7 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
     /// identically without calibration), the scope bias is applied to the
     /// score, and confirmed outcomes consume their receipts. All failures
     /// are silent.
-    pub fn with_calibration(mut self, calibration: Arc<dyn CalibrationStore>) -> RiskEngine<S, N> {
+    pub fn with_calibration(mut self, calibration: Arc<dyn CalibrationStore>) -> RiskEngine<S> {
         self.calibration = Some(calibration);
         self
     }
@@ -794,7 +781,7 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
     pub fn with_target_resolver(
         mut self,
         resolver: Arc<dyn TargetIdentifierResolver>,
-    ) -> RiskEngine<S, N> {
+    ) -> RiskEngine<S> {
         self.target_resolver = Some(resolver);
         self
     }
@@ -808,7 +795,7 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
     pub fn with_marks_reader(
         mut self,
         reader: Arc<dyn crate::marks::MarksReader>,
-    ) -> RiskEngine<S, N> {
+    ) -> RiskEngine<S> {
         self.marks_reader = Some(reader);
         self
     }
@@ -824,7 +811,7 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
     pub fn with_price_context(
         mut self,
         source: Arc<dyn crate::pricing::PriceContextSource>,
-    ) -> RiskEngine<S, N> {
+    ) -> RiskEngine<S> {
         self.price_context = Some(source);
         self
     }
@@ -868,7 +855,7 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
     /// through it to the source address's listed or unlisted bucket.
     /// Without a dataset the element resolves to the unlisted-namespace
     /// bucket of the source address, so distinct origins still spread.
-    pub fn with_asn_dataset(mut self, dataset: Arc<crate::asn::AsnDataset>) -> RiskEngine<S, N> {
+    pub fn with_asn_dataset(mut self, dataset: Arc<crate::asn::AsnDataset>) -> RiskEngine<S> {
         self.asn_dataset = Some(dataset);
         self
     }
@@ -883,7 +870,7 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
     pub fn with_decoy_escalation(
         mut self,
         reader: Arc<dyn crate::escalation::DecoyEscalationReader>,
-    ) -> RiskEngine<S, N> {
+    ) -> RiskEngine<S> {
         self.decoy_escalation = Some(reader);
         self
     }
@@ -1181,7 +1168,20 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
             Some(id) => self.target_spread_elements(id, Some(&ctx)),
             None => (String::new(), String::new()),
         };
-        let effective_v2_weights = v2_weights.unwrap_or_default();
+        // The risk-v2 weights the engine actually scores with: a v1
+        // assessment (no v2 context) scores through the plain scorer and
+        // applies no v2 evidence factor. The effective weights therefore
+        // zero out for that call, and the consolidated script computes
+        // the ledger score from the same factors the decision was judged
+        // by. The default weights are wrong here: the script derives the
+        // honeypot factor from the event kind and the two target factors
+        // from the maintained state, so it would book a score the v1
+        // decision never had.
+        let effective_v2_weights = if v2.is_none() {
+            RiskV2Weights::ZERO
+        } else {
+            v2_weights.unwrap_or_default()
+        };
         let registration = decision_id.as_ref().map(|id| OutcomeRegistration {
             decision_id: id.clone(),
             decision_hour: (now_ms / 3_600_000) as i64,
@@ -1536,9 +1536,12 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
                         mint_trust,
                     );
                 }
+                // The stored form is the stable network-tag pseudonym
+                // (never the bucket spelling): the field never encodes
+                // the address reversibly.
                 let _ = networks.record_principal_network_tag(
                     &principal_hex,
-                    &network_bucket(ctx.source_ip),
+                    &network_tag(&self.keys, ctx.source_ip),
                     true,
                 );
                 let asn = self.asn_bucket_of(&ctx.source_ip);
@@ -1654,6 +1657,33 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
         }
     }
 
+    /// Whether the principal's network history carries this source
+    /// address. The stable network tag is probed first; on a miss every
+    /// legacy bucket spelling is probed, so a field written under one
+    /// still vouches for the same network. The next post-Allow record
+    /// rewrites that network under the tag. A store error propagates to
+    /// the caller's fail-closed handling, never reading as neutral.
+    /// Mirrors the PHP `AdaptiveRiskEngine::networkSeen()`.
+    fn network_seen(
+        &self,
+        networks: &dyn crate::store::PrincipalNetworkTagStore,
+        principal_hex: &str,
+        ip: std::net::IpAddr,
+    ) -> Result<Option<bool>, crate::store::RiskStoreError> {
+        match networks.principal_network_seen(principal_hex, &network_tag(&self.keys, ip))? {
+            Some(true) => Ok(Some(true)),
+            Some(false) => {
+                for legacy in legacy_network_buckets(ip) {
+                    if networks.principal_network_seen(principal_hex, &legacy)? == Some(true) {
+                        return Ok(Some(true));
+                    }
+                }
+                Ok(Some(false))
+            }
+            None => Ok(None),
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn first_attempt_evidence(
         &self,
@@ -1690,7 +1720,6 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
                 (&self.principal_networks, &observation.principal_id)
             {
                 let principal_hex = hex::encode(principal);
-                let network = network_bucket(ctx.source_ip);
                 let asn = self.asn_bucket_of(&ctx.source_ip);
                 // Each probe is judged on its own result, and a store
                 // error arms the fail-closed flag instead of reading as
@@ -1708,13 +1737,17 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
                         }
                     }
                 };
-                let net_seen = match networks.principal_network_seen(&principal_hex, &network) {
-                    Ok(seen) => seen,
-                    Err(_) => {
-                        evidence_unavailable = true;
-                        Some(false)
-                    }
-                };
+                // The stored tag first, then the bucket spelling as the
+                // legacy form: history recorded under the legacy form
+                // still vouches for this network.
+                let net_seen =
+                    match self.network_seen(networks.as_ref(), &principal_hex, ctx.source_ip) {
+                        Ok(seen) => seen,
+                        Err(_) => {
+                            evidence_unavailable = true;
+                            Some(false)
+                        }
+                    };
                 let trusted = match networks.principal_has_trusted_network(&principal_hex) {
                     Ok(trusted) => trusted,
                     Err(_) => {
@@ -2246,16 +2279,19 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
 
     /// Registers one authentication failure against the target
     /// dimension (the outcome-bridge write path of target-account
-    /// protection). Fails closed: a store error surfaces, never a silent
-    /// drop.
+    /// protection), deduped by the report's event id: a redelivered
+    /// report is a no-op, so the leaky counter can never be inflated by
+    /// a retry. An empty event id books one failure per call. Fails
+    /// closed: a store error surfaces, never a silent drop.
     pub(crate) fn register_target_failure(
         &self,
         target_id: &str,
         source: &str,
         asn: &str,
+        event_id: &str,
     ) -> Result<(), RiskError> {
         self.store
-            .register_target_failure(target_id, source, asn)
+            .register_target_failure_once(target_id, source, asn, event_id)
             .map_err(|e| RiskError::Store(e.to_string()))?;
         Ok(())
     }
@@ -2544,10 +2580,70 @@ fn drop_quarantine_on_escalation(decision: RiskDecision) -> RiskDecision {
 
 /// The network bucket of a source address for the novel-network gate
 /// (P0-1): the IPv4 address itself, or the IPv6 /64 prefix. Stable,
-/// deployment-neutral spelling (family byte + masked packed bytes, hex)
-/// so both cores key the same bucket for the same address.
+/// deployment-neutral spelling (family byte + masked packed bytes at
+/// their natural width, hex) so both cores key the same bucket for the
+/// same address. [`RiskEngine::network_seen`] reads this spelling on a
+/// tag miss, so history recorded under it keeps vouching.
 fn network_bucket(ip: std::net::IpAddr) -> String {
     hex::encode(crate::identity::masked_network(ip, 32, 64))
+}
+
+/// The bucket spellings the gate reads as the legacy field form: the
+/// canonical spelling, plus the truncated IPv6 /64 spelling the earlier
+/// PHP engine wrote (family byte plus the eight prefix bytes). Both
+/// cores read both spellings, so a deployment that switched cores keeps
+/// its IPv6 history.
+fn legacy_network_buckets(ip: std::net::IpAddr) -> Vec<String> {
+    let canonical = network_bucket(ip);
+    if canonical.len() == 34 {
+        return vec![canonical.clone(), canonical[..18].to_string()];
+    }
+    vec![canonical]
+}
+
+/// Purpose label of the network-tag key derivation: HMAC-ing this label
+/// under the master-derived source key yields the network-tag purpose
+/// key, independent of every identity pseudonym derivation.
+pub(crate) const NETWORK_TAG_KEY_LABEL: &[u8] = b"kiwi-risk-network-tag-key-v1";
+
+/// Purpose label of the network-tag HMAC over the bucket spelling. The
+/// label is domain separation: the same bucket under another purpose
+/// derives a different value.
+pub(crate) const NETWORK_TAG_LABEL: &[u8] = b"kiwi-risk-network-tag-v1";
+
+/// The stable network-tag pseudonym of a source address for the
+/// novel-network gate: a purpose-separated HMAC-SHA256 under a key
+/// derived from the deployment risk master secret, over the bucket
+/// spelling (the full IPv4 address, or the IPv6 /64). This is the field
+/// the writer records and every gate read probes, so the store never
+/// holds the address in a reversible encoding.
+///
+/// The derivation is byte-identical with the PHP
+/// `AdaptiveRiskEngine::networkTag()`. The purpose key is the
+/// HMAC-SHA256 over the label "kiwi-risk-network-tag-key-v1", keyed by
+/// K_source. The tag is the lowercase hex of the HMAC-SHA256 over the
+/// label "kiwi-risk-network-tag-v1", a 0x00 separator and the bucket
+/// spelling, keyed by the purpose key.
+///
+/// K_source is the master-derived source identity key, so the key
+/// material comes from the deployment secret and never from a constant.
+/// The tag is stable across epochs by design: the gate compares one
+/// bucket across time, so the epoch-scoped identity pseudonyms cannot
+/// serve as the stored form.
+pub fn network_tag(keys: &RiskKeys, ip: std::net::IpAddr) -> String {
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+    type HmacSha256 = Hmac<Sha256>;
+    let mut key_mac =
+        HmacSha256::new_from_slice(&keys.source).expect("HMAC accepts any key length");
+    key_mac.update(NETWORK_TAG_KEY_LABEL);
+    let purpose_key = key_mac.finalize().into_bytes();
+    let mut tag_mac =
+        HmacSha256::new_from_slice(&purpose_key).expect("HMAC accepts any key length");
+    tag_mac.update(NETWORK_TAG_LABEL);
+    tag_mac.update(b"\0");
+    tag_mac.update(network_bucket(ip).as_bytes());
+    hex::encode(tag_mac.finalize().into_bytes())
 }
 
 pub(crate) fn now_ms() -> u64 {
@@ -2639,7 +2735,7 @@ mod tests {
     use crate::action::RiskAction;
     use crate::calibration::CalibrationStore;
     use crate::event::RiskEventKind;
-    use crate::network::{CidrEntry, CidrNetworkClassifier, NetworkFlags};
+    use crate::network::{CidrEntry, CidrNetworkClassifier, NetworkClassifier, NetworkFlags};
     use crate::policy::RiskPolicy;
     use crate::resources::ResourcePressure;
     use crate::signals::SignalVector;
@@ -2675,6 +2771,31 @@ mod tests {
 
     fn keys() -> RiskKeys {
         RiskKeys::from_master(&[0x42; 32])
+    }
+
+    #[test]
+    fn saturations_keep_the_frozen_lua_argv_order() {
+        // The Lua script indexes argv[8..18] by position: a reorder here
+        // silently feeds one channel's saturation into another. Pin the
+        // documented order rather than the field-name mapping.
+        let custom = Saturations {
+            src_fast: 1,
+            src_slow: 2,
+            issue: 3,
+            bad: 4,
+            mal: 5,
+            rep: 6,
+            action: 7,
+            switch: 8,
+            global: 9,
+            trust: 10,
+            principal: 11,
+        };
+        assert_eq!(custom.to_arg_order(), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
+        assert_eq!(
+            Saturations::default().to_arg_order(),
+            [8000, 100000, 6000, 4000, 3000, 2000, 6000, 10000, 70000, 10000, 10000]
+        );
     }
 
     #[test]
@@ -3167,7 +3288,7 @@ mod tests {
     /// hard-denying.
     #[test]
     fn v2_honeypot_evidence_raises_the_score_but_never_denies_alone() {
-        let engine = RiskEngine::new(V2FirstTagStore::default(), classifier(), policy(), keys());
+        let engine = RiskEngine::new(V2FirstTagStore::default(), policy(), keys());
         let clean = engine.assess_pre_issue(context(), None).unwrap();
         assert_eq!(clean.score, 100);
         assert_eq!(clean.action, RiskAction::Allow);
@@ -3175,7 +3296,7 @@ mod tests {
         // A fresh engine (no scope-action hysteresis memory): the plain
         // band mapping applies — 300 maps to Sha18 (a stronger profile is
         // selected, never a hard denial).
-        let fresh = RiskEngine::new(V2FirstTagStore::default(), classifier(), policy(), keys());
+        let fresh = RiskEngine::new(V2FirstTagStore::default(), policy(), keys());
         let hit = fresh
             .assess_pre_issue_v2(context(), &v2_context(true, None, None), None, None)
             .unwrap();
@@ -3204,7 +3325,7 @@ mod tests {
     /// even without an explicit context flag.
     #[test]
     fn v2_honeypot_event_kinds_derive_the_signal() {
-        let engine = RiskEngine::new(V2FirstTagStore::default(), classifier(), policy(), keys());
+        let engine = RiskEngine::new(V2FirstTagStore::default(), policy(), keys());
         for kind in [
             RiskEventKind::HoneypotTriggered,
             RiskEventKind::DecoyEndpointTouched,
@@ -3229,7 +3350,7 @@ mod tests {
     /// absent tag (first request) is neutral.
     #[test]
     fn v2_session_client_context_consistency() {
-        let engine = RiskEngine::new(V2FirstTagStore::default(), classifier(), policy(), keys());
+        let engine = RiskEngine::new(V2FirstTagStore::default(), policy(), keys());
         // A 16-byte session material: the decoded-cookie contract length.
         let session: &[u8; 16] = &[0x31u8; 16];
         let with_session = |_tag: &str| RiskContext {
@@ -3277,7 +3398,7 @@ mod tests {
     /// empty context.
     #[test]
     fn v2_absent_tag_and_empty_context_are_neutral() {
-        let engine = RiskEngine::new(V2FirstTagStore::default(), classifier(), policy(), keys());
+        let engine = RiskEngine::new(V2FirstTagStore::default(), policy(), keys());
         let plain = engine.assess_pre_issue(context(), None).unwrap();
         let empty = engine
             .assess_pre_issue_v2(context(), &v2_context(false, None, None), None, None)
@@ -3304,7 +3425,7 @@ mod tests {
     /// aggregate; an absent tag (first request) is neutral.
     #[test]
     fn v2_tls_consistency() {
-        let engine = RiskEngine::new(V2FirstTagStore::default(), classifier(), policy(), keys());
+        let engine = RiskEngine::new(V2FirstTagStore::default(), policy(), keys());
         let session: &[u8; 16] = &[0x32u8; 16];
         let with_session = |_tag: &str| RiskContext {
             session_id: Some(session),
@@ -3354,7 +3475,7 @@ mod tests {
     /// signal (neutral).
     #[test]
     fn v2_absent_or_overbound_tls_tag_is_neutral() {
-        let engine = RiskEngine::new(V2FirstTagStore::default(), classifier(), policy(), keys());
+        let engine = RiskEngine::new(V2FirstTagStore::default(), policy(), keys());
         let session: &[u8; 16] = &[0x33u8; 16];
 
         let first = engine
@@ -3427,7 +3548,7 @@ mod tests {
     /// only the weighted contribution.
     #[test]
     fn v2_weights_override_tunes_the_additive_factors() {
-        let engine = RiskEngine::new(V2FirstTagStore::default(), classifier(), policy(), keys());
+        let engine = RiskEngine::new(V2FirstTagStore::default(), policy(), keys());
 
         // Null override: the default weights apply (100 + 1000*200/1000 = 300).
         let default = engine
@@ -3593,7 +3714,7 @@ mod tests {
             observe_calls.clone(),
             register_calls.clone(),
         );
-        let engine = RiskEngine::new(store, classifier(), policy(), keys());
+        let engine = RiskEngine::new(store, policy(), keys());
         let session: [u8; 16] = [0x34u8; 16];
 
         // Prime: the first assessment records the session tag records and
@@ -3676,7 +3797,7 @@ mod tests {
             },
             2,
         );
-        let engine = RiskEngine::new(store, classifier(), policy(), keys());
+        let engine = RiskEngine::new(store, policy(), keys());
         let decision = engine.assess_pre_issue(context(), None).unwrap();
         assert_eq!(decision.score, 195); // 100 + weighted(500, 190)
         assert_eq!(decision.action, RiskAction::Sha18); // band Sha16 raised by global floor 2
@@ -3697,7 +3818,7 @@ mod tests {
     /// flip-flopping challenge profile.
     #[test]
     fn scope_action_hysteresis_stabilizes_oscillating_boundary_scores() {
-        let engine = RiskEngine::new(OscillatingStore::default(), classifier(), policy(), keys());
+        let engine = RiskEngine::new(OscillatingStore::default(), policy(), keys());
         for i in 0..8 {
             let decision = engine.assess_pre_issue(context(), None).unwrap();
             assert_eq!(
@@ -3729,12 +3850,7 @@ mod tests {
         let legit: [u8; 16] = [0x41; 16];
         let bot: [u8; 16] = [0xB0; 16];
         let fresh: [u8; 16] = [0x42; 16];
-        let engine = RiskEngine::new(
-            PerClientScoreStore::new(bot_pseudonym),
-            classifier(),
-            policy(),
-            keys(),
-        );
+        let engine = RiskEngine::new(PerClientScoreStore::new(bot_pseudonym), policy(), keys());
 
         // The legitimate client establishes an Allow history.
         let first = engine.assess_pre_issue(with_session(&legit), None).unwrap();
@@ -3769,7 +3885,7 @@ mod tests {
                 ..context()
             }
         }
-        let engine = RiskEngine::new(OscillatingStore::default(), classifier(), policy(), keys());
+        let engine = RiskEngine::new(OscillatingStore::default(), policy(), keys());
 
         // Source A: 449 -> Sha18 (its own fresh entry).
         let first = engine
@@ -3813,7 +3929,7 @@ mod tests {
     #[test]
     fn observation_carries_epoch_scoped_pseudonyms() {
         let store = CapturingStore(Mutex::new(Vec::new()), OutcomeLedger::default());
-        let engine = RiskEngine::new(store, classifier(), policy(), keys());
+        let engine = RiskEngine::new(store, policy(), keys());
         engine.assess_pre_issue(context(), None).unwrap();
 
         let captured = engine.store.0.lock().unwrap();
@@ -3843,7 +3959,7 @@ mod tests {
     #[test]
     fn idempotency_key_becomes_the_normalized_event_id() {
         let store = CapturingStore(Mutex::new(Vec::new()), OutcomeLedger::default());
-        let engine = RiskEngine::new(store, classifier(), policy(), keys());
+        let engine = RiskEngine::new(store, policy(), keys());
         let decision = engine
             .assess_pre_issue(context(), Some("deadbeef".to_string()))
             .unwrap();
@@ -3866,7 +3982,6 @@ mod tests {
         // wrapper) must never collide with the PreIssue dedupe id.
         let engine2 = RiskEngine::new(
             CapturingStore(Mutex::new(Vec::new()), OutcomeLedger::default()),
-            classifier(),
             policy(),
             keys(),
         );
@@ -3887,7 +4002,7 @@ mod tests {
     #[test]
     fn oversized_idempotency_key_errors() {
         let store = MockStore::new(SignalVector::zero(), 0);
-        let engine = RiskEngine::new(store, classifier(), policy(), keys());
+        let engine = RiskEngine::new(store, policy(), keys());
         let long = "x".repeat(4097);
         assert_eq!(
             engine.assess_pre_issue(context(), Some(long)),
@@ -3923,7 +4038,6 @@ mod tests {
         let store = MockStore::new(SignalVector::zero(), 0);
         let engine = RiskEngine::with_components(
             store,
-            classifier(),
             policy(),
             keys(),
             breaker::CircuitBreaker::default(),
@@ -4080,7 +4194,6 @@ mod tests {
         assert!(limiter.allow(), "burn the single admission");
         let engine = RiskEngine::with_components(
             store,
-            classifier(),
             policy(),
             keys(),
             breaker::CircuitBreaker::default(),
@@ -4110,7 +4223,6 @@ mod tests {
         let store = MockStore::failing();
         let engine = RiskEngine::with_components(
             store,
-            classifier(),
             policy(),
             keys(),
             breaker::CircuitBreaker::new(2, 60_000),
@@ -4145,7 +4257,6 @@ mod tests {
         assert!(limiter.allow(), "burn the single admission");
         let engine = RiskEngine::with_components(
             store,
-            classifier(),
             policy(),
             keys(),
             breaker::CircuitBreaker::default(),
@@ -4164,7 +4275,6 @@ mod tests {
         let store = MockStore::failing();
         let engine = RiskEngine::with_components(
             store,
-            classifier(),
             policy(),
             keys(),
             breaker::CircuitBreaker::new(2, 60_000),
@@ -4207,7 +4317,6 @@ mod tests {
         let store = MockStore::failing();
         let engine = RiskEngine::with_components(
             store,
-            classifier(),
             policy(),
             keys(),
             breaker::CircuitBreaker::new(2, 60_000),
@@ -4236,12 +4345,7 @@ mod tests {
 
     #[test]
     fn client_context_tag_is_bounded_to_64_bytes_fail_closed() {
-        let engine = RiskEngine::new(
-            MockStore::new(SignalVector::zero(), 0),
-            classifier(),
-            policy(),
-            keys(),
-        );
+        let engine = RiskEngine::new(MockStore::new(SignalVector::zero(), 0), policy(), keys());
 
         // 64 bytes: accepted.
         let ok = engine
@@ -4294,7 +4398,6 @@ mod tests {
         let store = MockStore::failing_then_ok(2);
         let engine = RiskEngine::with_components(
             store,
-            classifier(),
             policy(),
             keys(),
             breaker::CircuitBreaker::new(2, 50),
@@ -4316,7 +4419,7 @@ mod tests {
     #[test]
     fn record_feedback_maps_events_without_limiter_or_assess() {
         let store = CapturingStore(Mutex::new(Vec::new()), OutcomeLedger::default());
-        let engine = RiskEngine::new(store, classifier(), policy(), keys());
+        let engine = RiskEngine::new(store, policy(), keys());
         let ctx = |event| {
             RiskContext::new(
                 1,
@@ -4429,7 +4532,7 @@ mod tests {
     #[test]
     fn new_events_record_through_wrappers_without_limiter_or_assess() {
         let store = CapturingStore(Mutex::new(Vec::new()), OutcomeLedger::default());
-        let engine = RiskEngine::new(store, classifier(), policy(), keys());
+        let engine = RiskEngine::new(store, policy(), keys());
         let ctx = |event| {
             RiskContext::new(
                 1,
@@ -4487,7 +4590,7 @@ mod tests {
     #[test]
     fn decision_json_serialization() {
         let store = MockStore::new(SignalVector::zero(), 0);
-        let engine = RiskEngine::new(store, classifier(), policy(), keys());
+        let engine = RiskEngine::new(store, policy(), keys());
         let decision = engine.assess_pre_issue(context(), None).unwrap();
         let json = serde_json::to_value(&decision).unwrap();
         assert_eq!(json["action"], "allow");
@@ -4499,7 +4602,7 @@ mod tests {
     #[test]
     fn serialization_omits_decision_id() {
         let store = MockStore::new(SignalVector::zero(), 0);
-        let engine = RiskEngine::new(store, classifier(), policy(), keys());
+        let engine = RiskEngine::new(store, policy(), keys());
         let decision = engine.assess_pre_issue(context(), None).unwrap();
         // The struct still carries the id (used by record_receipt)...
         assert_eq!(decision.decision_id.len(), 32);
@@ -4513,7 +4616,7 @@ mod tests {
         // policy_version, model_revision, global_level, retry_after_ms,
         // band.
         assert_eq!(json.as_object().unwrap().len(), 9);
-        assert_eq!(json["model_revision"], 18);
+        assert_eq!(json["model_revision"], 19);
     }
 
     #[test]
@@ -4527,7 +4630,7 @@ mod tests {
             },
             0,
         );
-        let engine = RiskEngine::new(store, classifier(), policy(), keys());
+        let engine = RiskEngine::new(store, policy(), keys());
         let decision = engine.assess_pre_issue(context(), None).unwrap();
         assert_eq!(decision.action, RiskAction::Deny);
         let reasons = decision.reasons_vec();
@@ -4644,8 +4747,7 @@ mod tests {
     fn calibration_bias_applies_to_base_before_band_mapping() {
         let store = MockStore::new(SignalVector::zero(), 0);
         let cal = static_calibration(60, 1);
-        let engine =
-            RiskEngine::new(store, classifier(), policy(), keys()).with_calibration(cal.clone());
+        let engine = RiskEngine::new(store, policy(), keys()).with_calibration(cal.clone());
         let decision = engine.assess_pre_issue(context(), None).unwrap();
         // base 100 + bias 60 = 160 -> band 1, score 160.
         assert_eq!(decision.score, 160);
@@ -4669,8 +4771,7 @@ mod tests {
     fn confirmed_outcome_consumes_receipt_and_records() {
         let store = MockStore::new(SignalVector::zero(), 0);
         let cal = static_calibration(0, 1);
-        let engine =
-            RiskEngine::new(store, classifier(), policy(), keys()).with_calibration(cal.clone());
+        let engine = RiskEngine::new(store, policy(), keys()).with_calibration(cal.clone());
         let ctx = RiskContext::new(
             1,
             "203.0.113.27".parse().unwrap(),
@@ -4701,8 +4802,7 @@ mod tests {
         // status 0 (missing/already confirmed) -> NO reputation event, and
         // the receipt reports the outcome as a no-op.
         let cal = static_calibration(0, 0);
-        let engine =
-            RiskEngine::new(store, classifier(), policy(), keys()).with_calibration(cal.clone());
+        let engine = RiskEngine::new(store, policy(), keys()).with_calibration(cal.clone());
         let ctx = RiskContext::new(
             1,
             "203.0.113.27".parse().unwrap(),
@@ -4729,8 +4829,7 @@ mod tests {
     fn engine_confirm_outcome_delegates_and_validates() {
         let store = MockStore::new(SignalVector::zero(), 0);
         let cal = static_calibration(0, 1);
-        let engine =
-            RiskEngine::new(store, classifier(), policy(), keys()).with_calibration(cal.clone());
+        let engine = RiskEngine::new(store, policy(), keys()).with_calibration(cal.clone());
         assert_eq!(
             engine.confirm_outcome("", true, None),
             Err(RiskError::EmptyDecisionId)
@@ -4748,12 +4847,7 @@ mod tests {
         );
         // Without a calibration store the always-on ledger is flipped by
         // the store: an unknown decision is status 0 (never an error).
-        let plain = RiskEngine::new(
-            MockStore::new(SignalVector::zero(), 0),
-            classifier(),
-            policy(),
-            keys(),
-        );
+        let plain = RiskEngine::new(MockStore::new(SignalVector::zero(), 0), policy(), keys());
         assert_eq!(plain.confirm_outcome("decision-z", true, None).unwrap(), 0);
         // A registered decision confirms through the store exactly once.
         assert!(plain
@@ -4767,7 +4861,7 @@ mod tests {
     #[test]
     fn confirmed_outcomes_require_a_decision_id() {
         let store = MockStore::new(SignalVector::zero(), 0);
-        let engine = RiskEngine::new(store, classifier(), policy(), keys());
+        let engine = RiskEngine::new(store, policy(), keys());
         let ctx = |event| {
             RiskContext::new(
                 1,
@@ -4817,8 +4911,7 @@ mod tests {
         // The mock models a live receipt: the first confirm returns status 1
         // (recorded), every retry returns 0 (already consumed).
         let cal = static_calibration(0, 1);
-        let engine =
-            RiskEngine::new(store, classifier(), policy(), keys()).with_calibration(cal.clone());
+        let engine = RiskEngine::new(store, policy(), keys()).with_calibration(cal.clone());
         let ctx = |event| {
             RiskContext::new(
                 1,
@@ -4875,8 +4968,7 @@ mod tests {
         // untouched (the calibration.rs suite asserts the bucket stays
         // empty for status 2).
         let cal = static_calibration(0, 2);
-        let engine =
-            RiskEngine::new(store, classifier(), policy(), keys()).with_calibration(cal.clone());
+        let engine = RiskEngine::new(store, policy(), keys()).with_calibration(cal.clone());
         let ctx = RiskContext::new(
             1,
             "203.0.113.27".parse().unwrap(),
@@ -4900,8 +4992,7 @@ mod tests {
     fn confirm_correction_flips_the_ledger_through_the_calibrator() {
         let store = CapturingStore(Mutex::new(Vec::new()), OutcomeLedger::default());
         let cal = static_calibration(0, 1);
-        let engine =
-            RiskEngine::new(store, classifier(), policy(), keys()).with_calibration(cal.clone());
+        let engine = RiskEngine::new(store, policy(), keys()).with_calibration(cal.clone());
 
         // Empty decision id is rejected up front.
         assert_eq!(
@@ -4944,7 +5035,7 @@ mod tests {
         // flip it through the store: ConfirmedLegitimate/ConfirmedAbuse
         // work identically with or without calibration.
         let store = MockStore::new(SignalVector::zero(), 0);
-        let engine = RiskEngine::new(store, classifier(), policy(), keys());
+        let engine = RiskEngine::new(store, policy(), keys());
         let ctx = |event| {
             RiskContext::new(
                 1,
@@ -5011,7 +5102,7 @@ mod tests {
     #[test]
     fn record_feedback_rejects_confirmation_events() {
         let store = MockStore::new(SignalVector::zero(), 0);
-        let engine = RiskEngine::new(store, classifier(), policy(), keys());
+        let engine = RiskEngine::new(store, policy(), keys());
         let ctx = |event| {
             RiskContext::new(
                 1,
@@ -5073,7 +5164,7 @@ mod tests {
             ::redis::Client::open(url.clone()).expect("url parses"),
             &format!("led{}", hex::encode(suffix)),
         );
-        let engine = RiskEngine::new(store, classifier(), policy(), keys());
+        let engine = RiskEngine::new(store, policy(), keys());
 
         // Decision time registers the pending ledger (no calibration!).
         let decision = engine
@@ -5164,7 +5255,6 @@ mod tests {
         );
         let engine = RiskEngine::with_components(
             store,
-            classifier(),
             policy(),
             keys(),
             breaker::CircuitBreaker::default(),
@@ -5199,7 +5289,6 @@ mod tests {
         // deny even though the store reported level 4 + a future hold).
         let engine = RiskEngine::new(
             MockStore::with_cooldown(vector, 4, now + 5_000),
-            classifier(),
             policy(),
             keys(),
         )
@@ -5215,7 +5304,6 @@ mod tests {
         // deny, and the pressure signal contributes to the score.
         let engine = RiskEngine::new(
             MockStore::with_cooldown(vector, 4, now + 5_000),
-            classifier(),
             policy(),
             keys(),
         );
@@ -5247,7 +5335,7 @@ mod tests {
         let store = redis::RedisRiskStateStore::new(client, &format!("e2e{}", hex::encode(suffix)));
         let classifier = classifier();
         let flags = classifier.classify("203.0.113.27".parse().unwrap());
-        let engine = RiskEngine::new(store, classifier, policy(), keys());
+        let engine = RiskEngine::new(store, policy(), keys());
 
         let mut ctx = context();
         ctx.network_flags = flags;
@@ -5328,18 +5416,11 @@ mod tests {
         );
 
         // Blocked sources still hard-deny through the same policy override.
-        let blocked_classifier = CidrNetworkClassifier::from_entries(vec![(
-            CidrEntry::parse("203.0.113.0/24").unwrap(),
-            NetworkFlags {
-                local_risk_bucket: 255,
-                ..Default::default()
-            },
-        )]);
         let blocked_store = redis::RedisRiskStateStore::new(
             ::redis::Client::open(url).expect("url parses"),
             &format!("e2eb{}", hex::encode(suffix)),
         );
-        let blocked_engine = RiskEngine::new(blocked_store, blocked_classifier, policy(), keys());
+        let blocked_engine = RiskEngine::new(blocked_store, policy(), keys());
         let mut blocked_ctx = context();
         blocked_ctx.network_flags = NetworkFlags {
             local_risk_bucket: 255,
@@ -5395,7 +5476,6 @@ mod tests {
         let session = [0x33u8; 16];
         let plain_engine = RiskEngine::with_components(
             MockStore::new(SignalVector::zero(), 0),
-            classifier(),
             policy(),
             keys(),
             breaker::CircuitBreaker::default(),
@@ -5420,7 +5500,6 @@ mod tests {
         });
         let wired = RiskEngine::with_components(
             MockStore::new(SignalVector::zero(), 0),
-            classifier(),
             policy(),
             keys(),
             breaker::CircuitBreaker::default(),
@@ -5431,7 +5510,7 @@ mod tests {
         // assessment floors at the maximum rung with its reason, while the
         // unwired engine keeps the plain action for the same request.
         let escalated = wired.assess_pre_issue(ctx(), None).unwrap();
-        assert_eq!(escalated.action, RiskAction::Argon64);
+        assert_eq!(escalated.action, RiskAction::Rsw);
         assert!(escalated.has_reason(RiskReason::MarkedIdentity));
         let untouched = plain_engine.assess_pre_issue(ctx(), None).unwrap();
         assert_eq!(untouched.action, RiskAction::Allow);
@@ -5443,5 +5522,297 @@ mod tests {
         assert_eq!(session_id.len(), 32);
         assert!(session_id.bytes().all(|b| b.is_ascii_hexdigit()));
         assert_ne!(session_id, hex::encode(session));
+    }
+
+    /// The in-memory principal-network tag store of the network-tag
+    /// tests: seen-ness and the trust mirrors, with the network-class
+    /// trust probe of the canonical script (a bare-hex field counts,
+    /// like the net and asn classes).
+    #[derive(Default)]
+    struct NetworkTagFake {
+        tags: Mutex<HashMap<String, Vec<String>>>,
+        trusted: Mutex<HashMap<String, Vec<String>>>,
+    }
+
+    impl NetworkTagFake {
+        fn seed(&self, principal: &str, tag: &str, trusted: bool) {
+            self.tags
+                .lock()
+                .unwrap()
+                .entry(principal.to_string())
+                .or_default()
+                .push(tag.to_string());
+            if trusted {
+                self.trusted
+                    .lock()
+                    .unwrap()
+                    .entry(principal.to_string())
+                    .or_default()
+                    .push(tag.to_string());
+            }
+        }
+
+        fn seen(&self, principal: &str, tag: &str) -> bool {
+            self.tags
+                .lock()
+                .unwrap()
+                .get(principal)
+                .is_some_and(|tags| tags.iter().any(|t| t == tag))
+        }
+
+        fn trusted(&self, principal: &str, tag: &str) -> bool {
+            self.trusted
+                .lock()
+                .unwrap()
+                .get(principal)
+                .is_some_and(|tags| tags.iter().any(|t| t == tag))
+        }
+    }
+
+    impl crate::store::PrincipalNetworkTagStore for NetworkTagFake {
+        fn principal_network_seen(
+            &self,
+            principal_id: &str,
+            network: &str,
+        ) -> Result<Option<bool>, RiskStoreError> {
+            Ok(Some(self.seen(principal_id, network)))
+        }
+
+        fn record_principal_network_tag(
+            &self,
+            principal_id: &str,
+            network: &str,
+            trusted: bool,
+        ) -> Result<bool, RiskStoreError> {
+            let is_new = !self.seen(principal_id, network);
+            self.seed(principal_id, network, trusted);
+            Ok(is_new)
+        }
+
+        fn principal_has_trusted_network(
+            &self,
+            principal_id: &str,
+        ) -> Result<Option<bool>, RiskStoreError> {
+            Ok(Some(
+                self.trusted
+                    .lock()
+                    .unwrap()
+                    .get(principal_id)
+                    .is_some_and(|tags| !tags.is_empty()),
+            ))
+        }
+
+        fn tag_is_trusted(
+            &self,
+            principal_id: &str,
+            network: &str,
+        ) -> Result<Option<bool>, RiskStoreError> {
+            Ok(Some(self.trusted(principal_id, network)))
+        }
+    }
+
+    /// The shared derivation vectors, master 0x42 x 32. The PHP suite
+    /// (packages/kiwicaptcha-risk-php/tests/NetworkTagVectorsTest.php)
+    /// pins these identical literals, so one master and one bucket
+    /// derive one tag in both cores.
+    #[test]
+    fn network_tag_matches_the_php_reference_vectors() {
+        let keys = keys();
+        assert_eq!(
+            network_tag(&keys, "198.51.100.42".parse().unwrap()),
+            "0221669a302689e99be2e6f1bf3d478e66282fef0f213da4160c957ff16ccac2",
+            "the IPv4 tag vector",
+        );
+        assert_eq!(
+            network_tag(&keys, "127.0.0.1".parse().unwrap()),
+            "dd9b709dd17f2084613c9883c1a260c5f3d21783d7f1d2c002f9458aae7fca60",
+            "the loopback tag vector",
+        );
+        assert_eq!(
+            network_tag(
+                &keys,
+                "2001:db8:abcd:1234:5678:9abc:def0:1234".parse().unwrap()
+            ),
+            "9b35f176530031416eaafa5cc4231c82022fc33f65e9889191c13a49f10ba927",
+            "the IPv6 /64 tag vector",
+        );
+        assert_eq!(
+            network_tag(&keys, "2001:db8:abcd:1235::1".parse().unwrap()),
+            "3a6252639aa10f440d109fd571d53c348a25c16969fe63d1113bf82a4f577123",
+            "a second /64 derives a second tag",
+        );
+    }
+
+    #[test]
+    fn network_tag_is_stable_purpose_separated_and_not_the_bucket() {
+        let keys = keys();
+        let ip: std::net::IpAddr = "198.51.100.42".parse().unwrap();
+        let tag = network_tag(&keys, ip);
+        assert_eq!(
+            tag.len(),
+            64,
+            "the tag is 32 raw bytes of HMAC-SHA256 as hex"
+        );
+        assert!(tag
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit()));
+        assert_eq!(tag, network_tag(&keys, ip), "the derivation is stable");
+        assert_ne!(
+            tag,
+            network_bucket(ip),
+            "the tag is not the bucket spelling"
+        );
+        // Two hosts of one IPv6 /64 share the tag; another /64 differs.
+        let home: std::net::IpAddr = "2001:db8:abcd:1234:5678:9abc:def0:1234".parse().unwrap();
+        let sibling: std::net::IpAddr = "2001:db8:abcd:1234:ffff:ffff:ffff:ffff".parse().unwrap();
+        let other: std::net::IpAddr = "2001:db8:abcd:1235::1".parse().unwrap();
+        assert_eq!(
+            network_tag(&keys, home),
+            network_tag(&keys, sibling),
+            "the /64 granularity is preserved: siblings share the tag",
+        );
+        assert_ne!(network_tag(&keys, home), network_tag(&keys, other));
+        // Another master derives another tag: the key is deployment
+        // key material, never a constant.
+        assert_ne!(tag, network_tag(&RiskKeys::from_master(&[0x11; 32]), ip));
+        // The legacy spellings: the canonical bucket, plus the truncated
+        // IPv6 /64 spelling for an IPv6 address.
+        assert_eq!(legacy_network_buckets(ip), vec!["04c633642a".to_string()]);
+        assert_eq!(
+            legacy_network_buckets(home),
+            vec![
+                "0620010db8abcd12340000000000000000".to_string(),
+                "0620010db8abcd1234".to_string(),
+            ],
+        );
+    }
+
+    fn network_tag_engine(
+        networks: std::sync::Arc<NetworkTagFake>,
+        novelty: NoveltyEnforcement,
+    ) -> (RiskEngine<MockStore>, [u8; 16], String) {
+        let principal = [0xf6u8; 16];
+        let principal_hex = hex::encode(RiskIdentityFactory::new(keys()).principal_id(&principal));
+        let engine = RiskEngine::new(MockStore::new(SignalVector::zero(), 0), policy(), keys())
+            .with_principal_networks(networks)
+            .with_novelty_enforcement(novelty);
+        (engine, principal, principal_hex)
+    }
+
+    fn login_ctx_for(ip: std::net::IpAddr, principal: &[u8; 16]) -> RiskContext<'_> {
+        RiskContext::new(
+            1,
+            ip,
+            None,
+            Some(principal),
+            RiskEventKind::AuthenticationSuccess,
+            NetworkFlags::default(),
+            ResourcePressure::default(),
+        )
+    }
+
+    /// The writer's stored shape: an Allow records the stable tag with
+    /// the trust mirror, and the bucket spelling is never a stored
+    /// field.
+    #[test]
+    fn the_allow_record_stores_the_tag_and_never_the_bucket() {
+        let networks = std::sync::Arc::new(NetworkTagFake::default());
+        let (engine, principal, principal_hex) =
+            network_tag_engine(networks.clone(), NoveltyEnforcement::Learn);
+        let ip: std::net::IpAddr = "127.0.0.1".parse().unwrap();
+
+        let decision = engine
+            .reassess(login_ctx_for(ip, &principal), Some("tag-store".to_string()))
+            .expect("assess succeeds");
+        assert_eq!(
+            decision.action,
+            RiskAction::Allow,
+            "learn mode allows the first login"
+        );
+
+        let tag = network_tag(&keys(), ip);
+        assert_eq!(
+            tag, "dd9b709dd17f2084613c9883c1a260c5f3d21783d7f1d2c002f9458aae7fca60",
+            "the recorded tag is the pinned loopback tag",
+        );
+        assert!(
+            networks.seen(&principal_hex, &tag),
+            "the Allow records the tag"
+        );
+        assert!(
+            networks.trusted(&principal_hex, &tag),
+            "the record mints the trust mirror"
+        );
+        assert!(
+            !networks.seen(&principal_hex, "047f000001"),
+            "the loopback bucket spelling is never a stored field",
+        );
+    }
+
+    /// The upgrade path: a field recorded under the legacy bucket
+    /// spelling still answers seen, and the next Allow rewrites the
+    /// network under the tag.
+    #[test]
+    fn legacy_bucket_history_answers_seen_and_is_rewritten_under_the_tag() {
+        let networks = std::sync::Arc::new(NetworkTagFake::default());
+        let (engine, principal, principal_hex) =
+            network_tag_engine(networks.clone(), NoveltyEnforcement::Enforce);
+        let ip: std::net::IpAddr = "10.1.2.3".parse().unwrap();
+        let legacy = network_bucket(ip);
+        networks.seed(&principal_hex, &legacy, true);
+
+        let decision = engine
+            .reassess(login_ctx_for(ip, &principal), Some("legacy-1".to_string()))
+            .expect("assess succeeds");
+        assert_eq!(
+            decision.action,
+            RiskAction::Allow,
+            "the legacy field still vouches for the login",
+        );
+        assert!(
+            !decision.has_reason(RiskReason::NovelNetwork),
+            "the gate answers seen for the legacy bucket spelling",
+        );
+
+        let tag = network_tag(&keys(), ip);
+        assert!(
+            networks.seen(&principal_hex, &tag),
+            "the Allow rewrites the network under the tag"
+        );
+        assert!(
+            networks.trusted(&principal_hex, &tag),
+            "the rewrite mints the trust mirror"
+        );
+    }
+
+    /// The historical truncated IPv6 /64 spelling, which the earlier PHP
+    /// engine wrote, is read as the legacy form by both cores.
+    #[test]
+    fn the_historical_truncated_ipv6_spelling_answers_seen() {
+        let ip: std::net::IpAddr = "2001:db8:abcd:1234:5678:9abc:def0:1234".parse().unwrap();
+        assert_eq!(
+            network_bucket(ip),
+            "0620010db8abcd12340000000000000000",
+            "the canonical /64 spelling pads the masked bytes to full width",
+        );
+
+        let networks = std::sync::Arc::new(NetworkTagFake::default());
+        let (engine, principal, principal_hex) =
+            network_tag_engine(networks.clone(), NoveltyEnforcement::Enforce);
+        networks.seed(&principal_hex, "0620010db8abcd1234", true);
+
+        let decision = engine
+            .reassess(login_ctx_for(ip, &principal), Some("legacy-v6".to_string()))
+            .expect("assess succeeds");
+        assert_eq!(
+            decision.action,
+            RiskAction::Allow,
+            "the truncated /64 spelling still vouches for the login",
+        );
+        assert!(!decision.has_reason(RiskReason::NovelNetwork));
+        assert!(
+            networks.seen(&principal_hex, &network_tag(&keys(), ip)),
+            "the Allow rewrites the network under the tag",
+        );
     }
 }

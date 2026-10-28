@@ -21,7 +21,6 @@ use kiwicaptcha_risk::context::{RiskContext, RiskV2Context};
 use kiwicaptcha_risk::event::RiskEventKind;
 use kiwicaptcha_risk::keys::RiskKeys;
 use kiwicaptcha_risk::marks::{StoreMarksReader, TARGET_ATTACK_THRESHOLD};
-use kiwicaptcha_risk::network::CidrNetworkClassifier;
 use kiwicaptcha_risk::network::NetworkFlags;
 use kiwicaptcha_risk::outcomes::{KiwiOutcomes, Outcome, OutcomeHandle};
 use kiwicaptcha_risk::policy::{RiskPolicy, RiskReason};
@@ -104,14 +103,9 @@ fn clean_login_against_a_fresh_target_stays_allow() {
         &namespace,
     )
     .with_io_timeouts(2_000, 2_000);
-    let engine = RiskEngine::new(
-        store,
-        CidrNetworkClassifier::from_entries(vec![]),
-        policy(),
-        RiskKeys::from_master(&[0x42; 32]),
-    )
-    .with_target_resolver(resolver())
-    .with_marks_reader(Arc::new(StoreMarksReader::new(Arc::new(marks_store))));
+    let engine = RiskEngine::new(store, policy(), RiskKeys::from_master(&[0x42; 32]))
+        .with_target_resolver(resolver())
+        .with_marks_reader(Arc::new(StoreMarksReader::new(Arc::new(marks_store))));
 
     let fields = [("username", "victim@example.com")];
     let decision = engine
@@ -142,14 +136,9 @@ fn accumulated_target_failures_step_the_next_login_up() {
     };
     let store = build_store();
     let marks_store = build_store();
-    let engine = RiskEngine::new(
-        store,
-        CidrNetworkClassifier::from_entries(vec![]),
-        policy(),
-        RiskKeys::from_master(&[0x42; 32]),
-    )
-    .with_target_resolver(resolver())
-    .with_marks_reader(Arc::new(StoreMarksReader::new(Arc::new(marks_store))));
+    let engine = RiskEngine::new(store, policy(), RiskKeys::from_master(&[0x42; 32]))
+        .with_target_resolver(resolver())
+        .with_marks_reader(Arc::new(StoreMarksReader::new(Arc::new(marks_store))));
 
     let fields = [("username", "victim@example.com")];
 
@@ -225,13 +214,8 @@ fn wide_target_spread_raises_the_numeric_decision() {
     };
     let store = build_store();
     let outcomes_store = build_store();
-    let engine = RiskEngine::new(
-        store,
-        CidrNetworkClassifier::from_entries(vec![]),
-        policy(),
-        RiskKeys::from_master(&[0x42; 32]),
-    )
-    .with_target_resolver(resolver());
+    let engine = RiskEngine::new(store, policy(), RiskKeys::from_master(&[0x42; 32]))
+        .with_target_resolver(resolver());
     let outcomes = KiwiOutcomes::new(&engine, &outcomes_store);
 
     let fields = [("username", "sprayed@example.com")];

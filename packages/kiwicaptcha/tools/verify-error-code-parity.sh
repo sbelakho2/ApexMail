@@ -41,6 +41,14 @@ RUST_VERIFY="$HERE/../src/verify.rs"
 # divergence — the Rust variant exists and carries PHP's
 # telemetry_rejected code; only the variant name differs.)
 DIVERGENCES="
+# required_scope: the Rust core takes the expected scope as a required
+# argument; the missing-argument refusal is an SDK/middleware policy
+# code, not a verifier outcome.
+required_scope
+# token_source_conflict: request-source authority is resolved by the
+# server SDK middleware before the core verifier runs; the core never
+# sees a token source.
+token_source_conflict
 "
 
 fail=0

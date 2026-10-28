@@ -1,0 +1,66 @@
+{
+  "$schema": "kiwicaptcha.solution-token-v1/challenge-response/1",
+  "format_version": 1,
+  "description": "The canonical challenge-response wire fixture: one real /issue body per shape the kiwicaptcha-verifier sidecar emits (plain sha256, plain argon2id, plain rsw, execution-armed), captured from the Rust sidecar exactly as served. The key set and the JSON type of every value are the cross-language contract: the camelCase PoW key set (mKib, targetBits, ttlSecs, minDurationMs) the native solver parses, with the optional security fields on the canonical snake_case spellings the stored-record schema owns (execution_program, execution_version, rsw_modulus) \u2014 never a sidecar-private camelCase dialect (executionProgram/executionVersion), which native clients would silently drop and thereby parse an execution-armed challenge as an unarmed one. The values are one real mint (nonces, salts, programs are server-random per issuance); consumers assert the structural shape (key set plus per-key JSON type), not the random values. Enforced by the Rust fixture test (packages/kiwicaptcha-verifier tests/sidecar.rs challenge_response_wire_matches_the_golden_fixtures) and by tools/ci/challenge-response-parity-check.py.",
+  "shapes": [
+    {
+      "algorithm": "sha256",
+      "challenge": "djR8MnxKWXZCWnltN29HVWRKV1R1d1dqSCtVTWVWU3ovZ2p1dDNXWWN1NVNHWE9rPXxsb2dpbnxlMDY3MzIxNWMwZGNkOTMxYjZhOTNjZTQ4YWNlZTQyNzI1MTBlNGYyN2JiOTk4YWQwMzY1MThjMDEyZGEyNzIxfDE3OTI0NTcxODB8MTc5MjQ1NzMwMHxzaGEyNTZ8MHwwfDF8MTZ8WFlDemowa3M4OEI2WkFvMTYrdHFCZz09fDV8fDF8fHwxfG09MQ==.903ba730739a2f85c9279a240b4ab320092c969121856f29ccbedd13ede55c4b",
+      "mKib": 0,
+      "minDurationMs": 5,
+      "nonce": "JYvBZym7oGUdJWTuwWjH+UMeVSz/gjut3WYcu5SGXOk=",
+      "p": 1,
+      "prefix": "djR8MnxKWXZCWnltN29HVWRKV1R1d1dqSCtVTWVWU3ovZ2p1dDNXWWN1NVNHWE9rPXxsb2dpbnxlMDY3MzIxNWMwZGNkOTMxYjZhOTNjZTQ4YWNlZTQyNzI1MTBlNGYyN2JiOTk4YWQwMzY1MThjMDEyZGEyNzIxfDE3OTI0NTcxODB8MTc5MjQ1NzMwMHxzaGEyNTZ8MHwwfDF8MTZ8WFlDemowa3M4OEI2WkFvMTYrdHFCZz09fDV8fDF8fHwxfG09MQ==.903ba730739a2f85c9279a240b4ab320092c969121856f29ccbedd13ede55c4b|XYCzj0ks88B6ZAo16+tqBg==|",
+      "profile": "sha16",
+      "salt": "XYCzj0ks88B6ZAo16+tqBg==",
+      "t": 0,
+      "targetBits": 16,
+      "ttlSecs": 120
+    },
+    {
+      "algorithm": "argon2id",
+      "challenge": "djR8MnxYdFlIOStoVm9JNXJ3dVh3ZDRrSnlSa01Fcko2Z0YzOE9neWtkdDNHdVZRPXxhcmdvbnxjNDVmNzUzNzUyNTMzMjViMjgzYWNkNGFjZGNkM2I4M2ZmNmZlNjRhM2MwNWY2YmM2YmIwNDc4ODkyYWYxZjYyfDE3OTI0NTcxODB8MTc5MjQ1NzMwMHxhcmdvbjJpZHwxNjM4NHwzfDF8MXxBWWVGajVXYzN1K0YzNi9lbmtPcFl3PT18NTB8fDF8fHwxfG09MQ==.572e71ca9e300e58f46c3607dde79685daaad7d5174f621c7c7f43715bb92dba",
+      "mKib": 16384,
+      "minDurationMs": 50,
+      "nonce": "XtYH9+hVoI5rwuXwd4kJyRkMErJ6gF38Ogykdt3GuVQ=",
+      "p": 1,
+      "prefix": "djR8MnxYdFlIOStoVm9JNXJ3dVh3ZDRrSnlSa01Fcko2Z0YzOE9neWtkdDNHdVZRPXxhcmdvbnxjNDVmNzUzNzUyNTMzMjViMjgzYWNkNGFjZGNkM2I4M2ZmNmZlNjRhM2MwNWY2YmM2YmIwNDc4ODkyYWYxZjYyfDE3OTI0NTcxODB8MTc5MjQ1NzMwMHxhcmdvbjJpZHwxNjM4NHwzfDF8MXxBWWVGajVXYzN1K0YzNi9lbmtPcFl3PT18NTB8fDF8fHwxfG09MQ==.572e71ca9e300e58f46c3607dde79685daaad7d5174f621c7c7f43715bb92dba|AYeFj5Wc3u+F36/enkOpYw==|",
+      "profile": "argon16",
+      "salt": "AYeFj5Wc3u+F36/enkOpYw==",
+      "t": 3,
+      "targetBits": 1,
+      "ttlSecs": 120
+    },
+    {
+      "algorithm": "rsw",
+      "challenge": "djR8MnxKTDJoU1o3enBYN1FBYTZlT3RmaSs1QnJ0eWRoQXI0aS9PY1g0eDhKYTZBPXxyc3dzY29wZXw4MzU4ODY2ZmVhNDRhZTk2OTQ3ZTg0M2MwMjhjYTk5MGQwMmY3MDFmNGZjMjA1MGFjNGI5OTk3NDFjOWM3MjE1fDE3OTI0NTcxODB8MTc5MjQ1NzMwMHxyc3d8MHwxMDAwMHwxfDF8bHcvRW1iaENSUHpNQjNLOUhyd1Ixdz09fDUwfHwxfHx8MXxtPTE=.3d1f53a475af9f2ff66b509641c1463dad6833b46f9dfaa5125dc00966fc00b9",
+      "mKib": 0,
+      "minDurationMs": 50,
+      "nonce": "JL2hSZ7zpX7QAa6eOtfi+5BrtydhAr4i/OcX4x8Ja6A=",
+      "p": 1,
+      "prefix": "djR8MnxKTDJoU1o3enBYN1FBYTZlT3RmaSs1QnJ0eWRoQXI0aS9PY1g0eDhKYTZBPXxyc3dzY29wZXw4MzU4ODY2ZmVhNDRhZTk2OTQ3ZTg0M2MwMjhjYTk5MGQwMmY3MDFmNGZjMjA1MGFjNGI5OTk3NDFjOWM3MjE1fDE3OTI0NTcxODB8MTc5MjQ1NzMwMHxyc3d8MHwxMDAwMHwxfDF8bHcvRW1iaENSUHpNQjNLOUhyd1Ixdz09fDUwfHwxfHx8MXxtPTE=.3d1f53a475af9f2ff66b509641c1463dad6833b46f9dfaa5125dc00966fc00b9|lw/EmbhCRPzMB3K9HrwR1w==|",
+      "profile": "rsw",
+      "rsw_modulus": "sL1Mk2YZ4BnznBgWe2YB3uOZ+KFN/VETl1T0H9zuWkP54/nAN8sgPhqozDrRCVQxdJc5IDgkh9EemAGzYjku+zqv2fdryfy5iHbtQEhkHJVt+5f/6yxrZDvHUMhgDRAmLe7rRjEIZC8GqcfcbQyVECgxzNfd3FE+ATeuxc8wKafjUtQ/rvizFBJCo5L0r4U67JDooXVt4yTLtRsoFK3WZBOKIOSZ+E0vZJDt2ddeDSluS/qaqZ5C3dSVeaSyaelX8dGpmovr8xClC+9SKsFnMc+6m9WBo2CsCSpJGk3LZM2847HM5/r2gfmNdN5zRecjEY5MLLEQ/34JinuMtMJpuw==",
+      "salt": "lw/EmbhCRPzMB3K9HrwR1w==",
+      "t": 10000,
+      "targetBits": 1,
+      "ttlSecs": 120
+    },
+    {
+      "algorithm": "sha256",
+      "challenge": "djR8NHxpMnZQSW9JaXFzVy9HVFpYUHBZUTdibzc5akliVGFWOWNYWGdXcWY2TkNrPXxsb2dpbnwzMzBlODA1NTVjZThiNWJjNWQxZDk2N2YxYmVlMzM5NGFiNzdiMzkxZjI4ZGQ0NjYwMGE3MGEzNjQ2ODM5MGJjfDE3OTI0NTcxODF8MTc5MjQ1NzMwMXxzaGEyNTZ8MHwwfDF8MTZ8QVVWTDdKcUM1RU51K1lXV1daVlpaQT09fDV8fDF8fHwxfGU9Miw2ZjY1YjVhYzgzZjMyM2Y0Nzk2ODU1YzNmNWJmNTI0ZjVjZWYzMzYzNzA1OWZlMDc2Nzc0ZGE4NjI3OTBiNGRmfG09MQ==.4657666803fadf725f73f8dd5458a35f822fb2373543b8b8bf16123064b229c3",
+      "execution_program": "AQVsb2dpbgdkZWZhdWx0AhgQqghEbVZqMldjSxEuHCFPd1NCJzFlZkdpL3E1YSlpIFVHUzVNL1EpZX4SCBAhCERtVmoyV2NLBAoEC9YdCERtVmoyV2NLHwhEbVZqMldjSx4tXRwIRG1WajJXY0sODCUqW1E+KWlJJSciamgAAL7FsiVnZ4IAIv0MPcliZAMYBm1DWmJ4bBkGz5LjAT7ikc0C/sDpZZgXdxsKGgYjNJlf+4lAWgGZr3UH4yYDMgdtKuSnWDLDJBCcC2F4cHRqbEtkRlFYAh6aoeG/BnOp",
+      "execution_version": 2,
+      "mKib": 0,
+      "minDurationMs": 5,
+      "nonce": "i2vPIoIiqsW/GTZXPpYQ7bo79jIbTaV9cXXgWqf6NCk=",
+      "p": 1,
+      "prefix": "djR8NHxpMnZQSW9JaXFzVy9HVFpYUHBZUTdibzc5akliVGFWOWNYWGdXcWY2TkNrPXxsb2dpbnwzMzBlODA1NTVjZThiNWJjNWQxZDk2N2YxYmVlMzM5NGFiNzdiMzkxZjI4ZGQ0NjYwMGE3MGEzNjQ2ODM5MGJjfDE3OTI0NTcxODF8MTc5MjQ1NzMwMXxzaGEyNTZ8MHwwfDF8MTZ8QVVWTDdKcUM1RU51K1lXV1daVlpaQT09fDV8fDF8fHwxfGU9Miw2ZjY1YjVhYzgzZjMyM2Y0Nzk2ODU1YzNmNWJmNTI0ZjVjZWYzMzYzNzA1OWZlMDc2Nzc0ZGE4NjI3OTBiNGRmfG09MQ==.4657666803fadf725f73f8dd5458a35f822fb2373543b8b8bf16123064b229c3|AUVL7JqC5ENu+YWWWZVZZA==|",
+      "profile": "sha16",
+      "salt": "AUVL7JqC5ENu+YWWWZVZZA==",
+      "t": 0,
+      "targetBits": 16,
+      "ttlSecs": 120
+    }
+  ]
+}

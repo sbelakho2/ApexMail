@@ -70,12 +70,13 @@ these faces, from local files.
 
 ## Widget language
 
-The widget stays passive and quiet: a static 40 px mark, wrapped text, one
-decorative track and native recovery. Computation may use one decorative
-track; the mark stays static. Reduced-motion mode keeps visible status and
-recovery without decorative movement. The ten lifecycle states keep their
-distinct recovery contracts, and completion describes computation while
-the host verification and application policy remain separate.
+Edition 6 (23 October 2026) governs the widget system; the compact status
+surface and the factor task form live in
+`packages/kiwicaptcha-widget-system/` and its edition-6 guide is
+authoritative for the component. The identity rules still apply: the mark
+stays static, state meaning is carried by more than color alone, recovery
+names a useful next action, and completion describes computation while the
+host verification and application policy remain separate.
 
 ## Voice
 

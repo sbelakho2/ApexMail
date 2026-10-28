@@ -167,7 +167,6 @@
 0 packages/kiwicaptcha-risk/tests/trust_boundary.rs
 0 packages/kiwicaptcha-wasm/ACCESSIBILITY.md
 0 packages/kiwicaptcha-wasm/SECURITY.md
-0 packages/kiwicaptcha-wasm/build-embed.mjs
 0 packages/kiwicaptcha-wasm/build.sh
 0 packages/kiwicaptcha-wasm/src/lib.rs
 0 packages/kiwicaptcha-wasm/tests/browser/specs/security.spec.mjs

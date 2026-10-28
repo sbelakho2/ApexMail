@@ -1,0 +1,64 @@
+{
+  "$schema": "kiwicaptcha.execution.capability-matrix/1",
+  "format_version": 1,
+  "description": "The canonical execution-capability contract every issuer and every client must obey. A client advertises its maximum supported execution version via the Kiwi-Execution-Max-Version request header. ExecutionVersionPolicy::clientCapability() is the single interpretation: absent/empty/garbage reads as the v1 compatibility floor (1); an explicit 0 reads as CAPABILITY_NONE and the dimension must never arm; a canonical decimal reads as that value clamped to 1..MAX. The server arms at min(client_capability, fleet_available). Native clients (Android, iOS, Flutter, React-Native native) advertise 0 and must never receive an execution-armed challenge. This matrix is consumed by every SDK conformance test so one issuer and one parser cannot disagree.",
+  "header": "Kiwi-Execution-Max-Version",
+  "policy_class": "KiwiCaptcha\\ExecutionVersionPolicy",
+  "clients": [
+    {
+      "id": "old-or-unknown-browser",
+      "header": "absent",
+      "capability_interpretation": "v1 compatibility floor (1)",
+      "capability": 1,
+      "server_action": "may arm at version 1 (the v1 grammar), never above fleet_available"
+    },
+    {
+      "id": "current-browser",
+      "header": ">= required",
+      "capability_interpretation": "clamped decimal",
+      "capability": ">= 1",
+      "server_action": "arm at min(client, fleet_available) when the policy asks"
+    },
+    {
+      "id": "android",
+      "header": "0",
+      "capability_interpretation": "CAPABILITY_NONE",
+      "capability": 0,
+      "server_action": "never arm execution"
+    },
+    {
+      "id": "ios",
+      "header": "0",
+      "capability_interpretation": "CAPABILITY_NONE",
+      "capability": 0,
+      "server_action": "never arm execution"
+    },
+    {
+      "id": "flutter",
+      "header": "0",
+      "capability_interpretation": "CAPABILITY_NONE",
+      "capability": 0,
+      "server_action": "never arm execution"
+    },
+    {
+      "id": "react-native-native",
+      "header": "0",
+      "capability_interpretation": "CAPABILITY_NONE",
+      "capability": 0,
+      "server_action": "never arm execution"
+    },
+    {
+      "id": "future-native-execution",
+      "header": "N",
+      "capability_interpretation": "clamped decimal",
+      "capability": "N",
+      "server_action": "only versions <= min(N, fleet_available); never above N regardless of fleet"
+    }
+  ],
+  "server_invariants": [
+    "if client_capability == 0 (explicit): execution never arms; effective_version is none (special-cased before any arithmetic)",
+    "otherwise effective_version = min(client_capability, fleet_available), floored at 1 for armed issuance",
+    "the response's execution_version never exceeds the client's advertised capability",
+    "an absent header may arm at version 1 but never above fleet_available"
+  ]
+}

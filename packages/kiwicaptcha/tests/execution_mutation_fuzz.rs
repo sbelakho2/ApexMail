@@ -1149,9 +1149,12 @@ fn record_execution_version_register_matches_the_php_gate_sweep() {
 
 /// The differential corpus shared with the PHP suite. Each case pins a
 /// program blob, a trace and the expected decode/verify classification
-/// (malformed, execution_mismatch or valid). The same 19 entries live
+/// (malformed, execution_mismatch or valid). The same 28 entries live
 /// in `ExecutionDifferentialCorpusTest`; both suites must land on the
-/// same verdict for every case.
+/// same verdict for every case. The geometry block carries the
+/// ceiling, one past it, a 40-digit height, a value past 2^53, a
+/// negative, a fractional and a non-numeric shape, plus the cyclic
+/// parent map that the bounded depth walk must refuse.
 struct CorpusCase {
     name: &'static str,
     version: u8,
@@ -1160,7 +1163,7 @@ struct CorpusCase {
     expected: &'static str,
 }
 
-const CORPUS: [CorpusCase; 19] = [
+const CORPUS: [CorpusCase; 28] = [
     CorpusCase {
         name: "v1-valid",
         version: 1,
@@ -1294,6 +1297,69 @@ const CORPUS: [CorpusCase; 19] = [
         trace: "dcreate(bHMzQmpuUmVUb3ZGTg==);dset(eHpvYQ==);dappend(1);dcreate(V012dkl2Vw==);dattr(ZGF0YS1raXdp);dappend(1);dchild(aEoxOWY4a0N5b2R4);dchild(YkdPQ21TUg==);u8c(0);obs(19,10);u8r(10);u8w(230);evreal(kiwi-ev:span);dsib(2);ddepth(2);evreal(kiwi-ev:span);sreal(cd9e8bb6200d6f874d25e6c520fcf5355622e04f4fb2f9140f48775369a8decb);sreal(cd9e8bb6200d6f874d25e6c520fcf5355622e04f4fb2f9140f48775369a8decb);add(4231826189)garbage",
         expected: "execution_mismatch",
     },
+    CorpusCase {
+        name: "geom-small-valid",
+        version: 6,
+        program: "AQpwZXJmLXNjb3BlC3BlcmYtYWN0aW9uBggQAA9wZXJmbm9kZTAxMjM0NTYSHQ9wZXJmbm9kZTAxMjM0NTYdD3BlcmZub2RlMDEyMzQ1Nh0PcGVyZm5vZGUwMTIzNDU2HQ9wZXJmbm9kZTAxMjM0NTYdD3BlcmZub2RlMDEyMzQ1Nh0PcGVyZm5vZGUwMTIzNDU2",
+        trace: "dcreate(cGVyZm5vZGUwMTIzNDU2);dappend(1);geom(0,1);geom(0,1);geom(0,1);geom(0,1);geom(0,1);geom(0,1)",
+        expected: "valid",
+    },
+    CorpusCase {
+        name: "geom-ceiling-exact",
+        version: 6,
+        program: "AQpwZXJmLXNjb3BlC3BlcmYtYWN0aW9uBggQAA9wZXJmbm9kZTAxMjM0NTYSHQ9wZXJmbm9kZTAxMjM0NTYdD3BlcmZub2RlMDEyMzQ1Nh0PcGVyZm5vZGUwMTIzNDU2HQ9wZXJmbm9kZTAxMjM0NTYdD3BlcmZub2RlMDEyMzQ1Nh0PcGVyZm5vZGUwMTIzNDU2",
+        trace: "dcreate(cGVyZm5vZGUwMTIzNDU2);dappend(1);geom(4096,4096);geom(4096,4096);geom(4096,4096);geom(4096,4096);geom(4096,4096);geom(4096,4096)",
+        expected: "valid",
+    },
+    CorpusCase {
+        name: "geom-above-ceiling",
+        version: 6,
+        program: "AQpwZXJmLXNjb3BlC3BlcmYtYWN0aW9uBggQAA9wZXJmbm9kZTAxMjM0NTYSHQ9wZXJmbm9kZTAxMjM0NTYdD3BlcmZub2RlMDEyMzQ1Nh0PcGVyZm5vZGUwMTIzNDU2HQ9wZXJmbm9kZTAxMjM0NTYdD3BlcmZub2RlMDEyMzQ1Nh0PcGVyZm5vZGUwMTIzNDU2",
+        trace: "dcreate(cGVyZm5vZGUwMTIzNDU2);dappend(1);geom(4097,1);geom(4097,1);geom(4097,1);geom(4097,1);geom(4097,1);geom(4097,1)",
+        expected: "execution_mismatch",
+    },
+    CorpusCase {
+        name: "geom-past-2p53",
+        version: 6,
+        program: "AQpwZXJmLXNjb3BlC3BlcmYtYWN0aW9uBggQAA9wZXJmbm9kZTAxMjM0NTYSHQ9wZXJmbm9kZTAxMjM0NTYdD3BlcmZub2RlMDEyMzQ1Nh0PcGVyZm5vZGUwMTIzNDU2HQ9wZXJmbm9kZTAxMjM0NTYdD3BlcmZub2RlMDEyMzQ1Nh0PcGVyZm5vZGUwMTIzNDU2",
+        trace: "dcreate(cGVyZm5vZGUwMTIzNDU2);dappend(1);geom(9007199254740993,1);geom(9007199254740992,1);geom(9007199254740992,1);geom(9007199254740992,1);geom(9007199254740992,1);geom(9007199254740992,1)",
+        expected: "execution_mismatch",
+    },
+    CorpusCase {
+        name: "geom-40-digit",
+        version: 6,
+        program: "AQpwZXJmLXNjb3BlC3BlcmYtYWN0aW9uBggQAA9wZXJmbm9kZTAxMjM0NTYSHQ9wZXJmbm9kZTAxMjM0NTYdD3BlcmZub2RlMDEyMzQ1Nh0PcGVyZm5vZGUwMTIzNDU2HQ9wZXJmbm9kZTAxMjM0NTYdD3BlcmZub2RlMDEyMzQ1Nh0PcGVyZm5vZGUwMTIzNDU2",
+        trace: "dcreate(cGVyZm5vZGUwMTIzNDU2);dappend(1);geom(0,1111111111111111111111111111111111111111);geom(0,1111111111111111111111111111111111111111);geom(0,1111111111111111111111111111111111111111);geom(0,1111111111111111111111111111111111111111);geom(0,1111111111111111111111111111111111111111);geom(0,1111111111111111111111111111111111111111)",
+        expected: "execution_mismatch",
+    },
+    CorpusCase {
+        name: "geom-negative",
+        version: 6,
+        program: "AQpwZXJmLXNjb3BlC3BlcmYtYWN0aW9uBggQAA9wZXJmbm9kZTAxMjM0NTYSHQ9wZXJmbm9kZTAxMjM0NTYdD3BlcmZub2RlMDEyMzQ1Nh0PcGVyZm5vZGUwMTIzNDU2HQ9wZXJmbm9kZTAxMjM0NTYdD3BlcmZub2RlMDEyMzQ1Nh0PcGVyZm5vZGUwMTIzNDU2",
+        trace: "dcreate(cGVyZm5vZGUwMTIzNDU2);dappend(1);geom(-1,1);geom(-1,1);geom(-1,1);geom(-1,1);geom(-1,1);geom(-1,1)",
+        expected: "execution_mismatch",
+    },
+    CorpusCase {
+        name: "geom-fractional",
+        version: 6,
+        program: "AQpwZXJmLXNjb3BlC3BlcmYtYWN0aW9uBggQAA9wZXJmbm9kZTAxMjM0NTYSHQ9wZXJmbm9kZTAxMjM0NTYdD3BlcmZub2RlMDEyMzQ1Nh0PcGVyZm5vZGUwMTIzNDU2HQ9wZXJmbm9kZTAxMjM0NTYdD3BlcmZub2RlMDEyMzQ1Nh0PcGVyZm5vZGUwMTIzNDU2",
+        trace: "dcreate(cGVyZm5vZGUwMTIzNDU2);dappend(1);geom(0,1.5);geom(0,1.5);geom(0,1.5);geom(0,1.5);geom(0,1.5);geom(0,1.5)",
+        expected: "execution_mismatch",
+    },
+    CorpusCase {
+        name: "geom-non-numeric",
+        version: 6,
+        program: "AQpwZXJmLXNjb3BlC3BlcmYtYWN0aW9uBggQAA9wZXJmbm9kZTAxMjM0NTYSHQ9wZXJmbm9kZTAxMjM0NTYdD3BlcmZub2RlMDEyMzQ1Nh0PcGVyZm5vZGUwMTIzNDU2HQ9wZXJmbm9kZTAxMjM0NTYdD3BlcmZub2RlMDEyMzQ1Nh0PcGVyZm5vZGUwMTIzNDU2",
+        trace: "dcreate(cGVyZm5vZGUwMTIzNDU2);dappend(1);geom(0,abc);geom(0,abc);geom(0,abc);geom(0,abc);geom(0,abc);geom(0,abc)",
+        expected: "execution_mismatch",
+    },
+    CorpusCase {
+        name: "depth-walk-cycle",
+        version: 6,
+        program: "AQVzY29wZQxjeWNsZS1hY3Rpb24GCBAABEJCQkIjAARBQUFBIwAEQkJCQiQEQUFBQQAAAAAAAAAAAQAAAAAAAAAAAgAAAAAAAAAAAwAAAAAAAAAABA==",
+        trace: "dcreate(QkJCQg==);dchild(QUFBQQ==);dchild(QkJCQg==);ddepth(2);add(1);add(2);add(3);add(4)",
+        expected: "execution_mismatch",
+    },
 ];
 
 #[test]
@@ -1355,8 +1421,8 @@ fn differential_corpus_verdicts_match_the_php_suite() {
         }
     }
     assert_eq!(
-        valid_digests, 6,
-        "the corpus pins one valid case per version plus the version-5 fragment append"
+        valid_digests, 8,
+        "the corpus pins one valid case per version plus the version-5 fragment append and the two geometry ceiling accepts"
     );
 }
 

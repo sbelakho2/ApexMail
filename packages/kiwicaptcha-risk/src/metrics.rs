@@ -212,4 +212,19 @@ mod tests {
         assert_eq!(get("store:observe:count"), Some(2));
         assert_eq!(get("decisions:7:argon16:5"), Some(2));
     }
+
+    #[test]
+    fn incr_fixed_n_adds_the_explicit_amount_and_zero_is_a_noop() {
+        let metrics = Metrics::new();
+        metrics.incr_fixed_n(FixedMetric::DeniedLimiter, 5);
+        metrics.incr_fixed_n(FixedMetric::DeniedLimiter, 0);
+        metrics.incr_fixed_n(FixedMetric::DegradedBreaker, 3);
+        metrics.incr_fixed(FixedMetric::DegradedBreaker);
+
+        let snapshot = metrics.snapshot();
+        let get = |key: &str| snapshot.iter().find(|(k, _)| k == key).map(|(_, v)| *v);
+        assert_eq!(get("denied:limiter"), Some(5));
+        assert_eq!(get("degraded:breaker"), Some(4));
+        assert_eq!(get("degraded:store"), None);
+    }
 }

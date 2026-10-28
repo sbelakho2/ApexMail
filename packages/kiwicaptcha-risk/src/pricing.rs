@@ -68,27 +68,29 @@ pub struct PriceConsts {
     /// its raw risk; a low-value one below it.
     pub value_weights: [u32; 4],
     /// The work-score band edges (exclusive upper bounds of the first
-    /// eight rungs). The first four edges match `action_for_score`; the
-    /// upper bands widen so the narrowest consecutive gap (90) exceeds
+    /// nine rungs). The first four edges match `action_for_score`; the
+    /// upper bands widen so the narrowest consecutive gap (75) exceeds
     /// the trusted pressure residual (71) and the one-rung invariant is
-    /// structural rather than tested luck.
-    pub band_edges: [u16; 8],
-    /// Below this argon capacity a priced Argon rung re-escalates to the
-    /// interactive step-up (the policy's own capacity check, applied to
-    /// the priced rung exactly like the marks stage applies it).
+    /// structural rather than tested luck. The rsw band sits between the
+    /// argon64 and step-up bands, matching the ladder order.
+    pub band_edges: [u16; 9],
+    /// Below this argon capacity a priced capacity-gated rung (an Argon
+    /// rung or the rsw rung) re-escalates to the interactive step-up
+    /// (the policy's own capacity check, applied to the priced rung
+    /// exactly like the marks stage applies it).
     pub argon_capacity_floor: u16,
 }
 
 /// The pinned consts table of the current price model.
 pub const PRICE_CONSTS: PriceConsts = PriceConsts {
-    version: 1,
+    version: 2,
     score_saturation: 1000,
     trust_saturation: 10_000,
     trust_half_scale: 2_500,
     trusted_bucket_credit: 8_000,
     pressure_gain_saturation: 300,
     value_weights: [800, 1000, 1200, 1400],
-    band_edges: [150, 300, 450, 600, 700, 790, 880, 970],
+    band_edges: [150, 300, 450, 600, 700, 775, 850, 925, 1000],
     argon_capacity_floor: 300,
 };
 
@@ -246,7 +248,7 @@ impl PriceModel {
     }
 
     /// The quantization band table: maps a work score onto the ladder.
-    /// The edges are the exclusive upper bounds of the first eight rungs;
+    /// The edges are the exclusive upper bounds of the first nine rungs;
     /// a score at or above the last edge denies. The first four edges are
     /// `action_for_score`'s own, so the boundary between the sha and
     /// argon regimes (600) is the same number in both tables.
@@ -268,6 +270,8 @@ impl PriceModel {
         } else if w < edges[6] {
             RiskAction::Argon64
         } else if w < edges[7] {
+            RiskAction::Rsw
+        } else if w < edges[8] {
             RiskAction::StepUp
         } else {
             RiskAction::Deny
@@ -288,10 +292,11 @@ impl PriceModel {
     /// overrides, hysteresis, marks) with the priced rung. The price may
     /// only raise: when the priced rung does not exceed the composed
     /// action the decision passes through untouched, and when it does the
-    /// action rises to the priced rung. A priced Argon rung on a
+    /// action rises to the priced rung. A priced capacity-gated rung (an
+    /// Argon rung or the rsw time-lock rung) on a
     /// saturated backend re-escalates to the interactive step-up exactly
     /// like the policy's own capacity check, so the floor never demands
-    /// memory-hard work the backend cannot serve.
+    /// work the backend cannot serve.
     ///
     /// Pure; the decision's score, band, policy version, model revision,
     /// global level and decision id pass through untouched. Stage reasons
@@ -314,9 +319,12 @@ impl PriceModel {
         }
         let mut action = priced;
         let mut stage_reasons = vec![RiskReason::PricedEscalation];
-        if action.is_argon() && resources.argon_capacity < PRICE_CONSTS.argon_capacity_floor {
-            // StepUp outranks every argon rung, so the capacity
-            // re-escalation is still a raise over the composed action.
+        if action.is_capacity_gated()
+            && resources.argon_capacity < PRICE_CONSTS.argon_capacity_floor
+        {
+            // StepUp outranks every capacity-gated rung (the argon rungs
+            // and the rsw rung), so the capacity re-escalation is still a
+            // raise over the composed action.
             action = RiskAction::StepUp;
             stage_reasons.push(RiskReason::CapacityPressure);
         }
@@ -392,7 +400,7 @@ mod tests {
 
     #[test]
     fn consts_table_is_pinned() {
-        assert_eq!(PriceModel::version(), 1);
+        assert_eq!(PriceModel::version(), 2);
         assert_eq!(PRICE_CONSTS.score_saturation, 1000);
         assert_eq!(PRICE_CONSTS.trust_saturation, 10_000);
         assert_eq!(PRICE_CONSTS.trust_half_scale, 2_500);
@@ -401,7 +409,7 @@ mod tests {
         assert_eq!(PRICE_CONSTS.value_weights, [800, 1000, 1200, 1400]);
         assert_eq!(
             PRICE_CONSTS.band_edges,
-            [150, 300, 450, 600, 700, 790, 880, 970]
+            [150, 300, 450, 600, 700, 775, 850, 925, 1000]
         );
         assert_eq!(PRICE_CONSTS.argon_capacity_floor, 300);
     }
@@ -460,7 +468,8 @@ mod tests {
             1000
         );
 
-        // quantization corners of the band table.
+        // quantization corners of the band table, including the exact
+        // golden boundaries on both sides of the rsw band.
         let cases = [
             (0u16, RiskAction::Allow),
             (149, RiskAction::Allow),
@@ -473,12 +482,13 @@ mod tests {
             (600, RiskAction::Argon16),
             (699, RiskAction::Argon16),
             (700, RiskAction::Argon32),
-            (789, RiskAction::Argon32),
-            (790, RiskAction::Argon64),
-            (879, RiskAction::Argon64),
-            (880, RiskAction::StepUp),
-            (969, RiskAction::StepUp),
-            (970, RiskAction::Deny),
+            (774, RiskAction::Argon32),
+            (775, RiskAction::Argon64),
+            (849, RiskAction::Argon64),
+            (850, RiskAction::Rsw),
+            (924, RiskAction::Rsw),
+            (925, RiskAction::StepUp),
+            (999, RiskAction::StepUp),
             (1000, RiskAction::Deny),
         ];
         for (score, expected) in cases {
@@ -493,7 +503,11 @@ mod tests {
             PriceModel::action_for_work_score(RiskAction::DECISION_BOUNDARY_SCORE),
             RiskAction::Argon16
         );
-        // Priced rungs at the pinned corners.
+        // Priced rungs at the pinned corners: a trusted full-credit
+        // identity walks the upper ladder one rung at a time, so the
+        // golden boundaries on both sides of the rsw band are hit
+        // exactly by the work score (risk + the 60-point full-credit
+        // pressure residual).
         assert_eq!(
             PriceModel::price(100, ValueClass::Standard, 10_000, 1000),
             RiskAction::Sha16
@@ -505,6 +519,29 @@ mod tests {
         assert_eq!(
             PriceModel::price(500, ValueClass::High, 4_000, 600),
             RiskAction::Argon16
+        );
+        // Work scores 849 / 850 straddle the argon64-to-rsw edge.
+        assert_eq!(
+            PriceModel::price(789, ValueClass::Standard, 10_000, 1000),
+            RiskAction::Argon64
+        );
+        assert_eq!(
+            PriceModel::price(790, ValueClass::Standard, 10_000, 1000),
+            RiskAction::Rsw
+        );
+        // Work scores 924 / 925 straddle the rsw-to-step-up edge.
+        assert_eq!(
+            PriceModel::price(864, ValueClass::Standard, 10_000, 1000),
+            RiskAction::Rsw
+        );
+        assert_eq!(
+            PriceModel::price(865, ValueClass::Standard, 10_000, 1000),
+            RiskAction::StepUp
+        );
+        // Above the last edge the price denies.
+        assert_eq!(
+            PriceModel::price(999, ValueClass::Standard, 10_000, 1000),
+            RiskAction::Deny
         );
     }
 
@@ -641,7 +678,7 @@ mod tests {
             .band_edges
             .windows(2)
             .map(|pair| pair[1] - pair[0]);
-        let narrowest = gaps.min().expect("eight edges have seven gaps");
+        let narrowest = gaps.min().expect("nine edges have eight gaps");
         assert_eq!(trusted_residual, 71);
         assert!(
             trusted_residual < u32::from(narrowest),
@@ -721,7 +758,8 @@ mod tests {
         }
     }
 
-    /// Sharp for marked identities: composing marks (Argon64 floor) and
+    /// Sharp for marked identities: composing marks (Rsw floor, the
+    /// maximum challenge rung) and
     /// then the price keeps the action at or above the marks floor, so
     /// the price never softens the decisive stage.
     #[test]
@@ -752,7 +790,7 @@ mod tests {
                         &healthy(),
                     );
                     assert!(
-                        out.action.rank() >= RiskAction::Argon64.rank(),
+                        out.action.rank() >= RiskAction::Rsw.rank(),
                         "score {score} trust {trust} pressure {pressure}: {:?}",
                         out.action
                     );
@@ -803,6 +841,29 @@ mod tests {
         assert_eq!(out.action, RiskAction::StepUp);
         assert!(out.has_reason(RiskReason::PricedEscalation));
         assert!(out.has_reason(RiskReason::CapacityPressure));
+
+        // priced Rsw rung (the trusted full-credit identity at risk 800
+        // works 860) on a saturated backend re-escalates to StepUp too —
+        // the capacity gate covers the time-lock rung, never weakens —
+        // and with headroom the priced rsw rung stands.
+        let out = PriceModel::apply(
+            plain(800),
+            &inputs(ValueClass::Standard, 10_000),
+            1000,
+            &saturated,
+        );
+        assert_eq!(out.action, RiskAction::StepUp);
+        assert!(out.has_reason(RiskReason::PricedEscalation));
+        assert!(out.has_reason(RiskReason::CapacityPressure));
+        let out = PriceModel::apply(
+            plain(800),
+            &inputs(ValueClass::Standard, 10_000),
+            1000,
+            &healthy(),
+        );
+        assert_eq!(out.action, RiskAction::Rsw);
+        assert!(out.has_reason(RiskReason::PricedEscalation));
+        assert!(!out.has_reason(RiskReason::CapacityPressure));
 
         // priced Deny on a saturated backend stays Deny (capacity only
         // re-escalates argon rungs).

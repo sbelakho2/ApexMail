@@ -548,14 +548,14 @@ cmd_selftest() {
     # default flags in pipeline.conf — checked the same way the stage
     # contract above is, so a refactor cannot silently drop a lane.
     _ts="$CI_DIR/stages/test.sh"
-    for fn in run_php_tests run_sdk_tests run_satellite_crates run_static_lint_gates \
+    for fn in run_sdk_tests run_satellite_crates run_static_lint_gates \
               run_pre_commit_lane provision_contrast_node_modules \
               run_dogfood_lane \
               lane_tool_status provision_composer_vendor provision_sdk_python_venv; do
         grep -q "$fn()" "$_ts" 2>/dev/null || { ci_err "test stage lost lane/helper: $fn"; _sf_fail=1; }
     done
-    for fl in CI_PHP_CHECK CI_SDK_CHECK CI_SATELLITE_CHECK CI_STATIC_LINT_CHECK CI_SDK_VENV_DIR \
-              CI_PRE_COMMIT_CHECK CI_CONTRAST_GATE_CHECK CI_BROWSER_SUITE_CHECK \
+    for fl in CI_SDK_CHECK CI_SATELLITE_CHECK CI_STATIC_LINT_CHECK CI_SDK_VENV_DIR \
+              CI_PRE_COMMIT_CHECK CI_CONTRAST_GATE_CHECK \
               CI_DOGFOOD_CHECK CI_DOGFOOD_LIVE; do
         grep -q "$fl" "$CI_DIR/pipeline.conf" 2>/dev/null \
             || { ci_err "pipeline.conf lost flag: $fl"; _sf_fail=1; }

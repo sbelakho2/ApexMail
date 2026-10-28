@@ -24,7 +24,7 @@ use kiwicaptcha_risk::context::RiskContext;
 use kiwicaptcha_risk::event::RiskEventKind;
 use kiwicaptcha_risk::identity::RiskIdentityFactory;
 use kiwicaptcha_risk::keys::RiskKeys;
-use kiwicaptcha_risk::network::{CidrNetworkClassifier, NetworkFlags};
+use kiwicaptcha_risk::network::NetworkFlags;
 use kiwicaptcha_risk::policy::RiskPolicy;
 use kiwicaptcha_risk::resources::ResourcePressure;
 use kiwicaptcha_risk::store::{
@@ -167,16 +167,10 @@ fn context() -> RiskContext<'static> {
 #[test]
 fn canary_never_reaches_store_calls_logs_or_metrics() {
     let store = CapturingTargetStore::new();
-    let classifier = CidrNetworkClassifier::from_entries(vec![]);
     let mut field_names = std::collections::HashMap::new();
     field_names.insert(1u32, "email".to_string());
-    let engine = RiskEngine::new(
-        store.clone(),
-        classifier,
-        policy(),
-        RiskKeys::from_master(&[0x42; 32]),
-    )
-    .with_target_resolver(Arc::new(FormFieldTargetResolver::new(field_names)));
+    let engine = RiskEngine::new(store.clone(), policy(), RiskKeys::from_master(&[0x42; 32]))
+        .with_target_resolver(Arc::new(FormFieldTargetResolver::new(field_names)));
 
     // The engine path and the target side channel run for the same
     // request: the assessment hands the store its observation while the
@@ -242,7 +236,6 @@ fn canary_never_reaches_store_calls_logs_or_metrics() {
     // An engine without a resolver carries no target dimension at all.
     let bare = RiskEngine::new(
         CapturingTargetStore::new(),
-        CidrNetworkClassifier::from_entries(vec![]),
         policy(),
         RiskKeys::from_master(&[0x42; 32]),
     );

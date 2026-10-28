@@ -3,7 +3,6 @@
 //! pseudonym value, a raw identifier or any derived hex. Hermetic (an
 //! in-memory store; no Redis is contacted).
 
-use std::net::IpAddr;
 use std::sync::Arc;
 
 use kiwicaptcha_risk::asn::AsnDataset;
@@ -68,15 +67,6 @@ impl RiskStateStore for HotStore {
 impl SessionContextTagStore for HotStore {}
 impl SessionTlsTagStore for HotStore {}
 
-#[derive(Default)]
-struct NoRiskClassifier;
-
-impl kiwicaptcha_risk::network::NetworkClassifier for NoRiskClassifier {
-    fn classify(&self, _ip: IpAddr) -> NetworkFlags {
-        NetworkFlags::default()
-    }
-}
-
 fn policy() -> Arc<RiskPolicy> {
     Arc::new(
         RiskPolicy::from_config(
@@ -138,12 +128,7 @@ fn serialized_explanations_never_carry_pseudonym_values_or_raw_inputs() {
 
     // The engine surface: assess the canary request and serialize the
     // explained result.
-    let engine = RiskEngine::new(
-        HotStore,
-        NoRiskClassifier,
-        policy(),
-        RiskKeys::from_master(&[0x42; 32]),
-    );
+    let engine = RiskEngine::new(HotStore, policy(), RiskKeys::from_master(&[0x42; 32]));
     let cookie = hex::decode(CANARY_COOKIE_HEX).expect("hex cookie");
     let cookie: [u8; 16] = cookie.try_into().expect("16 cookie bytes");
     let ctx = RiskContext {

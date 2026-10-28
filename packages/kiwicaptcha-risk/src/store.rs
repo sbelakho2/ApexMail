@@ -277,6 +277,32 @@ pub trait RiskStateStore {
         Ok(TargetState::default())
     }
 
+    /// Registers one authentication failure against the target
+    /// dimension exactly once per `event_id`: a retried report (a
+    /// redelivered webhook, two workers racing one delivery) is a no-op
+    /// that returns the current state, so the leaky counter and the
+    /// spread can never be inflated by redelivery. The claim and the
+    /// increment are one atomic script on the target family's own slot.
+    /// An empty `event_id` disables the dedupe and books one failure
+    /// per call.
+    ///
+    /// The default implementation ignores the event id and delegates to
+    /// [`RiskStateStore::register_target_failure`], so a third-party
+    /// store keeps compiling unchanged and books one failure per call.
+    ///
+    /// # Errors
+    ///
+    /// - backend errors (`BackendUnavailable`, `ScriptError`, `Timeout`).
+    fn register_target_failure_once(
+        &self,
+        target_id: &str,
+        source: &str,
+        asn: &str,
+        _event_id: &str,
+    ) -> Result<TargetState, RiskStoreError> {
+        self.register_target_failure(target_id, source, asn)
+    }
+
     /// Resets the target's failure counter (step-up completed: the
     /// account owner proved themselves, so a legitimate user is not
     /// stepped up twice). The spread HLLs keep their history.
@@ -391,6 +417,14 @@ pub trait SessionTlsTagStore {
 /// from that network), so a bare password check never vouches for the
 /// network and a retried stuffed login stays novel until the victim
 /// really proves themselves.
+///
+/// The network-class tag is [`crate::network_tag()`], the engine's
+/// stable purpose-separated pseudonym over the bucket spelling. Store
+/// implementations persist whatever tag they receive; the derivation
+/// lives in the engine, which holds the master-derived key. The bucket
+/// spelling is the legacy field form: the engine reads it on a tag
+/// miss, so a deployment upgrading into the pseudonym form keeps its
+/// history.
 ///
 /// The full surface mirrors the PHP
 /// `PrincipalNetworkTagStoreInterface` and the canonical
@@ -524,3 +558,102 @@ pub trait RiskStateStoreExt: RiskStateStore {
 }
 
 impl<T: RiskStateStore + ?Sized> RiskStateStoreExt for T {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::event::RiskObservation;
+    use crate::store::{Observed, RiskStateStore, RiskStoreError};
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    struct CapturingStore {
+        seen: Mutex<Option<RiskObservation>>,
+    }
+
+    impl RiskStateStore for CapturingStore {
+        fn observe(&self, o: &RiskObservation) -> Result<Observed, RiskStoreError> {
+            *self.seen.lock().unwrap() = Some(o.clone());
+            Ok(Observed {
+                vector: SignalVector::default(),
+                global_level: 0,
+                cooldown_until_ms: 0,
+                is_duplicate: false,
+            })
+        }
+
+        fn register_outcome(
+            &self,
+            _decision_id: &str,
+            _scope: u32,
+            _decision_hour: i64,
+            _score: u32,
+        ) -> Result<bool, RiskStoreError> {
+            Ok(true)
+        }
+
+        fn confirm_outcome(
+            &self,
+            _decision_id: &str,
+            _legitimate: bool,
+        ) -> Result<u8, RiskStoreError> {
+            Ok(0)
+        }
+
+        fn correct_outcome(
+            &self,
+            _decision_id: &str,
+            _legitimate: bool,
+        ) -> Result<bool, RiskStoreError> {
+            Ok(false)
+        }
+    }
+
+    #[test]
+    fn record_event_builds_the_identityless_observation_and_delegates_to_observe() {
+        let store = CapturingStore::default();
+        let observed = store
+            .record_event(
+                RiskEventKind::PreIssue,
+                7,
+                11,
+                "aa",
+                "ab",
+                "ac",
+                12,
+                "ba",
+                "bb",
+                "bc",
+                "event-1",
+                1_700_000_000_000,
+            )
+            .expect("the wrapper delegates");
+        assert_eq!(observed.vector, SignalVector::default());
+
+        let seen = store
+            .seen
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("observe was called");
+        assert_eq!(seen.event, RiskEventKind::PreIssue);
+        assert_eq!(seen.scope, 7);
+        assert_eq!(seen.source_epoch, 11);
+        assert_eq!(seen.source_id_prev, "aa");
+        assert_eq!(seen.source_id, "ab");
+        assert_eq!(seen.source_id_next, "ac");
+        assert_eq!(seen.subnet_epoch, 12);
+        assert_eq!(seen.subnet_id_prev, "ba");
+        assert_eq!(seen.subnet_id, "bb");
+        assert_eq!(seen.subnet_id_next, "bc");
+        assert_eq!(seen.event_id, "event-1");
+        assert_eq!(seen.now_ms, 1_700_000_000_000);
+        // The convenience wrapper carries no identity dimensions and no
+        // classifier-derived risk: callers that need them build the
+        // observation themselves.
+        assert_eq!(seen.session_id, None);
+        assert_eq!(seen.principal_id, None);
+        assert_eq!(seen.device_id, None);
+        assert_eq!(seen.network_risk, 0);
+    }
+}

@@ -27,6 +27,30 @@ use crate::rsw::RswTrapdoor;
 /// clock anomaly and the solution is rejected with [`VerifyError::TooFast`].
 pub const SKEW_TOLERANCE_US: u64 = 5_000_000;
 
+/// A receipt magnitude that cannot be epoch microseconds in any plausible
+/// deployment: 1e17 µs is ~3.2 million years after 1970. A larger value is a
+/// nanosecond clock (the literal reading of the `now_ns` parameter name).
+/// The PHP mirror is `Verifier::US_RECEIPT_MAGNITUDE_CEILING`.
+pub const US_RECEIPT_MAGNITUDE_CEILING: u64 = 100_000_000_000_000_000;
+
+/// Fold a caller-supplied receipt clock into epoch microseconds, the unit
+/// `issued_at_ns` and every duration check use.
+///
+/// The parameter is named `now_ns` but its documented contract is
+/// microseconds; a caller that passes a true nanosecond clock hands a value
+/// 1000x too large, and the minimum-duration gate then computes an elapsed
+/// gap of ~1e18 µs and never trips. Reconciling by magnitude is safe in both
+/// directions: a legitimate microsecond receipt stays below the ceiling for
+/// millions of years, and a nanosecond receipt is always far above it.
+/// The PHP mirror is `Verifier::receiptMicros()`.
+pub const fn fold_receipt_to_us(now_ns: u64) -> u64 {
+    if now_ns > US_RECEIPT_MAGNITUDE_CEILING {
+        now_ns / 1_000
+    } else {
+        now_ns
+    }
+}
+
 /// Compute the hash for the given record + counter.
 ///
 /// The computation is driven by the challenge's explicit [`PoWAlgorithm`],
@@ -1035,10 +1059,13 @@ pub(crate) fn measurable_solve_duration_ms(
     record: &ChallengeRecord,
     receipt_ns: u64,
 ) -> Option<u64> {
-    if record.server_mac.is_none() || record.issued_at_ns == 0 || receipt_ns < record.issued_at_ns {
+    // Same unit fold as the minimum-duration floor: a nanosecond receipt
+    // must not fabricate a ~1e6x solve duration.
+    let receipt_us = fold_receipt_to_us(receipt_ns);
+    if record.server_mac.is_none() || record.issued_at_ns == 0 || receipt_us < record.issued_at_ns {
         return None;
     }
-    Some((receipt_ns - record.issued_at_ns) / 1_000)
+    Some((receipt_us - record.issued_at_ns) / 1_000)
 }
 
 /// The ExecutionChallengeV1 binding (hard), shared verbatim by
@@ -1257,7 +1284,14 @@ pub fn verify_solution(ctx: &mut VerifyContext<'_>) -> VerifyOutcome {
         // Legacy v1 records: `nonce|scope|ip_hash|issued_at` (the binding
         // field carried the legacy hash_ip). Verified for the migration
         // window (max TTL) alongside v2.
-        1 => verify_signature(&payload_from_record(ctx.record), sig, secret),
+        1 => {
+            let payload = payload_from_record(ctx.record);
+            let canonical = crate::challenge::canonical_signing_input(&payload);
+            if !crate::challenge::challenge_payload_matches(&ctx.record.challenge, &canonical) {
+                return VerifyOutcome::Invalid(VerifyError::BadSignature);
+            }
+            verify_signature(&payload, sig, secret)
+        }
         _ => verify_signature_v2_with_tenant(ctx.record, sig, secret, ctx.tenant),
     };
     match sig_ok {
@@ -1431,13 +1465,16 @@ pub fn verify_solution(ctx: &mut VerifyContext<'_>) -> VerifyOutcome {
         return VerifyOutcome::Invalid(VerifyError::MalformedRecord);
     }
     if floor > 0 {
-        if ctx.now_ns >= ctx.record.issued_at_ns {
+        // Fold a nanosecond caller clock into microseconds so the floor
+        // cannot be silently disabled by the parameter's own name.
+        let now_us = fold_receipt_to_us(ctx.now_ns);
+        if now_us >= ctx.record.issued_at_ns {
             // High-resolution path: elapsed time between issuance and receipt,
             // both observed by the server clock. Both `now_ns` and
             // `issued_at_ns` are epoch microseconds (the names keep the `_ns`
             // suffix), so the ms floor is compared in the
             // same unit: ms -> µs (× 1_000).
-            let elapsed_us = ctx.now_ns - ctx.record.issued_at_ns;
+            let elapsed_us = now_us - ctx.record.issued_at_ns;
             if elapsed_us < floor.saturating_mul(1_000) {
                 return VerifyOutcome::Invalid(VerifyError::TooFast);
             }
@@ -1447,7 +1484,7 @@ pub fn verify_solution(ctx: &mut VerifyContext<'_>) -> VerifyOutcome {
             // we tolerate (skip the floor heuristic — the negative elapsed
             // time carries no timing signal); a larger skew means the clocks
             // are broken and the timing guarantee is void.
-            let skew = ctx.record.issued_at_ns - ctx.now_ns;
+            let skew = ctx.record.issued_at_ns - now_us;
             if skew > SKEW_TOLERANCE_US {
                 return VerifyOutcome::Invalid(VerifyError::TooFast);
             }
@@ -3009,6 +3046,52 @@ mod tests {
         assert_eq!(
             verify_solution(&mut ctx),
             VerifyOutcome::Invalid(VerifyError::TooFast)
+        );
+    }
+
+    #[test]
+    fn nanosecond_receipt_clock_cannot_disable_the_minimum_duration_floor() {
+        // Regression (parity with PHP Verifier::receiptMicros): the
+        // `now_ns` parameter is documented as epoch microseconds. A caller
+        // that passes a true nanosecond clock hands a value 1000x too
+        // large; before the unit fold the floor computed an elapsed gap of
+        // ~1e18 µs, never below the bound, and an immediate verify passed
+        // a 60 s floor. The magnitude fold must fire TooFast instead.
+        let mut record = make_record(8);
+        let counter = solve_for_test(&record).unwrap();
+        let mut ctx = VerifyContext {
+            record: &mut record,
+            secret_key: "test-key-32-bytes-0123456789abcd",
+            tenant: None,
+            secrets_by_kid: None,
+            revoked_kids: None,
+            counter,
+            duration_ms: 5000,
+            now_unix: Some(&mut || NOW_UNIX),
+            now_ns: NOW_NS * 1_000, // nanoseconds, not microseconds
+            min_duration_ms: 60_000,
+            expected_scope: None,
+            expected_request_binding: RequestBindingExpectation::Unenforced,
+            client_ip: Some("1.2.3.4"),
+            execution_digest: None,
+            execution_trace: None,
+            expected_region: None,
+            expected_issuer: None,
+            expected_policy_version: None,
+            policy_version_floor: None,
+            telemetry: None,
+            enforce_telemetry: false,
+            max_attempts: 0,
+            accept_legacy_v1: false,
+            rsw_proof: None,
+            rsw_modulus_n: None,
+            rsw_lambda: None,
+            rsw_keyring: None,
+        };
+        assert_eq!(
+            verify_solution(&mut ctx),
+            VerifyOutcome::Invalid(VerifyError::TooFast),
+            "a nanosecond receipt clock must not disable the 60 s floor"
         );
     }
 
@@ -7264,6 +7347,83 @@ mod tests {
                 VerifyOutcome::Invalid(VerifyError::InsufficientWork)
             ),
             "an argon2id record must reject a presented rsw proof"
+        );
+    }
+}
+
+#[cfg(test)]
+mod wire_timing_tests {
+    //! The constant-time comparison behind the signature and rsw
+    //! checks, measured against an early-exit comparator that
+    //! calibrates the noise floor. A position-dependent timing
+    //! difference on the production comparator fails the test.
+
+    use std::hint::black_box;
+    use std::time::Instant;
+
+    use super::ct_eq;
+
+    const LENGTH: usize = 8192;
+    // More best-of rounds, not a looser threshold: under a loaded box a
+    // min-of-25 picks up scheduler noise (the identical-input baseline
+    // inflates), the noise term multiplies the threshold, and the
+    // deliberately leaky control stops resolving. Min-of-200 keeps a
+    // clean slice even under contention while the assertion stays as
+    // strict as before.
+    const ROUNDS: usize = 200;
+    const CALLS: usize = 10;
+
+    fn measure(f: impl Fn(&[u8], &[u8]) -> bool, a: &[u8], b: &[u8]) -> f64 {
+        let mut best = f64::INFINITY;
+        for _ in 0..ROUNDS {
+            let start = Instant::now();
+            for _ in 0..CALLS {
+                black_box(f(black_box(a), black_box(b)));
+            }
+            best = best.min(start.elapsed().as_nanos() as f64 / CALLS as f64);
+        }
+        best
+    }
+
+    fn leaking(a: &[u8], b: &[u8]) -> bool {
+        for (x, y) in a.iter().zip(b.iter()) {
+            if x != y {
+                return false;
+            }
+        }
+        true
+    }
+
+    #[test]
+    fn ct_eq_does_not_leak_the_mismatch_position() {
+        let first = vec![b'a'; LENGTH];
+        let mut last = first.clone();
+        last[LENGTH - 1] = b'b';
+        let mut head = first.clone();
+        head[0] = b'b';
+
+        let noise_a = measure(leaking, &first, &first);
+        let noise_b = measure(leaking, &first, &first);
+        let noise = (noise_a - noise_b).abs().max(1.0);
+
+        let leak_first = measure(leaking, &first, &head);
+        let leak_last = measure(leaking, &first, &last);
+        let leak_delta = (leak_last - leak_first).abs();
+        assert!(
+            leak_delta > (noise * 10.0).max(10_000.0),
+            "the measurement must see an early exit: first={leak_first}ns last={leak_last}ns noise={noise}ns"
+        );
+
+        let real_first = measure(ct_eq, &first, &head);
+        let real_last = measure(ct_eq, &first, &last);
+        eprintln!(
+            "ct_eq timing: noise={noise:.0}ns leak_first={leak_first:.0}ns leak_last={leak_last:.0}ns real_first={real_first:.0}ns real_last={real_last:.0}ns"
+        );
+        let real_delta = (real_last - real_first).abs();
+        let budget = (noise * 10.0).max(real_first * 0.20).max(2_000.0);
+        assert!(
+            real_delta <= budget,
+            "ct_eq leaked the mismatch position: first={real_first}ns last={real_last}ns noise={noise}ns"
         );
     }
 }

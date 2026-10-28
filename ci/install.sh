@@ -24,10 +24,9 @@
 #      /usr/local/bin); gh from GitHub's apt repository as a CONVENIENCE —
 #      no stage requires it (the branch-protection gate it served was
 #      retired on 2026-10-22). No GitHub token is needed.
-#   2c. playwright chromium for BOTH pinned playwright minors (the
-#       tests/browser suite lock and tools/contrast-audit's lock) under
-#       ~/.cache/ms-playwright — the browser-suite and contrast lanes fail
-#       closed without them (idempotent)
+#   2c. playwright chromium for the contrast/layout gates' pinned playwright
+#       (tools/contrast-audit's lock) under ~/.cache/ms-playwright — the
+#       contrast lane fails closed without it (idempotent)
 #   3. /etc/apexmail/pipeline.conf   (host overrides: CI_DEPLOY_DIR, env file)
 #   4. systemd units: apexmail-pipeline.service (oneshot)
 #                     apexmail-pipeline.timer   (every 5 minutes)
@@ -343,26 +342,23 @@ install_zola() {
     rm -rf "$_tmp"
 }
 
-# playwright browsers — the browser suite (tests/browser, the mirrored
-# KiwiCaptcha Playwright suite) and the contrast/layout pixel gates
-# (tools/contrast-audit) pin DIFFERENT playwright minors, so the host must
-# carry the chromium build for BOTH: each `npx playwright@X.Y.Z install
-# chromium` drops its own revision directory under ~/.cache/ms-playwright and
-# the revisions coexist. Idempotent — playwright skips an installed build.
-# The pins mirror ci/ci-image/toolchain-versions.env (the CI image bakes the
-# same two revisions); when a mirror advance moves tests/browser's lock, bump
-# PLAYWRIGHT_BROWSER_SUITE_VERSION there in the same PR.
+# playwright browsers — the contrast/layout pixel gates (tools/contrast-audit)
+# pin their playwright minor, so the host must carry the matching chromium
+# build: `npx playwright@X.Y.Z install chromium` drops its revision directory
+# under ~/.cache/ms-playwright. Idempotent — playwright skips an installed
+# build. The pin mirrors ci/ci-image/toolchain-versions.env (the CI image bakes
+# the same revision). (The KiwiCaptcha browser suite's second pin left with
+# the PHP mirror on 2026-10-28.)
 install_playwright_browsers() {
     if ! have npx; then
-        log "npx absent — skipping playwright browser provisioning (the browser-suite and contrast lanes fail closed until node/npm/npx exist)"
+        log "npx absent — skipping playwright browser provisioning (the contrast lane fails closed until node/npm/npx exist)"
         return 0
     fi
-    for _pw in "${CI_PLAYWRIGHT_VERSION:-1.63.0}" "${CI_PLAYWRIGHT_BROWSER_SUITE_VERSION:-1.62.1}"; do
-        log "playwright@$_pw: installing chromium (idempotent)"
-        if ! npx --yes "playwright@$_pw" install chromium >/dev/null 2>&1; then
-            log "playwright@$_pw chromium install FAILED — the browser-suite/contrast lanes will fail closed until it succeeds (network + ~/.cache/ms-playwright)"
-        fi
-    done
+    _pw="${CI_PLAYWRIGHT_VERSION:-1.63.0}"
+    log "playwright@$_pw: installing chromium (idempotent)"
+    if ! npx --yes "playwright@$_pw" install chromium >/dev/null 2>&1; then
+        log "playwright@$_pw chromium install FAILED — the contrast lane will fail closed until it succeeds (network + ~/.cache/ms-playwright)"
+    fi
 }
 
 # --- 3. host config -------------------------------------------------------------------

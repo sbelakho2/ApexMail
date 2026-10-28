@@ -13,7 +13,6 @@ use std::sync::Arc;
 use kiwicaptcha_risk::context::RiskContext;
 use kiwicaptcha_risk::event::{RiskEventKind, RiskObservation};
 use kiwicaptcha_risk::keys::RiskKeys;
-use kiwicaptcha_risk::network::CidrNetworkClassifier;
 use kiwicaptcha_risk::network::NetworkFlags;
 use kiwicaptcha_risk::policy::RiskPolicy;
 use kiwicaptcha_risk::resources::ResourcePressure;
@@ -143,15 +142,8 @@ fn context(ip: IpAddr) -> RiskContext<'static> {
     )
 }
 
-fn engine(
-    trust: Option<Arc<dyn ContextTrustSource>>,
-) -> RiskEngine<AggregateStore, CidrNetworkClassifier> {
-    let mut engine = RiskEngine::new(
-        AggregateStore,
-        CidrNetworkClassifier::from_entries(vec![]),
-        policy(),
-        RiskKeys::from_master(&[0x42; 32]),
-    );
+fn engine(trust: Option<Arc<dyn ContextTrustSource>>) -> RiskEngine<AggregateStore> {
+    let mut engine = RiskEngine::new(AggregateStore, policy(), RiskKeys::from_master(&[0x42; 32]));
     if let Some(source) = trust {
         engine = engine.with_context_trust(source);
     }

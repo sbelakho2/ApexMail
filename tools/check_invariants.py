@@ -89,10 +89,13 @@ def kind_evidence(name: str, kind: str) -> bool:
             for p in src.rglob("*.rs")
         )
     if kind == "journey":
-        browser = REPO / "tests" / "browser"
-        return browser.is_dir() and any(
+        # The journey drivers are ApexMail-owned (tests/journeys since
+        # 2026-10-28, when the mirrored tests/browser left with the PHP
+        # mirror).
+        journeys = REPO / "tests" / "journeys"
+        return journeys.is_dir() and any(
             name.split("/")[0].split("-")[0] in p.read_text(errors="replace")
-            for p in browser.glob("journey-*.mjs")
+            for p in journeys.glob("journey-*.mjs")
         )
     if kind == "eval":
         return crate.is_dir() and any(

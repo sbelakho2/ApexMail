@@ -222,6 +222,185 @@ pub const WRITE_TIMEOUT: Duration = Duration::from_secs(1);
 /// returns this long after the first failed connect.
 pub const POOL_CHECKOUT_TIMEOUT: Duration = Duration::from_secs(1);
 
+/// A bounded, protocol-aware liveness probe BEFORE redis-rs's own
+/// `connect()`. Upstream's setup pipeline (`CLIENT SETINFO`, and `HELLO`
+/// unless RESP2) runs with NO reply bound after the TCP connect — a
+/// server that accepts and then stays silent parks `get_connection_with_timeout`
+/// forever. The URL is parsed by the SAME structured `IntoConnectionInfo`
+/// the client uses (host, port, ACL username/password, database — never
+/// an ad-hoc string split, so `redis://user:pass@host/0` cannot be
+/// mistaken for a hostname), and the probe speaks real RESP over the
+/// matching transport: AUTH (when credentials are present), SELECT
+/// (non-zero db) and PING, each answered within the 1 s read/write bounds.
+/// An error reply (`-ERR …`) fails the probe — a live-but-refusing
+/// handshake is not a usable backend.
+pub fn bounded_redis_probe(url: &str) -> Result<(), String> {
+    let info = redis::IntoConnectionInfo::into_connection_info(url)
+        .map_err(|e| format!("redis url rejected by the client parser: {e}"))?;
+    probe_connection_info(&info)
+}
+
+/// The probe over an already-parsed connection description (the pool
+/// and the meta plane share this entry).
+pub fn probe_connection_info(info: &redis::ConnectionInfo) -> Result<(), String> {
+    match &info.addr {
+        redis::ConnectionAddr::Tcp(host, port) => {
+            let mut last_err = String::new();
+            let addrs: Vec<std::net::SocketAddr> =
+                std::net::ToSocketAddrs::to_socket_addrs(&(host.as_str(), *port))
+                    .map_err(|e| format!("redis probe resolve: {e}"))?
+                    .collect();
+            if addrs.is_empty() {
+                return Err("redis probe resolve: no addresses".to_string());
+            }
+            for addr in addrs {
+                match std::net::TcpStream::connect_timeout(&addr, CONNECT_TIMEOUT) {
+                    Ok(stream) => {
+                        let probed = (|| {
+                            stream
+                                .set_read_timeout(Some(READ_TIMEOUT))
+                                .map_err(|e| format!("redis probe read timeout: {e}"))?;
+                            stream
+                                .set_write_timeout(Some(WRITE_TIMEOUT))
+                                .map_err(|e| format!("redis probe write timeout: {e}"))?;
+                            resp_liveness(stream, info)
+                        })();
+                        match probed {
+                            Ok(()) => return Ok(()),
+                            // A live-but-refusing first address must not
+                            // hide a healthy one behind it (multi-homed
+                            // hosts, anycast, a broken DNS record).
+                            Err(e) => last_err = e,
+                        }
+                    }
+                    Err(e) => last_err = e.to_string(),
+                }
+            }
+            Err(format!("redis probe connect: {last_err}"))
+        }
+        redis::ConnectionAddr::Unix(path) => {
+            let stream = std::os::unix::net::UnixStream::connect(path)
+                .map_err(|e| format!("redis unix connect: {e}"))?;
+            stream
+                .set_read_timeout(Some(READ_TIMEOUT))
+                .map_err(|e| format!("redis probe read timeout: {e}"))?;
+            stream
+                .set_write_timeout(Some(WRITE_TIMEOUT))
+                .map_err(|e| format!("redis probe write timeout: {e}"))?;
+            resp_liveness(stream, info)
+        }
+        redis::ConnectionAddr::TcpTls { .. } => Err(
+            "TLS (rediss://) is refused — this build carries no Redis TLS backend (terminate TLS in front of Redis)".to_string(),
+        ),
+    }
+}
+
+/// RESP handshake over any stream: optional AUTH (ACL username +
+/// password, or password alone), optional SELECT for a non-zero
+/// database, then PING. Each reply is a framed CRLF-terminated line
+/// (a fragmented `+OK` can never desync the next handshake command);
+/// only `+`/`$` count as success, `-ERR …` is a refusal.
+fn resp_liveness<S: std::io::Read + std::io::Write>(
+    mut stream: S,
+    info: &redis::ConnectionInfo,
+) -> Result<(), String> {
+    if let Some(password) = info.redis.password.as_deref() {
+        match info.redis.username.as_deref() {
+            Some(user) if !user.is_empty() => resp_send(&mut stream, &["AUTH", user, password])?,
+            _ => resp_send(&mut stream, &["AUTH", password])?,
+        }
+        resp_expect(&mut stream, "auth")?;
+    }
+    if info.redis.db != 0 {
+        let db = info.redis.db.to_string();
+        resp_send(&mut stream, &["SELECT", db.as_str()])?;
+        resp_expect(&mut stream, "select")?;
+    }
+    resp_send(&mut stream, &["PING"])?;
+    resp_expect(&mut stream, "ping")
+}
+
+/// Encode and write one RESP array command.
+fn resp_send<S: std::io::Write>(stream: &mut S, args: &[&str]) -> Result<(), String> {
+    let mut out = format!("*{}\r\n", args.len());
+    for a in args {
+        out.push('$');
+        out.push_str(&a.len().to_string());
+        out.push_str("\r\n");
+        out.push_str(a);
+        out.push_str("\r\n");
+    }
+    stream
+        .write_all(out.as_bytes())
+        .map_err(|e| format!("redis probe write: {e}"))
+}
+
+/// Read one complete CRLF-terminated RESP reply. Bytes are
+/// accumulated until `\r\n`, so a reply split across TCP segments
+/// (`+O` then `K\r\n`) still parses as one step and never leaves a
+/// tail that desyncs the next command. AUTH/SELECT/PING answer with
+/// a simple string (`+…`); `-…` is a refusal; a bulk `$N` body is
+/// consumed in full (some forks) so the stream stays framed; any
+/// other type is a protocol violation.
+fn resp_expect<S: std::io::Read>(stream: &mut S, what: &str) -> Result<(), String> {
+    let mut line: Vec<u8> = Vec::with_capacity(32);
+    let mut byte = [0u8; 1];
+    loop {
+        let n = stream
+            .read(&mut byte)
+            .map_err(|e| format!("redis probe {what}: {e}"))?;
+        if n == 0 {
+            return Err(if line.is_empty() {
+                format!("redis probe {what}: server closed without a reply")
+            } else {
+                format!(
+                    "redis probe {what}: truncated reply {:?}",
+                    String::from_utf8_lossy(&line)
+                )
+            });
+        }
+        line.push(byte[0]);
+        if line.len() >= 2 && line[line.len() - 2] == b'\r' && line[line.len() - 1] == b'\n' {
+            break;
+        }
+        if line.len() > 4096 {
+            return Err(format!("redis probe {what}: reply line exceeds 4 KiB"));
+        }
+    }
+    match line.first() {
+        Some(b'-') => {
+            let detail = String::from_utf8_lossy(&line[..line.len().min(160)]).to_string();
+            Err(format!("redis probe {what} refused: {detail}"))
+        }
+        // Any well-formed RESP type proves the peer speaks Redis
+        // protocol (simple string, integer, bulk, array, map, set,
+        // bool, double, big number, verbatim, push). Test doubles and
+        // some proxies answer PING with a non-simple-string type;
+        // that is still liveness. A first byte outside RESP is not.
+        Some(b'+') | Some(b':') | Some(b'$') | Some(b'*') | Some(b'%') | Some(b'#')
+        | Some(b',') | Some(b'(') | Some(b'~') | Some(b'|') => {
+            if line.first() == Some(&b'$') {
+                // Bulk header `$N\r\n` is the line just read; consume the
+                // payload (N bytes + CRLF) so the next handshake step
+                // starts on a clean boundary.
+                let n: usize = String::from_utf8_lossy(&line[1..line.len() - 2])
+                    .trim()
+                    .parse()
+                    .map_err(|_| format!("redis probe {what}: malformed bulk length"))?;
+                let mut body = vec![0u8; n + 2];
+                stream
+                    .read_exact(&mut body)
+                    .map_err(|e| format!("redis probe {what}: bulk body incomplete: {e}"))?;
+            }
+            Ok(())
+        }
+        other => Err(format!(
+            "redis probe {what}: unexpected reply type {:?}",
+            other.copied()
+        )),
+    }
+}
+
 /// The r2d2 connection manager: opens a real `redis::Connection` per pooled
 /// slot with the crate's timeouts applied at connect time, and reports
 /// poisoned connections as broken so r2d2 evicts them instead of reusing
@@ -279,6 +458,14 @@ impl r2d2::ManageConnection for StoreConnectionManager {
     type Error = redis::RedisError;
 
     fn connect(&self) -> Result<ManagedConnection, redis::RedisError> {
+        // Bounded liveness first: upstream's setup pipeline (SETINFO /
+        // HELLO) has no reply bound after the TCP connect, so a silent
+        // acceptor would park this slot's connect forever. The probe
+        // owns the 500 ms / 1 s bounds; only an answering server is
+        // handed to redis-rs.
+        probe_connection_info(self.client.get_connection_info()).map_err(|e| {
+            redis::RedisError::from((redis::ErrorKind::IoError, "redis probe before connect", e))
+        })?;
         let inner = self.client.get_connection_with_timeout(CONNECT_TIMEOUT)?;
         inner.set_read_timeout(Some(READ_TIMEOUT))?;
         inner.set_write_timeout(Some(WRITE_TIMEOUT))?;
@@ -329,21 +516,43 @@ const ENVELOPE_LUA_PRELUDE: &str = r#"
 -- every splice targets the top-level field span located by the scanner
 -- below, so a nested occurrence can never be rewritten either. The
 -- byte ceiling bounds the JSON parse before it happens.
+--
+-- The classifier and the splice targets come from ONE walk of the
+-- stored bytes: kiwiTopLevelFields() proves the document semantically
+-- unique at every nesting level and returns the span of every
+-- top-level field, and kiwiApplyEdits() lands the transition's edits
+-- on those spans right to left, so no step re-walks the document. The
+-- walk compares bytes (string.byte) and jumps between structural
+-- characters with plain string.find searches; a substring allocation
+-- per byte is what a JSON scanner of this kind cannot afford.
 local KIWI_ENVELOPE_MAX_BYTES = 131072
 local KIWI_ENVELOPE_MAX_DEPTH = 32
+
+local KIWI_B_QUOTE = 34
+local KIWI_B_BACKSLASH = 92
+local KIWI_B_OBRACE = 123
+local KIWI_B_CBRACE = 125
+local KIWI_B_OBRACKET = 91
+local KIWI_B_CBRACKET = 93
+local KIWI_B_COLON = 58
+local KIWI_B_COMMA = 44
+local KIWI_B_SPACE = 32
+local KIWI_B_TAB = 9
+local KIWI_B_LF = 10
+local KIWI_B_CR = 13
+
+-- The byte classes the scans search for: the bytes that end a scalar
+-- value (any bracket, comma or JSON whitespace byte).
+local KIWI_VALUE_STOP_PATTERN = '[,}%] \t\r\n]'
 
 local function kiwiNullish(x)
   return x == nil or x == cjson.null
 end
 
-local function kiwiIsSpace(c)
-  return string.find(' \t\r\n', c, 1, true) ~= nil
-end
-
 local function kiwiSkipSpace(v, i, n)
   while i <= n do
-    local c = string.sub(v, i, i)
-    if not kiwiIsSpace(c) then break end
+    local b = string.byte(v, i)
+    if b ~= KIWI_B_SPACE and b ~= KIWI_B_TAB and b ~= KIWI_B_LF and b ~= KIWI_B_CR then break end
     i = i + 1
   end
   return i
@@ -351,66 +560,28 @@ end
 
 local function kiwiSkipSpaceBack(v, j)
   while j >= 1 do
-    local c = string.sub(v, j, j)
-    if not kiwiIsSpace(c) then break end
+    local b = string.byte(v, j)
+    if b ~= nil and b ~= KIWI_B_SPACE and b ~= KIWI_B_TAB and b ~= KIWI_B_LF and b ~= KIWI_B_CR then break end
     j = j - 1
   end
   return j
 end
 
--- The index of the LAST byte of the JSON value starting at s, or nil
--- when the value is malformed.
-local function kiwiValueEnd(v, s, n)
-  local c = string.sub(v, s, s)
-  if c == '"' then
-    local i = s + 1
-    local esc = false
-    while i <= n do
-      local ci = string.sub(v, i, i)
-      if esc then esc = false
-      elseif ci == '\\' then esc = true
-      elseif ci == '"' then return i end
-      i = i + 1
-    end
-    return nil
-  elseif c == '{' or c == '[' then
-    local open = c
-    local close = (c == '{') and '}' or ']'
-    local depth = 0
-    local i = s
-    while i <= n do
-      local ci = string.sub(v, i, i)
-      if ci == '"' then
-        i = i + 1
-        local esc = false
-        while i <= n do
-          local cj = string.sub(v, i, i)
-          if esc then esc = false
-          elseif cj == '\\' then esc = true
-          elseif cj == '"' then break end
-          i = i + 1
-        end
-        if i > n then return nil end
-      elseif ci == open then
-        depth = depth + 1
-      elseif ci == close then
-        depth = depth - 1
-        if depth == 0 then return i end
-      end
-      i = i + 1
-    end
-    return nil
+-- i points at an opening quote; returns the index AFTER the matching
+-- closing quote, or nil when the string is unterminated. The scan jumps
+-- quote to quote with one plain search each and only counts the
+-- backslash run in front of a quote to decide whether it is escaped.
+local function kiwiSkipString(v, i, n)
+  local j = i + 1
+  while j <= n do
+    local q = string.find(v, '"', j, true)
+    if q == nil or q > n then return nil end
+    local k = q - 1
+    while k >= j and string.byte(v, k) == KIWI_B_BACKSLASH do k = k - 1 end
+    if (q - 1 - k) % 2 == 0 then return q + 1 end
+    j = q + 1
   end
-  local i = s
-  while i <= n do
-    local ci = string.sub(v, i, i)
-    if ci == ',' or ci == '}' or ci == ']' or ci == ' ' or ci == '\t' or ci == '\r' or ci == '\n' then
-      break
-    end
-    i = i + 1
-  end
-  if i == s then return nil end
-  return i - 1
+  return nil
 end
 
 -- The recursive semantic-duplicate scan of a whole stored document: a
@@ -419,73 +590,68 @@ end
 -- the same field as "state"). This is the same authority the Symfony
 -- persisted-state predicate (PersistedJsonLuaPredicate) applies, so the
 -- core envelope and the state machines share one cleanliness rule.
-local function kiwiSkipString(v, i, n)
-  i = i + 1
-  while i <= n do
-    local c = string.sub(v, i, i)
-    if c == '\\' then
-      i = i + 2
-    elseif c == '"' then
-      return i + 1
-    else
-      i = i + 1
-    end
-  end
-  return nil
-end
-
 local kiwiUniqueScanValue
 local kiwiUniqueScanObject
 local kiwiUniqueScanArray
 
+-- The DECODED name of the quoted key token spanning [i, keyEnd - 1]. A
+-- token carrying neither a backslash escape nor a raw NUL decodes to
+-- exactly its inner bytes (cjson accepts every other byte verbatim, so
+-- the plain read is exact); every other token is decoded through cjson
+-- and refused when it does not decode.
+local function kiwiKeyName(v, i, keyEnd)
+  local inner = string.sub(v, i + 1, keyEnd - 2)
+  if string.find(inner, '\\', 1, true) == nil and string.find(inner, '\0', 1, true) == nil then
+    return inner
+  end
+  local ok, decoded = pcall(cjson.decode, '"' .. inner .. '"')
+  if not ok or type(decoded) ~= 'string' then return nil end
+  return decoded
+end
+
 kiwiUniqueScanValue = function(v, i, n, depth)
   if depth > KIWI_ENVELOPE_MAX_DEPTH then return nil end
   if i > n then return nil end
-  local c = string.sub(v, i, i)
-  if c == '{' then
+  local b = string.byte(v, i)
+  if b == KIWI_B_OBRACE then
     return kiwiUniqueScanObject(v, i + 1, n, depth)
   end
-  if c == '[' then
+  if b == KIWI_B_OBRACKET then
     return kiwiUniqueScanArray(v, i + 1, n, depth)
   end
-  if c == '"' then
+  if b == KIWI_B_QUOTE then
     return kiwiSkipString(v, i, n)
   end
-  local start = i
-  while i <= n do
-    local c2 = string.sub(v, i, i)
-    if c2 == ',' or c2 == '}' or c2 == ']' or kiwiIsSpace(c2) then break end
-    i = i + 1
-  end
-  if i == start then return nil end
-  return i
+  local stop = string.find(v, KIWI_VALUE_STOP_PATTERN, i)
+  if stop == nil then stop = n + 1 end
+  if stop == i then return nil end
+  return stop
 end
 
 kiwiUniqueScanObject = function(v, i, n, depth)
   if depth > KIWI_ENVELOPE_MAX_DEPTH then return nil end
   local seen = {}
   i = kiwiSkipSpace(v, i, n)
-  if i <= n and string.sub(v, i, i) == '}' then return i + 1 end
+  if i <= n and string.byte(v, i) == KIWI_B_CBRACE then return i + 1 end
   while true do
     i = kiwiSkipSpace(v, i, n)
-    if i > n or string.sub(v, i, i) ~= '"' then return nil end
+    if i > n or string.byte(v, i) ~= KIWI_B_QUOTE then return nil end
     local keyEnd = kiwiSkipString(v, i, n)
     if keyEnd == nil then return nil end
-    local token = string.sub(v, i, keyEnd - 1)
-    local ok, key = pcall(cjson.decode, token)
-    if not ok or type(key) ~= 'string' then return nil end
+    local key = kiwiKeyName(v, i, keyEnd)
+    if key == nil then return nil end
     if seen[key] ~= nil then return nil end
     seen[key] = true
     i = kiwiSkipSpace(v, keyEnd, n)
-    if i > n or string.sub(v, i, i) ~= ':' then return nil end
+    if i > n or string.byte(v, i) ~= KIWI_B_COLON then return nil end
     i = kiwiUniqueScanValue(v, kiwiSkipSpace(v, i + 1, n), n, depth + 1)
     if i == nil then return nil end
     i = kiwiSkipSpace(v, i, n)
     if i > n then return nil end
-    local sep = string.sub(v, i, i)
-    if sep == ',' then
+    local b = string.byte(v, i)
+    if b == KIWI_B_COMMA then
       i = i + 1
-    elseif sep == '}' then
+    elseif b == KIWI_B_CBRACE then
       return i + 1
     else
       return nil
@@ -496,33 +662,21 @@ end
 kiwiUniqueScanArray = function(v, i, n, depth)
   if depth > KIWI_ENVELOPE_MAX_DEPTH then return nil end
   i = kiwiSkipSpace(v, i, n)
-  if i <= n and string.sub(v, i, i) == ']' then return i + 1 end
+  if i <= n and string.byte(v, i) == KIWI_B_CBRACKET then return i + 1 end
   while true do
     i = kiwiUniqueScanValue(v, i, n, depth + 1)
     if i == nil then return nil end
     i = kiwiSkipSpace(v, i, n)
     if i > n then return nil end
-    local sep = string.sub(v, i, i)
-    if sep == ',' then
+    local b = string.byte(v, i)
+    if b == KIWI_B_COMMA then
       i = i + 1
-    elseif sep == ']' then
+    elseif b == KIWI_B_CBRACKET then
       return i + 1
     else
       return nil
     end
   end
-end
-
--- True when the whole document is one well-formed JSON object with no
--- semantic duplicate key at any nesting level and no trailing bytes.
-local function kiwiDocumentIsUnique(v)
-  local n = #v
-  if n == 0 or n > KIWI_ENVELOPE_MAX_BYTES then return false end
-  local i = kiwiSkipSpace(v, 1, n)
-  if i > n or string.sub(v, i, i) ~= '{' then return false end
-  local endIndex = kiwiUniqueScanObject(v, i + 1, n, 0)
-  if endIndex == nil then return false end
-  return kiwiSkipSpace(v, endIndex, n) > n
 end
 
 -- The spans of every TOP-LEVEL field of the JSON object v, indexed by
@@ -538,124 +692,107 @@ end
 local function kiwiTopLevelFields(v)
   local n = #v
   if n > KIWI_ENVELOPE_MAX_BYTES then return nil end
-  -- The WHOLE document must be semantically unique at every nesting
-  -- level before any top-level span is trusted (one cleanliness rule
-  -- across the core envelope and the persisted-state machines).
-  if not kiwiDocumentIsUnique(v) then return nil end
-  local i = 1
-  i = kiwiSkipSpace(v, i, n)
-  if string.sub(v, i, i) ~= '{' then return nil end
-  i = i + 1
+  local i = kiwiSkipSpace(v, 1, n)
+  if i > n or string.byte(v, i) ~= KIWI_B_OBRACE then return nil end
+  i = kiwiSkipSpace(v, i + 1, n)
+  if i > n then return nil end
   local fields = {}
-  while i <= n do
-    local c = string.sub(v, i, i)
-    if string.find(' \t\r\n,', c, 1, true) then
-      i = i + 1
-    elseif c == '}' then
+  if string.byte(v, i) == KIWI_B_CBRACE then
+    if kiwiSkipSpace(v, i + 1, n) <= n then return nil end
+    return fields
+  end
+  while true do
+    if string.byte(v, i) ~= KIWI_B_QUOTE then return nil end
+    local keyStart = i
+    local keyEnd = kiwiSkipString(v, i, n)
+    if keyEnd == nil then return nil end
+    local name = kiwiKeyName(v, i, keyEnd)
+    if name == nil then return nil end
+    if fields[name] ~= nil then return nil end
+    i = kiwiSkipSpace(v, keyEnd, n)
+    if i > n or string.byte(v, i) ~= KIWI_B_COLON then return nil end
+    local valueStart = kiwiSkipSpace(v, i + 1, n)
+    if valueStart > n then return nil end
+    i = kiwiUniqueScanValue(v, valueStart, n, 1)
+    if i == nil then return nil end
+    fields[name] = {keyStart, valueStart, i - 1}
+    i = kiwiSkipSpace(v, i, n)
+    if i > n then return nil end
+    local b = string.byte(v, i)
+    if b == KIWI_B_COMMA then
+      i = kiwiSkipSpace(v, i + 1, n)
+      if i > n then return nil end
+    elseif b == KIWI_B_CBRACE then
+      if kiwiSkipSpace(v, i + 1, n) <= n then return nil end
       return fields
-    elseif c == '"' then
-      local j = i + 1
-      local esc = false
-      while j <= n do
-        local cj = string.sub(v, j, j)
-        if esc then esc = false
-        elseif cj == '\\' then esc = true
-        elseif cj == '"' then break end
-        j = j + 1
-      end
-      if j > n then return nil end
-      local name = string.sub(v, i + 1, j - 1)
-      local nameOk, decodedName = pcall(cjson.decode, '"' .. name .. '"')
-      if not nameOk or type(decodedName) ~= 'string' then return nil end
-      if fields[decodedName] ~= nil then return nil end
-      local p = j + 1
-      p = kiwiSkipSpace(v, p, n)
-      if string.sub(v, p, p) ~= ':' then return nil end
-      local s = p + 1
-      s = kiwiSkipSpace(v, s, n)
-      local e = kiwiValueEnd(v, s, n)
-      if e == nil then return nil end
-      fields[decodedName] = {i, s, e}
-      i = e + 1
     else
       return nil
     end
   end
-  return nil
 end
 
--- The spans of the top-level field `key`, or nil when it is absent,
--- duplicated, or the document is malformed or oversized. Depth-,
--- string- and escape-aware, so a nested field with the same name can
--- never be mistaken for the envelope's own.
-local function kiwiTopLevelField(v, key)
-  local fields = kiwiTopLevelFields(v)
-  if fields == nil then return nil end
-  return fields[key]
-end
--- Replace the value of the top-level field `key` with the raw literal,
--- or nil when the field is absent, duplicated or the document is
--- malformed.
-local function kiwiReplaceTopLevel(v, key, literal)
-  local span = kiwiTopLevelField(v, key)
-  if span == nil then return nil end
-  local head = string.sub(v, 1, span[2] - 1)
-  local tail = string.sub(v, span[3] + 1)
-  return head .. literal .. tail
-end
-
--- Remove the top-level field `key` (with one adjacent comma), or nil
--- when the field is absent, duplicated or the document is malformed.
-local function kiwiRemoveTopLevel(v, key)
-  local span = kiwiTopLevelField(v, key)
-  if span == nil then return nil end
-  local i = span[3] + 1
-  i = kiwiSkipSpace(v, i, #v)
-  if string.sub(v, i, i) == ',' then
-    return string.sub(v, 1, span[1] - 1) .. string.sub(v, i + 1)
+-- Apply the transition's edits to the stored bytes in ONE walk: every
+-- span was measured on the SAME v by kiwiTopLevelFields, so no edit
+-- re-inspects the document. Each edit is {from, to, literal, remove}:
+-- a value splice carries the replacement literal, a field removal
+-- carries the flag and drops the field with one adjacent comma, whose
+-- side is decided on the bytes as they stand when the edit runs (a
+-- right-to-left application never moves the bytes at or before `from`,
+-- so every span stays exact).
+local function kiwiApplyEdits(v, edits)
+  if #edits > 1 then
+    table.sort(edits, function(a, b) return a[1] > b[1] end)
   end
-  local j = span[1] - 1
-  j = kiwiSkipSpaceBack(v, j)
-  if string.sub(v, j, j) == ',' then
-    return string.sub(v, 1, j - 1) .. string.sub(v, span[3] + 1)
+  for k = 1, #edits do
+    local e = edits[k]
+    if e[4] then
+      local n = #v
+      local i = kiwiSkipSpace(v, e[2] + 1, n)
+      if i <= n and string.byte(v, i) == KIWI_B_COMMA then
+        v = string.sub(v, 1, e[1] - 1) .. string.sub(v, i + 1)
+      else
+        local j = kiwiSkipSpaceBack(v, e[1] - 1)
+        if j >= 1 and string.byte(v, j) == KIWI_B_COMMA then
+          v = string.sub(v, 1, j - 1) .. string.sub(v, e[2] + 1)
+        else
+          v = string.sub(v, 1, e[1] - 1) .. string.sub(v, e[2] + 1)
+        end
+      end
+    else
+      v = string.sub(v, 1, e[1] - 1) .. e[3] .. string.sub(v, e[2] + 1)
+    end
   end
-  return string.sub(v, 1, span[1] - 1) .. string.sub(v, span[3] + 1)
+  return v
 end
 
 -- Append a raw field literal before the object's closing brace, or nil
 -- when the document is not a JSON object.
 local function kiwiAppendTopLevel(v, literal)
   local n = #v
-  local i = 1
-  i = kiwiSkipSpace(v, i, n)
-  if string.sub(v, i, i) ~= '{' then return nil end
+  local first = kiwiSkipSpace(v, 1, n)
+  if first > n or string.byte(v, first) ~= KIWI_B_OBRACE then return nil end
   local depth = 0
   local last = nil
-  local first = i
+  local i = first
   while i <= n do
-    local c = string.sub(v, i, i)
-    if c == '"' then
-      i = i + 1
-      local esc = false
-      while i <= n do
-        local ci = string.sub(v, i, i)
-        if esc then esc = false
-        elseif ci == '\\' then esc = true
-        elseif ci == '"' then break end
-        i = i + 1
-      end
-      if i > n then return nil end
-    elseif c == '{' or c == '[' then
+    local b = string.byte(v, i)
+    if b == KIWI_B_QUOTE then
+      local e = kiwiSkipString(v, i, n)
+      if e == nil then return nil end
+      i = e
+    elseif b == KIWI_B_OBRACE or b == KIWI_B_OBRACKET then
       depth = depth + 1
-    elseif c == '}' or c == ']' then
+      i = i + 1
+    elseif b == KIWI_B_CBRACE or b == KIWI_B_CBRACKET then
       depth = depth - 1
       if depth == 0 then last = i break end
+      i = i + 1
+    else
+      i = i + 1
     end
-    i = i + 1
   end
   if last == nil then return nil end
-  local p = last - 1
-  p = kiwiSkipSpaceBack(v, p)
+  local p = kiwiSkipSpaceBack(v, last - 1)
   if p == first then
     return string.sub(v, 1, last - 1) .. literal .. string.sub(v, last)
   end
@@ -751,7 +888,6 @@ const CLAIM_TTL_SECS: u64 = 60;
 /// would rewrite large integers (`issued_at_ns` ~1.7e15) in scientific
 /// notation, which the strict cross-language parsers reject. PHP mirrors
 /// this script byte-for-byte.
-
 const CONSUME_TRANSITION_LUA: &str = r#"
 -- kiwicaptcha consume transition
 --
@@ -768,11 +904,13 @@ local v = redis.call('GET', KEYS[1])
 if not v then return false end
 local decoded = kiwiDecodeEnvelope(v)
 if decoded == nil then return false end
--- A semantically duplicated top-level field (an escaped alias such as
+-- ONE walk proves the document semantically unique at every nesting
+-- level and locates every top-level span the flips below target. A
+-- semantically duplicated top-level field (an escaped alias such as
 -- "st\u0061te") makes the envelope ambiguous corruption: no transition
--- may classify or mutate it. kiwiTopLevelFields() rejects it, and the
--- states below are still read from the decoded view when it is unique.
-if kiwiTopLevelFields(v) == nil then
+-- may classify or mutate it.
+local fields = kiwiTopLevelFields(v)
+if fields == nil then
   return false
 end
 local state = decoded['state']
@@ -804,10 +942,14 @@ if not kiwiNullish(decoded['consumed_result'])
     or not kiwiNullish(decoded['resume_until']) then
     return false
 end
-local updated = kiwiReplaceTopLevel(v, 'state', '"consumed"')
-if updated == nil then
+local stateSpan = fields['state']
+if stateSpan == nil then
     return false
 end
+-- The flip and the identity splice land on spans measured on the same
+-- bytes; kiwiApplyEdits() applies them right to left, so the flip can
+-- never redirect the identity splice or the other way round.
+local edits = {{stateSpan[2], stateSpan[3], '"consumed"'}}
 -- The operation-identity splice is part of the caller's contract when
 -- ARGV[1] is non-empty: a pending envelope that carries no
 -- operation_identity marker (only store() writes the null marker, so a
@@ -818,12 +960,13 @@ end
 -- Mirrors the PHP consume script byte for byte.
 local identitySpliced = 0
 if ARGV[1] ~= '' then
-    local withIdentity = kiwiReplaceTopLevel(updated, 'operation_identity', ARGV[1])
-    if withIdentity ~= nil then
-        updated = withIdentity
+    local identitySpan = fields['operation_identity']
+    if identitySpan ~= nil then
+        edits[#edits + 1] = {identitySpan[2], identitySpan[3], ARGV[1]}
         identitySpliced = 1
     end
 end
+local updated = kiwiApplyEdits(v, edits)
 -- The re-SET preserves the key's exact remaining TTL in milliseconds: a
 -- persistent (foreign) key is refused untouched (a negative `PTTL`
 -- means no expiry — the transition never destroys foreign state), and a
@@ -879,10 +1022,11 @@ local decoded = kiwiDecodeEnvelope(v)
 if decoded == nil then
   return {'corrupt'}
 end
--- A semantically duplicated top-level field (an escaped alias such as
--- "st\u0061te") makes the envelope ambiguous corruption: no transition
--- may classify or mutate it. kiwiTopLevelFields() rejects it, and the
--- states below are still read from the decoded view when it is unique.
+-- ONE walk proves the document semantically unique at every nesting
+-- level while locating the top-level spans. A semantically duplicated
+-- top-level field (an escaped alias such as "st\u0061te") makes the
+-- envelope ambiguous corruption: no transition may classify or mutate
+-- it.
 if kiwiTopLevelFields(v) == nil then
   return {'corrupt'}
 end
@@ -942,11 +1086,13 @@ local decoded = kiwiDecodeEnvelope(v)
 if decoded == nil then
   return nil
 end
--- A semantically duplicated top-level field (an escaped alias such as
--- "st\u0061te") makes the envelope ambiguous corruption: no transition
--- may classify or mutate it. kiwiTopLevelFields() rejects it, and the
--- states below are still read from the decoded view when it is unique.
-if kiwiTopLevelFields(v) == nil then
+-- ONE walk proves the document semantically unique at every nesting
+-- level and locates every top-level span the flip below targets. A
+-- semantically duplicated top-level field (an escaped alias such as
+-- "st\u0061te") makes the envelope ambiguous corruption: no
+-- transition may classify or mutate it.
+local fields = kiwiTopLevelFields(v)
+if fields == nil then
   return nil
 end
 local state = decoded['state']
@@ -964,10 +1110,11 @@ if pttl < 0 then
   return false
 end
 if pttl < 1000 then pttl = 1000 end
-local updated = kiwiReplaceTopLevel(v, 'state', '"cancelled"')
-if updated == nil then
+local stateSpan = fields['state']
+if stateSpan == nil then
   return nil
 end
+local updated = kiwiApplyEdits(v, {{stateSpan[2], stateSpan[3], '"cancelled"'}})
 redis.call("SET", KEYS[1], updated, "PX", pttl)
 return {'cancelled-now'}
 "#;
@@ -991,11 +1138,13 @@ local v = redis.call('GET', KEYS[1])
 if not v then return 0 end
 local decoded = kiwiDecodeEnvelope(v)
 if decoded == nil then return 0 end
--- A semantically duplicated top-level field (an escaped alias such as
--- "st\u0061te") makes the envelope ambiguous corruption: no transition
--- may classify or mutate it. kiwiTopLevelFields() rejects it, and the
--- states below are still read from the decoded view when it is unique.
-if kiwiTopLevelFields(v) == nil then
+-- ONE walk proves the document semantically unique at every nesting
+-- level and locates every top-level span the mutation below targets. A
+-- semantically duplicated top-level field (an escaped alias such as
+-- "st\u0061te") makes the envelope ambiguous corruption: no
+-- transition may classify or mutate it.
+local fields = kiwiTopLevelFields(v)
+if fields == nil then
   return 0
 end
 if decoded['state'] ~= 'consumed' then return 0 end
@@ -1011,8 +1160,9 @@ if ARGV[3] ~= '' then
     parsed['mac'] = ARGV[3]
     result = cjson.encode(parsed)
 end
-local updated = kiwiReplaceTopLevel(v, 'consumed_result', result)
-if updated == nil then return 0 end
+local resultSpan = fields['consumed_result']
+if resultSpan == nil then return 0 end
+local updated = kiwiApplyEdits(v, {{resultSpan[2], resultSpan[3], result}})
 -- The re-SET preserves the key's exact remaining TTL in milliseconds; a
 -- persistent (foreign) key is refused with no write (a negative `PTTL`
 -- means no expiry — the commit never destroys foreign state).
@@ -1064,11 +1214,13 @@ local decoded = kiwiDecodeEnvelope(v)
 if decoded == nil then
   return nil
 end
--- A semantically duplicated top-level field (an escaped alias such as
--- "st\u0061te") makes the envelope ambiguous corruption: no transition
--- may classify or mutate it. kiwiTopLevelFields() rejects it, and the
--- states below are still read from the decoded view when it is unique.
-if kiwiTopLevelFields(v) == nil then
+-- ONE walk proves the document semantically unique at every nesting
+-- level and locates every top-level span the strip below targets. A
+-- semantically duplicated top-level field (an escaped alias such as
+-- "st\u0061te") makes the envelope ambiguous corruption: no
+-- transition may classify or mutate it.
+local fields = kiwiTopLevelFields(v)
+if fields == nil then
   return nil
 end
 if decoded['state'] ~= 'consumed' then
@@ -1091,15 +1243,15 @@ if not kiwiNullish(decoded['resume_owner']) then
   -- Expired claim: strip the stale fields before appending the fresh
   -- ones. A shape that cannot be stripped is refused as still-claimed
   -- rather than duplicated.
-  local stripped = kiwiRemoveTopLevel(v, 'resume_until')
-  if stripped == nil then
+  local untilSpan = fields['resume_until']
+  local ownerSpan = fields['resume_owner']
+  if untilSpan == nil or ownerSpan == nil then
     return nil
   end
-  stripped = kiwiRemoveTopLevel(stripped, 'resume_owner')
-  if stripped == nil then
-    return nil
-  end
-  v = stripped
+  v = kiwiApplyEdits(v, {
+    {untilSpan[1], untilSpan[3], nil, true},
+    {ownerSpan[1], ownerSpan[3], nil, true},
+  })
 end
 local pttl = redis.call("PTTL", KEYS[1])
 if pttl < 0 then
@@ -1149,11 +1301,13 @@ local decoded = kiwiDecodeEnvelope(v)
 if decoded == nil then
   return 0
 end
--- A semantically duplicated top-level field (an escaped alias such as
--- "st\u0061te") makes the envelope ambiguous corruption: no transition
--- may classify or mutate it. kiwiTopLevelFields() rejects it, and the
--- states below are still read from the decoded view when it is unique.
-if kiwiTopLevelFields(v) == nil then
+-- ONE walk proves the document semantically unique at every nesting
+-- level and locates every top-level span the clear below targets. A
+-- semantically duplicated top-level field (an escaped alias such as
+-- "st\u0061te") makes the envelope ambiguous corruption: no
+-- transition may classify or mutate it.
+local fields = kiwiTopLevelFields(v)
+if fields == nil then
   return 0
 end
 if decoded['state'] ~= 'consumed' then
@@ -1162,14 +1316,15 @@ end
 if decoded['resume_owner'] ~= ARGV[1] then
   return 0
 end
-local updated = kiwiRemoveTopLevel(v, 'resume_until')
-if updated == nil then
+local untilSpan = fields['resume_until']
+local ownerSpan = fields['resume_owner']
+if untilSpan == nil or ownerSpan == nil then
   return 0
 end
-updated = kiwiRemoveTopLevel(updated, 'resume_owner')
-if updated == nil then
-  return 0
-end
+local updated = kiwiApplyEdits(v, {
+  {untilSpan[1], untilSpan[3], nil, true},
+  {ownerSpan[1], ownerSpan[3], nil, true},
+})
 local pttl = redis.call("PTTL", KEYS[1])
 if pttl < 0 then
   return 0
@@ -1212,11 +1367,13 @@ local decoded = kiwiDecodeEnvelope(v)
 if decoded == nil then
   return 0
 end
--- A semantically duplicated top-level field (an escaped alias such as
--- "st\u0061te") makes the envelope ambiguous corruption: no transition
--- may classify or mutate it. kiwiTopLevelFields() rejects it, and the
--- states below are still read from the decoded view when it is unique.
-if kiwiTopLevelFields(v) == nil then
+-- ONE walk proves the document semantically unique at every nesting
+-- level and locates every top-level span the mutation and claim clear
+-- below target. A semantically duplicated top-level field (an escaped
+-- alias such as "st\u0061te") makes the envelope ambiguous
+-- corruption: no transition may classify or mutate it.
+local fields = kiwiTopLevelFields(v)
+if fields == nil then
   return 0
 end
 if decoded['state'] ~= 'consumed' then
@@ -1247,18 +1404,27 @@ if ARGV[4] ~= '' then
     parsed['mac'] = ARGV[4]
     result = cjson.encode(parsed)
 end
-local updated = kiwiReplaceTopLevel(v, 'consumed_result', result)
-if updated == nil then return 0 end
-local cleared = kiwiRemoveTopLevel(updated, 'resume_until')
-if cleared == nil then return 0 end
-cleared = kiwiRemoveTopLevel(cleared, 'resume_owner')
-if cleared == nil then return 0 end
+-- The result splice and the claim clear land on spans measured on the
+-- stored bytes: kiwiApplyEdits() applies them right to left in one
+-- pass.
+local resultSpan = fields['consumed_result']
+if resultSpan == nil then return 0 end
+local untilSpan = fields['resume_until']
+local ownerSpan = fields['resume_owner']
+if untilSpan == nil or ownerSpan == nil then
+  return 0
+end
+local updated = kiwiApplyEdits(v, {
+  {resultSpan[2], resultSpan[3], result},
+  {untilSpan[1], untilSpan[3], nil, true},
+  {ownerSpan[1], ownerSpan[3], nil, true},
+})
 local pttl = redis.call('PTTL', KEYS[1])
 if pttl < 0 then
   return 0
 end
 if pttl < 1000 then pttl = 1000 end
-redis.call('SET', KEYS[1], cleared, 'PX', pttl)
+redis.call('SET', KEYS[1], updated, 'PX', pttl)
 return 1
 "#;
 
@@ -2415,7 +2581,6 @@ impl RedisChallengeStore {
                 None => (None, true),
             };
             identity_spliced = spliced;
-            let parsed = parsed;
             // Durability barrier: only the fresh pending → consumed
             // transition mutated the store, so only it waits. The wait
             // proves that at least N replicas acknowledged the write; it
@@ -4573,7 +4738,14 @@ impl ProductionVerifier {
         //     re-deriving per verification.
         let sig = signature_from_challenge(record);
         let sig_ok = match record.protocol_version {
-            1 => verify_signature(&payload_from_record(record), sig, secret),
+            1 => {
+                let payload = payload_from_record(record);
+                let canonical = crate::challenge::canonical_signing_input(&payload);
+                if !crate::challenge::challenge_payload_matches(&record.challenge, &canonical) {
+                    return Err(VerifyError::BadSignature);
+                }
+                verify_signature(&payload, sig, secret)
+            }
             _ => {
                 let keys = self.resolve_derived_keys(record)?;
                 verify_signature_v2_with_keys(record, sig, &keys)
@@ -4812,12 +4984,193 @@ mod tests {
 
     fn redis_url() -> Option<String> {
         match std::env::var("RISK_REDIS_URL") {
-            Ok(url) => Some(url),
-            Err(_) => {
+            Ok(url) if !url.is_empty() => {
+                // The shared harness convention may carry a predis-style
+                // `tcp://host:port`; redis-rs only parses `redis://`.
+                Some(if let Some(rest) = url.strip_prefix("tcp://") {
+                    format!("redis://{rest}")
+                } else {
+                    url
+                })
+            }
+            _ => {
                 eprintln!("RISK_REDIS_URL unset — Redis integration test skipped");
                 None
             }
         }
+    }
+
+    /// A bare `-ERR …` (wrong password, NOAUTH) is a live server that
+    /// refused the handshake: the probe must fail, not report liveness
+    /// for a backend the real connect could never authenticate against.
+    #[test]
+    fn probe_fails_on_an_error_reply_not_just_any_bytes() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let server = std::thread::spawn(move || {
+            let Ok((mut stream, _)) = listener.accept() else {
+                return;
+            };
+            let mut buf = [0u8; 256];
+            let _ = std::io::Read::read(&mut stream, &mut buf);
+            let _ = std::io::Write::write_all(&mut stream, b"-ERR invalid password\r\n");
+        });
+        let url = format!("redis://appuser:wrong@{addr}/0");
+        let err = bounded_redis_probe(&url).expect_err("an -ERR handshake must fail the probe");
+        assert!(
+            err.contains("refused") && err.contains("invalid password"),
+            "the refusal carries the server's error: {err}"
+        );
+        let _ = server.join();
+    }
+
+    /// A closed connection (zero bytes) still fails within the bound.
+    #[test]
+    fn probe_fails_when_the_server_closes_without_replying() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let server = std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0u8; 64];
+                let _ = std::io::Read::read(&mut stream, &mut buf);
+                // drop = FIN without a reply
+                drop(stream);
+            }
+        });
+        let err = bounded_redis_probe(&format!("redis://{addr}/"))
+            .expect_err("a close-without-reply must fail");
+        assert!(
+            err.contains("closed") || err.contains("probe ping"),
+            "the close is reported: {err}"
+        );
+        let _ = server.join();
+    }
+
+    /// ACL credentials survive the structured parse: AUTH user pass
+    /// rides the wire before PING (an ad-hoc host splitter would have
+    /// resolved `user:pass@host` as a hostname and never reached us).
+    #[test]
+    fn probe_authenticates_acl_urls_before_pinging() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let seen2 = std::sync::Arc::clone(&seen);
+        let server = std::thread::spawn(move || {
+            let Ok((mut stream, _)) = listener.accept() else {
+                return;
+            };
+            let mut buf = [0u8; 1024];
+            for _ in 0..4 {
+                let Ok(n) = std::io::Read::read(&mut stream, &mut buf) else {
+                    return;
+                };
+                if n == 0 {
+                    return;
+                }
+                let cmd = String::from_utf8_lossy(&buf[..n]).to_string();
+                let word = cmd.split("\r\n").nth(2).unwrap_or("").to_string();
+                seen2.lock().expect("seen").push(word.clone());
+                let reply: &[u8] = if word == "AUTH" || word == "SELECT" {
+                    b"+OK\r\n"
+                } else if word == "PING" {
+                    b"+PONG\r\n"
+                } else {
+                    b"-ERR unknown\r\n"
+                };
+                let _ = std::io::Write::write_all(&mut stream, reply);
+                if word == "PING" {
+                    return;
+                }
+            }
+        });
+        bounded_redis_probe(&format!("redis://appuser:secret@{addr}/0"))
+            .expect("the credentialed probe completes the handshake");
+        let words = seen.lock().expect("seen").clone();
+        let _ = server.join();
+        assert_eq!(
+            words,
+            vec!["AUTH".to_string(), "PING".to_string()],
+            "the probe authenticates with the parsed ACL credentials before PING: {words:?}"
+        );
+    }
+
+    /// TLS is refused at the probe boundary: a `rediss://` URL never
+    /// pretends a plaintext PING proves a TLS endpoint alive.
+    #[test]
+    fn probe_refuses_tls_urls_instead_of_pinging_plaintext() {
+        let err = bounded_redis_probe("rediss://user:secret@redis.internal:6380/0")
+            .expect_err("TLS must be refused");
+        assert!(
+            err.contains("TLS") || err.contains("rediss"),
+            "the refusal names TLS: {err}"
+        );
+    }
+
+    /// A reply drip-fed one byte at a time must still frame: the probe
+    /// reassembles CRLF across TCP segments instead of treating the
+    /// first fragment as a complete answer (and desyncing the next
+    /// handshake command).
+    #[test]
+    fn probe_frames_a_reply_drip_fed_one_byte_at_a_time() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let server = std::thread::spawn(move || {
+            let Ok((mut stream, _)) = listener.accept() else {
+                return;
+            };
+            let mut buf = [0u8; 256];
+            let _ = std::io::Read::read(&mut stream, &mut buf);
+            for b in b"+PONG\r\n" {
+                let _ = std::io::Write::write_all(&mut stream, &[*b]);
+                let _ = std::io::Write::flush(&mut stream);
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        });
+        bounded_redis_probe(&format!("redis://{addr}/"))
+            .expect("a drip-fed +PONG still completes the handshake");
+        let _ = server.join();
+    }
+
+    /// A bulk PING body is consumed in full so the stream stays framed.
+    #[test]
+    fn probe_consumes_a_bulk_ping_body() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let server = std::thread::spawn(move || {
+            let Ok((mut stream, _)) = listener.accept() else {
+                return;
+            };
+            let mut buf = [0u8; 256];
+            let _ = std::io::Read::read(&mut stream, &mut buf);
+            let _ = std::io::Write::write_all(&mut stream, b"$4\r\nPONG\r\n");
+        });
+        bounded_redis_probe(&format!("redis://{addr}/"))
+            .expect("a bulk PONG completes the handshake");
+        let _ = server.join();
+    }
+
+    /// A non-RESP first byte (`X…`) is a protocol violation, not
+    /// liveness — the probe must refuse garbage that happens to be
+    /// non-empty.
+    #[test]
+    fn probe_refuses_a_non_resp_first_byte() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let server = std::thread::spawn(move || {
+            let Ok((mut stream, _)) = listener.accept() else {
+                return;
+            };
+            let mut buf = [0u8; 256];
+            let _ = std::io::Read::read(&mut stream, &mut buf);
+            let _ = std::io::Write::write_all(&mut stream, b"Xnot-resp\r\n");
+        });
+        let err = bounded_redis_probe(&format!("redis://{addr}/"))
+            .expect_err("garbage must not count as a live server");
+        assert!(
+            err.contains("unexpected reply type"),
+            "the refusal names the protocol violation: {err}"
+        );
+        let _ = server.join();
     }
 
     fn now_unix() -> u64 {

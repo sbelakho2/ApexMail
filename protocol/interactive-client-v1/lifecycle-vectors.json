@@ -1,0 +1,132 @@
+[
+  {
+    "name": "deliver-immediately-min-duration-zero",
+    "receivedAtMs": 1000000,
+    "ttlSecs": 120,
+    "minDurationMs": 0,
+    "solveFinishedAtMs": 1000400,
+    "nowMs": 1000400,
+    "cancelled": false,
+    "expect": { "deliver": true, "deliverAtMs": 1000400, "reason": "deliver" }
+  },
+  {
+    "name": "defer-to-min-submit-when-solve-beats-the-floor",
+    "receivedAtMs": 1000000,
+    "ttlSecs": 120,
+    "minDurationMs": 5000,
+    "solveFinishedAtMs": 1000600,
+    "nowMs": 1000600,
+    "cancelled": false,
+    "expect": { "deliver": false, "deliverAtMs": 1005000, "reason": "defer" }
+  },
+  {
+    "name": "deferred-delivery-fires-exactly-at-min-submit",
+    "receivedAtMs": 1000000,
+    "ttlSecs": 120,
+    "minDurationMs": 5000,
+    "solveFinishedAtMs": 1000600,
+    "nowMs": 1005000,
+    "cancelled": false,
+    "expect": { "deliver": true, "deliverAtMs": 1005000, "reason": "deliver" }
+  },
+  {
+    "name": "expired-during-solve",
+    "receivedAtMs": 1000000,
+    "ttlSecs": 30,
+    "minDurationMs": 0,
+    "solveFinishedAtMs": 1031500,
+    "nowMs": 1031500,
+    "cancelled": false,
+    "expect": { "deliver": false, "deliverAtMs": 0, "reason": "expired" }
+  },
+  {
+    "name": "solve-finishes-just-before-expiry-delivers",
+    "receivedAtMs": 1000000,
+    "ttlSecs": 30,
+    "minDurationMs": 0,
+    "solveFinishedAtMs": 1028999,
+    "nowMs": 1028999,
+    "cancelled": false,
+    "expect": { "deliver": true, "deliverAtMs": 1028999, "reason": "deliver" }
+  },
+  {
+    "name": "min-submit-at-reaches-expiry-is-expired",
+    "receivedAtMs": 1000000,
+    "ttlSecs": 30,
+    "minDurationMs": 29000,
+    "solveFinishedAtMs": 1001000,
+    "nowMs": 1001000,
+    "cancelled": false,
+    "expect": { "deliver": false, "deliverAtMs": 0, "reason": "expired" }
+  },
+  {
+    "name": "cancelled-generation-delivers-nothing",
+    "receivedAtMs": 1000000,
+    "ttlSecs": 120,
+    "minDurationMs": 0,
+    "solveFinishedAtMs": 1000500,
+    "nowMs": 1000500,
+    "cancelled": true,
+    "expect": { "deliver": false, "deliverAtMs": 0, "reason": "cancelled" }
+  },
+  {
+    "name": "now-exactly-at-expiry-is-expired",
+    "receivedAtMs": 1000000,
+    "ttlSecs": 30,
+    "minDurationMs": 0,
+    "solveFinishedAtMs": 1028000,
+    "nowMs": 1029000,
+    "cancelled": false,
+    "expect": { "deliver": false, "deliverAtMs": 0, "reason": "expired" }
+  },
+  {
+    "name": "solve-finish-exactly-at-expiry-is-expired",
+    "receivedAtMs": 1000000,
+    "ttlSecs": 30,
+    "minDurationMs": 0,
+    "solveFinishedAtMs": 1029000,
+    "nowMs": 1029000,
+    "cancelled": false,
+    "expect": { "deliver": false, "deliverAtMs": 0, "reason": "expired" }
+  },
+  {
+    "name": "long-ttl-no-min-duration-checkpoint-mid-solve",
+    "receivedAtMs": 1000000,
+    "ttlSecs": 3600,
+    "minDurationMs": 0,
+    "solveFinishedAtMs": 1000200,
+    "nowMs": 1000100,
+    "cancelled": false,
+    "expect": { "deliver": false, "deliverAtMs": 1000200, "reason": "defer" }
+  },
+  {
+    "name": "ttl-zero-no-expiry-delivers-after-min-duration",
+    "receivedAtMs": 1000000,
+    "ttlSecs": 0,
+    "minDurationMs": 2000,
+    "solveFinishedAtMs": 1000500,
+    "nowMs": 1000500,
+    "cancelled": false,
+    "expect": { "deliver": false, "deliverAtMs": 1002000, "reason": "defer" }
+  },
+  {
+    "name": "ttl-zero-no-min-duration-delivers-immediately",
+    "receivedAtMs": 1000000,
+    "ttlSecs": 0,
+    "minDurationMs": 0,
+    "solveFinishedAtMs": 1000300,
+    "nowMs": 1000300,
+    "cancelled": false,
+    "expect": { "deliver": true, "deliverAtMs": 1000300, "reason": "deliver" }
+  },
+  {
+    "name": "deferred-min-duration-lands-after-expiry-checkpoint",
+    "receivedAtMs": 1000000,
+    "ttlSecs": 30,
+    "minDurationMs": 25000,
+    "solveFinishedAtMs": 1000500,
+    "nowMs": 1030000,
+    "cancelled": false,
+    "expect": { "deliver": false, "deliverAtMs": 0, "reason": "expired" }
+  }
+]

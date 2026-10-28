@@ -412,7 +412,8 @@ impl RiskPolicy {
     ///
     /// Argon re-escalation order: `action = strongest(band, minimum,
     /// floor)` first; then the scope's step-up rung (a raise only); then,
-    /// when the final action is Argon and the argon
+    /// when the final action is capacity-gated (an Argon rung or the rsw
+    /// time-lock rung) and the argon
     /// capacity is below 300, the action steps UP to `StepUp` — the
     /// capacity check is last, so floors/minimum can never reintroduce
     /// Argon after a demotion.
@@ -514,12 +515,13 @@ impl RiskPolicy {
             action = RiskAction::Deny;
         } else if let Some(floor_action) = velocity_floor {
             action = strongest(action, floor_action, action);
-            if action.is_argon() && r.argon_capacity < 300 {
+            if action.is_capacity_gated() && r.argon_capacity < 300 {
                 action = RiskAction::StepUp;
                 reasons.push(RiskReason::CapacityPressure);
             }
-        } else if action.is_argon() && r.argon_capacity < 300 {
-            // Capacity check last: the final action is Argon and the
+        } else if action.is_capacity_gated() && r.argon_capacity < 300 {
+            // Capacity check last: the final action demands backend
+            // headroom (an argon rung or the rsw time-lock rung) and the
             // backend cannot serve memory-hard work — re-escalate to the
             // interactive step-up flow instead of weakening the guard.
             action = RiskAction::StepUp;
@@ -1306,6 +1308,58 @@ mod tests {
         assert!(!d.has_reason(RiskReason::CapacityPressure));
     }
 
+    /// An rsw band decision under a saturated backend re-escalates to
+    /// the interactive step-up, exactly like an argon rung: the
+    /// capacity gate covers the sequential time-lock rung (never a
+    /// weaker answer), and with headroom the band mapping stands. An
+    /// "rsw" scope minimum or global floor parses on both engines.
+    #[test]
+    fn rsw_band_and_minimum_capacity_gated() {
+        let p = policy();
+        let d = p.decide(
+            1,
+            940,
+            &zero_vector(),
+            &ResourcePressure {
+                argon_capacity: 299,
+                ..Default::default()
+            },
+            0,
+            1_700_000_000_000,
+            0,
+        );
+        assert_eq!(d.action, RiskAction::StepUp);
+        assert!(d.has_reason(RiskReason::CapacityPressure));
+
+        let d = p.decide(
+            1,
+            940,
+            &zero_vector(),
+            &ResourcePressure {
+                argon_capacity: 300,
+                ..Default::default()
+            },
+            0,
+            1_700_000_000_000,
+            0,
+        );
+        assert_eq!(d.action, RiskAction::Rsw);
+        assert!(!d.has_reason(RiskReason::CapacityPressure));
+
+        // A score above the rsw band keeps the stronger plain action.
+        let d = p.decide(1, 960, &zero_vector(), &healthy(), 0, 1_700_000_000_000, 0);
+        assert_eq!(d.action, RiskAction::StepUp);
+
+        let mut cfg = config();
+        cfg["scopes"]["2"]["minimum"] = json!("rsw");
+        cfg["global_floors"]["4"] = json!("rsw");
+        let p = RiskPolicy::from_config(3, &cfg).expect("config parses");
+        assert_eq!(p.minimum(2), RiskAction::Rsw);
+        assert_eq!(p.global_floors[4], RiskAction::Rsw);
+        let d = p.decide(2, 100, &zero_vector(), &healthy(), 0, 1_700_000_000_000, 0);
+        assert_eq!(d.action, RiskAction::Rsw);
+    }
+
     #[test]
     fn floors_or_minimum_never_reintroduce_argon() {
         // Score 600 -> Argon16; global floor 4 is Sha20 (rank 3 < 4) so the
@@ -1579,7 +1633,7 @@ mod tests {
         assert_eq!(json["action"], "sha20");
         assert_eq!(json["policy_version"], 3);
         // The revision is exposed in the public JSON (bounded).
-        assert_eq!(json["model_revision"], 18);
+        assert_eq!(json["model_revision"], 19);
         assert_eq!(json["global_level"], 2);
         assert_eq!(json["retry_after_ms"], Value::Null);
         assert_eq!(json["band"], 5);
@@ -1588,8 +1642,8 @@ mod tests {
 
     /// The revision constant is a shared cross-language value.
     #[test]
-    fn model_revision_constant_is_seventeen() {
-        assert_eq!(crate::RISK_MODEL_REVISION, 18);
+    fn model_revision_constant_is_nineteen() {
+        assert_eq!(crate::RISK_MODEL_REVISION, 19);
     }
 
     /// Policy-level wiring: an oscillating boundary score

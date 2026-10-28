@@ -183,7 +183,6 @@ fn escalation_drops_the_quarantine_and_inertia_keeps_it() {
 #[test]
 fn engine_emits_the_quarantine_disposition_and_its_metric_label() {
     use kiwicaptcha_risk::keys::RiskKeys;
-    use kiwicaptcha_risk::network::CidrNetworkClassifier;
     use kiwicaptcha_risk::RiskEngine;
     use std::sync::Arc;
 
@@ -263,7 +262,7 @@ fn engine_emits_the_quarantine_disposition_and_its_metric_label() {
     impl kiwicaptcha_risk::store::SessionContextTagStore for ZeroStore {}
     impl kiwicaptcha_risk::store::SessionTlsTagStore for ZeroStore {}
 
-    fn risk_engine(live_decoy: bool) -> RiskEngine<ZeroStore, CidrNetworkClassifier> {
+    fn risk_engine(live_decoy: bool) -> RiskEngine<ZeroStore> {
         let policy_json = serde_json::json!({
             "version": 3,
             "weights": {},
@@ -274,7 +273,6 @@ fn engine_emits_the_quarantine_disposition_and_its_metric_label() {
         });
         let mut engine = RiskEngine::new(
             ZeroStore,
-            CidrNetworkClassifier::from_entries(vec![]),
             Arc::new(RiskPolicy::from_config(3, &policy_json).expect("policy parses")),
             RiskKeys::from_master(&[0x42; 32]),
         )

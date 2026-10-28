@@ -1,7 +1,8 @@
 //! Slow-script guard (a guard, not a benchmark): the verification-path
 //! scripts (risk-v1.lua + the calibration read) must run well under a
 //! generous bound when the state is at its maximum allowed size (every key
-//! carrying its full bounded field set — 12 flat fields per risk state
+//! carrying its full bounded field set — 12 state fields plus the event
+//! effect marker (fx) per risk state
 //! hash, 6 fields per calibration bucket, all 24 buckets + state present).
 //! The asserted bound is a generous 50 ms average over 100 runs so CI
 //! noise can never flake it; typical means are sub-millisecond. Skipped
@@ -23,7 +24,7 @@ fn unique_namespace(prefix: &str) -> String {
     common::unique_namespace(prefix)
 }
 
-/// The 12 state fields of the risk state hashes at their maximum.
+/// The 12 state fields plus the effect marker of a risk state hash.
 fn seed_risk_state(conn: &mut redis::Connection, key: &str, now: i64) {
     let cmd = redis::Cmd::hset_multiple(
         key,

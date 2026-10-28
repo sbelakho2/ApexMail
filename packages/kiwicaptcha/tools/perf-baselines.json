@@ -9,43 +9,43 @@
   },
   "budgets": {
     "widget_driver": {
-      "raw_bytes": 124672,
-      "brotli_bytes": 30247,
+      "raw_bytes": 128893,
+      "brotli_bytes": 31319,
       "raw_cap_bytes": 160000,
       "gzip_cap_bytes": 40000,
       "brotli_cap_bytes": 34000,
       "copies_identical": true,
       "note": "The eager driver core (widget-driver.js), three byte-identical copies, the always-loaded asset; the lazy widget modules (widget-risk.js / widget-telemetry.js / widget-locales.js / widget-compat.js) and the execution interpreter carry their own budget rows. The raw cap is carried onto the always-loaded core; the compressed caps are the ordinary-bootstrap target. Compressed sizes use gzip -n -9 and brotli -q 11. perf-budget.sh verifies the recorded raw_bytes equals the current measured bytes. Structured fields are authoritative. The Escape-dismissal capture listener (the cross-engine keyboard fix) added the current delta.",
-      "gzip_bytes_zlib12": 36039,
-      "gzip_bytes_zlib13": 36039,
+      "gzip_bytes_zlib12": 37310,
+      "gzip_bytes_zlib13": 37310,
       "headroom_review": {
-        "gzip": "reviewed 2026-10-12: 35552/40000 bytes (88.9%). The step-up surface of the eager core (the step-up dialog machinery, the email-ownership factor UI and the rendered-demand attribute fallback) grew the always-loaded driver on purpose; the gzip cap is re-baselined to 40,000 for that surface. The eager driver core still carries the always-loaded bootstrap (solvers, lifecycle, a11y, provider surface). The reviewed follow-up stands: move the pure-JS SHA-256 fallback (the largest non-bootstrap block, only reached when neither wasm nor the worker is available) into a lazy module before the next behavior wave. Any further growth must either recover bytes or re-review this note."
+        "gzip": "reviewed 2026-10-18: 36725/40000 bytes (91.8%). CSP nonce propagation onto lazy modules and the execution iframe grew the always-loaded driver; the cap is unchanged. The reviewed follow-up stands: move the pure-JS SHA-256 fallback (the largest non-bootstrap block, only reached when neither wasm nor the worker is available) into a lazy module before the next behavior wave. Re-measured 2026-10-21 after the Interactive-Client Lifecycle v1 delivery floor gate (min-duration validation, receipt-anchored floor wait): 37310/40000 (93.3%), still under the 95% line with this review on file; any further growth must recover bytes or re-review this note."
       },
-      "gzip_bytes": 35731
+      "gzip_bytes": 37310
     },
     "widget_worker": {
-      "raw_bytes": 158934,
+      "raw_bytes": 158781,
       "copies_identical": true,
       "note": "The worker asset (kiwi-worker.js), three byte-identical copies; since the r8 glue-embedding change the asset is assembled by tools/embed-worker as the `var window = self;` prelude plus the full wasm glue (kiwicaptcha-wasm.js) plus the worker solver source, so a files-mode worker boots with wasm in scope (SHA solves in the worker use solve_sha256_chunk; the rsw sequential time-lock solver stays pure JS BigInt, exactly the Argon worker's loading and message pattern). The lazy runtime fetch of the driver stays for the compat tier. The row carries no cap fields by design, like the widget_runtime and widget_css rows: the asset is lazy in the files tier (a SHA-only page never fetches it) and perf-budget.sh verifies the recorded raw_bytes equals the current measured bytes.",
-      "brotli_bytes": 37622,
+      "brotli_bytes": 37552,
       "raw_cap_bytes": 159934,
       "gzip_cap_bytes": 55247,
       "brotli_cap_bytes": 55238,
-      "gzip_bytes_zlib12": 54747,
-      "gzip_bytes": 54747,
-      "gzip_bytes_zlib13": 54747
+      "gzip_bytes_zlib12": 54657,
+      "gzip_bytes": 54657,
+      "gzip_bytes_zlib13": 54657
     },
     "widget_runtime": {
-      "raw_bytes": 127009,
+      "raw_bytes": 126856,
       "copies_identical": true,
       "note": "The wasm glue runtime asset (kiwicaptcha-wasm.js), three byte-identical copies; the embedded worker source is regenerated from the worker solver source (the tail of assets/kiwi-worker.js) by the embed-worker tool, so the rsw solver rides the glue copy too; the release worker asset embeds this same glue text, so the files-mode worker needs no runtime fetch to solve. perf-budget.sh verifies the recorded raw_bytes equals the current measured bytes.",
-      "brotli_bytes": 36368,
+      "brotli_bytes": 36288,
       "raw_cap_bytes": 128009,
       "gzip_cap_bytes": 45713,
       "brotli_cap_bytes": 45701,
-      "gzip_bytes_zlib12": 45213,
-      "gzip_bytes": 45213,
-      "gzip_bytes_zlib13": 45213
+      "gzip_bytes_zlib12": 45110,
+      "gzip_bytes": 45110,
+      "gzip_bytes_zlib13": 45110
     },
     "widget_css": {
       "raw_bytes": 11145,
@@ -93,16 +93,16 @@
       "note": "The wire shape of the bundle /challenge response when the execution dimension is armed (the authenticated decoy rides along). Maximum deterministic execution-enabled challenge response at the manifest execution-version maximum and maximum valid execution-program op count. RSW fixture included. Re-recorded at the version-6 rung (op-count ceiling 20 + byte % 4, top 23). The per-algorithm ranges are the measured spread of the drawn program operands across hand re-measurement runs. Structured min/max, op count, version and cap fields are authoritative."
     },
     "widget_risk": {
-      "raw_bytes": 42552,
-      "brotli_bytes": 10714,
+      "raw_bytes": 44044,
+      "brotli_bytes": 11094,
       "raw_cap_bytes": 49152,
       "gzip_cap_bytes": 20000,
       "brotli_cap_bytes": 16000,
       "copies_identical": true,
       "note": "The lazy adaptive-risk module (widget-risk.js), three byte-identical copies; carries the Argon2id/rsw worker solve tier, the ExecutionChallengeV1 runner and the decoy/honeypot machinery. Compressed sizes use gzip -n -9 and brotli -q 11. Structured raw/gzip/brotli fields are authoritative (perf-budget.sh equality-gates them).",
-      "gzip_bytes_zlib12": 12473,
-      "gzip_bytes_zlib13": 12473,
-      "gzip_bytes": 12473
+      "gzip_bytes_zlib12": 12887,
+      "gzip_bytes_zlib13": 12887,
+      "gzip_bytes": 12887
     },
     "widget_telemetry": {
       "raw_bytes": 5621,

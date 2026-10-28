@@ -41,7 +41,7 @@
                 "session": { "kind": "spamReported", "count": 1, "first_ms": 1700000000000, "last_ms": 1700000000000 }
             },
             "target_mark": null, "corroborated": false,
-            "expected_action": "argon64", "expected_retry_after_ms": null, "expected_reasons": ["marked_identity"]
+            "expected_action": "rsw", "expected_retry_after_ms": null, "expected_reasons": ["marked_identity"]
         },
         {
             "why": "a marked principal dimension escalates identically",
@@ -51,7 +51,7 @@
                 "principal": { "kind": "accountBanned", "count": 2, "first_ms": 1700000000000, "last_ms": 1700000000000 }
             },
             "target_mark": null, "corroborated": false,
-            "expected_action": "argon64", "expected_retry_after_ms": null, "expected_reasons": ["marked_identity"]
+            "expected_action": "rsw", "expected_retry_after_ms": null, "expected_reasons": ["marked_identity"]
         },
         {
             "why": "a marked asn bucket escalates identically",
@@ -61,7 +61,7 @@
                 "asn": { "kind": "fraudConfirmed", "count": 3, "first_ms": 1700000000000, "last_ms": 1700000000000 }
             },
             "target_mark": null, "corroborated": false,
-            "expected_action": "argon64", "expected_retry_after_ms": null, "expected_reasons": ["marked_identity"]
+            "expected_action": "rsw", "expected_retry_after_ms": null, "expected_reasons": ["marked_identity"]
         },
         {
             "why": "a marked agent dimension escalates identically",
@@ -71,7 +71,7 @@
                 "agent": { "kind": "chargeback", "count": 1, "first_ms": 1700000000000, "last_ms": 1700000000000 }
             },
             "target_mark": null, "corroborated": false,
-            "expected_action": "argon64", "expected_retry_after_ms": null, "expected_reasons": ["marked_identity"]
+            "expected_action": "rsw", "expected_retry_after_ms": null, "expected_reasons": ["marked_identity"]
         },
         {
             "why": "a marked identity under the level-3 global floor still reaches the rung",
@@ -81,7 +81,7 @@
                 "session": { "kind": "spamReported", "count": 1, "first_ms": 1700000000000, "last_ms": 1700000000000 }
             },
             "target_mark": null, "corroborated": false,
-            "expected_action": "argon64", "expected_retry_after_ms": null, "expected_reasons": ["marked_identity"]
+            "expected_action": "rsw", "expected_retry_after_ms": null, "expected_reasons": ["marked_identity"]
         },
         {
             "why": "a plain deny band stays a deny; the mark only adds its reason",
@@ -95,7 +95,7 @@
         },
         {
             "why": "a plain step-up keeps its rank above the rung",
-            "scope": 1, "score": 950, "global_level": 0, "now_ms": 1700000000000,
+            "scope": 1, "score": 965, "global_level": 0, "now_ms": 1700000000000,
             "signals": {}, "argon_capacity": 1000, "issuance_capacity": 1000,
             "own_marks": {
                 "session": { "kind": "spamReported", "count": 1, "first_ms": 1700000000000, "last_ms": 1700000000000 }
@@ -199,6 +199,26 @@
             "corroborated": true,
             "expected_action": "deny", "expected_retry_after_ms": 4294967295,
             "expected_reasons": ["corroborated_abuse", "target_under_attack", "invalid_proofs"]
+        },
+        {
+            "why": "a plain rsw band sits exactly at the mark floor",
+            "scope": 1, "score": 940, "global_level": 0, "now_ms": 1700000000000,
+            "signals": {}, "argon_capacity": 1000, "issuance_capacity": 1000,
+            "own_marks": {
+                "session": { "kind": "accountBanned", "count": 1, "first_ms": 1700000000000, "last_ms": 1700000000000 }
+            },
+            "target_mark": null, "corroborated": false,
+            "expected_action": "rsw", "expected_retry_after_ms": null, "expected_reasons": ["marked_identity"]
+        },
+        {
+            "why": "the rsw mark floor under a saturated backend re-escalates to the interactive step-up",
+            "scope": 1, "score": 940, "global_level": 0, "now_ms": 1700000000000,
+            "signals": {}, "argon_capacity": 0, "issuance_capacity": 1000,
+            "own_marks": {
+                "session": { "kind": "accountBanned", "count": 1, "first_ms": 1700000000000, "last_ms": 1700000000000 }
+            },
+            "target_mark": null, "corroborated": false,
+            "expected_action": "step_up", "expected_retry_after_ms": null, "expected_reasons": ["marked_identity", "capacity_pressure"]
         }
     ]
 }

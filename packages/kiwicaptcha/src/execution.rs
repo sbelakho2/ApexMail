@@ -230,6 +230,19 @@ pub const DATASET_ALPHABET: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyz_";
 /// Wire ceiling for the base64 program a record/challenge may carry.
 pub const MAX_PROGRAM_BASE64: usize = 4096;
 
+/// The ceiling of every geometry trace field in CSS pixels. A geometry
+/// probe measures a node laid out inside the sandboxed execution
+/// document, so a real offset or height stays far below this bound.
+/// The ceiling closes the field: without it the accepted set would
+/// depend on the host number type (an exact integer, a cast or a
+/// float), the cross-runtime split the shared register forbids.
+pub const MAX_GEOMETRY_PX: u64 = 4096;
+
+/// The ancestor-walk step ceiling of the depth probe. A hand-crafted
+/// child record can make the parent map self-referential, so the walk
+/// stops at this count and refuses instead of spinning forever.
+const MAX_DEPTH_WALK_STEPS: u64 = 4096;
+
 pub const OP_ADD: u8 = 0;
 pub const OP_SUB: u8 = 1;
 pub const OP_MUL: u8 = 2;
@@ -2591,6 +2604,33 @@ fn int_obs_envelope(seed: u32) -> (i64, i64, i64) {
     ((q_exp - 2).max(0), (q_exp + 2).min(100), t0_pct)
 }
 
+/// Read one numeric trace field at `pos`: a non-empty run of ASCII
+/// digits whose exact value is at most `ceiling`, terminated by the
+/// byte `terminator`. The position advances past both; `None` when the
+/// field is absent, carries any other byte, exceeds the ceiling, or
+/// would overflow the accumulator. The checked arithmetic and the
+/// early ceiling refusal keep the acceptance set independent of the
+/// host number type: a field past the ceiling is refused, never
+/// wrapped or saturated.
+fn trace_uint(bytes: &[u8], pos: &mut usize, ceiling: u64, terminator: u8) -> Option<u64> {
+    let start = *pos;
+    let mut value: u64 = 0;
+    while *pos < bytes.len() && bytes[*pos].is_ascii_digit() {
+        value = value
+            .checked_mul(10)?
+            .checked_add(u64::from(bytes[*pos] - b'0'))?;
+        if value > ceiling {
+            return None;
+        }
+        *pos += 1;
+    }
+    if *pos == start || bytes.get(*pos) != Some(&terminator) {
+        return None;
+    }
+    *pos += 1;
+    Some(value)
+}
+
 /// Validate a `SUBMITTED` execution trace against a program: the
 /// browser-equivalent canonical shape with the layout-probe entries
 /// validated against their invariants (`GEOMETRY` monotonic in the
@@ -2649,7 +2689,7 @@ pub(crate) fn verify_executed_trace_decoded(program: &Program, trace: &str) -> O
     let mut cur: Option<DomNode> = None;
     let mut doc_ids: HashSet<Vec<u8>> = HashSet::new();
     let mut ctx: Option<ExecutionGraph> = (program.op_version >= 5).then(ExecutionGraph::new);
-    let mut prev_top: i64 = -1;
+    let mut prev_top: u64 = 0;
     let mut append_rank: HashMap<Vec<u8>, usize> = HashMap::new();
     let mut tree_parent: HashMap<Vec<u8>, Vec<u8>> = HashMap::new();
     let bytes = trace.as_bytes();
@@ -2677,20 +2717,17 @@ pub(crate) fn verify_executed_trace_decoded(program: &Program, trace: &str) -> O
         pos += name_open.len();
         match op.opcode {
             OP_DOM_GEOMETRY => {
-                let rest = std::str::from_utf8(&bytes[pos..]).ok()?;
-                let end = rest.find(')')?;
-                let body = &rest[..end];
-                let mut parts = body.splitn(2, ',');
-                let top: i64 = parts.next()?.parse().ok()?;
-                let height: i64 = parts.next()?.parse().ok()?;
                 // The layout offsets are construction-order positions:
-                // each is non-negative and monotonic (never below the
-                // previous entry's offset).
-                if height < 1 || top < 0 || top < prev_top {
+                // each is non-negative, at most the register ceiling
+                // and monotonic (never below the previous entry's
+                // offset). The entry grammar is the exact digit run of
+                // the PHP, Rust and node walkers alike.
+                let top = trace_uint(bytes, &mut pos, MAX_GEOMETRY_PX, b',')?;
+                let height = trace_uint(bytes, &mut pos, MAX_GEOMETRY_PX, b')')?;
+                if height < 1 || top < prev_top {
                     return None;
                 }
                 prev_top = top;
-                pos += end + 1;
             }
             OP_DOM_POINT => {
                 let top_tag = if construction.is_empty() {
@@ -2718,20 +2755,17 @@ pub(crate) fn verify_executed_trace_decoded(program: &Program, trace: &str) -> O
                 // a bounded step count instead of spinning forever.
                 let mut guard = 0usize;
                 while let Some(pid) = cursor {
-                    if guard >= 4096 {
+                    if guard as u64 >= MAX_DEPTH_WALK_STEPS {
                         return None;
                     }
                     guard += 1;
                     depth += 1;
                     cursor = tree_parent.get(&pid).cloned();
                 }
-                let rest = std::str::from_utf8(&bytes[pos..]).ok()?;
-                let end = rest.find(')')?;
-                let value: usize = rest[..end].parse().ok()?;
-                if value != depth {
+                let value = trace_uint(bytes, &mut pos, depth as u64, b')')?;
+                if value != depth as u64 {
                     return None;
                 }
-                pos += end + 1;
             }
             OP_DOM_SIBLING_INDEX => {
                 // The sibling-index traversal: the value is the rank of
@@ -2743,14 +2777,11 @@ pub(crate) fn verify_executed_trace_decoded(program: &Program, trace: &str) -> O
                 let expected = append_rank
                     .get(&operand_bytes(op, "id"))
                     .copied()
-                    .map(|rank| rank + SRCDOC_PREEXISTING_BODY_ELEMENTS);
-                let rest = std::str::from_utf8(&bytes[pos..]).ok()?;
-                let end = rest.find(')')?;
-                let value: usize = rest[..end].parse().ok()?;
-                if expected != Some(value) {
+                    .map(|rank| rank + SRCDOC_PREEXISTING_BODY_ELEMENTS)?;
+                let value = trace_uint(bytes, &mut pos, expected as u64, b')')?;
+                if value != expected as u64 {
                     return None;
                 }
-                pos += end + 1;
             }
             OP_DOM_OBSERVE => {
                 // The causal observe entry `obs(<dst>,<h>)`: the walker
@@ -2759,22 +2790,18 @@ pub(crate) fn verify_executed_trace_decoded(program: &Program, trace: &str) -> O
                 // replays the reported height into its own u8 state so
                 // every later checksum/read entry is exact-compared
                 // against the observed byte (whole-trace coherence).
-                let rest = std::str::from_utf8(&bytes[pos..]).ok()?;
-                let end = rest.find(')')?;
-                let body = &rest[..end];
-                let mut parts = body.splitn(2, ',');
-                let dst: i64 = parts.next()?.parse().ok()?;
-                let observed: i64 = parts.next()?.parse().ok()?;
-                if !doc_ids.contains(&operand_bytes(op, "id"))
-                    || dst != operand_int(op, "idx") as i64
-                    || !(1..=255).contains(&observed)
-                {
+                if !doc_ids.contains(&operand_bytes(op, "id")) {
+                    return None;
+                }
+                let idx = operand_int(op, "idx");
+                let dst = trace_uint(bytes, &mut pos, idx, b',')?;
+                let observed = trace_uint(bytes, &mut pos, 255, b')')?;
+                if dst != idx || observed < 1 {
                     return None;
                 }
                 if (dst as usize) < u8arr.len() {
                     u8arr[dst as usize] = observed as u8;
                 }
-                pos += end + 1;
             }
             OP_DOM_URL_CANON => {
                 // The URL-canon entry is the one browser-observed value
@@ -2804,20 +2831,16 @@ pub(crate) fn verify_executed_trace_decoded(program: &Program, trace: &str) -> O
                 if !doc_ids.contains(&operand_bytes(op, "id")) {
                     return None;
                 }
-                let rest = std::str::from_utf8(&bytes[pos..]).ok()?;
-                let end = rest.find(')')?;
-                let mut parts = rest[..end].splitn(2, ',');
-                let fs: i64 = parts.next()?.parse().ok()?;
-                let height: i64 = parts.next()?.parse().ok()?;
                 let (fs_lo, fs_hi, h_lo, h_hi) = css_geom_envelope(operand_int(op, "seed") as u32);
-                if fs < fs_lo || fs > fs_hi || height < h_lo || height > h_hi {
+                let fs = trace_uint(bytes, &mut pos, fs_hi as u64, b',')?;
+                let height = trace_uint(bytes, &mut pos, h_hi as u64, b')')?;
+                if fs < fs_lo as u64 || height < h_lo as u64 {
                     return None;
                 }
                 let cell = operand_int(op, "cell") as usize;
                 if cell < u8arr.len() {
                     u8arr[cell] = height as u8;
                 }
-                pos += end + 1;
             }
             OP_MUT_ORDER => {
                 // The mutation delivery-order envelope: the exact
@@ -2873,24 +2896,20 @@ pub(crate) fn verify_executed_trace_decoded(program: &Program, trace: &str) -> O
                 if !doc_ids.contains(&operand_bytes(op, "id")) {
                     return None;
                 }
-                let rest = std::str::from_utf8(&bytes[pos..]).ok()?;
-                let end = rest.find(')')?;
-                let mut parts = rest[..end].splitn(3, ',');
-                let t: i64 = parts.next()?.parse().ok()?;
-                let rects: i64 = parts.next()?.parse().ok()?;
-                let sel_count: i64 = parts.next()?.parse().ok()?;
                 let (t_exact, rects_lo, rects_hi) = range_order_envelope(
                     operand_int(op, "b0") as u32,
                     operand_int(op, "b1") as u32,
                 );
-                if t != t_exact || rects < rects_lo || rects > rects_hi || sel_count != 1 {
+                let t = trace_uint(bytes, &mut pos, t_exact as u64, b',')?;
+                let rects = trace_uint(bytes, &mut pos, rects_hi as u64, b',')?;
+                let sel_count = trace_uint(bytes, &mut pos, 1, b')')?;
+                if t != t_exact as u64 || rects < rects_lo as u64 || sel_count != 1 {
                     return None;
                 }
                 let cell = operand_int(op, "cell") as usize;
                 if cell < u8arr.len() {
                     u8arr[cell] = rects as u8;
                 }
-                pos += end + 1;
             }
             OP_INT_OBS => {
                 // The intersection envelope: the observer must have
@@ -2902,27 +2921,24 @@ pub(crate) fn verify_executed_trace_decoded(program: &Program, trace: &str) -> O
                 if !doc_ids.contains(&operand_bytes(op, "id")) {
                     return None;
                 }
-                let rest = std::str::from_utf8(&bytes[pos..]).ok()?;
-                let end = rest.find(')')?;
-                let mut parts = rest[..end].splitn(3, ',');
-                let fired: i64 = parts.next()?.parse().ok()?;
-                let q: i64 = parts.next()?.parse().ok()?;
-                let is_int: i64 = parts.next()?.parse().ok()?;
                 let (q_lo, q_hi, t0_pct) = int_obs_envelope(operand_int(op, "seed") as u32);
-                if fired != 1 || q < q_lo || q > q_hi {
+                let fired = trace_uint(bytes, &mut pos, 1, b',')?;
+                let q = trace_uint(bytes, &mut pos, q_hi as u64, b',')?;
+                let is_int = trace_uint(bytes, &mut pos, 1, b')')?;
+                if fired != 1 || q < q_lo as u64 {
                     return None;
                 }
-                if q >= t0_pct + 2 && is_int != 1 {
+                let q_signed = q as i64;
+                if q_signed >= t0_pct + 2 && is_int != 1 {
                     return None;
                 }
-                if q <= t0_pct - 2 && is_int != 0 {
+                if q_signed <= t0_pct - 2 && is_int != 0 {
                     return None;
                 }
                 let cell = operand_int(op, "cell") as usize;
                 if cell < u8arr.len() {
                     u8arr[cell] = q as u8;
                 }
-                pos += end + 1;
             }
             _ => {
                 let sim_entry = format!("{sim})");
@@ -4204,6 +4220,37 @@ mod tests {
             passed, attempted,
             "WHITE-BOX PASS RATE: the full-knowledge forger must pass every version-6 program \
              without a browser (pass rate 1.0, rejection rate 0.0)"
+        );
+    }
+
+    #[test]
+    fn protocol_version_and_tag_grammar_are_pinned() {
+        // The op-version byte is part of the cross-language program
+        // grammar: every interpreter (Rust, JS worker, PHP) reads it and
+        // rejects an unknown value. The tag list feeds DOM_CREATE, so a
+        // reorder or an invalid entry changes every generated program.
+        assert_eq!(PROTOCOL_VERSION, 1);
+        assert_eq!(TAG_NAMES, ["div", "span", "section", "p"]);
+
+        let mut seen = std::collections::HashSet::new();
+        for tag in TAG_NAMES {
+            assert!(seen.insert(tag), "tag names must be unique");
+            assert!(!tag.is_empty());
+            assert!(
+                tag.bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit()),
+                "tag names are lowercase HTML element names: {tag}"
+            );
+            assert_ne!(tag, "id", "the fixed list never contains 'id'");
+        }
+
+        // The generated program carries the same protocol version, so a
+        // decoder and an encoder can never disagree on the grammar rung.
+        let program = generate(KEY, "nonce-abc", "login", "login-action", 1)
+            .expect("version 1 must generate");
+        assert_eq!(
+            decode(&program).expect("the program parses").op_version,
+            PROTOCOL_VERSION
         );
     }
 }

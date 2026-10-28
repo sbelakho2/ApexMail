@@ -375,10 +375,15 @@ mod tests {
     fn widget_omits_nonce_attribute_when_none() {
         let html = kiwi_widget_html("/challenge", "login", None);
         assert!(html.contains("<style>"));
-        assert!(!html.contains("nonce="));
+        // The embedded asset sources mention `nonce=` in the code that
+        // propagates one; the claim is about the rendered tags, so the
+        // assertion targets tag openings rather than the whole document.
+        assert!(!html.contains("<style nonce="));
+        assert!(!html.contains("<script nonce="));
         // Empty-string nonce is treated as absent.
         let html2 = kiwi_widget_html("/challenge", "login", Some(""));
-        assert!(!html2.contains("nonce="));
+        assert!(!html2.contains("<style nonce="));
+        assert!(!html2.contains("<script nonce="));
     }
 
     #[test]

@@ -102,6 +102,12 @@ pub const DEFAULT_MARK_TTL_SECS: u64 = 7_776_000;
 /// The largest accepted mark kind length in bytes (the outcome name).
 pub const MAX_MARK_KIND_BYTES: usize = 64;
 
+/// The largest accepted caller identifier in bytes, mirroring PHP
+/// `RedisRiskStateStore::MAX_KEY_COMPONENT_BYTES`. Identifiers are
+/// interpolated into Redis keys, so an unbounded value would let one
+/// report mint a multi-megabyte key.
+pub const MAX_KEY_COMPONENT_BYTES: usize = 4096;
+
 /// Default raw saturations in Lua argv order:
 /// src_fast, src_slow, issue, bad, mal, rep, action, switch, global,
 /// trust, principal.
@@ -230,6 +236,18 @@ impl ConnectionPool {
             *guard = None;
         }
         if guard.is_none() {
+            // Bounded liveness first: redis-rs's setup pipeline (SETINFO /
+            // HELLO) has no reply bound after the TCP connect, so a silent
+            // acceptor would park this slot forever. The shared probe owns
+            // the connect/read/write bounds; only an answering server is
+            // handed to redis-rs.
+            if let Err(e) =
+                kiwicaptcha::redis_verify::probe_connection_info(client.get_connection_info())
+            {
+                return Err(RiskStoreError::BackendUnavailable(format!(
+                    "redis probe before risk connect: {e}"
+                )));
+            }
             let conn = client
                 .get_connection_with_timeout(Duration::from_millis(self.connection_timeout_ms))
                 .map_err(map_redis_error)?;
@@ -501,6 +519,23 @@ impl RedisRiskStateStore {
         self.namespace_version
     }
 
+    /// Builds the Redis-backed decoy-escalation reader over this store's
+    /// client and encoded namespace: the write/read path of the canonical
+    /// `decoy_escalation.lua` (the PHP `DecoyEscalationStore` mirror).
+    /// `gate_open` is the autofill-qualification decision; a closed gate
+    /// makes the script refuse the record before any write.
+    pub fn decoy_escalation_reader(
+        &self,
+        gate_open: bool,
+    ) -> crate::escalation::RedisDecoyEscalationStore {
+        crate::escalation::RedisDecoyEscalationStore::new(
+            self.client.clone(),
+            self.namespace.clone(),
+            gate_open,
+        )
+        .expect("the derived namespace is a safe key component")
+    }
+
     /// Re-derive every key from the raw namespace under an explicit key
     /// version: switching an existing deployment to
     /// [`NamespaceVersion::Digest`] changes its key space, so the caller
@@ -645,6 +680,7 @@ impl RedisRiskStateStore {
     /// enforce the same rule so every decision-id key path agrees.
     pub(crate) fn valid_key_component(value: &str) -> bool {
         !value.is_empty()
+            && value.len() <= MAX_KEY_COMPONENT_BYTES
             && !value
                 .chars()
                 .any(|c| c.is_control() || matches!(c, ':' | '}' | '\u{2028}' | '\u{2029}'))
@@ -824,7 +860,8 @@ impl RedisRiskStateStore {
             Some(reg) => keys.push(self.outcome_ledger_key(&reg.decision_id)),
             None => keys.push(format!("{}:risk:ledger:unused", self.key_tag)),
         }
-        match registration.and_then(|reg| reg.target_id.as_deref()) {
+        let target_id = registration.and_then(|reg| reg.target_id.as_deref());
+        match target_id {
             Some(target_id) => keys.extend(self.target_state_keys(target_id)),
             None => {
                 keys.push(format!("{}:risk:tgt:unused", self.key_tag));
@@ -832,6 +869,20 @@ impl RedisRiskStateStore {
                 keys.push(format!("{}:risk:tgt:asn:unused", self.key_tag));
             }
         }
+        // KEYS[17]: the per-report target-failure dedupe marker. The
+        // canonical target_failure.lua writes the identical key, so one
+        // report event id books one failure whichever report path
+        // reaches the state first. Always present so positions never
+        // shift; a target-less assessment passes an unused slot.
+        keys.push(match target_id {
+            Some(target_id) => crate::keyspace::target_failure_marker_key(
+                &self.namespace,
+                target_id,
+                &o.event_id,
+                KeyspaceMode::Legacy,
+            ),
+            None => format!("{}:risk:tgt:dd:unused", self.key_tag),
+        });
         // The real cluster contract: every key of the invocation hashes
         // to one slot (a divergent key set is refused server-side with a
         // cross-slot error, so the contract is enforced here first).
@@ -1017,13 +1068,17 @@ impl RedisRiskStateStore {
         crate::keyspace::target_state_keys(&self.namespace, target_id, KeyspaceMode::Legacy)
     }
 
-    /// One target_failure.lua op, returning {fails, spread}.
+    /// One target_failure.lua op, returning {fails, spread}. The
+    /// per-report dedupe marker of the fail op rides the fourth key, on
+    /// the target family's own slot; an empty event id leaves the
+    /// marker untouched.
     fn run_target_op(
         &self,
         op: &str,
         target_id: &str,
         source: &str,
         asn: &str,
+        event_id: &str,
     ) -> Result<crate::store::TargetState, RiskStoreError> {
         if !Self::valid_key_component(target_id) {
             return Err(RiskStoreError::InvalidIdentifier(format!(
@@ -1031,7 +1086,22 @@ impl RedisRiskStateStore {
                 hex::encode(target_id)
             )));
         }
-        let keys = self.target_state_keys(target_id);
+        if !event_id.is_empty() && !Self::valid_key_component(event_id) {
+            return Err(RiskStoreError::InvalidIdentifier(
+                "event_id is not a safe Redis key component".to_string(),
+            ));
+        }
+        let mut keys = self.target_state_keys(target_id).to_vec();
+        keys.push(crate::keyspace::target_failure_marker_key(
+            &self.namespace,
+            target_id,
+            if event_id.is_empty() {
+                "unused"
+            } else {
+                event_id
+            },
+            crate::keyspace::KeyspaceMode::Legacy,
+        ));
         // The target dimension's window is the principal retention (the
         // 24h default change.md assigns it); a dedicated knob would
         // only duplicate that contract.
@@ -1044,6 +1114,8 @@ impl RedisRiskStateStore {
         invocation.arg(source);
         invocation.arg(asn);
         invocation.arg(ttl);
+        invocation.arg(event_id);
+        invocation.arg(self.dedupe_ttl_secs);
         let reply: Vec<i64> = self
             .pool
             .with_connection(&self.client, |conn| invocation.invoke(conn))?;
@@ -1554,11 +1626,21 @@ impl RiskStateStore for RedisRiskStateStore {
         source: &str,
         asn: &str,
     ) -> Result<crate::store::TargetState, RiskStoreError> {
-        self.run_target_op("fail", target_id, source, asn)
+        self.run_target_op("fail", target_id, source, asn, "")
+    }
+
+    fn register_target_failure_once(
+        &self,
+        target_id: &str,
+        source: &str,
+        asn: &str,
+        event_id: &str,
+    ) -> Result<crate::store::TargetState, RiskStoreError> {
+        self.run_target_op("fail", target_id, source, asn, event_id)
     }
 
     fn clear_target_failures(&self, target_id: &str) -> Result<(), RiskStoreError> {
-        self.run_target_op("clear", target_id, "", "")?;
+        self.run_target_op("clear", target_id, "", "", "")?;
         Ok(())
     }
 
@@ -1566,7 +1648,7 @@ impl RiskStateStore for RedisRiskStateStore {
         &self,
         target_id: &str,
     ) -> Result<crate::store::TargetState, RiskStoreError> {
-        self.run_target_op("read", target_id, "", "")
+        self.run_target_op("read", target_id, "", "", "")
     }
 
     fn last_global_level(&self) -> u8 {
@@ -1641,6 +1723,12 @@ impl RedisRiskStateStore {
         tag: &str,
     ) -> Result<Option<String>, RiskStoreError> {
         use ::redis::Commands;
+        if tag.len() > 64 {
+            return Err(RiskStoreError::InvalidIdentifier(format!(
+                "session tag must be at most 64 bytes (got {})",
+                tag.len()
+            )));
+        }
         // ONE command: `SET key tag NX EX ttl`. The previous SET NX plus
         // a separate EXPIRE could be interrupted between the two (process
         // death, connection drop, command timeout), leaving a first-seen

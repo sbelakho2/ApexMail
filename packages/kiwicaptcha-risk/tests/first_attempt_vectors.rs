@@ -15,7 +15,7 @@ use kiwicaptcha_risk::context::{RiskContext, RiskV2Context};
 use kiwicaptcha_risk::event::{RiskEventKind, RiskObservation};
 use kiwicaptcha_risk::identity::RiskIdentityFactory;
 use kiwicaptcha_risk::keys::RiskKeys;
-use kiwicaptcha_risk::network::{CidrNetworkClassifier, NetworkFlags};
+use kiwicaptcha_risk::network::NetworkFlags;
 use kiwicaptcha_risk::policy::{RiskPolicy, RiskReason};
 use kiwicaptcha_risk::resources::ResourcePressure;
 use kiwicaptcha_risk::signals::SignalVector;
@@ -93,8 +93,10 @@ fn policy() -> Arc<RiskPolicy> {
     )
 }
 
-/// The network bucket of a source address, byte-identical with the
-/// engine's own spelling (family byte + masked bytes, hex).
+/// The legacy bucket spelling of a source address (family byte plus
+/// the masked bytes, hex). The corpus seeds its history with this
+/// spelling, which the gate reads as the legacy form, so every row
+/// keeps pinning the same verdicts it pinned before the stable tags.
 fn network_bucket(ip: IpAddr) -> String {
     hex::encode(kiwicaptcha_risk::identity::masked_network(ip, 32, 64))
 }
@@ -358,14 +360,10 @@ fn run_cell(case: &Case, enforce: NoveltyEnforcement, expected: &serde_json::Val
     } else {
         None
     };
-    let mut engine = kiwicaptcha_risk::RiskEngine::new(
-        store,
-        CidrNetworkClassifier::from_entries(vec![]),
-        policy(),
-        RiskKeys::from_master(&MASTER),
-    )
-    .with_principal_networks(Arc::new(networks.clone()))
-    .with_novelty_enforcement(enforce);
+    let mut engine =
+        kiwicaptcha_risk::RiskEngine::new(store, policy(), RiskKeys::from_master(&MASTER))
+            .with_principal_networks(Arc::new(networks.clone()))
+            .with_novelty_enforcement(enforce);
     if let Some(dataset) = dataset {
         engine = engine.with_asn_dataset(dataset);
     }

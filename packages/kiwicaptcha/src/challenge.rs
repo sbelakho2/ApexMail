@@ -871,11 +871,28 @@ pub(crate) fn valid_identifier(s: &str, max_len: usize) -> bool {
 ///
 /// Protocol v1 canonical input (legacy records, `protocol_version == 1`):
 /// `nonce|scope|ip_hash|issued_at`.
-fn canonical_signing_input(payload: &ChallengePayload) -> String {
+pub(crate) fn canonical_signing_input(payload: &ChallengePayload) -> String {
     format!(
         "{}|{}|{}|{}",
         payload.nonce, payload.scope, payload.ip_hash, payload.issued_at
     )
+}
+
+/// True when the challenge's payload segment (everything before the
+/// final dot) is the canonical standard base64 of exactly `canonical`.
+/// The challenge writers emit `base64(canonical) || "." || signature`
+/// and the signed fields reconstruct `canonical`, so a decoded segment
+/// that differs from the reconstruction is a malformed record: the
+/// signature would still cover the stored fields, leaving the
+/// client-visible payload unauthenticated.
+pub(crate) fn challenge_payload_matches(challenge: &str, canonical: &str) -> bool {
+    let Some((encoded, _signature)) = challenge.rsplit_once('.') else {
+        return false;
+    };
+    let Ok(bytes) = B64.decode(encoded) else {
+        return false;
+    };
+    bytes == canonical.as_bytes()
 }
 
 /// Protocol v2..v5 canonical input (canonical revision 4), the full
@@ -1202,6 +1219,12 @@ pub const RECORD_META_MAC_DOMAIN: &str = "kiwi/record-meta/v1";
 /// Domain tag of the consumed-result MAC input.
 pub const CONSUMED_RESULT_MAC_DOMAIN: &str = "kiwi/consumed-result/v1";
 
+/// Domain tag of the sidecar companion-metadata MAC. smeta is written
+/// and read only by the sidecar nodes (PHP never touches the key), so
+/// this contract needs no cross-language mirror — but its domain must
+/// stay disjoint from the two shared MACs under the same purpose key.
+pub const COMPANION_META_MAC_DOMAIN: &str = "kiwi/smeta/v1";
+
 fn mac_lp(out: &mut Vec<u8>, value: &str) {
     out.extend_from_slice(value.len().to_string().as_bytes());
     out.push(b':');
@@ -1347,6 +1370,69 @@ pub fn verify_consumed_result_mac(
     )
 }
 
+/// The exact sidecar companion-metadata MAC input bytes:
+/// `domain \n lp(challenge) \n opt(action) \n opt(cdata) \n opt(decision_id)`.
+/// Binds the issuance-bound presentation fields to the challenge they
+/// were minted with, so a storage writer that swaps `action` or
+/// `cdata` in the smeta companion can never make a success assert
+/// attacker-selected metadata (the reader drops unauthenticated
+/// fields instead of echoing them).
+pub fn companion_meta_mac_input(
+    challenge: &str,
+    action: Option<&str>,
+    cdata: Option<&str>,
+    decision_id: Option<&str>,
+) -> Vec<u8> {
+    let mut out = Vec::with_capacity(96 + challenge.len());
+    out.extend_from_slice(COMPANION_META_MAC_DOMAIN.as_bytes());
+    out.push(b'\n');
+    mac_lp(&mut out, challenge);
+    out.push(b'\n');
+    mac_opt(&mut out, action);
+    out.push(b'\n');
+    mac_opt(&mut out, cdata);
+    out.push(b'\n');
+    mac_opt(&mut out, decision_id);
+    out
+}
+
+/// The companion-metadata MAC (`smeta.mac`) under the server-state
+/// purpose key.
+pub fn companion_meta_mac(
+    derived: &DerivedKeys,
+    challenge: &str,
+    action: Option<&str>,
+    cdata: Option<&str>,
+    decision_id: Option<&str>,
+) -> String {
+    server_state_hmac(
+        derived.server_state_key(),
+        &companion_meta_mac_input(challenge, action, cdata, decision_id),
+    )
+}
+
+/// True when `tag` is a well-formed companion-metadata MAC over the
+/// given challenge and presentation fields (constant time). A `None`
+/// tag (a legacy unsigned companion) never verifies: the reader must
+/// drop the fields rather than trust them.
+pub fn verify_companion_meta_mac(
+    derived: &DerivedKeys,
+    challenge: &str,
+    action: Option<&str>,
+    cdata: Option<&str>,
+    decision_id: Option<&str>,
+    tag: Option<&str>,
+) -> bool {
+    let Some(tag) = tag else {
+        return false;
+    };
+    server_state_hmac_matches(
+        derived.server_state_key(),
+        &companion_meta_mac_input(challenge, action, cdata, decision_id),
+        tag,
+    )
+}
+
 /// Sign the payload with the secret key, returning a hex HMAC tag
 /// (protocol v1 canonical input; see [`ChallengePayload`]).
 ///
@@ -1398,15 +1484,14 @@ pub fn verify_signature_v2_with_tenant(
     secret_key: &str,
     tenant: Option<&str>,
 ) -> Result<bool, SignError> {
-    verify_canonical_v2(
-        &canonical_signing_input_v2_with_mac(
-            record,
-            signed_canonical_commits_record_meta(&record.challenge),
-        ),
-        signature,
-        secret_key,
-        tenant,
-    )
+    let canonical = canonical_signing_input_v2_with_mac(
+        record,
+        signed_canonical_commits_record_meta(&record.challenge),
+    );
+    if !challenge_payload_matches(&record.challenge, &canonical) {
+        return Ok(false);
+    }
+    verify_canonical_v2(&canonical, signature, secret_key, tenant)
 }
 
 /// Verify a v2 signature with an already derived challenge-signing key —
@@ -1421,14 +1506,14 @@ pub(crate) fn verify_signature_v2_with_keys(
     signature: &str,
     derived: &DerivedKeys,
 ) -> Result<bool, SignError> {
-    verify_canonical_v2_with_keys(
-        &canonical_signing_input_v2_with_mac(
-            record,
-            signed_canonical_commits_record_meta(&record.challenge),
-        ),
-        signature,
-        derived,
-    )
+    let canonical = canonical_signing_input_v2_with_mac(
+        record,
+        signed_canonical_commits_record_meta(&record.challenge),
+    );
+    if !challenge_payload_matches(&record.challenge, &canonical) {
+        return Ok(false);
+    }
+    verify_canonical_v2_with_keys(&canonical, signature, derived)
 }
 
 fn verify_canonical(canonical: &str, signature: &str, secret_key: &str) -> Result<bool, SignError> {
@@ -4941,6 +5026,80 @@ mod tests {
             crate::verify::verify_solution(&mut ctx),
             crate::verify::VerifyOutcome::Valid { .. }
         ));
+    }
+
+    /// Issue with one named Argon profile, solve a real counter, and
+    /// verify end to end. The profile allocation (32 or 64 MiB at t=3)
+    /// happens twice (solve + verify), exactly like a deployment.
+    fn issue_solve_verify_argon_profile(profile: ChallengeProfile, expected_m_kib: u32) {
+        let issued = issue_challenge_with_profile(
+            &profile_base_config(),
+            "login",
+            "1.2.3.4",
+            1_000_000,
+            1_700_000_000_000_000,
+            0,
+            &profile,
+            None,
+        )
+        .unwrap();
+        assert_eq!(issued.challenge.algorithm, PoWAlgorithm::Argon2id);
+        assert_eq!(issued.challenge.target_bits, 1);
+        assert_eq!(issued.challenge.m_kib, expected_m_kib);
+        assert_eq!(issued.challenge.t, 3);
+        assert_eq!(issued.challenge.p, 1);
+        assert_eq!(issued.record.m_kib, expected_m_kib);
+
+        let mut record = issued.record.clone();
+        let counter = crate::verify::solve_for_test(&record).expect("argon solve finds a counter");
+        let mut ctx = crate::verify::VerifyContext {
+            record: &mut record,
+            secret_key: "test-key-32-bytes-0123456789abcd",
+            tenant: None,
+            secrets_by_kid: None,
+            revoked_kids: None,
+            counter,
+            duration_ms: 5000,
+            now_unix: Some(&mut || 1_000_001),
+            now_ns: 1_700_000_005_000_000,
+            min_duration_ms: 0,
+            expected_scope: None,
+            expected_request_binding: RequestBindingExpectation::Unenforced,
+            client_ip: Some("1.2.3.4"),
+            execution_digest: None,
+            execution_trace: None,
+            expected_region: None,
+            expected_issuer: None,
+            expected_policy_version: None,
+            policy_version_floor: None,
+            telemetry: None,
+            enforce_telemetry: false,
+            max_attempts: 0,
+            accept_legacy_v1: false,
+            rsw_proof: None,
+            rsw_modulus_n: None,
+            rsw_lambda: None,
+            rsw_keyring: None,
+        };
+        assert!(
+            matches!(
+                crate::verify::verify_solution(&mut ctx),
+                crate::verify::VerifyOutcome::Valid { .. }
+            ),
+            "the {expected_m_kib} KiB argon profile must verify"
+        );
+    }
+
+    #[test]
+    fn issue_with_profile_argon32_solves_and_verifies() {
+        issue_solve_verify_argon_profile(ChallengeProfile::argon32(), 32 * 1024);
+    }
+
+    #[test]
+    fn issue_with_profile_argon64_solves_and_verifies() {
+        // The strongest named profile: 64 MiB × 3, one real solve and
+        // one real verification, bounded to a single issuance.
+        issue_solve_verify_argon_profile(ChallengeProfile::argon64(), 64 * 1024);
     }
 
     #[test]

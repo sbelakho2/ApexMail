@@ -460,8 +460,9 @@ fn consolidated_assessment_registers_tags_and_the_ledger() {
     );
 }
 
-/// The hysteresis script floors a corrupt negative level at 0 and never
-/// lets it feed the ratchet as upgrade head-start. The write-on-change
+/// The hysteresis script floors a negative finite level at 0 and never
+/// lets it feed the ratchet as upgrade head-start. A non-finite or
+/// fractional stored value is refused by the strict decoder. The write-on-change
 /// guard is pinned at the source: a steady-state transition must not
 /// rewrite the hot key (`OBJECT IDLETIME` cannot observe it — the
 /// script's own `HMGET` resets the idle clock — so the guard itself is
@@ -478,7 +479,7 @@ fn hysteresis_floors_negative_levels_and_writes_only_on_change() {
         "the hysteresis hash must be written only on change"
     );
     assert!(
-        src.contains("math.max(0, math.min(4, num(v[1])))"),
+        src.contains("math.max(0, math.min(4, raw_level or 0))"),
         "a stored level must be floored at 0 and clamped at 4"
     );
     let ns = common::unique_namespace("hystfloor");
