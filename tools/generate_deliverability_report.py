@@ -341,7 +341,7 @@ def render_partial(report: dict[str, object]) -> str:
             f"<strong>no</strong> delivery-rate claim. The query and its definitions are ready "
             f"({methodology_link}) and the table fills in as events arrive."
         )
-    return f"""{{# GENERATED FILE — do not edit by hand. #}}
+    return f"""{{# GENERATED FILE, do not edit by hand. #}}
 {{# Rendered by tools/generate_deliverability_report.py from #}}
 {{# apps/marketing-zola/data/deliverability-report.json (ClickHouse query #}}
 {{# `{report['query_version']}`, window {window['start']} → {window['end']}). #}}

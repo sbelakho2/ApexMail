@@ -169,6 +169,8 @@ class LinkResolver:
 
 
 def main(argv: list[str]) -> int:
+    if "--self-test" in argv[1:]:
+        return self_test()
     require_marketing = "--require-marketing" in argv
     positional = [a for a in argv[1:] if not a.startswith("--")]
     fixtures = Path(positional[0]) if positional else DEFAULT_FIXTURES
@@ -240,6 +242,91 @@ def main(argv: list[str]) -> int:
             print(f"  … and {len(failures) - 50} more")
         return 1
     print("ui links: all green")
+    return 0
+
+
+# ── self-test (drift injection over a throwaway fixture set) ────────────────
+#
+# Fixtures dir + the REAL route sources (web.rs / baseline manifest), with
+# MARKETING_PUBLIC pointed at a throwaway built-site tree so the marketing
+# half of the resolver is exercised deterministically instead of assumed
+# alive: an all-resolving document passes, and one known-bad variant per
+# defect class makes the REAL detection path print its FAIL line.
+
+_LINKS_SELFTEST_DOC = """<!DOCTYPE html>
+<html lang="en">
+<body id="top">
+<h1>Nav</h1>
+<a href="/">Home</a>
+<a href="/built-only-page">Pricing</a>
+<a href="/assets/app.css">Styles</a>
+<a href="https://api.apexmail.ee/v1/contact/sales">Api</a>
+<a href="#top">Top</a>
+</body>
+</html>
+"""
+
+
+def self_test() -> int:
+    import io
+    import json
+    import tempfile
+    from contextlib import redirect_stdout
+
+    def mutate(old: str, new: str) -> str:
+        assert old in _LINKS_SELFTEST_DOC, f"self-test anchor missing: {old!r}"
+        return _LINKS_SELFTEST_DOC.replace(old, new, 1)
+
+    ok = True
+
+    def case(label: str, expect: str | None, html: str) -> None:
+        nonlocal ok
+        failures.clear()
+        with tempfile.TemporaryDirectory() as tmp:
+            fixtures = Path(tmp)
+            (fixtures / "manifest.json").write_text(json.dumps(
+                {"fixtures": [{"surface": "web", "route": "/selftest",
+                               "htmlFile": "selftest.html"}]}))
+            (fixtures / "selftest.html").write_text(html)
+            buffer = io.StringIO()
+            with redirect_stdout(buffer):
+                code = main(["check_ui_links.py", str(fixtures)])
+        out = buffer.getvalue()
+        if expect is None:
+            good = code == 0 and "all green" in out
+        else:
+            good = code == 1 and f"FAIL {expect} " in out
+        if good:
+            print(f"self-test PASS [{label}]")
+        else:
+            print(f"self-test FAIL: {label} — exit {code}, expected {expect!r}, "
+                  f"findings: {out.splitlines()[-4:]}", file=sys.stderr)
+            ok = False
+
+    real_public = MARKETING_PUBLIC
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            site = Path(tmp) / "built-site"
+            (site / "built-only-page").mkdir(parents=True)
+            (site / "index.html").write_text("<html></html>\n")
+            (site / "built-only-page" / "index.html").write_text("<html></html>\n")
+            # the marketing-existence source is fixture-local for the run —
+            # LinkResolver reads the module constant at construction time.
+            globals()["MARKETING_PUBLIC"] = site
+            case("clean navigation passes (routes + built site + fragment)",
+                 None, _LINKS_SELFTEST_DOC)
+            case("href no route/static/built page resolves fails", "dead-link",
+                 mutate('<a href="#top">Top</a>',
+                        '<a href="/selftest/nowhere/link">Broken</a>\n'
+                        '<a href="#top">Top</a>'))
+            case("same-document fragment landing on no id fails", "dead-fragment",
+                 mutate('<a href="#top">Top</a>', '<a href="#missing-anchor">Top</a>'))
+    finally:
+        globals()["MARKETING_PUBLIC"] = real_public
+
+    if not ok:
+        return 1
+    print("ui links self-test: ok")
     return 0
 
 

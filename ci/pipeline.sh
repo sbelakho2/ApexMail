@@ -492,10 +492,20 @@ cmd_run() {
                         fi
                     done
                     _gb_lanes=$(blessing_lanes_statuses "$RUN_DIR/manifest.json")
-                    printf '{"sha":"%s","pipelineConfigHash":"%s","gateStagesStatuses":"%s","requiredLanesStatuses":"%s","machine":"%s","completedAt":"%s"}\n' \
-                        "$CI_SHA" "$_pipeline_hash" "$_gb_statuses" "$_gb_lanes" \
+                    _gb_completed=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+                    # I20: the blessing is SIGNED over commit+config+stages+
+                    # lanes+timestamp with the shared key; the deploy host
+                    # verifies signature AND freshness. No key configured on
+                    # the CI machine => an unsigned blessing is written AND A
+                    # WARNING IS PRINTED (every verifying host will refuse it).
+                    _gb_sig=$(ci_blessing_sign "$(ci_blessing_canonical "$CI_SHA" "$_pipeline_hash" "$_gb_statuses" "$_gb_lanes" "$_gb_completed")")
+                    if [ -z "$_gb_sig" ]; then
+                        ci_warn "NO CI_BLESSING_SIGNING_KEY configured — the blessing is UNSIGNED and verifying deploy hosts will refuse it"
+                    fi
+                    printf '{"sha":"%s","pipelineConfigHash":"%s","gateStagesStatuses":"%s","requiredLanesStatuses":"%s","signature":"%s","machine":"%s","completedAt":"%s"}\n' \
+                        "$CI_SHA" "$_pipeline_hash" "$_gb_statuses" "$_gb_lanes" "$_gb_sig" \
                         "$(hostname 2>/dev/null || printf 'ci-machine')" \
-                        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+                        "$_gb_completed" \
                         >"$RUNS_DIR/.gate-blessing.json"
                     ci_info "gate blessing recorded: $RUNS_DIR/.gate-blessing.json ($_gb_statuses)"
                     [ -z "$_gb_lanes" ] || ci_info "required lanes: $_gb_lanes"
@@ -796,47 +806,94 @@ list vs CI_CARGO_AUDIT_IGNORES (pipeline.conf) — restore EXACT lockstep"
     _gbb_tmp=$(mktemp -d "${TMPDIR:-/tmp}/apexmail-gate-bless.XXXXXX")
     # Every sub-lane row of required-lanes.txt recorded ok — what a real
     # green run's blessing carries (built from the file, so this fixture
-    # tracks the ledger instead of drifting from it).
+    # tracks the ledger instead of drifting from it). Signed with an
+    # EPHEMERAL key so the I20 verification path is exercised for real.
     _gbb_all_ok=$(sed -e '/^#/d' -e '/^$/d' "$CI_DIR/required-lanes.txt" |
         grep '\.' | sed 's/$/=ok/' | paste -sd, -)
+    _gbb_saved_key=${CI_BLESSING_SIGNING_KEY:-}
+    CI_BLESSING_SIGNING_KEY=selftest-ephemeral-blessing-key
+    export CI_BLESSING_SIGNING_KEY
+    _gbb_now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    _gbb_hash=$(ci_pipeline_config_hash)
+    _gbb_stages="fetch=ok,validate=ok,docs=ok,ui=ok,test=ok,security=ok"
+    _gbb_sign() {
+        ci_blessing_sign "$(ci_blessing_canonical deadbeef "$_gbb_hash" "$_gbb_stages" "$1" "$2")"
+    }
+    _gbb_write() { # <lanes> <completedAt> [signature]
+        printf '{"sha":"deadbeef","pipelineConfigHash":"%s","gateStagesStatuses":"%s","requiredLanesStatuses":"%s","signature":"%s","machine":"t","completedAt":"%s"}\n' \
+            "$_gbb_hash" "$_gbb_stages" "$1" "${3:-}" "$2" >"$_gbb_tmp/.gate-blessing.json"
+    }
+    _gbb_tmp=$(mktemp -d "${TMPDIR:-/tmp}/apexmail-gate-bless.XXXXXX")
     if ! gate_blessing_refusal "$_gbb_tmp" deadbeef >/dev/null; then
         ci_err "gate blessing: an EMPTY runs dir was accepted"
         _sf_fail=1
     fi
-    _gbb_hash=$(ci_pipeline_config_hash)
-    printf '{"sha":"deadbeef","pipelineConfigHash":"%s","gateStagesStatuses":"fetch=ok,validate=ok,docs=ok,ui=ok,test=ok,security=ok","requiredLanesStatuses":"%s"}\n' "$_gbb_hash" "$_gbb_all_ok" >"$_gbb_tmp/.gate-blessing.json"
+    # complete, signed, fresh => ACCEPTED
+    _gbb_write "$_gbb_all_ok" "$_gbb_now" "$(_gbb_sign "$_gbb_all_ok" "$_gbb_now")"
     if gate_blessing_refusal "$_gbb_tmp" deadbeef >/dev/null; then
-        ci_err "gate blessing: a fresh, complete blessing for HEAD was refused"
+        ci_err "gate blessing: a fresh signed complete blessing for HEAD was refused"
         _sf_fail=1
     fi
+    # wrong sha => refused
     if ! gate_blessing_refusal "$_gbb_tmp" cafebabe >/dev/null; then
         ci_err "gate blessing: a blessing for ANOTHER sha was accepted for HEAD"
         _sf_fail=1
     fi
-    printf '{"sha":"deadbeef","pipelineConfigHash":"stale","gateStagesStatuses":"fetch=ok,validate=ok,docs=ok,ui=ok,test=ok,security=ok","requiredLanesStatuses":"%s"}\n' "$_gbb_all_ok" >"$_gbb_tmp/.gate-blessing.json"
+    # stale config hash => refused
+    _gbb_saved_hash=$_gbb_hash
+    _gbb_hash=stale
+    _gbb_write "$_gbb_all_ok" "$_gbb_now" "$(_gbb_sign "$_gbb_all_ok" "$_gbb_now")"
     if ! gate_blessing_refusal "$_gbb_tmp" deadbeef >/dev/null; then
         ci_err "gate blessing: a blessing under a STALE pipeline config was accepted"
         _sf_fail=1
     fi
-    printf '{"sha":"deadbeef","pipelineConfigHash":"%s","gateStagesStatuses":"fetch=ok,validate=ok,docs=ok,ui=ok,test=advisory-fail,security=ok","requiredLanesStatuses":"%s"}\n' "$_gbb_hash" "$_gbb_all_ok" >"$_gbb_tmp/.gate-blessing.json"
+    _gbb_hash=$_gbb_saved_hash
+    # failing stage => refused
+    _gbb_stages_bad="fetch=ok,validate=ok,docs=ok,ui=ok,test=advisory-fail,security=ok"
+    printf '{"sha":"deadbeef","pipelineConfigHash":"%s","gateStagesStatuses":"%s","requiredLanesStatuses":"%s","signature":"%s","machine":"t","completedAt":"%s"}\n' \
+        "$_gbb_hash" "$_gbb_stages_bad" "$_gbb_all_ok" \
+        "$(ci_blessing_sign "$(ci_blessing_canonical deadbeef "$_gbb_hash" "$_gbb_stages_bad" "$_gbb_all_ok" "$_gbb_now")")" \
+        "$_gbb_now" >"$_gbb_tmp/.gate-blessing.json"
     if ! gate_blessing_refusal "$_gbb_tmp" deadbeef >/dev/null; then
         ci_err "gate blessing: a blessing with test=advisory-fail was accepted"
         _sf_fail=1
     fi
-    # Required-lane teeth (2026-10-28 wiring): a blessing whose stages are all
-    # ok but with ONE required lane failed, or missing the lane field entirely
-    # (pre-lane-recording blessing), must be refused.
-    printf '{"sha":"deadbeef","pipelineConfigHash":"%s","gateStagesStatuses":"fetch=ok,validate=ok,docs=ok,ui=ok,test=ok,security=ok","requiredLanesStatuses":"%s"}\n' \
-        "$_gbb_hash" "$(printf '%s' "$_gbb_all_ok" | sed 's/validate.stub-ban=ok/validate.stub-ban=fail/')" >"$_gbb_tmp/.gate-blessing.json"
+    # one required lane failed => refused
+    _gbb_one_bad=$(printf '%s' "$_gbb_all_ok" | sed 's/validate.stub-ban=ok/validate.stub-ban=fail/')
+    _gbb_write "$_gbb_one_bad" "$_gbb_now" "$(_gbb_sign "$_gbb_one_bad" "$_gbb_now")"
     if ! gate_blessing_refusal "$_gbb_tmp" deadbeef >/dev/null; then
         ci_err "gate blessing: a blessing with validate.stub-ban=fail was accepted"
         _sf_fail=1
     fi
-    printf '{"sha":"deadbeef","pipelineConfigHash":"%s","gateStagesStatuses":"fetch=ok,validate=ok,docs=ok,ui=ok,test=ok,security=ok"}\n' "$_gbb_hash" >"$_gbb_tmp/.gate-blessing.json"
+    # unsigned => refused (I20)
+    _gbb_write "$_gbb_all_ok" "$_gbb_now" ""
     if ! gate_blessing_refusal "$_gbb_tmp" deadbeef >/dev/null; then
-        ci_err "gate blessing: a blessing WITHOUT requiredLanesStatuses was accepted"
+        ci_err "gate blessing: an UNSIGNED blessing was accepted"
         _sf_fail=1
     fi
+    # tampered lanes (signature over the ORIGINAL lanes) => refused (I20)
+    _gbb_write "$_gbb_all_ok" "$_gbb_now" "$(_gbb_sign "$_gbb_one_bad" "$_gbb_now")"
+    if ! gate_blessing_refusal "$_gbb_tmp" deadbeef >/dev/null; then
+        ci_err "gate blessing: a TAMPERED blessing (signature/content mismatch) was accepted"
+        _sf_fail=1
+    fi
+    # stale completedAt => refused (I20 anti-replay)
+    _gbb_old="2020-01-01T00:00:00Z"
+    _gbb_write "$_gbb_all_ok" "$_gbb_old" "$(_gbb_sign "$_gbb_all_ok" "$_gbb_old")"
+    if ! gate_blessing_refusal "$_gbb_tmp" deadbeef >/dev/null; then
+        ci_err "gate blessing: a STALE blessing (anti-replay window exceeded) was accepted"
+        _sf_fail=1
+    fi
+    # no key on the verifying host => everything refused (fail closed)
+    CI_BLESSING_SIGNING_KEY=
+    unset CI_BLESSING_SIGNING_KEY
+    _gbb_write "$_gbb_all_ok" "$_gbb_now" "$(_gbb_sign_noop="")" ""
+    if ! gate_blessing_refusal "$_gbb_tmp" deadbeef >/dev/null; then
+        ci_err "gate blessing: a blessing was accepted on a host with NO signing key"
+        _sf_fail=1
+    fi
+    CI_BLESSING_SIGNING_KEY=$_gbb_saved_key
+    export CI_BLESSING_SIGNING_KEY
     rm -rf "$_gbb_tmp"
 
     # Synthetic-repository / runtime-policy fixtures (ci/tests/*.selftest.sh):

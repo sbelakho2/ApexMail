@@ -145,9 +145,9 @@ MIDDOT = "·"
 TEXT_SIZE = re.compile(r"^text-(xs|sm|base|lg|xl|2xl|3xl|4xl|5xl|6xl|\[[^\]]+\])$")
 
 
-def authority_vocabulary() -> set[str]:
+def authority_vocabulary(ark: Path = ARK) -> set[str]:
     """Every class defined in the authority stylesheet (unescaped)."""
-    css = ARK.read_text()
+    css = ark.read_text()
     classes: set[str] = set()
     for m in re.finditer(r"\.([A-Za-z_][A-Za-z0-9_-]*)", css):
         classes.add(m.group(1))
@@ -193,12 +193,20 @@ def class_tokens(line: str) -> list[str]:
     return tokens
 
 
-def scan() -> int:
-    vocab = authority_vocabulary()
+def scan(
+    renderers: list[Path] | None = None,
+    copy_authorities: list[Path] | None = None,
+    ark: Path = ARK,
+) -> int:
+    if renderers is None:
+        renderers = RENDERERS
+    if copy_authorities is None:
+        copy_authorities = COPY_AUTHORITIES
+    vocab = authority_vocabulary(ark)
     failures: list[tuple[str, int, str]] = []
     worklist: dict[str, list[str]] = {}
 
-    for path in RENDERERS:
+    for path in renderers:
         sp = str(path)
         if any(part in sp for part in SKIP_PARTS):
             continue
@@ -249,7 +257,7 @@ def scan() -> int:
                 if banned in line:
                     failures.append((sp, idx, f"banned value/pattern {banned!r}"))
 
-    for path in COPY_AUTHORITIES:
+    for path in copy_authorities:
         sp = str(path)
         for idx, line in enumerate(path.read_text().split("\n"), 1):
             if MIDDOT in line:
@@ -268,5 +276,52 @@ def scan() -> int:
     return 1 if failures else 0
 
 
+def self_test() -> int:
+    """Prove the law gate on a throwaway fixture tree (never mutates the repo)."""
+    import contextlib
+    import io
+    import tempfile
+
+    def run(files: dict[str, str], ark_css: str) -> tuple[int, str]:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            ark = root / "ark.css"
+            ark.write_text(ark_css)
+            paths: list[Path] = []
+            for name, text in files.items():
+                page = root / name
+                page.write_text(text)
+                paths.append(page)
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                code = scan(paths, [], ark)
+            return code, out.getvalue()
+
+    law = ".apex-panel { color: red; }\n"
+    clean = '<main class="apex-panel flex p-4">Deploy in minutes, not months.</main>\n'
+    code, out = run({"page.html": clean}, law)
+    if code != 0:
+        print(f"self-test FAIL: clean fixture flagged (exit {code}):\n{out}", file=sys.stderr)
+        return 1
+
+    defects = {
+        "unknown-apex": ('<div class="apex-nope">Copy here.</div>', "has no rule"),
+        "banned-legacy": ('<div class="apex-pill">Copy here.</div>', "banned legacy class"),
+        "text-size": ('<div class="text-sm">Copy here.</div>', "typography size utility"),
+        "banned-value": ('<div class="apex-panel" title="backdrop-blur">Copy here.</div>', "banned value/pattern"),
+        "middot": ('<div class="apex-panel">Plans · Pricing</div>', "middot separator"),
+    }
+    for name, (markup, needle) in defects.items():
+        code, out = run({f"{name}.html": markup + "\n"}, law)
+        if code != 1 or needle not in out:
+            print(f"self-test FAIL: {name} not caught (exit {code}):\n{out}", file=sys.stderr)
+            return 1
+
+    print("self-test: ok")
+    return 0
+
+
 if __name__ == "__main__":
+    if "--self-test" in sys.argv:
+        sys.exit(self_test())
     sys.exit(scan())

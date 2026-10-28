@@ -432,6 +432,34 @@ ci_github_status_publish() {
     return 0
 }
 
+# --- CI-signed gate blessing (invariant I20, 2026-10-28) -----------------------
+# ci_blessing_key — the shared signing key: CI_BLESSING_SIGNING_KEY (literal)
+# or CI_BLESSING_SIGNING_KEY_FILE (first line of the file). Empty when unset.
+ci_blessing_key() {
+    if [ -n "${CI_BLESSING_SIGNING_KEY:-}" ]; then
+        printf '%s' "$CI_BLESSING_SIGNING_KEY"
+        return 0
+    fi
+    if [ -n "${CI_BLESSING_SIGNING_KEY_FILE:-}" ] && [ -f "$CI_BLESSING_SIGNING_KEY_FILE" ]; then
+        head -n1 "$CI_BLESSING_SIGNING_KEY_FILE" 2>/dev/null || true
+    fi
+}
+
+# ci_blessing_canonical <sha> <configHash> <gateStages> <lanes> <completedAt> —
+# the exact string both sides sign; ANY field change breaks the signature.
+ci_blessing_canonical() {
+    printf '%s|%s|%s|%s|%s' "$1" "$2" "$3" "$4" "$5"
+}
+
+# ci_blessing_sign <canonical> — HMAC-SHA256 hex under the configured key.
+# Empty output when no key or no openssl (the caller decides how to treat it).
+ci_blessing_sign() {
+    _cbs_key=$(ci_blessing_key)
+    [ -n "$_cbs_key" ] || return 0
+    command -v openssl >/dev/null 2>&1 || return 0
+    printf '%s' "$1" | openssl dgst -sha256 -hmac "$_cbs_key" 2>/dev/null | awk '{print $NF}'
+}
+
 gate_blessing_refusal() {
     _gbr_runs=$1
     _gbr_head=$2
@@ -483,6 +511,44 @@ gate_blessing_refusal() {
                 ;;
         esac
     done
+    # I20: the blessing must be SIGNED by the CI machine's key and FRESH.
+    # Unsigned/mismatched blessings are refused outright; a host without the
+    # key refuses everything (fail closed — provision the shared key, see
+    # .env.production.example). Replay of an old blessing is bounded by the
+    # freshness window (CI_BLESSING_MAX_AGE_SECS, default 7 days).
+    _gbr_sig=$(sed -n 's/.*"signature":"\([^"]*\)".*/\1/p' "$_gbr_file" | head -n1)
+    _gbr_completed=$(sed -n 's/.*"completedAt":"\([^"]*\)".*/\1/p' "$_gbr_file" | head -n1)
+    _gbr_key=$(ci_blessing_key)
+    if [ -z "$_gbr_key" ]; then
+        printf '%s' "no CI_BLESSING_SIGNING_KEY configured on this host — every blessing is unverifiable (provision the shared key; .env.production.example)"
+        return 0
+    fi
+    if [ -z "$_gbr_sig" ]; then
+        printf '%s' "the blessing is UNSIGNED — only blessings signed by the CI machine's key deploy"
+        return 0
+    fi
+    _gbr_expect=$(ci_blessing_sign "$(ci_blessing_canonical "$_gbr_sha" "$_gbr_config" "$_gbr_stages" "$_gbr_lanes" "$_gbr_completed")")
+    if [ -z "$_gbr_expect" ] || [ "$_gbr_sig" != "$_gbr_expect" ]; then
+        printf '%s' "the blessing signature does not verify (tampered fields or a different key) — the CI machine must re-run and re-push"
+        return 0
+    fi
+    _gbr_age=$(python3 - "$_gbr_completed" <<'PYAGE' 2>/dev/null || echo -1
+import datetime, sys
+try:
+    then = datetime.datetime.fromisoformat(sys.argv[1].replace("Z", "+00:00"))
+    print(int((datetime.datetime.now(datetime.timezone.utc) - then).total_seconds()))
+except ValueError:
+    print(-1)
+PYAGE
+)
+    if [ "$_gbr_age" -lt 0 ] 2>/dev/null; then
+        printf '%s' "the blessing completedAt is unreadable ($_gbr_completed)"
+        return 0
+    fi
+    if [ "$_gbr_age" -gt "${CI_BLESSING_MAX_AGE_SECS:-604800}" ] 2>/dev/null; then
+        printf '%s' "the blessing is stale ($_gbr_age s old, max ${CI_BLESSING_MAX_AGE_SECS:-604800}) — the CI machine must re-run the gate line"
+        return 0
+    fi
     return 1
 }
 

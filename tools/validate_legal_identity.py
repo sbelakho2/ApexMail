@@ -166,6 +166,68 @@ def check_prohibited(build_dir: Path) -> None:
                 fail(f"{rel}: prohibited pattern match: {pattern}")
 
 
+def self_test() -> int:
+    """Prove the identity gate on throwaway built-HTML fixtures (never mutates the repo)."""
+    import contextlib
+    import io
+    import tempfile
+
+    footer = (
+        f"<footer>{REQUIRED_LEGAL_NAME} — Reg {REQUIRED_REGISTRY_CODE}, "
+        f"VAT {REQUIRED_VAT_NUMBER}, {REQUIRED_ADDRESS_FRAGMENTS[0]}, "
+        f"{REQUIRED_ADDRESS_FRAGMENTS[1]}, {REQUIRED_ADDRESS_FRAGMENTS[2]}</footer>\n"
+    )
+    jsonld = (
+        '<script type="application/ld+json">'
+        f'{{"legalName": "{REQUIRED_LEGAL_NAME}", "vatID": "{REQUIRED_VAT_NUMBER}"}}'
+        "</script>\n"
+    )
+
+    def run(index_html: str, privacy_html: str | None = None) -> tuple[bool, str]:
+        global FAILED
+        with tempfile.TemporaryDirectory() as tmp:
+            build_dir = Path(tmp)
+            (build_dir / "index.html").write_text(index_html, encoding="utf-8")
+            if privacy_html is not None:
+                legal = build_dir / "privacy/index.html"
+                legal.parent.mkdir(parents=True)
+                legal.write_text(privacy_html, encoding="utf-8")
+            FAILED = False
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                check_html_files(build_dir)
+                check_footer(build_dir)
+                check_legal_pages(build_dir)
+                check_jsonld(build_dir)
+                check_prohibited(build_dir)
+            return FAILED, out.getvalue()
+
+    page = "<html><body>{}{}</body></html>\n"
+    legal_page = f"<p>{REQUIRED_LEGAL_NAME} · {REQUIRED_REGISTRY_CODE}</p>\n"
+
+    clean_index = page.format(footer, jsonld)
+    failed, out = run(clean_index, legal_page)
+    if failed:
+        print(f"self-test FAIL: clean build flagged:\n{out}", file=sys.stderr)
+        return 1
+
+    defects = [
+        ("footer-registry-missing", run(page.format(footer.replace(REQUIRED_REGISTRY_CODE, "00000000"), jsonld)), "missing registry code"),
+        # Legacy name must be dropped everywhere in the page — the footer
+        # check reads the whole index.html, including the JSON-LD block.
+        ("legacy-legal-name", run(page.format(footer.replace(REQUIRED_LEGAL_NAME, "Bel Consulting Ltd"), jsonld.replace(REQUIRED_LEGAL_NAME, "Bel Consulting Ltd"))), "not exact legal name"),
+        ("jsonld-drift", run(page.format(footer, jsonld.replace(REQUIRED_LEGAL_NAME, "Bel Consulting Ltd"))), "JSON-LD legalName"),
+        ("prohibited-registry", run(clean_index, legal_page + "<p>old code 16192499</p>"), "prohibited pattern"),
+    ]
+    for name, (failed, out), needle in defects:
+        if not failed or needle not in out:
+            print(f"self-test FAIL: {name} not caught (failed={failed}):\n{out}", file=sys.stderr)
+            return 1
+
+    print("self-test: ok")
+    return 0
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Validate legal identity on built HTML")
     parser.add_argument("--build-dir", default="public", help="Zola build output directory")
@@ -198,4 +260,6 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    if "--self-test" in sys.argv:
+        sys.exit(self_test())
     main()

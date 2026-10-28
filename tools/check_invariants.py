@@ -236,6 +236,10 @@ def _file_is_exercisable(path: Path) -> bool:
         return "#[test]" in text or "#[tokio::test]" in text or "#[sqlx::test]" in text
     if path.suffix == ".py":
         return "def test_" in text or "--self-test" in text or "unittest" in text
+    if path.suffix == ".sh":
+        # Shell gates prove themselves via --self-test / selftest_contract
+        # (the repo's own convention: tools/*.sh and ci/pipeline.sh selftest).
+        return "--self-test" in text or "selftest_contract" in text
     if path.suffix in {".toml", ".txt"}:
         return True
     return False

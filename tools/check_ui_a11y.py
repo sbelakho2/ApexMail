@@ -166,6 +166,8 @@ def check_document(entry: dict, doc, allowlist: list[dict]) -> None:
 
 
 def main(argv: list[str]) -> int:
+    if "--self-test" in argv[1:]:
+        return self_test()
     fixtures = Path(argv[1]) if len(argv) > 1 else DEFAULT_FIXTURES
     if not fixtures.is_dir():
         print(f"FAIL fixtures directory missing: {fixtures}")
@@ -194,6 +196,91 @@ def main(argv: list[str]) -> int:
             print(f"  … and {len(failures) - 50} more")
         return 1
     print("accessibility: all green")
+    return 0
+
+
+# ── self-test (drift injection over a throwaway fixture set) ────────────────
+#
+# The same input the gate consumes in CI (a fixtures dir of manifest.json +
+# exported documents): a rule-satisfying document passes, and one known-bad
+# variant per rule class makes the REAL detection path print its FAIL line.
+
+_A11Y_SELFTEST_DOC = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Selftest</title>
+</head>
+<body>
+<h1>Console</h1>
+<img src="/chart.png" alt="Delivery chart">
+<form method="post" action="/web/auth/login">
+<input type="hidden" name="_csrf" value="t">
+<label for="email">Email</label>
+<input id="email" name="email" type="email" autocomplete="email"
+       aria-describedby="email-hint">
+<p id="email-hint">Work address only.</p>
+<button type="submit">Sign in</button>
+</form>
+</body>
+</html>
+"""
+
+
+def self_test() -> int:
+    import io
+    import json
+    import tempfile
+    from contextlib import redirect_stdout
+
+    def mutate(old: str, new: str) -> str:
+        assert old in _A11Y_SELFTEST_DOC, f"self-test anchor missing: {old!r}"
+        return _A11Y_SELFTEST_DOC.replace(old, new, 1)
+
+    ok = True
+
+    def case(label: str, expect: str | None, html: str) -> None:
+        nonlocal ok
+        failures.clear()
+        with tempfile.TemporaryDirectory() as tmp:
+            fixtures = Path(tmp)
+            (fixtures / "manifest.json").write_text(json.dumps(
+                {"fixtures": [{"surface": "web", "route": "/selftest",
+                               "htmlFile": "selftest.html"}]}))
+            (fixtures / "selftest.html").write_text(html)
+            buffer = io.StringIO()
+            with redirect_stdout(buffer):
+                code = main(["check_ui_a11y.py", str(fixtures)])
+        out = buffer.getvalue()
+        if expect is None:
+            good = code == 0 and "all green" in out
+        else:
+            good = code == 1 and f"FAIL {expect} " in out
+        if good:
+            print(f"self-test PASS [{label}]")
+        else:
+            print(f"self-test FAIL: {label} — exit {code}, expected {expect!r}, "
+                  f"findings: {out.splitlines()[-4:]}", file=sys.stderr)
+            ok = False
+
+    case("clean fixture passes", None, _A11Y_SELFTEST_DOC)
+    case("document without <html lang=…> fails", "html-lang",
+         mutate('<html lang="en">', "<html>"))
+    case("empty img alt without aria-hidden fails", "img-alt",
+         mutate('alt="Delivery chart"', 'alt=""'))
+    case("id-less control with no wrapping <label> fails", "control-label",
+         mutate('<input type="hidden" name="_csrf" value="t">',
+                '<input type="text" name="promo">\n'
+                '<input type="hidden" name="_csrf" value="t">'))
+    case("dangling aria-describedby target fails", "error-association",
+         mutate('aria-describedby="email-hint"', 'aria-describedby="email-error"'))
+    case("typeless <button> in a POST form fails", "button-type",
+         mutate('<button type="submit">', "<button>"))
+
+    if not ok:
+        return 1
+    print("ui a11y self-test: ok")
     return 0
 
 

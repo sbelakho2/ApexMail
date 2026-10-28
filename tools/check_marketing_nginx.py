@@ -68,7 +68,77 @@ def request(port: int, path: str, headers: dict[str, str] | None = None):
     return resp, body
 
 
+def rewrite_config(text: str, public: Path, ports: dict[str, int]) -> str:
+    """Rebind the committed container config's baked-in paths and ports to
+    this machine (the temp-prefix conf the live check then runs)."""
+    return (text
+            .replace("/usr/share/nginx/html", str(public))
+            .replace("listen 8080;", f"listen {ports['8080']};")
+            .replace("listen 127.0.0.1:8081;", f"listen 127.0.0.1:{ports['8081']};")
+            .replace("127.0.0.1:8081", f"127.0.0.1:{ports['8081']}")
+            .replace("127.0.0.1:8082", f"127.0.0.1:{ports['8082']}")
+            .replace("listen 127.0.0.1:8082;", f"listen 127.0.0.1:{ports['8082']};"))
+
+
+def banner_state(html: str, state: str) -> bool:
+    """The cookie banner renders in `state` (pending on first visit,
+    recorded after the consent cookie hop)."""
+    return f'data-consent-state="{state}"' in html or f"data-consent-state={state}" in html
+
+
+def self_test() -> int:
+    """nginx-free proof of the config-rewrite and expectation layers: a
+    clean fixture conf rebinds fully, each drifted variant leaves a stale
+    container token behind, and the banner-state expectations fire."""
+    import tempfile
+
+    def miss(detail: str) -> int:
+        print(f"self-test FAIL: {detail}", file=sys.stderr)
+        return 1
+
+    conf = ("server {\n    listen 8080;\n    root /usr/share/nginx/html;\n}\n"
+            "server {\n    listen 127.0.0.1:8081;\n    root /usr/share/nginx/html;\n}\n"
+            "location /api/ { proxy_pass http://127.0.0.1:8082/; }\n")
+    with tempfile.TemporaryDirectory() as td:
+        public = Path(td) / "public"
+        public.mkdir()
+        good = rewrite_config(conf, public, PORTS)
+        for name, ok in (
+            ("public listener rebound", "listen 18080;" in good and "listen 8080;" not in good),
+            ("docroot rebound", str(public) in good and "/usr/share/nginx/html" not in good),
+            ("internal hops rebound",
+             "127.0.0.1:18081" in good and "127.0.0.1:18082" in good
+             and ":8081" not in good and ":8082" not in good),
+        ):
+            if not ok:
+                return miss(f"clean fixture failed: {name}")
+
+        drift = (
+            ("listener drift", conf.replace("listen 8080;", "listen 8080 default_server;"),
+             lambda r: "8080" in r),
+            ("docroot drift", conf.replace("/usr/share/nginx/html", "/srv/site"),
+             lambda r: str(public) not in r),
+            ("internal-hop drift", conf.replace("8082", "8083"),
+             lambda r: "18082" not in r),
+        )
+        for name, bad_conf, detected in drift:
+            if not detected(rewrite_config(bad_conf, public, PORTS)):
+                return miss(f"{name} not detectable after rewrite")
+
+        pending = '<div data-consent-state="pending">cookies</div>'
+        if not banner_state(pending, "pending"):
+            return miss("banner pending expectation broken")
+        if banner_state("<div>no banner here</div>", "pending"):
+            return miss("missing banner state must fail the expectation")
+        if banner_state(pending, "recorded"):
+            return miss("unflipped consent page must fail the recorded expectation")
+    print("self-test: ok")
+    return 0
+
+
 def main() -> int:
+    if "--self-test" in sys.argv:
+        return self_test()
     ap = argparse.ArgumentParser()
     ap.add_argument("--root", default=str(PUBLIC))
     ap.add_argument("--keep", action="store_true", help="keep the temp prefix for inspection")
@@ -88,13 +158,7 @@ def main() -> int:
             return 2
 
     prefix = Path(tempfile.mkdtemp(prefix="apexmail-nginx-"))
-    conf = (CONFIG.read_text()
-            .replace("/usr/share/nginx/html", str(public))
-            .replace("listen 8080;", f"listen {PORTS['8080']};")
-            .replace("listen 127.0.0.1:8081;", f"listen 127.0.0.1:{PORTS['8081']};")
-            .replace("127.0.0.1:8081", f"127.0.0.1:{PORTS['8081']}")
-            .replace("127.0.0.1:8082", f"127.0.0.1:{PORTS['8082']}")
-            .replace("listen 127.0.0.1:8082;", f"listen 127.0.0.1:{PORTS['8082']};"))
+    conf = rewrite_config(CONFIG.read_text(), public, PORTS)
     (prefix / "nginx.conf").write_text(
         f"worker_processes 1;\npid {prefix}/nginx.pid;\n"
         f"error_log {prefix}/error.log;\n"
@@ -143,13 +207,12 @@ def main() -> int:
         check("GET / nosniff", resp.getheader("X-Content-Type-Options") == "nosniff", "")
         check("GET / HSTS", "max-age=" in (resp.getheader("Strict-Transport-Security") or ""), "")
         html = body.decode("utf-8", "replace")
-        check("banner pending", 'data-consent-state="pending"' in html or "data-consent-state=pending" in html,
+        check("banner pending", banner_state(html, "pending"),
               "cookie banner state not found on /")
 
         resp, body = request(port, "/", {"Cookie": "apexmail_consent=1"})
         html = body.decode("utf-8", "replace")
-        check("banner recorded with consent",
-              'data-consent-state="recorded"' in html or "data-consent-state=recorded" in html,
+        check("banner recorded with consent", banner_state(html, "recorded"),
               "the sub_filter hop did not rewrite the banner state")
 
         resp, body = request(port, "/css/ark.css")

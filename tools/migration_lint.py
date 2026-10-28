@@ -577,7 +577,60 @@ def check_file(path: Path) -> list[str]:
     return problems
 
 
+def self_test() -> int:
+    """Drift-injection proof: compliant + guarded fixtures are clean, one
+    seeded violation per rule class is reported by check_file's real rules."""
+    import tempfile
+
+    def miss(detail: str) -> int:
+        print(f"self-test FAIL: {detail}", file=sys.stderr)
+        return 1
+
+    good = (
+        "-- Migration 901: compliant conventions\n"
+        "DROP TABLE IF EXISTS staging_events;\n"
+        "CREATE TABLE IF NOT EXISTS events (id bigint);\n"
+        "CREATE INDEX IF NOT EXISTS events_id_idx ON events (id);\n"
+        "DELETE FROM events WHERE created_at < now() - interval '30 days';\n"
+    )
+    guarded = (
+        "-- Migration 902: DDL inside a catalog-probing guard\n"
+        "DO $$\n"
+        "BEGIN\n"
+        "  IF to_regclass('public.legacy_events') IS NULL THEN\n"
+        "    CREATE TABLE legacy_events (id bigint);\n"
+        "    CREATE INDEX legacy_events_id_idx ON legacy_events (id);\n"
+        "  END IF;\n"
+        "END\n"
+        "$$;\n"
+    )
+    defects = {
+        "header": ("-- 903 nonstandard header\nCREATE TABLE IF NOT EXISTS a (id int);\n", "[header]"),
+        "destructive": ("-- Migration 904: x\nDROP TABLE users;\n", "[destructive]"),
+        "create-table": ("-- Migration 905: x\nCREATE TABLE widgets (id int);\n", "[create-table]"),
+        "dml": ("-- Migration 906: x\nDELETE FROM users;\n", "[dml]"),
+        "forbidden": ("-- Migration 907: x\nGRANT ALL ON users TO PUBLIC;\n", "[forbidden]"),
+    }
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        for name, src in [("901_good.sql", good), ("902_guarded.sql", guarded)]:
+            f = d / name
+            f.write_text(src)
+            if problems := check_file(f):
+                return miss(f"compliant {name} reported: {problems}")
+        for i, (label, (src, want)) in enumerate(defects.items(), start=903):
+            f = d / f"{i}_{label.replace('-', '_')}.sql"
+            f.write_text(src)
+            problems = check_file(f)
+            if not any(want in p for p in problems):
+                return miss(f"{label} defect not reported ({want}): {problems}")
+    print("self-test: ok")
+    return 0
+
+
 def main() -> int:
+    if "--self-test" in sys.argv:
+        return self_test()
     if not MIGRATIONS_DIR.is_dir():
         print(f"migration_lint: {MIGRATIONS_DIR} not found", file=sys.stderr)
         return 2

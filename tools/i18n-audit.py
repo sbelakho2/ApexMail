@@ -56,7 +56,7 @@ def fail(msgs: list[str]) -> int:
     return 1 if msgs else 0
 
 
-def template_refs() -> tuple[set[tuple[str, str]], dict[tuple[str, str], str]]:
+def template_refs(site: Path = SITE) -> tuple[set[tuple[str, str]], dict[tuple[str, str], str]]:
     """Extract (section, key) references and their English default text
     from the {% if i18n_data[l]["s"]["k"] ... %}...{% else %}DEFAULT{% endif %}
     pattern (defaults are best-effort: same-line else branches)."""
@@ -67,7 +67,7 @@ def template_refs() -> tuple[set[tuple[str, str]], dict[tuple[str, str], str]]:
         r'(.*?){%\s*else\s*%}(.*?){%\s*endif\s*%}',
         re.S,
     )
-    for f in glob.glob(str(SITE / "templates" / "**" / "*.html"), recursive=True):
+    for f in glob.glob(str(site / "templates" / "**" / "*.html"), recursive=True):
         src = open(f, encoding="utf-8").read()
         for m in re.finditer(
             r'i18n_data(?:\[l\])?\["([a-z_0-9]+)"\]\["([a-z_0-9]+)"\]', src
@@ -80,9 +80,9 @@ def template_refs() -> tuple[set[tuple[str, str]], dict[tuple[str, str], str]]:
     return refs, defaults
 
 
-def check_json(refs, defaults) -> list[str]:
+def check_json(refs, defaults, site: Path = SITE) -> list[str]:
     msgs = []
-    data = json.loads((SITE / "data" / "i18n.json").read_text())
+    data = json.loads((site / "data" / "i18n.json").read_text())
 
     def flat(loc: str) -> dict[str, str]:
         out: dict[str, str] = {}
@@ -122,9 +122,9 @@ def check_json(refs, defaults) -> list[str]:
     return msgs
 
 
-def check_links() -> list[str]:
+def check_links(site: Path = SITE) -> list[str]:
     msgs = []
-    pub = SITE / "public"
+    pub = site / "public"
     if not pub.is_dir():
         return ["public/ not built — run zola build first"]
     pat = re.compile(r'href=(?:"([^"]+)"|([^\s">]+))')
@@ -159,12 +159,12 @@ def check_links() -> list[str]:
     return msgs
 
 
-def check_variants() -> list[str]:
+def check_variants(site: Path = SITE) -> list[str]:
     """Every template-linked page (non-shared) must exist in every locale."""
     msgs = []
     pat = re.compile(r'href=(?:"(/[^"#?]+)"|(/([^\s">#?]+)))')
     targets: set[str] = set()
-    for f in glob.glob(str(SITE / "templates" / "**" / "*.html"), recursive=True):
+    for f in glob.glob(str(site / "templates" / "**" / "*.html"), recursive=True):
         src = open(f, encoding="utf-8").read()
         for m in pat.finditer(src):
             h = (m.group(1) or m.group(2) or "").split("#")[0].split("?")[0]
@@ -180,13 +180,13 @@ def check_variants() -> list[str]:
         # every locale has a variant) — variant files are base.<loc>.md
         for loc in LOCALES:
             found = any(
-                (SITE / "content" / t.lstrip("/")).parent.glob(
-                    f"{(SITE / 'content' / t.lstrip('/')).name}.{loc}.md"
+                (site / "content" / t.lstrip("/")).parent.glob(
+                    f"{(site / 'content' / t.lstrip('/')).name}.{loc}.md"
                 )
-            ) if (SITE / "content" / t.lstrip("/")).name else False
+            ) if (site / "content" / t.lstrip("/")).name else False
             # handle both page.md and section/index.md shapes
-            cand_base = SITE / "content" / (t.lstrip("/") + ".md")
-            cand_index = SITE / "content" / t.lstrip("/") / "index.md"
+            cand_base = site / "content" / (t.lstrip("/") + ".md")
+            cand_index = site / "content" / t.lstrip("/") / "index.md"
             ok = (
                 cand_base.with_suffix(f".{loc}.md").exists()
                 if cand_base.name != "index.md"
@@ -197,7 +197,95 @@ def check_variants() -> list[str]:
     return msgs
 
 
+def self_test() -> int:
+    """Drift-injection proof on a synthetic site: the clean fixture passes
+    all three checks; each seeded localization defect is reported."""
+    import tempfile
+
+    def miss(detail: str) -> int:
+        print(f"self-test FAIL: {detail}", file=sys.stderr)
+        return 1
+
+    def caught(msgs: list[str], expect: str) -> bool:
+        return any(expect in m for m in msgs)
+
+    with tempfile.TemporaryDirectory() as td:
+        site = Path(td) / "site"
+        titles = {"de": "Enterprise-E-Mail zugestellt", "fr": "E-mail entreprise livree",
+                  "es": "Correo empresarial entregado"}
+        (site / "data").mkdir(parents=True)
+        (site / "data/i18n.json").write_text(json.dumps(
+            {loc: {"hero": {"title": t}} for loc, t in titles.items()}))
+        (site / "templates").mkdir()
+        (site / "templates/base.html").write_text(
+            '{% if i18n_data[l]["hero"]["title"] %}Enterprise email delivered'
+            "{% else %}Enterprise email delivered{% endif %}\n"
+            '<a href="/pricing">Pricing</a> <a href="/docs">Docs</a>\n')
+        (site / "content").mkdir()
+        (site / "content/pricing.md").write_text("Pricing\n")
+        for loc in LOCALES:
+            (site / f"content/pricing.{loc}.md").write_text(f"Pricing ({loc})\n")
+            (site / "public" / loc / "pricing").mkdir(parents=True)
+            (site / f"public/{loc}/index.html").write_text('<a href="/">Home</a>')
+            (site / f"public/{loc}/pricing/index.html").write_text(
+                f'<a href="/pricing">{"Preise" if loc == "de" else "Prix" if loc == "fr" else "Precios"}</a>')
+
+        refs, defaults = template_refs(site)
+        if refs != {("hero", "title")} or defaults.get(("hero", "title")) != "Enterprise email delivered":
+            return miss(f"template refs not extracted: {refs!r} {defaults!r}")
+        if check_json(refs, defaults, site):
+            return miss(f"clean i18n.json reported: {check_json(refs, defaults, site)}")
+        if check_variants(site):
+            return miss(f"clean variants reported: {check_variants(site)}")
+        if check_links(site):
+            return miss(f"clean links reported: {check_links(site)}")
+
+        i18n = site / "data/i18n.json"
+        good_json = i18n.read_text()
+
+        def json_defect(mutate) -> list[str]:
+            data = json.loads(good_json)
+            mutate(data)
+            i18n.write_text(json.dumps(data))
+            try:
+                return check_json(refs, defaults, site)
+            finally:
+                i18n.write_text(good_json)
+
+        if not caught(json_defect(lambda d: d.__setitem__("fr", {})), "fr missing"):
+            return miss("missing-key defect not reported")
+        if not caught(json_defect(lambda d: d["de"]["hero"].__setitem__("title", "Enterprise email delivered")),
+                      "untranslated: de.hero.title"):
+            return miss("untranslated-value defect not reported")
+        if not caught(json_defect(lambda d: d["es"]["hero"].__setitem__("title", "")),
+                      "es.hero.title is empty"):
+            return miss("empty-value defect not reported")
+
+        fr_var = site / "content/pricing.fr.md"
+        fr_var.rename(site / "content/held.tmp")
+        try:
+            msgs = check_variants(site)
+        finally:
+            (site / "content/held.tmp").rename(fr_var)
+        if not caught(msgs, "missing variant: /pricing has no fr"):
+            return miss("missing-variant defect not reported")
+
+        page = site / "public/de/pricing/index.html"
+        good_page = page.read_text()
+        page.write_text(good_page + '<a href="/features">Features</a>')
+        try:
+            msgs = check_links(site)
+        finally:
+            page.write_text(good_page)
+        if not caught(msgs, "mixed-language link"):
+            return miss("mixed-language-link defect not reported")
+    print("self-test: ok")
+    return 0
+
+
 def main() -> int:
+    if "--self-test" in sys.argv:
+        return self_test()
     if not (SITE / "data" / "i18n.json").exists():
         print("i18n: apps/marketing-zola/data/i18n.json not found")
         return 2

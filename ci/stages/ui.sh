@@ -98,7 +98,7 @@ run_ui_gates() {
     # missing python3 used to warn-and-skip all of them while the stage
     # reported ok (and a blessing could record `ui` as passed). Disposition
     # follows lane_tool_status: REQUIRED fails closed on any host; the
-    # explicit advisory override (all CI_UI_*_CHECK=advisory) keeps the
+    # explicit advisory override (any CI_UI_*_CHECK=advisory) keeps the
     # bounded triage window. ONE flag is required to fail-decision: if any
     # gate is required, the lane is required.
     _ui_flag=advisory
@@ -113,17 +113,17 @@ run_ui_gates() {
         fail) return "$CI_EXIT_FAIL" ;;
         skip) return "$CI_EXIT_OK" ;;
     esac
-    ui_gate "${CI_UI_FLASH_COPY_CHECK:-advisory}" \
-        "ui flash copy (gate C)" \
+    ui_gate "${CI_UI_FLASH_COPY_CHECK:-required}" \
+        "ui flash copy gate C" \
         python3 tools/check_flash_copy.py
-    ui_gate "${CI_UI_FORM_HYGIENE_CHECK:-advisory}" \
-        "ui form hygiene (gate D)" \
+    ui_gate "${CI_UI_FORM_HYGIENE_CHECK:-required}" \
+        "ui form hygiene gate D" \
         python3 tools/check_ui_form_hygiene.py "$UI_FIXTURES"
-    ui_gate "${CI_UI_A11Y_CHECK:-advisory}" \
-        "ui accessibility (gate E)" \
+    ui_gate "${CI_UI_A11Y_CHECK:-required}" \
+        "ui accessibility gate E" \
         python3 tools/check_ui_a11y.py "$UI_FIXTURES"
-    ui_gate "${CI_UI_MARKETING_CONTRAST_CHECK:-advisory}" \
-        "ui marketing token contrast (gate M)" \
+    ui_gate "${CI_UI_MARKETING_CONTRAST_CHECK:-required}" \
+        "ui marketing token contrast gate M" \
         python3 tools/check_marketing_contrast.py
     # Gate I/marketing: when the zola build was unavailable the marketing
     # half of the dead-link gate would be vacuous — under --require-marketing
@@ -132,14 +132,14 @@ run_ui_gates() {
     _ui_marketing_flag=''
     [ -f "$REPO_ROOT/apps/marketing-zola/public/index.html" ] || _ui_marketing_flag='--require-marketing'
     # shellcheck disable=SC2086  # flag is empty or one token, by construction
-    ui_gate "${CI_UI_LINKS_CHECK:-advisory}" \
-        "ui dead links (gate I)" \
+    ui_gate "${CI_UI_LINKS_CHECK:-required}" \
+        "ui dead links gate I" \
         python3 tools/check_ui_links.py "$UI_FIXTURES" $_ui_marketing_flag
-    ui_gate "${CI_UI_TERMINOLOGY_CHECK:-advisory}" \
-        "ui terminology (gate J)" \
+    ui_gate "${CI_UI_TERMINOLOGY_CHECK:-required}" \
+        "ui terminology gate J" \
         python3 tools/check_ui_terminology.py "$UI_FIXTURES"
-    ui_gate "${CI_UI_STRINGS_CATALOG_CHECK:-advisory}" \
-        "ui strings catalog drift (gate K)" \
+    ui_gate "${CI_UI_STRINGS_CATALOG_CHECK:-required}" \
+        "ui strings catalog drift gate K" \
         python3 tools/extract_ui_strings.py --check
     return "$CI_EXIT_OK"
 }

@@ -233,6 +233,8 @@ def canonical(catalog: dict) -> str:
 
 
 def main(argv: list[str]) -> int:
+    if "--self-test" in argv[1:]:
+        return self_test()
     check = "--check" in argv
     output = CATALOG
     if "--output" in argv:
@@ -276,6 +278,128 @@ def main(argv: list[str]) -> int:
     tmp.close()
     Path(tmp.name).replace(output)
     print(f"wrote {output}")
+    return 0
+
+
+# ── self-test (catalog drift injection over a throwaway UI tree) ────────────
+#
+# The gate is the --check drift compare, so the self-test proves exactly that:
+# extraction runs against a fixture UI tree (views / tracking / email / flash
+# all pointed at temp files), the freshly generated catalog is in sync by
+# construction, and ONE drifted committed row must be caught.
+
+_SELFTEST_VIEWS_RS = '''\
+pub fn web_selftest_home() -> impl IntoView {
+    view! {
+        <h1>"Selftest console"</h1>
+        <p>"Welcome to the selftest console."</p>
+    }
+}
+
+pub fn control_plane_selftest_status() -> impl IntoView {
+    view! { <p>"Workers are online."</p> }
+}
+
+pub fn shared_helper() -> impl IntoView {
+    view! { <p>"Skipped helper text."</p> }
+}
+'''
+
+_SELFTEST_TEMPLATES_RS = '''\
+pub fn render_pixel() -> String {
+    format!("<p>Pixel served for this message.</p>")
+}
+'''
+
+_SELFTEST_AUTH_RS = '''\
+pub async fn enqueue_verification_email() {
+    let subject = "Confirm your signup to finish";
+    let body = "<p>Confirm your signup to finish.</p>";
+    redirect_success("Selftest flash copy recorded.");
+}
+'''
+
+
+def self_test() -> int:
+    import io
+    from contextlib import redirect_stdout
+
+    import ui_flash_extract as _ufe
+
+    saved = {
+        "ROOT": ROOT,
+        "VIEWS": VIEWS,
+        "TRACKING_TEMPLATES": TRACKING_TEMPLATES,
+        "EMAIL_BUILDER_FNS": list(EMAIL_BUILDER_FNS),
+    }
+    saved_ufe = {"ROOT": _ufe.ROOT, "CRATES_SRC": _ufe.CRATES_SRC}
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp).resolve()  # macOS /var symlink must not break relative_to
+
+            def write(rel: str, text: str) -> None:
+                path = base / rel
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(text)
+
+            write("services/mail-server/crates/ui-foundation/src/leptos_views.rs",
+                  _SELFTEST_VIEWS_RS)
+            write("services/mail-server/crates/tracking-service/src/templates.rs",
+                  _SELFTEST_TEMPLATES_RS)
+            write("services/mail-server/crates/api-server/src/routes/auth.rs",
+                  _SELFTEST_AUTH_RS)
+            globals().update(
+                ROOT=base,
+                VIEWS=base / "services/mail-server/crates/ui-foundation/src/leptos_views.rs",
+                TRACKING_TEMPLATES=base / "services/mail-server/crates/tracking-service/src/templates.rs",
+                EMAIL_BUILDER_FNS=[
+                    ("services/mail-server/crates/api-server/src/routes/auth.rs",
+                     "enqueue_verification_email"),
+                ],
+            )
+            # The flash extractor reports repo-relative ids, so its module
+            # roots are pointed at the fixture tree for the run (restored in
+            # the finally below; default behavior untouched). Scanning the
+            # real crates here would also put the self-test over the CI
+            # probe's timeout — the proof must stay small and fast.
+            _ufe.ROOT = base
+            _ufe.CRATES_SRC = base / "services/mail-server/crates"
+            out = base / "docs" / "development" / "ui-strings-catalog.json"
+
+            def run_mode(*flags: str) -> tuple[int, str]:
+                buffer = io.StringIO()
+                with redirect_stdout(buffer):
+                    code = main(["extract_ui_strings.py", *flags, "--output", str(out)])
+                return code, buffer.getvalue()
+
+            run_mode()                                   # generate (default mode)
+            code, out_text = run_mode("--check")         # clean: in sync
+            clean_ok = code == 0 and "PASS catalog in sync" in out_text
+
+            catalog = json.loads(out.read_text())
+            texts = {e["text"] for ns in catalog["namespaces"].values() for e in ns}
+            fixture_ok = (
+                "Welcome to the selftest console." in texts
+                and "Pixel served for this message." in texts
+                and "Confirm your signup to finish." in texts
+                and "Selftest flash copy recorded." in texts
+                and "Skipped helper text." not in texts  # unprefixed helpers are skipped
+            )
+
+            catalog["namespaces"]["web"][0]["text"] += " drifted"
+            out.write_text(canonical(catalog))           # exactly one drifted row
+            code, drift_text = run_mode("--check")
+            drift_ok = code == 1 and "FAIL catalog drift" in drift_text
+    finally:
+        globals().update(**saved)
+        _ufe.ROOT = saved_ufe["ROOT"]
+        _ufe.CRATES_SRC = saved_ufe["CRATES_SRC"]
+
+    if not (clean_ok and fixture_ok and drift_ok):
+        print(f"self-test FAIL: catalog drift gate — clean={clean_ok} "
+              f"fixture={fixture_ok} drift={drift_ok}", file=sys.stderr)
+        return 1
+    print("ui strings catalog self-test: ok")
     return 0
 
 

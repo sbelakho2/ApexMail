@@ -266,6 +266,12 @@ services:
     ports: !override []  # force-clear dev compose ports (empty list is ignored by merge)
     environment:
       POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+      # WAL archiving / PITR (operator-gated overlay deploy/docker-compose.
+      # wal-archive.yml is authoritative; these forwarded defaults keep the
+      # DOCUMENTED env real on every deployment — the env-forwarding gate
+      # fails a capability that is documented but never wired).
+      WAL_ENCRYPTION_KEY_FILE: ${WAL_ENCRYPTION_KEY_FILE:-/run/secrets/backup_encryption_key}
+      WAL_ARCHIVE_TIMEOUT_SECS: ${WAL_ARCHIVE_TIMEOUT_SECS:-300}
     deploy:
       resources:
         limits:

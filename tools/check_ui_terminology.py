@@ -211,6 +211,8 @@ def scrub_domains_emails(text: str) -> str:
 
 
 def main(argv: list[str]) -> int:
+    if "--self-test" in argv[1:]:
+        return self_test()
     global structural_failure
     fixtures = Path(argv[1]) if len(argv) > 1 else DEFAULT_FIXTURES
 
@@ -328,6 +330,79 @@ def visible_text(html: str) -> str:
     html = _SCRIPT_RE.sub(" ", html)
     html = _TAG_RE.sub(" ", html)
     return _html.unescape(html)
+
+
+# ── self-test (drift injection over a throwaway fixture set) ────────────────
+#
+# The app-surface fixture scan runs against the REAL register and the REAL
+# flash/marketing sources (a green committed tree — the CI precondition):
+# clean copy passes, and one known-bad variant per contract clause makes the
+# REAL detection path print its FAIL line. The register class is proven by
+# pointing REGISTER at an absent file (a canon the gate cannot read).
+
+_TERM_SELFTEST_DOCS = {
+    "clean": "<p>Sign in to ApexMail to manage the workspace.</p>",
+    "wrong-case-brand": "<p>Sign in to Apexmail to manage the workspace.</p>",
+    "banned-phrase": "<p>Sign in to ApexMail for a seamless experience.</p>",
+}
+
+
+def self_test() -> int:
+    import io
+    import json
+    import tempfile
+    from contextlib import redirect_stdout
+
+    ok = True
+
+    def run_case(body: str, *, register: Path | None = None) -> tuple[int, str]:
+        failures.clear()
+        saved = REGISTER
+        if register is not None:
+            globals()["REGISTER"] = register
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                fixtures = Path(tmp)
+                (fixtures / "manifest.json").write_text(json.dumps(
+                    {"fixtures": [{"surface": "web", "route": "/selftest",
+                                   "htmlFile": "selftest.html"}]}))
+                (fixtures / "selftest.html").write_text(
+                    f"<!DOCTYPE html><html lang=\"en\"><body>{body}</body></html>")
+                buffer = io.StringIO()
+                with redirect_stdout(buffer):
+                    code = main(["check_ui_terminology.py", str(fixtures)])
+            return code, buffer.getvalue()
+        finally:
+            globals()["REGISTER"] = saved
+
+    def case(label: str, expect: str | None, body: str,
+             register: Path | None = None) -> None:
+        nonlocal ok
+        code, out = run_case(body, register=register)
+        if expect is None:
+            good = code == 0 and "all green" in out
+        else:
+            good = code == 1 and f"FAIL {expect}" in out
+        if good:
+            print(f"self-test PASS [{label}]")
+        else:
+            print(f"self-test FAIL: {label} — exit {code}, expected {expect!r}, "
+                  f"findings: {out.splitlines()[-4:]}", file=sys.stderr)
+            ok = False
+
+    case("clean app-surface copy passes", None, _TERM_SELFTEST_DOCS["clean"])
+    case("brand spelled against the register fails", "wrong-case-brand",
+         _TERM_SELFTEST_DOCS["wrong-case-brand"])
+    case("banned subjective phrase fails", "banned-phrase",
+         _TERM_SELFTEST_DOCS["banned-phrase"])
+    case("register the gate cannot parse fails structurally", "terminology register unparsable",
+         _TERM_SELFTEST_DOCS["clean"],
+         register=ROOT / "deploy/tests/product-names-register.selftest-absent.md")
+
+    if not ok:
+        return 1
+    print("ui terminology self-test: ok")
+    return 0
 
 
 if __name__ == "__main__":

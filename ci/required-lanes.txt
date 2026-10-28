@@ -2,23 +2,21 @@
 # rule 1: "Required means recorded"). One lane id per line; blank lines and
 # #-comments are ignored. A blessing whose requiredLanes map is missing a row
 # for any lane here, or records it as anything other than ok, is refused by
-# the deploy host (ci/lib.sh gate_blessing_refusal).
+# the deploy host (ci/lib.sh gate_blessing_refusal — which also verifies the
+# blessing's HMAC signature and freshness, invariant I20).
 #
 # Lane ids are MECHANICAL: "<stage>.<slug>" where slug is the ci_check label
 # lowercased with every non-alphanumeric run collapsed to one dash — the same
 # algorithm ci/lib.sh ci_check_lane_id applies when a stage records its lanes
 # into the run manifest. tools/check_waivers.py --check-lanes (the
 # validate.lane-waivers lane) proves every row here names a REQUIRED-capable
-# lane a stage actually runs — advisory checks (ci_check_advisory, advisory
-# gate flags, forced-advisory validators, the coverage record) are excluded
-# because an advisory failure must never refuse a blessing; a row with no
-# producing check fails CI.
+# lane a stage actually runs — advisory checks are excluded because an
+# advisory failure must never refuse a blessing; a row with no producing
+# check fails CI.
 #
 # Not listed here, deliberately:
 #   * test.coverage-ratchet and validate.claim-expiry — recorded every run,
 #     but advisory by declared default;
-#   * the ui stage's seven gates — CI_UI_* flags are advisory by default
-#     (recorded in the manifest, never blessing-gating);
 #   * checks with DYNAMIC labels (per-image trivy scans, the dogfood live
 #     battery) — recorded with their concrete per-run ids;
 #   * deploy-line stages (images/migrate/deploy/verify/notify) — verified by
@@ -34,6 +32,7 @@ security
 #
 # Validate-stage gate lanes:
 
+validate.alerting-rules
 validate.ark-authority-mirror
 validate.ark-console-artifact
 validate.ark-design-law
@@ -113,6 +112,18 @@ docs.docs-architecture-truth
 docs.docs-architecture-truth-selftest
 docs.repo-map-up-to-date
 #
+# UI-stage gate lanes (all REQUIRED by default since 2026-10-28 — the
+# in-stage fallbacks previously said advisory while pipeline.conf said
+# required, wrongly keeping seven real gates off this ledger):
+
+ui.ui-accessibility-gate-e
+ui.ui-dead-links-gate-i
+ui.ui-flash-copy-gate-c
+ui.ui-form-hygiene-gate-d
+ui.ui-marketing-token-contrast-gate-m
+ui.ui-strings-catalog-drift-gate-k
+ui.ui-terminology-gate-j
+#
 # Test-stage lanes:
 
 test.cargo-deny
@@ -122,6 +133,7 @@ test.dogfood-harness-self-test
 test.dogfood-ledger
 test.feature-entitlement-classification
 test.i18n-gate
+test.journey-lane-live-stack
 test.layout-gate
 test.pre-commit-parity
 test.satellite-kiwicaptcha-wasm

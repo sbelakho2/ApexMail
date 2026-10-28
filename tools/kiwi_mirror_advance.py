@@ -148,7 +148,96 @@ def apply(apex: Path, upstream: Path, old: str, new: str) -> int:
     return check(apex, upstream, new)
 
 
+def self_test() -> int:
+    """Throwaway-git proof of --check/--apply: parity holds on a faithful
+    mirror, a tampered byte fails, and --apply advances changed/added files
+    while preserving an ApexMail-owned extra inside the surface."""
+    import contextlib
+    import io
+    import tempfile
+
+    def miss(detail: str) -> int:
+        print(f"self-test FAIL: {detail}", file=sys.stderr)
+        return 1
+
+    def fixture_git(repo: Path, *args: str) -> str:
+        return subprocess.run(
+            ["git", "-C", str(repo), "-c", "user.email=self-test@apexmail.test",
+             "-c", "user.name=self-test", "-c", "commit.gpgsign=false", *args],
+            check=True, capture_output=True, text=True,
+        ).stdout
+
+    def capture(func, *args) -> tuple[int, str]:
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(io.StringIO()):
+            rc = func(*args)
+        return rc, buf.getvalue()
+
+    with tempfile.TemporaryDirectory() as td:
+        upstream, apex = Path(td) / "upstream", Path(td) / "apexmail"
+        upstream.mkdir()
+        apex.mkdir()
+        fixture_git(upstream, "init", "-q")
+        fixture_git(apex, "init", "-q")
+        surface = {
+            "packages/kiwicaptcha/src/lib.rs": b"kiwi v1\n",
+            "packages/kiwicaptcha/Cargo.toml": b'[package]\nname = "kiwicaptcha"\n',
+            # excluded bytes upstream carries but the mirror must not
+            "packages/kiwicaptcha/integrations/symfony/bundle.php": b"<?php\n",
+            "protocol/wire.json": b'{"v": 1}\n',
+        }
+        for rel, blob in surface.items():
+            (upstream / rel).parent.mkdir(parents=True, exist_ok=True)
+            (upstream / rel).write_bytes(blob)
+        fixture_git(upstream, "add", "-A")
+        fixture_git(upstream, "commit", "-qm", "old")
+        old = fixture_git(upstream, "rev-parse", "HEAD").strip()
+        for rel, blob in surface.items():  # the mirror: surface minus excludes
+            if excluded(rel):
+                continue
+            (apex / rel).parent.mkdir(parents=True, exist_ok=True)
+            (apex / rel).write_bytes(blob)
+        extra = apex / "packages/kiwicaptcha/README.apexmail.md"
+        extra.write_bytes(b"ApexMail-owned extra\n")
+        fixture_git(apex, "add", "-A")
+        fixture_git(apex, "commit", "-qm", "mirror at old")
+
+        rc, out = capture(check, apex, upstream, old)
+        if rc != 0 or "PARITY OK" not in out:
+            return miss(f"clean mirror must prove parity at OLD (rc={rc})")
+
+        wire = apex / "protocol/wire.json"
+        pristine = wire.read_bytes()
+        wire.write_bytes(b'{"v": 1, "tampered": true}\n')
+        rc, out = capture(check, apex, upstream, old)
+        if rc != 1 or "MISMATCH: protocol/wire.json" not in out:
+            return miss("tampered mirror byte must fail --check with a MISMATCH")
+        wire.write_bytes(pristine)
+
+        (upstream / "packages/kiwicaptcha/src/lib.rs").write_bytes(b"kiwi v2 with fixes\n")
+        risk = upstream / "packages/kiwicaptcha-risk/src/lib.rs"
+        risk.parent.mkdir(parents=True, exist_ok=True)
+        risk.write_bytes(b"risk v1\n")
+        fixture_git(upstream, "add", "-A")
+        fixture_git(upstream, "commit", "-qm", "new")
+        new = fixture_git(upstream, "rev-parse", "HEAD").strip()
+
+        rc, _ = capture(apply, apex, upstream, old, new)
+        if rc != 0:
+            return miss("--apply must advance the mirror to NEW and re-prove parity")
+        if (apex / "packages/kiwicaptcha/src/lib.rs").read_bytes() != b"kiwi v2 with fixes\n":
+            return miss("changed upstream file not advanced")
+        if not (apex / "packages/kiwicaptcha-risk/src/lib.rs").is_file():
+            return miss("added upstream file not advanced")
+        if extra.read_bytes() != b"ApexMail-owned extra\n":
+            return miss("ApexMail-owned extra inside the surface was not preserved")
+    print("self-test: ok")
+    return 0
+
+
 def main() -> int:
+    if "--self-test" in sys.argv:
+        return self_test()
     here = Path(__file__).resolve().parent.parent
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--upstream", default=str(here.parent / "kiwicaptcha-standalone"))

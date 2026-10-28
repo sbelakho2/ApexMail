@@ -190,5 +190,69 @@ def main() -> None:
         sys.exit(0)
 
 
+def self_test() -> int:
+    """Prove the expiry gate against a fixture registry (dates relative to today)."""
+    import contextlib
+    import io
+    import tempfile
+    from datetime import timedelta
+
+    def claim(cid: str, wording: str, review: date, expiration: str) -> str:
+        return (
+            "Claim {\n"
+            f'    claim_id: "{cid}",\n'
+            f'    exact_wording: "{wording}",\n'
+            "    category: ClaimCategory::Pricing,\n"
+            '    owner: "billing@example.com",\n'
+            "    approved_pages: vec![],\n"
+            f"    review_date: NaiveDate::from_ymd_opt({review.year}, {review.month}, {review.day}),\n"
+            f"    expiration_date: {expiration},\n"
+            "    status: ClaimStatus::Verified,\n"
+            "}\n"
+        )
+
+    def some(d: date) -> str:
+        return f"Some(NaiveDate::from_ymd_opt({d.year}, {d.month}, {d.day}))"
+
+    def run(block: str) -> tuple[list[dict], int, list[str]]:
+        with tempfile.TemporaryDirectory() as tmp:
+            registry = Path(tmp) / "claims_registry.rs"
+            registry.write_text(
+                "pub fn all() -> Vec<Claim> {\n    vec![" + block + "]\n}\n",
+                encoding="utf-8",
+            )
+            claims = parse_claims_registry(registry)
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                errors, report = check_claims(claims, warn_days=30)
+            return claims, errors, report
+
+    today = date.today()
+    fresh = claim("CL-1001", "Fresh claim.", today + timedelta(days=30), some(today + timedelta(days=200)))
+    claims, errors, report = run(fresh)
+    if errors != 0 or report or len(claims) != 1:
+        print(f"self-test FAIL: fresh claim did not pass cleanly ({claims}, {errors}, {report})", file=sys.stderr)
+        return 1
+
+    defects = [
+        # Expired claim: the one class that drives the gate's exit code.
+        ("expired", claim("CL-1002", "Stale claim.", today + timedelta(days=30), some(today - timedelta(days=1))), 1, "EXPIRED"),
+        # Past review date: report-only detection path.
+        ("overdue", claim("CL-1003", "Due claim.", today - timedelta(days=1), "None"), 0, "OVERDUE"),
+        # Expiry inside the 30-day warn window.
+        ("expiring", claim("CL-1004", "Soon.", today + timedelta(days=5), some(today + timedelta(days=10))), 0, "EXPIRING"),
+    ]
+    for name, block, want_errors, needle in defects:
+        claims, errors, report = run(block)
+        if errors != want_errors or len(claims) != 1 or not any(needle in line for line in report):
+            print(f"self-test FAIL: {name} not detected ({claims}, {errors}, {report})", file=sys.stderr)
+            return 1
+
+    print("self-test: ok")
+    return 0
+
+
 if __name__ == "__main__":
+    if "--self-test" in sys.argv:
+        sys.exit(self_test())
     main()

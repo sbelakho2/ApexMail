@@ -100,6 +100,17 @@ def check_compose(compose: str) -> list[str]:
                     f"docker-compose.prod.yml: {service} does not receive {var} "
                     "(payments fail closed without it)"
                 )
+        # The profile id must reach the service as ENV (directly or via the
+        # _FILE bridge) — a bare secret MOUNT without the env handoff was the
+        # hole the self-test's mutation exposed: the mount line stayed while
+        # the variable vanished, and payments silently named the wrong
+        # profile. (Substring check: MOLLIE_PROFILE_ID covers the _FILE form.)
+        if "MOLLIE_PROFILE_ID" not in block:
+            problems.append(
+                f"docker-compose.prod.yml: {service} does not receive MOLLIE_PROFILE_ID "
+                "(directly or via its _FILE bridge) — invoices and receipts name the "
+                "wrong payment profile without it"
+            )
         if "mollie_api_key" not in block:
             problems.append(
                 f"docker-compose.prod.yml: {service} does not mount the mollie_api_key secret"

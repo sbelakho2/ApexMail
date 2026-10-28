@@ -75,7 +75,40 @@ def check(path: Path) -> list[str]:
     return out
 
 
+def self_test() -> int:
+    """Drift-injection proof: clean page passes, each defect class is caught."""
+    import tempfile
+
+    def miss(detail: str) -> int:
+        print(f"self-test FAIL: {detail}", file=sys.stderr)
+        return 1
+
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        good = d / "good.html"
+        good.write_text(
+            "<html><body><header><div class=\"hero\">Hi<p>para<li>item</div></header>"
+            "<footer><span>ok</span><img src=\"x.png\"></footer></body></html>")
+        if check(good):
+            return miss(f"balanced page reported: {check(good)}")
+        defects = {
+            "unclosed-at-eof": ("<div class=\"cta\"><h1>Title</h1><p>push", "unclosed at EOF"),
+            "stray-close": ("<div><span>x</span></div></section>", "stray </section>"),
+            "swallowed": ("<div><a href=\"/x\"><span>link</a></div>", "swallowed"),
+        }
+        for label, (src, want) in defects.items():
+            f = d / f"bad_{label}.html"
+            f.write_text(src)
+            errs = check(f)
+            if not errs or not any(want in e for e in errs):
+                return miss(f"{label} defect not reported ({errs})")
+    print("self-test: ok")
+    return 0
+
+
 def main() -> int:
+    if "--self-test" in sys.argv:
+        return self_test()
     root = Path(__file__).resolve().parent
     repo = root.parent.parent
     files = []

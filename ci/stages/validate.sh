@@ -308,6 +308,22 @@ validate_repo_gates() {
     # Risk-WAF Lua parity + trust-neutrality: a real invariant gate that
     # regressed silently before and was never wired (2026-10-07 review).
     ci_check "risk lua parity" bash tools/check-risk-lua-parity.sh
+    # Alerting-rules quality gate (I17's CI anchor, 2026-10-28): the file
+    # Prometheus loads is checked for severity/annotations/runbook/pacing/
+    # expression defects plus `promtool check rules` (the authoritative
+    # parser). Tool-gated fail-closed like nginx; CI_ALERTING_RULES_CHECK
+    # is the bounded triage-window override.
+    _ar_st=$(lane_tool_status promtool alerting-rules "${CI_ALERTING_RULES_CHECK:-required}")
+    case $_ar_st in
+        run)
+            ci_check "alerting rules" python3 tools/check_alerting_rules.py \
+                || return "$CI_EXIT_FAIL"
+            ;;
+        fail) return "$CI_EXIT_FAIL" ;;
+        skip) [ "${CI_ALERTING_RULES_CHECK:-required}" = advisory ] \
+            && ci_warn "ADVISORY: alerting rules skipped — promtool absent (triage window)" \
+            || return "$CI_EXIT_FAIL" ;;
+    esac
     # KiwiCaptcha mirror parity: the carried Rust-only surface must be
     # blob-identical to the standalone repo's committed tree
     # (tools/kiwi_mirror_advance.py --check). Fail-closed when the sibling

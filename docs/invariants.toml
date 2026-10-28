@@ -140,7 +140,7 @@ statement = "The latest backup restores within the recovery-time objective"
 status = "planned"
 code = ["ha", "backups"]
 test_anchors = ["ha"]
-plan_test_today = "planned: continuous WAL archiving + a measured restore/RTO drill are not built yet (single host, nightly-backup RPO)"
+plan_test_today = "planned: the WAL archiving, encrypted PITR chain and automated restore drill ARE built (validate self-tests + postgres-restore-drill service); what remains is production enablement (operator checklist) and a MEASURED production RTO drill — the invariant claims a measured restore, not a built mechanism"
 gates = ["T13"]
 
 [[invariant]]
@@ -155,18 +155,18 @@ gates = ["T8", "T9"]
 id = "I19"
 statement = "Every gate fails on its known-bad fixture"
 code = ["tools/"]
-status = "planned"
+status = "enforced"
 test_anchors = ["tools/check_tool_selftests.py"]
-plan_test_today = "planned: tools/check_tool_selftests.py --self-test proves the detector; --inventory reports 21 of 43 CI tools still owe a drift-injection self-test"
+plan_test_today = "implemented 2026-10-28: every CI-invoked tool exposes a working drift-injection --self-test (49 tools, zero missing; dogfood-v2/run.py exempt with reason — its self-test IS the required test.dogfood-harness-self-test lane), and the meta-gate's own self-test is hermetic (fixture-driven, never re-probes the tree)"
 gates = ["T10"]
 
 [[invariant]]
 id = "I20"
 statement = "Only a signed, lane-complete blessing deploys"
-status = "planned"
+status = "enforced"
 code = ["ci/"]
-test_anchors = ["ci"]
-plan_test_today = "planned: the deploy blessing is a stage-level UNSIGNED check — the CI-signed, host-verified blessing (commit+config+lane digests, anti-replay) is not built"
+test_anchors = ["ci/pipeline.sh"]
+plan_test_today = "implemented 2026-10-28: the blessing is HMAC-signed over sha|config|stages|lanes|timestamp, carries requiredLanesStatuses, and the deploy host verifies signature + freshness (7-day anti-replay window) and refuses unsigned/tampered/keyless states — all ten refusal paths proven in the pipeline selftest"
 gates = ["T1"]
 
 [[invariant]]

@@ -210,7 +210,7 @@ plan_requires = """Fuzz attachment and calendar parsing (T7)"""
 tier = 2
 role = "Alerts, metrics, SLOs"
 required_kinds = ["unit"]
-plan_requires = """Make the compose alert smoke a required lane"""
+plan_requires = """validate.alerting-rules landed (promtool + structural contract, 2026-10-28); a LIVE firing drill against a running Prometheus stays operator-run"""
 
 [package.email-grader]
 tier = 2

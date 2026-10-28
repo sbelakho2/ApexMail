@@ -1309,6 +1309,29 @@ stage_main() {
     run_contrast_gate
     run_layout_gates
     run_i18n_gate
+    # T6 landed (2026-10-28): the live-stack journey lane. Boots the dev
+    # compose stack under an isolated project, health-fences the api, runs
+    # journey-deep --quick, and enforces ZERO findings (tools/run_journey_
+    # lane.sh owns the whole lifecycle + its own self-test). Tool-gated
+    # fail-closed: docker and node must exist; CI_JOURNEY_CHECK is the
+    # bounded triage-window override.
+    _jl_flag="${CI_JOURNEY_CHECK:-required}"
+    _jl_st=$(lane_tool_status docker journey-lane "$_jl_flag")
+    case $_jl_st in
+        fail) return "$CI_EXIT_FAIL" ;;
+        skip) return "$CI_EXIT_OK" ;;
+    esac
+    _jl_st=$(lane_tool_status node journey-lane "$_jl_flag")
+    case $_jl_st in
+        fail) return "$CI_EXIT_FAIL" ;;
+        skip) return "$CI_EXIT_OK" ;;
+    esac
+    if ci_dry; then
+        ci_info "dry-run: journey lane (compose stack + journey-deep --quick)"
+    else
+        ci_check "journey lane (live stack)" bash tools/run_journey_lane.sh --out "$RUN_DIR/journeys" \
+            || return "$CI_EXIT_FAIL"
+    fi
 
     ci_ephem_cleanup
     ci_info "test: all suites green"

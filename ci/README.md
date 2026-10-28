@@ -817,11 +817,15 @@ stage (`ci/install.sh` installs gh as a convenience only).
 2. every stage is fail-closed on the deploy host, and a red stage stops the
    line before images or deploy;
 3. the blessing manifest (`.gate-blessing.json`: sha + pipeline-config hash +
-   the stages that passed, and since 2026-10-28 `requiredLanesStatuses` — one
-   `lane=ok` row for EVERY sub-lane in `ci/required-lanes.txt`) is what the
-   deploy host accepts — a partial lane, a different pipeline configuration,
-   or a required sub-lane that did not finish ok cannot bless. The lane ids
-   are mechanical (`<stage>.<slug-of-the-ci_check-label>`, recorded by every
+   the stages that passed, `requiredLanesStatuses` — one `lane=ok` row for
+   EVERY sub-lane in `ci/required-lanes.txt` — and an HMAC-SHA256 `signature`
+   over sha|config|stages|lanes|timestamp under the shared
+   `CI_BLESSING_SIGNING_KEY`) is what the deploy host accepts — a partial
+   lane, a different pipeline configuration, a required sub-lane that did not
+   finish ok, an unsigned/tampered blessing, a blessing older than the
+   anti-replay window (default 7 days), or a host with no signing key
+   configured cannot deploy (invariant I20, enforced). The lane ids are
+   mechanical (`<stage>.<slug-of-the-ci_check-label>`, recorded by every
    stage into the run manifest), and `tools/check_waivers.py --check-lanes`
    (the `validate.waivers` lane) proves every required row names a lane a
    stage actually runs — a stale row like the retired `test.browsers` fails

@@ -37,7 +37,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from ui_flash_extract import all_flash_sites  # noqa: E402
+from ui_flash_extract import FlashSite, all_flash_sites  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 ALLOWLIST = Path(__file__).resolve().parent / "ui_copy_allowlist.txt"
@@ -111,6 +111,50 @@ def load_allowlist(path: Path) -> tuple[dict, dict]:
     return exact, []
 
 
+def self_test() -> int:
+    """Prove the canon rules and the allowlist parser on synthetic input."""
+    import tempfile
+
+    def site(text: str) -> FlashSite:
+        return FlashSite(path="fixture.rs", line=1, callee="redirect_error", text=text)
+
+    # Clean copy: canon-compliant literals (including the ellipsis exception
+    # for `{…}` interpolation) produce no violations at all.
+    for clean in ["Mailbox created.", "Importing {name}…", "2FA enabled."]:
+        if violations_for(site(clean)):
+            print(f"self-test FAIL: clean copy {clean!r} flagged: {violations_for(site(clean))}", file=sys.stderr)
+            return 1
+
+    defects = {
+        "not-capitalized": "mailbox created.",
+        "missing-period": "Mailbox created",
+        "terminal-exclamation": "Mailbox created!",
+        "banned:error-colon": "Error: mailbox not created.",
+        "empty-copy": "   ",
+    }
+    for rule, text in defects.items():
+        got = violations_for(site(text))
+        if rule not in got:
+            print(f"self-test FAIL: {rule} not fired for {text!r} (got {got})", file=sys.stderr)
+            return 1
+
+    # Exemptions: `path:line` wildcard, `path:line:rule` rule-scoped,
+    # unparseable entries skipped without killing the parse.
+    with tempfile.TemporaryDirectory() as tmp:
+        allowlist = Path(tmp) / "ui_copy_allowlist.txt"
+        allowlist.write_text("# comment\n\nfixture.rs:3\nfixture.rs:4:not-capitalized\nbogus\n")
+        exact, _ = load_allowlist(allowlist)
+        if exact.get(("fixture.rs", 3)) != {"*"}:
+            print(f"self-test FAIL: path:line exemption not a wildcard: {exact}", file=sys.stderr)
+            return 1
+        if exact.get(("fixture.rs", 4)) != {"not-capitalized"}:
+            print(f"self-test FAIL: path:line:rule exemption not scoped: {exact}", file=sys.stderr)
+            return 1
+
+    print("self-test: ok")
+    return 0
+
+
 def main(argv: list[str]) -> int:
     roots = [Path(p) for p in argv[1:]] or None
     if roots:
@@ -167,4 +211,6 @@ def main(argv: list[str]) -> int:
 
 
 if __name__ == "__main__":
+    if "--self-test" in sys.argv:
+        sys.exit(self_test())
     sys.exit(main(sys.argv))

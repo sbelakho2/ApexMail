@@ -59,6 +59,8 @@ FORM_ACTION_ALLOWLIST = {
 
 
 def main(argv: list[str]) -> int:
+    if "--self-test" in argv[1:]:
+        return self_test()
     fixtures = Path(argv[1]) if len(argv) > 1 else DEFAULT_FIXTURES
     if not fixtures.is_dir():
         print(f"FAIL fixtures directory missing: {fixtures}")
@@ -124,6 +126,81 @@ def main(argv: list[str]) -> int:
             print(f"  … and {len(failures) - 50} more")
         return 1
     print("form hygiene: all green")
+    return 0
+
+
+# ── self-test (drift injection over a throwaway fixture set) ────────────────
+#
+# Same input shape the gate consumes in CI (fixtures dir + the REAL web.rs
+# route table): a PRG-clean form passes, and one known-bad variant per
+# contract clause makes the REAL detection path print its FAIL line.
+
+_FORM_SELFTEST_DOC = """<!DOCTYPE html>
+<html lang="en">
+<head><meta name="viewport" content="width=device-width"></head>
+<body>
+<h1>Sign in</h1>
+<form method="post" action="/web/auth/login">
+<input type="hidden" name="_csrf" value="t">
+<label for="email">Email</label>
+<input id="email" name="email" type="email" autocomplete="email">
+<button type="submit">Go</button>
+</form>
+</body>
+</html>
+"""
+
+
+def self_test() -> int:
+    import io
+    import json
+    import tempfile
+    from contextlib import redirect_stdout
+
+    def mutate(old: str, new: str) -> str:
+        assert old in _FORM_SELFTEST_DOC, f"self-test anchor missing: {old!r}"
+        return _FORM_SELFTEST_DOC.replace(old, new, 1)
+
+    ok = True
+
+    def case(label: str, expect: str | None, html: str) -> None:
+        nonlocal ok
+        failures.clear()
+        with tempfile.TemporaryDirectory() as tmp:
+            fixtures = Path(tmp)
+            (fixtures / "manifest.json").write_text(json.dumps(
+                {"fixtures": [{"surface": "web", "route": "/selftest",
+                               "htmlFile": "selftest.html"}]}))
+            (fixtures / "selftest.html").write_text(html)
+            buffer = io.StringIO()
+            with redirect_stdout(buffer):
+                code = main(["check_ui_form_hygiene.py", str(fixtures)])
+        out = buffer.getvalue()
+        if expect is None:
+            good = code == 0 and "all green" in out
+        else:
+            good = code == 1 and f"FAIL {expect} " in out
+        if good:
+            print(f"self-test PASS [{label}]")
+        else:
+            print(f"self-test FAIL: {label} — exit {code}, expected {expect!r}, "
+                  f"findings: {out.splitlines()[-4:]}", file=sys.stderr)
+            ok = False
+
+    case("clean PRG form passes (registered action + _csrf + labels)", None,
+         _FORM_SELFTEST_DOC)
+    case("form action no web.rs route registers fails", "unregistered-action",
+         mutate('action="/web/auth/login"', 'action="/web/selftest/nope"'))
+    case("registered action without a _csrf input fails", "missing-csrf",
+         mutate('<input type="hidden" name="_csrf" value="t">\n', ""))
+    case("id-carrying control with no label fails", "unlabelled-control",
+         mutate('<button type="submit">Go</button>',
+                '<input id="code" name="code" type="text">\n'
+                '<button type="submit">Go</button>'))
+
+    if not ok:
+        return 1
+    print("form hygiene self-test: ok")
     return 0
 
 

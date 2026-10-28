@@ -37,7 +37,7 @@ RETIRED_NAME_ALLOWLIST = (
 RETIRED_PATH_PATTERN = re.compile(r"crates/outbound-queue/")
 
 
-def _scan_for_retired_references() -> list[str]:
+def _scan_for_retired_references(root: Path = ROOT) -> list[str]:
     """Docs and comments must not point at the deleted package again.
 
     Deleting the package was not enough: the first cleanup pass found ~22 live
@@ -46,10 +46,10 @@ def _scan_for_retired_references() -> list[str]:
     """
     violations: list[str] = []
     suffixes = {".md", ".rs", ".toml", ".yml", ".yaml", ".sh", ".py", ".json", ".sql"}
-    for path in sorted(ROOT.rglob("*")):
+    for path in sorted(root.rglob("*")):
         if not path.is_file() or path.suffix not in suffixes:
             continue
-        relative = path.relative_to(ROOT).as_posix()
+        relative = path.relative_to(root).as_posix()
         if any(relative.startswith(prefix) for prefix in RETIRED_NAME_ALLOWLIST):
             continue
         if "/target/" in relative or relative.startswith("target/"):
@@ -66,20 +66,21 @@ def _scan_for_retired_references() -> list[str]:
     return violations
 
 
-def main() -> int:
+def run(root: Path = ROOT) -> int:
+    crates = root / "services" / "mail-server" / "crates"
     violations: list[str] = []
     # The outbound-queue package was retired and its sources deleted. The
     # guardrail keeps watching the manifest path so a re-created manifest —
     # i.e. someone resurrecting a second, unapproved delivery path — still
     # fails this check.
-    retired_manifest = CRATES / "outbound-queue" / "Cargo.toml"
+    retired_manifest = crates / "outbound-queue" / "Cargo.toml"
     if retired_manifest.exists():
         violations.append("outbound-queue/Cargo.toml (retired delivery package restored)")
 
-    violations.extend(_scan_for_retired_references())
+    violations.extend(_scan_for_retired_references(root))
 
-    for path in sorted(CRATES.rglob("*.rs")):
-        relative = path.relative_to(CRATES).as_posix()
+    for path in sorted(crates.rglob("*.rs")):
+        relative = path.relative_to(crates).as_posix()
         if relative in APPROVED_FILES:
             continue
         # Generated code in cargo build dirs (e.g. the cargo-fuzz subproject's
@@ -101,5 +102,93 @@ def main() -> int:
     return 0
 
 
+# ── self-test (drift injection over a throwaway tree) ───────────────────────
+#
+# A clean fixture tree passes (the approved entry points may mention the
+# senders); one known-bad variant per guarded defect class makes the REAL
+# detection paths fire.
+
+_APPROVED_SENDER_RS = (
+    'pub async fn deliver() {\n    send_email_now(&msg);\n}\n'
+)
+_UNAPPROVED_SENDER_RS = (
+    'pub async fn inbox_reply_all() {\n    send_email_now(&msg);\n}\n'
+)
+_RETIRED_DOC_MD = (
+    "# Runbook\n\nSee crates/outbound-queue/src/worker.rs for the retry loop.\n"
+)
+
+
+def _selftest_tree(root: Path, *, retired_manifest: bool = False,
+                   retired_doc: bool = False, unapproved_sender: bool = False) -> None:
+    def write(rel: str, text: str) -> None:
+        path = root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+
+    base = "services/mail-server/crates"
+    write(f"{base}/api-server/src/routes/messages.rs", _APPROVED_SENDER_RS)
+    write("docs/operations/mail-runbook.md",
+          _RETIRED_DOC_MD if retired_doc else "# Runbook\n\nNothing retired here.\n")
+    if unapproved_sender:
+        write(f"{base}/api-server/src/routes/inbox.rs", _UNAPPROVED_SENDER_RS)
+    if retired_manifest:
+        write(f"{base}/outbound-queue/Cargo.toml", "[package]\nname = \"outbound-queue\"\n")
+
+
+def self_test() -> int:
+    import tempfile
+    from contextlib import redirect_stderr, redirect_stdout
+
+    ok = True
+
+    def case(label: str, expected: str = "", **kwargs) -> None:
+        """expected == "" → the clean tree must pass; otherwise the violation
+        text must appear in run()'s findings (scan results or stderr)."""
+        nonlocal ok
+        import io
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _selftest_tree(root, **kwargs)
+            violations = _scan_for_retired_references(root)
+            buffer = io.StringIO()
+            with redirect_stderr(buffer), redirect_stdout(io.StringIO()):
+                code = run(root)
+        if not expected:
+            good = code == 0
+        else:
+            good = code == 1 and (
+                any(expected in v for v in violations) or expected in buffer.getvalue()
+            )
+        if good:
+            print(f"self-test PASS [{label}]")
+        else:
+            print(f"self-test FAIL: {label} — exit {code}, expected "
+                  f"{expected!r}, violations {violations}", file=sys.stderr)
+            ok = False
+
+    case("clean tree passes (approved senders exempt)", )
+    case("retired delivery package restored",
+         expected="retired delivery package restored", retired_manifest=True)
+    case("doc points at the deleted outbound-queue package",
+         expected="references the deleted outbound-queue package", retired_doc=True)
+    # The sender scan reports crate-relative paths on stderr from inside run().
+    case("unapproved sender candidate outside the approved files",
+         expected="api-server/src/routes/inbox.rs", unapproved_sender=True)
+
+    if not ok:
+        return 1
+    print("outbound delivery contract self-test: ok")
+    return 0
+
+
+def main(argv: list[str]) -> int:
+    if "--self-test" in argv[1:]:
+        return self_test()
+    return run(ROOT)
+
+
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(main(sys.argv))
+

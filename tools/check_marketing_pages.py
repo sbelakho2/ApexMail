@@ -105,6 +105,72 @@ def check_templates() -> list[str]:
     return problems
 
 
+def _self_test_cases(base: Path, clean: str, cases: dict[str, str]) -> int:
+    """Runs the per-page and template arms; returns 1 on any escape."""
+    failures = 0
+    (base / "clean.html").write_text(clean, encoding="utf-8")
+    if check_page(base / "clean.html"):
+        print(f"self-test FAIL: the clean fixture was rejected: {check_page(base / 'clean.html')}",
+              file=sys.stderr)
+        return 1
+    for label, html in cases.items():
+        fixture = base / "seed.html"
+        fixture.write_text(html, encoding="utf-8")
+        if not check_page(fixture):
+            print(f"self-test FAIL: seeded defect not caught: {label}", file=sys.stderr)
+            failures += 1
+    tpl = base / "tpl"
+    tpl.mkdir()
+    (tpl / "good.html").write_text("{% block content %}" + "<p>x. " * 80 + "{% endblock %}",
+                                   encoding="utf-8")
+    (tpl / "bare.html").write_text("{% block content %}calculator {% endblock %}",
+                                   encoding="utf-8")
+    global TEMPLATES, ROOT
+    saved_templates, saved_root = TEMPLATES, ROOT
+    try:
+        TEMPLATES = tpl
+        ROOT = base  # check_templates reports paths relative to ROOT
+        problems = check_templates()
+    finally:
+        TEMPLATES, ROOT = saved_templates, saved_root
+    if not any("bare word" in p for p in problems):
+        print(f"self-test FAIL: the bare-word template arm did not fire: {problems}",
+              file=sys.stderr)
+        failures += 1
+    return 1 if failures else 0
+
+
+def self_test() -> int:
+    """Drift-injection proof of the gate's own defect classes."""
+    import tempfile
+
+    filler = "<p>" + "real body text. " * 60 + "</p>"
+    clean = f"<html><body><main><h1>Pricing</h1>{filler}</main></body></html>"
+    cases = {
+        "no h1": "<html><body><main>" + filler + "</main></body></html>",
+        "two h1s": "<html><body><main><h1>A</h1><h1>B</h1>"
+                   + filler + "</main></body></html>",
+        "skeleton main": "<html><body><main><h1>A</h1>thin</main></body></html>",
+        "placeholder marker": "<html><body><main><h1>A</h1>"
+                              + filler + "<p>TODO: finish this page</p>"
+                              + "</main></body></html>",
+    }
+    global PUBLIC
+    saved_public = PUBLIC
+    with tempfile.TemporaryDirectory() as tmp:
+        base = Path(tmp)
+        PUBLIC = base  # check_page reports paths relative to PUBLIC
+        try:
+            escaped = _self_test_cases(base, clean, cases)
+        finally:
+            PUBLIC = saved_public
+    if escaped:
+        return 1
+    print("check_marketing_pages self-test: ok (clean accepted; h1, skeleton, "
+          "placeholder and bare-word-template defects all caught)")
+    return 0
+
+
 def run() -> int:
     if not PUBLIC.is_dir():
         print(f"marketing-pages: built tree absent ({PUBLIC})")
@@ -126,4 +192,6 @@ def run() -> int:
 
 
 if __name__ == "__main__":
+    if "--self-test" in sys.argv:
+        sys.exit(self_test())
     sys.exit(run())

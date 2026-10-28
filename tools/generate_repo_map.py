@@ -25,6 +25,7 @@ change when the tree does:
 Usage:
   python3 tools/generate_repo_map.py            # rewrite tools/repo-map.md
   python3 tools/generate_repo_map.py --check    # exit 1 on drift, write nothing
+  python3 tools/generate_repo_map.py --root DIR # read DIR instead of the repo root
   python3 tools/generate_repo_map.py --out PATH # write to PATH instead
 
 ci/stages/validate.sh runs --check so a stale map fails the validate stage
@@ -60,17 +61,18 @@ HEADER = """# ApexMail — Repository Map (generated)
 """
 
 
-def workspace_members() -> list[str]:
+def workspace_members(root: Path = ROOT) -> list[str]:
     """Expand the workspace `members` globs (tomllib parses the table; the
     globs are resolved against the crate root so the map reflects the TREE,
     not just the manifest strings)."""
-    data = tomllib.loads(WORKSPACE_MANIFEST.read_text())
+    manifest = root / "services/mail-server/Cargo.toml"
+    data = tomllib.loads(manifest.read_text())
     members: list[str] = []
     for pattern in data.get("workspace", {}).get("members", []):
         pattern = pattern.rstrip("/")
         if any(ch in pattern for ch in "*?[]"):
-            matches = sorted(str(p.relative_to(WORKSPACE_MANIFEST.parent)) for p in WORKSPACE_MANIFEST.parent.glob(pattern))
-        elif (WORKSPACE_MANIFEST.parent / pattern).is_dir():
+            matches = sorted(str(p.relative_to(manifest.parent)) for p in manifest.parent.glob(pattern))
+        elif (manifest.parent / pattern).is_dir():
             matches = [pattern]
         else:
             matches = []  # a listed member missing from the tree is real drift;
@@ -82,9 +84,9 @@ def workspace_members() -> list[str]:
     return members
 
 
-def crate_kind(rel: str) -> str:
+def crate_kind(rel: str, root: Path = ROOT) -> str:
     """`binary` when the member declares [[bin]] targets, else `library`."""
-    manifest = WORKSPACE_MANIFEST.parent / rel / "Cargo.toml"
+    manifest = root / "services/mail-server" / rel / "Cargo.toml"
     if manifest.is_file():
         try:
             data = tomllib.loads(manifest.read_text())
@@ -92,13 +94,17 @@ def crate_kind(rel: str) -> str:
             return "library"
         if data.get("bin"):
             return "binary"
-    if (WORKSPACE_MANIFEST.parent / rel / "src/bin").is_dir():
+    if (root / "services/mail-server" / rel / "src/bin").is_dir():
         return "binary"
     return "library"
 
 
-def dockerfile_runtime_targets() -> list[str]:
-    return re.findall(r"^FROM runtime-base AS ([A-Za-z0-9_-]+)\s*$", DOCKERFILE.read_text(), re.M)
+def dockerfile_runtime_targets(root: Path = ROOT) -> list[str]:
+    return re.findall(
+        r"^FROM runtime-base AS ([A-Za-z0-9_-]+)\s*$",
+        (root / "services/mail-server/Dockerfile").read_text(),
+        re.M,
+    )
 
 
 def compose_services(path: Path) -> list[str]:
@@ -119,8 +125,8 @@ def compose_services(path: Path) -> list[str]:
     return services
 
 
-def capability_stages() -> tuple[list[str], list[tuple[str, str, str]]]:
-    data = json.loads(REGISTRY.read_text())
+def capability_stages(root: Path = ROOT) -> tuple[list[str], list[tuple[str, str, str]]]:
+    data = json.loads((root / "docs/development/capability-registry.json").read_text())
     ladder = data["lifecycle_ladder"]
     rows = []
     for entry in data["capabilities"]:
@@ -131,24 +137,25 @@ def capability_stages() -> tuple[list[str], list[tuple[str, str, str]]]:
     return ladder, rows
 
 
-def migration_facts() -> tuple[int, str, int]:
-    sqls = sorted(MIGRATIONS.glob("*.sql"))
-    tool_sqls = sorted(TOOL_MIGRATIONS.glob("*.sql")) if TOOL_MIGRATIONS.is_dir() else []
+def migration_facts(root: Path = ROOT) -> tuple[int, str, int]:
+    sqls = sorted((root / "services/mail-server/migrations").glob("*.sql"))
+    tool_dir = root / "tools/migrations"
+    tool_sqls = sorted(tool_dir.glob("*.sql")) if tool_dir.is_dir() else []
     return len(sqls), (sqls[-1].name if sqls else "—"), len(tool_sqls)
 
 
-def ui_route_counts() -> tuple[list[tuple[str, int, int]], int]:
-    data = json.loads(UI_MANIFEST.read_text())
+def ui_route_counts(root: Path = ROOT) -> tuple[list[tuple[str, int, int]], int]:
+    data = json.loads((root / "docs/development/ui-baseline-manifest.json").read_text())
     rows = [(s["id"], s["routeCount"], len(s["routes"])) for s in data["surfaces"]]
     return rows, sum(r[2] for r in rows)
 
 
-def build_map() -> str:
+def build_map(root: Path = ROOT) -> str:
     lines: list[str] = [HEADER, ""]
 
-    members = workspace_members()
-    binaries = [m for m in members if crate_kind(m) == "binary"]
-    libraries = [m for m in members if crate_kind(m) != "binary"]
+    members = workspace_members(root)
+    binaries = [m for m in members if crate_kind(m, root) == "binary"]
+    libraries = [m for m in members if crate_kind(m, root) != "binary"]
     lines += [
         "## 1. Cargo workspace (`services/mail-server`)",
         "",
@@ -161,7 +168,7 @@ def build_map() -> str:
         "",
     ]
 
-    targets = dockerfile_runtime_targets()
+    targets = dockerfile_runtime_targets(root)
     lines += [
         "## 2. Dockerfile runtime targets",
         "",
@@ -173,8 +180,8 @@ def build_map() -> str:
     lines += [f"- `{t}`" for t in targets]
     lines += [""]
 
-    dev = compose_services(COMPOSE_DEV)
-    prod = compose_services(COMPOSE_PROD)
+    dev = compose_services(root / "docker-compose.yml")
+    prod = compose_services(root / "docker-compose.prod.yml")
     prod_only = [s for s in prod if s not in dev]
     lines += [
         "## 3. Compose services",
@@ -186,7 +193,7 @@ def build_map() -> str:
         "",
     ]
 
-    ladder, rows = capability_stages()
+    ladder, rows = capability_stages(root)
     lines += [
         "## 4. Capability registry stages",
         "",
@@ -202,7 +209,7 @@ def build_map() -> str:
     lines += [f"| {cap} | {stage} | {gate} |" for cap, stage, gate in rows]
     lines += [""]
 
-    count, latest, tool_count = migration_facts()
+    count, latest, tool_count = migration_facts(root)
     lines += [
         "## 4b. Schema migrations",
         "",
@@ -213,7 +220,7 @@ def build_map() -> str:
     if tool_count:
         lines += [f"`tools/migrations/`: {tool_count} `*.sql` files.", ""]
 
-    surfaces, total = ui_route_counts()
+    surfaces, total = ui_route_counts(root)
     lines += [
         "## 5. UI route baseline",
         "",
@@ -230,12 +237,85 @@ def build_map() -> str:
     return "\n".join(lines)
 
 
+def self_test() -> int:
+    """Drift-injection proof on a synthetic tree: a stale map fails --check,
+    regeneration makes --check pass again."""
+    import contextlib
+    import io
+
+    def miss(detail: str) -> int:
+        print(f"self-test FAIL: {detail}", file=sys.stderr)
+        return 1
+
+    def run(*args: str) -> tuple[int, str, str]:
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = main(list(args))
+        return rc, out.getvalue(), err.getvalue()
+
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        ms = root / "services/mail-server"
+        for rel, text in {
+            "Cargo.toml": '[workspace]\nmembers = ["crates/*"]\n',
+            "crates/alpha/Cargo.toml": "[[bin]]\nname = \"alpha\"\n",
+            "crates/beta/Cargo.toml": "[lib]\npath = \"src/lib.rs\"\n",
+            "Dockerfile": "FROM runtime-base AS api\nFROM runtime-base AS worker\n",
+            "migrations/001_a.sql": "-- Migration 1: a\n",
+            "migrations/002_b.sql": "-- Migration 2: b\n",
+        }.items():
+            p = ms / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(text)
+        (root / "tools/migrations/001_tool.sql").parent.mkdir(parents=True, exist_ok=True)
+        (root / "tools/migrations/001_tool.sql").write_text("-- tool\n")
+        (root / "docs/development").mkdir(parents=True)
+        (root / "docs/development/capability-registry.json").write_text(json.dumps({
+            "lifecycle_ladder": ["claimed", "runtime-wired"],
+            "capabilities": [{"capability": "captcha", "stage": "runtime-wired",
+                              "evidence": {"env_gate": {"name": "APEXMAIL_CAPTCHA"}}}],
+        }))
+        (root / "docs/development/ui-baseline-manifest.json").write_text(json.dumps(
+            {"surfaces": [{"id": "marketing", "routeCount": 2, "routes": ["/", "/pricing"]}]}))
+        (root / "docker-compose.yml").write_text("services:\n  mail:\n  redis:\n")
+        (root / "docker-compose.prod.yml").write_text("services:\n  mail:\n  exporter:\n")
+        out = root / "tools/repo-map.md"
+        argv = ["--root", str(root), "--out", str(out)]
+
+        rc, _, _ = run(*argv)
+        if rc != 0 or not out.is_file():
+            return miss("generation phase failed")
+        content = out.read_text()
+        for expect in ("2 workspace members", "`crates/alpha`", "`exporter`",
+                       "`002_b.sql`", "Total: 2 routes."):
+            if expect not in content:
+                return miss(f"generated map lacks {expect!r}")
+        if run(*argv, "--check")[0] != 0:
+            return miss("--check must pass on a freshly generated map")
+
+        (ms / "migrations/003_drift.sql").write_text("-- Migration 3: drift\n")
+        rc, _, err = run(*argv, "--check")
+        if rc != 1 or "stale" not in err:
+            return miss("--check must fail (exit 1, stale) on a drifted tree")
+        if run(*argv)[0] != 0 or run(*argv, "--check")[0] != 0:
+            return miss("--check must pass right after regeneration")
+    print("self-test: ok")
+    return 0
+
+
 def main(argv: list[str]) -> int:
+    if "--self-test" in argv:
+        return self_test()
     args = list(argv)
     check = "--check" in args
     if check:
         args.remove("--check")
-    out = OUTPUT
+    root = ROOT
+    if "--root" in args:
+        i = args.index("--root")
+        root = Path(args[i + 1])
+        del args[i : i + 2]
+    out = root / "tools/repo-map.md"
     if "--out" in args:
         i = args.index("--out")
         out = Path(args[i + 1])
@@ -244,7 +324,7 @@ def main(argv: list[str]) -> int:
         print(__doc__.strip().splitlines()[-4], file=sys.stderr)
         return 2
 
-    content = build_map()
+    content = build_map(root)
     if check:
         if not out.is_file():
             print(f"repo-map drift: {out} missing — run `python3 tools/generate_repo_map.py`", file=sys.stderr)
