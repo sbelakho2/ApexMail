@@ -1739,7 +1739,24 @@ pub(crate) async fn collect_usage_invoice(
         }
     };
 
-    if let Some(mapping) = mollie.as_ref() {
+    // Audit step 7: an open attempt (a lost provider response) means the
+    // charge may already be moving. NO second charge and NO wallet fallback
+    // this tick: the webhook or the repair sweep settles the in-flight
+    // charge, and the finalize below hands the invoice to the same dunning
+    // observation the async charge path uses.
+    if mollie
+        .as_ref()
+        .is_some_and(|mapping| mapping.payment_id.trim().is_empty())
+    {
+        warn!(
+            invoice_id = %invoice.id,
+            "usage invoice collection: charge attempt in flight, settled by webhook or repair sweep"
+        );
+    }
+    if let Some(mapping) = mollie
+        .as_ref()
+        .filter(|mapping| !mapping.payment_id.trim().is_empty())
+    {
         let persisted = sqlx::query(
             r#"
             UPDATE invoices
@@ -2256,23 +2273,26 @@ struct MollieUsageInvoice {
     reference: String,
 }
 
-/// Immediate Mollie collection of a usage invoice's remaining amount
-/// (audit F34): charge the remainder NOW as a recurring payment against the
-/// tenant's stored mandate, not "on some future renewal" (which never comes
-/// for cancelled/PAYG tenants).
+/// Immediate provider collection of a usage invoice's remaining amount
+/// (audit F34): charge the remainder NOW against the tenant's stored
+/// payment credential, not "on some future renewal" (which never comes
+/// for cancelled/PAYG tenants). The charge goes through the neutral
+/// payment boundary (external audit P0-A, step 3); the adapter owns the
+/// wire translation (stored-credential sequence, decimal amounts).
 ///
-/// * The amount travels as a decimal string (Mollie's wire format), built
-///   from the frozen cents amount by [`Money`], exact, never rounded.
 /// * The metadata carries `invoice_id` (and `reference`) so the webhook
 ///   reconciles the payment to OUR invoice row.
-/// * `sequenceType: recurring` with the Mollie customer + mandate is the
-///   stored-mandate charge; the mandate lives on the Mollie customer, never in the body.
 /// * The idempotency key embeds the immutable local operation identity
 ///   (invoice id) AND the FROZEN amount, so a retry after a wallet-balance
 ///   change replays the SAME key, and a changed remainder can never mint
 ///   a second charge under a new key (F34).
-/// * Returns `Ok(None)` when the tenant has no stored Mollie mandate or no
-///   `MOLLIE_API_KEY` is configured (the wallet + dunning path covers them).
+/// * Returns `Ok(None)` when the tenant has no stored credential or the
+///   provider is not configured (the wallet + dunning path covers them).
+///
+/// NEUTRALITY-DEBT (N-09): the credential lookup still reads the legacy
+/// `mollie_subscriptions` mandate columns and the helper keeps its
+/// Mollie-era name (cosmetic, step 10). The credential lookup, the claim
+/// gate and the charge itself are all neutral (N-09 retired, steps 7-8).
 async fn create_and_finalize_mollie_usage_invoice(
     state: &AppState,
     invoice: &Invoice,
@@ -2282,31 +2302,62 @@ async fn create_and_finalize_mollie_usage_invoice(
     period_start: DateTime<Utc>,
     usage_kind: &str,
 ) -> Result<Option<MollieUsageInvoice>, String> {
-    use crate::mollie_client::{CreatePayment, MollieClient, Money};
+    use crate::payments::SavedMethodCharge;
 
     if amount_cents <= 0 {
         return Ok(None);
     }
-    let Ok(mollie) = MollieClient::from_env() else {
-        return Ok(None); // not Mollie-configured, wallet + dunning path
+    let Ok(provider) = crate::payments::registry::from_env() else {
+        return Ok(None); // provider not configured, wallet + dunning path
     };
 
+    // N-09 (audit step 7): the stored credential comes from the NEUTRAL
+    // payment_credentials ledger (written at activation, stamped on
+    // revocation). TRANSITIONAL fallback: rows written BEFORE the ledger
+    // (and the legacy-shaped fixtures) carry only the subscription mandate;
+    // migration 279 backfilled them once, but any legacy row inserted or
+    // restored after that point is invisible to the neutral table. The
+    // fallback reads the same mandate fact the backfill did, so no
+    // chargeable tenant can silently lose its method — and revocation
+    // stamps BOTH stores (subscriptions.rs), keeping them consistent.
     let stored: Option<(String, String)> = sqlx::query_as(
         r#"
-        SELECT s.mollie_customer_id, s.mollie_mandate_id
-        FROM mollie_subscriptions s
-        WHERE s.tenant_id = $1
-          AND s.mollie_mandate_id IS NOT NULL
-          AND s.mollie_mandate_id <> ''
-        ORDER BY CASE WHEN s.status = 'active' THEN 0 ELSE 1 END, s.created_at DESC
+        SELECT provider_customer_id, provider_method_id
+        FROM payment_credentials
+        WHERE tenant_id = $1
+          AND provider = $2
+          AND state = 'active'
+          AND revoked_at IS NULL
+        ORDER BY created_at DESC
         LIMIT 1
         "#,
     )
     .bind(&invoice.tenant_id)
+    .bind(provider.provider_name())
     .fetch_optional(&state.db)
     .await
-    .map_err(|e| format!("Mollie stored-mandate lookup failed: {e}"))?;
-    let Some((customer_id, mandate_id)) = stored else {
+    .map_err(|e| format!("stored payment credential lookup failed: {e}"))?;
+    let stored = match stored {
+        Some(found) => Some(found),
+        None => sqlx::query_as::<_, (String, String)>(
+            r#"
+            SELECT ms.mollie_customer_id, ms.mollie_mandate_id
+            FROM mollie_subscriptions ms
+            WHERE ms.tenant_id = $1
+              AND ms.mollie_mandate_id IS NOT NULL
+              AND ms.mollie_mandate_id <> ''
+              AND ms.mollie_mandate_id LIKE 'mdt\_%'
+              AND ms.status = 'active'
+            ORDER BY ms.updated_at DESC NULLS LAST, ms.created_at DESC
+            LIMIT 1
+            "#,
+        )
+        .bind(&invoice.tenant_id)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(|e| format!("legacy mandate fallback lookup failed: {e}"))?,
+    };
+    let Some((customer_id, method_id)) = stored else {
         return Ok(None); // no stored payment method, wallet + dunning path
     };
 
@@ -2316,15 +2367,53 @@ async fn create_and_finalize_mollie_usage_invoice(
     // Frozen external operation identity: local invoice + FROZEN amount
     // (audit F34/SM7 F3, a changed remainder can never reuse a previously
     // issued key; currency is the invoice's immutable currency).
+    // NEUTRALITY-DEBT (N-06): the key grammar is frozen operation identity
+    // and must stay byte-stable across the inversion.
     let idempotency_key = format!("usageinv_{}_{}c", invoice.id.simple(), amount_cents);
 
-    let payment = mollie
-        .create_payment(CreatePayment {
-            amount: Money::new(currency, amount_cents),
+    // CLAIM BEFORE CHARGE (audit step 7): the pending attempt row is the
+    // cross-tick lock. A concurrent scheduler tick, or a previous attempt
+    // whose provider response was LOST (timeout after a successful charge),
+    // makes the claim fail and NO second charge is opened; the caller
+    // finalizes as pending and the webhook/repair sweep settles the
+    // in-flight attempt.
+    let claimed = crate::payments::engine::claim_attempt(
+        &state.db,
+        provider.provider_name(),
+        &idempotency_key,
+        &invoice.tenant_id,
+        &reference,
+        "usage_collection",
+        amount_cents,
+        currency,
+    )
+    .await
+    .map_err(|e| format!("payment attempt claim failed: {e}"))?;
+    if !claimed {
+        warn!(
+            invoice_id = %invoice.id,
+            idempotency_key = %idempotency_key,
+            "usage collection: an attempt is already open for this operation, no second charge"
+        );
+        // An in-flight attempt exists (possibly keyless after a timeout).
+        // No second charge is opened — the ledger guarantee — but this is
+        // NOT a collected invoice: the caller gets an error, the outbox
+        // stays retryable, and the wallet path is never reached from here
+        // (the caller only tries the wallet when this fn reports
+        // Ok(None), which an open attempt never is).
+        return Err(format!(
+            "a payment attempt is already open for invoice {}/{} — the webhook or the repair sweep settles it, no second charge",
+            invoice.id, idempotency_key
+        ));
+    }
+
+    let charge = provider
+        .charge_saved_method(SavedMethodCharge {
+            provider_customer_id: customer_id,
+            provider_method_id: method_id,
+            amount_minor: amount_cents,
+            currency: currency.to_string(),
             description: description.to_string(),
-            // API-initiated: no browser return.
-            redirect_url: String::new(),
-            webhook_url: None,
             metadata: serde_json::json!({
                 "invoice_id": invoice.id.to_string(),
                 "reference": reference,
@@ -2332,34 +2421,102 @@ async fn create_and_finalize_mollie_usage_invoice(
                 "period_start": period_start.to_rfc3339(),
                 "usage_kind": usage_kind,
             }),
-            method: None,
-            customer_id: Some(customer_id),
-            mandate_id: Some(mandate_id),
-            sequence_type: Some("recurring".into()),
-            idempotency_key,
+            idempotency_key: idempotency_key.clone(),
         })
-        .await
-        .map_err(|e| format!("Mollie declined the usage collection: {e}"))?;
+        .await;
 
-    if payment.id.trim().is_empty() {
+    let payment = match charge {
+        Ok(payment) => payment,
+        Err(error @ crate::payments::ProviderError::Unavailable(_)) => {
+            // Timeout/transport/5xx: the outcome is UNKNOWN — the provider
+            // may have ACCEPTED the charge. The claim stays OPEN and
+            // keyless, which IS the no-second-charge guarantee: every later
+            // tick finds the open claim and never posts another payment;
+            // the webhook links the payment id by obligation reference and
+            // the repair sweep settles it. The CALLER still gets an ERROR
+            // (the outbox stays retryable, dunning keeps its ladder —
+            // "a failed ladder is not a resume"); in-flight progress is the
+            // sweep's job, never a success mapping here.
+            warn!(
+                invoice_id = %invoice.id,
+                error = %error,
+                "usage collection: the provider outcome is unknown, the attempt stays open; the webhook or the repair sweep will settle it"
+            );
+            return Err(format!(
+                "Mollie usage collection outcome unknown (attempt stays open, no second charge): {error}"
+            ));
+        }
+        Err(error) => {
+            // A refusal is terminal for this attempt: close the claim so
+            // the dunning retry ladder may retry later.
+            let _ = crate::payments::engine::fail_claim(
+                &state.db,
+                provider.provider_name(),
+                &idempotency_key,
+            )
+            .await;
+            return Err(format!("Mollie declined the usage collection: {error}"));
+        }
+    };
+
+    // A 2xx response with NO id is TERMINAL for this attempt: close the
+    // claim KEYLESS (before any confirm writes a terminal state) so the
+    // dunning ladder may retry later. Confirming first would stamp
+    // e.g. state=succeeded with a NULL id — a row neither fail_claim
+    // (pending-only) nor the reopen gate (failed/canceled-only) can act
+    // on, and every later tick would answer with the in-flight mapping
+    // (exactly the "failed ladder is not a resume" contract the tests pin).
+    if payment.provider_payment_id.trim().is_empty() {
+        let _ = crate::payments::engine::fail_claim(
+            &state.db,
+            provider.provider_name(),
+            &idempotency_key,
+        )
+        .await;
         return Err(
             "Mollie payment response carries no id, refusing to bind an unidentifiable charge"
                 .to_string(),
         );
     }
-    match payment.status.as_str() {
-        // Settlement is confirmed by the webhook reconciling the payment id /
-        // the invoice reference; this call only opens the (async) attempt.
-        "paid" | "open" | "pending" | "authorized" => {}
+
+    // CONFIRM AFTER CHARGE: the provider payment id and normalized state
+    // land on the claimed attempt row (the execution ledger).
+    crate::payments::engine::confirm_attempt(
+        &state.db,
+        provider.provider_name(),
+        &idempotency_key,
+        &payment.provider_payment_id,
+        payment.state,
+    )
+    .await
+    .map_err(|e| format!("payment attempt confirm failed: {e}"))?;
+    // Settlement is confirmed by the webhook reconciling the payment id /
+    // the invoice reference; this call only opens the (async) attempt.
+    // The neutral states cover exactly the pre-inversion accepted wire
+    // statuses (open/pending/authorized/paid map to Pending/Processing/
+    // Succeeded); anything else is a refusal.
+    match payment.state {
+        crate::payments::PaymentState::Succeeded
+        | crate::payments::PaymentState::Pending
+        | crate::payments::PaymentState::Processing => {}
         other => {
+            // Terminal refusal: close the claim (same ladder contract as
+            // the empty-id arm above).
+            let _ = crate::payments::engine::fail_claim(
+                &state.db,
+                provider.provider_name(),
+                &idempotency_key,
+            )
+            .await;
             return Err(format!(
-                "Mollie declined the usage collection: status {other}"
-            ))
+                "Mollie declined the usage collection: status {}",
+                crate::payments::engine::state_str(other)
+            ));
         }
     }
 
     Ok(Some(MollieUsageInvoice {
-        payment_id: payment.id,
+        payment_id: payment.provider_payment_id,
         reference,
     }))
 }

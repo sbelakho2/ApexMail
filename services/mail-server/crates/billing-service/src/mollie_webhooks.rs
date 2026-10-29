@@ -1,5 +1,13 @@
 //! The Mollie webhook ingest surface for `POST /webhooks/mollie`.
 //!
+//! NEUTRALITY-DEBT (external audit P0-A, row N-10): this module stays
+//! provider-specific BY DECISION this round. Its `ProviderNotification`
+//! normalizer (facts, not wire formats) is the nucleus the neutral
+//! `crate::payments::ProviderEvent` type was extracted from; steps 5 and 8
+//! promote the normalizer behind the provider boundary and move its
+//! writers onto the neutral event tables. Until then it keeps using
+//! `mollie_client` directly, byte-for-byte.
+//!
 //! The real contract (docs/tool-contracts/mollie.md, mirrored by
 //! `tools/dogfood-v2/harness/mollie.py`):
 //!
@@ -91,6 +99,10 @@ const TAX_AUTHORITY_LOCAL: &str = "apexmail_local";
 /// value (migration 140's CHECK still lists the pre-cutover set; see the
 /// migration-gap note in the module tests).
 const PAYMENT_ALLOCATION_SOURCE: &str = "mollie";
+/// The provider dimension on every allocation this module writes (audit
+/// step 5, migration 281): the source value stays the historical one the
+/// statutory ledger reads, the dimension carries the processor identity.
+const PAYMENT_ALLOCATION_PROVIDER: &str = "mollie";
 
 static DUNNING_CONFIG_TABLE_ENSURED: OnceLock<()> = OnceLock::new();
 
@@ -623,6 +635,46 @@ fn notification_arm(item: &ProviderNotification) -> NotificationArm {
 }
 
 async fn handle_notification(state: &AppState, item: &ProviderNotification) -> Result<(), String> {
+    // Audit step 8: every PAYMENT fact (refund facts carry the refund id in
+    // `provider_payment_id` and are excluded) is ledged through the GENERIC
+    // engine's observation core: the neutral attempts/events tables update,
+    // keyless open claims (a lost charge response) get linked to the
+    // provider payment id by obligation reference, and the SAME core the
+    // repair sweep uses stays warm. Best effort by design: observation
+    // never settles anything and must not fail the webhook arm.
+    if item.original_payment_id.is_none() {
+        if let Some(status) = item
+            .additional
+            .as_ref()
+            .and_then(|data| data.status.as_deref())
+        {
+            if let Ok(payment_state) = crate::payments::mollie_provider::map_payment_status(status)
+            {
+                let observed = crate::payments::engine::ObservedPayment {
+                    provider: "mollie".to_string(),
+                    provider_payment_id: item.provider_payment_id.trim().to_string(),
+                    state: payment_state,
+                    amount_minor: item.amount.as_ref().and_then(|amount| amount.value),
+                    currency: item
+                        .amount
+                        .as_ref()
+                        .and_then(|amount| amount.currency.clone()),
+                    tenant_id: item.metadata_tenant_id().map(str::to_string),
+                    obligation_ref: Some(item.reference.clone()).filter(|r| !r.is_empty()),
+                    purpose: "webhook",
+                };
+                if let Err(error) =
+                    crate::payments::engine::observe_payment(&state.db, &observed).await
+                {
+                    warn!(
+                        provider_payment_id = %item.provider_payment_id,
+                        error = %error,
+                        "engine observation failed; the webhook arm still runs"
+                    );
+                }
+            }
+        }
+    }
     match notification_arm(item) {
         NotificationArm::CheckoutAuthorisation => handle_checkout_authorisation(state, item).await,
         NotificationArm::RecurringAuthorisation => {
@@ -895,18 +947,22 @@ async fn settlement_tenant(
 }
 
 fn currencies_match(left: &str, right: &str) -> bool {
-    left.trim().eq_ignore_ascii_case(right.trim())
+    crate::payments::engine::currencies_match(left, right)
 }
 
 /// The payment amount actually recorded as an allocation: the verified charge,
 /// capped against the authoritative remaining obligation, never negative.
+/// DELEGATES to the generic engine (audit step 8): the webhook and the
+/// repair sweep cap identically.
 fn allocation_cents(charged_cents: i64, outstanding_cents: i64) -> i64 {
-    charged_cents.min(outstanding_cents).max(0)
+    crate::payments::engine::allocation_minor(charged_cents, outstanding_cents)
 }
 
 /// The allocation's unique operation id, the settlement's idempotency key.
+/// DELEGATES to the generic engine's operation id (audit step 8): the
+/// webhook and the repair sweep settle under the SAME identity.
 fn settlement_operation_id(item: &ProviderNotification) -> String {
-    format!("mollie:{}", item.provider_payment_id.trim())
+    crate::payments::engine::operation_id("mollie", &item.provider_payment_id)
 }
 
 /// Convert the old `handle_invoice_paid`: a successful recurring
@@ -1040,10 +1096,11 @@ async fn handle_recurring_authorisation(
         sqlx::query(
             r#"
             INSERT INTO invoice_payment_allocations (
-                id, tenant_id, invoice_id, operation_id, source, amount_cents, currency
+                id, tenant_id, invoice_id, operation_id, source, amount_cents, currency,
+                provider
             )
             VALUES (
-                gen_random_uuid(), $1, $2, $3, $4, $5, $6
+                gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7
             )
             ON CONFLICT (operation_id) DO NOTHING
             "#,
@@ -1054,6 +1111,7 @@ async fn handle_recurring_authorisation(
         .bind(PAYMENT_ALLOCATION_SOURCE)
         .bind(allocation)
         .bind(invoice_currency.trim().to_uppercase())
+        .bind(PAYMENT_ALLOCATION_PROVIDER)
         .execute(&mut *tx)
         .await
         .map_err(|error| format!("Failed to record Mollie payment allocation: {error}"))?;

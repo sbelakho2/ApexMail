@@ -28,6 +28,14 @@ pub mod mollie_webhooks;
 #[cfg(test)]
 mod money_invariants;
 pub mod overage;
+/// The provider-neutral payments domain (external audit, P0-A): the
+/// [`payments::PaymentProvider`] boundary every billing decision speaks to,
+/// the neutral state machines and fact types above it, and the Mollie
+/// adapter plus fail-closed registry below it. Nothing neutral in here
+/// names a provider id grammar; see `src/payments/NEUTRALITY_DEBT.md` for
+/// the couplings deliberately kept this round and the steps that remove
+/// them.
+pub mod payments;
 pub mod plan_billing;
 pub mod plans;
 /// Contract product-line billing: the Platform line (base + per-1K usage

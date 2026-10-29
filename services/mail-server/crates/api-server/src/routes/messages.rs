@@ -2555,6 +2555,19 @@ pub(crate) async fn send_message(
     )
     .await;
 
+    // Onboarding (seventh external audit, P1-D): the CANONICAL admission
+    // point — the transaction committed, the message is durably queued.
+    // This is the one place FirstSendObserved fires, so a tenant that
+    // reaches sending_ready and sends becomes active exactly once: the
+    // event is idempotent by machine design (active + FirstSendObserved is
+    // a legal no-op) and the hook never breaks the send on any error.
+    let _ = crate::routes::onboarding::attempt_onboarding_event(
+        &state.db,
+        &auth.tenant_id,
+        crate::routes::onboarding::OnboardingEvent::FirstSendObserved,
+    )
+    .await;
+
     Ok((StatusCode::ACCEPTED, Json(ApiResponse::success(response))).into_response())
 }
 

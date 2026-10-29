@@ -903,4 +903,28 @@ mod tests {
         let (status, body) = env_a.get("/v1/onboarding/not-a-route").await;
         assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
     }
+    /// P1-D: the LEGAL table must treat FirstSendObserved as idempotent in
+    /// `active` (ten simultaneous first sends produce ONE transition) and
+    /// Block/Unblock as the restriction lifecycle's pair (Block from ANY
+    /// state, Unblock restoring the recorded prior).
+    #[test]
+    fn first_send_is_idempotent_and_block_pair_is_total() {
+        use super::{advance, OnboardingEvent::*, OnboardingState::*, OnboardingError};
+        // Idempotent no-ops: re-observing a send in active stays active.
+        assert_eq!(
+            advance(Active, FirstSendObserved).unwrap(),
+            Active,
+            "the canonical admission point fires per send; only the FIRST transitions"
+        );
+        // Block is total (except already-blocked) and Unblock restores.
+        for state in [Invited, ConfiguringDomain, VerifyingDns, SendingReady, Active] {
+            assert_eq!(advance(state, Block("x".into())).unwrap(), Blocked);
+        }
+        assert!(matches!(
+            advance(Blocked, Block("x".into())),
+            Err(OnboardingError::AlreadyBlocked)
+        ));
+        assert_eq!(advance(Blocked, Unblock).unwrap(), Invited, "default prior");
+    }
+
 }

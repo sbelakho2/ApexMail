@@ -1,7 +1,13 @@
 //! Plan definitions and quota management.
 //!
-//! Canonical plan definitions for free / starter / pro / growth / scale /
-//! enterprise / pay-as-you-go tiers.
+//! Canonical plan definitions and quota management for free / starter /
+//! pro / growth / scale / enterprise / pay-as-you-go tiers.
+//!
+//! NEUTRALITY-DEBT (external audit P0-A, step 3, row N-02): the plan
+//! catalog still carries provider price-code columns
+//! (`mollie_plan_code_monthly`/`_yearly`); step 9 retires them behind the
+//! neutral `provider_catalog_mappings` table (migration 279). The catalog's
+//! PRICES are already neutral (integer cents keyed by interval+currency).
 
 use chrono::Utc;
 use sqlx::PgPool;

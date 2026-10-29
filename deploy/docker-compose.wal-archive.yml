@@ -113,7 +113,8 @@ services:
         exec docker-entrypoint.sh postgres \
           -c archive_mode=on \
           -c archive_command='/usr/local/bin/pg-wal-archive.sh %p %f' \
-          -c archive_timeout=${WAL_ARCHIVE_TIMEOUT_SECS:-300}
+          -c archive_timeout=${WAL_ARCHIVE_TIMEOUT_SECS:-300} \
+          -c max_slot_wal_keep_size=${STANDBY_SLOT_WAL_KEEP_SIZE_MB:-4096}MB
     volumes:
       - ./deploy/hardening/scripts/pg-wal-archive.sh:/usr/local/bin/pg-wal-archive.sh:ro
       # The canonical envelope + the PITR restore tooling: archive_command
@@ -145,6 +146,12 @@ services:
       WAL_ENCRYPTION_KEY_FILE: ${WAL_ENCRYPTION_KEY_FILE:-/run/secrets/backup_encryption_key}
       # Deterministic RPO bound: force a WAL switch at most every N seconds.
       WAL_ARCHIVE_TIMEOUT_SECS: ${WAL_ARCHIVE_TIMEOUT_SECS:-300}
+      # P1-DR-3 (seventh audit): a physical replication slot retains WAL
+      # with no default cap — an abandoned standby can fill the primary
+      # disk. Bounded (default 4 GiB); when the bound trips the slot is
+      # invalidated and the standby re-bootstraps from the PITR archive,
+      # which is the designed recovery path (warm-standby runbook).
+      STANDBY_SLOT_WAL_KEEP_SIZE_MB: ${STANDBY_SLOT_WAL_KEEP_SIZE_MB:-4096}
     secrets:
       # Envelope key for WAL segment encryption (the same secret the backup
       # service uses unless WAL_ENCRYPTION_KEY_FILE names a dedicated one).

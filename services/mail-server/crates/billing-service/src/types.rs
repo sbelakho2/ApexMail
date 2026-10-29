@@ -1,4 +1,11 @@
 //! Core billing domain types.
+//!
+//! NEUTRALITY-DEBT (external audit P0-A, step 3): the provider-named DTO
+//! fields kept this round (`Plan::mollie_plan_code_*`, `Subscription::
+//! mollie_subscription_id`/`mollie_customer_id`, `Invoice::
+//! mollie_payment_id`) are public API consumed outside this crate, so the
+//! inversion renames none of them; rows N-01, N-02 and N-08 in
+//! `src/payments/NEUTRALITY_DEBT.md` name their removing steps.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -27,6 +34,8 @@ pub struct Plan {
     pub api_call_limit: i64,
     /// JSON-encoded feature flags.
     pub features: PlanFeatures,
+    // NEUTRALITY-DEBT (N-02): provider price codes on the public catalog
+    // DTO; step 9 moves them behind provider_catalog_mappings.
     pub mollie_plan_code_monthly: Option<String>,
     pub mollie_plan_code_yearly: Option<String>,
     pub is_active: bool,
@@ -287,6 +296,8 @@ pub struct Subscription {
     pub billing_interval: BillingInterval,
     pub current_period_start: DateTime<Utc>,
     pub current_period_end: DateTime<Utc>,
+    // NEUTRALITY-DEBT (N-01): provider object ids on the public
+    // subscription DTO; step 8 renames them onto the neutral binding.
     pub mollie_subscription_id: Option<String>,
     pub mollie_customer_id: Option<String>,
     pub cancel_at_period_end: bool,
@@ -386,6 +397,8 @@ pub struct InvoiceLineItem {
 pub struct Invoice {
     pub id: Uuid,
     pub tenant_id: String,
+    // NEUTRALITY-DEBT (N-08): the provider payment binding on the public
+    // invoice DTO; step 8 moves it to the neutral payment binding.
     pub mollie_payment_id: Option<String>,
     pub invoice_number: String,
     pub status: InvoiceStatus,

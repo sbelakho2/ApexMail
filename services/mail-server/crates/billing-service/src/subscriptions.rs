@@ -1,13 +1,22 @@
 //! Subscription management – create, get, update plan, cancel.
 //!
-//! Mollie is the payment authority: subscription persistence and plan
-//! activation are driven by verified Mollie webhooks, and direct create/plan
-//! changes remain refused. CANCELLATION is different (external audit 15 Oct,
-//! H1): ApexMail owns the subscription state, so a customer cancelling from
-//! the product is a LOCAL state change, `cancel_at_period_end` stops the next
-//! renewal charge and a period-end sweep downgrades the tenant. The old
-//! refusal pointed customers at an Mollie hosted billing portal that does not
-//! exist, leaving them no way to stop being charged.
+//! NEUTRALITY-DEBT (external audit P0-A): provider decisions here (credential
+//! revocation) go through the neutral
+//! [`crate::payments::PaymentProvider`] boundary resolved by
+//! [`crate::payments::registry::from_env`], and revocation reads/writes the
+//! NEUTRAL `payment_credentials` ledger (N-04 retired, audit step 7). The
+//! remaining couplings are inventoried in `src/payments/NEUTRALITY_DEBT.md`
+//! (rows N-01, N-03).
+//!
+//! The payment provider is the payment authority: subscription persistence
+//! and plan activation are driven by verified provider webhooks, and direct
+//! create/plan changes remain refused. CANCELLATION is different (external
+//! audit 15 Oct, H1): ApexMail owns the subscription state, so a customer
+//! cancelling from the product is a LOCAL state change,
+//! `cancel_at_period_end` stops the next renewal charge and a period-end
+//! sweep downgrades the tenant. The old refusal pointed customers at a
+//! provider hosted billing portal that does not exist, leaving them no way
+//! to stop being charged.
 
 #[cfg(test)]
 use crate::types::UsageSummary;
@@ -40,6 +49,9 @@ pub async fn create_subscription(
 /// `tenants.plan`; the legacy `subscriptions` table stays empty, so reads
 /// must resolve against mollie_subscriptions (period bounds live in
 /// billing_cycle_start/end) and join tenants for the effective plan name.
+///
+/// NEUTRALITY-DEBT (N-03): reads target the legacy provider-named table;
+/// step 8 moves the reader onto the neutral subscription state.
 const GET_SUBSCRIPTION_SQL: &str = r#"
         SELECT
             s.id, s.tenant_id,
@@ -96,11 +108,12 @@ pub async fn update_plan(
 /// on its own). Every renewal path reads this row, so the next charge stops.
 /// Revoke the tenant's Mollie mandate at the provider.
 ///
-/// A local cancellation stops OUR charges, but a valid mandate at Mollie is
-/// still a standing permission to debit the customer. Revoking it is the only
-/// provider-side guarantee, so cancellation calls this and records the
-/// result on `mollie_customers.mandate_revoked_at` (NULL after a canceled
-/// subscription is the retry signal for the maintenance sweep).
+/// A local cancellation stops OUR charges, but a live stored credential at
+/// the provider is still a standing permission to debit the customer.
+/// Revoking it is the only provider-side guarantee, so cancellation calls
+/// this and records the result on the neutral `payment_credentials` row
+/// (`revoked_at` NULL on an active credential after a canceled subscription
+/// is the retry signal for the maintenance sweep; N-04 retired).
 ///
 /// Returns `Ok(false)` when the tenant has no stored mandate or Mollie is not
 /// configured (nothing to revoke). Provider failures are returned so the
@@ -115,55 +128,58 @@ pub async fn revoke_tenant_mandate_at_provider(
     Ok(revoked > 0)
 }
 
-/// Batch form: ONE lookup for every tenant, then one provider DELETE each.
+/// Batch form: ONE lookup for every tenant, then one provider revoke each.
 /// The period-end sweep must not add a per-row SELECT to its set-based path.
+///
+/// N-04 RETIRED (audit step 7): stored credentials are read from and
+/// revocations are stamped back to the NEUTRAL `payment_credentials` table
+/// (the legacy `mollie_customers.mandate_revoked_at` mirror has no readers
+/// left and is no longer written). The provider call goes through the
+/// neutral boundary as before.
 pub async fn revoke_tenant_mandates_at_provider(
     pool: &PgPool,
     tenant_ids: &[String],
 ) -> Result<u64, String> {
-    use crate::mollie_client::MollieClient;
-
     if tenant_ids.is_empty() {
         return Ok(0);
     }
-    let stored: Vec<(String, Option<String>, Option<String>)> = sqlx::query_as(
+    let stored: Vec<(String, String, String)> = sqlx::query_as(
         r#"
-        SELECT DISTINCT ON (s.tenant_id) s.tenant_id, s.mollie_customer_id, s.mollie_mandate_id
-        FROM mollie_subscriptions s
-        WHERE s.tenant_id = ANY($1)
-          AND s.mollie_mandate_id IS NOT NULL
-          AND s.mollie_mandate_id <> ''
-        ORDER BY s.tenant_id, s.created_at DESC
+        SELECT DISTINCT ON (pc.tenant_id)
+               pc.tenant_id, pc.provider_customer_id, pc.provider_method_id
+        FROM payment_credentials pc
+        WHERE pc.tenant_id = ANY($1)
+          AND pc.state = 'active'
+          AND pc.revoked_at IS NULL
+        ORDER BY pc.tenant_id, pc.created_at DESC
         "#,
     )
     .bind(tenant_ids)
     .fetch_all(pool)
     .await
-    .map_err(|error| format!("Failed to load the tenant mandates: {error}"))?;
+    .map_err(|error| format!("Failed to load the tenant payment credentials: {error}"))?;
 
-    let Ok(mollie) = MollieClient::from_env() else {
+    let Ok(provider) = crate::payments::registry::from_env() else {
         return Ok(0);
     };
     let mut revoked = 0u64;
-    for (tenant_id, customer_id, mandate_id) in stored {
-        let (Some(customer_id), Some(mandate_id)) = (customer_id, mandate_id) else {
-            continue;
-        };
-        mollie
-            .revoke_mandate(&customer_id, &mandate_id)
+    for (tenant_id, customer_id, method_id) in stored {
+        provider
+            .revoke_saved_method(&customer_id, &method_id)
             .await
             .map_err(|error| {
                 format!("Mollie mandate revocation for tenant {tenant_id} failed: {error}")
             })?;
         sqlx::query(
-            "UPDATE mollie_customers
-                SET mandate_revoked_at = NOW(), updated_at = NOW()
-              WHERE tenant_id = $1",
+            "UPDATE payment_credentials
+                SET state = 'failed', revoked_at = NOW(), updated_at = NOW()
+              WHERE provider = $1 AND provider_method_id = $2",
         )
-        .bind(&tenant_id)
+        .bind(provider.provider_name())
+        .bind(&method_id)
         .execute(pool)
         .await
-        .map_err(|error| format!("Failed to record the mandate revocation: {error}"))?;
+        .map_err(|error| format!("Failed to record the credential revocation: {error}"))?;
         revoked += 1;
     }
     Ok(revoked)
@@ -292,19 +308,23 @@ pub async fn cancel_subscription(
     subscription_by_id(pool, subscription_id).await
 }
 
-/// Retry mandate revocations for tenants whose subscription ended but whose
-/// mandate is still live at Mollie (`mandate_revoked_at IS NULL`). Idempotent:
-/// the provider call is a DELETE and a successful revoke stamps the row.
+/// Retry credential revocations for tenants whose subscription ended but
+/// whose stored payment credential is still live at the provider
+/// (`payment_credentials.revoked_at IS NULL`). Idempotent: the provider
+/// call is a DELETE and a successful revoke stamps the neutral row.
 pub async fn sweep_pending_mandate_revocations(pool: &PgPool) -> Result<u64, String> {
     let tenants: Vec<String> = sqlx::query_scalar(
         r#"
         SELECT DISTINCT s.tenant_id
         FROM mollie_subscriptions s
-        JOIN mollie_customers c ON c.tenant_id = s.tenant_id
+        JOIN payment_credentials pc
+          ON pc.tenant_id = s.tenant_id
+         AND pc.provider_method_id = s.mollie_mandate_id
+         AND pc.state = 'active'
+         AND pc.revoked_at IS NULL
         WHERE s.status = 'canceled'
           AND s.mollie_mandate_id IS NOT NULL
           AND s.mollie_mandate_id <> ''
-          AND c.mandate_revoked_at IS NULL
         LIMIT 100
         "#,
     )

@@ -1,0 +1,33 @@
+{
+  "_comment": "Schema-derived provider contract fixtures (seventh external audit, P2: provider mocks must be contract-derived, never invented). Shapes transcribed from the Hetzner Cloud API's documented create-server / get-action / get-server responses. The executor's serde models MUST deserialize these byte-for-byte; the stub serves them verbatim. If the provider's schema changes, update THIS file first — the tests follow it.",
+  "create_server_response": {
+    "server": {
+      "id": 4242,
+      "name": "apexmail-dt-example",
+      "status": "initializing",
+      "public_net": {
+        "ipv4": { "ip": "203.0.113.50" },
+        "ipv6": { "ip": "2a01:4f8:c17:2e8c::1" }
+      }
+    },
+    "action": {
+      "id": 777,
+      "command": "create_server",
+      "status": "running"
+    }
+  },
+  "action_running": { "action": { "id": 777, "command": "create_server", "status": "running" } },
+  "action_success": { "action": { "id": 777, "command": "create_server", "status": "success" } },
+  "action_error": { "action": { "id": 777, "command": "create_server", "status": "error" } },
+  "get_server_response": {
+    "server": {
+      "id": 4242,
+      "name": "apexmail-dt-example",
+      "status": "running",
+      "public_net": {
+        "ipv4": { "ip": "203.0.113.50" },
+        "ipv6": { "ip": "2a01:4f8:c17:2e8c::1" }
+      }
+    }
+  }
+}

@@ -1370,13 +1370,18 @@ pub enum InvoiceVoidError {
     Readback(#[from] InvoiceError),
 }
 
-/// Issue the provider refund for a paid invoice through the Mollie API.
+/// Issue the provider refund for a paid invoice through the neutral
+/// payment boundary (external audit P0-A, step 3).
 ///
-/// Mollie refunds are `POST /payments/{payment_id}/refunds` with a decimal
-/// amount, the secret key as a Bearer token and a deterministic
-/// `Idempotency-Key` (one refund per invoice, so a retried void replays the
-/// same request). The refund settles asynchronously: a 2xx means Mollie
-/// accepted it, and the webhook records the final state.
+/// The adapter owns the wire translation (an idempotency-keyed create with
+/// a decimal amount, one refund per invoice, so a retried void replays the
+/// same request). The refund settles asynchronously: a 2xx means the
+/// provider accepted it, and the webhook records the final state.
+///
+/// NEUTRALITY-DEBT (N-08): the error vocabulary below still names Mollie
+/// (`InvoiceVoidError::MollieUnavailable` / `MollieFailed`) and the void
+/// flow reads `invoices.mollie_payment_id`; step 8 renames both onto the
+/// neutral payment binding. The provider CALL is neutral.
 async fn mollie_refund_payment(
     invoice_id: Uuid,
     invoice_status: &str,
@@ -1386,26 +1391,26 @@ async fn mollie_refund_payment(
     reference: &str,
     idempotency_key: &str,
 ) -> Result<Option<String>, InvoiceVoidError> {
-    use crate::mollie_client::{MollieClient, Money};
-
-    let client = MollieClient::from_env().map_err(|_| InvoiceVoidError::MollieUnavailable {
-        invoice_id,
-        mollie_payment_id: payment_id.to_string(),
-        status: invoice_status.to_string(),
-    })?;
-    let refund = client
-        .create_refund(
-            payment_id,
-            Money::new(currency, amount_cents),
-            &format!("Refund {reference}"),
-            idempotency_key,
-        )
+    let provider =
+        crate::payments::registry::from_env().map_err(|_| InvoiceVoidError::MollieUnavailable {
+            invoice_id,
+            mollie_payment_id: payment_id.to_string(),
+            status: invoice_status.to_string(),
+        })?;
+    let refund = provider
+        .refund(crate::payments::RefundRequest {
+            provider_payment_id: payment_id.to_string(),
+            amount_minor: amount_cents,
+            currency: currency.to_string(),
+            description: format!("Refund {reference}"),
+            idempotency_key: idempotency_key.to_string(),
+        })
         .await
         .map_err(|error| InvoiceVoidError::MollieFailed {
             message: format!("Mollie refund request failed: {error}"),
         })?;
     // The refund id is the provider-side handle the webhook will name.
-    Ok(Some(refund.id).filter(|id| !id.is_empty()))
+    Ok(Some(refund.provider_refund_id).filter(|id| !id.is_empty()))
 }
 
 /// The locally-voidable pre-states: `draft` and `pending` (the platform's
@@ -1521,6 +1526,26 @@ pub async fn void_invoice(
             .bind(refund_id)
             .bind(&payment_psp_reference)
             .bind(&input.tenant_id)
+            .bind(total_cents)
+            .bind(currency.to_ascii_uppercase())
+            .execute(pool)
+            .await
+            .map_err(InvoiceVoidError::Db)?;
+            // Audit step 7: the SAME refund fact lands on the neutral
+            // refunds ledger (state pending; the webhook/repair sweep
+            // updates it), idempotent on the provider refund id.
+            sqlx::query(
+                r#"
+                INSERT INTO payment_provider_refunds
+                    (tenant_id, provider, provider_refund_id, provider_payment_id,
+                     state, amount_minor, currency)
+                VALUES ($1, 'mollie', $2, $3, 'pending', $4, $5)
+                ON CONFLICT (provider, provider_refund_id) DO NOTHING
+                "#,
+            )
+            .bind(&input.tenant_id)
+            .bind(refund_id)
+            .bind(&payment_psp_reference)
             .bind(total_cents)
             .bind(currency.to_ascii_uppercase())
             .execute(pool)

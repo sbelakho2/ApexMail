@@ -24,9 +24,11 @@ These scripts are part of the current repeatable developer workflow and are refe
 - `check_hsts_preload.py`: manual HSTS-preload readiness probe (`python3 tools/check_hsts_preload.py <domain>`), run by hand when preparing a preload submission — see `docs/security/hsts-preload.md`; it needs a public HTTPS endpoint, so it is not a CI stage gate.
 - `update-checksums.sh`: refreshes `tools/checksums.sha256` from real local release artifacts instead of hand-editing hashes.
 - `provider-import.py`: the switching importer's CLI (`tools/provider-import.py --provider sendgrid --kind suppressions --file bounces.csv [--commit]`). Uploads a SendGrid/Mailgun/Postmark/Resend export to `POST /v1/import/{provider}/{kind}`, prints the report (counts, conflicts, template conversions, the domains keep/delete plan), and defaults to a dry run; see the endpoint's contract in `services/mail-server/crates/api-server/src/routes/provider_import/mod.rs`.
+- `generate_current_readiness.py`: regenerates `docs/audit/CURRENT_READINESS.md` (the present-state dashboard split from the dated audit history in `docs/audit/history/`) from mechanical sources; `--check` fails on drift and `--self-test` proves a verdict row flips to OPEN when a pinned file disappears.
 
 ## Quality Gates
 
+- `check_payment_neutrality.py`: REQUIRED validate-stage gate (seventh external audit P0-A): production code outside the payments boundary (`billing-service/src/payments/**`, `mollie_client.rs`, `mollie_webhooks.rs` per debt N-10) must not name the payment processor (no `MollieClient`/`MollieProvider`, legacy `mollie_*` SQL, Stripe vocabulary, direct `MOLLIE_API_KEY` reads, or provider id-prefix literals); exceptions are line-pinned inside the tool with their NEUTRALITY-DEBT row and expire. `--self-test` proves every marker flags.
 ### Forbidden Pattern Gate
 
 Run `bash tools/check-forbidden-patterns.sh` before pushing changes that touch Rust runtime code, Docker Compose, or workflow files.

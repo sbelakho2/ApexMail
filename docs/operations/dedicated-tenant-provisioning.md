@@ -26,6 +26,25 @@ bundle renders, so DNS, monitoring and the provider agree on one name.
    (`POST /deployments/:id/transition`). Activation still records the
    billing contract and still requires the validated-bundle artifact.
 
+## Contract status (seventh external audit)
+
+The executor implements the provider's documented create-server contract.
+It sends the required `image` parameter, parses the singular `server` +
+`action` response, and follows the asynchronous action lifecycle: park in
+`provisioning`, poll the action, verify `running` plus a public IPv4
+before `provisioned`. Access is SSH-key-only, so no root password is ever
+generated or persisted. The wire shapes are pinned by committed fixtures
+(`services/mail-server/crates/enterprise/tests/fixtures/hetzner_contract.json`);
+if the provider's schema changes, that file changes first.
+
+Not yet exercised against the live provider. The capacity SKU, image and
+SSH-key names are the operator's explicit configuration
+(`DT_HETZNER_SERVER_TYPE`, `DT_HETZNER_IMAGE`, `DT_HETZNER_SSH_KEYS`):
+there is deliberately no default SKU, and execution refuses until they are
+set. The first live provisioning run is an operator-gated validation step;
+until it passes, treat one-command provisioning as code-complete, not
+operationally proven.
+
 ## Honesty boundary
 
 The route runs a real provider call, and nothing else. The gate is

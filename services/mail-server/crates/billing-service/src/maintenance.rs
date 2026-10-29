@@ -27,6 +27,10 @@ const METERING_TASK_INTERVAL: Duration = Duration::from_secs(60);
 const USAGE_ALERT_TASK_INTERVAL: Duration = Duration::from_secs(5 * 60);
 const COST_MARGIN_TASK_INTERVAL: Duration = Duration::from_secs(15 * 60);
 const MANDATE_REVOCATION_TASK_INTERVAL: Duration = Duration::from_secs(15 * 60);
+/// Audit gate E (step 8): how often open payment attempts are re-fetched
+/// from the provider and driven through the verify-then-settle core, so a
+/// missed webhook can never strand a paid charge.
+const PAYMENT_ATTEMPT_REPAIR_TASK_INTERVAL: Duration = Duration::from_secs(5 * 60);
 const DAILY_TASK_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 const METERING_SCAN_COUNT: usize = 200;
 const METERING_RECOVERY_LIMIT: usize = 10_000;
@@ -260,6 +264,33 @@ pub fn start_periodic_jobs(state: std::sync::Arc<AppState>) {
     // chargeable at Mollie. The cancel path attempts the DELETE immediately;
     // this sweep retries every tenant whose revocation is still outstanding
     // (the `mandate_revoked_at` NULL marker).
+    // Audit gate E (step 8): the generic repair sweep. Every open payment
+    // attempt is re-fetched WITH PROVIDER AUTHENTICATION and driven through
+    // the SAME observe -> verify -> settle core the webhook uses; a missed
+    // webhook settles the obligation on the next pass instead of stranding
+    // a paid charge.
+    let repair_state = state.clone();
+    tokio::spawn(async move {
+        let mut interval = interval_at(
+            Instant::now() + task_interval(PAYMENT_ATTEMPT_REPAIR_TASK_INTERVAL),
+            task_interval(PAYMENT_ATTEMPT_REPAIR_TASK_INTERVAL),
+        );
+        interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        loop {
+            interval.tick().await;
+            match crate::payments::engine::sweep_open_attempts(&repair_state).await {
+                Ok(stats) if stats == crate::payments::engine::AttemptSweepStats::default() => {}
+                Ok(stats) => info!(
+                    examined = stats.examined,
+                    settled = stats.settled,
+                    closed_failed = stats.closed_failed,
+                    "payment attempt repair sweep completed"
+                ),
+                Err(error) => error!(error = %error, "payment attempt repair sweep failed"),
+            }
+        }
+    });
+
     let mandate_state = state.clone();
     tokio::spawn(async move {
         let mut interval = interval_at(
@@ -2642,6 +2673,7 @@ async fn process_scheduled_retries(
             };
 
             let response = mollie_charge_stored_payment_method(
+                &state.db,
                 client,
                 &format!("invoice:{invoice_id}"),
                 &row.tenant_id,
@@ -3575,7 +3607,7 @@ async fn process_pending_dedicated_ip_charges(
             }
         };
 
-        match charge_dedicated_ip(&mut savepoint, client, &row, price_cents).await {
+        match charge_dedicated_ip(&mut savepoint, &state.db, client, &row, price_cents).await {
             Ok(()) => {
                 if let Err(error) = savepoint.commit().await {
                     warn!(ip_id = %row.id, error = %error, "failed to commit dedicated IP savepoint");
@@ -3682,6 +3714,7 @@ async fn process_pending_dedicated_ip_cancels(
 /// subscription id is shared by every add-on of the tenant).
 async fn charge_dedicated_ip(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    db: &sqlx::PgPool,
     client: &Client,
     row: &DedicatedIpPendingRow,
     price_cents: i64,
@@ -3725,6 +3758,7 @@ async fn charge_dedicated_ip(
     };
 
     let response = mollie_charge_stored_payment_method(
+        db,
         client,
         &format!("dedicated_ip:{}", row.id),
         &row.tenant_id,
@@ -5073,8 +5107,23 @@ pub async fn resolve_abuse_report(
 /// `failed`/`canceled`/`expired` status is an `Err`; `paid` and the async
 /// states (`open`, `pending`, `authorized`) are accepted, the webhook
 /// settles the final outcome.
+///
+/// Charge the tenant's stored payment method for one reference (auto-pay
+/// retry, dedicated-IP add-on) through the NEUTRAL payment boundary and the
+/// execution ledger (audit step 7; N-11 RETIRED).
+///
+/// * The provider call goes through `registry::from_env()` +
+///   `charge_saved_method`; no wire client is constructed here.
+/// * CLAIM BEFORE CHARGE: the attempt row is claimed under the frozen
+///   idempotency key BEFORE the provider call. A concurrent tick, or a
+///   previous attempt whose response was LOST (timeout after a successful
+///   charge), refuses the claim and NO second charge is opened.
+/// * CONFIRM AFTER CHARGE: the provider payment id and normalized state
+///   land on the claim; a transport failure leaves the claim open and
+///   keyless for the webhook/repair sweep to link and settle.
 #[allow(clippy::too_many_arguments)]
 async fn mollie_charge_stored_payment_method(
+    db: &sqlx::PgPool,
     _client: &Client,
     reference: &str,
     tenant_id: &str,
@@ -5085,9 +5134,36 @@ async fn mollie_charge_stored_payment_method(
     idempotency_key: &str,
     metadata: serde_json::Value,
 ) -> Result<MollieCharge, String> {
-    use crate::mollie_client::{MollieClient, Money};
+    use crate::payments::SavedMethodCharge;
 
-    let mollie = MollieClient::from_env().map_err(|error| error.to_string())?;
+    let provider = crate::payments::registry::from_env().map_err(|error| error.to_string())?;
+    let provider_name = provider.provider_name();
+
+    // The obligation reference is the caller's (invoice:{id} /
+    // dedicated_ip:{id}); the attempts ledger links provider callbacks to
+    // open claims by it.
+    let claimed = crate::payments::engine::claim_attempt(
+        db,
+        provider_name,
+        idempotency_key,
+        tenant_id,
+        reference,
+        "autopay",
+        amount_cents,
+        currency,
+    )
+    .await
+    .map_err(|error| format!("payment attempt claim failed ({reference}): {error}"))?;
+    if !claimed {
+        // Exactly one attempt per operation per tick: an open claim (maybe
+        // keyless after a lost response) means a charge may already be
+        // moving; refuse rather than double-charge.
+        return Err(format!(
+            "a payment attempt for {reference} is unresolved or already succeeded, \
+             no second charge"
+        ));
+    }
+
     let mut metadata = metadata;
     if let Some(object) = metadata.as_object_mut() {
         object.insert(
@@ -5099,31 +5175,64 @@ async fn mollie_charge_stored_payment_method(
             serde_json::Value::String(tenant_id.to_string()),
         );
     }
-    let link = mollie
-        .create_payment(crate::mollie_client::CreatePayment {
-            amount: Money::new(currency, amount_cents),
+    // A recurring charge is API-initiated: no browser redirect exists.
+    let charge = provider
+        .charge_saved_method(SavedMethodCharge {
+            provider_customer_id: customer_id.to_string(),
+            provider_method_id: mandate_id.to_string(),
+            amount_minor: amount_cents,
+            currency: currency.to_string(),
             description: format!("ApexMail {reference}"),
-            // A recurring charge is API-initiated: there is no browser
-            // redirect to return to.
-            redirect_url: String::new(),
-            webhook_url: None,
             metadata,
-            method: None,
-            customer_id: Some(customer_id.to_string()),
-            mandate_id: Some(mandate_id.to_string()),
-            sequence_type: Some("recurring".into()),
             idempotency_key: idempotency_key.to_string(),
         })
-        .await
-        .map_err(|error| format!("Mollie charge failed ({reference}): {error}"))?;
+        .await;
 
-    match link.status.as_str() {
-        "paid" | "open" | "pending" | "authorized" => Ok(MollieCharge {
-            payment_id: link.id,
+    let link = match charge {
+        Ok(link) => link,
+        Err(error @ crate::payments::ProviderError::Unavailable(_)) => {
+            // Timeout after a (possibly successful) provider charge: the
+            // claim stays open and keyless; the webhook links the payment id
+            // by reference and the repair sweep settles it. Surface the
+            // ambiguity as an error so the caller's retry ladder backs off
+            // instead of treating the charge as opened.
+            return Err(format!(
+                "Mollie charge outcome unknown ({reference}): {error}; the attempt stays open, \
+                 the webhook or repair sweep will settle it"
+            ));
+        }
+        Err(error) => {
+            let _ = crate::payments::engine::fail_claim(db, provider_name, idempotency_key).await;
+            return Err(format!("Mollie charge failed ({reference}): {error}"));
+        }
+    };
+
+    // CONFIRM: the payment id and normalized state land on the claim.
+    crate::payments::engine::confirm_attempt(
+        db,
+        provider_name,
+        idempotency_key,
+        &link.provider_payment_id,
+        link.state,
+    )
+    .await
+    .map_err(|error| format!("payment attempt confirm failed ({reference}): {error}"))?;
+
+    // The accepted outcome states cover exactly the pre-inversion wire
+    // statuses (open/pending/authorized/paid); anything else is a refusal
+    // and the claim is closed failed so a later tick may retry.
+    match link.state {
+        crate::payments::PaymentState::Succeeded
+        | crate::payments::PaymentState::Pending
+        | crate::payments::PaymentState::Processing => Ok(MollieCharge {
+            payment_id: link.provider_payment_id,
         }),
-        other => Err(format!(
-            "Mollie declined the charge ({reference}): status {other}"
-        )),
+        other => {
+            let _ = crate::payments::engine::fail_claim(db, provider_name, idempotency_key).await;
+            Err(format!(
+                "Mollie declined the charge ({reference}): state {other:?}"
+            ))
+        }
     }
 }
 
@@ -5594,6 +5703,10 @@ mod coverage_adversarial {
     struct Mock {
         responses: Arc<std::sync::Mutex<std::collections::HashMap<String, (u16, String)>>>,
         calls: Arc<std::sync::Mutex<Vec<RecordedCall>>>,
+        /// Per-path call counters for the `{seq}` placeholder (see
+        /// mock_handler): sequential posts to one route can return
+        /// DISTINCT payment ids, the way a real provider does.
+        seq: Arc<std::sync::Mutex<std::collections::HashMap<String, u64>>>,
     }
 
     impl Mock {
@@ -5651,6 +5764,13 @@ mod coverage_adversarial {
             .get(&path)
             .cloned()
             .unwrap_or_else(|| (404, "{}".to_string()));
+        let seq = {
+            let mut counters = mock.seq.lock().expect("lock");
+            let counter = counters.entry(path.clone()).or_insert(0);
+            *counter += 1;
+            *counter
+        };
+        let response_body = response_body.replace("{seq}", &seq.to_string());
         mock.calls.lock().expect("lock").push(RecordedCall {
             method,
             path,
@@ -9923,10 +10043,12 @@ mod coverage_adversarial {
                 "no post-commit provider-subscription lookup: {:?}",
                 capture.statements()
             );
+            // The batch mandate lookup reads the NEUTRAL payment_credentials
+            // ledger (billing-neutrality step 7; pc = payment_credentials).
             assert_eq!(
-                capture.count_starting_with("SELECT DISTINCT ON (s.tenant_id)"),
+                capture.count_starting_with("SELECT DISTINCT ON (pc.tenant_id)"),
                 1,
-                "ONE batch mandate lookup: {:?}",
+                "ONE batch credential lookup: {:?}",
                 capture.statements()
             );
             assert_eq!(
@@ -10908,10 +11030,13 @@ mod coverage_adversarial {
         let mock = Mock::default();
         // Dedicated-IP activation: ONE recurring `POST /v2/payments` per
         // add-on against the tenant's stored mandate.
+        // {seq} makes each POST return a DISTINCT payment id (a real provider
+        // never answers two payments with one id, and the attempts ledger's
+        // unique (provider, provider_payment_id) key enforces exactly that).
         mock.route(
             "/v2/payments",
             200,
-            r#"{"id":"tr_w6c_drv","status":"paid"}"#,
+            r#"{"id":"tr_w6c_drv_{seq}","status":"paid"}"#,
         );
         let base = spawn_mock(mock.clone()).await;
 

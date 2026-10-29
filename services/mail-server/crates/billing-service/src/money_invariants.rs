@@ -438,6 +438,26 @@ const MONEY_PATH_FILES: &[(&str, &str)] = &[
     ("src/credit_notes.rs", "src/credit_notes.rs"),
     ("src/subscriptions.rs", "src/subscriptions.rs"),
     (
+        // The neutral payments domain (external audit P0-A) carries money
+        // as integer minor units (amount_minor) on every fact type; it is
+        // money-shape by definition, gated like the modules it feeds.
+        "src/payments/mod.rs",
+        "payments/mod.rs",
+    ),
+    (
+        // The generic payment engine (audit steps 7-8): claim amounts,
+        // verified allocations and capped settlement are money movement,
+        // gated like every path it feeds.
+        "src/payments/engine.rs",
+        "payments/engine.rs",
+    ),
+    (
+        // The conformance harness asserts integer minor-unit money across
+        // the whole provider matrix (refunds, settlements, allocations).
+        "src/payments/conformance.rs",
+        "payments/conformance.rs",
+    ),
+    (
         // The sweep + collection path (wallet debit, Mollie invoice item,
         // overage/PAYG pricing) is money movement, gated.
         "src/overage.rs",

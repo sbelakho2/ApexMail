@@ -52,6 +52,7 @@ validate.asset-budget-self-test
 validate.capability-claims-vs-production-wiring
 validate.customer-dto-boundary
 validate.customer-dto-boundary-self-test
+validate.current-readiness-generated
 validate.deliverability-report-backed-by-its-artifact
 validate.docs-lint-integrity
 validate.docs-lint-ratchet
@@ -88,6 +89,7 @@ validate.pg-wal-archive-self-test
 validate.postgres-backup-retention-self-test
 validate.postgres-restore-drill-self-test
 validate.postgres-wal-base-backup-self-test
+validate.payment-neutrality
 validate.pricing-drift
 validate.processor-legal-facts
 validate.production-env-contract

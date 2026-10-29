@@ -596,6 +596,26 @@ groups:
           description: "The auth service SLI (successes over successes-plus-service-errors) spent 30 minutes above a 0.1 percent failure rate. This is the SLA 2.4 denominator; credential rejection outcomes are excluded by construction."
           runbook_url: "https://apexmail.ee/docs/alerts#api-auth-success-rate-below-sla"
 
+      - alert: PostgresReplicationSlotRetainedWALHigh
+        expr: pg_replication_slots_pg_wal_size{job="postgres"} > 2147483648
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "A replication slot is retaining more than 2 GiB of WAL"
+          description: "pg_replication_slots_pg_wal_size exceeds 2 GiB for 15 minutes. The standby is offline or lagging; retention is bounded by max_slot_wal_keep_size (STANDBY_SLOT_WAL_KEEP_SIZE_MB, default 4 GiB). Investigate the standby or drop the slot before the bound trips and invalidates it."
+          runbook_url: "https://apexmail.ee/docs/alerts#postgres-replication-slot-retained-wal-high"
+
+      - alert: PostgresReplicationSlotInactive
+        expr: pg_replication_slots_active{job="postgres"} == 0 and pg_replication_slots_pg_wal_size{job="postgres"} > 0
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "An inactive replication slot is retaining WAL"
+          description: "A physical slot has been inactive for 30 minutes while retaining WAL. Either the standby is restarting (acceptable briefly) or it is abandoned: re-bootstrap it from the PITR archive or drop the slot deliberately, never let it consume the retention bound."
+          runbook_url: "https://apexmail.ee/docs/alerts#postgres-replication-slot-inactive"
+
       - alert: OutboundThrottleDeferralAgeHigh
         expr: apexmail_outbound_mta_throttle_deferred_age_seconds > 3600
         for: 10m

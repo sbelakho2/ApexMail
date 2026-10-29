@@ -1,8 +1,19 @@
-//! Plan billing against Mollie subscriptions.
+//! Plan billing against provider-owned recurring charge schedules.
+//!
+//! NEUTRALITY-DEBT (external audit P0-A, step 3): this module now makes
+//! every provider DECISION through the neutral
+//! [`crate::payments::PaymentProvider`] boundary resolved by
+//! [`crate::payments::registry::from_env`] (pure inversion of control,
+//! behavior identical this round). The remaining couplings, all inventoried
+//! in `src/payments/NEUTRALITY_DEBT.md` with their removing step, are
+//! persistence-shaped: the legacy `mollie_*` tables and id columns the
+//! writers still target, the provider-tagged allocation vocabulary, and the
+//! idempotency-key grammar that must stay byte-stable across the inversion.
 //!
 //! The product's documented model: a paid, VERIFIED checkout activates the
-//! plan, the provider mints the mandate, and a Mollie SUBSCRIPTION
-//! (`sub_…`) is what grants and renews it. This module owns that lifecycle:
+//! plan, the provider mints the mandate, and a provider recurring SCHEDULE
+//! (Mollie's `sub_…` subscription) is what grants and renews it. This
+//! module owns that lifecycle:
 //!
 //! * [`activate_from_paid_checkout`], a settled checkout payment is mapped
 //!   back to an active catalog plan ONLY when its amount matches the catalog
@@ -31,7 +42,7 @@ use sqlx::Connection as _;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::mollie_client::{CreateSubscription, MollieClient, Money};
+use crate::payments::{ProviderError, RecurringScheduleRequest};
 use crate::routes::append_audit_log;
 
 /// The self-serve plans a generic checkout may sell.
@@ -45,13 +56,12 @@ pub fn interval_months(interval: &str) -> Option<u32> {
     }
 }
 
-/// Mollie subscription interval strings are fixed: `1 month`, `12 months`.
+/// The interval grammar is provider vocabulary and moved to the Mollie
+/// adapter with the inversion; this test-facing alias keeps the existing
+/// interval oracle intact.
+#[cfg(test)]
 fn mollie_interval(months: u32) -> String {
-    if months == 1 {
-        "1 month".to_string()
-    } else {
-        format!("{months} months")
-    }
+    crate::payments::mollie_provider::interval_string(months)
 }
 
 /// The catalog amount for a plan/interval/currency, or `None` when the plan is
@@ -316,12 +326,15 @@ async fn activate_locked(
     // adopted, or any later failure would leave the customer with NO live
     // subscription at all. The upsert below flips these rows to `canceled`.
     type PreviousSubscription = (String, Option<String>, Option<String>, Option<String>);
+    // NEUTRALITY-DEBT (N-07): RETIRED - the SQL id-grammar probe is gone;
+    // "is a provider schedule" is answered by the neutral binding row.
     let previous: Vec<PreviousSubscription> = sqlx::query_as(
-        "SELECT mollie_subscription_id, mollie_customer_id, plan, billing_interval \
-         FROM mollie_subscriptions \
-         WHERE tenant_id = $1 AND left(mollie_subscription_id, 4) = 'sub_' \
-           AND status IN ('active', 'trialing', 'past_due', 'unpaid') \
-         ORDER BY created_at DESC",
+        "SELECT s.mollie_subscription_id, s.mollie_customer_id, s.plan, s.billing_interval \
+         FROM mollie_subscriptions s \
+         JOIN subscription_payment_bindings b ON b.local_subscription_id = s.id \
+         WHERE s.tenant_id = $1 \
+           AND s.status IN ('active', 'trialing', 'past_due', 'unpaid') \
+         ORDER BY s.created_at DESC",
     )
     .bind(tenant_id)
     .fetch_all(&mut *conn)
@@ -349,27 +362,31 @@ async fn activate_locked(
 
     // Provider object first: its id is required by the (NOT NULL, unique)
     // column, and an idempotency key makes a retried webhook replay the same
-    // subscription rather than minting a second one.
-    let mollie = MollieClient::from_env().map_err(|error| error.to_string())?;
-    let subscription = mollie
-        .create_subscription(CreateSubscription {
-            customer_id: customer_id.to_string(),
-            mandate_id: Some(mandate_id.to_string()),
-            amount: Money::new(currency, gross_cents),
-            interval: mollie_interval(months),
+    // schedule rather than minting a second one. The call itself goes
+    // through the neutral boundary; the adapter owns Mollie's vocabulary.
+    // NEUTRALITY-DEBT (N-05, N-06): the idempotency key grammar and the
+    // legacy `mollie_*` columns written below stay byte-stable this round;
+    // steps 6-8 move them onto the neutral ledger.
+    let provider = crate::payments::registry::from_env().map_err(|error| error.to_string())?;
+    let schedule = provider
+        .create_recurring_schedule(RecurringScheduleRequest {
+            provider_customer_id: customer_id.to_string(),
+            provider_method_id: Some(mandate_id.to_string()),
+            amount_minor: gross_cents,
+            currency: currency.to_string(),
+            interval_months: months,
             description: format!("ApexMail {display_name}"),
-            webhook_url: None,
             metadata: serde_json::json!({
                 "tenant_id": tenant_id,
                 "plan_name": plan_name,
                 "interval": interval,
             }),
-            start_date: Some(end.format("%Y-%m-%d").to_string()),
+            first_charge_date: Some(end.format("%Y-%m-%d").to_string()),
             idempotency_key: format!("plan_sub_{tenant_id}_{payment_id}"),
         })
         .await
         .map_err(|error| format!("Mollie subscription creation failed: {error}"))?;
-    let provider_id = subscription.id;
+    let provider_id = schedule.provider_schedule_id;
     if provider_id.trim().is_empty() {
         return Err("Mollie subscription response carries no id".into());
     }
@@ -405,7 +422,7 @@ async fn activate_locked(
             });
         }
 
-        sqlx::query(
+        let (local_subscription_id,) = sqlx::query_as::<_, (Uuid,)>(
             r#"
         INSERT INTO mollie_subscriptions (
             id, tenant_id, mollie_subscription_id, plan, status, billing_interval,
@@ -427,6 +444,7 @@ async fn activate_locked(
             cancel_at_period_end = false,
             canceled_at = NULL,
             updated_at = NOW()
+        RETURNING id
         "#,
         )
         .bind(tenant_id)
@@ -437,9 +455,53 @@ async fn activate_locked(
         .bind(end)
         .bind(customer_id)
         .bind(mandate_id)
-        .execute(&mut *tx)
+        .fetch_one(&mut *tx)
         .await
         .map_err(|error| format!("subscription upsert failed: {error}"))?;
+
+        // Neutral ledger dual-writes (audit steps 6-7): the binding records
+        // WHICH provider schedule executes this local subscription (the SQL
+        // id-grammar probes retire behind it), and the credential registers
+        // the stored payment method the activation captured. Same
+        // transaction: a committed activation always leaves both behind.
+        sqlx::query(
+            r#"
+        INSERT INTO subscription_payment_bindings
+            (tenant_id, provider, local_subscription_id, provider_schedule_id, provider_customer_id)
+        VALUES ($1, $2, $3, $4, $5)
+        ON CONFLICT (provider, provider_schedule_id) DO UPDATE SET
+            local_subscription_id = EXCLUDED.local_subscription_id,
+            provider_customer_id = EXCLUDED.provider_customer_id,
+            updated_at = NOW()
+        "#,
+        )
+        .bind(tenant_id)
+        .bind(provider.provider_name())
+        .bind(local_subscription_id)
+        .bind(&provider_id)
+        .bind(customer_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| format!("subscription binding write failed: {error}"))?;
+        sqlx::query(
+            r#"
+        INSERT INTO payment_credentials
+            (tenant_id, provider, provider_customer_id, provider_method_id, state)
+        VALUES ($1, $2, $3, $4, 'active')
+        ON CONFLICT (provider, provider_method_id) DO UPDATE SET
+            state = 'active',
+            revoked_at = NULL,
+            provider_customer_id = EXCLUDED.provider_customer_id,
+            updated_at = NOW()
+        "#,
+        )
+        .bind(tenant_id)
+        .bind(provider.provider_name())
+        .bind(customer_id)
+        .bind(mandate_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| format!("payment credential write failed: {error}"))?;
 
         sqlx::query("UPDATE tenants SET plan = $2, updated_at = NOW() WHERE id = $1")
             .bind(tenant_id)
@@ -464,12 +526,17 @@ async fn activate_locked(
 
         // The settlement allocation and the statutory ledger, in the same
         // transaction as the invoice (idempotent on the operation id).
+        // NEUTRALITY-DEBT (N-05): the allocation `source` tag and the
+        // `mollie:` operation-id prefix are frozen ledger vocabulary this
+        // round; renaming would fork accounting history mid-stream (step 7
+        // dual-writes the neutral operation identity, step 10 retires the
+        // tag).
         let operation_id = format!("mollie:{payment_id}");
         sqlx::query(
             r#"
         INSERT INTO invoice_payment_allocations (
-            id, tenant_id, invoice_id, operation_id, source, amount_cents, currency
-        ) VALUES (gen_random_uuid(), $1, $2, $3, 'mollie', $4, $5)
+            id, tenant_id, invoice_id, operation_id, source, amount_cents, currency, provider
+        ) VALUES (gen_random_uuid(), $1, $2, $3, 'mollie', $4, $5, 'mollie')
         ON CONFLICT (operation_id) DO NOTHING
         "#,
         )
@@ -581,27 +648,52 @@ async fn refund_unusable_checkout(
     gross_cents: i64,
     currency: &str,
 ) -> Result<(), String> {
-    let mollie = MollieClient::from_env().map_err(|error| error.to_string())?;
-    let refund = mollie
-        .create_refund(
-            payment_id,
-            Money::new(currency, gross_cents),
-            "Plan activation needs a reusable payment method; refunded automatically",
-            &format!("plan_refund_no_mandate_{payment_id}"),
-        )
+    // The refund is a neutral provider operation; the legacy refund mapping
+    // row below stays (NEUTRALITY-DEBT N-05, step 6 moves it to
+    // payment_provider_refunds).
+    let provider = crate::payments::registry::from_env().map_err(|error| error.to_string())?;
+    let refund = provider
+        .refund(crate::payments::RefundRequest {
+            provider_payment_id: payment_id.to_string(),
+            amount_minor: gross_cents,
+            currency: currency.to_string(),
+            description: "Plan activation needs a reusable payment method; refunded automatically"
+                .to_string(),
+            // NEUTRALITY-DEBT (N-06): the key grammar is frozen operation
+            // identity; changing it would mint a second refund on retry.
+            idempotency_key: format!("plan_refund_no_mandate_{payment_id}"),
+        })
         .await
         .map_err(|error| format!("automatic refund failed for {payment_id}: {error}"))?;
     sqlx::query(
         "INSERT INTO mollie_refunds (id, payment_id, amount_cents, currency, status)
          VALUES ($1, $2, $3, $4, 'created') ON CONFLICT (id) DO NOTHING",
     )
-    .bind(&refund.id)
+    .bind(&refund.provider_refund_id)
     .bind(payment_id)
     .bind(gross_cents)
     .bind(currency.trim().to_ascii_uppercase())
     .execute(pool)
     .await
     .map_err(|error| format!("refund mapping failed: {error}"))?;
+    // Audit step 7: the same refund fact on the neutral refunds ledger.
+    sqlx::query(
+        r#"
+        INSERT INTO payment_provider_refunds
+            (provider, provider_refund_id, provider_payment_id, state,
+             amount_minor, currency)
+        VALUES ($1, $2, $3, 'pending', $4, $5)
+        ON CONFLICT (provider, provider_refund_id) DO NOTHING
+        "#,
+    )
+    .bind(provider.provider_name())
+    .bind(&refund.provider_refund_id)
+    .bind(payment_id)
+    .bind(gross_cents)
+    .bind(currency.trim().to_ascii_uppercase())
+    .execute(pool)
+    .await
+    .map_err(|error| format!("neutral refund ledger write failed: {error}"))?;
     sqlx::query(
         "INSERT INTO finance_incidents (kind, severity, status, detail, created_at)
          VALUES ('mollie_plan_payment_without_mandate', 'high', 'open', $1, NOW())",
@@ -763,12 +855,14 @@ async fn renew_locked(
     )
     .await
     .map_err(|error| format!("renewal invoice creation failed: {error}"))?;
+    // NEUTRALITY-DEBT (N-05): same frozen allocation vocabulary as the
+    // activation path (source tag + `mollie:` operation-id prefix).
     let operation_id = format!("mollie:{payment_id}");
     sqlx::query(
         r#"
         INSERT INTO invoice_payment_allocations (
-            id, tenant_id, invoice_id, operation_id, source, amount_cents, currency
-        ) VALUES (gen_random_uuid(), $1, $2, $3, 'mollie', $4, $5)
+            id, tenant_id, invoice_id, operation_id, source, amount_cents, currency, provider
+        ) VALUES (gen_random_uuid(), $1, $2, $3, 'mollie', $4, $5, 'mollie')
         ON CONFLICT (operation_id) DO NOTHING
         "#,
     )
@@ -885,11 +979,16 @@ pub async fn mark_subscription_payment_failed(
     Ok(())
 }
 
-/// Stop Mollie's own charge generation for the tenant and revoke the mandate.
+/// Stop the provider's own charge generation for one schedule.
 ///
-/// Called on activation (a plan change must cancel the previous subscription)
-/// and on cancellation. Idempotent: a missing provider id is a no-op and the
-/// DELETE is provider-idempotent.
+/// Called on activation (a plan change must cancel the previous schedule)
+/// and on cancellation. Idempotent: a non-provider sentinel id is a no-op
+/// (the adapter owns that judgment now) and the provider DELETE treats an
+/// already-forgotten object as success.
+///
+/// NEUTRALITY-DEBT (N-05): the ids arrive from the legacy
+/// `mollie_subscriptions` columns; step 8 renames the suppliers, the
+/// signature is already neutral.
 ///
 /// The ids are CAPTURED before the local state transition (see
 /// `subscriptions::cancel_subscription` and the period-end sweep): a local
@@ -899,20 +998,17 @@ pub async fn cancel_provider_subscription_object(
     customer_id: &str,
     subscription_id: &str,
 ) -> Result<(), String> {
-    if !subscription_id.starts_with("sub_") || customer_id.trim().is_empty() {
-        // A legacy/local sentinel is not a provider object.
-        return Ok(());
-    }
-    let Ok(mollie) = MollieClient::from_env() else {
+    let Ok(provider) = crate::payments::registry::from_env() else {
         return Ok(());
     };
-    match mollie
-        .cancel_subscription(customer_id, subscription_id)
+    match provider
+        .cancel_recurring_schedule(customer_id, subscription_id)
         .await
     {
         Ok(()) => Ok(()),
         // The provider already forgot the object: the desired end state.
-        Err(crate::mollie_client::MollieError::Rejected { status: 404, .. }) => Ok(()),
+        Err(ProviderError::Refused { status: 404, .. }) => Ok(()),
+        Err(ProviderError::NotFound { .. }) => Ok(()),
         Err(error) => Err(format!(
             "canceling Mollie subscription {subscription_id} failed: {error}"
         )),
@@ -921,9 +1017,16 @@ pub async fn cancel_provider_subscription_object(
 
 /// Reconcile local subscription state from the provider.
 ///
-/// Only `active` grants the plan; `canceled`, `completed`, `suspended` and
-/// `pending` resolve the tenant to Free. An amount that no longer matches the
-/// catalog raises a finance incident and never silently changes entitlement.
+/// Only `Active` grants the plan; every other provider state (canceled,
+/// completed, suspended, pending, or anything unmodeled) resolves the
+/// tenant to Free. An amount that no longer matches the catalog raises a
+/// finance incident and never silently changes entitlement.
+///
+/// Local state is AUTHORITATIVE (audit step 6): this reconciler WRITES the
+/// local rows, and entitlement readers never consult the provider.
+/// Provider facts arrive through the neutral boundary (fetch/list of
+/// recurring schedules), and "which local row is provider-executed" is
+/// answered by the neutral binding rows (N-07 retired).
 pub async fn sweep_provider_subscription_state(pool: &PgPool) -> Result<u64, String> {
     type ProviderSubscriptionRow = (
         Uuid,
@@ -934,16 +1037,23 @@ pub async fn sweep_provider_subscription_state(pool: &PgPool) -> Result<u64, Str
         Option<String>,
         Option<String>,
     );
+    // NEUTRALITY-DEBT (N-07): RETIRED - the sweep enumerates provider
+    // schedules through the neutral binding rows, never by id grammar.
     let rows: Vec<ProviderSubscriptionRow> = sqlx::query_as(
-        "SELECT id, tenant_id, plan, billing_interval, mollie_subscription_id, \
-                    mollie_customer_id, status FROM mollie_subscriptions \
-             WHERE left(mollie_subscription_id, 4) = 'sub_' \
-               AND status IN ('active', 'trialing', 'past_due', 'unpaid', 'canceled')",
+        "SELECT s.id, s.tenant_id, s.plan, s.billing_interval, s.mollie_subscription_id, \
+                s.mollie_customer_id, s.status \
+         FROM mollie_subscriptions s \
+         -- LEFT, not INNER: rows written before the neutral ledger (and the
+         -- legacy-shaped seeds) carry no binding; they must still be swept.
+         -- The binding is a payment EXECUTION detail, never the authority
+         -- for whether a stored subscription participates in reconciliation.
+         LEFT JOIN subscription_payment_bindings b ON b.local_subscription_id = s.id \
+         WHERE s.status IN ('active', 'trialing', 'past_due', 'unpaid', 'canceled')",
     )
     .fetch_all(pool)
     .await
     .map_err(|error| format!("subscription sweep load failed: {error}"))?;
-    let Ok(mollie) = MollieClient::from_env() else {
+    let Ok(provider) = crate::payments::registry::from_env() else {
         return Ok(0);
     };
     let mut reconciled = 0u64;
@@ -951,13 +1061,13 @@ pub async fn sweep_provider_subscription_state(pool: &PgPool) -> Result<u64, Str
         let (Some(subscription_id), Some(customer_id)) = (subscription_id, customer_id) else {
             continue;
         };
-        let provider = match mollie
-            .get_subscription(&customer_id, &subscription_id)
+        let schedule = match provider
+            .fetch_recurring_schedule(&customer_id, &subscription_id)
             .await
         {
-            Ok(provider) => provider,
+            Ok(schedule) => schedule,
             // A canceled local row whose provider object is GONE is converged.
-            Err(crate::mollie_client::MollieError::Rejected { status: 404, .. })
+            Err(ProviderError::Refused { status: 404, .. })
                 if local_status.as_deref() == Some("canceled") =>
             {
                 continue;
@@ -971,9 +1081,9 @@ pub async fn sweep_provider_subscription_state(pool: &PgPool) -> Result<u64, Str
         // The local cancel is committed before the provider DELETE (so a
         // provider outage can never leave the customer entitled but
         // uncanceled locally). If that DELETE did not land, the provider
-        // object is still active and charging, retry it here.
+        // schedule is still active and charging, retry it here.
         if local_status.as_deref() == Some("canceled") {
-            if provider.status == "active" {
+            if schedule.state == crate::payments::RecurringScheduleState::Active {
                 match cancel_provider_subscription_object(&customer_id, &subscription_id).await {
                     Ok(()) => reconciled += 1,
                     Err(error) => tracing::warn!(
@@ -985,62 +1095,65 @@ pub async fn sweep_provider_subscription_state(pool: &PgPool) -> Result<u64, Str
             }
             continue;
         }
-        // An ACTIVE provider subscription charging an amount the catalog does
-        // not expect is exactly the subscription that must be checked: the
+        // An ACTIVE provider schedule charging an amount the catalog does
+        // not expect is exactly the schedule that must be checked: the
         // check runs BEFORE the active early-return, is deduplicated per
-        // subscription while it stays open, and leaves entitlement untouched
+        // schedule while it stays open, and leaves entitlement untouched
         // (the customer paid; downgrading silently would punish them for the
-        // provider-side change). The incident names the subscription so the
+        // provider-side change). The incident names the schedule so the
         // operator can cancel and re-create it deliberately.
-        if let (Some(plan), Some(interval), Some(amount)) = (
-            plan.as_deref(),
-            interval.as_deref(),
-            provider.amount.as_ref(),
-        ) {
-            if let Some(expected) = catalog_amount_cents(plan, interval, &amount.currency) {
-                if expected != amount.cents {
-                    raise_billing_incident(
-                        pool,
-                        "mollie_subscription_amount_drift",
-                        "high",
-                        Some(&tenant_id),
-                        Some(&subscription_id),
-                        serde_json::json!({
-                            "tenantId": tenant_id,
-                            "subscriptionId": subscription_id,
-                            "plan": plan,
-                            "interval": interval,
-                            "expectedCents": expected,
-                            "providerCents": amount.cents,
-                            "currency": amount.currency,
-                        }),
-                    )
-                    .await;
+        if let (Some(plan), Some(interval), Some(amount_minor)) =
+            (plan.as_deref(), interval.as_deref(), schedule.amount_minor)
+        {
+            if let Some(currency) = schedule.currency.as_deref() {
+                if let Some(expected) = catalog_amount_cents(plan, interval, currency) {
+                    if expected != amount_minor {
+                        raise_billing_incident(
+                            pool,
+                            "mollie_subscription_amount_drift",
+                            "high",
+                            Some(&tenant_id),
+                            Some(&subscription_id),
+                            serde_json::json!({
+                                "tenantId": tenant_id,
+                                "subscriptionId": subscription_id,
+                                "plan": plan,
+                                "interval": interval,
+                                "expectedCents": expected,
+                                "providerCents": amount_minor,
+                                "currency": currency,
+                            }),
+                        )
+                        .await;
+                    }
                 }
             }
         }
-        if provider.status == "active" {
+        if schedule.state == crate::payments::RecurringScheduleState::Active {
             // The healthy case, and the ONLY place an orphan can hide: a
-            // live provider subscription for this customer that the local
-            // table does not reference (e.g. the losing side of a superseded
-            // activation whose retirement failed). Enumerate the customer's
-            // subscriptions and cancel every active/pending object that is
-            // not the locally active one.
-            match mollie.list_subscriptions(&customer_id).await {
-                Ok(provider_subscriptions) => {
-                    for stray in provider_subscriptions {
-                        if stray.id == subscription_id {
+            // live provider schedule for this customer that the local
+            // table does not reference (e.g. the losing side of a
+            // superseded activation whose retirement failed). Enumerate the
+            // customer's schedules and cancel every active/pending object
+            // that is not the locally active one.
+            match provider.list_recurring_schedules(&customer_id).await {
+                Ok(provider_schedules) => {
+                    for stray in provider_schedules {
+                        if stray.provider_schedule_id == subscription_id {
                             continue;
                         }
-                        if stray.status != "active" && stray.status != "pending" {
+                        if stray.state != crate::payments::RecurringScheduleState::Active
+                            && stray.state != crate::payments::RecurringScheduleState::Pending
+                        {
                             continue;
                         }
-                        match cancel_provider_subscription_object(&customer_id, &stray.id).await {
+                        let stray_id = stray.provider_schedule_id;
+                        match cancel_provider_subscription_object(&customer_id, &stray_id).await {
                             Ok(()) => {
                                 reconciled += 1;
                                 tracing::warn!(
                                     tenant_id = %tenant_id,
-                                    orphan = %stray.id,
+                                    orphan = %stray_id,
                                     "canceled an orphan Mollie subscription that was charging \
                                      outside the local state"
                                 );
@@ -1049,10 +1162,10 @@ pub async fn sweep_provider_subscription_state(pool: &PgPool) -> Result<u64, Str
                                     "mollie_orphan_subscription_canceled",
                                     "high",
                                     Some(&tenant_id),
-                                    Some(&stray.id),
+                                    Some(&stray_id),
                                     serde_json::json!({
                                         "tenantId": tenant_id,
-                                        "orphanSubscriptionId": stray.id,
+                                        "orphanSubscriptionId": stray_id,
                                         "localSubscriptionId": subscription_id,
                                         "customerId": customer_id,
                                     }),
@@ -1062,7 +1175,7 @@ pub async fn sweep_provider_subscription_state(pool: &PgPool) -> Result<u64, Str
                             Err(error) => {
                                 tracing::error!(
                                     tenant_id = %tenant_id,
-                                    orphan = %stray.id,
+                                    orphan = %stray_id,
                                     error = %error,
                                     "orphan Mollie subscription cancellation failed, incident raised"
                                 );
@@ -1071,10 +1184,10 @@ pub async fn sweep_provider_subscription_state(pool: &PgPool) -> Result<u64, Str
                                     "mollie_orphan_subscription_cancel_failed",
                                     "critical",
                                     Some(&tenant_id),
-                                    Some(&stray.id),
+                                    Some(&stray_id),
                                     serde_json::json!({
                                         "tenantId": tenant_id,
-                                        "orphanSubscriptionId": stray.id,
+                                        "orphanSubscriptionId": stray_id,
                                         "localSubscriptionId": subscription_id,
                                         "customerId": customer_id,
                                         "error": error,
@@ -1126,7 +1239,9 @@ pub async fn sweep_provider_subscription_state(pool: &PgPool) -> Result<u64, Str
             "subscription",
             Some(&subscription_id),
             serde_json::json!({
-                "providerStatus": provider.status,
+                // The normalized provider state (serialized camelCase), the
+                // fact the downgrade decision was made on.
+                "providerStatus": schedule.state,
                 "localStatusBefore": local_status,
             }),
             Utc::now(),
@@ -1141,13 +1256,19 @@ pub async fn sweep_provider_subscription_state(pool: &PgPool) -> Result<u64, Str
     Ok(reconciled)
 }
 
-/// `true` when the tenant's subscription is provider-managed (Mollie charges
-/// it). The local dunning retry path must NOT charge these rows: Mollie
-/// retries its own subscription payments.
+/// `true` when the tenant's subscription is provider-managed (the provider
+/// charges it). The local dunning retry path must NOT charge these rows:
+/// the provider retries its own subscription payments.
+///
+/// N-07 RETIRED (audit step 6): provider-managed means "has a neutral
+/// binding row", answered locally; no id-grammar probe remains.
 pub async fn has_provider_subscription(pool: &PgPool, tenant_id: &str) -> Result<bool, String> {
+    // NEUTRALITY-DEBT (N-07): RETIRED - provider-managed means "has a
+    // neutral binding row", answered locally, never by id grammar.
     sqlx::query_scalar::<_, bool>(
-        "SELECT EXISTS(SELECT 1 FROM mollie_subscriptions WHERE tenant_id = $1 \
-           AND left(mollie_subscription_id, 4) = 'sub_')",
+        "SELECT EXISTS(SELECT 1 FROM mollie_subscriptions s \
+           JOIN subscription_payment_bindings b ON b.local_subscription_id = s.id \
+           WHERE s.tenant_id = $1)",
     )
     .bind(tenant_id)
     .fetch_one(pool)

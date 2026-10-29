@@ -3415,11 +3415,18 @@ fn exec_error_response(
 ) -> (StatusCode, Json<serde_json::Value>) {
     use crate::dedicated_exec::ExecError;
     let status = match error {
-        ExecError::NotEnabled => StatusCode::FORBIDDEN,
+        ExecError::NotEnabled | ExecError::ConfigMissing { .. } => StatusCode::FORBIDDEN,
         ExecError::MissingCredential => StatusCode::CONFLICT,
         ExecError::NotFound(_) => StatusCode::NOT_FOUND,
         ExecError::InvalidState { .. } | ExecError::TransitionRefused { .. } => StatusCode::CONFLICT,
-        ExecError::Provider { .. }
+        // Async lifecycle outcomes (seventh audit, P0-DT-4): a timeout is
+        // ACCEPTED-BUT-UNFINISHED work the operator resumes (409, not 502);
+        // an action failure or a non-operational server is the provider
+        // refusing the work (502).
+        ExecError::ActionTimeout { .. } => StatusCode::CONFLICT,
+        ExecError::ActionFailed { .. }
+        | ExecError::ServerNotOperational { .. }
+        | ExecError::Provider { .. }
         | ExecError::Transport(_)
         | ExecError::ProviderResponse(_) => StatusCode::BAD_GATEWAY,
         ExecError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,

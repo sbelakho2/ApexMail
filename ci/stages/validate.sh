@@ -389,6 +389,23 @@ validate_repo_gates() {
         # (migrations 001-268, dated audits, trained tokenizer vocabularies).
         ci_check "legacy processor" python3 tools/check_legacy_processor.py
         ci_check "legacy processor self-test" python3 tools/check_legacy_processor.py --self-test
+        # Payment neutrality (seventh external audit P0-A, step 10):
+        # production code outside the payments boundary
+        # (billing-service/src/payments/**, mollie_client.rs,
+        # mollie_webhooks.rs per debt N-10) must not name the processor —
+        # no MollieClient/MollieProvider, no adapter construction, no
+        # legacy mollie_* SQL, no Stripe vocabulary, no direct
+        # MOLLIE_API_KEY reads, no provider id-prefix literals. REQUIRED
+        # and fail-closed; exceptions are line-pinned (with their
+        # NEUTRALITY-DEBT row) inside the tool and expire.
+        _pn_st=$(lane_tool_status python3 payment-neutrality required)
+        case $_pn_st in
+            fail) return "$CI_EXIT_FAIL" ;;
+        esac
+        ci_check "payment neutrality" python3 tools/check_payment_neutrality.py \
+            || return "$CI_EXIT_FAIL"
+        ci_check "payment neutrality self-test" \
+            python3 tools/check_payment_neutrality.py --self-test
         ci_check "ARK design law" python3 tools/check_ark_law.py
         ci_check "ARK authority mirror" python3 tools/check_ark_mirror.py
         ci_check "tool selftest inventory" \
@@ -528,6 +545,15 @@ validate_repo_gates() {
         # migration tail, UI route baseline). Regenerate to a temp file and
         # fail when the committed map lags the tree.
         ci_check "repo-map up to date" python3 tools/generate_repo_map.py --check
+        # Current-readiness drift guard (seventh external audit item 9 + P2:
+        # the audit ledger had drifted into a chronology). The dated records
+        # live under docs/audit/history/ (point-in-time, never edited after
+        # the fact) and the present state is GENERATED into
+        # docs/audit/CURRENT_READINESS.md from mechanical sources (required
+        # lanes, invariant registry, test-scope counts, nine pinned verdict
+        # rules). Regenerate to a temp file and fail when the committed
+        # dashboard lags the tree; the stamp line is exempt (clock only).
+        ci_check "current readiness generated" python3 tools/generate_current_readiness.py --check
         # Generated-binary guard: coverage artifacts and retired training
         # outputs were accidentally committed once (~290 MiB of .profraw).
         # `.gitignore` prevents new ones; this proves nothing slipped back.

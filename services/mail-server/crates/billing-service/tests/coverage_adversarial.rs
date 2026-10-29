@@ -7248,3 +7248,790 @@ db_test!(
             .ok();
     }
 );
+
+// ---------------------------------------------------------------------------
+// Migration 279: payment provider neutrality - the staged neutral ledger
+// ---------------------------------------------------------------------------
+//
+// The migration is additive-only and idempotent by construction, so the
+// canonical fresh chain (the template already includes 279) can be REPLAYED
+// against newly seeded legacy rows to exercise the backfill exactly as a
+// migration-time run saw the production rows: fresh-chain shape, the
+// uniqueness gate, backfill counts vs seeded legacy rows, provider tagging
+// ('mollie' for Mollie-grammar ids, 'adyen' for legacy ones), replay
+// idempotency, and legacy tables untouched.
+
+const MIGRATION_279: &str = "../../migrations/279_payment_provider_neutrality.sql";
+
+async fn replay_migration_279(h: &Harness) {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(MIGRATION_279);
+    let sql = std::fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("read migration 279: {error}"));
+    sqlx::raw_sql(sql.as_str())
+        .execute(&h.pool)
+        .await
+        .expect("migration 279 replay (guarded, idempotent)");
+}
+
+db_test!(
+    migration_279_builds_the_neutral_ledger_and_backfills_seeded_legacy_rows,
+    |h| {
+        // 1. Fresh chain: every neutral table exists with the staged shape.
+        for table in [
+            "payment_provider_customers",
+            "payment_credentials",
+            "payment_attempts",
+            "payment_provider_events",
+            "payment_provider_refunds",
+            "payment_disputes",
+            "payment_tax_evidence",
+            "subscription_payment_bindings",
+            "provider_catalog_mappings",
+        ] {
+            let present: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM information_schema.tables \
+                 WHERE table_schema = 'public' AND table_name = $1",
+            )
+            .bind(table)
+            .fetch_one(&h.pool)
+            .await
+            .unwrap_or_else(|error| panic!("table probe {table}: {error}"));
+            assert_eq!(present, 1, "{table} must exist after migration 279");
+        }
+
+        // 2. The neutrality gate: one provider customer object can never be
+        //    claimed by a second row (UNIQUE(provider, provider_customer_id)).
+        sqlx::query(
+            "INSERT INTO payment_provider_customers (tenant_id, provider, provider_customer_id) \
+             VALUES ('cov_neutral_t1', 'mollie', 'cst_cov_dup')",
+        )
+        .execute(&h.pool)
+        .await
+        .expect("seed neutral customer");
+        let duplicate_claim = sqlx::query(
+            "INSERT INTO payment_provider_customers (tenant_id, provider, provider_customer_id) \
+             VALUES ('cov_neutral_t2', 'mollie', 'cst_cov_dup')",
+        )
+        .execute(&h.pool)
+        .await;
+        assert!(
+            duplicate_claim.is_err(),
+            "the second claim of one provider customer object must be rejected"
+        );
+
+        // 3. Seed legacy rows the way the Mollie era wrote them, plus
+        //    pre-Mollie (Adyen-era) rows that must tag 'adyen'.
+        let tenant = "cov_neutral_279";
+        let legacy_tenant = "cov_neutral_279b";
+        seed_tenant(&h, tenant, "starter").await;
+        seed_tenant(&h, legacy_tenant, "free").await;
+        sqlx::query(
+            "INSERT INTO mollie_customers (tenant_id, mollie_customer_id) \
+             VALUES ($1, 'cst_cov_279'), ($2, 'legacy_cov_279_ref')",
+        )
+        .bind(tenant)
+        .bind(legacy_tenant)
+        .execute(&h.pool)
+        .await
+        .expect("seed legacy customers");
+        sqlx::query(
+            "INSERT INTO mollie_subscriptions \
+                 (tenant_id, mollie_subscription_id, plan, status, billing_cycle_start, \
+                  billing_cycle_end, mollie_customer_id, mollie_mandate_id) \
+             VALUES ($1, 'sub_cov_279', 'starter', 'active', NOW(), NOW() + INTERVAL '30 days', \
+                     'cst_cov_279', 'mdt_cov_279')",
+        )
+        .bind(tenant)
+        .execute(&h.pool)
+        .await
+        .expect("seed legacy subscription");
+        sqlx::query(
+            "INSERT INTO mollie_refunds (id, payment_id, tenant_id, amount_cents, currency, status) \
+             VALUES ('re_cov_279', 'tr_cov_279', $1, 500, 'EUR', 'refunded'), \
+                    ('legacy_refund_279', 'tr_cov_old', $1, 100, 'EUR', 'created')",
+        )
+        .bind(tenant)
+        .execute(&h.pool)
+        .await
+        .expect("seed legacy refunds");
+        sqlx::query(
+            "INSERT INTO mollie_webhook_events (mollie_event_id, event_type, mollie_payment_id, status) \
+             VALUES ('tr_cov_279:paid:1', 'payment.paid', 'tr_cov_279', 'processed')",
+        )
+        .execute(&h.pool)
+        .await
+        .expect("seed legacy webhook event");
+        // A dedicated plan row (never depending on template-seeded catalog
+        // rows) carrying a provider price code, the way operators set one.
+        sqlx::query(
+            "INSERT INTO plans (id, name, display_name, price_cents, email_limit, \
+                                  api_call_limit, mollie_plan_code_monthly, is_active) \
+             VALUES ('plan_cov_279', 'cov279plan', 'cov279plan', 4900, 100000, 100000, \
+                     'cov_code_monthly', true) \
+             ON CONFLICT (name) DO UPDATE \
+                 SET mollie_plan_code_monthly = EXCLUDED.mollie_plan_code_monthly",
+        )
+        .execute(&h.pool)
+        .await
+        .expect("seed a plan price code");
+
+        // 4. Replay the guarded migration: the backfills pick up the seeds.
+        replay_migration_279(&h).await;
+
+        // 5. Provider tagging: Mollie grammar -> 'mollie', legacy -> 'adyen'.
+        let (customers_mollie, customers_adyen): (i64, i64) = sqlx::query_as(
+            "SELECT COUNT(*) FILTER (WHERE provider = 'mollie'), \
+                    COUNT(*) FILTER (WHERE provider = 'adyen') \
+             FROM payment_provider_customers \
+             WHERE provider_customer_id IN ('cst_cov_279', 'legacy_cov_279_ref')",
+        )
+        .fetch_one(&h.pool)
+        .await
+        .expect("customer backfill tags");
+        assert_eq!(
+            (customers_mollie, customers_adyen),
+            (1, 1),
+            "one Mollie customer and one legacy (adyen-tagged) customer backfilled"
+        );
+
+        // 6. The mandate became a neutral credential; the live schedule
+        //    became a binding; refunds and events carried their states.
+        let credentials: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM payment_credentials WHERE provider_method_id = 'mdt_cov_279'",
+        )
+        .fetch_one(&h.pool)
+        .await
+        .expect("credential backfill count");
+        assert_eq!(
+            credentials, 1,
+            "the stored mandate backfills one credential"
+        );
+
+        let bindings: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM subscription_payment_bindings \
+             WHERE provider_schedule_id = 'sub_cov_279' AND provider = 'mollie'",
+        )
+        .fetch_one(&h.pool)
+        .await
+        .expect("binding backfill count");
+        assert_eq!(
+            bindings, 1,
+            "the live provider schedule backfills one binding"
+        );
+
+        let (refunds_mollie_succeeded, refunds_adyen_pending): (i64, i64) = sqlx::query_as(
+            "SELECT COUNT(*) FILTER (WHERE provider = 'mollie' AND state = 'succeeded'), \
+                    COUNT(*) FILTER (WHERE provider = 'adyen' AND state = 'pending') \
+             FROM payment_provider_refunds \
+             WHERE provider_refund_id IN ('re_cov_279', 'legacy_refund_279')",
+        )
+        .fetch_one(&h.pool)
+        .await
+        .expect("refund backfill tags");
+        assert_eq!(
+            (refunds_mollie_succeeded, refunds_adyen_pending),
+            (1, 1),
+            "refunded -> mollie/succeeded, created -> adyen/pending"
+        );
+
+        let events: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM payment_provider_events \
+             WHERE provider_event_id = 'tr_cov_279:paid:1' AND provider = 'mollie' \
+               AND provider_payment_id = 'tr_cov_279'",
+        )
+        .fetch_one(&h.pool)
+        .await
+        .expect("event backfill count");
+        assert_eq!(events, 1, "the webhook ledger backfills one neutral event");
+
+        let catalog: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM provider_catalog_mappings \
+             WHERE catalog_key = 'cov279plan' AND billing_interval = 'monthly' \
+               AND provider = 'mollie' AND provider_price_code = 'cov_code_monthly'",
+        )
+        .fetch_one(&h.pool)
+        .await
+        .expect("catalog mapping backfill count");
+        assert_eq!(catalog, 1, "the plan price code backfills one mapping");
+
+        // 7. Idempotent replay: a second run changes nothing.
+        replay_migration_279(&h).await;
+        let (customers_mollie_again, refunds_again, events_again, bindings_again): (
+            i64,
+            i64,
+            i64,
+            i64,
+        ) = sqlx::query_as(
+            "SELECT \
+                (SELECT COUNT(*) FROM payment_provider_customers \
+                  WHERE provider_customer_id IN ('cst_cov_279', 'legacy_cov_279_ref')), \
+                (SELECT COUNT(*) FROM payment_provider_refunds \
+                  WHERE provider_refund_id IN ('re_cov_279', 'legacy_refund_279')), \
+                (SELECT COUNT(*) FROM payment_provider_events \
+                  WHERE provider_event_id = 'tr_cov_279:paid:1'), \
+                (SELECT COUNT(*) FROM subscription_payment_bindings \
+                  WHERE provider_schedule_id = 'sub_cov_279')",
+        )
+        .fetch_one(&h.pool)
+        .await
+        .expect("idempotent replay counts");
+        assert_eq!(
+            (
+                customers_mollie_again,
+                refunds_again,
+                events_again,
+                bindings_again
+            ),
+            (2, 2, 1, 1),
+            "replaying the guarded backfills must not duplicate any row"
+        );
+
+        // 8. The legacy tables are untouched by the migration (read-only).
+        let (legacy_customers, legacy_refunds, legacy_events): (i64, i64, i64) = sqlx::query_as(
+            "SELECT \
+                (SELECT COUNT(*) FROM mollie_customers \
+                  WHERE mollie_customer_id IN ('cst_cov_279', 'legacy_cov_279_ref')), \
+                (SELECT COUNT(*) FROM mollie_refunds \
+                  WHERE id IN ('re_cov_279', 'legacy_refund_279')), \
+                (SELECT COUNT(*) FROM mollie_webhook_events \
+                  WHERE mollie_event_id = 'tr_cov_279:paid:1')",
+        )
+        .fetch_one(&h.pool)
+        .await
+        .expect("legacy table counts after the backfill");
+        assert_eq!(
+            (legacy_customers, legacy_refunds, legacy_events),
+            (2, 2, 1),
+            "the backfill reads the legacy tables and never rewrites them"
+        );
+    }
+);
+
+// ---------------------------------------------------------------------------
+// Migration 281 + payments::engine: the execution ledger and its
+// exactly-once gates (audit steps 5-8)
+// ---------------------------------------------------------------------------
+
+const MIGRATION_281: &str = "../../migrations/281_payment_execution_ledger.sql";
+
+async fn replay_migration_281(h: &Harness) {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(MIGRATION_281);
+    let sql = std::fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("read migration 281: {error}"));
+    sqlx::raw_sql(sql.as_str())
+        .execute(&h.pool)
+        .await
+        .expect("migration 281 replay (guarded, idempotent)");
+}
+
+db_test!(
+    migration_281_execution_ledger_and_engine_exactly_once_gates,
+    |h| {
+        use billing_service::payments::engine::{
+            claim_attempt, confirm_attempt, fail_claim, has_open_attempt, observe_payment,
+            settle_verified, verify_against_obligation, ObservedPayment,
+        };
+        use billing_service::payments::PaymentState;
+
+        // 1. Schema: the attempts ledger can hold a KEYLESS claim (a charge
+        //    whose provider response was lost), the operation key is unique,
+        //    and the obligation reference exists.
+        let nullable: String = sqlx::query_scalar(
+            "SELECT is_nullable::text FROM information_schema.columns \
+             WHERE table_schema = 'public' AND table_name = 'payment_attempts' \
+               AND column_name = 'provider_payment_id'",
+        )
+        .fetch_one(&h.pool)
+        .await
+        .expect("attempts nullability probe");
+        assert_eq!(
+            nullable, "YES",
+            "claims are written before the provider call"
+        );
+        let ledger_columns: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM information_schema.columns \
+             WHERE table_schema = 'public' AND table_name = 'payment_attempts' \
+               AND column_name IN ('idempotency_key', 'obligation_ref')",
+        )
+        .fetch_one(&h.pool)
+        .await
+        .expect("attempts column probe");
+        assert_eq!(
+            ledger_columns, 2,
+            "idempotency_key and obligation_ref exist"
+        );
+        let idem_index: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM pg_indexes
+             WHERE indexname = 'idx_payment_attempts_idem'
+               AND indexdef LIKE '%UNIQUE%'",
+        )
+        .fetch_one(&h.pool)
+        .await
+        .expect("index probe");
+        assert_eq!(idem_index, 1, "the claim gate's unique index exists");
+
+        // 2. The accounting allowlists accept the GENERIC processor roles
+        //    and every historical value survived.
+        let chart_check: String = sqlx::query_scalar(
+            "SELECT pg_get_constraintdef(oid) FROM pg_constraint \
+             WHERE conname = 'chart_of_accounts_account_role_check'",
+        )
+        .fetch_one(&h.pool)
+        .await
+        .expect("chart allowlist");
+        for role in [
+            "processor_clearing",
+            "processor_fees",
+            "mollie_clearing",
+            "stripe_fees",
+        ] {
+            assert!(chart_check.contains(role), "chart allowlist keeps {role}");
+        }
+        let source_check: String = sqlx::query_scalar(
+            "SELECT pg_get_constraintdef(oid) FROM pg_constraint \
+             WHERE conname = 'invoice_payment_allocations_source_check'",
+        )
+        .fetch_one(&h.pool)
+        .await
+        .expect("allocation source allowlist");
+        assert!(source_check.contains("processor"), "{source_check}");
+        let doc_check: String = sqlx::query_scalar(
+            "SELECT pg_get_constraintdef(oid) FROM pg_constraint \
+             WHERE conname = 'accounting_source_documents_source_type_check'",
+        )
+        .fetch_one(&h.pool)
+        .await
+        .expect("source document allowlist");
+        assert!(doc_check.contains("processor_settlement"), "{doc_check}");
+
+        // 3. The engine gates on a real obligation.
+        let tenant = "cov_281_engine";
+        seed_tenant(&h, tenant, "growth").await;
+        let invoice_id = uuid::Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO invoices (id, tenant_id, amount, currency, status, invoice_number, \
+                                   subtotal, vat_total, total, issued_at, due_at, \
+                                   period_start, period_end, created_at, updated_at) \
+             VALUES ($1, $2, 1130, 'EUR', 'pending', 'IVCOV281-' || gen_random_uuid()::text, \
+                     1000, 130, 1130, NOW(), NOW(), NOW(), NOW(), NOW(), NOW())",
+        )
+        .bind(invoice_id)
+        .bind(tenant)
+        .execute(&h.pool)
+        .await
+        .expect("seed invoice");
+
+        // CLAIM: the first tick owns the operation, the second is refused.
+        let key = format!("usageinv_{}_1130c", invoice_id.simple());
+        let obligation = format!("invoice:{invoice_id}");
+        assert!(
+            claim_attempt(
+                &h.pool,
+                "mollie",
+                &key,
+                tenant,
+                &obligation,
+                "usage_collection",
+                1130,
+                "EUR"
+            )
+            .await
+            .expect("first claim"),
+            "the first claim wins"
+        );
+        assert!(
+            !claim_attempt(
+                &h.pool,
+                "mollie",
+                &key,
+                tenant,
+                &obligation,
+                "usage_collection",
+                1130,
+                "EUR"
+            )
+            .await
+            .expect("second claim"),
+            "a concurrent tick is refused: one payment attempt per operation"
+        );
+        assert!(
+            has_open_attempt(&h.pool, "mollie", &key)
+                .await
+                .expect("open probe"),
+            "the keyless claim is open (the provider response was lost)"
+        );
+
+        // OBSERVE: the provider's own callback names the charge our lost
+        // response hid; the claim links and the state lands.
+        let observed = ObservedPayment {
+            provider: "mollie".to_string(),
+            provider_payment_id: "tr_cov_281_paid".to_string(),
+            state: PaymentState::Succeeded,
+            amount_minor: Some(1130),
+            currency: Some("EUR".to_string()),
+            tenant_id: Some(tenant.to_string()),
+            obligation_ref: Some(obligation.clone()),
+            purpose: "webhook",
+        };
+        observe_payment(&h.pool, &observed)
+            .await
+            .expect("observation");
+        let (linked_state, linked_id): (String, Option<String>) = sqlx::query_as(
+            "SELECT state, provider_payment_id FROM payment_attempts \
+             WHERE provider = 'mollie' AND idempotency_key = $1",
+        )
+        .bind(&key)
+        .fetch_one(&h.pool)
+        .await
+        .expect("linked claim");
+        assert_eq!(linked_id.as_deref(), Some("tr_cov_281_paid"));
+        assert_eq!(linked_state, "succeeded");
+
+        // VERIFY + SETTLE exactly once: two settles, one allocation, and
+        // the invoice flips paid with its obligation fully covered.
+        let verified = verify_against_obligation(&h.pool, &observed)
+            .await
+            .expect("verification");
+        assert_eq!(verified.invoice_id, invoice_id);
+        assert_eq!(verified.allocation_minor, 1130);
+        assert_eq!(verified.operation_id, "mollie:tr_cov_281_paid");
+        assert!(
+            settle_verified(&h.pool, "mollie", &verified)
+                .await
+                .expect("settle once"),
+            "the first settle performs the allocation"
+        );
+        assert!(
+            !settle_verified(&h.pool, "mollie", &verified)
+                .await
+                .expect("settle replay"),
+            "the replay settles nothing (idempotent on the operation id)"
+        );
+        let allocations: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM invoice_payment_allocations WHERE invoice_id = $1",
+        )
+        .bind(invoice_id)
+        .fetch_one(&h.pool)
+        .await
+        .expect("allocation count");
+        assert_eq!(allocations, 1, "exactly one allocation for one obligation");
+        let (status, provider_dim): (String, Option<String>) = sqlx::query_as(
+            "SELECT i.status::text, a.provider FROM invoices i \
+             JOIN invoice_payment_allocations a ON a.invoice_id = i.id WHERE i.id = $1",
+        )
+        .bind(invoice_id)
+        .fetch_one(&h.pool)
+        .await
+        .expect("invoice + allocation");
+        assert_eq!(status, "paid", "the fully covered obligation flips paid");
+        assert_eq!(
+            provider_dim.as_deref(),
+            Some("mollie"),
+            "the allocation carries the provider dimension"
+        );
+
+        // 4. Verification refuses what must never settle.
+        let cross_tenant = ObservedPayment {
+            provider: "mollie".to_string(),
+            provider_payment_id: "tr_cov_281_cross".to_string(),
+            state: PaymentState::Succeeded,
+            amount_minor: Some(1130),
+            currency: Some("EUR".to_string()),
+            tenant_id: Some("somebody-else".to_string()),
+            obligation_ref: Some(obligation.clone()),
+            purpose: "webhook",
+        };
+        match verify_against_obligation(&h.pool, &cross_tenant).await {
+            Err(billing_service::payments::engine::VerifyError::CrossTenant { .. }) => {}
+            other => panic!("cross-tenant facts must be refused, got {other:?}"),
+        }
+        let wrong_currency = ObservedPayment {
+            provider: "mollie".to_string(),
+            provider_payment_id: "tr_cov_281_usd".to_string(),
+            state: PaymentState::Succeeded,
+            amount_minor: Some(1130),
+            currency: Some("USD".to_string()),
+            tenant_id: Some(tenant.to_string()),
+            obligation_ref: Some(obligation.clone()),
+            purpose: "webhook",
+        };
+        match verify_against_obligation(&h.pool, &wrong_currency).await {
+            Err(billing_service::payments::engine::VerifyError::CurrencyMismatch { .. }) => {}
+            other => panic!("currency mismatches must be refused, got {other:?}"),
+        }
+
+        // 5. A failed claim may be retried; an open one may not.
+        let retry_key = format!("autopay_{}", invoice_id.simple());
+        assert!(claim_attempt(
+            &h.pool,
+            "mollie",
+            &retry_key,
+            tenant,
+            &obligation,
+            "autopay",
+            500,
+            "EUR"
+        )
+        .await
+        .expect("autopay claim"));
+        fail_claim(&h.pool, "mollie", &retry_key)
+            .await
+            .expect("fail claim");
+        assert!(
+            !has_open_attempt(&h.pool, "mollie", &retry_key)
+                .await
+                .expect("closed probe"),
+            "a failed claim is closed"
+        );
+        assert!(
+            claim_attempt(
+                &h.pool,
+                "mollie",
+                &retry_key,
+                tenant,
+                &obligation,
+                "autopay",
+                500,
+                "EUR"
+            )
+            .await
+            .expect("retry claim"),
+            "the retry ladder may re-open a FAILED claim"
+        );
+        confirm_attempt(
+            &h.pool,
+            "mollie",
+            &retry_key,
+            "tr_cov_281_autopay",
+            PaymentState::Pending,
+        )
+        .await
+        .expect("confirm");
+        assert!(
+            !claim_attempt(
+                &h.pool,
+                "mollie",
+                &retry_key,
+                tenant,
+                &obligation,
+                "autopay",
+                500,
+                "EUR"
+            )
+            .await
+            .expect("in-flight claim"),
+            "an in-flight attempt refuses a second charge"
+        );
+
+        // 6. The migration's dimension backfill stamps legacy rows and the
+        //    replay changes nothing.
+        replay_migration_281(&h).await;
+        let stale_dims: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM invoice_payment_allocations \
+             WHERE source IN ('mollie', 'stripe') AND provider IS NULL",
+        )
+        .fetch_one(&h.pool)
+        .await
+        .expect("dimension audit");
+        assert_eq!(
+            stale_dims, 0,
+            "every processor allocation carries its provider"
+        );
+        let allocations_after: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM invoice_payment_allocations WHERE invoice_id = $1",
+        )
+        .bind(invoice_id)
+        .fetch_one(&h.pool)
+        .await
+        .expect("allocation count after replay");
+        assert_eq!(
+            allocations_after, allocations,
+            "the replay settles and allocates nothing"
+        );
+    }
+);
+
+// ---------------------------------------------------------------------------
+// Conformance (audit step 9): MollieProvider runs the shared twelve-arm
+// matrix against a loopback wire stub
+// ---------------------------------------------------------------------------
+
+struct ConfStub {
+    responses: std::sync::Mutex<std::collections::HashMap<String, (u16, String)>>,
+    seq: std::sync::atomic::AtomicU64,
+}
+
+/// The conformance stub: `{seq}` in a routed body is replaced by a global
+/// call counter, so sequential creates/refunds answer with DISTINCT ids
+/// (the attempts-ledger unique key made shared ids a fixture lie).
+async fn conf_stub_handler(
+    axum::extract::State(state): axum::extract::State<&'static ConfStub>,
+    request: axum::http::Request<axum::body::Body>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let method = request.method().clone();
+    let path = request.uri().path().to_string();
+    let body_bytes = axum::body::to_bytes(request.into_body(), 64 * 1024)
+        .await
+        .unwrap_or_default();
+    let n = state.seq.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let json_header = [(axum::http::header::CONTENT_TYPE, "application/json")];
+    if method == axum::http::Method::POST && path.ends_with("/refunds") {
+        // Echo the requested amount; mint a distinct refund id per call.
+        let parsed: serde_json::Value =
+            serde_json::from_slice(&body_bytes).unwrap_or(serde_json::json!({}));
+        let amount = parsed
+            .get("amount")
+            .cloned()
+            .unwrap_or(serde_json::json!({"currency": "EUR", "value": "0.00"}));
+        let response = serde_json::json!({
+            "id": format!("re_conf_{n}"),
+            "status": "refunded",
+            "amount": amount,
+        });
+        return (
+            axum::http::StatusCode::OK,
+            json_header,
+            response.to_string(),
+        )
+            .into_response();
+    }
+    let routed = state.responses.lock().expect("lock").get(&path).cloned();
+    if let Some((status, body)) = routed {
+        let body = body.replace("{seq}", &n.to_string());
+        return (
+            axum::http::StatusCode::from_u16(status).expect("status"),
+            json_header,
+            body,
+        )
+            .into_response();
+    }
+    (
+        axum::http::StatusCode::NOT_FOUND,
+        json_header,
+        r#"{"title":"Not Found"}"#.to_string(),
+    )
+        .into_response()
+}
+
+/// The one process-wide conformance stub (own OS thread, own runtime).
+fn conformance_stub_api() -> (&'static ConfStub, String) {
+    static STUB: std::sync::OnceLock<(&'static ConfStub, String)> = std::sync::OnceLock::new();
+    STUB.get_or_init(|| {
+        let state: &'static ConfStub = Box::leak(Box::new(ConfStub {
+            responses: std::sync::Mutex::new(std::collections::HashMap::new()),
+            seq: std::sync::atomic::AtomicU64::new(0),
+        }));
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind conformance");
+        listener
+            .set_nonblocking(true)
+            .expect("nonblocking conformance listener");
+        let address = listener.local_addr().expect("conformance address");
+        let app = axum::Router::new()
+            .fallback(conf_stub_handler)
+            .with_state(state);
+        std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("conformance stub runtime");
+            runtime.block_on(async move {
+                let listener = tokio::net::TcpListener::from_std(listener).expect("tokio listener");
+                axum::serve(listener, app).await.expect("conformance stub");
+            });
+        });
+        (state, format!("http://{address}/v2"))
+    })
+    .clone()
+}
+
+fn wire_amount(minor: i64) -> String {
+    format!("{}.{:02}", minor.div_euclid(100), minor.rem_euclid(100))
+}
+
+/// The Mollie lane's scripting: routes the wire stub exactly as the real
+/// provider would answer for each matrix arm.
+struct MollieConformanceScripting {
+    stub: &'static ConfStub,
+}
+
+impl billing_service::payments::conformance::ConformanceScripting for MollieConformanceScripting {
+    fn arm_setup(
+        &self,
+        ctx: &billing_service::payments::conformance::ConformanceCtx<'_>,
+    ) -> Result<(), String> {
+        let amount = wire_amount(ctx.amount_minor);
+        let paid_doc = serde_json::json!({
+            "id": ctx.provider_payment_hint,
+            "status": "paid",
+            "amount": { "currency": ctx.currency, "value": amount },
+            "createdAt": "2026-10-29T10:00:00+00:00",
+        });
+        let mut routes = self.stub.responses.lock().expect("lock");
+        match ctx.arm {
+            4 | 11 => {
+                // The authenticated fetch answers with the paid object.
+                routes.insert(
+                    format!("/v2/payments/{}", ctx.provider_payment_hint),
+                    (200, paid_doc.to_string()),
+                );
+            }
+            6 => {
+                // The charge's response is LOST (a 503 maps to the neutral
+                // Unavailable); the provider's own record shows it paid.
+                routes.insert(
+                    "/v2/payments".to_string(),
+                    (503, r#"{"title":"upstream down"}"#.to_string()),
+                );
+                routes.insert(
+                    format!("/v2/payments/{}", ctx.provider_payment_hint),
+                    (200, paid_doc.to_string()),
+                );
+            }
+            8 => {
+                let failed_doc = serde_json::json!({
+                    "id": "{seq}",
+                    "status": "failed",
+                    "amount": { "currency": ctx.currency, "value": amount },
+                });
+                routes.insert("/v2/payments".to_string(), (200, failed_doc.to_string()));
+            }
+            10 => {
+                // POST /v2/payments/{id}/refunds: the handler echoes the
+                // requested amount and mints distinct ids.
+            }
+            12 => {
+                let settlements = serde_json::json!({
+                    "_embedded": { "settlements": [{
+                        "id": "stl_conf_1",
+                        "status": "paid",
+                        "amount": { "currency": ctx.currency, "value": amount },
+                        "settledAt": "2026-10-29T12:00:00+00:00",
+                    }]}
+                });
+                routes.insert(
+                    "/v2/settlements".to_string(),
+                    (200, settlements.to_string()),
+                );
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+}
+
+db_test!(mollie_provider_passes_the_shared_conformance_matrix, |h| {
+    use billing_service::payments::conformance::run_provider_conformance;
+    use billing_service::payments::mollie_provider::MollieProvider;
+
+    let (stub, base_url) = conformance_stub_api();
+    let provider = MollieProvider::new("test_conformance_key".to_string(), base_url, None)
+        .expect("conformance provider");
+    let scripting = MollieConformanceScripting { stub };
+    let report =
+        run_provider_conformance(&h.state, std::sync::Arc::new(provider), &scripting).await;
+    assert_eq!(report.provider, "mollie");
+    if let Err(failures) = report.assert_all_passed() {
+        panic!("MollieProvider must pass the shared conformance matrix:\n{failures}");
+    }
+});

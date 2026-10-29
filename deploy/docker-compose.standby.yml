@@ -110,9 +110,17 @@ services:
       postgres:
         condition: service_healthy
     networks:
-      # Data-network ONLY: the standby talks to the primary and nothing
-      # else; no egress, no frontend/backend membership.
+      # Same-host topology: the data network carries the streaming.
       - apexmail_data_internal
+      # SECOND-HOST topology (seventh external audit, P1-DR-2): the data
+      # network is `internal: true` in production, which by construction
+      # cannot reach a primary on another physical machine. The dedicated
+      # replication network is the deliberate transport for that topology:
+      # the operator marks it external and attaches it to a restricted
+      # peer path (WireGuard/Tailscale or a dedicated replication
+      # interface) — see docs/operations/warm-standby.md, which REFUSES
+      # the second-host mode when this network is absent.
+      - apexmail_replication
     deploy:
       resources:
         limits:
@@ -128,3 +136,14 @@ services:
 
 volumes:
   postgres_standby_data:
+
+networks:
+  # The second-failure-domain transport (P1-DR-2). `external: true` by
+  # default: the operator creates it attached to the real peer path
+  # (`docker network create --attachable apexmail_replication` bound to the
+  # WireGuard/host interface) BEFORE including this overlay. Set
+  # STANDBBY_REPLICATION_NETWORK_INTERNAL=1 ONLY for the same-host mode,
+  # where the data network already reaches the primary.
+  apexmail_replication:
+    external: true
+    name: ${STANDBY_REPLICATION_NETWORK_NAME:-apexmail_replication}

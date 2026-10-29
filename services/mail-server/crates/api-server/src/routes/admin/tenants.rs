@@ -525,6 +525,25 @@ async fn update_tenant(
         // immediately, not after the middleware caches lapse.
         invalidate_tenant_auth_caches(&state, &id).await;
 
+        // Onboarding (seventh audit, P1-D): the authoritative restriction
+        // lifecycle drives the machine's Block/Unblock — one status
+        // authority, not two. suspend → Block records the prior state for
+        // the Unblock restore; unsuspend → Unblock.
+        let onboarding_event = if action == "suspend" {
+            // The reason mirrors the admin surface's own vocabulary.
+            crate::routes::onboarding::OnboardingEvent::Block(
+                "operator suspension via the control plane".to_string(),
+            )
+        } else {
+            crate::routes::onboarding::OnboardingEvent::Unblock
+        };
+        let _ = crate::routes::onboarding::attempt_onboarding_event(
+            &state.db,
+            &id,
+            onboarding_event,
+        )
+        .await;
+
         // Audit log
         log_tenant_audit(&state, &auth, action, Some(&id)).await;
         return Ok(StatusCode::OK);

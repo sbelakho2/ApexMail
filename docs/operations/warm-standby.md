@@ -93,6 +93,23 @@ On the primary, `pg_stat_replication` must show the standby with state
 `streaming`, and `pg_replication_slots` must list `apexmail_standby` as
 active.
 
+## Second-host transport requirement (seventh external audit)
+
+The production data network is `internal: true`: it cannot carry traffic to
+a primary on another physical machine. A second-failure-domain standby must
+join the dedicated `apexmail_replication` network this overlay declares:
+
+1. Create the network on both hosts attached to the restricted peer path
+   (WireGuard/Tailscale or a dedicated replication interface), never a
+   public bridge: `docker network create --attachable apexmail_replication`.
+2. Expose PostgreSQL only to that peer (firewall the port to the peer
+   address; do not open it broadly).
+3. Set `STANDBY_PRIMARY_HOST` to the address reachable through that peer.
+
+Same-host operation needs none of this: the data network already reaches
+the primary. The promotion gate below additionally refuses a promotion
+when freshness evidence is missing.
+
 ## Lag SLO
 
 The quantity the standby itself can measure is the **replay lag**: WAL the
