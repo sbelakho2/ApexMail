@@ -195,7 +195,7 @@
       "name": "Dedicated Tenant",
       "eur_display": "from €4,000/mo, 12-month minimum, €10k–€40k setup",
       "usd_display": "EUR contract pricing",
-      "description": "Single-tenant stack on dedicated hardware, EU region by default, 5M recipients, 2 managed IPs, named owner, monthly review"
+      "description": "Single-tenant stack on dedicated compute (dedicated-vCPU line), EU region by default, 5M recipients, 2 managed IPs, named owner, monthly review"
     },
     {
       "id": "mailboxes",

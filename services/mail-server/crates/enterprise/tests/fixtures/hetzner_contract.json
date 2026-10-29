@@ -29,5 +29,20 @@
         "ipv6": { "ip": "2a01:4f8:c17:2e8c::1" }
       }
     }
+  },
+  "list_servers_response": {
+    "_comment": "GET /servers?label_selector=<k>=<v> — the documented list shape (a `servers` array of the same server objects). The label reconciliation (eighth audit, P0-DT) filters by the deterministic create label apexmail-dt:<deployment id>; the stub serves THIS shape with its provider-state matches.",
+    "servers": [
+      {
+        "id": 4242,
+        "name": "apexmail-dt-example",
+        "status": "running",
+        "public_net": {
+          "ipv4": { "ip": "203.0.113.50" },
+          "ipv6": { "ip": "2a01:4f8:c17:2e8c::1" }
+        },
+        "labels": { "apexmail-dt": "00000000-0000-0000-0000-000000000000" }
+      }
+    ]
   }
 }

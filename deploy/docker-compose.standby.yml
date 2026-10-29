@@ -1,19 +1,21 @@
 # =============================================================================
-# docker-compose.standby.yml — warm-standby overlay (postgres-standby)
+# docker-compose.standby.yml — SAME-HOST warm-standby overlay (postgres-standby)
 # =============================================================================
-# Repo-side preparation (external audit 6 remediation #14). Including this
-# file is the OPERATOR's explicit production decision — nothing in the
-# default deployment changes, and the standby is NOT started by any default
-# compose command:
+# Repo-side preparation (external audit 6 remediation #14; topology split,
+# eighth audit DR wave: same-host vs remote are now two separate overlays).
+# Including this file is the OPERATOR's explicit production decision —
+# nothing in the default deployment changes, and the standby is NOT started
+# by any default compose command.
+#
+# SAME-HOST invocation (run from the repository root — relative paths in
+# EVERY compose file are resolved against the project directory, which is
+# the FIRST -f file's dir):
 #
 #   docker compose \
 #     -f docker-compose.yml \
 #     -f docker-compose.prod.yml \
 #     -f deploy/docker-compose.standby.yml \
 #     --env-file .env up -d postgres-standby
-#
-# (run from the repository root: relative paths in EVERY compose file are
-# resolved against the project directory, which is the FIRST -f file's dir.)
 #
 # What it adds:
 #   * `postgres-standby` — a warm streaming standby of the primary `postgres`
@@ -27,24 +29,30 @@
 #     into PGDATA, and execs the image entrypoint back with
 #     `postgres -c hot_standby=on`. Idempotent: an existing PGDATA with
 #     standby.signal skips the basebackup and rejoins streaming replication.
-#   * `pg-standby-promote.sh` (bind-mounted read-only) is the LAG-GUARDED
-#     promotion tool the operator runs via docker compose exec — it refuses
-#     above STANDBY_MAX_LAG_BYTES unless --force.
+#   * `pg-standby-promote.sh` (bind-mounted read-only) is the gate-guarded
+#     promotion tool the operator runs via docker compose exec: --force
+#     covers ONLY the replay-lag byte cap; heartbeat age, replay age and
+#     archive continuity are freshness gates that refuse unless
+#     --accept-unknown-loss.
 #   * env guards: STANDBY_PRIMARY_HOST and STANDBY_REPL_PASSWORD_FILE are
 #     REQUIRED (`${VAR:?}` — compose refuses to render without them, the
 #     same fail-fast pattern every mandatory production variable uses).
 #
-# The overlay deliberately joins ONLY apexmail_data_internal: the standby
-# reaches the primary over the data network and needs no egress. A standby
-# on the SAME host as the primary survives postgres-level loss, never host
-# loss — for host-loss protection run this overlay on a second host with
-# STANDBY_PRIMARY_HOST pointing at the primary (see
-# docs/operations/warm-standby.md for the honest posture, the bootstrap
-# prerequisites on the primary, the lag SLO, the promote procedure and the
-# failback note).
+# TOPOLOGY (eighth audit: "same-host Compose contradicted the runbook"):
+# this overlay attaches postgres-standby ONLY to `apexmail_data_internal`
+# — the primary's own compose network, defined by docker-compose.yml. There
+# is deliberately NO external network stanza here: a same-host standby
+# reaches the primary over the data network and needs no other transport.
+# A standby on the SAME host as the primary survives postgres-level loss,
+# never host loss — for host-loss protection run the REMOTE overlay
+# (deploy/docker-compose.standby-remote.yml) on a second host; see
+# docs/operations/warm-standby.md for both recipes, the bootstrap
+# prerequisites on the primary, the freshness gates, the promote procedure
+# and the failback note.
 #
-# Validated by the repo's compose render contract (docker compose config -q
-# with a dummy env, base + prod + this overlay).
+# Validated by tools/check_standby_contract.py (renders this overlay and
+# proves every STANDBY_* variable the scripts consume is forwarded here or
+# explicitly allowlisted) and the repo's compose render contract.
 # =============================================================================
 
 services:
@@ -74,7 +82,7 @@ services:
       - ./deploy/hardening/scripts/pg-standby-bootstrap.sh:/usr/local/bin/pg-standby-bootstrap.sh:ro
       # The operator's promotion tool runs inside THIS container:
       #   docker compose ... exec postgres-standby \
-      #     sh /usr/local/bin/pg-standby-promote.sh [--force]
+      #     sh /usr/local/bin/pg-standby-promote.sh
       - ./deploy/hardening/scripts/pg-standby-promote.sh:/usr/local/bin/pg-standby-promote.sh:ro
       - postgres_standby_data:/var/lib/postgresql/data
       # Replication password (host file, read-only) — the same host-path env
@@ -82,8 +90,7 @@ services:
       - ${STANDBY_REPL_PASSWORD_FILE:?production must define the standby replication password file when the standby overlay is included}:/run/standby-repl-password:ro
     environment:
       # REQUIRED: the primary to clone and follow. On the primary's own
-      # compose network this is the service name `postgres`; from a second
-      # host it is the primary's address.
+      # compose network this is the service name `postgres`.
       STANDBY_PRIMARY_HOST: ${STANDBY_PRIMARY_HOST:?production must define the primary host when the standby overlay is included}
       STANDBY_PRIMARY_PORT: ${STANDBY_PRIMARY_PORT:-5432}
       # Replication role created on the primary (runbook: CREATE ROLE
@@ -94,8 +101,23 @@ services:
       # WAL for; a stale slot from an earlier attempt is detected and reused.
       STANDBY_SLOT: ${STANDBY_SLOT:-apexmail_standby}
       STANDBY_BOOTSTRAP_TIMEOUT_SECS: ${STANDBY_BOOTSTRAP_TIMEOUT_SECS:-600}
-      # Promotion guard (pg-standby-promote.sh): refuse above this replay lag.
+      # Promotion gates (pg-standby-promote.sh):
+      #   * STANDBY_MAX_LAG_BYTES — the replay-lag byte cap (--force
+      #     overrides this one gate only);
+      #   * STANDBY_MAX_HEARTBEAT_AGE_SECONDS — the replicated-heartbeat
+      #     age cap, the PRIMARY freshness evidence (apexmail_ops.
+      #     replication_heartbeat, written on the primary by
+      #     pg-replication-heartbeat.sh, default 90s);
+      #   * STANDBY_MAX_RECEIVE_AGE_SECS — the second freshness evidence,
+      #     the last-replayed-transaction age (default 30s);
+      #   * STANDBY_WAL_ARCHIVE_DIR — optional mount of the offsite WAL
+      #     archive INSIDE this container (e.g. an sshfs/NFS mount); when
+      #     empty the archive-continuity gate is not configured and
+      #     freshness rests on the heartbeat + replay-age gates.
       STANDBY_MAX_LAG_BYTES: ${STANDBY_MAX_LAG_BYTES:-1048576}
+      STANDBY_MAX_HEARTBEAT_AGE_SECONDS: ${STANDBY_MAX_HEARTBEAT_AGE_SECONDS:-90}
+      STANDBY_MAX_RECEIVE_AGE_SECS: ${STANDBY_MAX_RECEIVE_AGE_SECS:-30}
+      STANDBY_WAL_ARCHIVE_DIR: ${STANDBY_WAL_ARCHIVE_DIR:-}
       # psql superuser of the CLONED cluster (the primary's POSTGRES_USER);
       # the promote script probes with it.
       POSTGRES_USER: ${POSTGRES_USER:-apexmail}
@@ -105,22 +127,18 @@ services:
       timeout: 5s
       retries: 5
     depends_on:
-      # The bootstrap waits for the primary anyway (credentials/hba may lag
-      # behind container start); depends_on only orders the boot.
+      # SAME-HOST only: the primary is a service of this compose project.
+      # (The bootstrap waits for the primary anyway — credentials/hba may
+      # lag behind container start; depends_on only orders the boot. The
+      # REMOTE overlay carries no depends_on: a remote host has no local
+      # postgres service.)
       postgres:
         condition: service_healthy
     networks:
-      # Same-host topology: the data network carries the streaming.
+      # Same-host topology: the data network carries the streaming, and it
+      # is the ONLY network this standby needs (no egress, no replication
+      # transport — that is the remote overlay's job).
       - apexmail_data_internal
-      # SECOND-HOST topology (seventh external audit, P1-DR-2): the data
-      # network is `internal: true` in production, which by construction
-      # cannot reach a primary on another physical machine. The dedicated
-      # replication network is the deliberate transport for that topology:
-      # the operator marks it external and attaches it to a restricted
-      # peer path (WireGuard/Tailscale or a dedicated replication
-      # interface) — see docs/operations/warm-standby.md, which REFUSES
-      # the second-host mode when this network is absent.
-      - apexmail_replication
     deploy:
       resources:
         limits:
@@ -136,14 +154,3 @@ services:
 
 volumes:
   postgres_standby_data:
-
-networks:
-  # The second-failure-domain transport (P1-DR-2). `external: true` by
-  # default: the operator creates it attached to the real peer path
-  # (`docker network create --attachable apexmail_replication` bound to the
-  # WireGuard/host interface) BEFORE including this overlay. Set
-  # STANDBBY_REPLICATION_NETWORK_INTERNAL=1 ONLY for the same-host mode,
-  # where the data network already reaches the primary.
-  apexmail_replication:
-    external: true
-    name: ${STANDBY_REPLICATION_NETWORK_NAME:-apexmail_replication}

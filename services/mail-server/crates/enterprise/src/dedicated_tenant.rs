@@ -1,7 +1,7 @@
 //! Dedicated Tenant provisioning, the code-side half.
 //!
 //! The plan sells Dedicated Tenant (from €4,000/mo, 12-month minimum,
-//! €10k–40k setup, single-tenant stack on dedicated hardware, EU region by
+//! €10k–40k setup, single-tenant stack on dedicated compute (the dedicated-vCPU line), EU region by
 //! default, 5M recipients, 2 managed IPs, named owner, monthly review). The
 //! operating act of bringing a host group up is the OPERATOR's; this module
 //! is everything the code can honestly do around it:

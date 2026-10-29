@@ -292,8 +292,9 @@ struct LegacyPlanDto {
     email_limit: i64,
     api_call_limit: i64,
     features: LegacyPlanFeaturesPayload,
-    mollie_plan_code_monthly: Option<String>,
-    mollie_plan_code_yearly: Option<String>,
+    // Provider price codes are OFF the public plan payloads (N-02 RESOLVED,
+    // beta authority inversion): checkout quoting resolves price ids through
+    // provider_catalog_mappings.
     is_active: bool,
     sort_order: i32,
     created_at: chrono::DateTime<chrono::Utc>,
@@ -312,8 +313,6 @@ impl From<Plan> for LegacyPlanDto {
             email_limit: plan.email_limit,
             api_call_limit: plan.api_call_limit,
             features: plan.features.into(),
-            mollie_plan_code_monthly: plan.mollie_plan_code_monthly,
-            mollie_plan_code_yearly: plan.mollie_plan_code_yearly,
             is_active: plan.is_active,
             sort_order: plan.sort_order,
             created_at: plan.created_at,
@@ -373,8 +372,6 @@ struct LegacyPlanCreateBody {
     price_yearly: i64,
     features: LegacyPlanFeaturesPayload,
     limits: LegacyPlanCreateLimitsInput,
-    mollie_plan_code_monthly: Option<String>,
-    mollie_plan_code_yearly: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -386,8 +383,6 @@ struct LegacyPlanPatchBody {
     price_yearly: Option<i64>,
     features: Option<LegacyPlanFeaturesPayload>,
     limits: Option<LegacyPlanPatchLimitsInput>,
-    mollie_plan_code_monthly: Option<String>,
-    mollie_plan_code_yearly: Option<String>,
 }
 
 fn legacy_support_level(level: SupportLevel) -> &'static str {
@@ -605,8 +600,6 @@ async fn create_plan(
             api_call_limit: body.limits.api_calls_per_month,
             sort_order: 0,
             features: body.features.into(),
-            mollie_plan_code_monthly: body.mollie_plan_code_monthly,
-            mollie_plan_code_yearly: body.mollie_plan_code_yearly,
         },
     )
     .await?;
@@ -656,12 +649,6 @@ async fn update_plan(
                 .unwrap_or(existing.api_call_limit),
             sort_order: existing.sort_order,
             features: body.features.map(Into::into).unwrap_or(existing.features),
-            mollie_plan_code_monthly: body
-                .mollie_plan_code_monthly
-                .or(existing.mollie_plan_code_monthly),
-            mollie_plan_code_yearly: body
-                .mollie_plan_code_yearly
-                .or(existing.mollie_plan_code_yearly),
         },
     )
     .await?;
@@ -3257,8 +3244,6 @@ mod tests {
             email_limit: 10_000,
             api_call_limit: 100_000,
             features: PlanFeatures::default(),
-            mollie_plan_code_monthly: None,
-            mollie_plan_code_yearly: None,
             is_active: true,
             sort_order: 0,
             created_at: now,
@@ -3274,8 +3259,6 @@ mod tests {
             email_limit: 50_000,
             api_call_limit: 250_000,
             features: PlanFeatures::default(),
-            mollie_plan_code_monthly: None,
-            mollie_plan_code_yearly: None,
             is_active: true,
             sort_order: 1,
             created_at: now,
@@ -3322,8 +3305,6 @@ mod tests {
             email_limit: 10_000,
             api_call_limit: 100_000,
             features: PlanFeatures::default(),
-            mollie_plan_code_monthly: None,
-            mollie_plan_code_yearly: None,
             is_active: true,
             sort_order: 0,
             created_at: now,
@@ -3339,8 +3320,6 @@ mod tests {
             email_limit: 50_000,
             api_call_limit: 250_000,
             features: PlanFeatures::default(),
-            mollie_plan_code_monthly: None,
-            mollie_plan_code_yearly: None,
             is_active: true,
             sort_order: 1,
             created_at: now,
@@ -3540,8 +3519,6 @@ mod tests {
             email_limit: 30_000,
             api_call_limit: 300_000,
             features: PlanFeatures::default(),
-            mollie_plan_code_monthly: None,
-            mollie_plan_code_yearly: None,
             is_active: true,
             sort_order: 0,
             created_at: now,

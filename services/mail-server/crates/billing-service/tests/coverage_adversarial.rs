@@ -2654,10 +2654,14 @@ db_test!(router_quota_and_subscription_surfaces, |h| {
     assert_eq!(status, StatusCode::OK);
     // The subscription view resolves the EFFECTIVE plan from tenants.plan.
     assert_eq!(json["subscription"]["plan_name"], "free", "body: {json}");
-    assert_eq!(
-        json["subscription"]["mollie_subscription_id"],
-        "sub_cov_route"
+    // N-01 (beta authority inversion): the public DTO carries NO provider
+    // object ids.
+    assert!(
+        json["subscription"].get("mollieSubscriptionId").is_none()
+            && json["subscription"].get("mollie_subscription_id").is_none(),
+        "body: {json}"
     );
+    assert_eq!(json["subscription"]["status"], "active", "body: {json}");
 });
 
 db_test!(
@@ -3577,7 +3581,6 @@ type MockResponses = Arc<std::sync::Mutex<std::collections::HashMap<String, (u16
 struct MockState {
     responses: MockResponses,
     created: std::sync::Mutex<Vec<String>>,
-    deleted: std::sync::Mutex<std::collections::HashSet<String>>,
     counter: std::sync::atomic::AtomicU64,
 }
 
@@ -3599,14 +3602,11 @@ impl MockMollie {
         self.route(&format!("/v2/payments/{id}"), 200, document.to_string());
     }
 
-    /// Subscription ids the mock minted (in creation order).
+    /// Subscription ids the mock minted (in creation order). Always empty
+    /// in the local-authority world: the activation mints NO provider
+    /// schedule (the assertion the activation test pins).
     fn created(&self) -> Vec<String> {
         self.state.created.lock().expect("lock").clone()
-    }
-
-    /// Subscription ids the mock saw DELETEd.
-    fn deleted(&self) -> std::collections::HashSet<String> {
-        self.state.deleted.lock().expect("lock").clone()
     }
 }
 
@@ -3617,17 +3617,6 @@ async fn mock_handler(
     use axum::response::IntoResponse;
     let method = request.method().clone();
     let path = request.uri().path().to_string();
-    if method == axum::http::Method::DELETE {
-        if let Some(id) = path.rsplit('/').next() {
-            state.deleted.lock().expect("lock").insert(id.to_string());
-        }
-        return (
-            axum::http::StatusCode::NO_CONTENT,
-            [(axum::http::header::CONTENT_TYPE, "application/json")],
-            String::new(),
-        )
-            .into_response();
-    }
     if method == axum::http::Method::POST && path.ends_with("/subscriptions") {
         let explicit = state.responses.lock().expect("lock").get(&path).cloned();
         if explicit.is_none() {
@@ -3669,6 +3658,13 @@ async fn mock_handler(
                 (404, r#"{"title":"Not Found"}"#.to_string())
             }
         });
+    // `{seq}` in a routed body is replaced by the global call counter, so a
+    // POST /v2/payments route mints a DISTINCT payment id per call (the
+    // attempts ledger's unique key made shared ids a fixture lie).
+    let seq = state
+        .counter
+        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let response_body = response_body.replace("{seq}", &seq.to_string());
     (
         axum::http::StatusCode::from_u16(status).expect("status"),
         [(axum::http::header::CONTENT_TYPE, "application/json")],
@@ -6669,21 +6665,13 @@ fn overage_math_is_exact_and_quotes_only_catalog_rates() {
 }
 
 // ---------------------------------------------------------------------------
-// Plan activation, the money path: a verified paid checkout grants the plan,
-// issues a paid invoice that reconciles to the collected gross, and is
-// idempotent on the payment id.
+// Plan billing, the LOCAL authority (beta authority inversion): a verified
+// paid checkout activates the plan locally (no provider schedule is minted),
+// the renewal worker invoices the NEXT period BEFORE any charge, dunning
+// opens new immutable attempts, `cancel_at_period_end` ends the subscription
+// with no charge, and a provider-initiated renewal payment never resurrects
+// a locally-canceled subscription nor summons an invoice into existence.
 // ---------------------------------------------------------------------------
-
-fn subscription_document(id: &str, customer: &str, cents: i64) -> serde_json::Value {
-    serde_json::json!({
-        "id": id,
-        "customerId": customer,
-        "status": "active",
-        "amount": { "currency": "EUR", "value": money_value(cents) },
-        "interval": "1 month",
-        "description": "ApexMail Starter"
-    })
-}
 
 db_test!(
     paid_checkout_activation_grants_exactly_the_charged_gross,
@@ -6691,11 +6679,10 @@ db_test!(
         let mock = mock_mollie_api();
         seed_tenant(&h, "cov_activate", "free").await;
         seed_billing_address(&h, "cov_activate", "EE").await;
-        mock.route(
-            "/v2/customers/cst_cov_activate/subscriptions",
-            201,
-            subscription_document("sub_cov_activate", "cst_cov_activate", 2_000).to_string(),
-        );
+        // No subscription-create route is registered: the activation must
+        // mint NO provider object (renewal is local). If it did call the
+        // provider, the dynamic mint route would fire and `created` below
+        // would be non-empty.
 
         let outcome = billing_service::plan_billing::activate_from_paid_checkout(
             &h.pool,
@@ -6710,11 +6697,20 @@ db_test!(
         )
         .await
         .expect("activation");
-        assert_eq!(
-            outcome.mollie_subscription_id.as_deref(),
-            Some("sub_cov_activate")
+        let subscription_id = outcome
+            .subscription_id
+            .clone()
+            .expect("the local subscription id");
+        assert!(
+            subscription_id.starts_with("local_"),
+            "the activation mints a LOCAL subscription id, got {subscription_id}"
         );
         assert!(!outcome.already_active);
+        assert!(
+            mock.created().is_empty(),
+            "no provider schedule may be minted at activation: {:?}",
+            mock.created()
+        );
 
         let plan: String = sqlx::query_scalar("SELECT plan FROM tenants WHERE id = $1")
             .bind("cov_activate")
@@ -6723,7 +6719,7 @@ db_test!(
             .expect("tenant plan");
         assert_eq!(plan, "starter");
 
-        let (status, subscription_id): (String, String) = sqlx::query_as(
+        let (status, stored_id): (String, String) = sqlx::query_as(
             "SELECT status, mollie_subscription_id FROM mollie_subscriptions WHERE tenant_id = $1",
         )
         .bind("cov_activate")
@@ -6731,7 +6727,7 @@ db_test!(
         .await
         .expect("subscription row");
         assert_eq!(status, "active");
-        assert_eq!(subscription_id, "sub_cov_activate");
+        assert_eq!(stored_id, subscription_id);
 
         let (invoice_status, net, vat, total): (String, i64, i64, i64) = sqlx::query_as(
             "SELECT status, subtotal, vat_total, total FROM invoices \
@@ -6753,6 +6749,17 @@ db_test!(
     .await
     .expect("allocation");
         assert_eq!((allocations, allocated), (1, 2_000));
+
+        // The stored method lands on the NEUTRAL credentials ledger: this is
+        // what the renewal worker charges.
+        let credentials: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM payment_credentials \
+         WHERE tenant_id = 'cov_activate' AND state = 'active' AND revoked_at IS NULL",
+        )
+        .fetch_one(&h.pool)
+        .await
+        .expect("credentials");
+        assert_eq!(credentials, 1);
 
         // Webhook redelivery / operator replay: the payment id is the key.
         let replay = billing_service::plan_billing::activate_from_paid_checkout(
@@ -6802,17 +6809,46 @@ db_test!(
     }
 );
 
+/// Seed a subscription shaped like the local renewal worker's due set.
+async fn seed_due_subscription(
+    h: &Harness,
+    tenant: &str,
+    plan: &str,
+    cycle_end_sql: &str,
+    cancel_at_period_end: bool,
+    status: &str,
+) -> String {
+    let suffix = uuid::Uuid::new_v4().simple().to_string()[..8].to_string();
+    let subscription_id = format!("local_cov_{suffix}");
+    sqlx::query(&format!(
+        "INSERT INTO mollie_subscriptions \
+             (tenant_id, mollie_subscription_id, plan, status, billing_interval, \
+              billing_cycle_start, billing_cycle_end, cancel_at_period_end, mollie_customer_id, \
+              mollie_mandate_id, mollie_sequence_type, renewal_attempts) \
+         VALUES ($1, $2, $3, $5, 'monthly', NOW() - INTERVAL '30 days', {cycle_end_sql}, \
+                 $4, $1, 'mdt_renew', 'recurring', 0)"
+    ))
+    .bind(tenant)
+    .bind(&subscription_id)
+    .bind(plan)
+    .bind(cancel_at_period_end)
+    .bind(status)
+    .execute(&h.pool)
+    .await
+    .expect("seed subscription");
+    subscription_id
+}
+
+async fn renewal_provider() -> std::sync::Arc<dyn billing_service::payments::PaymentProvider> {
+    billing_service::payments::registry::from_env().expect("the mock provider registry")
+}
+
 db_test!(
-    recurring_payment_issues_the_next_period_and_failure_marks_past_due,
+    renewal_worker_invoices_the_next_period_before_the_charge,
     |h| {
         let mock = mock_mollie_api();
         seed_tenant(&h, "cov_renew", "free").await;
         seed_billing_address(&h, "cov_renew", "EE").await;
-        mock.route(
-            "/v2/customers/cst_cov_renew/subscriptions",
-            201,
-            subscription_document("sub_cov_renew", "cst_cov_renew", 2_000).to_string(),
-        );
         billing_service::plan_billing::activate_from_paid_checkout(
             &h.pool,
             "tr_cov_renew_first",
@@ -6835,137 +6871,587 @@ db_test!(
         .await
         .expect("cycle before");
 
-        billing_service::plan_billing::renew_from_paid_subscription(
-            &h.pool,
-            "tr_cov_renew_second",
-            "sub_cov_renew",
-            2_000,
-            "EUR",
-        )
-        .await
-        .expect("renewal");
-        // A redelivered renewal is a no-op on the same payment id.
-        billing_service::plan_billing::renew_from_paid_subscription(
-            &h.pool,
-            "tr_cov_renew_second",
-            "sub_cov_renew",
-            2_000,
-            "EUR",
-        )
-        .await
-        .expect("renewal replay");
+        // The stored-credential charge succeeds at the provider; `{seq}`
+        // mints a distinct payment id per call. The mock keys routes by
+        // PATH (the historical keying).
+        mock.route(
+            "/v2/payments",
+            200,
+            r#"{"id": "tr_renew_{seq}", "status": "paid"}"#.to_string(),
+        );
 
-        let (status, net, vat, total): (String, i64, i64, i64) = sqlx::query_as(
-            "SELECT status, subtotal, vat_total, total FROM invoices \
-         WHERE mollie_payment_id = 'tr_cov_renew_second'",
+        // The worker runs at a `now` past the paid period's end.
+        let later = Utc::now() + chrono::Duration::days(40);
+        let renewed = billing_service::plan_billing::renew_due_subscriptions_with(
+            &h.state,
+            renewal_provider().await,
+            later,
         )
+        .await
+        .expect("renewal tick");
+        assert_eq!(renewed, 1, "exactly one due subscription renewed");
+
+        // The activation invoice + the NEXT period's invoice, now paid.
+        let invoices: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM invoices WHERE tenant_id = $1 AND status = 'paid'",
+        )
+        .bind("cov_renew")
         .fetch_one(&h.pool)
         .await
-        .expect("renewal invoice");
-        assert_eq!(status, "paid");
-        assert_eq!(total, 2_000);
-        assert_eq!(net + vat, total);
-        let renewal_invoices: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM invoices WHERE mollie_payment_id = 'tr_cov_renew_second'",
+        .expect("paid invoices");
+        assert_eq!(invoices, 2);
+
+        // INVOICE FIRST: the claimed attempt's obligation is an invoice that
+        // existed before the attempt row.
+        let (obligation, attempt_no, invoice_created, attempt_created): (
+            String,
+            i64,
+            DateTime<Utc>,
+            DateTime<Utc>,
+        ) = sqlx::query_as(
+            "SELECT a.obligation_ref, a.attempt_no::bigint, \
+                    (SELECT i.created_at FROM invoices i WHERE i.id = CAST(SUBSTRING(a.obligation_ref FROM 9) AS uuid)), \
+                    a.created_at \
+             FROM payment_attempts a WHERE a.tenant_id = $1 AND a.purpose = 'renewal'",
         )
+        .bind("cov_renew")
         .fetch_one(&h.pool)
         .await
-        .expect("renewal count");
-        assert_eq!(renewal_invoices, 1);
+        .expect("renewal attempt");
+        assert_eq!(attempt_no, 1);
+        assert!(
+            invoice_created <= attempt_created,
+            "the obligation must exist before the charge claim"
+        );
+        assert!(obligation.starts_with("invoice:"), "{obligation}");
 
-        let (cycle_after, subscription_status): (DateTime<Utc>, String) = sqlx::query_as(
-            "SELECT billing_cycle_end, status FROM mollie_subscriptions WHERE tenant_id = $1",
+        // The local period advanced and the dunning state reset.
+        let (cycle_after, status, attempts, locked): (
+            DateTime<Utc>,
+            String,
+            i32,
+            Option<DateTime<Utc>>,
+        ) = sqlx::query_as(
+            "SELECT billing_cycle_end, status, renewal_attempts, renewal_locked_at \
+             FROM mollie_subscriptions WHERE tenant_id = $1",
         )
         .bind("cov_renew")
         .fetch_one(&h.pool)
         .await
         .expect("cycle after");
         assert!(cycle_after > cycle_before, "the cycle advances");
-        assert_eq!(subscription_status, "active");
+        assert_eq!(status, "active");
+        assert_eq!(
+            attempts, 0,
+            "a successful renewal resets the dunning counter"
+        );
+        assert!(locked.is_none(), "a successful renewal clears the gate");
 
-        // A failed recurring charge marks the row past_due and notifies the
-        // tenant; the plan stays until cancellation/reconciliation decides.
-        billing_service::plan_billing::mark_subscription_payment_failed(
-            &h.pool,
-            "sub_cov_renew",
-            Some("insufficient funds"),
-            Some(2_000),
+        // The renewal is audited.
+        let audits: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM audit_logs WHERE tenant_id = $1 AND action = 'billing.subscription_renewed'",
+        )
+        .bind("cov_renew")
+        .fetch_one(&h.pool)
+        .await
+        .expect("renewal audits");
+        assert_eq!(audits, 1);
+
+        // A second tick with the same `now` renews nothing (the new period
+        // has not ended) and mints no second invoice or charge.
+        let again = billing_service::plan_billing::renew_due_subscriptions_with(
+            &h.state,
+            renewal_provider().await,
+            later,
         )
         .await
-        .expect("failure");
-        let status: String =
-            sqlx::query_scalar("SELECT status FROM mollie_subscriptions WHERE tenant_id = $1")
+        .expect("second tick");
+        assert_eq!(again, 0);
+        let invoices_after: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM invoices WHERE tenant_id = $1")
                 .bind("cov_renew")
                 .fetch_one(&h.pool)
                 .await
-                .expect("status");
-        assert_eq!(status, "past_due");
-        let notifications: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM notification_queue WHERE tenant_id = $1 AND type = 'payment_failed'",
-    )
-    .bind("cov_renew")
-    .fetch_one(&h.pool)
-    .await
-    .expect("notification count");
-        assert_eq!(notifications, 1);
+                .expect("invoice count");
+        assert_eq!(invoices_after, 2);
+
+        // A replayed provider fact for the SAME payment settles exactly once
+        // (the repair reconciler's idempotent arm).
+        let payment_id: String = sqlx::query_scalar(
+            "SELECT provider_payment_id FROM payment_attempts \
+         WHERE tenant_id = $1 AND purpose = 'renewal' AND provider_payment_id IS NOT NULL",
+        )
+        .bind("cov_renew")
+        .fetch_one(&h.pool)
+        .await
+        .expect("renewal payment id");
+        let allocations_before: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM invoice_payment_allocations WHERE tenant_id = $1",
+        )
+        .bind("cov_renew")
+        .fetch_one(&h.pool)
+        .await
+        .expect("allocations before");
+        let invoice_id: Uuid = sqlx::query_scalar(
+            "SELECT CAST(SUBSTRING(obligation_ref FROM 9) AS uuid) FROM payment_attempts \
+         WHERE tenant_id = $1 AND purpose = 'renewal'",
+        )
+        .bind("cov_renew")
+        .fetch_one(&h.pool)
+        .await
+        .expect("obligation invoice");
+        let reconciled = billing_service::plan_billing::reconcile_provider_renewal_payment(
+            &h.pool,
+            &payment_id,
+            "local_cov_unknown",
+            2_000,
+            "EUR",
+        )
+        .await
+        .expect("reconciliation replay");
+        assert_eq!(reconciled, Some(invoice_id));
+        let allocations_after: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM invoice_payment_allocations WHERE tenant_id = $1",
+        )
+        .bind("cov_renew")
+        .fetch_one(&h.pool)
+        .await
+        .expect("allocations after");
+        assert_eq!(allocations_after, allocations_before);
     }
 );
 
 db_test!(
-    provider_reconciliation_downgrades_a_non_active_subscription,
+    renewal_dunning_opens_new_attempts_and_marks_past_due_after_three_failures,
     |h| {
         let mock = mock_mollie_api();
-        seed_tenant(&h, "cov_reconcile", "starter").await;
-        sqlx::query(
-        "INSERT INTO mollie_subscriptions (tenant_id, mollie_subscription_id, plan, status, \
-            billing_interval, billing_cycle_start, billing_cycle_end, mollie_customer_id, \
-            mollie_mandate_id, mollie_sequence_type) \
-         VALUES ($1, 'sub_cov_reconcile', 'starter', 'active', 'monthly', NOW(), \
-                 NOW() + INTERVAL '30 days', 'cst_cov_reconcile', 'mdt_cov_reconcile', 'recurring')",
-    )
-    .bind("cov_reconcile")
-    .execute(&h.pool)
-    .await
-    .expect("seed subscription");
+        seed_tenant(&h, "cov_dunning", "free").await;
+        seed_billing_address(&h, "cov_dunning", "EE").await;
+        billing_service::plan_billing::activate_from_paid_checkout(
+            &h.pool,
+            "tr_cov_dunning_first",
+            "cov_dunning",
+            "starter",
+            "monthly",
+            "EUR",
+            2_000,
+            Some("cst_cov_dunning"),
+            Some("mdt_cov_dunning"),
+        )
+        .await
+        .expect("activation");
+
+        // Every charge definitively fails at the provider. The mock keys
+        // routes by PATH (the historical keying).
         mock.route(
-            "/v2/customers/cst_cov_reconcile/subscriptions/sub_cov_reconcile",
+            "/v2/payments",
             200,
-            serde_json::json!({
-                "id": "sub_cov_reconcile",
-                "customerId": "cst_cov_reconcile",
-                "status": "canceled",
-                "amount": { "currency": "EUR", "value": "20.00" },
-                "interval": "1 month"
-            })
-            .to_string(),
+            r#"{"id": "tr_dun_{seq}", "status": "failed"}"#.to_string(),
         );
 
-        let reconciled = billing_service::plan_billing::sweep_provider_subscription_state(&h.pool)
+        let cycle_before_dunning: DateTime<Utc> = sqlx::query_scalar(
+            "SELECT billing_cycle_end FROM mollie_subscriptions WHERE tenant_id = $1",
+        )
+        .bind("cov_dunning")
+        .fetch_one(&h.pool)
+        .await
+        .expect("cycle before dunning");
+        let base = Utc::now() + chrono::Duration::days(40);
+        for tick in 0..3 {
+            let now = base + chrono::Duration::hours(2 * tick);
+            let renewed = billing_service::plan_billing::renew_due_subscriptions_with(
+                &h.state,
+                renewal_provider().await,
+                now,
+            )
             .await
-            .expect("reconcile sweep");
-        assert!(reconciled >= 1, "the dead subscription is reconciled");
+            .expect("dunning tick");
+            assert_eq!(renewed, 0, "a failed charge never renews the period");
+        }
 
-        let plan: String = sqlx::query_scalar("SELECT plan FROM tenants WHERE id = $1")
-            .bind("cov_reconcile")
-            .fetch_one(&h.pool)
-            .await
-            .expect("tenant plan");
-        assert_eq!(plan, "free", "only an active subscription grants the plan");
-        let status: String =
-            sqlx::query_scalar("SELECT status FROM mollie_subscriptions WHERE tenant_id = $1")
-                .bind("cov_reconcile")
-                .fetch_one(&h.pool)
-                .await
-                .expect("subscription status");
-        assert_eq!(status, "canceled");
+        // Three attempts, three DISTINCT immutable rows under the shared
+        // dunning-key scheme; the invoice stays OPEN.
+        let ladder: Vec<(i64, String, String)> = sqlx::query_as(
+            "SELECT attempt_no::bigint, idempotency_key, state FROM payment_attempts \
+         WHERE tenant_id = $1 AND purpose = 'renewal' ORDER BY attempt_no",
+        )
+        .bind("cov_dunning")
+        .fetch_all(&h.pool)
+        .await
+        .expect("dunning ladder");
+        assert_eq!(ladder.len(), 3, "attempt 2 and 3 are NEW rows: {ladder:?}");
+        for (index, (attempt_no, key, state)) in ladder.iter().enumerate() {
+            assert_eq!(*attempt_no, index as i64 + 1);
+            assert!(
+                key.starts_with("payment:invoice:") && key.ends_with(&format!(":{attempt_no}")),
+                "the dunning key follows payment:{{ref}}:{{n}}: {key}"
+            );
+            assert_eq!(state, "failed");
+        }
+        let (status, attempts): (String, i32) = sqlx::query_as(
+            "SELECT status, renewal_attempts FROM mollie_subscriptions WHERE tenant_id = $1",
+        )
+        .bind("cov_dunning")
+        .fetch_one(&h.pool)
+        .await
+        .expect("subscription state");
+        assert_eq!(status, "past_due", "the dunning ladder ends past_due");
+        assert_eq!(attempts, 3);
+        let open_invoices: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM invoices WHERE tenant_id = $1 AND status = 'pending'",
+        )
+        .bind("cov_dunning")
+        .fetch_one(&h.pool)
+        .await
+        .expect("open invoices");
+        assert_eq!(open_invoices, 1, "a failed renewal leaves the invoice open");
+
+        // The customer is notified and the failure audited (the crate's
+        // existing dunning vocabulary).
+        let notifications: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM notification_queue WHERE tenant_id = $1 AND type = 'payment_failed'",
+        )
+        .bind("cov_dunning")
+        .fetch_one(&h.pool)
+        .await
+        .expect("notification count");
+        assert_eq!(notifications, 1);
+        let audits: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM audit_logs \
+         WHERE tenant_id = $1 AND action = 'billing.subscription_payment_failed'",
+        )
+        .bind("cov_dunning")
+        .fetch_one(&h.pool)
+        .await
+        .expect("failure audits");
+        assert_eq!(audits, 1);
+
+        // The period NEVER advanced on failure.
+        let cycle: DateTime<Utc> = sqlx::query_scalar(
+            "SELECT billing_cycle_end FROM mollie_subscriptions WHERE tenant_id = $1",
+        )
+        .bind("cov_dunning")
+        .fetch_one(&h.pool)
+        .await
+        .expect("cycle");
+        assert_eq!(
+            cycle, cycle_before_dunning,
+            "a failed renewal never advances the period"
+        );
     }
 );
 
-// ---------------------------------------------------------------------------
-// Activation saga, the distributed-state invariants the black-box probes
-// could not cover: concurrent distinct-payment activations, orphan provider
-// subscriptions, and amount drift on a LIVE subscription.
-// ---------------------------------------------------------------------------
+db_test!(
+    cancel_at_period_end_ends_the_subscription_without_invoicing_or_charging,
+    |h| {
+        let _mock = mock_mollie_api();
+        seed_tenant(&h, "cov_cancel", "growth").await;
+        seed_due_subscription(
+            &h,
+            "cov_cancel",
+            "growth",
+            "NOW() - INTERVAL '1 day'",
+            true,
+            "active",
+        )
+        .await;
+
+        let renewed = billing_service::plan_billing::renew_due_subscriptions_with(
+            &h.state,
+            renewal_provider().await,
+            Utc::now(),
+        )
+        .await
+        .expect("renewal tick");
+        assert_eq!(
+            renewed, 0,
+            "a cancel-at-period-end subscription never renews"
+        );
+
+        let (status, flag): (String, bool) = sqlx::query_as(
+            "SELECT status, cancel_at_period_end FROM mollie_subscriptions WHERE tenant_id = $1",
+        )
+        .bind("cov_cancel")
+        .fetch_one(&h.pool)
+        .await
+        .expect("subscription state");
+        assert_eq!(
+            status, "canceled",
+            "the subscription ends per the local vocabulary"
+        );
+        assert!(!flag, "the flag is cleared once applied");
+        let plan: String = sqlx::query_scalar("SELECT plan FROM tenants WHERE id = $1")
+            .bind("cov_cancel")
+            .fetch_one(&h.pool)
+            .await
+            .expect("tenant plan");
+        assert_eq!(plan, "free", "an ended subscription downgrades the tenant");
+        let invoices: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM invoices WHERE tenant_id = $1")
+                .bind("cov_cancel")
+                .fetch_one(&h.pool)
+                .await
+                .expect("invoices");
+        assert_eq!(invoices, 0, "no invoice is created");
+        let attempts: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM payment_attempts WHERE tenant_id = $1")
+                .bind("cov_cancel")
+                .fetch_one(&h.pool)
+                .await
+                .expect("attempts");
+        assert_eq!(attempts, 0, "no charge attempt is claimed");
+    }
+);
+
+db_test!(
+    provider_renewal_payment_never_resurrects_a_canceled_subscription,
+    |h| {
+        seed_tenant(&h, "cov_nores", "starter").await;
+        // A locally-canceled subscription whose provider-era contract a
+        // legacy schedule still charges behind our back. The renewal worker
+        // had already created the next period's invoice before the cancel
+        // landed.
+        let subscription_id = seed_due_subscription(
+            &h,
+            "cov_nores",
+            "starter",
+            "NOW() - INTERVAL '1 day'",
+            true,
+            "canceled",
+        )
+        .await;
+        let invoice_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO invoices (id, tenant_id, invoice_number, status, amount, currency,
+                                   subtotal, vat_total, total, due_at, period_start, period_end,
+                                   created_at, updated_at)
+             VALUES ($1, $2, $3, 'pending', 2000, 'EUR', 1613, 387, 2000, NOW(),
+                     (SELECT billing_cycle_end FROM mollie_subscriptions WHERE tenant_id = $2),
+                     NOW() + INTERVAL '30 days', NOW(), NOW())",
+        )
+        .bind(invoice_id)
+        .bind("cov_nores")
+        .bind(format!("COV-NORES-{}", &invoice_id.to_string()[..8]))
+        .execute(&h.pool)
+        .await
+        .expect("seed the open renewal invoice");
+        let cycle_before: DateTime<Utc> = sqlx::query_scalar(
+            "SELECT billing_cycle_end FROM mollie_subscriptions WHERE tenant_id = $1",
+        )
+        .bind("cov_nores")
+        .fetch_one(&h.pool)
+        .await
+        .expect("cycle before");
+
+        // The provider-initiated charge lands as a webhook fact. It may
+        // settle the money (the obligation exists), but the canceled
+        // subscription is NEVER resurrected and the cycle never advances.
+        let settled = billing_service::plan_billing::reconcile_provider_renewal_payment(
+            &h.pool,
+            "tr_legacy_renew",
+            &subscription_id,
+            2_000,
+            "EUR",
+        )
+        .await
+        .expect("the obligation settles");
+        assert_eq!(settled, Some(invoice_id));
+        let invoice_status: String =
+            sqlx::query_scalar("SELECT status::text FROM invoices WHERE id = $1")
+                .bind(invoice_id)
+                .fetch_one(&h.pool)
+                .await
+                .expect("invoice status");
+        assert_eq!(
+            invoice_status, "paid",
+            "the money is settled against the obligation"
+        );
+
+        let (status, cycle_after): (String, DateTime<Utc>) = sqlx::query_as(
+            "SELECT status, billing_cycle_end FROM mollie_subscriptions WHERE tenant_id = $1",
+        )
+        .bind("cov_nores")
+        .fetch_one(&h.pool)
+        .await
+        .expect("subscription state");
+        assert_eq!(
+            status, "canceled",
+            "a provider fact never resurrects the subscription"
+        );
+        assert_eq!(
+            cycle_after, cycle_before,
+            "a provider fact never advances a canceled subscription's period"
+        );
+        let plan: String = sqlx::query_scalar("SELECT plan FROM tenants WHERE id = $1")
+            .bind("cov_nores")
+            .fetch_one(&h.pool)
+            .await
+            .expect("tenant plan");
+        assert_eq!(
+            plan, "starter",
+            "entitlement is untouched by the reconciliation"
+        );
+
+        // The reconciliation is audited as NOT applied.
+        let audits: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM audit_logs \
+         WHERE tenant_id = $1 AND action = 'billing.provider_renewal_reconciled' \
+           AND details->>'applied' = 'false'",
+        )
+        .bind("cov_nores")
+        .fetch_one(&h.pool)
+        .await
+        .expect("reconciliation audits");
+        assert_eq!(audits, 1);
+    }
+);
+
+db_test!(
+    provider_renewal_without_a_local_obligation_is_a_reconciliation_incident,
+    |h| {
+        seed_tenant(&h, "cov_incident", "starter").await;
+        // An ACTIVE subscription whose next period has NO invoice: the
+        // provider (a legacy schedule) charged anyway. The provider must
+        // never decide when the next charge exists: no invoice is summoned,
+        // no period advances, and the incident is typed + recorded.
+        let subscription_id = seed_due_subscription(
+            &h,
+            "cov_incident",
+            "starter",
+            "NOW() - INTERVAL '1 day'",
+            false,
+            "active",
+        )
+        .await;
+        let cycle_before: DateTime<Utc> = sqlx::query_scalar(
+            "SELECT billing_cycle_end FROM mollie_subscriptions WHERE tenant_id = $1",
+        )
+        .bind("cov_incident")
+        .fetch_one(&h.pool)
+        .await
+        .expect("cycle before");
+
+        let error = billing_service::plan_billing::reconcile_provider_renewal_payment(
+            &h.pool,
+            "tr_orphan_renew",
+            &subscription_id,
+            2_000,
+            "EUR",
+        )
+        .await
+        .expect_err("a provider-initiated charge with no obligation is an incident");
+        let message = error.to_string();
+        assert!(
+            message.contains("RECONCILIATION INCIDENT") && message.contains("NO local obligation"),
+            "{message}"
+        );
+
+        let invoices: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM invoices WHERE tenant_id = $1")
+                .bind("cov_incident")
+                .fetch_one(&h.pool)
+                .await
+                .expect("invoices");
+        assert_eq!(
+            invoices, 0,
+            "no invoice is created on the provider's authority"
+        );
+        let cycle_after: DateTime<Utc> = sqlx::query_scalar(
+            "SELECT billing_cycle_end FROM mollie_subscriptions WHERE tenant_id = $1",
+        )
+        .bind("cov_incident")
+        .fetch_one(&h.pool)
+        .await
+        .expect("cycle after");
+        assert_eq!(cycle_after, cycle_before, "the period never advances");
+        let (status, attempts): (String, i32) = sqlx::query_as(
+            "SELECT status, renewal_attempts FROM mollie_subscriptions WHERE tenant_id = $1",
+        )
+        .bind("cov_incident")
+        .fetch_one(&h.pool)
+        .await
+        .expect("subscription state");
+        assert_eq!(
+            status, "active",
+            "a provider fact alone never ends the subscription"
+        );
+        assert_eq!(attempts, 0);
+        let incidents: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM finance_incidents WHERE kind = 'provider_renewal_no_local_obligation'",
+        )
+        .fetch_one(&h.pool)
+        .await
+        .expect("incidents");
+        assert_eq!(incidents, 1, "the incident is recorded for the operator");
+    }
+);
+
+db_test!(
+    simultaneous_distinct_payment_activations_leave_one_live_subscription,
+    |h| {
+        let _mock = mock_mollie_api();
+        seed_tenant(&h, "cov_race", "free").await;
+        seed_billing_address(&h, "cov_race", "EE").await;
+
+        let pool_a = h.pool.clone();
+        let pool_b = h.pool.clone();
+        let (a, b) = tokio::join!(
+            race_activation(pool_a, "tr_race_a", "cov_race"),
+            race_activation(pool_b, "tr_race_b", "cov_race"),
+        );
+        a.expect("first activation");
+        b.expect("second activation");
+
+        // Both payments are real purchases: each carries exactly one invoice.
+        for payment in ["tr_race_a", "tr_race_b"] {
+            let invoices: i64 =
+                sqlx::query_scalar("SELECT count(*) FROM invoices WHERE mollie_payment_id = $1")
+                    .bind(payment)
+                    .fetch_one(&h.pool)
+                    .await
+                    .expect("invoice count");
+            assert_eq!(invoices, 1, "{payment} settled exactly once");
+        }
+
+        // The distributed invariant: ONE live LOCAL subscription for the
+        // tenant. The per-tenant billing lock serializes the two racing
+        // activations so the loser cannot clobber the winner's row; there
+        // are no provider objects at all (renewal is local).
+        let rows: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM mollie_subscriptions WHERE tenant_id = $1")
+                .bind("cov_race")
+                .fetch_one(&h.pool)
+                .await
+                .expect("subscription rows");
+        assert_eq!(
+            rows, 1,
+            "exactly one local subscription row survives the race"
+        );
+        let active_local: String = sqlx::query_scalar(
+        "SELECT mollie_subscription_id FROM mollie_subscriptions WHERE tenant_id = $1 AND status = 'active'",
+    )
+    .bind("cov_race")
+    .fetch_one(&h.pool)
+    .await
+    .expect("one active local row");
+        assert!(
+            active_local.starts_with("local_"),
+            "the surviving row is the locally adopted one: {active_local}"
+        );
+
+        // The retirement of the loser is journaled as an audit row per adoption.
+        let activations: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM audit_logs WHERE action = 'billing.subscription_activated' AND tenant_id = $1",
+    )
+    .bind("cov_race")
+    .fetch_one(&h.pool)
+    .await
+    .expect("activation audits");
+        assert_eq!(activations, 2);
+
+        cleanup_race(&h).await;
+    }
+);
 
 fn race_activation(
     pool: sqlx::PgPool,
@@ -6997,85 +7483,13 @@ fn race_activation(
 
 use futures::FutureExt as _;
 
-db_test!(
-    simultaneous_distinct_payment_activations_leave_one_live_subscription,
-    |h| {
-        let mock = mock_mollie_api();
-        seed_tenant(&h, "cov_race", "free").await;
-        seed_billing_address(&h, "cov_race", "EE").await;
-        // The subscriptions-create path is deliberately NOT registered: the mock
-        // mints a DISTINCT sub_ id per call, exactly what two racing webhooks
-        // with different payment ids produce at the real provider.
-
-        let pool_a = h.pool.clone();
-        let pool_b = h.pool.clone();
-        let (a, b) = tokio::join!(
-            race_activation(pool_a, "tr_race_a", "cov_race"),
-            race_activation(pool_b, "tr_race_b", "cov_race"),
-        );
-        a.expect("first activation");
-        b.expect("second activation");
-
-        // Both payments are real purchases: each carries exactly one invoice.
-        for payment in ["tr_race_a", "tr_race_b"] {
-            let invoices: i64 =
-                sqlx::query_scalar("SELECT count(*) FROM invoices WHERE mollie_payment_id = $1")
-                    .bind(payment)
-                    .fetch_one(&h.pool)
-                    .await
-                    .expect("invoice count");
-            assert_eq!(invoices, 1, "{payment} settled exactly once");
-        }
-
-        // The distributed invariant: ONE live provider subscription for the
-        // tenant. The mock minted two distinct objects; exactly one was retired
-        // (DELETEd at the provider), and it is the one the local row does NOT
-        // reference. Before the per-tenant serialization this test left BOTH
-        // provider objects live and charging.
-        let created = mock.created();
-        assert_eq!(
-            created.len(),
-            2,
-            "the mock must mint distinct provider subscriptions: {created:?}"
-        );
-        let deleted = mock.deleted();
-        let active_local: String = sqlx::query_scalar(
-        "SELECT mollie_subscription_id FROM mollie_subscriptions WHERE tenant_id = $1 AND status = 'active'",
-    )
-    .bind("cov_race")
-    .fetch_one(&h.pool)
-    .await
-    .expect("one active local row");
-        let live: Vec<&String> = created.iter().filter(|id| !deleted.contains(*id)).collect();
-        assert_eq!(
-        live.len(),
-        1,
-        "exactly one provider subscription may remain live: created={created:?} deleted={deleted:?}"
-    );
-        assert_eq!(
-            live[0].as_str(),
-            active_local,
-            "the surviving provider object is the locally adopted one"
-        );
-
-        // The retirement of the loser is journaled as an audit row per adoption.
-        let activations: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM audit_logs WHERE action = 'billing.subscription_activated' AND tenant_id = $1",
-    )
-    .bind("cov_race")
-    .fetch_one(&h.pool)
-    .await
-    .expect("activation audits");
-        assert_eq!(activations, 2);
-
-        cleanup_race(&h).await;
-    }
-);
-
 async fn cleanup_race(h: &Harness) {
     for statement in [
         "DELETE FROM invoice_payment_allocations WHERE tenant_id = $1",
         "DELETE FROM invoices WHERE tenant_id = $1",
+        "DELETE FROM payment_attempts WHERE tenant_id = $1",
+        "DELETE FROM payment_provider_events WHERE provider = 'mollie'",
+        "DELETE FROM payment_credentials WHERE tenant_id = $1",
         "DELETE FROM mollie_subscriptions WHERE tenant_id = $1",
         "DELETE FROM audit_logs WHERE tenant_id = $1",
         "DELETE FROM billing_addresses WHERE tenant_id = $1",
@@ -7088,166 +7502,6 @@ async fn cleanup_race(h: &Harness) {
             .ok();
     }
 }
-
-db_test!(
-    sweep_cancels_an_orphan_provider_subscription_and_raises_an_incident,
-    |h| {
-        let mock = mock_mollie_api();
-        seed_tenant(&h, "cov_orph", "starter").await;
-        sqlx::query(
-        "INSERT INTO mollie_subscriptions (tenant_id, mollie_subscription_id, plan, status, billing_interval, billing_cycle_start, billing_cycle_end, mollie_customer_id, mollie_mandate_id, mollie_sequence_type) VALUES ($1, 'sub_orph_local', 'starter', 'active', 'monthly', NOW(),      NOW() + INTERVAL '20 days', 'cst_cov_orph', 'mdt_cov_orph', 'recurring')",
-    )
-    .bind("cov_orph")
-    .execute(&h.pool)
-    .await
-    .expect("seed local subscription");
-        // The customer holds TWO live provider objects; the local table only
-        // knows the first. The list endpoint is the only way to see the orphan.
-        mock.route(
-            "/v2/customers/cst_cov_orph/subscriptions",
-            200,
-            serde_json::json!({
-                "_embedded": { "subscriptions": [
-                    { "id": "sub_orph_local", "customerId": "cst_cov_orph", "status": "active",
-                      "amount": { "currency": "EUR", "value": "20.00" }, "interval": "1 month" },
-                    { "id": "sub_orph_stray", "customerId": "cst_cov_orph", "status": "active",
-                      "amount": { "currency": "EUR", "value": "20.00" }, "interval": "1 month" }
-                ]}
-            })
-            .to_string(),
-        );
-        mock.route(
-            "/v2/customers/cst_cov_orph/subscriptions/sub_orph_local",
-            200,
-            serde_json::json!({
-                "id": "sub_orph_local", "customerId": "cst_cov_orph", "status": "active",
-                "amount": { "currency": "EUR", "value": "20.00" }, "interval": "1 month"
-            })
-            .to_string(),
-        );
-
-        let reconciled = billing_service::plan_billing::sweep_provider_subscription_state(&h.pool)
-            .await
-            .expect("sweep");
-        assert!(reconciled >= 1, "the orphan is canceled: {reconciled}");
-        assert!(
-            mock.deleted().contains("sub_orph_stray"),
-            "the orphan was DELETEd at the provider: {:?}",
-            mock.deleted()
-        );
-        let incidents: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM finance_incidents  WHERE kind = 'mollie_orphan_subscription_canceled' AND detail->>'orphanSubscriptionId' = 'sub_orph_stray'",
-    )
-    .fetch_one(&h.pool)
-    .await
-    .expect("incident count");
-        assert_eq!(incidents, 1, "the orphan is recorded for the operator");
-        // The legitimate subscription is untouched.
-        let status: String = sqlx::query_scalar(
-        "SELECT status FROM mollie_subscriptions WHERE mollie_subscription_id = 'sub_orph_local'",
-    )
-    .fetch_one(&h.pool)
-    .await
-    .expect("local row");
-        assert_eq!(status, "active");
-
-        cleanup_orph(&h).await;
-    }
-);
-
-async fn cleanup_orph(h: &Harness) {
-    for statement in [
-        "DELETE FROM finance_incidents WHERE tenant_id = $1",
-        "DELETE FROM mollie_subscriptions WHERE tenant_id = $1",
-        "DELETE FROM audit_logs WHERE tenant_id = $1",
-        "DELETE FROM tenants WHERE id = $1",
-    ] {
-        sqlx::query(statement)
-            .bind("cov_orph")
-            .execute(&h.pool)
-            .await
-            .ok();
-    }
-}
-
-db_test!(
-    active_subscription_amount_drift_is_reported_and_deduplicated,
-    |h| {
-        let mock = mock_mollie_api();
-        seed_tenant(&h, "cov_drift", "starter").await;
-        sqlx::query(
-        "INSERT INTO mollie_subscriptions (tenant_id, mollie_subscription_id, plan, status, billing_interval, billing_cycle_start, billing_cycle_end, mollie_customer_id, mollie_mandate_id, mollie_sequence_type) VALUES ($1, 'sub_drift_1', 'starter', 'active', 'monthly', NOW(),      NOW() + INTERVAL '20 days', 'cst_cov_drift', 'mdt_cov_drift', 'recurring')",
-    )
-    .bind("cov_drift")
-    .execute(&h.pool)
-    .await
-    .expect("seed subscription");
-        // The provider charges 19.00 while the catalog expects 20.00, and the
-        // subscription IS active, the exact case the old check skipped.
-        mock.route(
-            "/v2/customers/cst_cov_drift/subscriptions/sub_drift_1",
-            200,
-            serde_json::json!({
-                "id": "sub_drift_1", "customerId": "cst_cov_drift", "status": "active",
-                "amount": { "currency": "EUR", "value": "19.00" }, "interval": "1 month"
-            })
-            .to_string(),
-        );
-
-        billing_service::plan_billing::sweep_provider_subscription_state(&h.pool)
-            .await
-            .expect("first sweep");
-        billing_service::plan_billing::sweep_provider_subscription_state(&h.pool)
-            .await
-            .expect("second sweep");
-
-        let incidents: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM finance_incidents WHERE kind = 'mollie_subscription_amount_drift'",
-    )
-    .fetch_one(&h.pool)
-    .await
-    .expect("incident count");
-        assert_eq!(
-            incidents, 1,
-            "one open incident per drifted subscription, not one per hourly sweep"
-        );
-        // The customer paid; entitlement is untouched, the operator decides.
-        let plan: String = sqlx::query_scalar("SELECT plan FROM tenants WHERE id = $1")
-            .bind("cov_drift")
-            .fetch_one(&h.pool)
-            .await
-            .expect("tenant plan");
-        assert_eq!(plan, "starter");
-        let status: String = sqlx::query_scalar(
-            "SELECT status FROM mollie_subscriptions WHERE mollie_subscription_id = 'sub_drift_1'",
-        )
-        .fetch_one(&h.pool)
-        .await
-        .expect("row status");
-        assert_eq!(status, "active");
-
-        sqlx::query("DELETE FROM finance_incidents WHERE tenant_id = $1")
-            .bind("cov_drift")
-            .execute(&h.pool)
-            .await
-            .ok();
-        sqlx::query("DELETE FROM mollie_subscriptions WHERE tenant_id = $1")
-            .bind("cov_drift")
-            .execute(&h.pool)
-            .await
-            .ok();
-        sqlx::query("DELETE FROM audit_logs WHERE tenant_id = $1")
-            .bind("cov_drift")
-            .execute(&h.pool)
-            .await
-            .ok();
-        sqlx::query("DELETE FROM tenants WHERE id = $1")
-            .bind("cov_drift")
-            .execute(&h.pool)
-            .await
-            .ok();
-    }
-);
 
 // ---------------------------------------------------------------------------
 // Migration 279: payment provider neutrality - the staged neutral ledger
@@ -7267,10 +7521,32 @@ async fn replay_migration_279(h: &Harness) {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(MIGRATION_279);
     let sql = std::fs::read_to_string(&path)
         .unwrap_or_else(|error| panic!("read migration 279: {error}"));
-    sqlx::raw_sql(sql.as_str())
-        .execute(&h.pool)
-        .await
-        .expect("migration 279 replay (guarded, idempotent)");
+    match sqlx::raw_sql(sql.as_str()).execute(&h.pool).await {
+        Ok(_) => {}
+        Err(error)
+            if error
+                .as_database_error()
+                .map(|db| {
+                    db.code().as_deref() == Some("42703")
+                        && db.message().contains("provider_schedule_id")
+                })
+                .unwrap_or(false) =>
+        {
+            // Migration 282 renamed subscription_payment_bindings'
+            // provider_schedule_id to provider_contract_id; the frozen 279
+            // file (checksums, never edited) names the pre-rename column in
+            // its binding-backfill statements, so those statements cannot
+            // re-run on the post-282 schema. The failed batch applied
+            // nothing; replay with the 282 rename applied — every other
+            // 279 guard stays literally proven.
+            let renamed = sql.replace("provider_schedule_id", "provider_contract_id");
+            sqlx::raw_sql(renamed.as_str())
+                .execute(&h.pool)
+                .await
+                .expect("migration 279 replay (guarded, idempotent, 282 rename applied)");
+        }
+        Err(error) => panic!("migration 279 replay (guarded, idempotent): {error}"),
+    }
 }
 
 db_test!(
@@ -7409,7 +7685,7 @@ db_test!(
 
         let bindings: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM subscription_payment_bindings \
-             WHERE provider_schedule_id = 'sub_cov_279' AND provider = 'mollie'",
+             WHERE provider_contract_id = 'sub_cov_279' AND provider = 'mollie'",
         )
         .fetch_one(&h.pool)
         .await
@@ -7470,7 +7746,7 @@ db_test!(
                 (SELECT COUNT(*) FROM payment_provider_events \
                   WHERE provider_event_id = 'tr_cov_279:paid:1'), \
                 (SELECT COUNT(*) FROM subscription_payment_bindings \
-                  WHERE provider_schedule_id = 'sub_cov_279')",
+                  WHERE provider_contract_id = 'sub_cov_279')",
         )
         .fetch_one(&h.pool)
         .await
@@ -7551,14 +7827,40 @@ db_test!(
         let ledger_columns: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM information_schema.columns \
              WHERE table_schema = 'public' AND table_name = 'payment_attempts' \
-               AND column_name IN ('idempotency_key', 'obligation_ref')",
+               AND column_name IN ('idempotency_key', 'obligation_ref', 'attempt_no')",
         )
         .fetch_one(&h.pool)
         .await
         .expect("attempts column probe");
         assert_eq!(
-            ledger_columns, 2,
-            "idempotency_key and obligation_ref exist"
+            ledger_columns, 3,
+            "idempotency_key, obligation_ref and attempt_no exist"
+        );
+        // Migration 282: the strict exact-amount gate's escape flag and the
+        // `unresolved` attempt state are legal schema.
+        let state_check: String = sqlx::query_scalar(
+            "SELECT pg_get_constraintdef(oid) FROM pg_constraint \
+             WHERE conname = 'payment_attempts_state_check'",
+        )
+        .fetch_one(&h.pool)
+        .await
+        .expect("attempts state check");
+        assert!(state_check.contains("unresolved"), "{state_check}");
+        let allow_partial: String = sqlx::query_scalar(
+            "SELECT is_nullable || '/' || column_default FROM information_schema.columns \
+             WHERE table_schema = 'public' AND table_name = 'invoices' \
+               AND column_name = 'allow_partial'",
+        )
+        .fetch_one(&h.pool)
+        .await
+        .expect("allow_partial column probe");
+        assert!(
+            allow_partial.starts_with("NO/"),
+            "allow_partial is NOT NULL with a false default: {allow_partial}"
+        );
+        assert!(
+            allow_partial.contains("false"),
+            "allow_partial defaults to false (the strict world): {allow_partial}"
         );
         let idem_index: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM pg_indexes
@@ -7760,7 +8062,10 @@ db_test!(
             other => panic!("currency mismatches must be refused, got {other:?}"),
         }
 
-        // 5. A failed claim may be retried; an open one may not.
+        // 5. Attempts are IMMUTABLE (migration 282): a closed attempt is
+        //    never reopened under its own key — the dunning retry opens a
+        //    NEW row with attempt_no = 2 and a distinct key — while an
+        //    open one refuses a second charge outright.
         let retry_key = format!("autopay_{}", invoice_id.simple());
         assert!(claim_attempt(
             &h.pool,
@@ -7784,7 +8089,7 @@ db_test!(
             "a failed claim is closed"
         );
         assert!(
-            claim_attempt(
+            !claim_attempt(
                 &h.pool,
                 "mollie",
                 &retry_key,
@@ -7795,25 +8100,123 @@ db_test!(
                 "EUR"
             )
             .await
-            .expect("retry claim"),
-            "the retry ladder may re-open a FAILED claim"
+            .expect("same-key retry"),
+            "a closed attempt is immutable: the same key never reopens it"
+        );
+        // The obligation's FIRST attempt (section 3) already succeeded, so
+        // the dunning gate refuses a second charge outright.
+        assert!(
+            billing_service::payments::engine::claim_next_attempt(
+                &h.pool,
+                "mollie",
+                tenant,
+                &obligation,
+                "autopay",
+                500,
+                "EUR",
+            )
+            .await
+            .expect("settled-obligation dunning probe")
+            .is_none(),
+            "a settled obligation's dunning ladder is closed (no second charge)"
+        );
+
+        // 5b. On a fresh obligation the dunning ladder opens a NEW
+        //     immutable row: attempt_no = max+1, a distinct
+        //     payment:{ref}:{n} key, the closed row untouched.
+        let invoice2_id = uuid::Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO invoices (id, tenant_id, amount, currency, status, invoice_number, \
+                                   subtotal, vat_total, total, issued_at, due_at, \
+                                   period_start, period_end, created_at, updated_at) \
+             VALUES ($1, $2, 900, 'EUR', 'pending', 'IVCOV281B-' || gen_random_uuid()::text, \
+                     900, 0, 900, NOW(), NOW(), NOW(), NOW(), NOW(), NOW())",
+        )
+        .bind(invoice2_id)
+        .bind(tenant)
+        .execute(&h.pool)
+        .await
+        .expect("seed second invoice");
+        let obligation2 = format!("invoice:{invoice2_id}");
+        let key_a = format!("autopay_{}", invoice2_id.simple());
+        assert!(claim_attempt(
+            &h.pool,
+            "mollie",
+            &key_a,
+            tenant,
+            &obligation2,
+            "autopay",
+            500,
+            "EUR"
+        )
+        .await
+        .expect("claim attempt 1"));
+        fail_claim(&h.pool, "mollie", &key_a)
+            .await
+            .expect("fail it");
+        let closed: (String, i64) = sqlx::query_as(
+            "SELECT state, attempt_no::bigint FROM payment_attempts \
+             WHERE provider = 'mollie' AND idempotency_key = $1",
+        )
+        .bind(&key_a)
+        .fetch_one(&h.pool)
+        .await
+        .expect("closed attempt row");
+        assert_eq!(
+            closed.0, "failed",
+            "the closed attempt is definitively failed"
+        );
+        let (attempt_no, dunning) = billing_service::payments::engine::claim_next_attempt(
+            &h.pool,
+            "mollie",
+            tenant,
+            &obligation2,
+            "autopay",
+            500,
+            "EUR",
+        )
+        .await
+        .expect("dunning claim")
+        .expect("the dunning ladder opens the next attempt");
+        assert_eq!(
+            attempt_no,
+            closed.1 + 1,
+            "the retry is the NEXT attempt in the obligation's chain"
+        );
+        assert_eq!(
+            dunning,
+            billing_service::payments::engine::dunning_key(&obligation2, attempt_no),
+            "the dunning key follows the shared payment:{{ref}}:{{n}} scheme"
+        );
+        assert_ne!(&dunning, &key_a, "the retry carries a distinct key");
+        let attempt_one_after: (String, i64) = sqlx::query_as(
+            "SELECT state, attempt_no::bigint FROM payment_attempts \
+             WHERE provider = 'mollie' AND idempotency_key = $1",
+        )
+        .bind(&key_a)
+        .fetch_one(&h.pool)
+        .await
+        .expect("attempt 1 row after the dunning claim");
+        assert_eq!(
+            closed, attempt_one_after,
+            "the closed attempt's immutable row is untouched by the retry"
         );
         confirm_attempt(
             &h.pool,
             "mollie",
-            &retry_key,
+            &dunning,
             "tr_cov_281_autopay",
             PaymentState::Pending,
         )
         .await
-        .expect("confirm");
+        .expect("confirm the dunning attempt");
         assert!(
             !claim_attempt(
                 &h.pool,
                 "mollie",
-                &retry_key,
+                &dunning,
                 tenant,
-                &obligation,
+                &obligation2,
                 "autopay",
                 500,
                 "EUR"
@@ -7852,7 +8255,8 @@ db_test!(
 );
 
 // ---------------------------------------------------------------------------
-// Conformance (audit step 9): MollieProvider runs the shared twelve-arm
+// Conformance (audit step 9, expanded in the eighth pass): MollieProvider
+// runs the shared seventeen-arm
 // matrix against a loopback wire stub
 // ---------------------------------------------------------------------------
 
@@ -7896,7 +8300,17 @@ async fn conf_stub_handler(
         )
             .into_response();
     }
-    let routed = state.responses.lock().expect("lock").get(&path).cloned();
+    // Method-keyed routes ("POST /v2/payments") take precedence; bare-path
+    // routes match any method (the historical keying) — this lets one path
+    // answer differently for a charge POST and a listing GET.
+    let method_key = format!("{method} {path}");
+    let routed = {
+        let responses = state.responses.lock().expect("lock");
+        responses
+            .get(&method_key)
+            .or_else(|| responses.get(&path))
+            .cloned()
+    };
     if let Some((status, body)) = routed {
         let body = body.replace("{seq}", &n.to_string());
         return (
@@ -7969,18 +8383,20 @@ impl billing_service::payments::conformance::ConformanceScripting for MollieConf
         });
         let mut routes = self.stub.responses.lock().expect("lock");
         match ctx.arm {
-            4 | 11 => {
+            6 | 16 => {
                 // The authenticated fetch answers with the paid object.
                 routes.insert(
                     format!("/v2/payments/{}", ctx.provider_payment_hint),
                     (200, paid_doc.to_string()),
                 );
             }
-            6 => {
+            8 => {
                 // The charge's response is LOST (a 503 maps to the neutral
                 // Unavailable); the provider's own record shows it paid.
+                // The method key overrides arm 5's POST route (routes
+                // persist across arms of the shared stub).
                 routes.insert(
-                    "/v2/payments".to_string(),
+                    "POST /v2/payments".to_string(),
                     (503, r#"{"title":"upstream down"}"#.to_string()),
                 );
                 routes.insert(
@@ -7988,19 +8404,44 @@ impl billing_service::payments::conformance::ConformanceScripting for MollieConf
                     (200, paid_doc.to_string()),
                 );
             }
-            8 => {
+            9 => {
+                // The charge's response is LOST and the provider-side
+                // listing is FULL (250 payments, none carrying our
+                // metadata key): the search cannot prove absence, so the
+                // stale-claim reconcile must park the attempt `unresolved`.
+                routes.insert(
+                    "POST /v2/payments".to_string(),
+                    (503, r#"{"title":"upstream down"}"#.to_string()),
+                );
+                let items: Vec<serde_json::Value> = (0..250)
+                    .map(|index| {
+                        serde_json::json!({
+                            "id": format!("tr_conf9_{index}"),
+                            "status": "open",
+                            "amount": { "currency": ctx.currency, "value": "1.00" },
+                            "metadata": { "reference": "somebody-else" },
+                        })
+                    })
+                    .collect();
+                let page = serde_json::json!({ "_embedded": { "payments": items } });
+                routes.insert("GET /v2/payments".to_string(), (200, page.to_string()));
+            }
+            5 => {
                 let failed_doc = serde_json::json!({
                     "id": "{seq}",
                     "status": "failed",
                     "amount": { "currency": ctx.currency, "value": amount },
                 });
-                routes.insert("/v2/payments".to_string(), (200, failed_doc.to_string()));
+                routes.insert(
+                    "POST /v2/payments".to_string(),
+                    (200, failed_doc.to_string()),
+                );
             }
-            10 => {
+            12 => {
                 // POST /v2/payments/{id}/refunds: the handler echoes the
                 // requested amount and mints distinct ids.
             }
-            12 => {
+            17 => {
                 let settlements = serde_json::json!({
                     "_embedded": { "settlements": [{
                         "id": "stl_conf_1",

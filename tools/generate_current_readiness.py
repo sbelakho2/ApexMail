@@ -25,9 +25,12 @@ regression in the tree flips the row on the next generation.
                            counted against the CI-invoked set scanned from
                            ci/stages/*.sh by tools/check_tool_selftests.py
                            (its importable ci_invoked_tools(), not a copy)
-  * audit verdicts ....... the nine pinned rules in VERDICT_RULES below.
+  * audit verdicts ....... the pinned rules in VERDICT_RULES below.
                            Status is exactly one of LANDED (pinned
                            evidence exists and its lane rows resolve),
+                           PARTIAL (evidence exists but the rule's
+                           open_debt_file still carries open rows —
+                           scaffold never reads as closure),
                            OWNER-GATED (evidence exists and the pinned
                            owner gate names the env or credential the
                            execution needs) or OPEN (a pinned file, needle
@@ -49,6 +52,7 @@ from __future__ import annotations
 
 import datetime as dt
 import importlib.util
+import re
 import shutil
 import sys
 import tempfile
@@ -63,6 +67,8 @@ INVARIANTS_REL = "docs/invariants.toml"
 EXPECTATIONS_REL = "ci/test-expectations.toml"
 MIGRATIONS_REL = "services/mail-server/migrations"
 TOOL_MIGRATIONS_REL = "tools/migrations"
+_PATHISH = re.compile(r"[\w./-]+\.(?:rs|py|sql|sh|ya?ml|toml|md|json|js|ts)\b"
+                      r"|[\w-]+/[\w-]+")
 
 HEADER = """# ApexMail current readiness (generated)
 
@@ -99,8 +105,13 @@ that no CI run can supply. Each names its gate:
 # ci/required-lanes.txt. "owner_gate" is (file, env-or-credential needle):
 # when every other assertion holds and the needle is present, the status
 # is OWNER-GATED named after the needle; a vanished needle means the
-# mechanism changed and the row goes OPEN. Nothing here is prose that
-# could drift: a status always falls out of the tree plus this table.
+# mechanism changed and the row goes OPEN. "open_debt_file" is
+# (file, row-label): while that file exists with at least one open row
+# (any non-blank line that is not a comment/heading/marker), the status is
+# PARTIAL no matter what the needles prove — scaffold evidence alone must
+# never read as LANDED while the tree itself records unfinished work.
+# Nothing here is prose that could drift: a status always falls out of the
+# tree plus this table.
 VERDICT_RULES: list[dict] = [
     {
         "id": "auth SLI",
@@ -183,15 +194,24 @@ VERDICT_RULES: list[dict] = [
         "id": "standby",
         "files": [
             "deploy/docker-compose.standby.yml",
+            "deploy/docker-compose.standby-remote.yml",
             "deploy/hardening/scripts/pg-standby-bootstrap.sh",
             "deploy/hardening/scripts/pg-standby-promote.sh",
+            "deploy/hardening/scripts/pg-replication-heartbeat.sh",
+            "deploy/postgres-exporter-queries.yaml",
             "docs/operations/warm-standby.md",
         ],
         "needles": [
             ("deploy/hardening/scripts/pg-standby-promote.sh", "--self-test"),
+            ("deploy/hardening/scripts/pg-standby-promote.sh",
+             "replication_heartbeat"),
+            ("deploy/hardening/scripts/pg-standby-promote.sh",
+             "--accept-unknown-loss"),
+            ("deploy/alerting-rules.yml",
+             "apexmail_pg_replication_slots_retained_wal_bytes"),
         ],
-        "lanes": [],
-        "owner_gate": ("deploy/docker-compose.standby.yml",
+        "lanes": ["validate.standby-contract"],
+        "owner_gate": ("deploy/docker-compose.standby-remote.yml",
                        "STANDBY_PRIMARY_HOST"),
     },
     {
@@ -203,6 +223,8 @@ VERDICT_RULES: list[dict] = [
         "needles": [
             ("services/mail-server/crates/api-server/src/routes/onboarding.rs",
              "LEGAL: [(OnboardingState, OnboardingEvent, OnboardingState); 17]"),
+            ("services/mail-server/crates/api-server/src/routes/admin/tenants.rs",
+             "advance_onboarding_in_tx"),
             ("services/mail-server/crates/api-server/src/app.rs",
              'nest("/v1/onboarding"'),
         ],
@@ -213,33 +235,49 @@ VERDICT_RULES: list[dict] = [
         "id": "DT executor",
         "files": [
             "services/mail-server/migrations/278_dedicated_host_execution.sql",
+            "services/mail-server/migrations/280_dedicated_action_lifecycle.sql",
+            "services/mail-server/migrations/283_dt_create_claim.sql",
             "services/mail-server/crates/enterprise/src/dedicated_exec.rs",
+            "services/mail-server/crates/enterprise/tests/fixtures/hetzner_contract.json",
         ],
         "needles": [
             ("services/mail-server/crates/enterprise/src/dedicated_exec.rs",
              "DT_PROVISIONING_ENABLED"),
             ("services/mail-server/crates/enterprise/src/dedicated_exec.rs",
-             "HETZNER_API_TOKEN"),
+             "create_claim_token"),
+            ("services/mail-server/crates/enterprise/src/dedicated_exec.rs",
+             "label_selector"),
             ("services/mail-server/crates/enterprise/src/routes.rs",
              "/deployments/:id/provision"),
         ],
         "lanes": ["test.workspace-suite"],
-        "owner_gate": None,
+        "owner_gate": ("services/mail-server/crates/enterprise/src/dedicated_exec.rs",
+                       "HETZNER_API_TOKEN"),
     },
     {
         "id": "billing neutrality",
         "files": [
-            "apps/marketing-zola/data/pricing.json",
-            "docs/pricing.md",
-            "tools/validate_pricing_drift.py",
+            "services/mail-server/crates/billing-service/src/payments/mod.rs",
+            "services/mail-server/crates/billing-service/src/payments/engine.rs",
+            "services/mail-server/crates/billing-service/src/payments/conformance.rs",
+            "services/mail-server/crates/billing-service/src/payments/mollie_provider.rs",
+            "services/mail-server/migrations/279_payment_provider_neutrality.sql",
+            "services/mail-server/migrations/281_payment_execution_ledger.sql",
+            "tools/check_payment_neutrality.py",
         ],
         "needles": [
-            ("apps/marketing-zola/data/pricing.json", "EUR contract pricing"),
-            ("docs/pricing.md", "EUR contract pricing"),
-            ("tools/validate_pricing_drift.py", "EUR contract pricing"),
+            ("tools/check_payment_neutrality.py", "MARKERS: list"),
+            ("tools/check_payment_neutrality.py", "def is_allowed_path"),
+            ("services/mail-server/crates/billing-service/src/payments/mod.rs",
+             "trait PaymentProvider"),
+            ("services/mail-server/crates/billing-service/src/payments/engine.rs",
+             "settle_verified"),
         ],
-        "lanes": ["validate.pricing-drift"],
+        "lanes": ["validate.payment-neutrality"],
         "owner_gate": None,
+        "open_debt_file": ("services/mail-server/crates/billing-service/src/"
+                           "payments/NEUTRALITY_DEBT.md",
+                           "open neutrality-debt row"),
     },
 ]
 
@@ -275,6 +313,27 @@ def ordered_lane_rows(root: Path) -> list[str]:
     return rows
 
 
+def open_debt_rows(path: Path) -> list[str]:
+    """Open rows in a debt ledger: non-blank lines that are not headings,
+    comments, table rules or RESOLVED/lint-only markers, and — for table
+    rows — carry a path-like token (debt rows point at a location; table
+    headers and prose do not). A row the ledger itself marks closed does
+    not count."""
+    rows = []
+    for line in path.read_text(errors="replace").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith(("#", "|-", "|--", "```")):
+            continue
+        if stripped.startswith(("| id", "| ---", "|---")):
+            continue
+        if "RESOLVED" in stripped.upper() or "[lint-only]" in stripped:
+            continue
+        if stripped.startswith(("|", "-", "*")):
+            if _PATHISH.search(stripped):
+                rows.append(stripped)
+    return rows
+
+
 def evaluate_rule(rule: dict, root: Path, lanes: set[str]) -> tuple[str, str]:
     """Exactly one status per rule, derived from the tree plus the ledger.
     Returns (status, derivation) where derivation names the evidence."""
@@ -292,6 +351,16 @@ def evaluate_rule(rule: dict, root: Path, lanes: set[str]) -> tuple[str, str]:
             failures.append(f"lane row {lane} not in ci/required-lanes.txt")
     if failures:
         return "OPEN", "; ".join(failures)
+    debt = rule.get("open_debt_file")
+    if debt:
+        debt_rel, debt_label = debt
+        debt_path = root / debt_rel
+        if debt_path.is_file():
+            rows = open_debt_rows(debt_path)
+            if rows:
+                return ("PARTIAL",
+                        f"scaffold evidence holds; {debt_rel} still carries "
+                        f"{len(rows)} open row(s) — e.g. {rows[0][:80]}")
     gate = rule["owner_gate"]
     if gate:
         rel, needle = gate
@@ -479,10 +548,18 @@ def self_test() -> int:
                    for rel, _ in rule["needles"]}
         pinned |= {rule["owner_gate"][0] for rule in VERDICT_RULES
                    if rule["owner_gate"]}
+        pinned |= {rule["open_debt_file"][0] for rule in VERDICT_RULES
+                   if rule.get("open_debt_file")}
         for rel in sorted(pinned):
             target = root / rel
             target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(ROOT / rel, target)
+            if (ROOT / rel).is_file():
+                shutil.copy2(ROOT / rel, target)
+            else:
+                # A pinned file the live tree does not have yet (a lane in
+                # flight): materialize an empty target so the copy mirrors
+                # reality and the rule derives OPEN naming the file.
+                target.write_text("")
 
         waivers, _ = _tool_modules(root)
         lanes = waivers.load_lanes(root / LANES_REL)
@@ -495,6 +572,40 @@ def self_test() -> int:
                         "intact copy")
         if before.get("canary lane") != "LANDED":
             return miss("canary lane must derive LANDED on the intact copy")
+        dt_status, dt_derivation = next(
+            (s, d) for vid, s, d in verdict_rows(root, lanes)
+            if vid == "DT executor")
+        if dt_status == "OWNER-GATED":
+            pass  # complete tree: the token names the live-provisioning gate
+        elif dt_status == "OPEN":
+            # A tree mid-lane (a pinned DT file not yet landed) must derive
+            # OPEN naming the actual missing evidence, never a fabrication.
+            if "missing file" not in dt_derivation \
+                    and "not in" not in dt_derivation:
+                return miss(f"DT executor OPEN must name its missing "
+                            f"evidence, got {dt_derivation!r}")
+        else:
+            return miss(f"DT executor must derive OWNER-GATED or (mid-lane) "
+                        f"OPEN on the intact copy, got {dt_status!r}")
+
+        # The audit's core truth rule: neutrality scaffold evidence alone
+        # must NOT read LANDED while the tree carries open neutrality debt.
+        debt_rel = ("services/mail-server/crates/billing-service/src/"
+                    "payments/NEUTRALITY_DEBT.md")
+        neutrality = dict.fromkeys([])
+        for vid, status, derivation in verdict_rows(root, lanes):
+            if vid == "billing neutrality":
+                neutrality = (status, derivation)
+        if not neutrality:
+            return miss("billing neutrality row must exist")
+        if neutrality[0] not in ("PARTIAL", "LANDED"):
+            return miss(f"billing neutrality must derive PARTIAL or LANDED "
+                        f"on the intact copy, got {neutrality!r}")
+        debt_path = root / debt_rel
+        if debt_path.is_file() and open_debt_rows(debt_path):
+            if neutrality[0] != "PARTIAL":
+                return miss(f"open neutrality-debt rows exist but the row "
+                            f"reads {neutrality[0]!r}, not PARTIAL")
 
         out = root / OUTPUT_REL
         out.parent.mkdir(parents=True, exist_ok=True)

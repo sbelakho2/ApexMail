@@ -62,6 +62,32 @@ services:
       SMTP_PASSWORD: ""
       DKIM_ENABLED: "true"
 
+  # ── Exporter scrape proof (eighth audit, DR wave: "promtool green is not
+  # enough") ────────────────────────────────────────────────────────────────
+  # The SAME pinned postgres-exporter image as production (the base service
+  # pins v0.15.0) with the repo-owned custom queries mounted, activated for
+  # the lane (the base service is monitoring-profile-gated) and published on
+  # loopback with an ephemeral host port so tools/run_canary_lane.sh can
+  # curl :9187/metrics and PROVE the apexmail_pg_replication_slots_* metric
+  # families exist — the evidence that PostgresReplicationSlotRetainedWALHigh
+  # / PostgresReplicationSlotInactive can actually fire (the pinned exporter
+  # never emits pg_replication_slots_*; see deploy/postgres-exporter-queries.yaml).
+  postgres-exporter:
+    profiles: !override []
+    # The exporter exits on its STARTUP connection check (v0.15.0 fails
+    # fast when the database is not accepting connections yet); without
+    # this gate it race-loops against the booting postgres in `up --wait`
+    # and can sit in restart backoff when the scrape proof runs.
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command:
+      - --extend.query-path=/etc/postgres-exporter/queries.yaml
+    volumes:
+      - ./deploy/postgres-exporter-queries.yaml:/etc/postgres-exporter/queries.yaml:ro
+    ports:
+      - "127.0.0.1::9187"
+
   # The one-shot schema migration for the canary stack (the dev compose has
   # no migrator service; the canary database starts EMPTY). Mirrors the prod
   # migrate-profile shape but BUILDS the migrator target from this tree and

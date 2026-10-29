@@ -1,0 +1,62 @@
+# =============================================================================
+# deploy/postgres-exporter-queries.yaml — repo-owned custom exporter queries
+# =============================================================================
+# Eighth external audit (DR wave): the pinned prometheuscommunity/postgres-
+# exporter v0.15.0 NEVER emits pg_replication_slots_pg_wal_size /
+# pg_replication_slots_active (the stock collector dropped the replication-
+# slots collector), so the PostgresReplicationSlotRetainedWALHigh /
+# PostgresReplicationSlotInactive alerts in deploy/alerting-rules.yml were
+# dead — promtool-green on expressions that can never fire. These custom
+# queries emit the slot facts under apexmail_pg_replication_slots_* names WE
+# control (the prefix makes the provenance obvious and keeps the metric
+# family stable across exporter upgrades).
+#
+# Loaded via the exporter's documented `--extend.query-path` mechanism
+# (mounted by docker-compose.prod.yml's postgres-exporter service and by
+# deploy/docker-compose.canary.yml's scrape-proof copy). COLLECTOR RESTART
+# BEHAVIOR (documented exporter semantics): custom queries are read once at
+# exporter STARTUP — editing this file requires a container restart to take
+# effect; the queries themselves re-execute on every scrape.
+#
+# Emitted metrics (per replication slot):
+#   apexmail_pg_replication_slots_active{slot_name,slot_type,wal_status}
+#     — 1 when a WAL sender currently uses the slot, 0 when it is idle
+#       (standby disconnected, restarting, or abandoned);
+#   apexmail_pg_replication_slots_retained_wal_bytes{...}
+#     — pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn): the WAL the
+#       slot forces the primary to retain (disk pressure + the
+#       max_slot_wal_keep_size bound that, when tripped, invalidates the
+#       slot).
+# With NO slots in the cluster the query returns no rows and the metric
+# family does not appear — the canary lane's scrape proof therefore creates
+# a physical slot first (tools/run_canary_lane.sh).
+# =============================================================================
+
+apexmail_pg_replication_slots:
+  # pg_replication_slots is cluster-wide and readable from any database; a
+  # never-started slot carries a NULL restart_lsn — retained bytes coalesce
+  # to 0 (nothing confirmed to retain yet) and wal_status to 'unknown' so
+  # the LABEL stays present on every sample.
+  query: |
+    SELECT slot_name,
+           slot_type,
+           CASE WHEN active THEN 1 ELSE 0 END AS active,
+           COALESCE(pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn), 0)::bigint AS retained_wal_bytes,
+           COALESCE(wal_status, 'unknown') AS wal_status
+    FROM pg_replication_slots
+  metrics:
+    - slot_name:
+        usage: "LABEL"
+        description: "Replication slot name"
+    - slot_type:
+        usage: "LABEL"
+        description: "Replication slot type (physical | logical)"
+    - active:
+        usage: "GAUGE"
+        description: "1 when a WAL sender currently uses the slot, 0 when it is idle (standby disconnected or abandoned)"
+    - retained_wal_bytes:
+        usage: "GAUGE"
+        description: "WAL bytes the slot forces the primary to retain: pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn)"
+    - wal_status:
+        usage: "LABEL"
+        description: "Slot WAL retention status (reserved | extended | unreserved | lost)"

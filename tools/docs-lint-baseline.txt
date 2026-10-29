@@ -267,14 +267,18 @@
 15 docs/architecture/sales-autopilot.md
 4 docs/compliance/README.md
 9 docs/compliance/acceptable-use-policy.md
-13 docs/compliance/access-control.md
+7 docs/compliance/access-control.md
+0 docs/compliance/asset-inventory.md
 7 docs/compliance/baa-template.md
-10 docs/compliance/change-management.md
+4 docs/compliance/change-management.md
 8 docs/compliance/data-retention.md
 29 docs/compliance/dsar-rate-limiting.md
 22 docs/compliance/gdpr-compliance.md
 7 docs/compliance/incident-response.md
-13 docs/compliance/vulnerability-management.md
+0 docs/compliance/risk-register.md
+0 docs/compliance/statement-of-applicability.md
+0 docs/compliance/vendor-register.md
+12 docs/compliance/vulnerability-management.md
 32 docs/ddos_analysis_report.md
 0 docs/demos/demo-script.md
 11 docs/deployment/HETZNER_SIMULATION_CHECKLIST.md
@@ -350,8 +354,9 @@
 14 docs/operations/admin-2fa-enforcement.md
 5 docs/operations/backup-verification.md
 6 docs/operations/cache-warming.md
+12 docs/operations/dedicated-tenant-provisioning.md
 20 docs/operations/disaster-recovery-testing.md
-16 docs/operations/disaster-recovery.md
+15 docs/operations/disaster-recovery.md
 0 docs/operations/draft-review.md
 8 docs/operations/emergency-key-revocation.md
 7 docs/operations/encryption-at-rest.md
@@ -372,6 +377,7 @@
 20 docs/operations/secret-rotation.md
 4 docs/operations/self-hosted-ci.md
 16 docs/operations/slo-management.md
+0 docs/operations/warm-standby.md
 7 docs/operations/warmup-schedule.md
 1 docs/ops/alert-runbooks.md
 1 docs/pricing-authority.md
@@ -380,7 +386,7 @@
 96 docs/recovered-files-analysis.md
 94 docs/security/Security_Systems.md
 14 docs/security/advanced-analytics.md
-31 docs/security/compliance.md
+30 docs/security/compliance.md
 36 docs/security/data-protection.md
 15 docs/security/email-authentication.md
 11 docs/security/framework-status.md
@@ -424,4 +430,4 @@
 31 docs/user-guide/glossary.md
 13 docs/user-guide/inbox-placement-testing.md
 32 docs/user-guide/troubleshooting.md
-TOTAL 4796
+TOTAL 4793

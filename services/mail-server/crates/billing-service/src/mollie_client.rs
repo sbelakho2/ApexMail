@@ -415,6 +415,26 @@ impl MollieClient {
         Ok(payment_from_json(&document))
     }
 
+    /// The account's most recent payments, newest first, in ONE page of up
+    /// to `limit` (the provider caps the page at 250; larger values are
+    /// clamped). The adapter's idempotency-key search reads this listing:
+    /// Mollie offers no keyed payment lookup, so "provably absent" can only
+    /// mean "the complete recent window was enumerated" — the caller must
+    /// treat a full page as truncated and refuse to claim absence.
+    pub async fn list_payments(&self, limit: u32) -> Result<Vec<Payment>, MollieError> {
+        let limit = limit.clamp(1, 250);
+        let document = self
+            .send(self.http.get(self.url(&format!("payments?limit={limit}"))))
+            .await?;
+        let embedded = document
+            .get("_embedded")
+            .and_then(|value| value.get("payments"))
+            .and_then(|value| value.as_array())
+            .cloned()
+            .unwrap_or_default();
+        Ok(embedded.iter().map(payment_from_json).collect())
+    }
+
     /// Every refund of one payment (Mollie has no top-level refund fetch).
     pub async fn payment_refunds(&self, payment_id: &str) -> Result<Vec<Refund>, MollieError> {
         let document = self

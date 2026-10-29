@@ -775,15 +775,25 @@ async fn handle_checkout_activation(
         plan = %plan_name,
         interval = %interval,
         invoice_id = ?outcome.invoice_id,
-        mollie_subscription_id = ?outcome.mollie_subscription_id,
+        subscription_id = ?outcome.subscription_id,
         already_active = outcome.already_active,
-        "mollie checkout activated the plan"
+        "mollie checkout activated the plan (renewal is local; no provider schedule is minted)"
     );
     Ok(())
 }
 
-/// A Mollie subscription charge settled a period: one paid invoice per
-/// payment, the cycle advances, the plan stays active.
+/// A provider-initiated subscription charge arrived: the REPAIR-ONLY
+/// reconciler (beta authority inversion). The provider's view is an
+/// observation; the LOCAL row is the authority:
+///
+/// * a local obligation for the current period (the invoice the local
+///   renewal worker created BEFORE its own charge) settles through the
+///   neutral engine, and an active subscription's period advances;
+/// * NO local obligation, or an unknown provider contract: a typed
+///   reconciliation incident (no invoice is created, no period advances,
+///   nothing is granted) — the provider must never decide when the next
+///   charge exists;
+/// * a locally-canceled subscription is NEVER resurrected.
 async fn handle_subscription_renewal(
     state: &AppState,
     item: &ProviderNotification,
@@ -798,20 +808,36 @@ async fn handle_subscription_renewal(
     };
     let currency = item.amount_currency().unwrap_or("EUR");
     // Plan, interval and tenant are OUR row's facts (see plan_billing).
-    let invoice_id = crate::plan_billing::renew_from_paid_subscription(
+    match crate::plan_billing::reconcile_provider_renewal_payment(
         &state.db,
         item.provider_payment_id.trim(),
         subscription_id,
         amount_cents,
         currency,
     )
-    .await?;
-    info!(
-        subscription_id = %subscription_id,
-        invoice_id = ?invoice_id,
-        "mollie subscription renewed the plan period"
-    );
-    Ok(())
+    .await
+    {
+        Ok(invoice_id) => {
+            info!(
+                subscription_id = %subscription_id,
+                invoice_id = ?invoice_id,
+                "provider subscription payment reconciled against the local obligation"
+            );
+            Ok(())
+        }
+        Err(error) => {
+            // The typed reconciliation incidents and verification refusals
+            // propagate: the webhook deadletters and the operator sees the
+            // incident, never a silent drop and never a summoned invoice.
+            warn!(
+                subscription_id = %subscription_id,
+                provider_payment_id = %item.provider_payment_id,
+                error = %error,
+                "provider-initiated renewal payment could not be applied locally"
+            );
+            Err(error.to_string())
+        }
+    }
 }
 
 /// A subscription charge failed: the provider retries its own charges, so the
@@ -1332,6 +1358,39 @@ async fn handle_token_created(state: &AppState, item: &ProviderNotification) -> 
         ));
     };
     let processing_model = item.sequence_type();
+
+    // The NEUTRAL credentials ledger is the charging authority (the local
+    // renewal worker reads it, not the provider): the provider's token is a
+    // stored, customer-consented chargeable method, so it upserts there.
+    // Best-effort: the legacy mirror below stays the retry-safe record.
+    if let Some(tenant) = item.metadata_tenant_id() {
+        if let Err(error) = sqlx::query(
+            r#"
+            INSERT INTO payment_credentials
+                (tenant_id, provider, provider_customer_id, provider_method_id, state)
+            VALUES ($1, 'mollie', $2, $3, 'active')
+            ON CONFLICT (provider, provider_method_id) DO UPDATE SET
+                state = 'active',
+                revoked_at = NULL,
+                tenant_id = EXCLUDED.tenant_id,
+                provider_customer_id = EXCLUDED.provider_customer_id,
+                updated_at = NOW()
+            "#,
+        )
+        .bind(tenant)
+        .bind(item.customer_id().unwrap_or_default())
+        .bind(token)
+        .execute(&state.db)
+        .await
+        {
+            warn!(
+                tenant_id = %tenant,
+                mandate_id = %token,
+                error = %error,
+                "neutral credential upsert failed for the recurring token"
+            );
+        }
+    }
 
     let bound: Vec<(String,)> = sqlx::query_as(
         r#"

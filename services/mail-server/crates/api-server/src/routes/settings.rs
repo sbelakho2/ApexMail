@@ -123,15 +123,13 @@ impl MessageClassSurface {
 }
 
 /// The credential projection both the list and patch handlers return.
-const CREDENTIAL_COLUMNS: &str =
-    "id::text AS id, email, message_class, status, created_at";
+const CREDENTIAL_COLUMNS: &str = "id::text AS id, email, message_class, status, created_at";
 
 /// Reject an id that cannot be a `users.id` (uuid) as a plain 404: an
 /// unparseable id matches no row, and the 404 shape keeps it
 /// indistinguishable from another tenant's credential.
 pub(crate) fn parse_credential_id(raw: &str) -> Result<uuid::Uuid, ApiError> {
-    uuid::Uuid::parse_str(raw)
-        .map_err(|_| ApiError::NotFound("smtp credential not found".into()))
+    uuid::Uuid::parse_str(raw).map_err(|_| ApiError::NotFound("smtp credential not found".into()))
 }
 
 // ─── Handlers ──────────────────────────────────────────────────
@@ -300,13 +298,7 @@ mod tests {
         }
         // Case and vocabulary drift never reach the UPDATE: strict lowercase,
         // the exact CHECK values.
-        for invalid in [
-            "MARKETING",
-            "Transactional",
-            "banana",
-            "",
-            "notifications",
-        ] {
+        for invalid in ["MARKETING", "Transactional", "banana", "", "notifications"] {
             let result: Result<UpdateMessageClassRequest, _> =
                 serde_json::from_str(&format!("{{\"messageClass\":\"{invalid}\"}}"));
             assert!(result.is_err(), "{invalid} must be rejected");
@@ -343,8 +335,14 @@ mod tests {
             .iter()
             .map(|row| row["id"].as_str().expect("id string"))
             .collect();
-        assert!(ids.contains(&session_user.as_str()), "the session's own credential is listed");
-        assert!(ids.contains(&extra_credential.as_str()), "a second own credential is listed");
+        assert!(
+            ids.contains(&session_user.as_str()),
+            "the session's own credential is listed"
+        );
+        assert!(
+            ids.contains(&extra_credential.as_str()),
+            "a second own credential is listed"
+        );
         assert!(
             !ids.contains(&foreign_credential.as_str()),
             "another tenant's credential must never be listed"
@@ -385,11 +383,11 @@ mod tests {
         let stored: String = sqlx::query_scalar(
             "SELECT message_class FROM users WHERE id = $1::uuid AND tenant_id = $2",
         )
-                .bind(&credential)
-                .bind(&tenant_id)
-                .fetch_one(&pool)
-                .await
-                .expect("stored class");
+        .bind(&credential)
+        .bind(&tenant_id)
+        .fetch_one(&pool)
+        .await
+        .expect("stored class");
         assert_eq!(stored, "transactional");
 
         // And the change is audit-logged with the acting user and both
@@ -434,12 +432,15 @@ mod tests {
         let stored: String = sqlx::query_scalar(
             "SELECT message_class FROM users WHERE id = $1::uuid AND tenant_id = $2",
         )
-                .bind(&foreign_credential)
-                .bind(&tenant_b)
-                .fetch_one(&pool)
-                .await
-                .expect("stored class");
-        assert_eq!(stored, "marketing", "a refused cross-tenant PATCH must not write");
+        .bind(&foreign_credential)
+        .bind(&tenant_b)
+        .fetch_one(&pool)
+        .await
+        .expect("stored class");
+        assert_eq!(
+            stored, "marketing",
+            "a refused cross-tenant PATCH must not write"
+        );
     }
 
     /// An invalid class value is a 422 (the Json extractor's data rejection)
@@ -472,11 +473,11 @@ mod tests {
         let stored: String = sqlx::query_scalar(
             "SELECT message_class FROM users WHERE id = $1::uuid AND tenant_id = $2",
         )
-                .bind(&credential)
-                .bind(&tenant_id)
-                .fetch_one(&pool)
-                .await
-                .expect("stored class");
+        .bind(&credential)
+        .bind(&tenant_id)
+        .fetch_one(&pool)
+        .await
+        .expect("stored class");
         assert_eq!(stored, "marketing", "a 422 must never change the class");
     }
 
@@ -507,11 +508,11 @@ mod tests {
         let stored: String = sqlx::query_scalar(
             "SELECT message_class FROM users WHERE id = $1::uuid AND tenant_id = $2",
         )
-                .bind(&credential)
-                .bind(&tenant_id)
-                .fetch_one(&pool)
-                .await
-                .expect("stored class");
+        .bind(&credential)
+        .bind(&tenant_id)
+        .fetch_one(&pool)
+        .await
+        .expect("stored class");
         assert_eq!(stored, "marketing");
     }
 }

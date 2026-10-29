@@ -3418,7 +3418,14 @@ fn exec_error_response(
         ExecError::NotEnabled | ExecError::ConfigMissing { .. } => StatusCode::FORBIDDEN,
         ExecError::MissingCredential => StatusCode::CONFLICT,
         ExecError::NotFound(_) => StatusCode::NOT_FOUND,
-        ExecError::InvalidState { .. } | ExecError::TransitionRefused { .. } => StatusCode::CONFLICT,
+        ExecError::InvalidState { .. } | ExecError::TransitionRefused { .. } => {
+            StatusCode::CONFLICT
+        }
+        // Eighth audit, P0-DT: another execution holds the atomic create
+        // claim — a genuine conflict over one create (409), never a
+        // provider failure; nothing was created and the message points at
+        // the label-reconciliation recovery path.
+        ExecError::CreateClaimed(_) => StatusCode::CONFLICT,
         // Async lifecycle outcomes (seventh audit, P0-DT-4): a timeout is
         // ACCEPTED-BUT-UNFINISHED work the operator resumes (409, not 502);
         // an action failure or a non-operational server is the provider
@@ -7022,7 +7029,10 @@ mod rbac_scope_guards {
             ("ip_allocate", "SCOPE_DEDICATED_IPS_WRITE"),
             ("deploy_bundle", "SCOPE_DEDICATED_TENANTS_WRITE"),
             ("deploy_transition", "SCOPE_DEDICATED_TENANTS_WRITE"),
-            ("deploy_provision_dedicated", "SCOPE_DEDICATED_TENANTS_WRITE"),
+            (
+                "deploy_provision_dedicated",
+                "SCOPE_DEDICATED_TENANTS_WRITE",
+            ),
         ]
     }
 

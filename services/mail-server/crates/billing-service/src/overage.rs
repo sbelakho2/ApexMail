@@ -1776,7 +1776,6 @@ pub(crate) async fn collect_usage_invoice(
             Ok(execution) if execution.rows_affected() > 0 => {}
             Ok(_) => warn!(
                 invoice_id = %invoice.id,
-                existing = ?invoice.mollie_payment_id,
                 "usage invoice collection: Mollie mapping not stored, invoice already bound to a different Mollie payment"
             ),
             Err(error) => {
@@ -2371,13 +2370,16 @@ async fn create_and_finalize_mollie_usage_invoice(
     // and must stay byte-stable across the inversion.
     let idempotency_key = format!("usageinv_{}_{}c", invoice.id.simple(), amount_cents);
 
-    // CLAIM BEFORE CHARGE (audit step 7): the pending attempt row is the
-    // cross-tick lock. A concurrent scheduler tick, or a previous attempt
-    // whose provider response was LOST (timeout after a successful charge),
-    // makes the claim fail and NO second charge is opened; the caller
-    // finalizes as pending and the webhook/repair sweep settles the
-    // in-flight attempt.
-    let claimed = crate::payments::engine::claim_attempt(
+    // CLAIM BEFORE CHARGE (audit step 7) with the two-retry distinction
+    // (migration 282): the pending attempt row is the cross-tick lock. A
+    // concurrent scheduler tick, or a previous attempt whose provider
+    // response was LOST (timeout after a successful charge), makes the
+    // claim fail and NO second charge is opened; the caller finalizes as
+    // pending and the webhook/repair sweep settles the in-flight attempt.
+    // A definitively closed attempt is never mutated (closed attempts are
+    // immutable): the dunning retry opens attempt N+1 under the shared
+    // `payment:{ref}:{n}` key scheme instead.
+    let claimed_key = match crate::payments::engine::claim_attempt(
         &state.db,
         provider.provider_name(),
         &idempotency_key,
@@ -2388,24 +2390,46 @@ async fn create_and_finalize_mollie_usage_invoice(
         currency,
     )
     .await
-    .map_err(|e| format!("payment attempt claim failed: {e}"))?;
-    if !claimed {
-        warn!(
-            invoice_id = %invoice.id,
-            idempotency_key = %idempotency_key,
-            "usage collection: an attempt is already open for this operation, no second charge"
-        );
-        // An in-flight attempt exists (possibly keyless after a timeout).
-        // No second charge is opened — the ledger guarantee — but this is
-        // NOT a collected invoice: the caller gets an error, the outbox
-        // stays retryable, and the wallet path is never reached from here
-        // (the caller only tries the wallet when this fn reports
-        // Ok(None), which an open attempt never is).
-        return Err(format!(
-            "a payment attempt is already open for invoice {}/{} — the webhook or the repair sweep settles it, no second charge",
-            invoice.id, idempotency_key
-        ));
-    }
+    {
+        Ok(true) => idempotency_key.clone(),
+        Ok(false) => {
+            match crate::payments::engine::claim_next_attempt(
+                &state.db,
+                provider.provider_name(),
+                &invoice.tenant_id,
+                &reference,
+                "usage_collection",
+                amount_cents,
+                currency,
+            )
+            .await
+            .map_err(|e| format!("payment attempt dunning claim failed: {e}"))?
+            {
+                Some((_attempt_no, key)) => key,
+                None => {
+                    warn!(
+                        invoice_id = %invoice.id,
+                        idempotency_key = %idempotency_key,
+                        "usage collection: an attempt is already open for this operation, no second charge"
+                    );
+                    // An in-flight attempt exists (possibly keyless after a
+                    // timeout), or the obligation sits `unresolved` awaiting
+                    // human reconciliation. No second charge is opened — the
+                    // ledger guarantee — but this is NOT a collected
+                    // invoice: the caller gets an error, the outbox stays
+                    // retryable, and the wallet path is never reached from
+                    // here (the caller only tries the wallet when this fn
+                    // reports Ok(None), which an open attempt never is).
+                    return Err(format!(
+                        "a payment attempt is already open for invoice {}/{} — the webhook or the repair sweep settles it, no second charge",
+                        invoice.id, idempotency_key
+                    ));
+                }
+            }
+        }
+        Err(e) => return Err(format!("payment attempt claim failed: {e}")),
+    };
+    let idempotency_key = claimed_key;
 
     let charge = provider
         .charge_saved_method(SavedMethodCharge {

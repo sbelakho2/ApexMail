@@ -27,10 +27,10 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-/// The shared provider conformance harness (audit step 9): one twelve-arm
-/// matrix every adapter must pass, plus the scriptable
-/// [`conformance::ConformanceProvider`] double used to prove the harness
-/// has teeth.
+/// The shared provider conformance harness (audit step 9, expanded in the
+/// eighth pass): one eighteen-arm matrix every adapter must pass, plus the
+/// scriptable [`conformance::ConformanceProvider`] double used to prove the
+/// harness has teeth.
 pub mod conformance;
 pub mod engine;
 pub mod mollie_provider;
@@ -91,26 +91,13 @@ pub enum CredentialState {
     Failed,
 }
 
-/// The normalized life of a provider-owned recurring charge schedule.
-///
-/// `Other` is the honest total arm: a status the engine does not model maps
-/// to it instead of being guessed into a grant-bearing state. Only `Active`
-/// ever grants a plan.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum RecurringScheduleState {
-    Active,
-    Pending,
-    Canceled,
-    Suspended,
-    Completed,
-    /// A provider state this engine does not model; grants nothing.
-    Other,
-}
-
 /// What kind of fact a provider event carries. The event pipeline (a later
 /// step of the staged plan) consumes these; the neutral type exists now so
 /// adapters have a target to normalize into.
+///
+/// Recurring-schedule facts are deliberately ABSENT (beta authority
+/// inversion): core renewal is ApexMail-local, so no provider schedule
+/// lifecycle exists for an adapter to report.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ProviderEventKind {
@@ -119,7 +106,6 @@ pub enum ProviderEventKind {
     DisputeOpened,
     DisputeClosed,
     SettlementCompleted,
-    RecurringScheduleStateChange,
     Other,
 }
 
@@ -202,6 +188,23 @@ pub struct Refund {
     pub created_at: Option<DateTime<Utc>>,
 }
 
+/// The normalized life of one dispute (chargeback). The set is the
+/// provider-union minimum the reconciliation needs: a dispute is opened,
+/// then it is either lost (the money leaves) or won/reversed (the money
+/// comes back). A provider that models more states maps them onto these
+/// three; the neutral ledger fact records which of the three landed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum DisputeState {
+    /// The dispute is open: evidence may still change the outcome.
+    Opened,
+    /// The dispute was decided against us: the money is (being) taken back.
+    Lost,
+    /// The dispute was decided for us / reversed: the money stays or
+    /// returns.
+    Won,
+}
+
 /// One dispute (chargeback) against a payment.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -209,6 +212,9 @@ pub struct Dispute {
     pub provider: String,
     pub provider_dispute_id: String,
     pub provider_payment_id: String,
+    /// The normalized dispute state (the generic reconciliation keys on
+    /// this: opened records the fact, lost debits, won restores).
+    pub state: DisputeState,
     pub amount_minor: i64,
     pub currency: String,
     pub reason: Option<String>,
@@ -224,22 +230,6 @@ pub struct Settlement {
     pub amount_minor: i64,
     pub currency: String,
     pub settled_at: Option<DateTime<Utc>>,
-}
-
-/// A provider-owned recurring charge schedule (the neutral vocabulary for
-/// what Mollie calls a subscription): the provider generates and retries the
-/// charges; the engine reconciles entitlement from authenticated fetches.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RecurringSchedule {
-    pub provider: String,
-    pub provider_schedule_id: String,
-    pub provider_customer_id: String,
-    pub state: RecurringScheduleState,
-    pub amount_minor: Option<i64>,
-    pub currency: Option<String>,
-    /// Provider date string for the next scheduled charge, when reported.
-    pub next_charge_date: Option<String>,
 }
 
 /// One normalized provider event fact. This is the promotion target of the
@@ -273,7 +263,11 @@ pub struct ProviderCapabilities {
     pub saved_method_charging: bool,
     /// The provider can return money for a payment.
     pub refunds: bool,
-    /// The provider surfaces disputes (chargebacks) as objects/facts.
+    /// The provider surfaces disputes (chargebacks) as RETRIEVABLE objects:
+    /// [`PaymentProvider::list_disputes`] answers with real facts. A
+    /// provider whose wire offers no dispute retrieval must declare false
+    /// AND refuse `list_disputes` visibly (`Err`), never answer a silent
+    /// empty list — silence would hide chargebacks from reconciliation.
     pub disputes: bool,
     /// The provider settles payouts that must be reconciled.
     pub payouts: bool,
@@ -326,23 +320,6 @@ pub struct RefundRequest {
     pub idempotency_key: String,
 }
 
-/// Have the provider own a recurring charge schedule.
-#[derive(Debug, Clone)]
-pub struct RecurringScheduleRequest {
-    pub provider_customer_id: String,
-    pub provider_method_id: Option<String>,
-    pub amount_minor: i64,
-    pub currency: String,
-    /// Whole months between charges (1 monthly, 12 yearly).
-    pub interval_months: u32,
-    pub description: String,
-    pub metadata: serde_json::Value,
-    /// First charge date as a provider date string, when the caller defers
-    /// the first charge past creation.
-    pub first_charge_date: Option<String>,
-    pub idempotency_key: String,
-}
-
 // ---------------------------------------------------------------------------
 // Errors
 // ---------------------------------------------------------------------------
@@ -376,12 +353,14 @@ pub enum ProviderError {
 
 /// The one interface the billing engine speaks to a payment processor.
 ///
-/// The first seven methods are the audit-mandated core. The recurring
-/// schedule operations below them carry the same neutrality (schedule,
-/// saved method, provider customer are provider-union concepts) and exist
-/// because this round inverts plan billing and cancellation through the
-/// boundary without changing behavior; their adapter-side provider
-/// vocabulary is debt-tracked in `NEUTRALITY_DEBT.md`.
+/// The first seven methods are the audit-mandated core. The boundary is
+/// deliberately FINITE (beta authority inversion, external audit #8): core
+/// subscription renewal is an APEXMAIL-LOCAL scheduler (plan_billing's
+/// `renew_due_subscriptions` — local invoice first, then a claimed
+/// `charge_saved_method` attempt per period), so the trait carries NO
+/// recurring-schedule surface. A PSP adapter MAY expose provider-specific
+/// recurring functionality for an unrelated feature, but core renewal never
+/// depends on it — and a dead abstraction is debt too, so none is kept here.
 #[async_trait::async_trait]
 pub trait PaymentProvider: Send + Sync {
     /// The adapter's stable name (a config value, not a class name).
@@ -412,42 +391,35 @@ pub trait PaymentProvider: Send + Sync {
         provider_payment_id: &str,
     ) -> Result<Payment, ProviderError>;
 
+    /// AUTHENTICATED provider-side search for a charge by the idempotency
+    /// key the caller sent with it. The stale-claim reconciliation's fact
+    /// source: when a claimed charge's response was lost, the engine asks
+    /// the provider what became of the operation BEFORE it decides
+    /// anything (a lost webhook can no longer strand money or trigger a
+    /// blind second charge).
+    ///
+    /// # Contract (absence must be PROVABLE)
+    ///
+    /// * `Ok(Some(payment))` — the provider knows this charge; the payment
+    ///   carries its authoritative state and id.
+    /// * `Ok(None)` — the provider PROVABLY does not know this charge:
+    ///   the search space was enumerated COMPLETELY and the key is not in
+    ///   it. Only providers with real search semantics (a complete
+    ///   enumeration or a keyed lookup) may return `None`.
+    /// * `Err(..)` — the answer is UNKNOWN (truncated listing, search not
+    ///   offered, transport failure). A truncated or partial listing is
+    ///   ALWAYS `Err`, never `None`: guessing absence double-charges.
+    async fn search_payment_by_idempotency_key(
+        &self,
+        idempotency_key: &str,
+    ) -> Result<Option<Payment>, ProviderError>;
+
     /// Fetch one refund object WITH PROVIDER AUTHENTICATION.
     async fn fetch_refund(
         &self,
         provider_payment_id: &str,
         provider_refund_id: &str,
     ) -> Result<Refund, ProviderError>;
-
-    /// Have the provider own a recurring charge schedule (the provider
-    /// generates and retries the charges).
-    async fn create_recurring_schedule(
-        &self,
-        request: RecurringScheduleRequest,
-    ) -> Result<RecurringSchedule, ProviderError>;
-
-    /// Fetch one recurring schedule WITH PROVIDER AUTHENTICATION.
-    async fn fetch_recurring_schedule(
-        &self,
-        provider_customer_id: &str,
-        provider_schedule_id: &str,
-    ) -> Result<RecurringSchedule, ProviderError>;
-
-    /// Enumerate a provider customer's recurring schedules (the orphan
-    /// detector: a live provider schedule the local state does not
-    /// reference can only be found by listing).
-    async fn list_recurring_schedules(
-        &self,
-        provider_customer_id: &str,
-    ) -> Result<Vec<RecurringSchedule>, ProviderError>;
-
-    /// Stop a provider-owned schedule from generating charges. Idempotent:
-    /// a schedule the provider already forgot is success.
-    async fn cancel_recurring_schedule(
-        &self,
-        provider_customer_id: &str,
-        provider_schedule_id: &str,
-    ) -> Result<(), ProviderError>;
 
     /// Revoke a stored credential so it can never be charged again. The
     /// only provider-side guarantee that a canceled account stops being
@@ -467,6 +439,14 @@ pub trait PaymentProvider: Send + Sync {
 
     /// List payout settlements newest-first from the provider.
     async fn list_settlements(&self) -> Result<Vec<Settlement>, ProviderError>;
+
+    /// Enumerate the disputes (chargebacks) recorded against one payment,
+    /// WITH PROVIDER AUTHENTICATION ([`ProviderCapabilities::disputes`]).
+    /// A provider whose wire offers no dispute retrieval must refuse
+    /// visibly with `Err` — never a silent empty list, which would hide a
+    /// chargeback from the reconciliation.
+    async fn list_disputes(&self, provider_payment_id: &str)
+        -> Result<Vec<Dispute>, ProviderError>;
 }
 
 // ---------------------------------------------------------------------------
@@ -561,9 +541,8 @@ mod tests {
             serde_json::to_string(&CredentialState::Failed).expect("encode"),
             "\"failed\""
         );
-        let schedule: RecurringScheduleState =
-            serde_json::from_str("\"other\"").expect("decode schedule state");
-        assert_eq!(schedule, RecurringScheduleState::Other);
+        // The recurring-schedule state machine is retired (the local renewal
+        // authority): no provider schedule vocabulary round-trips here.
     }
 
     #[test]
@@ -607,6 +586,27 @@ mod tests {
             refund
         );
 
+        let dispute = Dispute {
+            provider: "mollie".into(),
+            provider_dispute_id: "opaque-dispute-id".into(),
+            provider_payment_id: "opaque-provider-id".into(),
+            state: DisputeState::Opened,
+            amount_minor: 1234,
+            currency: "EUR".into(),
+            reason: Some("fraudulent".into()),
+            opened_at: None,
+        };
+        let value = serde_json::to_value(&dispute).expect("encode dispute");
+        assert_eq!(value["state"], "opened");
+        assert_eq!(
+            serde_json::from_value::<Dispute>(value).expect("decode dispute"),
+            dispute
+        );
+        let lost: DisputeState = serde_json::from_str("\"lost\"").expect("decode");
+        let won: DisputeState = serde_json::from_str("\"won\"").expect("decode");
+        assert_eq!(lost, DisputeState::Lost);
+        assert_eq!(won, DisputeState::Won);
+
         let credential = PaymentCredential {
             provider: "mollie".into(),
             provider_customer_id: "opaque-customer-id".into(),
@@ -620,22 +620,6 @@ mod tests {
         assert_eq!(
             serde_json::from_value::<PaymentCredential>(value).expect("decode credential"),
             credential
-        );
-
-        let schedule = RecurringSchedule {
-            provider: "mollie".into(),
-            provider_schedule_id: "opaque-schedule-id".into(),
-            provider_customer_id: "opaque-customer-id".into(),
-            state: RecurringScheduleState::Active,
-            amount_minor: Some(4900),
-            currency: Some("EUR".into()),
-            next_charge_date: Some("2026-11-29".into()),
-        };
-        let value = serde_json::to_value(&schedule).expect("encode schedule");
-        assert!(value.get("providerScheduleId").is_some());
-        assert_eq!(
-            serde_json::from_value::<RecurringSchedule>(value).expect("decode schedule"),
-            schedule
         );
 
         let event = ProviderEvent {

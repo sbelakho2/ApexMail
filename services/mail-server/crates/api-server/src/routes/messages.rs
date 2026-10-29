@@ -6978,8 +6978,14 @@ Bcc: victim@example.com"@example.com"#
         // Exactly one of the two may lose the race with an honest 409
         // ("in flight"); never two independent sends, never two ids.
         let statuses = [l_status, r_status];
-        let accepted = statuses.iter().filter(|s| **s == StatusCode::ACCEPTED).count();
-        let conflicted = statuses.iter().filter(|s| **s == StatusCode::CONFLICT).count();
+        let accepted = statuses
+            .iter()
+            .filter(|s| **s == StatusCode::ACCEPTED)
+            .count();
+        let conflicted = statuses
+            .iter()
+            .filter(|s| **s == StatusCode::CONFLICT)
+            .count();
         assert!(
             (accepted, conflicted) == (2, 0) || (accepted, conflicted) == (1, 1),
             "both callers must succeed or one must conflict honestly: {l_status}/{r_status}              bodies: {l_body} / {r_body}"
@@ -7004,23 +7010,27 @@ Bcc: victim@example.com"@example.com"#
                 .fetch_one(&fixture.pool)
                 .await
                 .unwrap();
-        let metered: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM metering_events WHERE tenant_id = $1",
-        )
-        .bind(&fixture.tenant)
-        .fetch_one(&fixture.pool)
-        .await
-        .unwrap();
-        let ledger: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM idempotency_records WHERE tenant_id = $1",
-        )
-        .bind(&fixture.tenant)
-        .fetch_one(&fixture.pool)
-        .await
-        .unwrap();
-        assert_eq!(messages, 1, "the race must admit exactly ONE logical message");
+        let metered: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM metering_events WHERE tenant_id = $1")
+                .bind(&fixture.tenant)
+                .fetch_one(&fixture.pool)
+                .await
+                .unwrap();
+        let ledger: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM idempotency_records WHERE tenant_id = $1")
+                .bind(&fixture.tenant)
+                .fetch_one(&fixture.pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            messages, 1,
+            "the race must admit exactly ONE logical message"
+        );
         assert_eq!(queued, 1);
-        assert_eq!(metered, 1, "usage is charged for one logical send, never two");
+        assert_eq!(
+            metered, 1,
+            "usage is charged for one logical send, never two"
+        );
         assert_eq!(ledger, 1);
 
         fixture.cleanup().await;

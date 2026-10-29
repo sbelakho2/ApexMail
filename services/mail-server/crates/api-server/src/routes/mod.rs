@@ -51,11 +51,11 @@ pub mod routing;
 pub mod scim;
 pub mod segments;
 pub mod self_hosted_bounces;
+pub mod ses_notifications;
 /// Self-service workspace settings: SMTP credential message-class
 /// management (`/v1/settings/smtp-credentials`, migration 272's
 /// `users.message_class` — external audit 6 remediation #6).
 pub mod settings;
-pub mod ses_notifications;
 pub mod support;
 pub mod suppressions;
 pub(crate) mod system_sender;

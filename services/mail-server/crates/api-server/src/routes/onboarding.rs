@@ -909,7 +909,7 @@ mod tests {
     /// state, Unblock restoring the recorded prior).
     #[test]
     fn first_send_is_idempotent_and_block_pair_is_total() {
-        use super::{advance, OnboardingEvent::*, OnboardingState::*, OnboardingError};
+        use super::{advance, OnboardingError, OnboardingEvent::*, OnboardingState::*};
         // Idempotent no-ops: re-observing a send in active stays active.
         assert_eq!(
             advance(Active, FirstSendObserved).unwrap(),
@@ -917,7 +917,13 @@ mod tests {
             "the canonical admission point fires per send; only the FIRST transitions"
         );
         // Block is total (except already-blocked) and Unblock restores.
-        for state in [Invited, ConfiguringDomain, VerifyingDns, SendingReady, Active] {
+        for state in [
+            Invited,
+            ConfiguringDomain,
+            VerifyingDns,
+            SendingReady,
+            Active,
+        ] {
             assert_eq!(advance(state, Block("x".into())).unwrap(), Blocked);
         }
         assert!(matches!(
@@ -926,5 +932,4 @@ mod tests {
         ));
         assert_eq!(advance(Blocked, Unblock).unwrap(), Invited, "default prior");
     }
-
 }

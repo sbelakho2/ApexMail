@@ -1,0 +1,142 @@
+# =============================================================================
+# docker-compose.standby-remote.yml — REMOTE-host warm-standby overlay
+# =============================================================================
+# Eighth external audit, DR wave ("a remote standby depended on a local
+# postgres service"): the SECOND-FAILURE-DOMAIN topology in its own file.
+# The same-host overlay (deploy/docker-compose.standby.yml) depends on the
+# primary's compose project and joins its data network; a remote host has
+# NEITHER — this overlay therefore defines postgres-standby standalone:
+#
+#   * NO depends_on / reference / volumes_from of any local `postgres`
+#     service (the bootstrap's inputs are all env- and mount-based:
+#     STANDBY_PRIMARY_HOST/PORT, STANDBY_REPL_USER, a mounted password
+#     file, and the repo-relative script bind-mounts);
+#   * joins ONLY the dedicated external `apexmail_replication` network —
+#     the restricted peer path the streaming replication rides;
+#   * forwards EVERY STANDBY_* variable the standby scripts consume
+#     (proven mechanically by tools/check_standby_contract.py).
+#
+# PRECONDITIONS (operator, before the first boot):
+#   1. This repository checked out on the STANDBY host (the compose project
+#      directory and the script bind-mount paths come from it) with a .env
+#      that defines the STANDBY_* variables (STANDBY_PRIMARY_HOST and
+#      STANDBY_REPL_PASSWORD_FILE are REQUIRED).
+#   2. The external replication network pre-created on the standby host and
+#      bound to the restricted peer path — WireGuard/Tailscale or a
+#      dedicated replication interface over a private VLAN, NEVER a public
+#      bridge:
+#        docker network create --attachable apexmail_replication
+#      (the same network name, attached to the same peer path, must exist
+#      on the PRIMARY host and carry the primary's published replication
+#      listener — see docs/operations/warm-standby.md).
+#   3. The primary reachable through that peer at STANDBY_PRIMARY_HOST with
+#      pg_hba permitting this host's peer address, and the replication role
+#      created (runbook §Bootstrap).
+#
+# REMOTE invocation (run from the repository root on the STANDBY host — the
+# first -f file sets the project directory, so docker-compose.yml is listed
+# first even though none of its services are started by the command below):
+#
+#   docker compose \
+#     -f docker-compose.yml \
+#     -f deploy/docker-compose.standby-remote.yml \
+#     --env-file .env up -d postgres-standby
+#
+# `up -d postgres-standby` starts ONLY the standby: with no depends_on,
+# nothing else of the base project is pulled in.
+#
+# Validated by tools/check_standby_contract.py (renders this overlay and
+# proves the STANDBY_* forwarding AND that no local postgres dependency
+# crept back in) and the repo's compose render contract.
+# =============================================================================
+
+services:
+  postgres-standby:
+    # Same pinned image as the WAL-archiving override / same-host standby:
+    # the postgres-wal build bakes rsync/openssh into postgres:16.8-alpine.
+    # Built on THIS host from the checked-out repo on first `up`.
+    build:
+      context: .
+      dockerfile: deploy/hardening/postgres-wal/Dockerfile
+    image: apexmail/postgres-wal:16.8-r1
+    container_name: apexmail-postgres-standby
+    restart: unless-stopped
+    shm_size: 1gb
+    # Same bootstrap contract as the same-host overlay: the image
+    # entrypoint execs pg-standby-bootstrap.sh, which retries until the
+    # REMOTE primary accepts the replication credentials (it is the retry
+    # loop, not a compose dependency, that orders this boot), takes ONE
+    # pg_basebackup -R -X stream into PGDATA and execs postgres in standby
+    # mode. Idempotent: standby.signal skips the basebackup.
+    command:
+      - /bin/sh
+      - /usr/local/bin/pg-standby-bootstrap.sh
+    volumes:
+      - ./deploy/hardening/scripts/pg-standby-bootstrap.sh:/usr/local/bin/pg-standby-bootstrap.sh:ro
+      # The operator's promotion tool runs inside THIS container
+      # (docs/operations/warm-standby.md §Promote procedure).
+      - ./deploy/hardening/scripts/pg-standby-promote.sh:/usr/local/bin/pg-standby-promote.sh:ro
+      - postgres_standby_data:/var/lib/postgresql/data
+      # Replication password — a file ON THIS HOST (the standby host), read-only.
+      - ${STANDBY_REPL_PASSWORD_FILE:?the standby host must define the standby replication password file when the remote standby overlay is used}:/run/standby-repl-password:ro
+    environment:
+      # REQUIRED: the primary's address THROUGH THE REPLICATION NETWORK
+      # (the WireGuard/overlay peer address, not a compose service name —
+      # no local `postgres` exists here).
+      STANDBY_PRIMARY_HOST: ${STANDBY_PRIMARY_HOST:?the standby host must define the primary's replication-network address when the remote standby overlay is used}
+      STANDBY_PRIMARY_PORT: ${STANDBY_PRIMARY_PORT:-5432}
+      STANDBY_REPL_USER: ${STANDBY_REPL_USER:-replicator}
+      STANDBY_REPL_PASSWORD_FILE: /run/standby-repl-password
+      # Physical slot created on the primary (-C); must be unique per
+      # standby — never share a slot name with another standby of the same
+      # primary.
+      STANDBY_SLOT: ${STANDBY_SLOT:-apexmail_standby}
+      STANDBY_BOOTSTRAP_TIMEOUT_SECS: ${STANDBY_BOOTSTRAP_TIMEOUT_SECS:-600}
+      # Promotion gates — same contract as the same-host overlay (--force
+      # covers only the byte cap; heartbeat/replay-age/archive continuity
+      # are freshness gates, --accept-unknown-loss overrides those).
+      STANDBY_MAX_LAG_BYTES: ${STANDBY_MAX_LAG_BYTES:-1048576}
+      STANDBY_MAX_HEARTBEAT_AGE_SECONDS: ${STANDBY_MAX_HEARTBEAT_AGE_SECONDS:-90}
+      STANDBY_MAX_RECEIVE_AGE_SECS: ${STANDBY_MAX_RECEIVE_AGE_SECS:-30}
+      STANDBY_WAL_ARCHIVE_DIR: ${STANDBY_WAL_ARCHIVE_DIR:-}
+      # psql superuser of the CLONED cluster (the primary's POSTGRES_USER).
+      POSTGRES_USER: ${POSTGRES_USER:-apexmail}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-apexmail} -d postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    # Deliberately NO depends_on: the primary is not a service of any
+    # compose project on this host. The bootstrap's retry loop is the
+    # ordering mechanism (tools/check_standby_contract.py refuses a
+    # depends_on/reference of a local postgres service here).
+    networks:
+      # The ONLY network: the pre-created external replication transport
+      # (see PRECONDITIONS above). The primary's data network does not
+      # exist on this host and must not be referenced.
+      - apexmail_replication
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+        reservations:
+          memory: 256M
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /var/run/postgresql
+
+volumes:
+  postgres_standby_data:
+
+networks:
+  # Pre-created by the operator (`docker network create --attachable
+  # apexmail_replication`) and bound to the restricted peer path.
+  # external: true — compose refuses to start when it is absent, which is
+  # the fail-fast posture: a standby silently attached to a default bridge
+  # would be a topology lie, not a second failure domain.
+  apexmail_replication:
+    external: true
+    name: ${STANDBY_REPLICATION_NETWORK_NAME:-apexmail_replication}

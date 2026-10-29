@@ -236,8 +236,9 @@ struct LegacyPlanDto {
     email_limit: i64,
     api_call_limit: i64,
     features: LegacyPlanFeaturesPayload,
-    mollie_plan_code_monthly: Option<String>,
-    mollie_plan_code_yearly: Option<String>,
+    // Provider price codes are OFF the public plan payloads (N-02 RESOLVED,
+    // beta authority inversion): checkout quoting resolves price ids through
+    // provider_catalog_mappings.
     is_active: bool,
     sort_order: i32,
     created_at: chrono::DateTime<Utc>,
@@ -256,8 +257,6 @@ impl From<Plan> for LegacyPlanDto {
             email_limit: plan.email_limit,
             api_call_limit: plan.api_call_limit,
             features: plan.features.into(),
-            mollie_plan_code_monthly: plan.mollie_plan_code_monthly,
-            mollie_plan_code_yearly: plan.mollie_plan_code_yearly,
             is_active: plan.is_active,
             sort_order: plan.sort_order,
             created_at: plan.created_at,
@@ -3242,12 +3241,16 @@ async fn active_plan_checkout_target(
     pool: &sqlx::PgPool,
     price_id: &str,
 ) -> Result<Option<(String, bool)>, sqlx::Error> {
+    // N-02 RESOLVED (beta authority inversion): the price id resolves
+    // through the NEUTRAL provider_catalog_mappings table (migration 279),
+    // never through provider-tagged plan columns.
     sqlx::query_as::<_, (String, bool)>(
         r#"
-        SELECT name, mollie_plan_code_yearly = $1 AS yearly
-        FROM plans
-        WHERE is_active = true
-          AND (mollie_plan_code_monthly = $1 OR mollie_plan_code_yearly = $1)
+        SELECT p.name, m.billing_interval = 'yearly' AS yearly
+        FROM provider_catalog_mappings m
+        JOIN plans p ON p.name = m.catalog_key AND p.is_active = true
+        WHERE m.provider = 'mollie'
+          AND m.provider_price_code = $1
         LIMIT 1
         "#,
     )
@@ -3459,8 +3462,9 @@ fn subscription_mutation_payload(
         "billingInterval": serde_json::to_value(subscription.billing_interval).unwrap_or_default(),
         "currentPeriodStart": subscription.current_period_start,
         "currentPeriodEnd": subscription.current_period_end,
-        "mollieSubscriptionId": subscription.mollie_subscription_id,
-        "mollieShopperReference": subscription.mollie_customer_id,
+        // Provider object ids are OFF the public payload (N-01 RESOLVED,
+        // beta authority inversion); a legacy contract id survives only on
+        // the neutral subscription_payment_bindings row.
         "cancelAtPeriodEnd": subscription.cancel_at_period_end,
         "createdAt": subscription.created_at,
         "updatedAt": subscription.updated_at,
@@ -4697,7 +4701,7 @@ fn invoice_void_error_response(error: billing_service::invoices::InvoiceVoidErro
             StatusCode::CONFLICT,
             format!("Invoice {invoice_id} is in status '{status}': only draft or open (pending) invoices can be voided; refund a paid invoice with a credit note instead"),
         ),
-        VoidError::MollieUnavailable { .. } | VoidError::MollieFailed { .. } => {
+        VoidError::ProviderUnavailable { .. } | VoidError::ProviderFailed { .. } => {
             (StatusCode::CONFLICT, error.to_string())
         }
         // Infra faults (DB / audit pipeline): these are genuine 5xx-s —
@@ -6595,6 +6599,40 @@ mod adversarial_tests {
         .execute(pool)
         .await
         .expect("seed plan");
+        // Checkout resolves price ids through the NEUTRAL catalog mapping
+        // (migration 279 backfill + N-02): the seeded plan must carry the
+        // same mapping rows the production backfill would have written.
+        for (interval, code) in [("monthly", mollie_monthly), ("yearly", mollie_yearly)] {
+            match code {
+                Some(code) => {
+                    sqlx::query(
+                        "INSERT INTO provider_catalog_mappings
+                             (provider, catalog_key, provider_price_code, currency, billing_interval)
+                         VALUES ('mollie', $1, $2, 'EUR', $3)
+                         ON CONFLICT (provider, catalog_key, currency, billing_interval)
+                         DO UPDATE SET provider_price_code = EXCLUDED.provider_price_code",
+                    )
+                    .bind(name)
+                    .bind(code)
+                    .bind(interval)
+                    .execute(pool)
+                    .await
+                    .expect("seed plan catalog mapping");
+                }
+                None => {
+                    sqlx::query(
+                        "DELETE FROM provider_catalog_mappings
+                                 WHERE provider = 'mollie' AND catalog_key = $1
+                                   AND billing_interval = $2",
+                    )
+                    .bind(name)
+                    .bind(interval)
+                    .execute(pool)
+                    .await
+                    .expect("seed plan catalog mapping clear");
+                }
+            }
+        }
     }
 
     async fn seed_tenant(pool: &PgPool, tenant_id: &str, plan: &str) {
@@ -6849,7 +6887,16 @@ mod adversarial_tests {
         let (status, body) = get(&env, "/v1/billing/plans/advpro").await;
         assert_eq!(status, StatusCode::OK, "{body}");
         assert_eq!(body["data"]["name"], "advpro");
-        assert_eq!(body["data"]["molliePlanCodeMonthly"], "price_pro_m");
+        // The plan surface is provider-neutral (audit N-02): price codes
+        // live in provider_catalog_mappings, never on a public plan DTO.
+        assert!(
+            body["data"].get("molliePlanCodeMonthly").is_none(),
+            "the public plan surface must not leak a provider price code: {body}"
+        );
+        assert!(
+            !body.to_string().to_lowercase().contains("mollie"),
+            "the public plan detail must not name the provider at all: {body}"
+        );
         // An inactive plan is still readable by name (legacy clients need
         // it for renewal copy) but is never in the catalog, asserted above.
         let (status, body) = get(&env, "/v1/billing/plans/advlegacy").await;
@@ -11338,8 +11385,6 @@ mod adversarial_tests {
             email_limit: 1000,
             api_call_limit: 1000,
             features: billing_service::types::PlanFeatures::default(),
-            mollie_plan_code_monthly: None,
-            mollie_plan_code_yearly: None,
             is_active: true,
             sort_order: 0,
             created_at: Utc::now(),

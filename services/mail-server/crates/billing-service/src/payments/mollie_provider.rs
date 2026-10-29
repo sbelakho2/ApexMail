@@ -4,28 +4,29 @@
 //! DELEGATING to [`crate::mollie_client::MollieClient`]: no HTTP is
 //! duplicated here, the wire client stays the one place this repository
 //! speaks to the provider, and this file is where Mollie's vocabulary
-//! (`tr_…` payments, `mdt_…` mandates, `sub_…` subscriptions, decimal-string
-//! amounts) is translated into the neutral domain's opaque ids, state
-//! machines and integer minor units.
+//! (`tr_…` payments, `mdt_…` mandates, decimal-string amounts) is
+//! translated into the neutral domain's opaque ids, state machines and
+//! integer minor units.
 //!
 //! The status mappings below are exhaustive over the statuses the wire
 //! client documents, and unit-tested for totality: an UNKNOWN status is a
-//! typed [`ProviderError::UnmappedStatus`] (fail closed), except the
-//! recurring-schedule map, which has an `Other` arm because the
-//! reconciliation sweep's contract is total (a provider state the engine
-//! does not model must still resolve the tenant to Free, exactly as the
-//! pre-inversion string comparisons did).
+//! typed [`ProviderError::UnmappedStatus`] (fail closed).
+//!
+//! Recurring schedules are deliberately ABSENT (beta authority inversion):
+//! core renewal is ApexMail-local (plan_billing's `renew_due_subscriptions`
+//! charges the saved method per local period), so the adapter neither
+//! creates nor cancels Mollie subscription objects. The wire client's
+//! subscription endpoints remain for the owner-gated legacy-table
+//! retirement only; nothing in the billing core calls them.
 
 use chrono::{DateTime, Utc};
 
-use crate::mollie_client::{
-    self, CreatePayment, CreateSubscription, MollieClient, MollieError, Money,
-};
+use crate::mollie_client::{self, CreatePayment, MollieClient, MollieError, Money};
 
 use super::{
-    Checkout, CheckoutRequest, CredentialState, Payment, PaymentProvider, PaymentState,
-    ProviderCapabilities, ProviderError, RecurringSchedule, RecurringScheduleRequest,
-    RecurringScheduleState, Refund, RefundRequest, RefundState, SavedMethodCharge, Settlement,
+    Checkout, CheckoutRequest, CredentialState, Dispute, Payment, PaymentProvider, PaymentState,
+    ProviderCapabilities, ProviderError, Refund, RefundRequest, RefundState, SavedMethodCharge,
+    Settlement,
 };
 
 /// The adapter's stable name (the registry's `mollie` value).
@@ -144,25 +145,10 @@ pub(crate) fn map_credential_status(status: &str) -> Result<CredentialState, Pro
     }
 }
 
-/// Map one Mollie subscription status to the neutral schedule machine.
-/// TOTAL by design (see the module doc): an unmodeled status resolves to
-/// [`RecurringScheduleState::Other`], which grants nothing, mirroring the
-/// pre-inversion sweep where any status other than `active` resolved the
-/// tenant to Free.
-pub(crate) fn map_schedule_status(status: &str) -> RecurringScheduleState {
-    match status.trim() {
-        "active" => RecurringScheduleState::Active,
-        "pending" => RecurringScheduleState::Pending,
-        "canceled" => RecurringScheduleState::Canceled,
-        "suspended" => RecurringScheduleState::Suspended,
-        "completed" => RecurringScheduleState::Completed,
-        _ => RecurringScheduleState::Other,
-    }
-}
-
 /// Mollie subscription interval strings are fixed: `1 month`, `12 months`.
-/// Moved here from plan billing with the inversion: interval GRAMMAR is
-/// provider vocabulary.
+/// Interval GRAMMAR is provider vocabulary and lives in the adapter; the
+/// local renewal scheduler (plan_billing) converts a local billing interval
+/// to the provider string only for operator-facing descriptions.
 pub fn interval_string(months: u32) -> String {
     if months == 1 {
         "1 month".to_string()
@@ -250,23 +236,6 @@ fn neutral_settlement(settlement: mollie_client::Settlement) -> Settlement {
     }
 }
 
-fn neutral_schedule(
-    schedule: mollie_client::Subscription,
-) -> Result<RecurringSchedule, ProviderError> {
-    Ok(RecurringSchedule {
-        provider: PROVIDER_NAME.to_string(),
-        provider_schedule_id: schedule.id,
-        provider_customer_id: schedule.customer_id,
-        state: map_schedule_status(&schedule.status),
-        amount_minor: schedule.amount.as_ref().map(|amount| amount.cents),
-        currency: schedule
-            .amount
-            .as_ref()
-            .map(|amount| amount.currency.clone()),
-        next_charge_date: schedule.next_payment_date,
-    })
-}
-
 // ---------------------------------------------------------------------------
 // The boundary implementation
 // ---------------------------------------------------------------------------
@@ -278,15 +247,18 @@ impl PaymentProvider for MollieProvider {
     }
 
     /// Mollie's surface: hosted checkout pages, stored-mandate charging,
-    /// refunds, chargeback facts (disputes arrive as payment states, not a
-    /// fetchable dispute object), settlement payouts, and an
-    /// `Idempotency-Key` honored on every mutating call.
+    /// refunds, settlement payouts, and an `Idempotency-Key` honored on
+    /// every mutating call. Mollie's wire offers NO retrievable dispute
+    /// object (chargebacks arrive only as payment statuses), so the
+    /// disputes capability is honestly `false` and
+    /// [`PaymentProvider::list_disputes`] refuses visibly — never a silent
+    /// empty list that would hide a chargeback from reconciliation.
     fn capabilities(&self) -> ProviderCapabilities {
         ProviderCapabilities {
             hosted_checkout: true,
             saved_method_charging: true,
             refunds: true,
-            disputes: true,
+            disputes: false,
             payouts: true,
             idempotency_keys: true,
         }
@@ -332,6 +304,17 @@ impl PaymentProvider for MollieProvider {
         &self,
         request: SavedMethodCharge,
     ) -> Result<Payment, ProviderError> {
+        // The adapter puts the idempotency key INTO the charge metadata:
+        // Mollie offers no keyed payment lookup, so the stale-claim
+        // reconciliation's provider-side search can only match on the
+        // metadata we ourselves sent (see `search_payment_by_idempotency_key`).
+        let mut metadata = request.metadata;
+        if let Some(object) = metadata.as_object_mut() {
+            object.insert(
+                "idempotency_key".to_string(),
+                serde_json::Value::String(request.idempotency_key.clone()),
+            );
+        }
         let link = self
             .client
             .create_payment(CreatePayment {
@@ -341,7 +324,7 @@ impl PaymentProvider for MollieProvider {
                 // redirectUrl would be rejected as an invalid URL).
                 redirect_url: String::new(),
                 webhook_url: None,
-                metadata: request.metadata,
+                metadata,
                 method: None,
                 customer_id: Some(request.provider_customer_id),
                 mandate_id: Some(request.provider_method_id),
@@ -394,6 +377,51 @@ impl PaymentProvider for MollieProvider {
         neutral_payment(payment)
     }
 
+    /// Mollie has no idempotency-key payment lookup. The HONEST
+    /// implementation enumerates the account's most recent payments and
+    /// matches the `metadata.idempotency_key` this adapter puts on every
+    /// stored-method charge. `None` is returned ONLY when the listing was
+    /// provably complete (a short page): a full page may be truncated, and
+    /// a truncated listing can never prove absence — that is
+    /// [`ProviderError::Config`], never `None` (guessing absence
+    /// double-charges).
+    async fn search_payment_by_idempotency_key(
+        &self,
+        idempotency_key: &str,
+    ) -> Result<Option<Payment>, ProviderError> {
+        const PAGE_LIMIT: u32 = 250;
+        let key = idempotency_key.trim();
+        if key.is_empty() {
+            return Err(ProviderError::Config(
+                "mollie: an empty idempotency key cannot be searched".into(),
+            ));
+        }
+        let payments = self
+            .client
+            .list_payments(PAGE_LIMIT)
+            .await
+            .map_err(map_error)?;
+        for payment in &payments {
+            if payment
+                .metadata
+                .get("idempotency_key")
+                .and_then(|value| value.as_str())
+                == Some(key)
+            {
+                return neutral_payment(payment.clone()).map(Some);
+            }
+        }
+        if payments.len() as u32 >= PAGE_LIMIT {
+            // The window is full: older payments (including possibly THE
+            // charge) are cut off, so absence is NOT provable.
+            return Err(ProviderError::Config(format!(
+                "mollie: the recent-payments listing is full ({PAGE_LIMIT}); absence of the \
+                 idempotency key cannot be proven"
+            )));
+        }
+        Ok(None)
+    }
+
     async fn fetch_refund(
         &self,
         provider_payment_id: &str,
@@ -417,78 +445,6 @@ impl PaymentProvider for MollieProvider {
             })
     }
 
-    async fn create_recurring_schedule(
-        &self,
-        request: RecurringScheduleRequest,
-    ) -> Result<RecurringSchedule, ProviderError> {
-        let schedule = self
-            .client
-            .create_subscription(CreateSubscription {
-                customer_id: request.provider_customer_id,
-                mandate_id: request.provider_method_id,
-                amount: Money::new(&request.currency, request.amount_minor),
-                interval: interval_string(request.interval_months),
-                description: request.description,
-                // None lets the wire client derive the webhook from its own
-                // environment, exactly as the pre-inversion caller did.
-                webhook_url: None,
-                metadata: request.metadata,
-                start_date: request.first_charge_date,
-                idempotency_key: request.idempotency_key,
-            })
-            .await
-            .map_err(map_error)?;
-        neutral_schedule(schedule)
-    }
-
-    async fn fetch_recurring_schedule(
-        &self,
-        provider_customer_id: &str,
-        provider_schedule_id: &str,
-    ) -> Result<RecurringSchedule, ProviderError> {
-        let schedule = self
-            .client
-            .get_subscription(provider_customer_id, provider_schedule_id)
-            .await
-            .map_err(map_error)?;
-        neutral_schedule(schedule)
-    }
-
-    async fn list_recurring_schedules(
-        &self,
-        provider_customer_id: &str,
-    ) -> Result<Vec<RecurringSchedule>, ProviderError> {
-        let schedules = self
-            .client
-            .list_subscriptions(provider_customer_id)
-            .await
-            .map_err(map_error)?;
-        schedules.into_iter().map(neutral_schedule).collect()
-    }
-
-    async fn cancel_recurring_schedule(
-        &self,
-        provider_customer_id: &str,
-        provider_schedule_id: &str,
-    ) -> Result<(), ProviderError> {
-        // The id grammar lives HERE, in the adapter: a legacy/local
-        // sentinel that is not a provider object is a no-op, and a provider
-        // object it already forgot is the desired end state (mirroring the
-        // pre-inversion semantics byte for byte).
-        if !provider_schedule_id.starts_with("sub_") || provider_customer_id.trim().is_empty() {
-            return Ok(());
-        }
-        match self
-            .client
-            .cancel_subscription(provider_customer_id, provider_schedule_id)
-            .await
-        {
-            Ok(()) => Ok(()),
-            Err(MollieError::Rejected { status: 404, .. }) => Ok(()),
-            Err(error) => Err(map_error(error)),
-        }
-    }
-
     async fn fetch_settlement(
         &self,
         provider_settlement_id: &str,
@@ -508,6 +464,20 @@ impl PaymentProvider for MollieProvider {
             .await
             .map_err(map_error)?;
         Ok(settlements.into_iter().map(neutral_settlement).collect())
+    }
+
+    /// Mollie's wire offers no chargeback/dispute retrieval on this
+    /// surface (chargebacks surface only as payment statuses), so this
+    /// adapter refuses VISIBLY. The refusal is the contract for a
+    /// `disputes: false` capability: never a silent empty list, which
+    /// would hide a chargeback from the reconciliation.
+    async fn list_disputes(
+        &self,
+        _provider_payment_id: &str,
+    ) -> Result<Vec<Dispute>, ProviderError> {
+        Err(ProviderError::Config(
+            "mollie: dispute retrieval not offered by the provider API".into(),
+        ))
     }
 
     async fn revoke_saved_method(
@@ -618,24 +588,6 @@ mod tests {
         assert!(map_credential_status("brand-new").is_err());
     }
 
-    /// The schedule map is TOTAL: the reconciliation sweep's contract
-    /// (anything not active grants nothing) survives unknown statuses.
-    #[test]
-    fn schedule_status_mapping_is_total_with_other_for_unmodeled() {
-        let expected = [
-            ("active", RecurringScheduleState::Active),
-            ("pending", RecurringScheduleState::Pending),
-            ("canceled", RecurringScheduleState::Canceled),
-            ("suspended", RecurringScheduleState::Suspended),
-            ("completed", RecurringScheduleState::Completed),
-            ("something-new", RecurringScheduleState::Other),
-            ("", RecurringScheduleState::Other),
-        ];
-        for (wire, state) in expected {
-            assert_eq!(map_schedule_status(wire), state, "{wire}");
-        }
-    }
-
     #[test]
     fn interval_strings_are_the_fixed_provider_grammar() {
         assert_eq!(interval_string(1), "1 month");
@@ -734,8 +686,46 @@ mod tests {
         assert!(capabilities.hosted_checkout);
         assert!(capabilities.saved_method_charging);
         assert!(capabilities.refunds);
-        assert!(capabilities.disputes);
+        // Honest: Mollie's wire offers no retrievable dispute object, so
+        // the capability is false and list_disputes refuses visibly.
+        assert!(!capabilities.disputes);
         assert!(capabilities.payouts);
         assert!(capabilities.idempotency_keys);
+    }
+
+    /// The disputes refusal is the `disputes: false` contract: an Err the
+    /// caller must surface, never a silent empty list.
+    #[tokio::test]
+    async fn dispute_retrieval_refuses_visibly() {
+        let provider = MollieProvider::for_tests("http://127.0.0.1:1/v2".into());
+        match provider.list_disputes("tr_example").await {
+            Err(ProviderError::Config(message)) => {
+                assert!(
+                    message.contains("dispute retrieval not offered"),
+                    "{message}"
+                )
+            }
+            other => panic!("expected a Config refusal, got {other:?}"),
+        }
+    }
+
+    /// The search refuses an empty key and cannot prove absence on a full
+    /// listing (the wire is unreachable here, so the honest full-window
+    /// answer is a transport error, never a guessed None).
+    #[tokio::test]
+    async fn idempotency_search_never_guesses_absence() {
+        let provider = MollieProvider::for_tests("http://127.0.0.1:1/v2".into());
+        match provider.search_payment_by_idempotency_key("  ").await {
+            Err(ProviderError::Config(message)) => {
+                assert!(message.contains("cannot be searched"), "{message}")
+            }
+            other => panic!("expected a Config refusal, got {other:?}"),
+        }
+        // The stub address refuses connections: the search surfaces the
+        // transport failure instead of inventing an answer.
+        assert!(provider
+            .search_payment_by_idempotency_key("usageinv_x_1c")
+            .await
+            .is_err());
     }
 }

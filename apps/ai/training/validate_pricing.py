@@ -79,7 +79,7 @@ CANONICAL_PRICING = {
          "includes": "Isolated-reputation subaccounts, white-label tracking and bounce domains, provisioning API"},
         {"name": "Dedicated Tenant", "price": "from €4,000/mo, 12-month minimum, €10k–€40k setup",
          "usd": "from USD 4,500/mo",
-         "includes": "Single-tenant stack on dedicated hardware, EU region by default, "
+         "includes": "Single-tenant stack on dedicated compute (dedicated-vCPU line), EU region by default, "
                      "5M recipients, 2 managed IPs, named owner, monthly review"},
         {"name": "Mailboxes", "price": "€6 per seat/mo, 10-seat minimum; archive +€2 per seat",
          "usd": "USD 7 per seat/mo; +USD 2 archive",

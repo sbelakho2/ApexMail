@@ -41,9 +41,16 @@ Not yet exercised against the live provider. The capacity SKU, image and
 SSH-key names are the operator's explicit configuration
 (`DT_HETZNER_SERVER_TYPE`, `DT_HETZNER_IMAGE`, `DT_HETZNER_SSH_KEYS`):
 there is deliberately no default SKU, and execution refuses until they are
-set. The first live provisioning run is an operator-gated validation step;
-until it passes, treat one-command provisioning as code-complete, not
-operationally proven.
+set. The approved SKU matrix (eighth external audit, DT) enforces SKU
+truth at config load: Dedicated Tenant capacity is DEDICATED COMPUTE
+RESOURCES — the provider's dedicated-vCPU CCX line (ccx13, ccx23, ccx33,
+ccx43, ccx63, ...) — never "dedicated hardware" (that is a different
+product) and never the CX/CPX/CAX families, which are SHARED compute.
+Shared-compute SKUs are refused unless `DT_ALLOW_SHARED_COMPUTE_SKU=1` is
+explicitly set, a flag that exists for non-dedicated product tiers only.
+Unlisted SKU families fail closed. The first live provisioning run is an
+operator-gated validation step; until it passes, treat one-command
+provisioning as code-complete, not operationally proven.
 
 ## Honesty boundary
 
@@ -62,3 +69,29 @@ deployment row, which stays `validated`. Resolve the cause and call the
 route again. Re-execution is idempotent: a deployment that already carries a
 provider host returns an `already_exists` outcome and makes no second
 create call.
+
+## The create claim and label reconciliation (eighth external audit)
+
+Before any provider create, the executor atomically CLAIMS the create on
+the deployment row (migration 283: one conditional UPDATE; only the winner
+proceeds, concurrent callers receive a typed 409 naming the claim and
+reconciliation, and no second create can be billed). The create stamps the
+provider server with the deterministic label `apexmail-dt:<deployment id>`.
+
+Before every create — and after any create whose outcome is uncertain
+(transport error/timeout) or unrecorded (a local persist failure after the
+provider accepted) — the executor LISTs the provider by that label:
+
+- exactly one match: the previous create landed — it is ADOPTED (recorded
+  and moved through the lifecycle), never re-created;
+- zero matches: the previous create provably never landed, so creating is
+  safe;
+- more than one: a typed error demanding MANUAL reconciliation; nothing is
+  created automatically.
+
+A live claim blocks re-execution for its 10-minute window; a STALE claim
+(older than 10 minutes) is stealable by the next execution — that is the
+recovery path for a claimant that crashed mid-flight. If a previous
+attempt's create landed without being recorded, the label reconciliation
+adopts it on the next execution, so no retry can ever build a second
+machine.

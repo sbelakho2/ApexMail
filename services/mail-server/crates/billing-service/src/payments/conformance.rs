@@ -1,8 +1,9 @@
 //! The shared provider conformance harness (external audit, seventh pass,
-//! P0-A, step 9 of the mandated 18-step order).
+//! P0-A, step 9 of the mandated 18-step order; expanded to the
+//! financial-correctness matrix in the eighth pass).
 //!
 //! ONE matrix, ONE harness, every adapter. [`run_provider_conformance`]
-//! drives the audit's exact twelve-arm matrix against any
+//! drives the audit's eighteen-arm matrix against any
 //! [`PaymentProvider`] plus the neutral engine, so a new processor (Stripe,
 //! steps 11-18) proves itself against the SAME gates Mollie passes today
 //! instead of writing its own idea of correct.
@@ -12,18 +13,37 @@
 //! | arm | audit statement |
 //! |-----|-----------------|
 //! | 1 | wrong tenant (cross-tenant obligation) refuses, nothing settles |
-//! | 2 | wrong amount refuses: absent/zero never mints, over-charge never over-settles |
+//! | 2 | wrong exact amount REFUSES ([`VerifyError::AmountMismatch`]): absent
+//!     never mints, over- AND under-charge never allocate, never cap — the
+//!     attempt stays open for human reconciliation |
 //! | 3 | wrong currency refuses |
-//! | 4 | duplicate webhook settles exactly once |
-//! | 5 | out-of-order events never regress the verified terminal |
-//! | 6 | timeout after a successful charge: claim stays open, no second
+//! | 4 | requires_action grants nothing and blocks blind retry |
+//! | 5 | failed charge closes the claim failed, no entitlement |
+//! | 6 | duplicate webhook settles exactly once |
+//! | 7 | out-of-order events never regress the verified terminal |
+//! | 8 | timeout after a successful charge: claim stays open, no second
 //!      charge, the repair sweep settles it |
-//! | 7 | requires_action grants nothing and blocks blind retry |
-//! | 8 | failed charge closes the claim failed and stays retryable |
-//! | 9 | scheduler race: two concurrent claims, exactly one wins |
-//! | 10 | partial + full refund produce distinct neutral refund facts |
-//! | 11 | missed webhook: the repair sweep settles from the authenticated fetch |
-//! | 12 | payout/settlement facts land as neutral settlement facts |
+//! | 9 | timeout with NO provider confirmation: the search cannot prove
+//!      absence, so the attempt parks `unresolved`, is never auto-retried
+//!      and never settles |
+//! | 10 | attempt 2 after a definitive failure: a NEW immutable row with
+//!      attempt_no = 2 and a distinct idempotency key; attempt 1 untouched |
+//! | 11 | scheduler race: two concurrent claims, exactly one wins |
+//! | 12 | partial + full refund produce distinct neutral refund facts |
+//! | 13 | dispute opened: the neutral fact and the dispute row land |
+//! | 14 | dispute lost: the terminal debit posts |
+//! | 15 | dispute won/reversed: the restoration entry posts |
+//! | 16 | missed webhook: the repair sweep settles from the authenticated
+//!      fetch |
+//! | 17 | payout/settlement facts land as neutral settlement facts |
+//! | 18 | cancel-at-period-end prevents new local renewal: the local flag
+//!      ends the subscription with no invoice and no charge |
+//!
+//! Arms 13-15 are capability-gated ([`ProviderCapabilities::disputes`]): a
+//! provider that declares no dispute retrieval passes by REFUSING
+//! `list_disputes` visibly (never a silent empty list that would hide a
+//! chargeback); a provider that declares the capability must prove the
+//! full fact -> row -> ledger -> journal path.
 //!
 //! [`ConformanceProvider`] is the scriptable double used to develop against
 //! and to prove the harness has teeth: seeding a [`Defect`] into the double
@@ -39,37 +59,48 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
 
+use chrono::Utc;
 use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::AppState;
 
 use super::engine::{
-    claim_attempt, confirm_attempt, has_open_attempt, observe_payment, record_refund_fact,
-    record_settlement_fact, settle_verified, sweep_open_attempts_with, verify_against_obligation,
-    ObservedPayment,
+    claim_attempt, claim_next_attempt, confirm_attempt, dunning_key, has_open_attempt,
+    observe_dispute, observe_payment, record_refund_fact, record_settlement_fact, settle_verified,
+    sweep_open_attempts_with, verify_against_obligation, ObservedPayment, UNRESOLVED_ATTEMPT_STATE,
 };
 use super::{
-    Checkout, CheckoutRequest, Payment, PaymentProvider, PaymentState, ProviderCapabilities,
-    ProviderError, RecurringSchedule, RecurringScheduleRequest, RecurringScheduleState, Refund,
-    RefundRequest, RefundState, SavedMethodCharge, Settlement,
+    Checkout, CheckoutRequest, Dispute, DisputeState, Payment, PaymentProvider, PaymentState,
+    ProviderCapabilities, ProviderError, Refund, RefundRequest, RefundState, SavedMethodCharge,
+    Settlement,
 };
 
 /// The matrix ids and names, in report order.
-pub const MATRIX: [(u8, &str); 12] = [
+pub const MATRIX: [(u8, &str); 18] = [
     (1, "wrong tenant refuses"),
-    (2, "wrong amount refuses"),
+    (2, "wrong exact amount refuses, attempt stays open"),
     (3, "wrong currency refuses"),
-    (4, "duplicate webhook settles exactly once"),
-    (5, "out-of-order events stay terminal"),
-    (6, "timeout after charge: no second charge, repair settles"),
-    (7, "requires_action grants nothing"),
-    (8, "failed charge closes the claim, retryable"),
-    (9, "scheduler race: one claim wins"),
-    (10, "partial and full refunds are distinct facts"),
-    (11, "missed webhook repaired by the sweep"),
-    (12, "settlement facts land on the neutral ledger"),
+    (4, "requires_action grants nothing"),
+    (5, "failed charge closes the claim, no entitlement"),
+    (6, "duplicate webhook settles exactly once"),
+    (7, "out-of-order events stay terminal"),
+    (8, "timeout after charge: no second charge, repair settles"),
+    (9, "timeout without confirmation: unresolved, never retried"),
+    (10, "attempt 2 is a new immutable row"),
+    (11, "scheduler race: one claim wins"),
+    (12, "partial and full refunds are distinct facts"),
+    (13, "dispute opened: fact and dispute row land"),
+    (14, "dispute lost: terminal debit posts"),
+    (15, "dispute won: restoration posts"),
+    (16, "missed webhook repaired by the sweep"),
+    (17, "settlement facts land on the neutral ledger"),
+    (18, "cancel-at-period-end prevents new local renewal"),
 ];
+
+// The recurring-schedule arms are retired with the provider-owned schedule
+// surface itself (beta authority inversion): the local renewal worker owns
+// period advancement, and arm 18 pins the cancel-at-period-end authority.
 
 // ---------------------------------------------------------------------------
 // The scriptable double
@@ -81,31 +112,36 @@ pub const MATRIX: [(u8, &str); 12] = [
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Defect {
     /// A charge that should surface the lost response as an error instead
-    /// reports success. Must fail arm 6 (the timeout is hidden).
+    /// reports success. Must fail arm 8 (the timeout is hidden).
     HideTimeout,
     /// The authenticated fetch lies about the state (paid reported failed).
-    /// Must fail arm 11 (the repair sweep cannot settle a "failed" charge).
+    /// Must fail arm 16 (the repair sweep cannot settle a "failed" charge).
     FetchLiesAboutState,
-    /// The authenticated fetch reports the wrong currency. Must fail arm 4
+    /// The authenticated fetch reports the wrong currency. Must fail arm 6
     /// (verification refuses, so the exactly-once settle never happens).
     FetchReportsWrongCurrency,
     /// Two distinct refunds answer with the same refund id. Must fail arm
-    /// 10 (the second refund collapses onto the first ledger row).
+    /// 12 (the second refund collapses onto the first ledger row).
     RefundIdCollision,
-    /// Settlement amounts are misreported. Must fail arm 12 (the recorded
+    /// Settlement amounts are misreported. Must fail arm 17 (the recorded
     /// neutral fact carries the wrong money).
     SettlementAmountWrong,
+    /// A dispute decided AGAINST us is reported as won. Must fail arm 14
+    /// (the terminal debit never posts, so the loss is invisible to the
+    /// statutory ledger).
+    DisputeStateLies,
 }
 
 impl Defect {
     /// The arm a seeded defect must break (the teeth mapping).
     pub fn breaks_arm(self) -> u8 {
         match self {
-            Defect::HideTimeout => 6,
-            Defect::FetchLiesAboutState => 11,
-            Defect::FetchReportsWrongCurrency => 4,
-            Defect::RefundIdCollision => 10,
-            Defect::SettlementAmountWrong => 12,
+            Defect::HideTimeout => 8,
+            Defect::FetchLiesAboutState => 16,
+            Defect::FetchReportsWrongCurrency => 6,
+            Defect::RefundIdCollision => 12,
+            Defect::SettlementAmountWrong => 17,
+            Defect::DisputeStateLies => 14,
         }
     }
 }
@@ -117,7 +153,13 @@ struct Script {
     refunds: VecDeque<Result<Refund, ProviderError>>,
     payments: HashMap<String, Payment>,
     settlements: VecDeque<Settlement>,
-    schedule_counter: u64,
+    /// The idempotency-key search answers, keyed by the searched key. The
+    /// outer `Option` distinguishes "scripted" from "unscripted"; the inner
+    /// one is the answer (`Some(None)` = provable absence, `Some(Some(p))`
+    /// = the provider knows the charge).
+    searches: HashMap<String, Option<Option<Payment>>>,
+    /// Scripted dispute facts per provider payment id.
+    disputes: HashMap<String, Vec<Dispute>>,
     defect: Option<Defect>,
 }
 
@@ -202,6 +244,29 @@ impl ConformanceProvider {
             .expect("script lock")
             .settlements
             .push_back(settlement);
+    }
+
+    /// Script the idempotency-key search answer for one key:
+    /// `Some(Some(payment))` = the provider knows the charge;
+    /// `Some(None)` = the provider provably does not; unscripted keys
+    /// fail closed with [`ProviderError::Config`].
+    pub fn script_search(&self, idempotency_key: &str, answer: Option<Payment>) {
+        self.script
+            .lock()
+            .expect("script lock")
+            .searches
+            .insert(idempotency_key.to_string(), Some(answer));
+    }
+
+    /// Script one dispute fact against a provider payment.
+    pub fn script_dispute(&self, provider_payment_id: &str, dispute: Dispute) {
+        self.script
+            .lock()
+            .expect("script lock")
+            .disputes
+            .entry(provider_payment_id.to_string())
+            .or_default()
+            .push(dispute);
     }
 
     /// Seed a contract defect (teeth).
@@ -317,6 +382,21 @@ impl PaymentProvider for ConformanceProvider {
         Ok(payment)
     }
 
+    /// The scripted idempotency-key search: a key with no scripted answer
+    /// fails closed (absence is never guessed by the double either).
+    async fn search_payment_by_idempotency_key(
+        &self,
+        idempotency_key: &str,
+    ) -> Result<Option<Payment>, ProviderError> {
+        let script = self.script.lock().expect("script lock");
+        match script.searches.get(idempotency_key) {
+            Some(Some(answer)) => Ok(answer.clone()),
+            _ => Err(ProviderError::Config(format!(
+                "conformance: unscripted idempotency-key search for {idempotency_key}"
+            ))),
+        }
+    }
+
     async fn fetch_refund(
         &self,
         provider_payment_id: &str,
@@ -338,62 +418,6 @@ impl PaymentProvider for ConformanceProvider {
                 kind: "refund",
                 id: provider_refund_id.to_string(),
             }))
-    }
-
-    async fn create_recurring_schedule(
-        &self,
-        request: RecurringScheduleRequest,
-    ) -> Result<RecurringSchedule, ProviderError> {
-        let mut script = self.script.lock().expect("script lock");
-        script.schedule_counter += 1;
-        Ok(RecurringSchedule {
-            provider: self.name.to_string(),
-            provider_schedule_id: format!("sched_{}", script.schedule_counter),
-            provider_customer_id: request.provider_customer_id,
-            state: RecurringScheduleState::Active,
-            amount_minor: Some(request.amount_minor),
-            currency: Some(request.currency),
-            next_charge_date: None,
-        })
-    }
-
-    async fn fetch_recurring_schedule(
-        &self,
-        provider_customer_id: &str,
-        provider_schedule_id: &str,
-    ) -> Result<RecurringSchedule, ProviderError> {
-        Ok(RecurringSchedule {
-            provider: self.name.to_string(),
-            provider_schedule_id: provider_schedule_id.to_string(),
-            provider_customer_id: provider_customer_id.to_string(),
-            state: RecurringScheduleState::Active,
-            amount_minor: None,
-            currency: None,
-            next_charge_date: None,
-        })
-    }
-
-    async fn list_recurring_schedules(
-        &self,
-        provider_customer_id: &str,
-    ) -> Result<Vec<RecurringSchedule>, ProviderError> {
-        Ok(vec![RecurringSchedule {
-            provider: self.name.to_string(),
-            provider_schedule_id: "sched_1".to_string(),
-            provider_customer_id: provider_customer_id.to_string(),
-            state: RecurringScheduleState::Active,
-            amount_minor: None,
-            currency: None,
-            next_charge_date: None,
-        }])
-    }
-
-    async fn cancel_recurring_schedule(
-        &self,
-        _provider_customer_id: &str,
-        _provider_schedule_id: &str,
-    ) -> Result<(), ProviderError> {
-        Ok(())
     }
 
     async fn revoke_saved_method(
@@ -435,6 +459,37 @@ impl PaymentProvider for ConformanceProvider {
             }
         }
         Ok(out)
+    }
+
+    /// The scripted dispute facts for one payment. Unscripted payments
+    /// fail closed. The DisputeStateLies defect reports a Lost dispute as
+    /// Won, so the terminal debit never posts (the tooth for arm 14).
+    async fn list_disputes(
+        &self,
+        provider_payment_id: &str,
+    ) -> Result<Vec<Dispute>, ProviderError> {
+        let script = self.script.lock().expect("script lock");
+        let facts = script
+            .disputes
+            .get(provider_payment_id)
+            .cloned()
+            .ok_or_else(|| {
+                ProviderError::Config(format!(
+                    "conformance: unscripted dispute search for {provider_payment_id}"
+                ))
+            })?;
+        if script.defect == Some(Defect::DisputeStateLies) {
+            return Ok(facts
+                .into_iter()
+                .map(|mut dispute| {
+                    if dispute.state == DisputeState::Lost {
+                        dispute.state = DisputeState::Won;
+                    }
+                    dispute
+                })
+                .collect());
+        }
+        Ok(facts)
     }
 }
 
@@ -589,8 +644,9 @@ fn observed(
     }
 }
 
-/// Run the full twelve-arm conformance matrix against one provider plus the
-/// neutral engine. Never panics: every arm's outcome lands in the report.
+/// Run the full seventeen-arm conformance matrix against one provider plus
+/// the neutral engine. Never panics: every arm's outcome lands in the
+/// report.
 pub async fn run_provider_conformance(
     state: &AppState,
     provider: std::sync::Arc<dyn PaymentProvider>,
@@ -625,7 +681,7 @@ pub async fn run_provider_conformance(
             arm_record(arm, false, format!("scripting failed: {error}"), &mut arms);
             continue;
         }
-        let detail = match run_arm(state, provider.as_ref(), &ctx).await {
+        let detail = match run_arm(state, &provider, &ctx).await {
             Ok(()) => String::new(),
             Err(error) => error,
         };
@@ -639,7 +695,7 @@ pub async fn run_provider_conformance(
 
 async fn run_arm(
     state: &AppState,
-    provider: &dyn PaymentProvider,
+    provider: &std::sync::Arc<dyn PaymentProvider>,
     ctx: &ConformanceCtx<'_>,
 ) -> Result<(), String> {
     let pool = &state.db;
@@ -668,8 +724,12 @@ async fn run_arm(
             Ok(())
         }
         2 => {
-            // Wrong amount: an absent amount refuses outright, and an
-            // over-charge can never settle more than the obligation.
+            // Wrong exact amount: an absent amount refuses outright, and an
+            // over-charge AND an under-charge are AmountMismatch
+            // reconciliation incidents — no entitlement, no paid
+            // transition, no allocation, NO capping, and the attempt stays
+            // open for human reconciliation (never closed failed: the money
+            // may exist).
             let absent = observed(
                 name,
                 ctx.provider_payment_hint,
@@ -683,33 +743,71 @@ async fn run_arm(
                 Err(super::engine::VerifyError::NotSuccessful(_)) => {}
                 other => return Err(format!("absent amount must refuse, got {other:?}")),
             }
-            let over = observed(
-                name,
-                ctx.provider_payment_hint,
-                PaymentState::Succeeded,
-                Some(ARM_AMOUNT * 10),
-                Some(ARM_CURRENCY),
-                Some(ctx.tenant_id),
-                ctx.obligation_ref,
-            );
-            let verified = verify_against_obligation(pool, &over)
+            for (label, charged) in [
+                ("over-charge", Some(ARM_AMOUNT * 10)),
+                ("under-charge", Some(ARM_AMOUNT / 2)),
+            ] {
+                let fact = observed(
+                    name,
+                    ctx.provider_payment_hint,
+                    PaymentState::Succeeded,
+                    charged,
+                    Some(ARM_CURRENCY),
+                    Some(ctx.tenant_id),
+                    ctx.obligation_ref,
+                );
+                // The authenticated fact lands on the attempt ledger first
+                // (exactly what the webhook path does), then verification
+                // refuses.
+                observe_payment(pool, &fact)
+                    .await
+                    .map_err(|error| format!("{label}: observe failed: {error}"))?;
+                match verify_against_obligation(pool, &fact).await {
+                    Err(super::engine::VerifyError::AmountMismatch {
+                        expected_minor,
+                        actual_minor,
+                        ..
+                    }) => {
+                        if expected_minor != ARM_AMOUNT || Some(actual_minor) != charged {
+                            return Err(format!(
+                                "{label}: the refusal must carry the true evidence \
+                                 (expected {expected_minor}, actual {actual_minor})"
+                            ));
+                        }
+                    }
+                    other => {
+                        return Err(format!(
+                            "{label} must refuse with AmountMismatch, never cap: got {other:?}"
+                        ))
+                    }
+                }
+                let state: String = sqlx::query_scalar(
+                    "SELECT state FROM payment_attempts \
+                     WHERE provider = $1 AND provider_payment_id = $2",
+                )
+                .bind(name)
+                .bind(ctx.provider_payment_hint)
+                .fetch_one(pool)
                 .await
-                .map_err(|error| format!("over-charge should cap, not refuse: {error}"))?;
-            if verified.allocation_minor != ARM_AMOUNT {
-                return Err(format!(
-                    "the allocation must cap at the obligation, got {}",
-                    verified.allocation_minor
-                ));
+                .map_err(|error| format!("{label}: attempt read failed: {error}"))?;
+                if state == "failed" {
+                    return Err(format!(
+                        "{label}: the mismatched attempt must stay OPEN for reconciliation, \
+                         never be closed failed"
+                    ));
+                }
             }
-            settle_verified(pool, name, &verified)
-                .await
-                .map_err(|error| format!("settle failed: {error}"))?;
-            let allocated = allocation_count(pool, ctx.invoice_id).await;
-
-            if allocated != ARM_AMOUNT {
-                return Err(format!(
-                    "the ledger must never exceed the obligation: {allocated}"
-                ));
+            if allocation_count(pool, ctx.invoice_id).await != 0 {
+                return Err("a refused amount must not allocate".into());
+            }
+            let status: String =
+                sqlx::query_scalar("SELECT status::text FROM invoices WHERE id = $1")
+                    .bind(ctx.invoice_id)
+                    .fetch_one(pool)
+                    .await
+                    .map_err(|error| format!("invoice status read failed: {error}"))?;
+            if status == "paid" {
+                return Err("a mismatched charge must never mark the obligation paid".into());
             }
             Ok(())
         }
@@ -730,7 +828,7 @@ async fn run_arm(
             }
             Ok(())
         }
-        4 => {
+        6 => {
             // Duplicate webhook: the authenticated fetch feeds observe ->
             // settle twice; exactly one allocation.
             let payment = provider
@@ -771,7 +869,7 @@ async fn run_arm(
             }
             Ok(())
         }
-        5 => {
+        7 => {
             // Out-of-order: failed arrives, then succeeded (truth), then a
             // stale failed again. The verified terminal must hold.
             let failed = observed(
@@ -823,9 +921,10 @@ async fn run_arm(
                 .map_err(|error| format!("settle failed: {error}"))?;
             Ok(())
         }
-        6 => {
+        8 => {
             // Timeout after a successful charge: the claim stays open, a
-            // second tick opens NO second charge, the repair settles.
+            // second tick opens NO second charge (the transport retry
+            // reuses the SAME key and row), the repair settles.
             let key = format!("conf{arm}_{}", ctx.invoice_id.simple());
             let claimed = claim_attempt(
                 pool,
@@ -910,7 +1009,7 @@ async fn run_arm(
             .execute(pool)
             .await
             .map_err(|error| format!("aging failed: {error}"))?;
-            let stats = sweep_open_attempts_with(state, provider)
+            let stats = sweep_open_attempts_with(state, provider.as_ref())
                 .await
                 .map_err(|error| format!("repair sweep failed: {error}"))?;
             if stats.settled == 0 {
@@ -921,8 +1020,10 @@ async fn run_arm(
             }
             Ok(())
         }
-        7 => {
-            // RequiresAction grants nothing and blocks a blind retry.
+        4 => {
+            // RequiresAction grants nothing and blocks a blind retry (a
+            // retry with the SAME key conflicts on the open attempt; a
+            // legitimate dunning retry is a NEW attempt, arm 10).
             let fact = observed(
                 name,
                 ctx.provider_payment_hint,
@@ -981,8 +1082,10 @@ async fn run_arm(
             }
             Ok(())
         }
-        8 => {
-            // Failed charge: the claim closes failed and stays retryable.
+        5 => {
+            // Failed charge: the claim closes failed definitively and
+            // settles nothing. (The retry ladder is arm 10's business: a
+            // dunning retry is a NEW immutable attempt, never a reopen.)
             let key = format!("conf{arm}_{}", ctx.invoice_id.simple());
             claim_attempt(
                 pool,
@@ -1030,9 +1133,20 @@ async fn run_arm(
                 .await
                 .map_err(|error| format!("open probe failed: {error}"))?
             {
-                return Err("a failed claim must not block the retry ladder".into());
+                return Err("a failed claim must be closed".into());
             }
-            let retry = claim_attempt(
+            if allocation_count(pool, ctx.invoice_id).await != 0 {
+                return Err("a failed charge must settle nothing".into());
+            }
+            Ok(())
+        }
+        9 => {
+            // Timeout with NO provider confirmation: the stale-claim
+            // reconcile asks the provider (authenticated search); when
+            // absence cannot be PROVEN, the attempt parks `unresolved` —
+            // never closed failed, never auto-retried, never settled.
+            let key = dunning_key(ctx.obligation_ref, 1);
+            let claimed = claim_attempt(
                 pool,
                 name,
                 &key,
@@ -1043,16 +1157,206 @@ async fn run_arm(
                 ARM_CURRENCY,
             )
             .await
-            .map_err(|error| format!("retry claim failed: {error}"))?;
-            if !retry {
-                return Err("the dunning ladder must be able to retry a failed charge".into());
+            .map_err(|error| format!("claim failed: {error}"))?;
+            if !claimed {
+                return Err("the first claim must win".into());
+            }
+            let charge = provider
+                .charge_saved_method(SavedMethodCharge {
+                    provider_customer_id: format!("customer_{arm}"),
+                    provider_method_id: format!("method_{arm}"),
+                    amount_minor: ARM_AMOUNT,
+                    currency: ARM_CURRENCY.to_string(),
+                    description: format!("conformance arm {arm}"),
+                    metadata: serde_json::json!({
+                        "reference": ctx.obligation_ref,
+                        "tenant_id": ctx.tenant_id,
+                    }),
+                    idempotency_key: key.clone(),
+                })
+                .await;
+            match charge {
+                Err(super::ProviderError::Unavailable(_)) => {}
+                other => {
+                    return Err(format!(
+                        "the lost response must surface as Unavailable, got {other:?}"
+                    ))
+                }
+            }
+            if !has_open_attempt(pool, name, &key)
+                .await
+                .map_err(|error| format!("open probe failed: {error}"))?
+            {
+                return Err("the claim must stay open after the timeout".into());
+            }
+            // Age the claim past the stale-claim window, then sweep.
+            sqlx::query(
+                "UPDATE payment_attempts SET created_at = NOW() - INTERVAL '2 hours' \
+                 WHERE provider = $1 AND idempotency_key = $2",
+            )
+            .bind(name)
+            .bind(&key)
+            .execute(pool)
+            .await
+            .map_err(|error| format!("aging failed: {error}"))?;
+            let stats = sweep_open_attempts_with(state, provider.as_ref())
+                .await
+                .map_err(|error| format!("repair sweep failed: {error}"))?;
+            let state_now: String = sqlx::query_scalar(
+                "SELECT state FROM payment_attempts WHERE provider = $1 AND idempotency_key = $2",
+            )
+            .bind(name)
+            .bind(&key)
+            .fetch_one(pool)
+            .await
+            .map_err(|error| format!("attempt read failed: {error}"))?;
+            if state_now != UNRESOLVED_ATTEMPT_STATE {
+                return Err(format!(
+                    "absence unprovable must park the attempt `unresolved`, got {state_now}"
+                ));
+            }
+            if stats.settled != 0 {
+                return Err("an unconfirmed timeout must never settle".into());
+            }
+            if allocation_count(pool, ctx.invoice_id).await != 0 {
+                return Err("an unresolved attempt must never allocate".into());
+            }
+            // And it is NEVER auto-retried: the dunning gate refuses while
+            // the obligation's attempt sits in `unresolved`.
+            let retry = claim_next_attempt(
+                pool,
+                name,
+                ctx.tenant_id,
+                ctx.obligation_ref,
+                "conformance",
+                ARM_AMOUNT,
+                ARM_CURRENCY,
+            )
+            .await
+            .map_err(|error| format!("dunning probe failed: {error}"))?;
+            if retry.is_some() {
+                return Err("an unresolved attempt must never be auto-retried".into());
             }
             Ok(())
         }
-        9 => {
+        10 => {
+            // Attempt 2 after a definitive failure: a NEW immutable row
+            // with attempt_no = 2 and a DISTINCT idempotency key; attempt
+            // 1's row is untouched (closed attempts are never reopened).
+            let key1 = dunning_key(ctx.obligation_ref, 1);
+            let claimed = claim_attempt(
+                pool,
+                name,
+                &key1,
+                ctx.tenant_id,
+                ctx.obligation_ref,
+                "conformance",
+                ARM_AMOUNT,
+                ARM_CURRENCY,
+            )
+            .await
+            .map_err(|error| format!("claim 1 failed: {error}"))?;
+            if !claimed {
+                return Err("the first claim must win".into());
+            }
+            // The definitive failure closes attempt 1.
+            confirm_attempt(
+                pool,
+                name,
+                &key1,
+                ctx.provider_payment_hint,
+                PaymentState::Failed,
+            )
+            .await
+            .map_err(|error| format!("confirm failed: {error}"))?;
+            let before: (String, Option<String>, i64) = sqlx::query_as(
+                "SELECT state, provider_payment_id, attempt_no::bigint FROM payment_attempts \
+                 WHERE provider = $1 AND idempotency_key = $2",
+            )
+            .bind(name)
+            .bind(&key1)
+            .fetch_one(pool)
+            .await
+            .map_err(|error| format!("attempt 1 read failed: {error}"))?;
+            if before.0 != "failed" {
+                return Err(format!("attempt 1 must be closed failed, got {}", before.0));
+            }
+            // The SAME key can never reopen it: closed attempts are
+            // immutable.
+            let reopen = claim_attempt(
+                pool,
+                name,
+                &key1,
+                ctx.tenant_id,
+                ctx.obligation_ref,
+                "conformance",
+                ARM_AMOUNT,
+                ARM_CURRENCY,
+            )
+            .await
+            .map_err(|error| format!("same-key retry failed: {error}"))?;
+            if reopen {
+                return Err("a closed attempt must never reopen under the same key".into());
+            }
+            // The dunning ladder opens attempt 2: a new row, a new key.
+            let (attempt_no, key2) = claim_next_attempt(
+                pool,
+                name,
+                ctx.tenant_id,
+                ctx.obligation_ref,
+                "conformance",
+                ARM_AMOUNT,
+                ARM_CURRENCY,
+            )
+            .await
+            .map_err(|error| format!("dunning claim failed: {error}"))?
+            .ok_or_else(|| "the dunning ladder must open attempt 2".to_string())?;
+            if attempt_no != 2 {
+                return Err(format!("the retry must be attempt 2, got {attempt_no}"));
+            }
+            if key2 == key1 {
+                return Err("attempt 2 must carry a distinct idempotency key".into());
+            }
+            if key2 != dunning_key(ctx.obligation_ref, 2) {
+                return Err(format!(
+                    "the dunning key must follow the shared scheme, got {key2}"
+                ));
+            }
+            let after: (String, Option<String>, i64) = sqlx::query_as(
+                "SELECT state, provider_payment_id, attempt_no::bigint FROM payment_attempts \
+                 WHERE provider = $1 AND idempotency_key = $2",
+            )
+            .bind(name)
+            .bind(&key1)
+            .fetch_one(pool)
+            .await
+            .map_err(|error| format!("attempt 1 reread failed: {error}"))?;
+            if after != before {
+                return Err(format!(
+                    "attempt 1's immutable row was mutated: {before:?} -> {after:?}"
+                ));
+            }
+            let second: (String, i64) = sqlx::query_as(
+                "SELECT state, attempt_no::bigint FROM payment_attempts \
+                 WHERE provider = $1 AND idempotency_key = $2",
+            )
+            .bind(name)
+            .bind(&key2)
+            .fetch_one(pool)
+            .await
+            .map_err(|error| format!("attempt 2 read failed: {error}"))?;
+            if second.0 != "pending" || second.1 != 2 {
+                return Err(format!(
+                    "attempt 2 must be a fresh pending row with attempt_no 2, got {second:?}"
+                ));
+            }
+            Ok(())
+        }
+        11 => {
             // Scheduler race: two concurrent claims on one key, exactly one
-            // wins (the loser never charges).
-            let key = format!("conf{arm}_{}", ctx.invoice_id.simple());
+            // wins (the loser never charges) and the winning row is
+            // attempt 1 of the obligation's chain.
+            let key = dunning_key(ctx.obligation_ref, 1);
             let (first, second) = tokio::join!(
                 claim_attempt(
                     pool,
@@ -1082,9 +1386,24 @@ async fn run_arm(
                     "exactly one scheduler must win the claim (A={first}, B={second})"
                 ));
             }
+            let (rows, attempt_no): (i64, i64) = sqlx::query_as(
+                "SELECT COUNT(*), MIN(attempt_no)::bigint FROM payment_attempts \
+                 WHERE provider = $1 AND idempotency_key = $2",
+            )
+            .bind(name)
+            .bind(&key)
+            .fetch_one(pool)
+            .await
+            .map_err(|error| format!("race ledger read failed: {error}"))?;
+            if rows != 1 || attempt_no != 1 {
+                return Err(format!(
+                    "the race must leave exactly one attempt row, attempt_no 1 \
+                     (rows={rows}, attempt_no={attempt_no})"
+                ));
+            }
             Ok(())
         }
-        10 => {
+        12 => {
             // Partial then full refund: distinct neutral refund facts.
             let partial = provider
                 .refund(RefundRequest {
@@ -1135,7 +1454,7 @@ async fn run_arm(
             }
             Ok(())
         }
-        11 => {
+        16 => {
             // Missed webhook: a confirmed-but-unsettled attempt is repaired
             // from the AUTHENTICATED fetch.
             let key = format!("conf{arm}_{}", ctx.invoice_id.simple());
@@ -1170,7 +1489,7 @@ async fn run_arm(
             .execute(pool)
             .await
             .map_err(|error| format!("aging failed: {error}"))?;
-            let stats = sweep_open_attempts_with(state, provider)
+            let stats = sweep_open_attempts_with(state, provider.as_ref())
                 .await
                 .map_err(|error| format!("repair sweep failed: {error}"))?;
             if stats.settled == 0 {
@@ -1181,7 +1500,130 @@ async fn run_arm(
             }
             Ok(())
         }
-        12 => {
+        13..=15 => {
+            // Dispute reconciliation (arms 13/14/15): the neutral fact and
+            // the dispute row land, a LOST dispute posts the terminal
+            // debit the refund writer uses, a WON/REVERSED dispute posts
+            // the restoration. Capability-gated: a provider that declares
+            // no dispute retrieval passes by refusing `list_disputes`
+            // VISIBLY (an Err) — never a silent empty list, which would
+            // hide a chargeback from reconciliation.
+            if !provider.capabilities().disputes {
+                return match provider.list_disputes(ctx.provider_payment_hint).await {
+                    Err(_) => Ok(()),
+                    Ok(facts) => Err(format!(
+                        "a provider without dispute retrieval must refuse list_disputes, \
+                         never answer a silent list ({})",
+                        facts.len()
+                    )),
+                };
+            }
+            let disputes = provider
+                .list_disputes(ctx.provider_payment_hint)
+                .await
+                .map_err(|error| format!("dispute list failed: {error}"))?;
+            if disputes.is_empty() {
+                return Err("the scripted dispute must arrive as a fact".into());
+            }
+            for dispute in &disputes {
+                observe_dispute(pool, name, dispute)
+                    .await
+                    .map_err(|error| format!("dispute observe failed: {error}"))?;
+            }
+            let dispute = &disputes[0];
+            let expected_state = match arm {
+                13 => "opened",
+                14 => "lost",
+                _ => "won",
+            };
+            let row_state: String = sqlx::query_scalar(
+                "SELECT state FROM payment_disputes \
+                 WHERE provider = $1 AND provider_dispute_id = $2",
+            )
+            .bind(name)
+            .bind(&dispute.provider_dispute_id)
+            .fetch_one(pool)
+            .await
+            .map_err(|error| format!("dispute row read failed: {error}"))?;
+            if row_state != expected_state {
+                return Err(format!(
+                    "the dispute row must be {expected_state:?}, got {row_state:?}"
+                ));
+            }
+            let event_kind = format!(
+                "dispute{}",
+                match arm {
+                    13 => "Opened",
+                    14 => "Lost",
+                    _ => "Won",
+                }
+            );
+            let facts: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM payment_provider_events \
+                 WHERE provider = $1 AND event_kind = $2 AND provider_payment_id = $3",
+            )
+            .bind(name)
+            .bind(&event_kind)
+            .bind(ctx.provider_payment_hint)
+            .fetch_one(pool)
+            .await
+            .map_err(|error| format!("dispute fact read failed: {error}"))?;
+            if facts == 0 {
+                return Err(format!(
+                    "the neutral ledger must carry the {event_kind} fact"
+                ));
+            }
+            // Money movement: an OPENED dispute moves nothing; a LOST
+            // dispute posts the terminal debit; a WON dispute posts the
+            // restoration. Both journals are idempotent on the dispute id.
+            let lost_key = format!("dispute:{}:lost", dispute.provider_dispute_id);
+            let won_key = format!("dispute:{}:won", dispute.provider_dispute_id);
+            let (debits, credits): (i64, i64) = sqlx::query_as(
+                "SELECT COALESCE(SUM(l.debit_cents), 0)::bigint, COALESCE(SUM(l.credit_cents), 0)::bigint \
+                 FROM journal_entries e JOIN journal_lines l ON l.entry_id = e.id \
+                 WHERE e.idempotency_key = $1",
+            )
+            .bind(if arm == 14 { &lost_key } else { &won_key })
+            .fetch_one(pool)
+            .await
+            .map_err(|error| format!("dispute journal read failed: {error}"))?;
+            match arm {
+                13 => {
+                    let lost_debits: i64 = sqlx::query_scalar(
+                        "SELECT COALESCE(SUM(l.debit_cents), 0)::bigint \
+                         FROM journal_entries e JOIN journal_lines l ON l.entry_id = e.id \
+                         WHERE e.idempotency_key = $1",
+                    )
+                    .bind(&lost_key)
+                    .fetch_one(pool)
+                    .await
+                    .map_err(|error| format!("opened-dispute journal read failed: {error}"))?;
+                    if lost_debits != 0 {
+                        return Err("an OPENED dispute must not move money".into());
+                    }
+                }
+                14 => {
+                    if debits != dispute.amount_minor || credits != dispute.amount_minor {
+                        return Err(format!(
+                            "a LOST dispute must post the terminal debit for the full amount \
+                             (debited {debits}, credited {credits}, expected {})",
+                            dispute.amount_minor
+                        ));
+                    }
+                }
+                _ => {
+                    if debits != dispute.amount_minor || credits != dispute.amount_minor {
+                        return Err(format!(
+                            "a WON dispute must post the restoration for the full amount \
+                             (debited {debits}, credited {credits}, expected {})",
+                            dispute.amount_minor
+                        ));
+                    }
+                }
+            }
+            Ok(())
+        }
+        17 => {
             // Payout/settlement facts land on the neutral ledger.
             let settlements = provider
                 .list_settlements()
@@ -1217,6 +1659,97 @@ async fn run_arm(
             }
             Ok(())
         }
+        18 => {
+            // The reserved cancel-at-period-end arm (beta authority
+            // inversion): the LOCAL flag is the authority. A subscription
+            // seeded at current_period_end with cancel_at_period_end = true
+            // is ended by the local renewal worker — NO new invoice, NO
+            // charge claim (the double counts charge calls and stays at
+            // zero for this arm), NO allocation, and the local vocabulary
+            // (status `canceled`, flag cleared, tenant downgraded) applies.
+            let suffix = Uuid::new_v4().simple().to_string()[..8].to_string();
+            let subscription_id = format!("local_conf18_{suffix}");
+            sqlx::query(
+                "INSERT INTO mollie_subscriptions \
+                     (tenant_id, mollie_subscription_id, plan, status, billing_interval, \
+                      billing_cycle_start, billing_cycle_end, cancel_at_period_end) \
+                 VALUES ($1, $2, 'growth', 'active', 'monthly', \
+                         NOW() - INTERVAL '1 month', NOW(), true)",
+            )
+            .bind(ctx.tenant_id)
+            .bind(&subscription_id)
+            .execute(pool)
+            .await
+            .map_err(|error| format!("arm 18: subscription seed failed: {error}"))?;
+            let invoices_before: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM invoices WHERE tenant_id = $1")
+                    .bind(ctx.tenant_id)
+                    .fetch_one(pool)
+                    .await
+                    .map_err(|error| format!("arm 18: invoice count failed: {error}"))?;
+
+            let renewed = crate::plan_billing::renew_due_subscriptions_with(
+                state,
+                provider.clone(),
+                Utc::now(),
+            )
+            .await
+            .map_err(|error| format!("arm 18: renewal worker failed: {error}"))?;
+            if renewed != 0 {
+                return Err(format!(
+                    "a cancel-at-period-end subscription must not renew, worker renewed {renewed}"
+                ));
+            }
+            let invoices_after: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM invoices WHERE tenant_id = $1")
+                    .bind(ctx.tenant_id)
+                    .fetch_one(pool)
+                    .await
+                    .map_err(|error| format!("arm 18: invoice recount failed: {error}"))?;
+            if invoices_after != invoices_before {
+                return Err(format!(
+                    "cancel-at-period-end must not create an invoice \
+                     (before {invoices_before}, after {invoices_after})"
+                ));
+            }
+            let attempts: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM payment_attempts WHERE tenant_id = $1")
+                    .bind(ctx.tenant_id)
+                    .fetch_one(pool)
+                    .await
+                    .map_err(|error| format!("arm 18: attempt count failed: {error}"))?;
+            if attempts != 0 {
+                return Err("cancel-at-period-end must never claim a charge attempt".into());
+            }
+            if allocation_count(pool, ctx.invoice_id).await != 0 {
+                return Err("cancel-at-period-end must settle nothing".into());
+            }
+            let (status, cancel_flag): (String, bool) = sqlx::query_as(
+                "SELECT status, cancel_at_period_end FROM mollie_subscriptions \
+                 WHERE tenant_id = $1",
+            )
+            .bind(ctx.tenant_id)
+            .fetch_one(pool)
+            .await
+            .map_err(|error| format!("arm 18: subscription read failed: {error}"))?;
+            if status != "canceled" || cancel_flag {
+                return Err(format!(
+                    "the subscription must end per the local vocabulary \
+                     (canceled, flag cleared), got status={status:?} flag={cancel_flag}"
+                ));
+            }
+            let plan: String = sqlx::query_scalar("SELECT plan FROM tenants WHERE id = $1")
+                .bind(ctx.tenant_id)
+                .fetch_one(pool)
+                .await
+                .map_err(|error| format!("arm 18: tenant read failed: {error}"))?;
+            if plan != "free" {
+                return Err(format!(
+                    "an ended subscription must downgrade the tenant to free, got {plan}"
+                ));
+            }
+            Ok(())
+        }
         other => Err(format!("unknown arm {other}")),
     }
 }
@@ -1238,7 +1771,11 @@ mod tests {
     impl ConformanceScripting for DoubleScripting {
         fn arm_setup(&self, ctx: &ConformanceCtx<'_>) -> Result<(), String> {
             match ctx.arm {
-                4 => {
+                5 => {
+                    self.provider
+                        .script_charge(ctx.provider_payment_hint, PaymentState::Failed);
+                }
+                6 => {
                     self.provider.publish_payment(Payment {
                         provider: ctx.provider_name.to_string(),
                         provider_payment_id: ctx.provider_payment_hint.to_string(),
@@ -1248,7 +1785,7 @@ mod tests {
                         created_at: None,
                     });
                 }
-                6 => {
+                8 => {
                     // The charge's response is LOST; the provider's own
                     // record (fetched later) shows the charge succeeded.
                     self.provider
@@ -1262,11 +1799,14 @@ mod tests {
                         created_at: None,
                     });
                 }
-                8 => {
+                9 => {
+                    // The charge's response is lost AND the provider-side
+                    // search cannot prove absence: the stale-claim
+                    // reconcile must park the attempt `unresolved`.
                     self.provider
-                        .script_charge(ctx.provider_payment_hint, PaymentState::Failed);
+                        .script_charge_error(ProviderError::Unavailable("lost response".into()));
                 }
-                10 => {
+                12 => {
                     self.provider.script_refund(
                         "re_conf_partial",
                         ctx.provider_payment_hint,
@@ -1280,7 +1820,37 @@ mod tests {
                         ARM_AMOUNT - 300,
                     );
                 }
-                11 => {
+                13..=15 => {
+                    // The dispute the arm reconciles: opened / lost / won.
+                    // The per-run dispute id follows the payout arm's
+                    // rule: provider fact ids are provider-unique, so a
+                    // reused id would let the ledger's ON CONFLICT hide a
+                    // later run's fact (exactly the false-pass the
+                    // DisputeStateLies tooth probes).
+                    let state = match ctx.arm {
+                        13 => DisputeState::Opened,
+                        14 => DisputeState::Lost,
+                        _ => DisputeState::Won,
+                    };
+                    self.provider.script_dispute(
+                        ctx.provider_payment_hint,
+                        Dispute {
+                            provider: ctx.provider_name.to_string(),
+                            provider_dispute_id: format!(
+                                "disp_conf_{}_{}",
+                                ctx.arm,
+                                ctx.invoice_id.simple()
+                            ),
+                            provider_payment_id: ctx.provider_payment_hint.to_string(),
+                            state,
+                            amount_minor: ARM_AMOUNT,
+                            currency: ARM_CURRENCY.to_string(),
+                            reason: Some("conformance".into()),
+                            opened_at: None,
+                        },
+                    );
+                }
+                16 => {
                     // The charge SUCCEEDED at the provider; only the webhook
                     // was missed. The repair sweep must find the fact via the
                     // authenticated fetch, not a "never knew this payment".
@@ -1293,7 +1863,7 @@ mod tests {
                         created_at: None,
                     });
                 }
-                12 => {
+                17 => {
                     // The payout id is per-RUN (keyed off the fresh invoice):
                     // provider fact ids are provider-unique, and a reused id
                     // would let the ledger's ON CONFLICT hide a later run's
@@ -1350,6 +1920,7 @@ mod tests {
             Defect::FetchReportsWrongCurrency,
             Defect::RefundIdCollision,
             Defect::SettlementAmountWrong,
+            Defect::DisputeStateLies,
         ] {
             let double = std::sync::Arc::new(ConformanceProvider::new("conformance"));
             double.seed_defect(defect);
@@ -1372,8 +1943,9 @@ mod tests {
         env.finish().await;
     }
 
-    /// Arm 6's no-second-charge guarantee is literal: the double receives
-    /// exactly one charge call even though two ticks ran.
+    /// Arm 8's no-second-charge guarantee is literal: the double receives
+    /// exactly the scripted charge calls even though the sweeps and retries
+    /// run (arms 5, 8 and 9 each charge once; no arm ever charges twice).
     #[tokio::test]
     async fn the_timeout_arm_never_charges_twice() {
         let Some(env) = provision("payments_conformance_timeout").await else {
@@ -1387,8 +1959,9 @@ mod tests {
         assert_all_arms(&report);
         assert_eq!(
             double.charge_calls(),
-            2,
-            "exactly the scripted charges (arm 6 timeout + arm 8 failure), never a retry"
+            3,
+            "exactly the scripted charges (arm 8 timeout + arm 9 unconfirmed timeout \
+             + arm 5 failure), never a retry"
         );
         env.finish().await;
     }
@@ -1404,6 +1977,7 @@ mod tests {
             Defect::FetchReportsWrongCurrency,
             Defect::RefundIdCollision,
             Defect::SettlementAmountWrong,
+            Defect::DisputeStateLies,
         ] {
             let arm = defect.breaks_arm();
             assert!((1..=MATRIX.len() as u8).contains(&arm));

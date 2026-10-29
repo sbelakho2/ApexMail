@@ -620,7 +620,6 @@ pub async fn create_invoice_in_tx(
     Ok(Invoice {
         id,
         tenant_id: input.tenant_id,
-        mollie_payment_id: input.mollie_payment_id,
         invoice_number,
         status: InvoiceStatus::Draft,
         currency,
@@ -640,29 +639,38 @@ pub async fn create_invoice_in_tx(
     })
 }
 
-/// Create a PAID invoice for a plan charge whose Mollie payment was the
-/// GROSS amount actually collected.
+/// The money/tax facts of a plan invoice, computed ONCE for both creators:
+/// the VAT-extraction core (gross → net + VAT + US sales tax exactly), the
+/// immutable address snapshot fields and the rendered line items.
+struct PlanInvoiceAmounts {
+    addr: BillingAddrSnapshotRow,
+    country: String,
+    net: i64,
+    vat: i64,
+    vat_rate: f64,
+    vat_evidence_id: Option<Uuid>,
+    us_tax_cents: i64,
+    us_tax_snapshot: Option<String>,
+    all_lines: Vec<InvoiceLineItem>,
+}
+
+/// Compute [`PlanInvoiceAmounts`] for a gross plan charge.
 ///
 /// Catalog prices are the customer-facing charge, so VAT (and, for a US
 /// registered state, sales tax) is EXTRACTED from the gross rather than added
-/// on top: the invoice total must equal the money Mollie took, or the tax
-/// gate (which compares the charge to the invoice total) would refuse the
+/// on top: the invoice total must equal the money the provider took, or the
+/// tax gate (which compares the charge to the invoice total) would refuse the
 /// very payment that funded it. The rate comes from the same
 /// `calculate_vat_with_evidence` the invoice writer uses; reverse charge
 /// requires VIES evidence exactly as there. The address is snapshotted
-/// immutably and the recognition ledger is materialised with the paid date.
-#[allow(clippy::too_many_arguments)]
-pub async fn create_paid_plan_invoice_in_tx(
+/// immutably.
+async fn compute_plan_invoice_amounts(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     tenant_id: &str,
     plan_display_name: &str,
     interval: &str,
     gross_cents: i64,
-    currency: &str,
-    mollie_payment_id: &str,
-    period_start: DateTime<Utc>,
-    period_end: DateTime<Utc>,
-) -> Result<Invoice, InvoiceError> {
+) -> Result<PlanInvoiceAmounts, InvoiceError> {
     if gross_cents <= 0 {
         return Err(InvoiceError::PdfGeneration(
             "a plan charge must be positive".into(),
@@ -798,21 +806,185 @@ pub async fn create_paid_plan_invoice_in_tx(
             });
         }
     }
-    let items_json = encode_invoice_line_items(&all_lines)?;
+    Ok(PlanInvoiceAmounts {
+        addr,
+        country,
+        net,
+        vat,
+        vat_rate,
+        vat_evidence_id,
+        us_tax_cents,
+        us_tax_snapshot,
+        all_lines,
+    })
+}
+
+/// Create the OPEN (pending) invoice for the NEXT subscription period — the
+/// LOCAL renewal worker's invoice-FIRST contract: the obligation exists
+/// BEFORE any charge is claimed, so a provider fact can never decide when
+/// the next charge exists and the engine's exact-amount verification has
+/// something to verify against.
+///
+/// Same tax-extraction core as the paid creator (the invoice total is the
+/// gross the card WILL be charged); the payment binding stays NULL until a
+/// charge actually settles it (`settle_verified` flips `pending` → `paid`).
+/// The recognition ledger is materialized at issue (paid_at NULL;
+/// cash-accounting supplies recognise on payment via the by-id
+/// materializer the settlement paths call).
+#[allow(clippy::too_many_arguments)]
+pub async fn create_open_plan_invoice_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tenant_id: &str,
+    plan_display_name: &str,
+    interval: &str,
+    gross_cents: i64,
+    currency: &str,
+    period_start: DateTime<Utc>,
+    period_end: DateTime<Utc>,
+) -> Result<Invoice, InvoiceError> {
+    let amounts =
+        compute_plan_invoice_amounts(tx, tenant_id, plan_display_name, interval, gross_cents)
+            .await?;
+    let now = Utc::now();
+    let items_json = encode_invoice_line_items(&amounts.all_lines)?;
     let invoice_number = generate_invoice_number_tx(tx).await?;
     let id = Uuid::new_v4();
     let address_snapshot = serde_json::json!({
         "snapshotVersion": BILLING_ADDRESS_SNAPSHOT_VERSION,
-        "company_name": addr.company_name,
-        "vat_number": addr.vat_number,
-        "address_line1": addr.address_line1,
-        "address_line2": addr.address_line2,
-        "city": addr.city,
-        "state": addr.state,
-        "postal_code": addr.postal_code,
-        "country": addr.country,
-        "email": addr.email,
-        "registry_code": addr.registry_code,
+        "company_name": amounts.addr.company_name,
+        "vat_number": amounts.addr.vat_number,
+        "address_line1": amounts.addr.address_line1,
+        "address_line2": amounts.addr.address_line2,
+        "city": amounts.addr.city,
+        "state": amounts.addr.state,
+        "postal_code": amounts.addr.postal_code,
+        "country": amounts.addr.country,
+        "email": amounts.addr.email,
+        "registry_code": amounts.addr.registry_code,
+    })
+    .to_string();
+
+    sqlx::query(
+        r#"
+        INSERT INTO invoices (
+            id, tenant_id, mollie_payment_id, invoice_number, status,
+            currency, amount, subtotal, vat_total, total, line_items,
+            issued_at, due_at, period_start, period_end,
+            billing_country, vat_rate, billing_address, billing_registry_code,
+            vat_evidence_id, us_sales_tax_cents, us_sales_tax_snapshot,
+            created_at, updated_at
+        ) VALUES (
+            $1, $2, NULL, $3, 'pending',
+            $4, $5, $6, $7, $5, $8,
+            $9, $9 + INTERVAL '30 days', $10, $11,
+            $12, $13, $14, $15,
+            $16, $17, $18::jsonb,
+            $9, $9
+        )
+        "#,
+    )
+    .bind(id)
+    .bind(tenant_id)
+    .bind(&invoice_number)
+    .bind(currency.trim().to_ascii_uppercase())
+    .bind(gross_cents)
+    .bind(amounts.net)
+    .bind(amounts.vat)
+    .bind(&items_json)
+    .bind(now)
+    .bind(period_start)
+    .bind(period_end)
+    .bind(amounts.country.to_uppercase())
+    .bind(amounts.vat_rate)
+    .bind(address_snapshot)
+    .bind(amounts.addr.registry_code)
+    .bind(amounts.vat_evidence_id)
+    .bind(amounts.us_tax_cents)
+    .bind(amounts.us_tax_snapshot.as_deref())
+    .execute(&mut **tx)
+    .await
+    .map_err(InvoiceError::Db)?;
+
+    crate::vat_recognition::materialize_invoice_recognition(
+        tx,
+        &crate::vat_recognition::InvoiceRecognitionInput {
+            invoice_id: id,
+            tenant_id: tenant_id.to_string(),
+            currency: currency.trim().to_ascii_uppercase(),
+            subtotal_cents: amounts.net,
+            vat_rate: amounts.vat_rate,
+            vat_cents: amounts.vat,
+            issued_at: now,
+            paid_at: None,
+            billing_country: Some(amounts.country.to_uppercase()),
+        },
+        now,
+    )
+    .await
+    .map_err(InvoiceError::Recognition)?;
+
+    Ok(Invoice {
+        id,
+        tenant_id: tenant_id.to_string(),
+        invoice_number,
+        status: InvoiceStatus::Pending,
+        currency: currency.trim().to_ascii_uppercase(),
+        subtotal: amounts.net,
+        vat_total: amounts.vat,
+        us_sales_tax_cents: amounts.us_tax_cents,
+        us_sales_tax_snapshot: amounts
+            .us_tax_snapshot
+            .and_then(|text| serde_json::from_str(&text).ok()),
+        total: gross_cents,
+        line_items: amounts.all_lines,
+        issued_at: now,
+        due_at: now + chrono::Duration::days(30),
+        paid_at: None,
+        period_start,
+        period_end,
+        created_at: now,
+        updated_at: now,
+    })
+}
+
+/// Create a PAID invoice for a plan charge whose provider payment was the
+/// GROSS amount actually collected.
+///
+/// Same tax-extraction core as the open creator; the invoice is born paid
+/// with its payment binding, the allocation and the statutory postings land
+/// in the caller's transaction, and the recognition ledger is materialised
+/// with the paid date.
+#[allow(clippy::too_many_arguments)]
+pub async fn create_paid_plan_invoice_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tenant_id: &str,
+    plan_display_name: &str,
+    interval: &str,
+    gross_cents: i64,
+    currency: &str,
+    mollie_payment_id: &str,
+    period_start: DateTime<Utc>,
+    period_end: DateTime<Utc>,
+) -> Result<Invoice, InvoiceError> {
+    let amounts =
+        compute_plan_invoice_amounts(tx, tenant_id, plan_display_name, interval, gross_cents)
+            .await?;
+    let now = Utc::now();
+    let items_json = encode_invoice_line_items(&amounts.all_lines)?;
+    let invoice_number = generate_invoice_number_tx(tx).await?;
+    let id = Uuid::new_v4();
+    let address_snapshot = serde_json::json!({
+        "snapshotVersion": BILLING_ADDRESS_SNAPSHOT_VERSION,
+        "company_name": amounts.addr.company_name,
+        "vat_number": amounts.addr.vat_number,
+        "address_line1": amounts.addr.address_line1,
+        "address_line2": amounts.addr.address_line2,
+        "city": amounts.addr.city,
+        "state": amounts.addr.state,
+        "postal_code": amounts.addr.postal_code,
+        "country": amounts.addr.country,
+        "email": amounts.addr.email,
+        "registry_code": amounts.addr.registry_code,
     })
     .to_string();
 
@@ -841,19 +1013,19 @@ pub async fn create_paid_plan_invoice_in_tx(
     .bind(&invoice_number)
     .bind(currency.trim().to_ascii_uppercase())
     .bind(gross_cents)
-    .bind(net)
-    .bind(vat)
+    .bind(amounts.net)
+    .bind(amounts.vat)
     .bind(&items_json)
     .bind(now)
     .bind(period_start)
     .bind(period_end)
-    .bind(country.to_uppercase())
-    .bind(vat_rate)
+    .bind(amounts.country.to_uppercase())
+    .bind(amounts.vat_rate)
     .bind(address_snapshot)
-    .bind(addr.registry_code)
-    .bind(vat_evidence_id)
-    .bind(us_tax_cents)
-    .bind(us_tax_snapshot.as_deref())
+    .bind(amounts.addr.registry_code)
+    .bind(amounts.vat_evidence_id)
+    .bind(amounts.us_tax_cents)
+    .bind(amounts.us_tax_snapshot.as_deref())
     .execute(&mut **tx)
     .await
     .map_err(InvoiceError::Db)?;
@@ -864,12 +1036,12 @@ pub async fn create_paid_plan_invoice_in_tx(
             invoice_id: id,
             tenant_id: tenant_id.to_string(),
             currency: currency.trim().to_ascii_uppercase(),
-            subtotal_cents: net,
-            vat_rate,
-            vat_cents: vat,
+            subtotal_cents: amounts.net,
+            vat_rate: amounts.vat_rate,
+            vat_cents: amounts.vat,
             issued_at: now,
             paid_at: Some(now),
-            billing_country: Some(country.to_uppercase()),
+            billing_country: Some(amounts.country.to_uppercase()),
         },
         now,
     )
@@ -879,16 +1051,17 @@ pub async fn create_paid_plan_invoice_in_tx(
     Ok(Invoice {
         id,
         tenant_id: tenant_id.to_string(),
-        mollie_payment_id: Some(mollie_payment_id.to_string()),
         invoice_number,
         status: InvoiceStatus::Paid,
         currency: currency.trim().to_ascii_uppercase(),
-        subtotal: net,
-        vat_total: vat,
-        us_sales_tax_cents: us_tax_cents,
-        us_sales_tax_snapshot: us_tax_snapshot.and_then(|text| serde_json::from_str(&text).ok()),
+        subtotal: amounts.net,
+        vat_total: amounts.vat,
+        us_sales_tax_cents: amounts.us_tax_cents,
+        us_sales_tax_snapshot: amounts
+            .us_tax_snapshot
+            .and_then(|text| serde_json::from_str(&text).ok()),
         total: gross_cents,
-        line_items: all_lines,
+        line_items: amounts.all_lines,
         issued_at: now,
         due_at: now,
         paid_at: Some(now),
@@ -1244,7 +1417,7 @@ pub async fn list_invoices(
     let rows: Vec<InvoiceRow> = sqlx::query_as(
         r#"
         SELECT
-            id, tenant_id, mollie_payment_id, invoice_number,
+            id, tenant_id, invoice_number,
             status, currency, subtotal, vat_total, us_sales_tax_cents,
             us_sales_tax_snapshot, total,
             line_items,
@@ -1281,7 +1454,7 @@ pub async fn get_invoice_by_id(
     let row: Option<InvoiceRow> = sqlx::query_as(
         r#"
         SELECT
-            id, tenant_id, mollie_payment_id, invoice_number,
+            id, tenant_id, invoice_number,
             status, currency, subtotal, vat_total, us_sales_tax_cents,
             us_sales_tax_snapshot, total,
             line_items,
@@ -1333,34 +1506,33 @@ pub enum InvoiceVoidError {
     #[error("invoice not found: {0}")]
     InvoiceNotFound(Uuid),
     /// Only draft/pending invoices void locally. A PAID invoice voids as a
-    /// provider refund of its bound payment; without a bound payment
-    /// (`mollie_payment_id`) there is nothing provider-side to return, so
-    /// the refusal carries the refusing state verbatim, a wallet-settled
-    /// paid invoice is refunded with a credit note instead.
+    /// provider refund of its bound payment; without a bound payment there
+    /// is nothing provider-side to return, so the refusal carries the
+    /// refusing state verbatim, a wallet-settled paid invoice is refunded
+    /// with a credit note instead.
     #[error(
         "invoice {invoice_id} is in status '{status}': only draft or open (pending) invoices can \
-         be voided, and a paid invoice only when it is bound to a Mollie payment \
-         (mollie_payment_id)"
+         be voided, and a paid invoice only when it is bound to a provider payment"
     )]
     NotVoidable { invoice_id: Uuid, status: String },
-    /// The invoice carries a Mollie payment (`mollie_payment_id`) whose
-    /// refund is required, but this deployment cannot reach Mollie (no
-    /// `MOLLIE_API_KEY`/`MOLLIE_PROFILE_ID`): refused HONESTLY, the
-    /// local row is left untouched rather than drifting from the provider
-    /// state.
+    /// The invoice carries a provider payment whose refund is required, but
+    /// this deployment cannot reach the payment provider (no credentials):
+    /// refused HONESTLY, the local row is left untouched rather than
+    /// drifting from the provider state.
     #[error(
-        "invoice {invoice_id} is bound to Mollie payment {mollie_payment_id} but Mollie is not \
-         configured (MOLLIE_API_KEY/MOLLIE_PROFILE_ID): the refund cannot be issued from this \
-         deployment, so the local invoice was left in status '{status}'"
+        "invoice {invoice_id} is bound to provider payment {provider_payment_id} but the payment \
+         provider is not configured: the refund cannot be issued from this deployment, so the \
+         local invoice was left in status '{status}'"
     )]
-    MollieUnavailable {
+    ProviderUnavailable {
         invoice_id: Uuid,
-        mollie_payment_id: String,
+        provider_payment_id: String,
         status: String,
     },
-    /// Mollie was configured but refused/completed-with-error on the refund.
-    #[error("Mollie refused the invoice refund: {message}")]
-    MollieFailed { message: String },
+    /// The provider was configured but refused / completed-with-error on the
+    /// refund.
+    #[error("the payment provider refused the invoice refund: {message}")]
+    ProviderFailed { message: String },
     #[error("audit log failure: {0}")]
     Audit(String),
     /// The void committed but the re-read of the voided invoice failed
@@ -1378,10 +1550,10 @@ pub enum InvoiceVoidError {
 /// same request). The refund settles asynchronously: a 2xx means the
 /// provider accepted it, and the webhook records the final state.
 ///
-/// NEUTRALITY-DEBT (N-08): the error vocabulary below still names Mollie
-/// (`InvoiceVoidError::MollieUnavailable` / `MollieFailed`) and the void
-/// flow reads `invoices.mollie_payment_id`; step 8 renames both onto the
-/// neutral payment binding. The provider CALL is neutral.
+/// N-08 RESOLVED (beta authority inversion): the error vocabulary is
+/// provider-neutral (`ProviderUnavailable` / `ProviderFailed`). The legacy
+/// `invoices.mollie_payment_id` COLUMN still feeds the binding read; its
+/// physical rename is the owner-gated step-10 retirement.
 async fn mollie_refund_payment(
     invoice_id: Uuid,
     invoice_status: &str,
@@ -1391,12 +1563,13 @@ async fn mollie_refund_payment(
     reference: &str,
     idempotency_key: &str,
 ) -> Result<Option<String>, InvoiceVoidError> {
-    let provider =
-        crate::payments::registry::from_env().map_err(|_| InvoiceVoidError::MollieUnavailable {
+    let provider = crate::payments::registry::from_env().map_err(|_| {
+        InvoiceVoidError::ProviderUnavailable {
             invoice_id,
-            mollie_payment_id: payment_id.to_string(),
+            provider_payment_id: payment_id.to_string(),
             status: invoice_status.to_string(),
-        })?;
+        }
+    })?;
     let refund = provider
         .refund(crate::payments::RefundRequest {
             provider_payment_id: payment_id.to_string(),
@@ -1406,8 +1579,8 @@ async fn mollie_refund_payment(
             idempotency_key: idempotency_key.to_string(),
         })
         .await
-        .map_err(|error| InvoiceVoidError::MollieFailed {
-            message: format!("Mollie refund request failed: {error}"),
+        .map_err(|error| InvoiceVoidError::ProviderFailed {
+            message: format!("provider refund request failed: {error}"),
         })?;
     // The refund id is the provider-side handle the webhook will name.
     Ok(Some(refund.provider_refund_id).filter(|id| !id.is_empty()))
@@ -1608,10 +1781,12 @@ pub async fn void_invoice(
             "reason": input.reason,
             "idempotencyKey": input.idempotency_key,
             // A paid void returned provider money via an async refund; an
-            // unpaid void needed no provider call at all.
-            "mollieRefunded": status == "paid",
-            "mollieRefundPaymentId": refund_psp_reference,
-            "molliePaymentPspReference": mollie_payment_id,
+            // unpaid void needed no provider call at all. The payload keys
+            // are provider-neutral (the legacy payment-binding column read
+            // below is step-10 vocabulary).
+            "providerRefunded": status == "paid",
+            "providerRefundId": refund_psp_reference,
+            "providerPaymentId": mollie_payment_id,
         }),
         now,
     )
@@ -1633,7 +1808,6 @@ pub async fn void_invoice(
 struct InvoiceRow {
     id: Uuid,
     tenant_id: String,
-    mollie_payment_id: Option<String>,
     invoice_number: String,
     status: String,
     currency: String,
@@ -1724,7 +1898,6 @@ impl InvoiceRow {
         Ok(Invoice {
             id: self.id,
             tenant_id: self.tenant_id,
-            mollie_payment_id: self.mollie_payment_id,
             invoice_number: self.invoice_number,
             status,
             currency: self.currency,
@@ -2026,7 +2199,6 @@ mod tests {
         let row = InvoiceRow {
             id: invoice_id,
             tenant_id: "tenant_01HZY2Q4YQ0L8QW8Q7Q28WKSFJ".into(),
-            mollie_payment_id: None,
             invoice_number: "2026-000002".into(),
             status: "pending".into(),
             currency: "eur".into(),
@@ -2227,7 +2399,6 @@ mod tests {
         let row = InvoiceRow {
             id: Uuid::new_v4(),
             tenant_id: "tenant_01HZY2Q4YQ0L8QW8Q7Q28WKSFJ".into(),
-            mollie_payment_id: None,
             invoice_number: "2026-000001".into(),
             status: "paid".into(),
             currency: "eur".into(),
@@ -3520,21 +3691,21 @@ mod coverage_adversarial {
 
         assert_eq!(resource, "invoice");
         assert_eq!(resource_id.as_deref(), Some(draft.to_string().as_str()));
-        // An unpaid local void issues NO provider refund (Mollie has no
-        // provider-side invoice object): the audit row records the honest
-        // mollieRefunded=false and no provider refund id.
+        // An unpaid local void issues NO provider refund (the provider has
+        // no invoice object): the audit row records the honest
+        // providerRefunded=false and no provider refund id.
         assert_eq!(
-            details["mollieRefunded"],
+            details["providerRefunded"],
             serde_json::Value::Bool(false),
-            "a local-only void records an honest mollieRefunded=false"
+            "a local-only void records an honest providerRefunded=false"
         );
         assert!(
-            details["mollieRefundPaymentId"].is_null(),
+            details["providerRefundId"].is_null(),
             "no refund id without provider money to return: {details}"
         );
         assert!(
-            details["molliePaymentPspReference"].is_null(),
-            "a draft carries no bound Mollie payment: {details}"
+            details["providerPaymentId"].is_null(),
+            "a draft carries no bound provider payment: {details}"
         );
 
         // Byte-exact re-derivation: the canonical 7-segment formula over the
@@ -3635,13 +3806,13 @@ mod coverage_adversarial {
         .fetch_one(&env.pool)
         .await
         .expect("local void audit");
-        assert_eq!(details["mollieRefunded"], serde_json::Value::Bool(false));
+        assert_eq!(details["providerRefunded"], serde_json::Value::Bool(false));
         assert_eq!(
-            details["molliePaymentPspReference"],
+            details["providerPaymentId"],
             serde_json::json!("tr_void_cov"),
             "the bound payment is recorded even when nothing was refunded"
         );
-        assert!(details["mollieRefundPaymentId"].is_null());
+        assert!(details["providerRefundId"].is_null());
 
         // 2. PAID with a bound payment and Mollie UNCONFIGURED: the refund
         // cannot be issued, so the refusal is honest and the row stands.
@@ -3652,17 +3823,17 @@ mod coverage_adversarial {
             void_input(tenant, unconfigured, "k-mollie-unconf"),
         )
         .await
-        .expect_err("unconfigured Mollie refuses the refund");
+        .expect_err("unconfigured provider refuses the refund");
         match &error {
-            InvoiceVoidError::MollieUnavailable {
-                mollie_payment_id,
+            InvoiceVoidError::ProviderUnavailable {
+                provider_payment_id,
                 status,
                 ..
             } => {
-                assert_eq!(mollie_payment_id, "tr_void_unconf");
+                assert_eq!(provider_payment_id, "tr_void_unconf");
                 assert_eq!(status, "paid");
             }
-            other => panic!("expected MollieUnavailable, got {other:?}"),
+            other => panic!("expected ProviderUnavailable, got {other:?}"),
         }
         let status: String = sqlx::query_scalar("SELECT status::text FROM invoices WHERE id = $1")
             .bind(unconfigured)
@@ -3731,9 +3902,9 @@ mod coverage_adversarial {
         .fetch_one(&env.pool)
         .await
         .expect("paid void audit");
-        assert_eq!(details["mollieRefunded"], serde_json::Value::Bool(true));
+        assert_eq!(details["providerRefunded"], serde_json::Value::Bool(true));
         assert_eq!(
-            details["mollieRefundPaymentId"],
+            details["providerRefundId"],
             serde_json::json!("re_void_refund"),
             "the accepted refund's id is recorded"
         );
@@ -3761,7 +3932,7 @@ mod coverage_adversarial {
             .await
             .expect_err("Mollie refusal propagates");
         assert!(
-            matches!(&error, InvoiceVoidError::MollieFailed { message }
+            matches!(&error, InvoiceVoidError::ProviderFailed { message }
                 if message.contains("The refund could not be processed")),
             "{error:?}"
         );

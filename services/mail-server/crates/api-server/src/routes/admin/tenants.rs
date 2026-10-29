@@ -383,9 +383,12 @@ pub struct UpdateTenantRequest {
     pub status: Option<String>,
 }
 
-/// Tenant lifecycle statuses the generic editor may write. The suspend
-/// action path and the billing subscription override keep their own
-/// (different) allowlists, this one guards the direct PATCH field.
+/// Tenant lifecycle statuses the generic field editor may write at all.
+/// The `suspended` member is the lifecycle writer's state: the editor
+/// accepts it into the allowlist vocabulary but REFUSES to write it (a
+/// typed 409 pointing at the suspend action) — the sanctioned lifecycle
+/// pending → suspended → active flows ONLY through the action endpoints,
+/// which keep the onboarding machine in the same transaction.
 const TENANT_ALLOWED_STATUSES: [&str; 3] = ["active", "suspended", "pending"];
 
 /// `tenants.name` is VARCHAR(255): an over-long (or empty) name must be a
@@ -411,6 +414,20 @@ fn validate_generic_tenant_update(body: &UpdateTenantRequest) -> Result<(), ApiE
                 TENANT_ALLOWED_STATUSES.join(", "),
             )]));
         }
+        // Lifecycle single-writer (eighth audit: a '{"status":"suspended"}'
+        // through the generic editor bypassed the onboarding sync): writing
+        // 'suspended' is a lifecycle transition and belongs to the suspend
+        // action endpoint, which moves the onboarding machine in the SAME
+        // transaction. The generic field editor never writes it.
+        if status == "suspended" {
+            return Err(ApiError::Conflict(
+                "status 'suspended' is a lifecycle transition: use the suspend \
+                 action endpoint (PATCH /v1/admin/tenants with {\"action\": \
+                 \"suspend\"}), which syncs the onboarding state atomically; \
+                 lifting one uses the \"unsuspend\" action"
+                    .into(),
+            ));
+        }
     }
     if let Some(name) = &body.name {
         if name.trim().is_empty() || name.chars().count() > TENANT_NAME_MAX_CHARS {
@@ -431,6 +448,175 @@ fn validate_generic_tenant_update(body: &UpdateTenantRequest) -> Result<(), ApiE
 async fn invalidate_tenant_auth_caches(state: &AppState, tenant_id: &str) {
     crate::middleware::auth::invalidate_tenant_status_cache(tenant_id, state).await;
     crate::middleware::auth::invalidate_tenant_user_status_cache(tenant_id, state).await;
+}
+
+// ─── Onboarding sync (single lifecycle writer, eighth audit) ──────────────────
+//
+// `routes::onboarding` exposes `advance` (pure) and `advance_persisted`
+// (pool-taking, best-effort hook shape) but no transaction-taking variant —
+// that file is outside this remediation's ownership, so the tx-shaped
+// persistence lives HERE, executing the SAME SQL and note contracts
+// (`onboarding_note` JSON `{"prior": ...}`) as `advance_persisted`, inside
+// the caller's transaction so the tenant status and the onboarding machine
+// commit together or not at all.
+
+/// What the in-transaction onboarding advance decided.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OnboardingAdvance {
+    /// The machine moved (or was verified in place) — commit with the
+    /// status write.
+    Applied,
+    /// The machine is ALREADY in the state the event targets (a second
+    /// Block on an already-blocked machine): nothing to write, the target
+    /// state already holds — the status write still commits.
+    AlreadyInTarget,
+}
+
+/// Transaction-taking variant of `onboarding::advance_persisted`: read the
+/// current state, run the pure machine, substitute the recorded prior on
+/// Unblock, and write with the same optimistic
+/// `WHERE id = $tenant AND onboarding_state = $expected` guard — all on the
+/// caller's transaction. A lost race (`Conflict`) rolls the WHOLE action
+/// back at the caller.
+async fn advance_onboarding_in_tx(
+    tx: &mut sqlx::Transaction<'static, sqlx::Postgres>,
+    tenant_id: &str,
+    event: crate::routes::onboarding::OnboardingEvent,
+) -> Result<OnboardingAdvance, crate::routes::onboarding::OnboardingError> {
+    use crate::routes::onboarding::{OnboardingError, OnboardingEvent, OnboardingState};
+
+    // Current state (same query as onboarding::read_state, on the tx — the
+    // row is already locked by the status UPDATE in this transaction).
+    let raw: Option<String> =
+        sqlx::query_scalar("SELECT onboarding_state FROM tenants WHERE id = $1")
+            .bind(tenant_id)
+            .fetch_optional(&mut **tx)
+            .await
+            .map_err(OnboardingError::Database)?
+            .flatten();
+    let Some(raw) = raw else {
+        // Unreachable in practice: the status UPDATE above already matched
+        // this tenant inside the same transaction.
+        return Err(OnboardingError::MissingTenant);
+    };
+    let current =
+        OnboardingState::parse(&raw).ok_or_else(|| OnboardingError::UnknownState(raw.clone()))?;
+
+    // The PURE machine decides legality first — an illegal event never
+    // touches the database (same contract as advance_persisted).
+    let next = match crate::routes::onboarding::advance(current, event.clone()) {
+        Ok(next) => next,
+        // A second Block on a blocked machine is a redundant fact, not a
+        // wrong move: the machine is already where suspend wants it, so the
+        // status write commits without an onboarding write.
+        Err(OnboardingError::AlreadyBlocked) => return Ok(OnboardingAdvance::AlreadyInTarget),
+        Err(error) => return Err(error),
+    };
+
+    // Block records the interrupted state as JSON `{"prior": ...}`,
+    // Unblock consumes (clears) the note — the advance_persisted contract.
+    let (note_set, note_value): (bool, Option<String>) = match &event {
+        OnboardingEvent::Block(_) => (
+            true,
+            Some(serde_json::json!({ "prior": current.as_str() }).to_string()),
+        ),
+        OnboardingEvent::Unblock => (true, None),
+        _ => (false, None),
+    };
+
+    if next == current {
+        // Idempotent no-op: nothing to write, but the expectation must
+        // still hold (0 rows means the state moved underneath us).
+        let held: Option<i32> =
+            sqlx::query_scalar("SELECT 1 FROM tenants WHERE id = $1 AND onboarding_state = $2")
+                .bind(tenant_id)
+                .bind(current.as_str())
+                .fetch_optional(&mut **tx)
+                .await
+                .map_err(OnboardingError::Database)?;
+        return if held.is_some() {
+            Ok(OnboardingAdvance::Applied)
+        } else {
+            Err(OnboardingError::Conflict { expected: current })
+        };
+    }
+
+    // Unblock restores the state Block recorded in `onboarding_note`
+    // (default `invited` when nothing usable is recorded) — the same
+    // substitution advance_persisted performs via its recorded_prior read.
+    let next = if matches!(event, OnboardingEvent::Unblock) {
+        let note: Option<Option<String>> = sqlx::query_scalar(
+            "SELECT onboarding_note FROM tenants WHERE id = $1 AND onboarding_state = $2",
+        )
+        .bind(tenant_id)
+        .bind(current.as_str())
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(OnboardingError::Database)?;
+        note.flatten()
+            .as_deref()
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+            .and_then(|value| {
+                value
+                    .get("prior")
+                    .and_then(|prior| prior.as_str())
+                    .and_then(OnboardingState::parse)
+            })
+            .unwrap_or(OnboardingState::Invited)
+    } else {
+        next
+    };
+
+    let result = sqlx::query(
+        "UPDATE tenants \
+         SET onboarding_state = $1, \
+             onboarding_updated_at = NOW(), \
+             onboarding_note = CASE WHEN $2 THEN $3::text ELSE onboarding_note END \
+         WHERE id = $4 AND onboarding_state = $5",
+    )
+    .bind(next.as_str())
+    .bind(note_set)
+    .bind(note_value)
+    .bind(tenant_id)
+    .bind(current.as_str())
+    .execute(&mut **tx)
+    .await
+    .map_err(OnboardingError::Database)?;
+
+    if result.rows_affected() == 0 {
+        return Err(OnboardingError::Conflict { expected: current });
+    }
+    Ok(OnboardingAdvance::Applied)
+}
+
+/// Map an in-transaction onboarding sync failure to the honest API answer:
+/// the status transition was ROLLED BACK, so the operator must know nothing
+/// was written and which authority moved underneath the request.
+fn onboarding_sync_error(
+    error: crate::routes::onboarding::OnboardingError,
+    action: &str,
+) -> ApiError {
+    use crate::routes::onboarding::OnboardingError as OnboardingSyncError;
+    match error {
+        OnboardingSyncError::Conflict { expected } => ApiError::Conflict(format!(
+            "the onboarding state changed concurrently (expected '{expected}'); \
+             the {action} was rolled back and nothing was written — retry"
+        )),
+        OnboardingSyncError::IllegalTransition { from, event } => ApiError::Conflict(format!(
+            "the {action} moves the onboarding machine with the tenant status, \
+             but the machine is in state '{from}' and does not accept {event}; \
+             resolve the onboarding state first (the {action} was rolled back \
+             and nothing was written)"
+        )),
+        OnboardingSyncError::AlreadyBlocked => ApiError::Conflict(format!(
+            "the onboarding machine is already blocked; the {action} was rolled back"
+        )),
+        OnboardingSyncError::MissingTenant => ApiError::NotFound("tenant not found".into()),
+        OnboardingSyncError::UnknownState(raw) => {
+            ApiError::Internal(format!("unknown onboarding_state: {raw}"))
+        }
+        OnboardingSyncError::Database(error) => error.into(),
+    }
 }
 
 // ─── Handlers ──────────────────────────────────────────────────
@@ -497,34 +683,6 @@ async fn update_tenant(
             }
         };
 
-        // rows_affected distinguishes a wrong-state transition from a
-        // missing tenant: silently 200-ing on either hides the problem
-        // from the operator.
-        let result = sqlx::query(
-            "UPDATE tenants SET status = $1, updated_at = NOW()
-             WHERE id = $2 AND status = ANY($3)",
-        )
-        .bind(new_status)
-        .bind(&id)
-        .bind(&from_statuses)
-        .execute(&state.db)
-        .await?;
-        if result.rows_affected() == 0 {
-            let current: Option<String> =
-                sqlx::query_scalar("SELECT status FROM tenants WHERE id = $1")
-                    .bind(&id)
-                    .fetch_optional(&state.db)
-                    .await?;
-            return match current {
-                Some(_) => Err(ApiError::Conflict(wrong_state_message.into())),
-                None => Err(ApiError::NotFound("tenant not found".into())),
-            };
-        }
-
-        // F18: the status change must reach authenticated traffic
-        // immediately, not after the middleware caches lapse.
-        invalidate_tenant_auth_caches(&state, &id).await;
-
         // Onboarding (seventh audit, P1-D): the authoritative restriction
         // lifecycle drives the machine's Block/Unblock — one status
         // authority, not two. suspend → Block records the prior state for
@@ -537,12 +695,49 @@ async fn update_tenant(
         } else {
             crate::routes::onboarding::OnboardingEvent::Unblock
         };
-        let _ = crate::routes::onboarding::attempt_onboarding_event(
-            &state.db,
-            &id,
-            onboarding_event,
+
+        // ONE TRANSACTION (eighth audit: the onboarding advance used to be a
+        // best-effort post-commit hook, so a swallowed failure left
+        // tenants.status and the onboarding machine diverged — two status
+        // authorities). Both writes commit together or neither does; a
+        // machine refusal rolls the status transition back and surfaces as a
+        // typed 409.
+        let mut tx = state.db.begin().await?;
+
+        // rows_affected distinguishes a wrong-state transition from a
+        // missing tenant: silently 200-ing on either hides the problem
+        // from the operator.
+        let result = sqlx::query(
+            "UPDATE tenants SET status = $1, updated_at = NOW()
+             WHERE id = $2 AND status = ANY($3)",
         )
-        .await;
+        .bind(new_status)
+        .bind(&id)
+        .bind(&from_statuses)
+        .execute(&mut *tx)
+        .await?;
+        if result.rows_affected() == 0 {
+            tx.rollback().await?;
+            let current: Option<String> =
+                sqlx::query_scalar("SELECT status FROM tenants WHERE id = $1")
+                    .bind(&id)
+                    .fetch_optional(&state.db)
+                    .await?;
+            return match current {
+                Some(_) => Err(ApiError::Conflict(wrong_state_message.into())),
+                None => Err(ApiError::NotFound("tenant not found".into())),
+            };
+        }
+
+        if let Err(error) = advance_onboarding_in_tx(&mut tx, &id, onboarding_event).await {
+            tx.rollback().await?;
+            return Err(onboarding_sync_error(error, action));
+        }
+        tx.commit().await?;
+
+        // F18: the status change must reach authenticated traffic
+        // immediately, not after the middleware caches lapse.
+        invalidate_tenant_auth_caches(&state, &id).await;
 
         // Audit log
         log_tenant_audit(&state, &auth, action, Some(&id)).await;
@@ -557,6 +752,28 @@ async fn update_tenant(
     //, `tenants.name` is VARCHAR(255) and an over-long name must never
     // reach the UPDATE as a raw 22001 database error.)
     let mut tx = state.db.begin().await?;
+    // Lifecycle single-writer (eighth audit): the status of a SUSPENDED
+    // tenant may only change through the unsuspend action endpoint (which
+    // syncs the onboarding machine in the same transaction) — the generic
+    // editor must not mutate it in any direction, even to another
+    // allowlisted value.
+    if body.status.is_some() {
+        let current: Option<String> =
+            sqlx::query_scalar("SELECT status FROM tenants WHERE id = $1")
+                .bind(&id)
+                .fetch_optional(&mut *tx)
+                .await?;
+        if current.as_deref() == Some("suspended") {
+            tx.rollback().await?;
+            return Err(ApiError::Conflict(
+                "tenant is suspended: its status can only change through the \
+                 unsuspend action endpoint (PATCH /v1/admin/tenants with \
+                 {\"action\": \"unsuspend\"}), which syncs the onboarding \
+                 state atomically; suspending one uses the \"suspend\" action"
+                    .into(),
+            ));
+        }
+    }
     let mut changed = false;
     let mut rows_affected: u64 = 0;
     if let Some(name) = &body.name {
@@ -899,9 +1116,13 @@ mod tests {
         }
     }
 
+    /// Lifecycle single-writer (eighth audit): the generic editor keeps
+    /// 'active'/'pending' but must REFUSE 'suspended' with a typed 409
+    /// pointing at the suspend/unsuspend action endpoints — the sanctioned
+    /// lifecycle flows ONLY through the actions, which sync onboarding.
     #[test]
-    fn generic_tenant_update_accepts_allowlisted_statuses() {
-        for allowed in ["active", "suspended", "pending"] {
+    fn generic_tenant_update_lifecycle_status_flows_through_the_action_endpoints() {
+        for allowed in ["active", "pending"] {
             let request = UpdateTenantRequest {
                 id: "tenant_123".into(),
                 action: None,
@@ -911,6 +1132,22 @@ mod tests {
             };
             validate_generic_tenant_update(&request)
                 .unwrap_or_else(|error| panic!("status {allowed:?} should be accepted: {error:?}"));
+        }
+        let suspended = UpdateTenantRequest {
+            id: "tenant_123".into(),
+            action: None,
+            name: None,
+            plan: None,
+            status: Some("suspended".into()),
+        };
+        match validate_generic_tenant_update(&suspended) {
+            Err(ApiError::Conflict(message)) => {
+                assert!(
+                    message.contains("suspend") && message.contains("action"),
+                    "the refusal must point at the suspend/unsuspend actions, got {message:?}"
+                );
+            }
+            other => panic!("a direct status='suspended' PATCH must be a typed 409, got {other:?}"),
         }
     }
 
@@ -1137,7 +1374,10 @@ mod tests {
             "an allowlist-external status must be rejected, not stored"
         );
 
-        // (c) A legitimate direct edit applies AND is audited.
+        // (c) A legitimate direct edit applies AND is audited. The direct
+        // editor writes 'pending' (an allowlisted, non-lifecycle status);
+        // 'suspended' is the action endpoints' state and is refused — see
+        // tenant_direct_suspend_patch_is_refused_to_the_action_endpoint.
         update_tenant(
             State(state.clone()),
             system_operator,
@@ -1146,7 +1386,7 @@ mod tests {
                 action: None,
                 name: Some("Renamed Co".into()),
                 plan: None,
-                status: Some("suspended".into()),
+                status: Some("pending".into()),
             }),
         )
         .await
@@ -1158,7 +1398,7 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(name, "Renamed Co");
-        assert_eq!(status, "suspended");
+        assert_eq!(status, "pending");
         let audited: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM audit_logs WHERE resource = 'tenant' AND resource_id = $1",
         )
@@ -1167,6 +1407,169 @@ mod tests {
         .await
         .unwrap();
         assert!(audited >= 1, "direct name/status edits must be audited");
+    }
+
+    /// Eighth audit (lifecycle single-writer): the suspend/unsuspend action
+    /// endpoints move tenants.status AND the onboarding machine in ONE
+    /// transaction — both columns of the tenants row flip together, the
+    /// Block note records the interrupted machine state, and Unblock
+    /// restores it. A machine already in the target state (Blocked on a
+    /// second suspension) commits the status write without an onboarding
+    /// write; nothing diverges.
+    #[tokio::test]
+    async fn tenant_suspend_and_unsuspend_move_status_and_onboarding_atomically() {
+        let Some(pool) = crate::test_db::canonical_pool("admin_tenants_lifecycle_tx").await else {
+            eprintln!(
+                "skipping tenant_suspend_and_unsuspend_move_status_and_onboarding_atomically: no TEST_DATABASE_URL"
+            );
+            return;
+        };
+        let state = crate::app::test_support::test_state_over(pool.clone()).await;
+        let operator = AuthUser {
+            tenant_id: "system".into(),
+            user_id: None,
+            api_key_id: None,
+            session_id: None,
+            scopes: vec!["*".into()],
+        };
+        let tenant_id = format!("tlife{}", &uuid::Uuid::new_v4().simple().to_string()[..12]);
+        sqlx::query(
+            "INSERT INTO tenants (id, name, slug, plan, status) VALUES ($1, 'Lifecycle Co', $2, 'free', 'pending')",
+        )
+        .bind(&tenant_id)
+        .bind(format!("slug-{tenant_id}"))
+        .execute(&pool)
+        .await
+        .expect("seed tenant");
+        let onboarding = async |pool: &sqlx::PgPool, tenant: &str| {
+            let row: (String, Option<String>) = sqlx::query_as(
+                "SELECT onboarding_state, onboarding_note FROM tenants WHERE id = $1",
+            )
+            .bind(tenant)
+            .fetch_one(pool)
+            .await
+            .expect("onboarding row");
+            row
+        };
+
+        // pending + invited → suspend: BOTH columns flip in one transaction.
+        update_tenant(
+            State(state.clone()),
+            operator.clone(),
+            Json(UpdateTenantRequest {
+                id: tenant_id.clone(),
+                action: Some("suspend".into()),
+                name: None,
+                plan: None,
+                status: None,
+            }),
+        )
+        .await
+        .expect("suspending must succeed");
+        let (status, machine): (String, String) =
+            sqlx::query_as("SELECT status, onboarding_state FROM tenants WHERE id = $1")
+                .bind(&tenant_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(status, "suspended", "the status must flip");
+        assert_eq!(
+            machine, "blocked",
+            "the onboarding machine must flip WITH it"
+        );
+        let (_, note) = onboarding(&pool, &tenant_id).await;
+        assert_eq!(
+            note.as_deref(),
+            Some(r#"{"prior":"invited"}"#),
+            "Block must record the interrupted machine state (the advance_persisted contract)"
+        );
+
+        // suspended + blocked → unsuspend: BOTH restore in one transaction.
+        update_tenant(
+            State(state.clone()),
+            operator.clone(),
+            Json(UpdateTenantRequest {
+                id: tenant_id.clone(),
+                action: Some("unsuspend".into()),
+                name: None,
+                plan: None,
+                status: None,
+            }),
+        )
+        .await
+        .expect("unsuspending must succeed");
+        let (status, machine): (String, String) =
+            sqlx::query_as("SELECT status, onboarding_state FROM tenants WHERE id = $1")
+                .bind(&tenant_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(status, "active");
+        assert_eq!(machine, "invited", "Unblock restores the recorded prior");
+        let (_, note) = onboarding(&pool, &tenant_id).await;
+        assert!(note.is_none(), "Unblock consumes the recorded prior");
+
+        // A machine ALREADY blocked (blocked through the onboarding surface,
+        // note absent): the suspend is a redundant machine fact — the status
+        // still flips, the machine stays blocked and its (default) restore
+        // is invited.
+        let blocked_tenant = format!("tblk{}", &uuid::Uuid::new_v4().simple().to_string()[..12]);
+        sqlx::query(
+            "INSERT INTO tenants (id, name, slug, plan, status, onboarding_state) \
+             VALUES ($1, 'Blocked Co', $2, 'free', 'active', 'blocked')",
+        )
+        .bind(&blocked_tenant)
+        .bind(format!("slug-{blocked_tenant}"))
+        .execute(&pool)
+        .await
+        .expect("seed blocked-machine tenant");
+        update_tenant(
+            State(state.clone()),
+            operator.clone(),
+            Json(UpdateTenantRequest {
+                id: blocked_tenant.clone(),
+                action: Some("suspend".into()),
+                name: None,
+                plan: None,
+                status: None,
+            }),
+        )
+        .await
+        .expect("suspending an already-blocked machine must succeed (AlreadyBlocked is redundant, not illegal)");
+        let (status, machine): (String, String) =
+            sqlx::query_as("SELECT status, onboarding_state FROM tenants WHERE id = $1")
+                .bind(&blocked_tenant)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(status, "suspended");
+        assert_eq!(
+            machine, "blocked",
+            "the machine stays blocked, no double write"
+        );
+        update_tenant(
+            State(state.clone()),
+            operator,
+            Json(UpdateTenantRequest {
+                id: blocked_tenant.clone(),
+                action: Some("unsuspend".into()),
+                name: None,
+                plan: None,
+                status: None,
+            }),
+        )
+        .await
+        .expect("unsuspending restores the machine's default prior");
+        let (status, machine): (String, String) =
+            sqlx::query_as("SELECT status, onboarding_state FROM tenants WHERE id = $1")
+                .bind(&blocked_tenant)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(status, "active");
+        assert_eq!(machine, "invited", "no recorded prior restores to invited");
+
+        pool.close().await;
     }
 }
 
@@ -1387,6 +1790,100 @@ mod adversarial_tests {
             )
             .await;
         assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    /// Eighth audit (lifecycle single-writer): a direct status='suspended'
+    /// PATCH is refused with a typed 409 pointing at the suspend action —
+    /// '{"status":"suspended"} through the generic editor used to bypass
+    /// the onboarding sync — and the status of a SUSPENDED tenant cannot be
+    /// mutated through the editor in any direction (unsuspend is the only
+    /// way out). Both refusals write nothing.
+    #[tokio::test]
+    async fn tenant_direct_suspend_patch_is_refused_to_the_action_endpoint() {
+        let Some(pool) = crate::test_db::canonical_pool("ten_lifecycle_writer").await else {
+            return;
+        };
+        let env = AdvEnv::admin(pool.clone()).await;
+        let tenant = seed_tenant(&pool, "w").await;
+
+        // status='suspended' through the generic editor: typed 409 naming
+        // the suspend action, nothing written.
+        let (status, body) = env
+            .patch(
+                "/v1/admin/tenants",
+                &serde_json::json!({ "id": tenant, "status": "suspended" }).to_string(),
+            )
+            .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        let message = body["error"]["message"].as_str().unwrap_or_default();
+        assert!(
+            message.contains("suspend") && message.contains("action"),
+            "the refusal must point at the suspend action endpoint, got {message:?}"
+        );
+        let stored: String = sqlx::query_scalar("SELECT status FROM tenants WHERE id = $1")
+            .bind(&tenant)
+            .fetch_one(&pool)
+            .await
+            .expect("row");
+        assert_eq!(stored, "active", "a refused lifecycle PATCH must not write");
+
+        // Suspend through the ACTION endpoint (the sanctioned writer), then
+        // try to mutate the suspended tenant's status directly in any
+        // direction — including 'active' (the unsuspend direction) and back
+        // to 'pending'.
+        let (status, body) = env
+            .patch(
+                "/v1/admin/tenants",
+                &serde_json::json!({ "id": tenant, "action": "suspend" }).to_string(),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        for attempt in ["active", "pending"] {
+            let (status, body) = env
+                .patch(
+                    "/v1/admin/tenants",
+                    &serde_json::json!({ "id": tenant, "status": attempt }).to_string(),
+                )
+                .await;
+            assert_eq!(
+                status,
+                StatusCode::CONFLICT,
+                "mutating a suspended tenant's status to {attempt:?} must conflict: {body}"
+            );
+            let message = body["error"]["message"].as_str().unwrap_or_default();
+            assert!(
+                message.contains("unsuspend"),
+                "the refusal must point at the unsuspend action endpoint, got {message:?}"
+            );
+        }
+        // A name-only edit of the suspended tenant is still fine (only the
+        // STATUS mutation is the lifecycle writer's business).
+        let (status, _body) = env
+            .patch(
+                "/v1/admin/tenants",
+                &serde_json::json!({ "id": tenant, "name": "Renamed While Suspended" }).to_string(),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        // And the unsuspend action lifts it.
+        let (status, _body) = env
+            .patch(
+                "/v1/admin/tenants",
+                &serde_json::json!({ "id": tenant, "action": "unsuspend" }).to_string(),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        let (stored, machine): (String, String) =
+            sqlx::query_as("SELECT status, onboarding_state FROM tenants WHERE id = $1")
+                .bind(&tenant)
+                .fetch_one(&pool)
+                .await
+                .expect("row");
+        assert_eq!(stored, "active");
+        assert_eq!(
+            machine, "invited",
+            "the sanctioned lifecycle keeps the machine in sync"
+        );
     }
 
     #[tokio::test]
@@ -1684,7 +2181,10 @@ mod adversarial_tests {
         .fetch_one(&pool)
         .await
         .expect("audit row");
-        assert_eq!(action, "control_plane.smtp_credential.message_class_updated");
+        assert_eq!(
+            action,
+            "control_plane.smtp_credential.message_class_updated"
+        );
         assert_eq!(details["previous_message_class"], "marketing");
         assert_eq!(details["new_message_class"], "transactional");
         assert_eq!(details["surface"], "control_plane");

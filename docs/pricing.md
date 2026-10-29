@@ -42,7 +42,7 @@ line.
 | Compliance | €990/month, annual | $1,090/month | 1M emails, EU-only routing included, dedicated IP, DORA/NIS2 evidence pack, GDPR processor pack (DPA, SCCs, sub-processor list), signed routing receipts, 1-year audit log, SSO |
 | Enterprise Cloud | €1,750/month, annual | $1,950/month | 5M emails, 3 dedicated IPs, legal hold and archive, quarterly evidence refresh, EU-only routing included |
 | Platform | €990/month base + €0.30 per 1,000 above 1M + €1 per active subaccount above 100 | $1,090 base + $0.35 per 1,000 + $1 per subaccount | Subaccounts with isolated reputation, white-label tracking and bounce domains, provisioning API |
-| Dedicated Tenant | from €4,000/month (12-month minimum, €10k–€40k setup) | EUR contract pricing | Single-tenant stack on dedicated hardware, EU region by default, 5M recipients, 2 managed IPs, named owner, monthly review |
+| Dedicated Tenant | from €4,000/month (12-month minimum, €10k–€40k setup) | EUR contract pricing | Single-tenant stack on dedicated compute (dedicated-vCPU line), EU region by default, 5M recipients, 2 managed IPs, named owner, monthly review |
 | Mailboxes | €6 per seat/month (10-seat minimum); archive and in-platform journaling +€2 per seat | $7 per seat/month; +$2 archive | EU-hosted IMAP/SMTP mailboxes on the existing stack, autoconfig, spam and AV filtering, self-serve import |
 
 ## Public purchase paths

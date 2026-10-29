@@ -264,6 +264,18 @@ services:
   postgres:
     # Production: Do NOT expose database port to host
     ports: !override []  # force-clear dev compose ports (empty list is ignored by merge)
+    # Replication-slot retention bound on the PRIMARY (eighth audit, DR:
+    # "the slot cap was not coupled to the standby overlay"): physical slots
+    # can exist whenever a standby has ever bootstrapped, including WITHOUT
+    # the wal-archive overlay, so the cap must apply to every primary run —
+    # an abandoned standby slot with no bound fills the primary's disk.
+    # Same env var + default as deploy/docker-compose.wal-archive.yml's
+    # archive_command (which REPLACES this command when that overlay is
+    # included — it carries the identical flag).
+    command:
+      - postgres
+      - -c
+      - max_slot_wal_keep_size=${STANDBY_SLOT_WAL_KEEP_SIZE_MB:-4096}MB
     environment:
       POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
       # WAL archiving / PITR (operator-gated overlay deploy/docker-compose.
@@ -284,6 +296,22 @@ services:
       options:
         max-size: "10m"
         max-file: "5"
+
+  postgres-exporter:
+    # Replication-slot metrics (eighth audit: "the new alerts are dead —
+    # the pinned postgres-exporter v0.15.0 never emits
+    # pg_replication_slots_pg_wal_size/pg_replication_slots_active"): the
+    # repo-owned custom queries below supply
+    # apexmail_pg_replication_slots_active /
+    # apexmail_pg_replication_slots_retained_wal_bytes, the names the
+    # PostgresReplicationSlot* alerts in deploy/alerting-rules.yml consume.
+    # extend.query-path loads the queries at exporter STARTUP — editing
+    # deploy/postgres-exporter-queries.yaml requires a container restart
+    # (the queries themselves re-execute on every scrape).
+    command:
+      - --extend.query-path=/etc/postgres-exporter/queries.yaml
+    volumes:
+      - ./deploy/postgres-exporter-queries.yaml:/etc/postgres-exporter/queries.yaml:ro
 
   redis:
     # Production: Do NOT expose Redis port to host

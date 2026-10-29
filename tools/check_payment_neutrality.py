@@ -124,6 +124,10 @@ ALLOWLIST_TOML = """
 # boundary) whose production code still names the processor. Rewriting them
 # is owner-gated follow-up (NEUTRALITY_DEBT.md, step 10+); the grant keeps
 # the census honest and reviewed while pinning nothing in-crate.
+# BETA authority-inversion wave: every grant below was re-verified against
+# the post-cleanup tree — each granted file still names the processor in
+# PRODUCTION code (legacy-table reads, wire-client calls, credential env
+# plumbing); grants whose couplings closed were deleted.
 [[file_grant]]
 path = "services/mail-server/crates/api-server/src/routes/admin/billing_ops.rs"
 reason = "admin ops tooling: wire-client calls + legacy subscription/mandate SQL; retire with N-05/N-10"
@@ -190,9 +194,15 @@ reason = "MOLLIE_API_KEY config plumbing into BillingConfig; retire with N-08"
 expires = "2027-04-27"
 
 # -- line-pinned in-crate exceptions ----------------------------------------
+# Recomputed against the post-beta-authority-inversion tree: every pin is
+# the exact SHA-256 (first 16 hex chars) of a line that EXISTS in the
+# production tree today; pins whose lines retired with the provider-owned
+# schedule surface were deleted. In-crate pins are only the legacy physical
+# table/column vocabulary (owner-gated step-10 rename) and the neutral
+# trait-object injection into the renewal worker.
 [[allow]]
 path = "services/mail-server/crates/billing-service/src/maintenance.rs"
-line = 1397
+line = 1401
 marker = "mollie_subscriptions-sql"
 line_hash = "1c01b495c3e1ab62"
 reason = "transitional legacy mandate/dunning SQL reads (dedicated-IP mandate read + retry-candidate scan); retire with NEUTRALITY-DEBT rows N-05/N-06"
@@ -201,7 +211,7 @@ expires = "2027-04-27"
 
 [[allow]]
 path = "services/mail-server/crates/billing-service/src/maintenance.rs"
-line = 1417
+line = 1421
 marker = "mollie_subscriptions-sql"
 line_hash = "a4bb4307edb4165a"
 reason = "transitional legacy mandate/dunning SQL reads (dedicated-IP mandate read + retry-candidate scan); retire with NEUTRALITY-DEBT rows N-05/N-06"
@@ -210,7 +220,7 @@ expires = "2027-04-27"
 
 [[allow]]
 path = "services/mail-server/crates/billing-service/src/maintenance.rs"
-line = 1425
+line = 1429
 marker = "mollie_subscriptions-sql"
 line_hash = "dbb5c540384c26ac"
 reason = "transitional legacy mandate/dunning SQL reads (dedicated-IP mandate read + retry-candidate scan); retire with NEUTRALITY-DEBT rows N-05/N-06"
@@ -219,7 +229,7 @@ expires = "2027-04-27"
 
 [[allow]]
 path = "services/mail-server/crates/billing-service/src/maintenance.rs"
-line = 1917
+line = 1909
 marker = "mollie_mandate-sql"
 line_hash = "53a59d134d5b86c7"
 reason = "transitional legacy mandate/dunning SQL reads (dedicated-IP mandate read + retry-candidate scan); retire with NEUTRALITY-DEBT rows N-05/N-06"
@@ -228,7 +238,7 @@ expires = "2027-04-27"
 
 [[allow]]
 path = "services/mail-server/crates/billing-service/src/maintenance.rs"
-line = 2085
+line = 2077
 marker = "mollie_subscriptions-sql"
 line_hash = "7985c6c07088ef47"
 reason = "transitional legacy mandate/dunning SQL reads (dedicated-IP mandate read + retry-candidate scan); retire with NEUTRALITY-DEBT rows N-05/N-06"
@@ -237,7 +247,7 @@ expires = "2027-04-27"
 
 [[allow]]
 path = "services/mail-server/crates/billing-service/src/maintenance.rs"
-line = 2506
+line = 2498
 marker = "mollie_subscriptions-sql"
 line_hash = "390c9137e68212ee"
 reason = "transitional legacy mandate/dunning SQL reads (dedicated-IP mandate read + retry-candidate scan); retire with NEUTRALITY-DEBT rows N-05/N-06"
@@ -246,7 +256,7 @@ expires = "2027-04-27"
 
 [[allow]]
 path = "services/mail-server/crates/billing-service/src/maintenance.rs"
-line = 2592
+line = 2584
 marker = "mollie_mandate-sql"
 line_hash = "991018ada394be6f"
 reason = "transitional legacy mandate/dunning SQL reads (dedicated-IP mandate read + retry-candidate scan); retire with NEUTRALITY-DEBT rows N-05/N-06"
@@ -255,7 +265,7 @@ expires = "2027-04-27"
 
 [[allow]]
 path = "services/mail-server/crates/billing-service/src/maintenance.rs"
-line = 2594
+line = 2586
 marker = "mollie_subscriptions-sql"
 line_hash = "e20c9c96919be9b2"
 reason = "transitional legacy mandate/dunning SQL reads (dedicated-IP mandate read + retry-candidate scan); retire with NEUTRALITY-DEBT rows N-05/N-06"
@@ -264,7 +274,7 @@ expires = "2027-04-27"
 
 [[allow]]
 path = "services/mail-server/crates/billing-service/src/maintenance.rs"
-line = 2654
+line = 2646
 marker = "mollie_mandate-sql"
 line_hash = "ee10c8d9cda64f9e"
 reason = "transitional legacy mandate/dunning SQL reads (dedicated-IP mandate read + retry-candidate scan); retire with NEUTRALITY-DEBT rows N-05/N-06"
@@ -273,7 +283,7 @@ expires = "2027-04-27"
 
 [[allow]]
 path = "services/mail-server/crates/billing-service/src/maintenance.rs"
-line = 3576
+line = 3568
 marker = "mollie_mandate-sql"
 line_hash = "6fff5b4fd0cfd80f"
 reason = "transitional legacy mandate/dunning SQL reads (dedicated-IP mandate read + retry-candidate scan); retire with NEUTRALITY-DEBT rows N-05/N-06"
@@ -282,7 +292,7 @@ expires = "2027-04-27"
 
 [[allow]]
 path = "services/mail-server/crates/billing-service/src/maintenance.rs"
-line = 3724
+line = 3716
 marker = "mollie_mandate-sql"
 line_hash = "07db432a2e3454be"
 reason = "transitional legacy mandate/dunning SQL reads (dedicated-IP mandate read + retry-candidate scan); retire with NEUTRALITY-DEBT rows N-05/N-06"
@@ -291,7 +301,7 @@ expires = "2027-04-27"
 
 [[allow]]
 path = "services/mail-server/crates/billing-service/src/maintenance.rs"
-line = 3785
+line = 3777
 marker = "mollie_mandate-sql"
 line_hash = "a13312b7a2023cb2"
 reason = "transitional legacy mandate/dunning SQL reads (dedicated-IP mandate read + retry-candidate scan); retire with NEUTRALITY-DEBT rows N-05/N-06"
@@ -300,7 +310,7 @@ expires = "2027-04-27"
 
 [[allow]]
 path = "services/mail-server/crates/billing-service/src/maintenance.rs"
-line = 3814
+line = 3806
 marker = "mollie_mandate-sql"
 line_hash = "88a3aedabc7a6bf6"
 reason = "transitional legacy mandate/dunning SQL reads (dedicated-IP mandate read + retry-candidate scan); retire with NEUTRALITY-DEBT rows N-05/N-06"
@@ -318,7 +328,7 @@ expires = "2027-04-27"
 
 [[allow]]
 path = "services/mail-server/crates/billing-service/src/overage.rs"
-line = 2293
+line = 2292
 marker = "mollie_subscriptions-sql"
 line_hash = "e33d256dc6714634"
 reason = "transitional legacy-mandate fallback in the neutral credential lookup; retire with NEUTRALITY-DEBT rows N-09/N-06"
@@ -327,7 +337,7 @@ expires = "2027-04-27"
 
 [[allow]]
 path = "services/mail-server/crates/billing-service/src/overage.rs"
-line = 2344
+line = 2343
 marker = "mollie_mandate-sql"
 line_hash = "9b1cca98b8a2631c"
 reason = "transitional legacy-mandate fallback in the neutral credential lookup; retire with NEUTRALITY-DEBT rows N-09/N-06"
@@ -336,7 +346,7 @@ expires = "2027-04-27"
 
 [[allow]]
 path = "services/mail-server/crates/billing-service/src/overage.rs"
-line = 2345
+line = 2344
 marker = "mollie_subscriptions-sql"
 line_hash = "ee23941aeeb49771"
 reason = "transitional legacy-mandate fallback in the neutral credential lookup; retire with NEUTRALITY-DEBT rows N-09/N-06"
@@ -345,7 +355,7 @@ expires = "2027-04-27"
 
 [[allow]]
 path = "services/mail-server/crates/billing-service/src/overage.rs"
-line = 2347
+line = 2346
 marker = "mollie_mandate-sql"
 line_hash = "a0ce18628f29b4f3"
 reason = "transitional legacy-mandate fallback in the neutral credential lookup; retire with NEUTRALITY-DEBT rows N-09/N-06"
@@ -354,7 +364,7 @@ expires = "2027-04-27"
 
 [[allow]]
 path = "services/mail-server/crates/billing-service/src/overage.rs"
-line = 2348
+line = 2347
 marker = "mollie_mandate-sql"
 line_hash = "8066ed5d99ec943d"
 reason = "transitional legacy-mandate fallback in the neutral credential lookup; retire with NEUTRALITY-DEBT rows N-09/N-06"
@@ -363,7 +373,7 @@ expires = "2027-04-27"
 
 [[allow]]
 path = "services/mail-server/crates/billing-service/src/overage.rs"
-line = 2349
+line = 2348
 marker = "mollie_mandate-sql"
 line_hash = "a1fd421901f229b1"
 reason = "transitional legacy-mandate fallback in the neutral credential lookup; retire with NEUTRALITY-DEBT rows N-09/N-06"
@@ -372,7 +382,7 @@ expires = "2027-04-27"
 
 [[allow]]
 path = "services/mail-server/crates/billing-service/src/plan_billing.rs"
-line = 333
+line = 348
 marker = "mollie_subscriptions-sql"
 line_hash = "01de90692f85d4c5"
 reason = "load-bearing legacy provider-table writes (activation upsert, renewal, sweep); retire with NEUTRALITY-DEBT rows N-05/N-06"
@@ -381,7 +391,7 @@ expires = "2027-04-27"
 
 [[allow]]
 path = "services/mail-server/crates/billing-service/src/plan_billing.rs"
-line = 427
+line = 404
 marker = "mollie_subscriptions-sql"
 line_hash = "794f6dcf5b2fd1ae"
 reason = "load-bearing legacy provider-table writes (activation upsert, renewal, sweep); retire with NEUTRALITY-DEBT rows N-05/N-06"
@@ -390,7 +400,7 @@ expires = "2027-04-27"
 
 [[allow]]
 path = "services/mail-server/crates/billing-service/src/plan_billing.rs"
-line = 429
+line = 406
 marker = "mollie_mandate-sql"
 line_hash = "be0990ca6f0bf314"
 reason = "load-bearing legacy provider-table writes (activation upsert, renewal, sweep); retire with NEUTRALITY-DEBT rows N-05/N-06"
@@ -399,7 +409,7 @@ expires = "2027-04-27"
 
 [[allow]]
 path = "services/mail-server/crates/billing-service/src/plan_billing.rs"
-line = 442
+line = 419
 marker = "mollie_mandate-sql"
 line_hash = "7119e5b6606738bc"
 reason = "load-bearing legacy provider-table writes (activation upsert, renewal, sweep); retire with NEUTRALITY-DEBT rows N-05/N-06"
@@ -408,25 +418,52 @@ expires = "2027-04-27"
 
 [[allow]]
 path = "services/mail-server/crates/billing-service/src/plan_billing.rs"
-line = 725
-marker = "mollie_subscriptions-sql"
-line_hash = "d921a23f6df6d143"
-reason = "load-bearing legacy provider-table writes (activation upsert, renewal, sweep); retire with NEUTRALITY-DEBT rows N-05/N-06"
+line = 652
+marker = "adapter-construction-outside-payments"
+line_hash = "e6f776df5afab94b"
+reason = "the NEUTRAL PaymentProvider trait object injected into the local renewal worker (inversion of control); the adapter is constructed only in payments::registry (NEUTRALITY-DEBT row N-05)"
 owner = "payments-neutrality"
 expires = "2027-04-27"
 
 [[allow]]
 path = "services/mail-server/crates/billing-service/src/plan_billing.rs"
-line = 824
-marker = "mollie_subscriptions-sql"
-line_hash = "f7fd84573843f2f9"
-reason = "load-bearing legacy provider-table writes (activation upsert, renewal, sweep); retire with NEUTRALITY-DEBT rows N-05/N-06"
+line = 720
+marker = "adapter-construction-outside-payments"
+line_hash = "0d412e29a9b34858"
+reason = "the NEUTRAL PaymentProvider trait object injected into the local renewal worker (inversion of control); the adapter is constructed only in payments::registry (NEUTRALITY-DEBT row N-05)"
 owner = "payments-neutrality"
 expires = "2027-04-27"
 
 [[allow]]
 path = "services/mail-server/crates/billing-service/src/plan_billing.rs"
-line = 881
+line = 738
+marker = "mollie_subscriptions-sql"
+line_hash = "213b9df055be1d64"
+reason = "load-bearing legacy provider-table writes (the LOCAL subscription state: activation upsert, renewal worker, dunning); the physical rename is the owner-gated step-10 retirement (NEUTRALITY-DEBT rows N-03/N-05)"
+owner = "payments-neutrality"
+expires = "2027-04-27"
+
+[[allow]]
+path = "services/mail-server/crates/billing-service/src/plan_billing.rs"
+line = 898
+marker = "mollie_subscriptions-sql"
+line_hash = "59759657a6a82945"
+reason = "load-bearing legacy provider-table writes (the LOCAL subscription state: activation upsert, renewal worker, dunning); the physical rename is the owner-gated step-10 retirement (NEUTRALITY-DEBT rows N-03/N-05)"
+owner = "payments-neutrality"
+expires = "2027-04-27"
+
+[[allow]]
+path = "services/mail-server/crates/billing-service/src/plan_billing.rs"
+line = 1169
+marker = "mollie_subscriptions-sql"
+line_hash = "89dc752a28709dfe"
+reason = "load-bearing legacy provider-table writes (the LOCAL subscription state: activation upsert, renewal worker, dunning); the physical rename is the owner-gated step-10 retirement (NEUTRALITY-DEBT rows N-03/N-05)"
+owner = "payments-neutrality"
+expires = "2027-04-27"
+
+[[allow]]
+path = "services/mail-server/crates/billing-service/src/plan_billing.rs"
+line = 1189
 marker = "mollie_subscriptions-sql"
 line_hash = "c66cbeb7f1a89013"
 reason = "load-bearing legacy provider-table writes (activation upsert, renewal, sweep); retire with NEUTRALITY-DEBT rows N-05/N-06"
@@ -435,7 +472,34 @@ expires = "2027-04-27"
 
 [[allow]]
 path = "services/mail-server/crates/billing-service/src/plan_billing.rs"
-line = 928
+line = 1245
+marker = "mollie_subscriptions-sql"
+line_hash = "5ba5c0f6f9360783"
+reason = "load-bearing legacy provider-table writes (the LOCAL subscription state: activation upsert, renewal worker, dunning); the physical rename is the owner-gated step-10 retirement (NEUTRALITY-DEBT rows N-03/N-05)"
+owner = "payments-neutrality"
+expires = "2027-04-27"
+
+[[allow]]
+path = "services/mail-server/crates/billing-service/src/plan_billing.rs"
+line = 1312
+marker = "mollie_subscriptions-sql"
+line_hash = "8ef96c746f7d8b51"
+reason = "load-bearing legacy provider-table writes (the LOCAL subscription state: activation upsert, renewal worker, dunning); the physical rename is the owner-gated step-10 retirement (NEUTRALITY-DEBT rows N-03/N-05)"
+owner = "payments-neutrality"
+expires = "2027-04-27"
+
+[[allow]]
+path = "services/mail-server/crates/billing-service/src/plan_billing.rs"
+line = 1405
+marker = "mollie_subscriptions-sql"
+line_hash = "8cdd0bde689772c2"
+reason = "load-bearing legacy provider-table writes (the LOCAL subscription state: activation upsert, renewal worker, dunning); the physical rename is the owner-gated step-10 retirement (NEUTRALITY-DEBT rows N-03/N-05)"
+owner = "payments-neutrality"
+expires = "2027-04-27"
+
+[[allow]]
+path = "services/mail-server/crates/billing-service/src/plan_billing.rs"
+line = 1810
 marker = "mollie_subscriptions-sql"
 line_hash = "e74aa0b8348f7f08"
 reason = "load-bearing legacy provider-table writes (activation upsert, renewal, sweep); retire with NEUTRALITY-DEBT rows N-05/N-06"
@@ -444,7 +508,7 @@ expires = "2027-04-27"
 
 [[allow]]
 path = "services/mail-server/crates/billing-service/src/plan_billing.rs"
-line = 945
+line = 1827
 marker = "mollie_subscriptions-sql"
 line_hash = "6a31da98da8798ad"
 reason = "load-bearing legacy provider-table writes (activation upsert, renewal, sweep); retire with NEUTRALITY-DEBT rows N-05/N-06"
@@ -452,35 +516,8 @@ owner = "payments-neutrality"
 expires = "2027-04-27"
 
 [[allow]]
-path = "services/mail-server/crates/billing-service/src/plan_billing.rs"
-line = 990
-marker = "mollie_subscriptions-sql"
-line_hash = "0e045e69f554a000"
-reason = "load-bearing legacy provider-table writes (activation upsert, renewal, sweep); retire with NEUTRALITY-DEBT rows N-05/N-06"
-owner = "payments-neutrality"
-expires = "2027-04-27"
-
-[[allow]]
-path = "services/mail-server/crates/billing-service/src/plan_billing.rs"
-line = 1218
-marker = "mollie_subscriptions-sql"
-line_hash = "16894ce2dc36fd26"
-reason = "load-bearing legacy provider-table writes (activation upsert, renewal, sweep); retire with NEUTRALITY-DEBT rows N-05/N-06"
-owner = "payments-neutrality"
-expires = "2027-04-27"
-
-[[allow]]
-path = "services/mail-server/crates/billing-service/src/plan_billing.rs"
-line = 1269
-marker = "mollie_subscriptions-sql"
-line_hash = "2cdd43196e8e4489"
-reason = "load-bearing legacy provider-table writes (activation upsert, renewal, sweep); retire with NEUTRALITY-DEBT rows N-05/N-06"
-owner = "payments-neutrality"
-expires = "2027-04-27"
-
-[[allow]]
 path = "services/mail-server/crates/billing-service/src/routes.rs"
-line = 1134
+line = 1121
 marker = "mollie_subscriptions-sql"
 line_hash = "0dcbade639bdad58"
 reason = "legacy admin-surface SQL reads; retire with NEUTRALITY-DEBT rows N-03/N-02"
@@ -489,7 +526,7 @@ expires = "2027-04-27"
 
 [[allow]]
 path = "services/mail-server/crates/billing-service/src/routes.rs"
-line = 1732
+line = 1719
 marker = "mollie_subscriptions-sql"
 line_hash = "5af1424a23990844"
 reason = "legacy admin-surface SQL reads; retire with NEUTRALITY-DEBT rows N-03/N-02"
@@ -498,7 +535,7 @@ expires = "2027-04-27"
 
 [[allow]]
 path = "services/mail-server/crates/billing-service/src/routes.rs"
-line = 1796
+line = 1783
 marker = "mollie_subscriptions-sql"
 line_hash = "9703b44d3d713894"
 reason = "legacy admin-surface SQL reads; retire with NEUTRALITY-DEBT rows N-03/N-02"
@@ -507,7 +544,7 @@ expires = "2027-04-27"
 
 [[allow]]
 path = "services/mail-server/crates/billing-service/src/routes.rs"
-line = 1820
+line = 1807
 marker = "mollie_subscriptions-sql"
 line_hash = "cbf75f314185abb9"
 reason = "legacy admin-surface SQL reads; retire with NEUTRALITY-DEBT rows N-03/N-02"
@@ -516,25 +553,7 @@ expires = "2027-04-27"
 
 [[allow]]
 path = "services/mail-server/crates/billing-service/src/subscriptions.rs"
-line = 48
-marker = "mollie_subscriptions-sql"
-line_hash = "0a15993bc12cb4b6"
-reason = "legacy provider-named table reads (entitlement SQL, cancel capture); retire with NEUTRALITY-DEBT row N-03"
-owner = "payments-neutrality"
-expires = "2027-04-27"
-
-[[allow]]
-path = "services/mail-server/crates/billing-service/src/subscriptions.rs"
-line = 50
-marker = "mollie_subscriptions-sql"
-line_hash = "7155af9c0c4a8b89"
-reason = "legacy provider-named table reads (entitlement SQL, cancel capture); retire with NEUTRALITY-DEBT row N-03"
-owner = "payments-neutrality"
-expires = "2027-04-27"
-
-[[allow]]
-path = "services/mail-server/crates/billing-service/src/subscriptions.rs"
-line = 136
+line = 143
 marker = "mollie_customers-sql"
 line_hash = "793146428528dedf"
 reason = "legacy provider-named table reads (entitlement SQL, cancel capture); retire with NEUTRALITY-DEBT row N-03"
@@ -543,7 +562,7 @@ expires = "2027-04-27"
 
 [[allow]]
 path = "services/mail-server/crates/billing-service/src/subscriptions.rs"
-line = 222
+line = 227
 marker = "mollie_subscriptions-sql"
 line_hash = "76534b58e63a66f8"
 reason = "legacy provider-named table reads (entitlement SQL, cancel capture); retire with NEUTRALITY-DEBT row N-03"
@@ -552,7 +571,7 @@ expires = "2027-04-27"
 
 [[allow]]
 path = "services/mail-server/crates/billing-service/src/subscriptions.rs"
-line = 322
+line = 312
 marker = "mollie_mandate-sql"
 line_hash = "321a22d481115264"
 reason = "legacy provider-named table reads (entitlement SQL, cancel capture); retire with NEUTRALITY-DEBT row N-03"
@@ -561,7 +580,7 @@ expires = "2027-04-27"
 
 [[allow]]
 path = "services/mail-server/crates/billing-service/src/subscriptions.rs"
-line = 326
+line = 316
 marker = "mollie_mandate-sql"
 line_hash = "bc854fc5e54b70fc"
 reason = "legacy provider-named table reads (entitlement SQL, cancel capture); retire with NEUTRALITY-DEBT row N-03"
@@ -570,7 +589,7 @@ expires = "2027-04-27"
 
 [[allow]]
 path = "services/mail-server/crates/billing-service/src/subscriptions.rs"
-line = 327
+line = 317
 marker = "mollie_mandate-sql"
 line_hash = "d83432d2646f796f"
 reason = "legacy provider-named table reads (entitlement SQL, cancel capture); retire with NEUTRALITY-DEBT row N-03"
@@ -594,7 +613,6 @@ line_hash = "a7d02c32cd8a6771"
 reason = "billing-period reads on the legacy provider-named table; retire with NEUTRALITY-DEBT row N-03"
 owner = "payments-neutrality"
 expires = "2027-04-27"
-
 """
 
 

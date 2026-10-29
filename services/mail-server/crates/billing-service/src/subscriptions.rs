@@ -4,19 +4,26 @@
 //! revocation) go through the neutral
 //! [`crate::payments::PaymentProvider`] boundary resolved by
 //! [`crate::payments::registry::from_env`], and revocation reads/writes the
-//! NEUTRAL `payment_credentials` ledger (N-04 retired, audit step 7). The
-//! remaining couplings are inventoried in `src/payments/NEUTRALITY_DEBT.md`
-//! (rows N-01, N-03).
+//! NEUTRAL `payment_credentials` ledger (N-04 retired, audit step 7).
 //!
-//! The payment provider is the payment authority: subscription persistence
-//! and plan activation are driven by verified provider webhooks, and direct
-//! create/plan changes remain refused. CANCELLATION is different (external
-//! audit 15 Oct, H1): ApexMail owns the subscription state, so a customer
-//! cancelling from the product is a LOCAL state change,
-//! `cancel_at_period_end` stops the next renewal charge and a period-end
-//! sweep downgrades the tenant. The old refusal pointed customers at a
-//! provider hosted billing portal that does not exist, leaving them no way
-//! to stop being charged.
+//! N-01/N-03 RESOLVED (beta authority inversion): entitlement reads come
+//! from the LOCAL subscription state (the billing-cycle row the webhook
+//! writers and the local renewal worker maintain) joined with the tenant's
+//! effective plan; the public DTO carries no provider object ids (a legacy
+//! contract id survives for reconciliation on the neutral
+//! `subscription_payment_bindings` row, keyed by the local subscription id).
+//! The physical table name the state lives in is legacy provider-tagged
+//! vocabulary; its rename is the owner-gated step-10 table retirement.
+//!
+//! The payment provider is the payment authority for CHECKOUTS: subscription
+//! persistence and plan activation are driven by verified provider webhooks,
+//! and direct create/plan changes remain refused. CANCELLATION is different
+//! (external audit 15 Oct, H1): ApexMail owns the subscription state, so a
+//! customer cancelling from the product is a LOCAL state change,
+//! `cancel_at_period_end` stops the next renewal charge and the local
+//! renewal worker ends the subscription when the period actually ends. The
+//! old refusal pointed customers at a provider hosted billing portal that
+//! does not exist, leaving them no way to stop being charged.
 
 #[cfg(test)]
 use crate::types::UsageSummary;
@@ -33,9 +40,9 @@ use crate::types::{BillingInterval, Subscription, SubscriptionStatus};
 
 /// Direct local subscription creation is disabled.
 ///
-/// Verified Mollie webhook handling owns subscription persistence. Retaining
-/// this public helper as a safe failure prevents future callers from creating
-/// an `active` local record without a matching Mollie event.
+/// Verified provider webhook handling owns subscription persistence. The
+/// input shape keeps no provider object ids (N-01): a subscription is local
+/// state, created by the webhook-verified activation only.
 pub async fn create_subscription(
     _pool: &PgPool,
     _input: CreateSubscriptionInput,
@@ -45,13 +52,14 @@ pub async fn create_subscription(
 
 /// SQL used by [`get_subscription`] to read the live subscription.
 ///
-/// Fix C, entitlement writers only ever touch `mollie_subscriptions` +
+/// Fix C, entitlement writers only ever touch the local subscription state +
 /// `tenants.plan`; the legacy `subscriptions` table stays empty, so reads
-/// must resolve against mollie_subscriptions (period bounds live in
+/// resolve against the live subscription row (period bounds live in
 /// billing_cycle_start/end) and join tenants for the effective plan name.
 ///
-/// NEUTRALITY-DEBT (N-03): reads target the legacy provider-named table;
-/// step 8 moves the reader onto the neutral subscription state.
+/// N-03 (beta authority inversion): the LOCAL row is the authority this
+/// reader resolves; only the physical table name is provider-tagged legacy
+/// vocabulary (owner-gated step-10 rename).
 const GET_SUBSCRIPTION_SQL: &str = r#"
         SELECT
             s.id, s.tenant_id,
@@ -59,7 +67,6 @@ const GET_SUBSCRIPTION_SQL: &str = r#"
             s.status, s.billing_interval,
             s.billing_cycle_start AS current_period_start,
             s.billing_cycle_end AS current_period_end,
-            s.mollie_subscription_id, s.mollie_customer_id,
             s.cancel_at_period_end, s.created_at, s.updated_at
         FROM mollie_subscriptions s
         JOIN tenants t ON t.id = s.tenant_id
@@ -193,12 +200,10 @@ pub async fn cancel_subscription(
     let mut tx = pool.begin().await.map_err(SubscriptionError::Db)?;
 
     // Serialize concurrent cancels for this tenant; only a live subscription
-    // can be canceled. The provider ids are CAPTURED here, before the local
-    // transition: flipping the row to `canceled` first would make a
-    // status-filtered lookup miss it and Mollie would keep charging.
-    let row: Option<(Uuid, Option<String>, Option<String>)> = sqlx::query_as(
+    // can be canceled.
+    let row: Option<(Uuid,)> = sqlx::query_as(
         r#"
-        SELECT id, mollie_subscription_id, mollie_customer_id
+        SELECT id
         FROM mollie_subscriptions
         WHERE tenant_id = $1
           AND status IN ('active', 'trialing', 'past_due', 'unpaid')
@@ -211,7 +216,7 @@ pub async fn cancel_subscription(
     .fetch_optional(&mut *tx)
     .await
     .map_err(SubscriptionError::Db)?;
-    let Some((subscription_id, provider_subscription_id, provider_customer_id)) = row else {
+    let Some((subscription_id,)) = row else {
         tx.rollback().await.ok();
         return Err(SubscriptionError::NotFound);
     };
@@ -274,33 +279,18 @@ pub async fn cancel_subscription(
 
     tx.commit().await.map_err(SubscriptionError::Db)?;
 
-    // Immediate cancellation stops the provider: Mollie's own subscription
-    // is canceled (no further charge generation) and the mandate is revoked.
-    // Best-effort by design (the local cancel is committed); failures are
+    // Immediate cancellation revokes the stored credential at the provider
+    // (the standing permission to debit the customer). There is no
+    // provider-side SUBSCRIPTION to cancel: the local row is the renewal
+    // authority, so stopping the local row stops the charges. Revocation is
+    // best-effort by design (the local cancel is committed); failures are
     // retried by the maintenance sweep.
     if immediately {
-        if let (Some(subscription_id), Some(customer_id)) = (
-            provider_subscription_id.as_deref(),
-            provider_customer_id.as_deref(),
-        ) {
-            if let Err(error) = crate::plan_billing::cancel_provider_subscription_object(
-                customer_id,
-                subscription_id,
-            )
-            .await
-            {
-                tracing::warn!(
-                    tenant_id = %tenant_id,
-                    error = %error,
-                    "subscription canceled locally but the Mollie subscription cancellation failed; the reconciliation sweep retries it"
-                );
-            }
-        }
         if let Err(error) = revoke_tenant_mandate_at_provider(pool, tenant_id).await {
             tracing::warn!(
                 tenant_id = %tenant_id,
                 error = %error,
-                "subscription canceled locally but the Mollie mandate revocation failed; the sweep will retry"
+                "subscription canceled locally but the stored-credential revocation failed; the sweep will retry"
             );
         }
     }
@@ -356,7 +346,6 @@ const GET_LATEST_SUBSCRIPTION_SQL: &str = r#"
             s.status, s.billing_interval,
             s.billing_cycle_start AS current_period_start,
             s.billing_cycle_end AS current_period_end,
-            s.mollie_subscription_id, s.mollie_customer_id,
             s.cancel_at_period_end, s.created_at, s.updated_at
         FROM mollie_subscriptions s
         JOIN tenants t ON t.id = s.tenant_id
@@ -385,8 +374,6 @@ pub struct CreateSubscriptionInput {
     pub billing_interval: BillingInterval,
     pub period_start: DateTime<Utc>,
     pub period_end: DateTime<Utc>,
-    pub mollie_subscription_id: Option<String>,
-    pub mollie_customer_id: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -450,8 +437,6 @@ struct SubRow {
     billing_interval: String,
     current_period_start: DateTime<Utc>,
     current_period_end: DateTime<Utc>,
-    mollie_subscription_id: Option<String>,
-    mollie_customer_id: Option<String>,
     cancel_at_period_end: bool,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
@@ -475,8 +460,6 @@ impl SubRow {
             billing_interval: parse_interval(&self.billing_interval),
             current_period_start: self.current_period_start,
             current_period_end: self.current_period_end,
-            mollie_subscription_id: self.mollie_subscription_id,
-            mollie_customer_id: self.mollie_customer_id,
             cancel_at_period_end: self.cancel_at_period_end,
             created_at: self.created_at,
             updated_at: self.updated_at,
@@ -572,10 +555,6 @@ mod tests {
             billing_interval: "monthly".into(),
             current_period_start: now,
             current_period_end: now,
-            // Provider handles use Mollie's prefixes; the customer is its
-            // own object (the tenant is resolved through the mapping row).
-            mollie_subscription_id: Some("sub_8Kq2Mz9Wn1".into()),
-            mollie_customer_id: Some("cst_6Bn4Yt2Rq8".into()),
             cancel_at_period_end: false,
             created_at: now,
             updated_at: now,
@@ -597,8 +576,6 @@ mod tests {
             billing_interval: "monthly".into(),
             current_period_start: now,
             current_period_end: now,
-            mollie_subscription_id: None,
-            mollie_customer_id: None,
             cancel_at_period_end: false,
             created_at: now,
             updated_at: now,
@@ -652,8 +629,6 @@ mod tests {
                     billing_interval: BillingInterval::Monthly,
                     period_start: now,
                     period_end: now,
-                    mollie_subscription_id: Some("sub_8Kq2Mz9Wn1".into()),
-                    mollie_customer_id: Some("tenant_123".into()),
                 },
             )
             .await,

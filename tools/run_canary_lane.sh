@@ -172,7 +172,15 @@ PYMANIFEST
 }
 
 stack_down() {
-  docker compose -p "$PROJECT" -f docker-compose.yml -f docker-compose.override.yml -f deploy/docker-compose.canary.yml down -v --remove-orphans >/dev/null 2>&1 || true
+  # The down MUST carry the same --env-file and profile set as the up:
+  # without them compose interpolation fails (prod-required vars like
+  # TRACKING_BASE_URL) and the `|| true` turns a full teardown into a
+  # silent no-op — the next run then inherits stale containers (the
+  # fixed-name postgres-exporter reconnects across wiped volumes and the
+  # exporter scrape proof scrapes a corpse).
+  docker compose -p "$PROJECT" -f docker-compose.yml -f docker-compose.override.yml \
+    -f deploy/docker-compose.canary.yml --env-file .env \
+    --profile full-stack --profile migrate down -v --remove-orphans >/dev/null 2>&1 || true
 }
 
 self_test() {
@@ -223,6 +231,15 @@ self_test() {
     || { echo "self-test FAIL: the evidence-manifest writer is missing" >&2; rc=1; }
   grep -q 'image: greenmail/standalone@sha256:' deploy/docker-compose.canary.yml \
     || { echo "self-test FAIL: greenmail is not digest-pinned" >&2; rc=1; }
+  # 5b. Exporter scrape-proof wiring (eighth audit): the lane overlay must
+  #     mount the repo-owned queries under the exporter's extend.query-path
+  #     mechanism, and the lane must carry the scrape-assert step itself.
+  grep -q 'extend.query-path=/etc/postgres-exporter/queries.yaml' deploy/docker-compose.canary.yml \
+    || { echo "self-test FAIL: the canary exporter does not load the repo-owned queries" >&2; rc=1; }
+  grep -q 'postgres-exporter-queries.yaml' deploy/docker-compose.canary.yml \
+    || { echo "self-test FAIL: the canary exporter does not mount deploy/postgres-exporter-queries.yaml" >&2; rc=1; }
+  grep -q 'apexmail_pg_replication_slots_active' "$0" \
+    || { echo "self-test FAIL: the lane carries no apexmail_pg_replication_slots_* scrape assert" >&2; rc=1; }
   # 6. Usage contract.
   rc_inner=0; bash "$0" >/dev/null 2>&1 || rc_inner=$?
   [ "$rc_inner" -eq 2 ] || { echo "self-test FAIL: missing --out must exit 2" >&2; rc=1; }
@@ -266,6 +283,53 @@ log "booting the canary stack (isolated project $PROJECT)"
 api_port=$(docker compose -p "$PROJECT" -f docker-compose.yml -f docker-compose.override.yml -f deploy/docker-compose.canary.yml port api-server 8080 2>/dev/null | sed 's/.*://')
 imap_port=$(docker compose -p "$PROJECT" -f docker-compose.yml -f docker-compose.override.yml -f deploy/docker-compose.canary.yml port canary-greenmail 3143 2>/dev/null | sed 's/.*://')
 [ -n "$api_port" ] && [ -n "$imap_port" ] || die "could not resolve api/imap ports"
+
+# ── Exporter scrape proof (eighth audit, DR wave: "promtool green is not
+# enough") ────────────────────────────────────────────────────────────────────
+# The PostgresReplicationSlot* alerts read the repo-owned custom-query
+# metrics (deploy/postgres-exporter-queries.yaml). Custom queries emit rows
+# ONLY for existing slots, so the proof first seeds a physical replication
+# slot (the same product shape the standby bootstrap creates on a real
+# primary), then curls the exporter through the lane's loopback publishing
+# and asserts the apexmail_pg_replication_slots_* families appear — without
+# this, alert expressions can be promtool-green while firing on nothing.
+log "exporter scrape proof: seeding a physical replication slot (the metric family only renders for existing slots)"
+docker compose -p "$PROJECT" -f docker-compose.yml -f docker-compose.override.yml \
+  -f deploy/docker-compose.canary.yml --env-file .env \
+  exec -T postgres psql -U apexmail -d apexmail -v ON_ERROR_STOP=1 \
+  -c "SELECT pg_create_physical_replication_slot('apexmail_standby')" >/dev/null \
+  || die "could not seed the canary replication slot (exporter scrape proof)"
+
+exporter_port=$(docker compose -p "$PROJECT" -f docker-compose.yml -f docker-compose.override.yml -f deploy/docker-compose.canary.yml port postgres-exporter 9187 2>/dev/null | sed 's/.*://')
+[ -n "$exporter_port" ] || die "could not resolve the postgres-exporter port"
+
+log "exporter scrape proof: asserting apexmail_pg_replication_slots_* on 127.0.0.1:$exporter_port/metrics"
+# Fetch to a file, THEN grep: under `set -o pipefail` a `curl | grep -q`
+# pipeline can never pass a large exposition (grep exits on the first
+# match, curl dies of SIGPIPE, and the matched pipeline reports failure) —
+# the proof would die while the families it wants are on the wire.
+exporter_metrics_file="$OUT/exporter-metrics-last-scrape.txt"
+exporter_deadline=$(( $(date +%s) + 120 ))
+exporter_proof=""
+while [ "$(date +%s)" -lt "$exporter_deadline" ]; do
+  if curl -fsS --max-time 5 "http://127.0.0.1:$exporter_port/metrics" 2>/dev/null \
+      >"$exporter_metrics_file" \
+    && grep -q '^apexmail_pg_replication_slots_active' "$exporter_metrics_file" \
+    && grep -q '^apexmail_pg_replication_slots_retained_wal_bytes' "$exporter_metrics_file"; then
+    exporter_proof=1
+    break
+  fi
+  sleep 3
+done
+[ -n "$exporter_proof" ] \
+  || { curl -sS --max-time 5 "http://127.0.0.1:$exporter_port/metrics" >"$OUT/exporter-metrics-failure.txt" 2>&1 || true
+       docker logs apexmail-postgres-exporter >"$OUT/exporter-failure.log" 2>&1 || true
+       die "postgres-exporter /metrics lacks the apexmail_pg_replication_slots_{active,retained_wal_bytes} families — the replication-slot alerts cannot fire (eighth audit: promtool green is not enough; exporter metrics + logs dumped to $OUT)"; }
+grep '^apexmail_pg_replication_slots_' "$exporter_metrics_file" \
+  >"$OUT/exporter-metrics-sample.txt"
+printf '{"status":"EXPORTER_METRICS_PROVED","metrics":["apexmail_pg_replication_slots_active","apexmail_pg_replication_slots_retained_wal_bytes"],"slot":"apexmail_standby","exporter_port":"127.0.0.1:%s"}\n' \
+  "$exporter_port" >"$OUT/canary-exporter-metrics.json"
+log "exporter scrape proof: PROVED (sample in exporter-metrics-sample.txt, verdict in canary-exporter-metrics.json)"
 
 log "health-fencing the api on 127.0.0.1:$api_port"
 deadline=$(( $(date +%s) + 300 ))

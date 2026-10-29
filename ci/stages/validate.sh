@@ -614,6 +614,20 @@ validate_repo_gates() {
             python3 tools/check_prod_env_forwarding.py
             python3 tools/check_prod_env_forwarding.py --self-test
         '
+        # Standby env-forwarding + topology contract (eighth audit, DR +
+        # control plane: "the STANDBY_* mechanism exists more strongly in
+        # the scripts than in the deployment topology"). Renders BOTH
+        # standby overlays (same-host + remote) plus the wal-archive
+        # heartbeat runner and proves every STANDBY_*/HEARTBEAT_* variable
+        # the standby scripts consume is forwarded or explicitly
+        # default-only; the remote overlay must reference no local
+        # postgres service. --self-test proves both directions on a
+        # synthetic script fixture.
+        ci_check "standby contract" bash -c '
+            set -eu
+            python3 tools/check_standby_contract.py
+            python3 tools/check_standby_contract.py --self-test
+        '
         # Published deliverability report (plan A4): the methodology page's
         # numbers are rendered from the committed ClickHouse artifact
         # (apps/marketing-zola/data/deliverability-report.json) by

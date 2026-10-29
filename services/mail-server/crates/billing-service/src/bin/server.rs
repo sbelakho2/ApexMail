@@ -359,16 +359,28 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    // The same one-shot ops pattern for provider subscription state: fetch
-    // every `sub_…` row at Mollie and converge the local entitlement state.
-    // Deliberately BEFORE the webhook fail-fast, reconciliation only needs
-    // the API key the client reads from the environment, and an unconfigured
-    // client reconciles nothing (0) instead of blocking ops.
+    // The same one-shot ops pattern for the LOCAL renewal worker (beta
+    // authority inversion): invoice + charge + settle every due local
+    // subscription period. Deliberately BEFORE the webhook fail-fast,
+    // renewal only needs the API key the client reads from the environment,
+    // and an unconfigured client renews nothing (0) instead of blocking ops.
     if cli.reconcile_subscriptions_only {
-        let reconciled = billing_service::plan_billing::sweep_provider_subscription_state(&db)
+        let redis =
+            deadpool_redis::Config::from_url(&cli.redis_url).create_pool(Some(Runtime::Tokio1))?;
+        let config = BillingConfig {
+            database_url: cli.database_url.clone(),
+            redis_url: cli.redis_url.clone(),
+            listen_addr: cli.listen.clone(),
+            service_auth_token: cli.service_auth_token.clone(),
+            mollie_api_key: cli.mollie_api_key.clone(),
+            api_base_url: cli.api_base_url.clone(),
+            ..BillingConfig::default()
+        };
+        let state = AppState::new(db, redis, config);
+        let renewed = billing_service::plan_billing::renew_due_subscriptions(&state)
             .await
             .map_err(anyhow::Error::msg)?;
-        println!("subscription reconcile: reconciled={reconciled}");
+        println!("subscription renewal: renewed={renewed}");
         return Ok(());
     }
 

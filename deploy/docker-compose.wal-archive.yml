@@ -163,6 +163,57 @@ services:
       # the base file is preserved).
       - apexmail_backup_egress
 
+  # ===========================================================================
+  # REPLICATION HEARTBEAT RUNNER (eighth audit, DR wave)
+  # ===========================================================================
+  # Writes one apexmail_ops.replication_heartbeat row every
+  # HEARTBEAT_INTERVAL_SECONDS (default 15) on the PRIMARY; physical
+  # replication carries the rows to the standby, where
+  # pg-standby-promote.sh measures their age as the END-TO-END "recently
+  # heard from the primary" freshness evidence (the replay timestamp alone
+  # freezes when replication stops and cannot serve this role — the audit
+  # finding). See deploy/hardening/scripts/pg-replication-heartbeat.sh.
+  # Reuses the SAME baked WAL/postgres image the postgres service above
+  # builds (run the build block once: `docker compose ... build postgres`);
+  # only ever talks to postgres over the data network, so it needs no
+  # egress and works unchanged on the internal production network.
+  postgres-heartbeat:
+    image: apexmail/postgres-wal:16.8-r1
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # The image entrypoint execs this (first arg is not `postgres`); the
+    # script connects with libpq env vars below + the shared password secret.
+    command:
+      - /bin/sh
+      - /usr/local/bin/pg-replication-heartbeat.sh
+    volumes:
+      - ./deploy/hardening/scripts/pg-replication-heartbeat.sh:/usr/local/bin/pg-replication-heartbeat.sh:ro
+    environment:
+      HEARTBEAT_INTERVAL_SECONDS: ${HEARTBEAT_INTERVAL_SECONDS:-15}
+      PGHOST: postgres
+      PGUSER: ${POSTGRES_USER:-apexmail}
+      PGDATABASE: postgres
+      # The script reads this file into PGPASSWORD (same shared credential
+      # the postgres service uses — one secret, no second password).
+      PGPASSWORD_FILE: /run/secrets/postgres_password
+    secrets:
+      - postgres_password
+    networks:
+      - apexmail_data_internal
+    read_only: true
+    tmpfs:
+      - /tmp
+    deploy:
+      resources:
+        limits:
+          memory: 64M
+        reservations:
+          memory: 32M
+    security_opt:
+      - no-new-privileges:true
+
 volumes:
   wal_spool:
   wal_ssh:

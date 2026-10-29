@@ -238,9 +238,14 @@ pub fn start_periodic_jobs(state: std::sync::Arc<AppState>) {
         }
     });
 
-    // Provider subscription state is reconciled from authenticated fetches:
-    // only an ACTIVE Mollie subscription grants the plan, and an amount that
-    // drifted from the catalog is a finance incident.
+    // THE LOCAL RENEWAL WORKER (beta authority inversion): the billing
+    // maintenance tick drives `renew_due_subscriptions` — every active local
+    // subscription at/after its period end gets its NEXT period invoiced
+    // FIRST, then a claimed, idempotency-keyed stored-credential charge;
+    // dunning retries open new immutable attempts, `cancel_at_period_end`
+    // ends the subscription with no charge. This tick previously ran the
+    // provider-schedule reconciliation sweep, which retired with the
+    // provider-owned recurring schedule surface.
     let subscription_state = state.clone();
     tokio::spawn(async move {
         let mut interval = interval_at(
@@ -250,12 +255,10 @@ pub fn start_periodic_jobs(state: std::sync::Arc<AppState>) {
         interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
         loop {
             interval.tick().await;
-            match crate::plan_billing::sweep_provider_subscription_state(&subscription_state.db)
-                .await
-            {
+            match crate::plan_billing::renew_due_subscriptions(&subscription_state).await {
                 Ok(0) => {}
-                Ok(reconciled) => info!(reconciled, "reconciled Mollie subscription state"),
-                Err(error) => error!(error = %error, "Mollie subscription reconciliation failed"),
+                Ok(renewed) => info!(renewed, "local subscription renewal worker ticked"),
+                Err(error) => error!(error = %error, "subscription renewal worker failed"),
             }
         }
     });
@@ -284,6 +287,7 @@ pub fn start_periodic_jobs(state: std::sync::Arc<AppState>) {
                     examined = stats.examined,
                     settled = stats.settled,
                     closed_failed = stats.closed_failed,
+                    unresolved = stats.unresolved,
                     "payment attempt repair sweep completed"
                 ),
                 Err(error) => error!(error = %error, "payment attempt repair sweep failed"),
@@ -1466,29 +1470,17 @@ pub async fn sweep_canceled_at_period_end(state: &AppState) -> Result<u64, Strin
         .await
         .map_err(|e| format!("Failed to commit canceled-subscription sweep: {e}"))?;
 
-    // The provider-side half of the period-end cancellation: stop Mollie's
-    // own charge generation and revoke the mandate, using the ids captured
-    // before the local transition. A provider failure here is logged; the
-    // reconciliation sweep retries any provider object still active for a
-    // locally canceled row, and the revocation sweep retries mandates.
+    // The provider-side half of the period-end cancellation is the stored
+    // CREDENTIAL revocation only (beta authority inversion): there is no
+    // provider-side subscription to cancel — the local row is the renewal
+    // authority, so the local `canceled` transition stops the charges. A
+    // revocation failure here is logged; the revocation sweep retries.
     let tenants: Vec<String> = due.iter().map(|(_, tenant, _, _)| tenant.clone()).collect();
-    for (_, tenant_id, subscription_id, customer_id) in &due {
-        let Some(customer_id) = customer_id.as_deref() else {
-            continue;
-        };
-        if let Err(error) =
-            crate::plan_billing::cancel_provider_subscription_object(customer_id, subscription_id)
-                .await
-        {
-            tracing::warn!(tenant_id = %tenant_id, error = %error,
-                "period-end cancellation: provider subscription cancellation failed (reconciliation retries it)");
-        }
-    }
     if let Err(error) =
         crate::subscriptions::revoke_tenant_mandates_at_provider(&state.db, &tenants).await
     {
         tracing::warn!(error = %error,
-            "period-end cancellation: mandate revocation failed (sweep will retry)");
+            "period-end cancellation: credential revocation failed (sweep will retry)");
     }
     Ok(due.len() as u64)
 }
@@ -5117,7 +5109,10 @@ pub async fn resolve_abuse_report(
 /// * CLAIM BEFORE CHARGE: the attempt row is claimed under the frozen
 ///   idempotency key BEFORE the provider call. A concurrent tick, or a
 ///   previous attempt whose response was LOST (timeout after a successful
-///   charge), refuses the claim and NO second charge is opened.
+///   charge), refuses the claim and NO second charge is opened. A
+///   definitively failed attempt is never mutated (migration 282: closed
+///   attempts are immutable): the dunning retry opens attempt N+1 under
+///   the shared `payment:{ref}:{n}` key scheme.
 /// * CONFIRM AFTER CHARGE: the provider payment id and normalized state
 ///   land on the claim; a transport failure leaves the claim open and
 ///   keyless for the webhook/repair sweep to link and settle.
@@ -5142,7 +5137,15 @@ async fn mollie_charge_stored_payment_method(
     // The obligation reference is the caller's (invoice:{id} /
     // dedicated_ip:{id}); the attempts ledger links provider callbacks to
     // open claims by it.
-    let claimed = crate::payments::engine::claim_attempt(
+    //
+    // CLAIM BEFORE CHARGE with the two-retry distinction (migration 282):
+    // * the operation key is the TRANSPORT-retry identity — a retry while
+    //   the attempt is open conflicts and claims nothing (no second
+    //   charge);
+    // * a definitively closed attempt is IMMUTABLE — the dunning retry
+    //   opens attempt N+1 under the shared `payment:{ref}:{n}` key scheme
+    //   instead of mutating attempt 1's row.
+    let claimed_key = match crate::payments::engine::claim_attempt(
         db,
         provider_name,
         idempotency_key,
@@ -5153,16 +5156,43 @@ async fn mollie_charge_stored_payment_method(
         currency,
     )
     .await
-    .map_err(|error| format!("payment attempt claim failed ({reference}): {error}"))?;
-    if !claimed {
-        // Exactly one attempt per operation per tick: an open claim (maybe
-        // keyless after a lost response) means a charge may already be
-        // moving; refuse rather than double-charge.
-        return Err(format!(
-            "a payment attempt for {reference} is unresolved or already succeeded, \
-             no second charge"
-        ));
-    }
+    {
+        Ok(true) => idempotency_key.to_string(),
+        Ok(false) => {
+            match crate::payments::engine::claim_next_attempt(
+                db,
+                provider_name,
+                tenant_id,
+                reference,
+                "autopay",
+                amount_cents,
+                currency,
+            )
+            .await
+            .map_err(|error| {
+                format!("payment attempt dunning claim failed ({reference}): {error}")
+            })? {
+                Some((_attempt_no, key)) => key,
+                None => {
+                    // Exactly one attempt per operation per tick: an open
+                    // claim (maybe keyless after a lost response), an
+                    // `unresolved` claim awaiting human reconciliation, or
+                    // a succeeded attempt means a charge may already be
+                    // moving; refuse rather than double-charge.
+                    return Err(format!(
+                        "a payment attempt for {reference} is unresolved, in flight or \
+                         already succeeded, no second charge"
+                    ));
+                }
+            }
+        }
+        Err(error) => {
+            return Err(format!(
+                "payment attempt claim failed ({reference}): {error}"
+            ));
+        }
+    };
+    let idempotency_key = claimed_key.as_str();
 
     let mut metadata = metadata;
     if let Some(object) = metadata.as_object_mut() {
