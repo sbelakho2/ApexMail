@@ -35,6 +35,10 @@ pub mod lists;
 pub mod message_timeline;
 pub mod messages;
 pub mod notification_drain;
+/// Tenant onboarding state machine (`/v1/onboarding`, migration 277): the
+/// invited → configuring_domain → verifying_dns → sending_ready → active
+/// walk (blocked absorbing), advanced by the two domains hooks.
+pub mod onboarding;
 pub mod pagination;
 /// Provider-export importer (SendGrid / Mailgun / Postmark / Resend): reads a
 /// switching customer's export and writes through the EXISTING canonical
@@ -47,6 +51,10 @@ pub mod routing;
 pub mod scim;
 pub mod segments;
 pub mod self_hosted_bounces;
+/// Self-service workspace settings: SMTP credential message-class
+/// management (`/v1/settings/smtp-credentials`, migration 272's
+/// `users.message_class` — external audit 6 remediation #6).
+pub mod settings;
 pub mod ses_notifications;
 pub mod support;
 pub mod suppressions;
@@ -94,6 +102,9 @@ mod tests {
         "journal.rs",
         "lists.rs",
         "messages.rs",
+        // /v1/onboarding: the caller's OWN tenants row (state + next action),
+        // pinned by the authenticated principal like every settings surface.
+        "onboarding.rs",
         // The importer's SQL-bearing files (the per-kind parsers are pure).
         // Listed so the tenant-scope guard covers the importer's probes,
         // writes and report reads like every other tenant-scoped surface.
@@ -104,6 +115,10 @@ mod tests {
         "provider_import/templates.rs",
         "routing.rs",
         "scim.rs",
+        // /v1/settings/smtp-credentials: the tenant-owned view of the
+        // users rows the MTA submission path authenticates (each row IS an
+        // SMTP credential), tenant-pinned like every other settings surface.
+        "settings.rs",
         "support.rs",
         "suppressions.rs",
         "templates.rs",

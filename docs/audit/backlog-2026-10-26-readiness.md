@@ -18,8 +18,8 @@ surface (owner directive 2026-10-26).
 | 2d | Backup encryption fail-closed | **DONE** | A missing key or openssl now FAILS the backup instead of silently storing plaintext; `ALLOW_UNENCRYPTED_BACKUPS=true` is the explicit development-only escape. |
 | 3 | Mailbot: purpose-aware multi-label purpose classifier feeding policy | **OPEN** | The 11-value sales disposition taxonomy is still the classification output. Keep the promotion-safety machinery; replace what feeds it. |
 | 4 | Mailbot: tenant-owned draft review UX | **OPEN** | `/v1/admin/ai/drafts` and `/web/admin/ai/drafts/*` remain operator-only; customers currently 403. Largest product blocker. |
-| 5 | Mailbot: 500–1,000 real-model threads scored end to end | **OPEN** | Dogfood evidence still runs the mock LLM. Needs real-model credentials (owner-gated). KPI: % drafts sendable with no/trivial edits, >90–95% per autosend class. |
-| 6 | Console Assistant: large real-model evaluation (~500-task corpus) | **OPEN** | Architecture verified; model quality unproven (mock-llm evidence). Controlled release only until scored. |
+| 5 | Mailbot: 500–1,000 real-model threads scored end to end | **LANDED (lane), RUN owner-gated** | `tools/run_real_model_eval.sh` (test.real-model-eval-lane) runs the corpus contract always and the REAL replay under AI_MODEL_API_KEY + non-mock AI_MODEL_ENDPOINT, recording NOT EXECUTED without them. The run itself waits on real-model credentials. KPI: % drafts sendable with no/trivial edits, >90–95% per autosend class. |
+| 6 | Console Assistant: large real-model evaluation (~500-task corpus) | **LANDED (lane), RUN owner-gated** | Same lane drives the console/chat goldens against the real model when credentials exist; NOT EXECUTED otherwise. Controlled release only until scored. |
 | 7 | Certification control/policy layer (org size never disclosed publicly) | **PARTIAL** | `soc2.rs` seeds rewritten to truthful control ownership; the internal change-management and access-control policy rewrite (CI gates as the independent control, no fictional reviewer roles) is in flight under the same no-disclosure rule. |
 | 8 | SOC 2/ISO internal evidence core (org risk register, asset inventory, vendor register, SoA, cadence alerts) | **OPEN** | Private, never advertised. Do not begin a formal observation period before 7 and this land. |
 | 9 | Release governance: blessing verified at BOTH deploy paths + repo-boundary status checks (I20) | **PARTIAL** | DONE: `deploy/scripts/deploy.sh` Step 0.5 verifies `.gate-blessing.json` fail-closed with the same `gate_blessing_refusal` the pipeline fetch stage uses (refuses wrong sha and incomplete lanes — proven); GitHub `main` protection APPLIED (force-push + deletion forbidden, admins included). OPEN: required status checks at the repo boundary — sequenced behind CI posting the six lane statuses to GitHub (nothing posts them today; enabling checks first would wedge every push); signed blessing artifacts (commit/config-digest/image-digests/lanes/timestamp/nonce) remain I20. |
@@ -71,10 +71,10 @@ audit's Tier 0-4 list with landing status.
 | 0.5 | One clean full-workspace run from final HEAD | This wave (recorded in the release evidence; count reported honestly). |
 | 1.6 | Purpose/risk/delivery-class classification replacing marketing-default replies | This wave: deterministic classifier + policy table + release-path fix (approved replies to inbound mail are SERVICE correspondence — the marketing-consent gate never applies to conversation replies; suppression/kill-switch/autonomy gates unchanged). The 11-value sales disposition stays for sales analytics. |
 | 1.7 | Tenant-owned draft review UX | OPEN (the audit's remaining Mailbot GA blocker with 1.8). |
-| 1.8 | 500-1,000 real-model thread study | OPEN, owner-gated credentials (corpus + grading rubric committed). |
+| 1.8 | 500-1,000 real-model thread study | LANE LANDED (tools/run_real_model_eval.sh); run remains owner-gated on credentials (corpus + grading rubric committed). |
 | 1.9 | Empirical per-purpose autosend promotion | OPEN after 1.6 accumulates data. |
 | 2.10 | Console live read-only tools (resolve the prompt/tool mismatch) | This wave: bounded one-round read-only tool loop in the live chat path, prompt matched to reality. |
-| 2.11 | ~500-task real-model Assistant benchmark | OPEN, owner-gated credentials. |
+| 2.11 | ~500-task real-model Assistant benchmark | LANE LANDED (same lane); run owner-gated on credentials. |
 | 3.12 | Onboarding as a state machine | OPEN. |
 | 3.13 | Questionnaire/trust packages exception-only | PARTIAL: owner labels neutralized to "ApexMail" this wave; answer-bank truth-checking is the remaining build. |
 | 3.14 | Dedicated Tenant idempotent provisioner | OPEN (bundle generation exists; physical provisioning is operator action). |
@@ -116,8 +116,8 @@ tier list with landing status this wave:
 | 2.14 | Multi-label purpose classification | DONE: `classify_all` returns every matched purpose + effective risk (MAX) + strictest autonomy + primary; monotonicity property test (17^3 sweep). |
 | 2.15 | Header/MIME-based OOO/DSN classification | DONE: automated requires structural evidence (Auto-Submitted, Precedence, DSN multipart/report, autoreply headers, null Return-Path) plus 7 documented subject-line templates; prose-only phrases can no longer mark a customer as machine mail (counterexample pinned). The claim SQL/DDL now carries `headers`. |
 | 2.16 | Tenant-owned Mailbot review UX | DONE: tenant-scoped `/v1/ai/drafts` list/get/approve/reject with structured reason and regenerate share the operator approval core (consent, claims, audit all enforced server-side), plus the console page with its goldens. |
-| 2.17 | 500-1,000 real-model Mailbot corpus | OPEN, owner-gated credentials (corpus + grading committed). |
-| 2.18 | ~500-task real-model Console corpus | OPEN, owner-gated credentials. |
+| 2.17 | 500-1,000 real-model Mailbot corpus | LANE LANDED; run owner-gated on credentials (corpus + grading committed). |
+| 2.18 | ~500-task real-model Console corpus | LANE LANDED; run owner-gated on credentials. |
 | 3.19 | Separate CI machine + status publishing | PARTIAL: publisher implemented (apexmail/<lane>); operator must run CI with the token, observe contexts, then enable required checks. Host separation = owner infra decision. |
 | 3.20 | Required GitHub status checks | OPEN until contexts are observed (explicit sequencing to avoid wedging main). |
 | 3.21 | Encrypted PITR enabled in production | OPEN, operator checklist step. |
@@ -142,3 +142,32 @@ during the final minutes of a ~40-minute parallel run. An isolated rerun of exac
 those two crates against a fresh ephemeral Postgres and Redis at the same HEAD ran
 871 tests: 871 passed, 0 skipped, exit 0. The full-run failures were load-induced
 (late-run cluster), not defects.
+
+## Sixth external audit (all 10 commits since e6a7c8b8) — 2026-10-29
+
+Verdict accepted: controlled paying launch YES (more confident); Mailbot and
+Console controlled release YES; broad autonomous Mailbot GA NO until the
+real-model corpus scores; 100-contract steady state NO; SOC 2 Type II
+observation NO. Owner directive: implement everything EXCEPT GitHub required
+status checks (deliberately skipped). Remediation landing status:
+
+| # | Remediation | Status |
+|---|---|---|
+| 1 | Auth SLI measured honestly | DONE: two counters — `apexmail_auth_service_attempts_total{outcome=succeeded,error}` (the SLA denominator: every success path incl. DB/HMAC/Argon2/CP-static, DB+scopes error paths instrumented; customer-caused outcomes excluded) and the credential funnel as before; alerts rebuilt on failure/(success+error) math (`ApiAuthServiceFailureRate`, `ApiAuthSuccessRateBelowSla`); sla.md names the service SLI as the commitment's measure. |
+| 2 | Placement one exact frozen cohort | DONE: one CTE (tests created in-window) drives planned AND observed; an old test re-observed today enters neither side; `consistent=false` REFUSES the bound instead of clamping (post-hoc plan shrink proven by test); trends dedup to latest-per-unit-per-day; gmail branch matched on domain shape. analytics 246/246. |
+| 3 | Webhook ordering claim | DONE as the AUDIT'S PREFERRED OPTION: at-least-once UNORDERED contract documented (concurrent dispatch, head-of-line rationale, order/dedupe guidance); the reorder test renamed + reworded to prove "no state dropped", receiver-order assertions removed. |
+| 4 | Canary evidence binding | DONE: qualification-manifest.json binds HEAD + dirty-tree + per-service image digests + rendered compose sha + migration-set sha + runner sha + terminal chain; GreenMail digest-pinned (`greenmail/standalone@sha256:3086…`); lane self-test enforces both. |
+| 5 | Dedicated Tenant USD contradiction | DONE: USD offer removed (`EUR contract pricing`) in pricing.json + docs/pricing.md; validate_pricing_drift learned EUR-only contract lines (None = must carry the marker, must NOT carry a $). |
+| 6 | Self-service SMTP message-class management | DONE: tenant `/v1/settings/smtp-credentials` list + PATCH message-class (migration-272 vocabulary, tenant-pinned, audit-in-tx) + control-plane `PATCH /v1/admin/tenants/:id/smtp-credentials/:id/message-class`; 10 + cross-tenant/422/403 tests green. |
+| 7 | Mailbot review UX | DONE: Edit & Send (optional edited body, edit-distance telemetry, shared core), REAL regenerate (version+supersede via migration 276; honest 503 naming the env gate when the generation backend is off — never a fake draft), Escalate (identity+reason+audit, escalated-first operator queue + filter), sources/why on the detail payload (evidence from the classifier itself), uniform telemetry on every terminal action. 46/46 + purpose 16/16. |
+| 8 | Real-model corpora | LANE LANDED (tools/run_real_model_eval.sh, test.real-model-eval-lane): corpus contract always; replay under AI_MODEL_API_KEY + non-mock endpoint; NOT EXECUTED artifact otherwise (reason + requires inside). Run remains credential-gated; readiness rows updated. |
+| 9 | Stale AI training generators | DONE: canonical_truth.py derives tool registry + compliance status from capability-registry.json/ai-service chat.rs/pricing.json (fail-closed); generator enforces before writing; prompts_v2 TOOL_DEFINITIONS rendered from the real registry; check_eval_corpora gained a TRUTH check (HIPAA/SOC-ISO assertions + non-registry tools) wired into its self-test (4 new mutations, 23 total). |
+| 10 | Rust-only Kiwi leftovers | DONE: docs-lint scan-root comment rewritten (PHP-era scope claims gone), .gitleaks rows tagged HISTORICAL-ONLY (full-history scan needs them for git history), baseline verified PHP-free, mirror-internal refs registered in one report-only place (kiwi_mirror_advance EXCLUDES docstring). Parity OK 271/271. |
+| 11 | WAL tooling baked image | DONE: deploy/hardening/postgres-wal/Dockerfile (pinned postgres:16.8-alpine + exact rsync/openssh revisions) built and proven (rsync+ssh present); overlay builds that image and REFUSES to boot half-tooled; apk-at-startup gone. Overlay renders. |
+| 12a | Asymmetric CI blessing | DONE: Ed25519 sign on the CI side (signatureAlg=ed25519), deploy side verifies with ONLY the public key (verify-but-never-mint); HMAC kept for transition; selftest teeth: ephemeral keypair, valid/tampered/wrong-key/unsigned/keyless-host cases; pipeline selftest ALL OK. |
+| 13 | Timed destructive PITR restore drill | DONE (repo side): tools/pitr_drill.sh — throwaway source with real encrypted WAL flow + encrypted base, DESTRUCTIVE teardown, timed PITR replay with row-count+md5 verification, JSON with per-phase + total_rto_s; usage/verifier self-test; documented in disaster-recovery.md. Production cadence runs remain operator-executed. |
+| 14 | Warm standby | DONE (repo side): deploy/docker-compose.standby.yml (operator-gated, pg-standby-bootstrap.sh one-shot pg_basebackup -R with slot, idempotent), pg-standby-promote.sh (lag-capped promotion, --force override, self-test), STANDBY_* env documented, warm-standby.md runbook with same-host/second-host honesty. Render passes. |
+| 15 | Onboarding state machine + DT provisioner | DONE: onboarding machine (migration 277 with honest seeding: sent-mail tenants to active, non-active status to blocked; exhaustive 17-edge LEGAL table, optimistic-concurrency persistence, Block/Unblock with prior-state note, hooks on domain create + dns-records request + verification, tenant GET /v1/onboarding + CP GET /v1/admin/tenants/:id/onboarding, 64/64 tests) + DT host execution GROUNDED in the existing lifecycle machine (migration 278 host columns; enterprise dedicated_exec.rs: hard DT_PROVISIONING_ENABLED=1 gate, HETZNER_API_TOKEN required with no fake success, create-server against host_group_name, provider results recorded, existing transition_dedicated authorize NEVER bypassed, idempotent AlreadyExists resume, provision_error fail-closed; CP POST /ent/private-deployments/:id/provision with 403/409 mapping, enterprise 486/486). |
+| 16 | SOC evidence cadence sweep | DONE: stale_evidence_controls + sweep_stale_attestations (fail-loud, persisted, daily cron job 11), CP `GET /v1/admin/compliance/stale-evidence`, validate.soc-evidence-cadence gate with self-test (four unwiring directions fail), no migration needed (039 columns reused); ledger row added. compliance 15/15. |
+| — | GitHub required status checks | NOT DONE — owner directive: skipped. |
+

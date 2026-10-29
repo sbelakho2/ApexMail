@@ -26,7 +26,11 @@
 
 services:
   canary-greenmail:
-    image: greenmail/standalone:2.1.0
+    # Digest-pinned (audit 6): a mutable tag could silently change the
+    # receiver under qualification evidence. Bump BOTH tag and digest
+    # together via `docker inspect greenmail/standalone:<tag> --format
+    # '{{index .RepoDigests 0}}'`.
+    image: greenmail/standalone@sha256:308685b99ad840f05bd2dee43f47f7956f876adbf396523f68166f078300cd29
     restart: "no"
     environment:
       # All protocols; no auth enforcement on SMTP, auto-provisioned IMAP.

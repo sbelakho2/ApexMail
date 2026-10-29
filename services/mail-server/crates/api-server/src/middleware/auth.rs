@@ -457,16 +457,34 @@ pub(crate) async fn authenticate_compat_api_key(
     authenticate_api_key(key, &Method::POST, request_path, false, state).await
 }
 
-/// SLA auth-denominator instrumentation (external report 2026-10-28 P1):
-/// the published /v1/auth 2xx share cannot measure "valid credential
-/// attempts" — these counters CAN. `mechanism="api_key"`; outcomes:
-/// `authenticated` (the valid-credential denominator), `invalid`,
-/// `expired`, `revoked_or_restricted`, `tenant_mismatch`, `error`.
+/// SLA auth instrumentation (external audit 6, P1 — the c50a96e3 metric
+/// undercounted successes and mixed client failures into the service SLI).
+/// TWO separate counters with disjoint semantics:
+///
+/// * `apexmail_auth_service_attempts_total{outcome}` — the SERVICE-SIDE
+///   reliability SLI the SLA denominator actually needs:
+///   `succeeded` (an authenticated principal, EVERY success path: Redis
+///   cache hit, HMAC DB hit, legacy SHA-256 cache/DB hit, Argon2id
+///   fallback) vs `error` (ApexMail-side failures: DB/Redis outages on the
+///   authentication path itself). Client-caused outcomes NEVER appear
+///   here — a bad key is not a service outage.
+/// * `apexmail_auth_credential_attempts_total{outcome}` — the credential
+///   funnel: `authenticated`, `invalid`, `expired`, `tenant_mismatch`.
+///   Same counter as before, now incremented on EVERY success path.
 fn auth_metric(outcome: &str) {
     metrics::counter!(
         "apexmail_auth_credential_attempts_total",
         "mechanism" => "api_key",
         "outcome" => outcome.to_string(),
+    )
+    .increment(1);
+}
+
+fn auth_service_metric(succeeded: bool) {
+    metrics::counter!(
+        "apexmail_auth_service_attempts_total",
+        "mechanism" => "api_key",
+        "outcome" => if succeeded { "succeeded" } else { "error" },
     )
     .increment(1);
 }
@@ -492,6 +510,7 @@ async fn authenticate_api_key(
             }
 
             tracing::debug!("authenticated via control-plane static API key");
+            auth_service_metric(true);
             return Ok(AuthUser {
                 tenant_id: "system".into(), // sentinel:system-level admin
                 user_id: None,
@@ -518,6 +537,7 @@ async fn authenticate_api_key(
             touch_api_key_last_used(api_key_id, &hmac_hash, state).await?;
         }
         auth_metric("authenticated");
+        auth_service_metric(true);
         return Ok(cached);
     }
 
@@ -530,6 +550,7 @@ async fn authenticate_api_key(
                 touch_api_key_last_used(api_key_id, &legacy_hash, state).await?;
             }
             auth_metric("authenticated");
+            auth_service_metric(true);
             return Ok(cached);
         }
     }
@@ -543,6 +564,7 @@ async fn authenticate_api_key(
     .await
     .map_err(|e| {
         tracing::error!(error = %e, "api key lookup failed");
+        auth_service_metric(false);
         ApiError::Internal("authentication error".into())
     })?;
 
@@ -559,6 +581,7 @@ async fn authenticate_api_key(
             .await
             .map_err(|e| {
                 tracing::error!(error = %e, "api key lookup failed (legacy)");
+                auth_service_metric(false);
                 ApiError::Internal("authentication error".into())
             })?;
 
@@ -594,6 +617,7 @@ async fn authenticate_api_key(
 
     let scopes: Vec<String> = serde_json::from_value(row.scopes.clone()).map_err(|e| {
         tracing::warn!(error = %e, api_key_id = %row.id, "malformed scopes in api_keys table");
+        auth_service_metric(false);
         ApiError::Internal("invalid API key scopes configuration".into())
     })?;
 
@@ -633,6 +657,8 @@ async fn authenticate_api_key(
 
     touch_api_key_last_used(&row.id, &row.key_hash, state).await?;
 
+    auth_metric("authenticated");
+    auth_service_metric(true);
     Ok(auth_user)
 }
 
@@ -777,9 +803,12 @@ async fn authenticate_api_key_argon2_fallback(
         cache_api_key(&new_hash, &auth_user, row.expires_at, state).await;
         touch_api_key_last_used(&row.id, &new_hash, state).await?;
 
+        auth_metric("authenticated");
+        auth_service_metric(true);
         return Ok(auth_user);
     }
 
+    auth_metric("invalid");
     Err(ApiError::Unauthorized("invalid API key".into()))
 }
 

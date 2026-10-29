@@ -106,6 +106,71 @@ PY
   log "external provider panel: NOT EXECUTED (recorded in canary-external.json)"
 }
 
+# write_evidence_manifest <out-dir> — bind the qualification result to the
+# exact source/image/config artifacts that produced it (audit 6): the
+# runner's chain proves the test record; this proves WHAT ran.
+write_evidence_manifest() {
+  local out=$1
+  python3 - "$ROOT" "$PROJECT" "$out" <<'PYMANIFEST'
+import hashlib, json, subprocess, sys
+from pathlib import Path
+
+root, project, out = Path(sys.argv[1]), sys.argv[2], Path(sys.argv[3])
+compose = ["docker", "compose", "-p", project, "-f", "docker-compose.yml",
+           "-f", "docker-compose.override.yml", "-f", "deploy/docker-compose.canary.yml",
+           "--env-file", ".env"]
+
+def run(args, cwd=None):
+    return subprocess.run(args, cwd=cwd or root, capture_output=True, text=True)
+
+head = run(["git", "rev-parse", "HEAD"]).stdout.strip()
+dirty = bool(run(["git", "status", "--porcelain"]).stdout.strip())
+
+# Per-service image digests for every RUNNING container of this project.
+images = {}
+for cid in run(["docker", "ps", "-q"]).stdout.split():
+    info = run(["docker", "inspect", cid])
+    if info.returncode != 0:
+        continue
+    try:
+        data = json.loads(info.stdout)[0]
+    except ValueError:
+        continue
+    name = (data.get("Config", {}).get("Labels") or {}).get("com.docker.compose.project")
+    if name != project:
+        continue
+    service = (data.get("Config", {}).get("Labels") or {}).get(
+        "com.docker.compose.service", data["Name"].lstrip("/"))
+    images[service] = (data.get("Image") or "")[:71]  # sha256:<64>
+
+# The rendered compose config (what actually ran) and the migration set.
+config = run(compose + ["config"])
+compose_hash = hashlib.sha256(config.stdout.encode()).hexdigest() if config.returncode == 0 else None
+mig = run(["./target/debug/migrator", "--dry-run"], cwd=root / "services/mail-server")
+migration_hash = hashlib.sha256(mig.stdout.encode()).hexdigest() if mig.returncode == 0 else None
+
+runner = root / "tests/qualification/ApexMail_Real_Mail_Tests.py"
+manifest = {
+    "head": head,
+    "dirty_tree": dirty,
+    "image_digests": dict(sorted(images.items())),
+    "compose_config_sha256": compose_hash,
+    "migration_set_sha256": migration_hash,
+    "runner_sha256": hashlib.sha256(runner.read_bytes()).hexdigest(),
+}
+summary = out / "local-evidence/summary.json"
+if summary.exists():
+    result = json.loads(summary.read_text())
+    manifest["result_status"] = result.get("status")
+    manifest["plan_sha256"] = result.get("plan_sha256")
+    manifest["terminal_chain_sha256"] = result.get("terminal_chain_sha256")
+(out / "qualification-manifest.json").write_text(
+    json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+print(json.dumps({"phase": "manifest", **{k: manifest[k] for k in
+      ("head", "dirty_tree", "result_status")}}))
+PYMANIFEST
+}
+
 stack_down() {
   docker compose -p "$PROJECT" -f docker-compose.yml -f docker-compose.override.yml -f deploy/docker-compose.canary.yml down -v --remove-orphans >/dev/null 2>&1 || true
 }
@@ -152,7 +217,13 @@ self_test() {
       || { echo "self-test FAIL: canary compose overlay does not render" >&2; rc=1; }
     rm -rf "$d"
   fi
-  # 5. Usage contract.
+  # 5. Evidence binding: the manifest writer exists and the receiver image
+  #    is digest-pinned (a bare tag would silently drift).
+  grep -q 'write_evidence_manifest()' "$0" \
+    || { echo "self-test FAIL: the evidence-manifest writer is missing" >&2; rc=1; }
+  grep -q 'image: greenmail/standalone@sha256:' deploy/docker-compose.canary.yml \
+    || { echo "self-test FAIL: greenmail is not digest-pinned" >&2; rc=1; }
+  # 6. Usage contract.
   rc_inner=0; bash "$0" >/dev/null 2>&1 || rc_inner=$?
   [ "$rc_inner" -eq 2 ] || { echo "self-test FAIL: missing --out must exit 2" >&2; rc=1; }
   rm -rf "$tmp"
@@ -225,6 +296,12 @@ python3 "$ROOT/tools/canary_drive.py" \
   --out "$OUT/local-evidence" >&2 \
   || die "the local qualification run failed (evidence above and in $OUT/local-evidence)"
 
+# Evidence binding (audit 6): the result chain alone proves the test
+# record; this manifest binds it to the EXACT artifacts that produced the
+# mail — source HEAD, dirty-tree state, per-service image digests, the
+# rendered compose config, the migration set, the pinned runner, and the
+# terminal chain. Written BEFORE teardown so the images still exist.
+write_evidence_manifest "$OUT" || die "could not bind the evidence manifest"
 evaluate_summary "$OUT/local-evidence/summary.json"
 terminal=$(python3 - "$OUT/local-evidence/summary.json" <<'PY'
 import json, sys

@@ -666,10 +666,30 @@ validate_repo_gates() {
         # leak transport/source-ip/host/provider keys through them — the
         # Events API finding). Request bodies (Deserialize) are exempt.
         ci_check "customer DTO boundary" \
-            python3 "$REPO_ROOT/tools/check_customer_dtos.py"
+            python3 tools/check_customer_dtos.py
         ci_check "customer DTO boundary self-test" \
-            python3 "$REPO_ROOT/tools/check_customer_dtos.py" --self-test
+            python3 tools/check_customer_dtos.py --self-test
     fi
+
+    # SOC evidence cadence (external audit 6 remediation #16, 2026-10-28):
+    # the stale-attestation sweep must exist AND stay wired — a sweep only
+    # an operator can invoke is exactly the "no recurring system" state the
+    # audit found. Static grep-level contract (sweep fns, the cron arm, the
+    # CP listing route) plus the canonical-fixture tests that prove stale
+    # rows surface; --self-test proves each wiring direction can fail. The
+    # alerting observation window itself remains the owner's decision
+    # (compliance exports no Prometheus surface) — see docs/compliance/.
+    _sec_st=$(lane_tool_status python3 "soc evidence cadence" required)
+    case $_sec_st in
+        run)
+            ci_check "soc evidence cadence" bash -c '
+                set -eu
+                python3 tools/check_soc_evidence_cadence.py
+                python3 tools/check_soc_evidence_cadence.py --self-test
+            ' || return "$CI_EXIT_FAIL"
+            ;;
+        fail) return "$CI_EXIT_FAIL" ;;
+    esac
 
     # (c2) migration SQL lint (enterprise conventions — NEW 2026-09-10):
     # tools/migration_lint.py enforces the chain's idempotency/transaction

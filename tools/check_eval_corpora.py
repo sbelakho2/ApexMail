@@ -30,7 +30,16 @@ Checks:
      all covered; `draft_must_contain` facts canonical; `draft_must_not_contain`
      drawn from the declared vocabulary, which must itself never contain a
      canonical fact.
-  6. structural sanity: no duplicate cases, no empty case, and every corpus
+  6. TRUTH (audit-6 #9): a REQUIRED entry (`must_contain`,
+     `draft_must_contain`, live variants) may not assert HIPAA/BAA/SOC 2/
+     ISO 27001 availability or certification unless the capability registry
+     (docs/development/capability-registry.json) carries the framework, and
+     may not name a tool/action outside the assistant's REAL registry
+     (`CHAT_READ_ONLY_TOOLS` in ai-service chat.rs — "a tool_call whose name
+     is not here is NEVER executed"). Denials ("not currently offered")
+     pass; `must_not_contain`/`forbidden_claims` entries are BANS on
+     untruths and are never flagged.
+  7. structural sanity: no duplicate cases, no empty case, and every corpus
      file is valid JSON with the documented shape.
 
 `--coverage` prints the category → case-count tables for the report.
@@ -338,6 +347,137 @@ def published_docs_text() -> str:
 NUMERIC_RE = re.compile(r"\d[\d,]*(?:\.\d+)?")
 
 
+# ── TRUTH (audit-6 #9) — tool/compliance authority from the registries ────
+# Import-free twin of apps/ai/training/canonical_truth.py: the goldens may
+# only require facts the REAL registries back. The tool allowlist is the
+# assistant's executed registry in chat.rs; the compliance frameworks are
+# assertable only when capability-registry.json carries an entry for them
+# (none does today — HIPAA/BAA/SOC 2/ISO 27001 are not offered, and
+# knowledge.rs COMPLIANCE_FACTS is the published restatement of that).
+
+CAPABILITY_REGISTRY = ROOT / "docs/development/capability-registry.json"
+
+_CHAT_TOOL_BLOCK_RE = re.compile(
+    r"CHAT_READ_ONLY_TOOLS\s*:\s*&\[\s*\(&str,\s*&str\)\]\s*=\s*&\[(.*?)\n\];",
+    re.S,
+)
+
+#: Framework keyword regexes a required entry may mention only in DENIED
+#: form, unless the capability registry carries the framework.
+_COMPLIANCE_FRAMEWORKS = {
+    "HIPAA": re.compile(r"hipaa", re.I),
+    "BAA": re.compile(r"\bbaa\b", re.I),
+    "SOC 2": re.compile(r"soc[\s_-]?2", re.I),
+    "ISO 27001": re.compile(r"iso[\s_-]?27001", re.I),
+}
+_COMPLIANCE_REGISTRY_HINT = re.compile(
+    r"hipaa|soc[\s_-]?2|iso[\s_-]?27001|\bbaa\b", re.I
+)
+_DENIAL_RE = re.compile(
+    r"not\s+(?:currently\s+|yet\s+|formally\s+)?[\w\s-]{0,30}?"
+    r"(?:offered|available|certified|compliant|supported|signed)"
+    r"|no\s+(?:hipaa|baa|soc[\s_-]?2|iso[\s_-]?27001|certification|audit)"
+    r"|(?:do(?:es)?n'?t|cannot|can'?t|never|won'?t)\s+(?:offer|support|provide|certify|sign)"
+    r"|uncertified|without\s+(?:a\s+)?(?:signed\s+)?(?:hipaa|baa)",
+    re.I,
+)
+#: Same sentence-split contract as the training-side twin: a framework
+#: keyword is clean only when the SAME sentence denies it. Soft newlines
+#: inside a wrapped sentence do not split; list/table rows do.
+_SENTENCE_RE = re.compile(
+    r"(?<=[.!?])\s+|\n\s*\n|\n(?=\s*(?:[-*•]\s|\d+\.\s|\|))"
+)
+_TOOL_JSON_RE = re.compile(r'\\?"tool\\?"\s*:\s*\\?"([A-Za-z0-9_]+)\\?"')
+_TOOL_VERB_RE = re.compile(
+    r"(?:call|calling|execute|executing|emit|emitting|invoke|invoking"
+    r"|run|running|using)\s+(?:the\s+)?`?([A-Za-z][A-Za-z0-9_]{2,})`?\s+tool",
+    re.I,
+)
+_TOOL_BACKTICK_RE = re.compile(r"`([a-z][a-z0-9_]+)`\s+tool")
+
+_CHAT_TOOL_CACHE: set[str] | None = None
+
+
+def chat_tool_registry() -> set[str]:
+    """The assistant's executed tool names, parsed from chat.rs. Fails the
+    run (fail-closed) when the registry block cannot be found — a check
+    that cannot read the truth may never pass silently."""
+    global _CHAT_TOOL_CACHE
+    if _CHAT_TOOL_CACHE is not None:
+        return _CHAT_TOOL_CACHE
+    block = _CHAT_TOOL_BLOCK_RE.search(CHAT_MODULE.read_text())
+    if block is None:
+        fail(
+            "TRUTH: CHAT_READ_ONLY_TOOLS not found in "
+            f"{CHAT_MODULE} — the tool-authority source moved; update this "
+            "scanner in the same change"
+        )
+        _CHAT_TOOL_CACHE = set()
+        return _CHAT_TOOL_CACHE
+    _CHAT_TOOL_CACHE = set(re.findall(r"\(\s*\"([a-z0-9_]+)\"\s*,", block.group(1)))
+    if not _CHAT_TOOL_CACHE:
+        fail(f"TRUTH: tool registry in {CHAT_MODULE} parsed empty")
+    return _CHAT_TOOL_CACHE
+
+
+def offered_compliance_frameworks() -> set[str]:
+    """Frameworks the capability registry actually carries (today: none of
+    HIPAA/BAA/SOC 2/ISO 27001)."""
+    try:
+        registry = json.loads(CAPABILITY_REGISTRY.read_text())
+    except (OSError, json.JSONDecodeError) as error:
+        fail(f"TRUTH: cannot read capability registry: {error}")
+        return set()
+    offered: set[str] = set()
+    for capability in registry.get("capabilities", []):
+        blob = json.dumps(capability)
+        if _COMPLIANCE_REGISTRY_HINT.search(blob):
+            offered.update(
+                framework
+                for framework, pattern in _COMPLIANCE_FRAMEWORKS.items()
+                if pattern.search(blob)
+            )
+    return offered
+
+
+def truth_problems(entry: str) -> list[str]:
+    """Human-readable TRUTH violations in one REQUIRED corpus entry."""
+    problems: list[str] = []
+    registry = chat_tool_registry()
+    if registry:
+        for match in _TOOL_JSON_RE.finditer(entry):
+            name = match.group(1)
+            if not name.isupper() and name not in registry:
+                problems.append(
+                    f"names tool/action {name!r}, which is not in the real "
+                    "chat registry (CHAT_READ_ONLY_TOOLS) — the runtime "
+                    "would refuse it"
+                )
+        for pattern in (_TOOL_VERB_RE, _TOOL_BACKTICK_RE):
+            for match in pattern.finditer(entry):
+                name = match.group(1)
+                if "_" in name and not name.isupper() and name not in registry:
+                    problems.append(
+                        f"names tool/action {name!r}, which is not in the real "
+                        "chat registry (CHAT_READ_ONLY_TOOLS) — the runtime "
+                        "would refuse it"
+                    )
+    offered = offered_compliance_frameworks()
+    for framework, pattern in _COMPLIANCE_FRAMEWORKS.items():
+        if framework in offered:
+            continue
+        for sentence in _SENTENCE_RE.split(entry):
+            hit = pattern.search(sentence)
+            if hit is not None and not _DENIAL_RE.search(sentence):
+                problems.append(
+                    f"asserts {framework} availability/certification "
+                    f"({hit.group(0)!r}) but the capability registry offers "
+                    "no such framework"
+                )
+                break
+    return problems
+
+
 def tokens_of(value: str) -> list[str]:
     return NUMERIC_RE.findall(value)
 
@@ -431,6 +571,9 @@ def check_chat(corpus: dict, values: set[str], facts: str) -> None:
                         f"{CHAT}: {question!r} requires {entry!r}, which appears nowhere in "
                         "the canonical docs"
                     )
+                if not invert:
+                    for problem in truth_problems(entry):
+                        fail(f"{CHAT}: {question!r} requires {entry!r}, which {problem}")
     for category in CHAT_CATEGORIES:
         if category not in seen_categories:
             fail(f"{CHAT}: category {category!r} has no case — coverage is incomplete")
@@ -638,6 +781,8 @@ def check_tech(corpus: dict, values: set[str], docs: str) -> None:
                             "appear in the published docs — the corpus asserts an "
                             "invented endpoint/limit/error code"
                         )
+                    for problem in truth_problems(entry):
+                        fail(f"{TECH}: {question!r} requires {entry!r}, which {problem}")
                 else:
                     for number in numbers:
                         if is_canonical(number, values):
@@ -695,10 +840,14 @@ def check_draft(corpus: dict, values: set[str], facts: str) -> None:
             problem = _required_fact_problem(entry, values, facts)
             if problem:
                 fail(f"{DRAFT}: {scenario!r} {problem}")
+            for truth_problem in truth_problems(entry):
+                fail(f"{DRAFT}: {scenario!r} requires {entry!r}, which {truth_problem}")
         for entry in (case.get("live") or {}).get("draft_must_contain") or []:
             problem = _required_fact_problem(entry, values, facts)
             if problem:
                 fail(f"{DRAFT}: {scenario!r} live {problem}")
+            for truth_problem in truth_problems(entry):
+                fail(f"{DRAFT}: {scenario!r} live requires {entry!r}, which {truth_problem}")
         for entry in case.get("draft_must_not_contain") or []:
             problem = _banned_claim_problem(entry, values, facts)
             if problem:
@@ -946,6 +1095,28 @@ def _self_test() -> int:
         "a draft requiring a stale fact fails",
         DRAFT,
         lambda c: c["cases"][0].__setitem__("draft_must_contain", ["65"]),
+    )
+    expect_failure(
+        "a required HIPAA availability claim fails",
+        CHAT,
+        lambda c: c["cases"][0].__setitem__("must_contain", ["HIPAA compliant"]),
+    )
+    expect_failure(
+        "a required SOC 2 certification claim fails",
+        CHAT,
+        lambda c: c["cases"][0].__setitem__("must_contain", ["SOC 2 Type II certified"]),
+    )
+    expect_failure(
+        "a required tool outside the chat registry fails",
+        CHAT,
+        lambda c: c["cases"][0].__setitem__(
+            "must_contain", ["I'll call the `cancel_subscription` tool"]
+        ),
+    )
+    expect_failure(
+        "a required BAA claim in a draft fails",
+        DRAFT,
+        lambda c: c["cases"][0].__setitem__("draft_must_contain", ["BAA available"]),
     )
     if not run_checks(ROOT):
         print("self-test PASS [pristine tree]")

@@ -666,7 +666,7 @@ stages:
 | validate | `ci/stages/validate.sh` | compose/env sanity, pipeline-config invariants, repo gates (kiwi isolation, panic paths, outbound-delivery contract, migration lint, …) |
 | docs | `ci/stages/docs.sh` | documentation architecture-truth gates (production runbooks must not teach kubectl/helm/k9s operations; historical/roadmap docs carry an `ARCHITECTURE-TRUTH:` marker) |
 | ui | `ci/stages/ui.sh` | the seven REQUIRED visual-fixture gates (flash copy, form hygiene, a11y, dead links, terminology, strings catalog, marketing token contrast) |
-| test | `ci/stages/test.sh` | `cargo fmt --check`, `clippy --workspace --all-targets -D warnings`, `cargo test --workspace` against the postgres service, machete + deny, coverage ratchet, PHP/SDK/satellite/static-lint lanes, dogfood ledger + self-test (§8c) |
+| test | `ci/stages/test.sh` | `cargo fmt --check`, `clippy --workspace --all-targets -D warnings`, `cargo test --workspace` against the postgres service, machete + deny, coverage ratchet, SDK/satellite/static-lint lanes, dogfood ledger + self-test (§8c), and the three live lanes: journey (isolated stack + journey-deep), canary (isolated stack + the byte-pinned external qualification runner), and real-model eval (corpus contract always; the replay runs under real model credentials and records NOT EXECUTED otherwise) |
 | security | `ci/stages/security.sh` | gitleaks (full history), cargo audit, cargo vet, semgrep SAST, fresh-database migration validation, Trivy |
 
 The DB-gated suites really run: the pipeline declares `postgres` + `redis`
@@ -824,7 +824,14 @@ stage (`ci/install.sh` installs gh as a convenience only).
    lane, a different pipeline configuration, a required sub-lane that did not
    finish ok, an unsigned/tampered blessing, a blessing older than the
    anti-replay window (default 7 days), or a host with no signing key
-   configured cannot deploy (invariant I20, enforced). The lane ids are
+   configured cannot deploy (invariant I20, enforced). Since 2026-10-28 the
+   preferred mode is asymmetric (`"signatureAlg":"ed25519"`): the CI machine
+   signs with an Ed25519 private key (`CI_BLESSING_SIGNING_KEY_FILE`) and
+   production verifies with the corresponding public key only
+   (`CI_BLESSING_VERIFY_PUBLIC_KEY`), so a fully compromised deploy host can
+   verify but never mint a blessing — the shared-secret HMAC
+   (`CI_BLESSING_SIGNING_KEY`) remains honoured during the transition. The
+   lane ids are
    mechanical (`<stage>.<slug-of-the-ci_check-label>`, recorded by every
    stage into the run manifest), and `tools/check_waivers.py --check-lanes`
    (the `validate.waivers` lane) proves every required row names a lane a

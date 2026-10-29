@@ -493,17 +493,35 @@ cmd_run() {
                     done
                     _gb_lanes=$(blessing_lanes_statuses "$RUN_DIR/manifest.json")
                     _gb_completed=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-                    # I20: the blessing is SIGNED over commit+config+stages+
-                    # lanes+timestamp with the shared key; the deploy host
-                    # verifies signature AND freshness. No key configured on
-                    # the CI machine => an unsigned blessing is written AND A
-                    # WARNING IS PRINTED (every verifying host will refuse it).
-                    _gb_sig=$(ci_blessing_sign "$(ci_blessing_canonical "$CI_SHA" "$_pipeline_hash" "$_gb_statuses" "$_gb_lanes" "$_gb_completed")")
-                    if [ -z "$_gb_sig" ]; then
-                        ci_warn "NO CI_BLESSING_SIGNING_KEY configured — the blessing is UNSIGNED and verifying deploy hosts will refuse it"
+                    # I20 (asymmetric since 2026-10-28, external audit #12):
+                    # the blessing is signed over commit+config+stages+
+                    # lanes+timestamp; the deploy host verifies signature AND
+                    # freshness. Preferred mode: Ed25519 under the CI
+                    # machine's PRIVATE key (CI_BLESSING_SIGNING_KEY_FILE) —
+                    # the signature lands base64 in "signature" with
+                    # "signatureAlg":"ed25519", and verifying hosts need only
+                    # the PUBLIC key (they can verify but never mint).
+                    # Transition: the legacy HMAC shared secret
+                    # (CI_BLESSING_SIGNING_KEY) still signs when no Ed25519
+                    # key is configured. No key at all => an unsigned
+                    # blessing AND A LOUD WARNING (every verifying host
+                    # refuses it).
+                    _gb_alg=''
+                    _gb_canon=$(ci_blessing_canonical "$CI_SHA" "$_pipeline_hash" "$_gb_statuses" "$_gb_lanes" "$_gb_completed")
+                    _gb_sig=$(ci_blessing_sign_payload "$_gb_canon")
+                    if [ -n "$_gb_sig" ]; then
+                        _gb_alg=ed25519
+                    else
+                        _gb_sig=$(ci_blessing_sign "$_gb_canon")
+                        if [ -n "$_gb_sig" ]; then
+                            _gb_alg=hmac-sha256
+                        fi
                     fi
-                    printf '{"sha":"%s","pipelineConfigHash":"%s","gateStagesStatuses":"%s","requiredLanesStatuses":"%s","signature":"%s","machine":"%s","completedAt":"%s"}\n' \
-                        "$CI_SHA" "$_pipeline_hash" "$_gb_statuses" "$_gb_lanes" "$_gb_sig" \
+                    if [ -z "$_gb_sig" ]; then
+                        ci_warn "NO Ed25519 signing key (CI_BLESSING_SIGNING_KEY_FILE) and no HMAC secret (CI_BLESSING_SIGNING_KEY) configured — the blessing is UNSIGNED and verifying deploy hosts will refuse it"
+                    fi
+                    printf '{"sha":"%s","pipelineConfigHash":"%s","gateStagesStatuses":"%s","requiredLanesStatuses":"%s","signature":"%s","signatureAlg":"%s","machine":"%s","completedAt":"%s"}\n' \
+                        "$CI_SHA" "$_pipeline_hash" "$_gb_statuses" "$_gb_lanes" "$_gb_sig" "$_gb_alg" \
                         "$(hostname 2>/dev/null || printf 'ci-machine')" \
                         "$_gb_completed" \
                         >"$RUNS_DIR/.gate-blessing.json"
@@ -895,6 +913,92 @@ list vs CI_CARGO_AUDIT_IGNORES (pipeline.conf) — restore EXACT lockstep"
     CI_BLESSING_SIGNING_KEY=$_gbb_saved_key
     export CI_BLESSING_SIGNING_KEY
     rm -rf "$_gbb_tmp"
+
+    # Asymmetric blessing teeth (external audit #12): an ephemeral
+    # Ed25519 pair — a valid signature verifies on a host holding ONLY the
+    # public key (the security property: it can verify but never mint),
+    # while tampered lanes, a different signer, an unsigned blessing and a
+    # host without ANY verification key all refuse.
+    if ci_blessing_ed25519_ok; then
+        _ed_dir=$(mktemp -d "${TMPDIR:-/tmp}/apexmail-bless.XXXXXX")
+        mkdir -p "$_ed_dir/runs"
+        _ed_priv=$_ed_dir/ci-signing.pem
+        _ed_other=$_ed_dir/other-signer.pem
+        openssl genpkey -algorithm ed25519 -out "$_ed_priv" 2>/dev/null \
+            && openssl genpkey -algorithm ed25519 -out "$_ed_other" 2>/dev/null \
+            || { ci_err "openssl could not generate the ephemeral Ed25519 pair"; _sf_fail=1; }
+        # the raw 32-byte public key, base64 — exactly what
+        # CI_BLESSING_VERIFY_PUBLIC_KEY carries on a deploy host
+        _ed_pub=$(openssl pkey -in "$_ed_priv" -pubout -outform DER 2>/dev/null | tail -c 32 | base64 | tr -d '\n')
+        _ed_saved_key=${CI_BLESSING_SIGNING_KEY:-}
+        _ed_saved_keyfile=${CI_BLESSING_SIGNING_KEY_FILE:-}
+        _ed_saved_pub=${CI_BLESSING_VERIFY_PUBLIC_KEY:-}
+        _ed_saved_pubfile=${CI_BLESSING_VERIFY_PUBLIC_KEY_FILE:-}
+        # the verifying "host" below holds ONLY the public key — no signing
+        # material of either mode
+        CI_BLESSING_SIGNING_KEY=''
+        CI_BLESSING_SIGNING_KEY_FILE=''
+        CI_BLESSING_VERIFY_PUBLIC_KEY=$_ed_pub
+        CI_BLESSING_VERIFY_PUBLIC_KEY_FILE=''
+        _ed_hash=$(ci_pipeline_config_hash)
+        _ed_stages="fetch=ok,validate=ok,docs=ok,ui=ok,test=ok,security=ok"
+        _ed_lanes=$_gbb_all_ok
+        _ed_lanes_bad=$(printf '%s' "$_ed_lanes" | sed 's/validate.stub-ban=ok/validate.stub-ban=fail/')
+        _ed_now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+        _ed_write() { # <lanes> <sig> — fixture blessing into the host runs dir
+            printf '{"sha":"deadbeef","pipelineConfigHash":"%s","gateStagesStatuses":"%s","requiredLanesStatuses":"%s","signature":"%s","signatureAlg":"ed25519","machine":"t","completedAt":"%s"}\n' \
+                "$_ed_hash" "$_ed_stages" "$1" "$2" "$_ed_now" >"$_ed_dir/runs/.gate-blessing.json"
+        }
+        _ed_sign() { # <keyfile> <lanes> — Ed25519 sig over the canonical string
+            CI_BLESSING_SIGNING_KEY_FILE=$1
+            _ed_sig_val=$(ci_blessing_sign_payload \
+                "$(ci_blessing_canonical deadbeef "$_ed_hash" "$_ed_stages" "$2" "$_ed_now")")
+            CI_BLESSING_SIGNING_KEY_FILE=''
+            printf '%s' "$_ed_sig_val"
+        }
+        # valid signature => accepted on the public-key-only host
+        _ed_write "$_ed_lanes" "$(_ed_sign "$_ed_priv" "$_ed_lanes")"
+        if gate_blessing_refusal "$_ed_dir/runs" deadbeef >/dev/null; then
+            ci_err "gate blessing: a VALID ed25519-signed blessing was refused on a host holding only the public key"
+            _sf_fail=1
+        fi
+        # tampered lanes => refused (the file upgraded a FAILING lane to ok;
+        # the signature still covers the honest, failing lanes)
+        _ed_write "$_ed_lanes" "$(_ed_sign "$_ed_priv" "$_ed_lanes_bad")"
+        if ! gate_blessing_refusal "$_ed_dir/runs" deadbeef >/dev/null; then
+            ci_err "gate blessing: a TAMPERED ed25519 blessing (lanes edited after signing) was accepted"
+            _sf_fail=1
+        fi
+        # wrong key => refused (signed by a second, unrelated key)
+        _ed_write "$_ed_lanes" "$(_ed_sign "$_ed_other" "$_ed_lanes")"
+        if ! gate_blessing_refusal "$_ed_dir/runs" deadbeef >/dev/null; then
+            ci_err "gate blessing: an ed25519 blessing signed by ANOTHER key was accepted"
+            _sf_fail=1
+        fi
+        # unsigned => refused
+        _ed_write "$_ed_lanes" ""
+        if ! gate_blessing_refusal "$_ed_dir/runs" deadbeef >/dev/null; then
+            ci_err "gate blessing: an UNSIGNED ed25519 blessing was accepted"
+            _sf_fail=1
+        fi
+        # host without ANY verification key => refused (fail closed)
+        CI_BLESSING_VERIFY_PUBLIC_KEY=''
+        _ed_write "$_ed_lanes" "$(_ed_sign "$_ed_priv" "$_ed_lanes")"
+        if ! gate_blessing_refusal "$_ed_dir/runs" deadbeef >/dev/null; then
+            ci_err "gate blessing: a blessing was accepted on a host with NO verification key at all"
+            _sf_fail=1
+        fi
+        ci_info "PASS: ed25519 blessing teeth (valid / tampered / wrong-key / unsigned / keyless host)"
+        # restore the pre-fixture environment
+        CI_BLESSING_SIGNING_KEY=$_ed_saved_key
+        CI_BLESSING_SIGNING_KEY_FILE=$_ed_saved_keyfile
+        CI_BLESSING_VERIFY_PUBLIC_KEY=$_ed_saved_pub
+        CI_BLESSING_VERIFY_PUBLIC_KEY_FILE=$_ed_saved_pubfile
+        rm -rf "$_ed_dir"
+    else
+        ci_err "this host's openssl lacks Ed25519 — the asymmetric blessing path cannot be exercised (install OpenSSL 3.x+)"
+        _sf_fail=1
+    fi
 
     # Synthetic-repository / runtime-policy fixtures (ci/tests/*.selftest.sh):
     # each one extracts the REAL functions from the stage under test and runs

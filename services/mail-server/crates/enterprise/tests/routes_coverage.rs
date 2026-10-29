@@ -878,3 +878,80 @@ fn qbr_pdf_renders_through_the_configured_renderer() {
         std::env::remove_var("PDF_RENDERER_URL");
     });
 }
+
+// ── Dedicated-tenant host execution guards ──────────────────────────────
+
+/// The host-execution route carries the same guards as its neighbours plus
+/// the hard operator gate: 401 without a bearer token, 403 without the
+/// dedicated-tenants scope, and 403 with the `DT_PROVISIONING_ENABLED=1`
+/// instruction when the operator gate is off. The gate refusal happens
+/// before any database or provider access, so the broken (never-connecting)
+/// pool is the right substrate: nothing about this route may depend on a
+/// reachable database to stay disabled.
+// The env lock spans awaits BY DESIGN: it serializes the
+// DT_PROVISIONING_ENABLED mutations across concurrent tests.
+#[allow(clippy::await_holding_lock)]
+#[test]
+fn dedicated_host_provision_route_is_guarded_and_gated() {
+    run(async {
+        let Some(h) = harness().await else { return };
+        let path = format!("/ent/private-deployments/{}/provision", Uuid::new_v4());
+
+        // No bearer token → 401.
+        let (status, json) = call(&h.app, "POST", &path, None, None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{json}");
+
+        // A scoped-less user token → 403 (same RBAC as the transition route).
+        let (status, json) = call(&h.app, "POST", &path, Some(&h.token_a), None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{json}");
+
+        // Admin, but the operator gate is OFF → 403 carrying the instruction,
+        // on an app whose database never connects (the gate fires first).
+        let broken = broken_app();
+        let admin = mint_token(&h.tenant_a, "routes-cov-admin", true);
+        let _guard = dt_env_test_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let saved = std::env::var("DT_PROVISIONING_ENABLED").ok();
+        std::env::remove_var("DT_PROVISIONING_ENABLED");
+        let (status, json) = call(&broken, "POST", &path, Some(&admin), None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{json}");
+        assert!(
+            json["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("DT_PROVISIONING_ENABLED=1"),
+            "the 403 must carry the instruction: {json}"
+        );
+
+        // With the gate ON and no provider credential the route refuses with
+        // a 409 naming HETZNER_API_TOKEN — still before any provider call.
+        std::env::set_var("DT_PROVISIONING_ENABLED", "1");
+        let saved_token = std::env::var("HETZNER_API_TOKEN").ok();
+        std::env::remove_var("HETZNER_API_TOKEN");
+        let (status, json) = call(&broken, "POST", &path, Some(&admin), None).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{json}");
+        assert!(
+            json["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("HETZNER_API_TOKEN"),
+            "the 409 must name the env var: {json}"
+        );
+
+        match saved {
+            Some(value) => std::env::set_var("DT_PROVISIONING_ENABLED", value),
+            None => std::env::remove_var("DT_PROVISIONING_ENABLED"),
+        }
+        match saved_token {
+            Some(value) => std::env::set_var("HETZNER_API_TOKEN", value),
+            None => std::env::remove_var("HETZNER_API_TOKEN"),
+        }
+    });
+}
+
+/// Serializes the tests that mutate the process-global dedicated-exec env
+/// (`dedicated_host_provision_route_is_guarded_and_gated`): the gate is read
+/// per call, so concurrent mutations made the assertions order-dependent.
+fn dt_env_test_lock() -> &'static std::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+}

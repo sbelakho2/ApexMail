@@ -22,6 +22,14 @@
 #   * deploy-line stages (images/migrate/deploy/verify/notify) — verified by
 #     .gate-blessing.json membership, not this ledger.
 #
+# REGENERATION: the lane rows below are generated from the stage sources —
+# for every stage on the CI_STAGES line (ci/pipeline.conf), collect the
+# REQUIRED-capable labels with the same scanner tools/check_waivers.py uses
+# (stage_slug_set: ci_check labels, required ci_lane_record ids, docs/ui
+# gates, _mv_gate without `advisory`), slugify, sort, and emit one
+# <stage>.<slug> row per section. Never hand-add a row a stage cannot
+# produce; tools/check_waivers.py --check-lanes fails the run on one.
+#
 # Stage lanes (ci/stages/*.sh — one row each, always required):
 fetch
 validate
@@ -95,6 +103,7 @@ validate.route-census-self-test
 validate.rust-panic-paths
 validate.sdk-version-lockstep
 validate.security-posture-baseline
+validate.soc-evidence-cadence
 validate.stub-ban
 validate.stub-ban-self-test
 validate.subprocessor-register-derived-from-deployment-config
@@ -126,6 +135,8 @@ ui.ui-terminology-gate-j
 #
 # Test-stage lanes:
 
+test.canary-lane-real-mail-qualification
+test.real-model-eval-lane
 test.cargo-deny
 test.cargo-machete
 test.contrast-gate
@@ -134,7 +145,6 @@ test.dogfood-ledger
 test.feature-entitlement-classification
 test.i18n-gate
 test.journey-lane-live-stack
-test.canary-lane-real-mail-qualification
 test.layout-gate
 test.pre-commit-parity
 test.satellite-kiwicaptcha-wasm

@@ -857,6 +857,12 @@ pub fn build_app(state: AppState) -> Router {
         )
         .nest("/v1/dedicated-ips", routes::dedicated_ips::router())
         .nest("/v1/account", routes::account::router())
+        // Self-service SMTP credential message-class management (external
+        // audit 6 remediation #6): the tenant's own users rows the MTA
+        // submission path authenticates, see routes/settings.rs.
+        .nest("/v1/settings", routes::settings::router())
+        // Tenant onboarding state machine ({state, nextAction}), migration 277.
+        .nest("/v1/onboarding", routes::onboarding::router())
         .nest("/v1/stream", routes::stream_tokens::router())
         // ── Zero-JS console form routes that require a session ──────
         .merge(routes::web::authenticated_router(state.clone()))

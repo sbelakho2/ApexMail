@@ -1,0 +1,130 @@
+# =============================================================================
+# docker-compose.standby.yml — warm-standby overlay (postgres-standby)
+# =============================================================================
+# Repo-side preparation (external audit 6 remediation #14). Including this
+# file is the OPERATOR's explicit production decision — nothing in the
+# default deployment changes, and the standby is NOT started by any default
+# compose command:
+#
+#   docker compose \
+#     -f docker-compose.yml \
+#     -f docker-compose.prod.yml \
+#     -f deploy/docker-compose.standby.yml \
+#     --env-file .env up -d postgres-standby
+#
+# (run from the repository root: relative paths in EVERY compose file are
+# resolved against the project directory, which is the FIRST -f file's dir.)
+#
+# What it adds:
+#   * `postgres-standby` — a warm streaming standby of the primary `postgres`
+#     service, from the SAME apexmail/postgres-wal image the WAL-archiving
+#     override builds (the build block below is identical to
+#     deploy/docker-compose.wal-archive.yml's; postgres + rsync + ssh baked
+#     in, no startup package installs).
+#   * `command:` boots the standby: the image entrypoint execs
+#     pg-standby-bootstrap.sh (bind-mounted read-only), which waits for the
+#     primary's replication credentials, takes ONE pg_basebackup -R -X stream
+#     into PGDATA, and execs the image entrypoint back with
+#     `postgres -c hot_standby=on`. Idempotent: an existing PGDATA with
+#     standby.signal skips the basebackup and rejoins streaming replication.
+#   * `pg-standby-promote.sh` (bind-mounted read-only) is the LAG-GUARDED
+#     promotion tool the operator runs via docker compose exec — it refuses
+#     above STANDBY_MAX_LAG_BYTES unless --force.
+#   * env guards: STANDBY_PRIMARY_HOST and STANDBY_REPL_PASSWORD_FILE are
+#     REQUIRED (`${VAR:?}` — compose refuses to render without them, the
+#     same fail-fast pattern every mandatory production variable uses).
+#
+# The overlay deliberately joins ONLY apexmail_data_internal: the standby
+# reaches the primary over the data network and needs no egress. A standby
+# on the SAME host as the primary survives postgres-level loss, never host
+# loss — for host-loss protection run this overlay on a second host with
+# STANDBY_PRIMARY_HOST pointing at the primary (see
+# docs/operations/warm-standby.md for the honest posture, the bootstrap
+# prerequisites on the primary, the lag SLO, the promote procedure and the
+# failback note).
+#
+# Validated by the repo's compose render contract (docker compose config -q
+# with a dummy env, base + prod + this overlay).
+# =============================================================================
+
+services:
+  postgres-standby:
+    # Same pinned image as the WAL-archiving override: the postgres-wal
+    # build bakes rsync/openssh into postgres:16.8-alpine so the standby's
+    # tooling has no package-mirror startup dependency either.
+    build:
+      context: .
+      dockerfile: deploy/hardening/postgres-wal/Dockerfile
+    image: apexmail/postgres-wal:16.8-r1
+    container_name: apexmail-postgres-standby
+    restart: unless-stopped
+    # The bootstrap needs no huge DSM budget for the basebackup itself, but
+    # the promoted standby answers production query load — parity with the
+    # primary's shm_size.
+    shm_size: 1gb
+    # command replaces the image's `postgres` CMD: the image entrypoint
+    # (docker-entrypoint.sh) execs this script (first arg is not `postgres`),
+    # and the script execs the entrypoint BACK with `postgres -c
+    # hot_standby=on` once PGDATA is a standby clone — the official init
+    # path (gosu drop, perms, socket dir) stays intact.
+    command:
+      - /bin/sh
+      - /usr/local/bin/pg-standby-bootstrap.sh
+    volumes:
+      - ./deploy/hardening/scripts/pg-standby-bootstrap.sh:/usr/local/bin/pg-standby-bootstrap.sh:ro
+      # The operator's promotion tool runs inside THIS container:
+      #   docker compose ... exec postgres-standby \
+      #     sh /usr/local/bin/pg-standby-promote.sh [--force]
+      - ./deploy/hardening/scripts/pg-standby-promote.sh:/usr/local/bin/pg-standby-promote.sh:ro
+      - postgres_standby_data:/var/lib/postgresql/data
+      # Replication password (host file, read-only) — the same host-path env
+      # pattern as the WAL-archiving override's SSH key mounts.
+      - ${STANDBY_REPL_PASSWORD_FILE:?production must define the standby replication password file when the standby overlay is included}:/run/standby-repl-password:ro
+    environment:
+      # REQUIRED: the primary to clone and follow. On the primary's own
+      # compose network this is the service name `postgres`; from a second
+      # host it is the primary's address.
+      STANDBY_PRIMARY_HOST: ${STANDBY_PRIMARY_HOST:?production must define the primary host when the standby overlay is included}
+      STANDBY_PRIMARY_PORT: ${STANDBY_PRIMARY_PORT:-5432}
+      # Replication role created on the primary (runbook: CREATE ROLE
+      # ... REPLICATION LOGIN PASSWORD ...).
+      STANDBY_REPL_USER: ${STANDBY_REPL_USER:-replicator}
+      STANDBY_REPL_PASSWORD_FILE: /run/standby-repl-password
+      # Physical slot the bootstrap creates (-C) and the standby retains
+      # WAL for; a stale slot from an earlier attempt is detected and reused.
+      STANDBY_SLOT: ${STANDBY_SLOT:-apexmail_standby}
+      STANDBY_BOOTSTRAP_TIMEOUT_SECS: ${STANDBY_BOOTSTRAP_TIMEOUT_SECS:-600}
+      # Promotion guard (pg-standby-promote.sh): refuse above this replay lag.
+      STANDBY_MAX_LAG_BYTES: ${STANDBY_MAX_LAG_BYTES:-1048576}
+      # psql superuser of the CLONED cluster (the primary's POSTGRES_USER);
+      # the promote script probes with it.
+      POSTGRES_USER: ${POSTGRES_USER:-apexmail}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-apexmail} -d postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    depends_on:
+      # The bootstrap waits for the primary anyway (credentials/hba may lag
+      # behind container start); depends_on only orders the boot.
+      postgres:
+        condition: service_healthy
+    networks:
+      # Data-network ONLY: the standby talks to the primary and nothing
+      # else; no egress, no frontend/backend membership.
+      - apexmail_data_internal
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+        reservations:
+          memory: 256M
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /var/run/postgresql
+
+volumes:
+  postgres_standby_data:

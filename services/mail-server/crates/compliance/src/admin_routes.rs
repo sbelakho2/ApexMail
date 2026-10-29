@@ -43,6 +43,12 @@ pub fn admin_router() -> Router<Arc<AppState>> {
             get(soc2_list_evidence),
         )
         .route("/v1/admin/soc2/run", post(soc2_run_collectors))
+        // Audit 6 remediation #16: the live stale-evidence listing. Same
+        // pure query the cron sweep persists; read-only.
+        .route(
+            "/v1/admin/compliance/stale-evidence",
+            get(compliance_stale_evidence),
+        )
         // HIPAA
         .route(
             "/v1/admin/hipaa/baas",
@@ -311,6 +317,28 @@ async fn soc2_run_collectors(
     // summary (and in soc2_evidence_collection_runs), never returned.
     let summary = state.soc2.run_automated_collectors(start, end).await;
     Ok(ok_json(summary))
+}
+
+/// GET /v1/admin/compliance/stale-evidence — every in-scope control whose
+/// attestation deadline passed or whose required evidence set is incomplete
+/// or stale (external audit 6 remediation #16), computed LIVE from the same
+/// pure query the cron sweep persists. Read-only: refreshing the persisted
+/// run rows is the sweep's job, not a GET's.
+async fn compliance_stale_evidence(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
+    verify_bearer(&headers, &state.config).map_err(|(c, m)| err_json(c, m))?;
+    let swept_at = Utc::now();
+    let stale_controls = state.soc2.stale_evidence_controls(swept_at).await.map_err(|e| {
+        error!("soc2 stale_evidence_controls failed: {e}");
+        err_json(StatusCode::INTERNAL_SERVER_ERROR, "stale evidence query failed")
+    })?;
+    Ok(ok_json(serde_json::json!({
+        "swept_at": swept_at,
+        "count": stale_controls.len(),
+        "stale_controls": stale_controls,
+    })))
 }
 
 // ─── HIPAA handlers ────────────────────────────────────────────────────────
@@ -1188,6 +1216,7 @@ mod db_tests {
                 )
                 .await,
             ),
+            status(compliance_stale_evidence(State(state.clone()), none.clone()).await),
             status(
                 hipaa_request_baa(
                     State(state.clone()),
@@ -1339,7 +1368,7 @@ mod db_tests {
                 .await,
             ),
         ];
-        assert_eq!(codes.len(), 30, "every admin handler is listed");
+        assert_eq!(codes.len(), 31, "every admin handler is listed");
         for (index, code) in codes.iter().enumerate() {
             assert_eq!(*code, StatusCode::UNAUTHORIZED, "admin handler #{index}");
         }
@@ -1431,6 +1460,77 @@ mod db_tests {
                 .await
             ),
             StatusCode::OK
+        );
+    }
+
+    /// Audit 6 remediation #16: the CP listing must surface every control
+    /// the pure query flags — after seeding that is every in-scope control
+    /// (all start unattested, so their full required set is "missing") —
+    /// and must NOT surface a control whose full evidence set is fresh, nor
+    /// a control deliberately deferred out of the cadence.
+    #[tokio::test]
+    async fn compliance_stale_evidence_route_lists_stale_controls_only() {
+        let Some(state) = state("stale_evidence").await else {
+            return;
+        };
+        state.soc2.seed_default_controls().await.expect("seed");
+
+        let body = json_data(compliance_stale_evidence(State(state.clone()), auth()).await).await;
+        let stale = body["stale_controls"].as_array().expect("stale array").clone();
+        assert!(
+            stale.len() >= 20,
+            "a freshly seeded catalog is entirely unattested: {stale:?}"
+        );
+        assert_eq!(body["count"], json!(stale.len()));
+        let finding = &stale[0];
+        assert!(finding["control_id"].as_str().is_some());
+        assert!(
+            !finding["missing"]
+                .as_array()
+                .expect("missing list")
+                .is_empty(),
+            "an unattested control's finding carries its missing evidence types"
+        );
+        assert!(finding["days_overdue"].as_i64().is_some());
+
+        // A fully evidenced control leaves the listing. CC2.1 requires
+        // audit_log_sample AND audit_chain_verification.
+        let now = Utc::now();
+        for evidence_type in ["audit_log_sample", "audit_chain_verification"] {
+            state
+                .soc2
+                .record_evidence(
+                    "CC2.1",
+                    evidence_type,
+                    "test",
+                    json!({"evidence_type": evidence_type}),
+                    now - Duration::hours(1),
+                    now,
+                    "test",
+                )
+                .await
+                .expect("evidence");
+        }
+        // A deferred control is outside the cadence entirely.
+        state
+            .soc2
+            .set_status("CC1.1", ControlStatus::Deferred)
+            .await
+            .expect("defer");
+
+        let body = json_data(compliance_stale_evidence(State(state.clone()), auth()).await).await;
+        let stale = body["stale_controls"].as_array().expect("stale array").clone();
+        let ids: Vec<&str> = stale
+            .iter()
+            .filter_map(|finding| finding["control_id"].as_str())
+            .collect();
+        assert!(
+            !ids.contains(&"CC2.1"),
+            "a freshly evidenced control must not be listed: {ids:?}"
+        );
+        assert!(
+            !ids.contains(&"CC1.1"),
+            "a deferred control must not be listed: {ids:?}"
         );
     }
 
@@ -2075,6 +2175,9 @@ mod db_tests {
                 .await,
             ),
             status(
+                compliance_stale_evidence(State(state.clone()), headers.clone()).await,
+            ),
+            status(
                 hipaa_request_baa(
                     State(state.clone()),
                     headers.clone(),
@@ -2210,7 +2313,7 @@ mod db_tests {
                 trust_revoke_access(State(state.clone()), headers.clone(), Path("r".into())).await,
             ),
         ];
-        assert_eq!(codes.len(), 25, "every DB-backed admin handler is listed");
+        assert_eq!(codes.len(), 26, "every DB-backed admin handler is listed");
         for (index, code) in codes.iter().enumerate() {
             assert!(
                 code.is_client_error() || code.is_server_error(),

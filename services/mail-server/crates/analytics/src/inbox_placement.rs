@@ -73,7 +73,7 @@ impl InboxPlacementService {
                 JOIN placement_tests pt ON pt.id = pr.test_id \
                 JOIN seed_accounts sa ON sa.id = pr.seed_account_id \
                 LEFT JOIN seed_providers sp ON sp.id = sa.provider_id \
-                WHERE pt.tenant_id = $1 AND pr.checked_at >= $2 \
+                WHERE pt.tenant_id = $1 AND pt.created_at >= $2 \
                 ORDER BY pr.test_id, pr.seed_account_id, pr.checked_at DESC \
              ) latest_per_unit GROUP BY 1, 2",
         )
@@ -88,27 +88,45 @@ impl InboxPlacementService {
         // list written at dispatch). Missing units are counted EXPLICITLY —
         // a seed that was never observed stays in the denominator instead
         // of silently disappearing from the placement story.
-        // Two INDEPENDENT aggregates: joining observations onto the planned
-        // array would multiply SUM(cardinality(...)) by the observation
-        // count (one planned unit polled three times summed to 3 — caught
-        // by repeated_observations_deduplicate_to_one_unit).
+        // ONE frozen cohort (external audit 6, P1): planned AND observed
+        // both derive from the same set of non-cancelled tests created in
+        // the window. An OLD test re-observed today can no longer enter the
+        // numerator without entering the denominator (its test is not in
+        // the cohort); a cohort unit observed after the window still
+        // counts, because the cohort is frozen at test creation.
+        // Observations count EVERY result on a cohort test — deliberately
+        // NOT filtered by seed_accounts_used: the plan array is mutable,
+        // and filtering by it would make observed > planned structurally
+        // invisible instead of surfaced (audit 6).
         let (planned_units, observed_units): (i64, i64) = sqlx::query_as(
-            "SELECT \
-                (SELECT COALESCE(SUM(cardinality(pt.seed_accounts_used)), 0)::bigint \
-                   FROM placement_tests pt \
-                  WHERE pt.tenant_id = $1 AND pt.status <> 'cancelled' \
-                    AND pt.created_at >= $2), \
+            "WITH cohort AS ( \
+                SELECT pt.id, pt.seed_accounts_used \
+                  FROM placement_tests pt \
+                 WHERE pt.tenant_id = $1 AND pt.status <> 'cancelled' \
+                   AND pt.created_at >= $2 \
+             ) \
+             SELECT \
+                (SELECT COALESCE(SUM(cardinality(seed_accounts_used)), 0)::bigint \
+                   FROM cohort), \
                 (SELECT COUNT(DISTINCT (pr.test_id, pr.seed_account_id))::bigint \
                    FROM placement_results pr \
-                   JOIN placement_tests pt ON pt.id = pr.test_id \
-                  WHERE pt.tenant_id = $1 AND pr.checked_at >= $2 \
-                    AND pr.seed_account_id = ANY (pt.seed_accounts_used))",
+                   JOIN cohort c ON c.id = pr.test_id)",
         )
         .bind(tenant_id)
         .bind(since)
         .fetch_one(&self.pool)
         .await?;
-        let missing_units = (planned_units - observed_units).max(0);
+        // Audit 6: NEVER silently clamp a cohort inconsistency. If the
+        // observation store claims more units than the cohort planned,
+        // that is data corruption (or a cohort-definition bug) and the
+        // honest answer refuses to bound rather than publishing an
+        // interval computed from mismatched I and N.
+        let cohort_consistent = observed_units <= planned_units;
+        let missing_units = if cohort_consistent {
+            planned_units - observed_units
+        } else {
+            0
+        };
 
         // Distinct SMTP-level metrics from canonical events (no placement
         // claim). Provider grouping derives from the recipient's domain —
@@ -244,13 +262,17 @@ impl InboxPlacementService {
             planned_units,
             observed_units,
             missing_units,
+            consistent: cohort_consistent,
         };
         // The identifying missing-data bound (report p.11): with I units
         // conclusively inbox-classified and U unresolved, the honest claim
         // is I/N <= inbox fraction <= (I+U)/N — a bound, never a binomial
         // confidence interval. None when no cohort was planned.
-        let inbox_fraction_bounds =
-            inbox_fraction_bounds(measured.inbox, missing_units, planned_units);
+        let inbox_fraction_bounds = if cohort_consistent {
+            inbox_fraction_bounds(measured.inbox, missing_units, planned_units)
+        } else {
+            None
+        };
 
         let recommendations = generate_recommendations(overall_inbox_rate, &providers);
 
@@ -275,12 +297,22 @@ impl InboxPlacementService {
         let since = Utc::now() - chrono::Duration::days(days.max(0));
 
         let rows: Vec<(String, Option<String>, i64)> = sqlx::query_as(
-            "SELECT DATE(pr.checked_at)::text AS day, \
-                    lower(pr.inbox_type) AS inbox_type, \
-                    COUNT(*)::bigint AS cnt \
-             FROM placement_results pr \
-             JOIN placement_tests pt ON pt.id = pr.test_id \
-             WHERE pt.tenant_id = $1 AND pr.checked_at >= $2 \
+            "SELECT day, inbox_type, COUNT(*)::bigint AS cnt FROM ( \
+                SELECT DATE(pr.checked_at)::text AS day, \
+                       lower(pr.inbox_type) AS inbox_type, \
+                       pr.checked_at, \
+                       pr.test_id, pr.seed_account_id \
+                FROM placement_results pr \
+                JOIN placement_tests pt ON pt.id = pr.test_id \
+                WHERE pt.tenant_id = $1 AND pr.checked_at >= $2 \
+             ) latest_per_unit_day \
+             WHERE NOT EXISTS ( \
+                SELECT 1 FROM placement_results pr2 \
+                WHERE pr2.test_id = latest_per_unit_day.test_id \
+                  AND pr2.seed_account_id = latest_per_unit_day.seed_account_id \
+                  AND DATE(pr2.checked_at) = latest_per_unit_day.day::date \
+                  AND pr2.checked_at > latest_per_unit_day.checked_at \
+             ) \
              GROUP BY 1, 2 ORDER BY 1",
         )
         .bind(tenant_id)
@@ -396,7 +428,14 @@ pub fn generate_recommendations(
     }
 
     // Gmail-specific
-    if let Some(gmail) = providers.iter().find(|p| p.provider == "gmail") {
+    // The measured provider names are the seed_providers names plus
+    // "other"; classify_provider() emits DOMAIN-shaped names like
+    // "gmail.com", so an exact "gmail" match never fired (audit 6: the
+    // Gmail advice branch was unreachable).
+    if let Some(gmail) = providers
+        .iter()
+        .find(|p| p.provider == "gmail" || p.provider.starts_with("gmail."))
+    {
         if let Some(rate) = gmail.inbox_rate {
             if rate < 0.85 {
                 recs.push(
@@ -530,6 +569,7 @@ mod tests {
                 planned_units: 0,
                 observed_units: 0,
                 missing_units: 0,
+                consistent: true,
             },
             inbox_fraction_bounds: None,
             delivery: DeliveryMetrics {

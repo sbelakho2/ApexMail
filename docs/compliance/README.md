@@ -70,6 +70,10 @@ ApexMail's HIPAA readiness is under active development.
 | **Report Availability** | Will be made available under NDA after audit completion |
 | **Target Timeline** | Readiness assessment Q1 2027; audit to follow based on assessment outcome |
 
+### Evidence cadence
+
+The compliance service runs a daily stale-evidence sweep (cron job 11) over every in-scope control. The sweep flags a control when its attestation deadline has passed or when its required evidence set is incomplete or outdated, and records each finding in the `soc2_evidence_collection_runs` trail under the evidence type `stale_attestation_sweep`. Operators can list the current findings live in the control plane at `GET /v1/admin/compliance/stale-evidence`, which reports each control's deadline, the missing or outdated evidence types, and how many days it is overdue. The CI lane `validate.soc-evidence-cadence` (tools/check_soc_evidence_cadence.py) fails the build if the sweep or its wiring is removed. The observation window for alerting on stale evidence remains the owner's decision; the sweep only makes the state visible.
+
 ---
 
 ## ISO Frameworks

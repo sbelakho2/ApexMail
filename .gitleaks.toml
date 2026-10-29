@@ -58,7 +58,12 @@ paths = [
     "(^|/)crates/integration-tests/tests/concurrency_tests[.]rs$",
     "(^|/)crates/compliance/tests/gdpr_lifecycle_adversarial_tests[.]rs$",
     # KiwiCaptcha-mirrored browser suites: the upstream repo's canonical test
-    # vectors (mirror bytes; consumed as-is).
+    # vectors (mirror bytes; consumed as-is). Rust-only cleanup 2026-10-28:
+    # the tests/browser/ paths below no longer exist in the tree (the PHP
+    # browser harness was removed; the journeys moved to tests/journeys/) —
+    # the rows are retained for the REQUIRED full-history scan only, so
+    # historical commits carrying those fixtures stay clean. The
+    # kiwicaptcha-risk suite is live mirror content.
     "(^|/)tests/browser/execution-v6/",
     "(^|/)tests/browser/pentest/lifecycle-teardown[.]html$",
     "(^|/)tests/browser/specs/compat-observer[.]spec[.]mjs$",
@@ -97,6 +102,11 @@ paths = [
     # SDK + KiwiCaptcha test/example suites use deterministic fake secrets
     # ('0123456789abcdef...', 'am_test_...'); also matched by the value
     # regexes below — the path entries keep historical commits clean.
+    # Rust-only cleanup 2026-10-28: kiwicaptcha-php and the integrations/
+    # tree are REMOVED from the product surface (no PHP in the mirror —
+    # tools/kiwi_mirror_advance.py EXCLUDES); their rows below are retained
+    # for the REQUIRED full-history scan only. The kiwicaptcha (tests|
+    # examples) row is live mirror content.
     "(^|/)packages/kiwicaptcha-php/tests/",
     "(^|/)packages/kiwicaptcha/(tests|examples)/",
     "(^|/)packages/kiwicaptcha/integrations/[^/]+/tests/",
@@ -195,7 +205,12 @@ paths = [
     "(^|/)crates/mailstore-core/src/(encryption|main|storage)[.]rs$",
     "(^|/)crates/sales-autopilot/src/dispatcher[.]rs$",
     # KiwiCaptcha canonical example vectors live in the package source and
-    # perf tooling (deterministic fake secrets by design).
+    # perf tooling (deterministic fake secrets by design). The src/ and
+    # tools/ rows are live (Rust) mirror content; the three PHP rows below
+    # are HISTORICAL-ONLY (Rust-only cleanup 2026-10-28: kiwicaptcha-php,
+    # the Symfony integrations tree and the tests/browser router are
+    # removed from the tree; the rows stay so the REQUIRED full-history
+    # scan keeps the commits that carried them clean).
     "(^|/)packages/kiwicaptcha/src/",
     "(^|/)packages/kiwicaptcha/tools/",
     "(^|/)packages/kiwicaptcha-php/src/ExecutionChallengeGenerator[.]php$",

@@ -561,19 +561,40 @@ groups:
           description: "No WAL segment reached the offsite archive for {{ $value | humanizeDuration }} on {{ $labels.instance }}. With archive_timeout=300s a quiet database still archives every ~5 minutes; 20m+ means the documented RPO bound (minutes, deterministic) is not holding. Check PostgresWALArchiveFailing and the archive helper's log lines."
           runbook_url: "https://apexmail.ee/docs/alerts#postgres-wal-archive-lag-exceeded"
 
-      - alert: ApiAuthValidCredentialFailureRate
+      - alert: ApiAuthServiceFailureRate
         expr: |
-          sum(rate(apexmail_auth_credential_attempts_total{job="apexmail-api",outcome!="authenticated"}[30m]))
+          sum(rate(apexmail_auth_service_attempts_total{job="apexmail-api",outcome="error"}[30m]))
           /
-          clamp_min(sum(rate(apexmail_auth_credential_attempts_total{job="apexmail-api",outcome="authenticated"}[30m])), 0.001)
-          > 0.05
+          clamp_min(
+            sum(rate(apexmail_auth_service_attempts_total{job="apexmail-api"}[30m])),
+            0.001
+          )
+          > 0.01
         for: 15m
+        labels:
+          severity: critical
+        annotations:
+          summary: "API-key authentication is failing service-side above 1 percent"
+          description: "The auth SERVICE SLI (apexmail_auth_service_attempts_total) shows ApexMail-side failures (DB/Redis/scopes errors) above 1 percent of all attempts for 15 minutes. Invalid or expired customer keys never enter this SLI; inspect the outcome=error stream."
+          runbook_url: "https://apexmail.ee/docs/alerts#api-auth-service-failure-rate"
+
+      - alert: ApiAuthSuccessRateBelowSla
+        expr: |
+          1 - (
+            sum(rate(apexmail_auth_service_attempts_total{job="apexmail-api",outcome="succeeded"}[30m]))
+            /
+            clamp_min(
+              sum(rate(apexmail_auth_service_attempts_total{job="apexmail-api"}[30m])),
+              0.001
+            )
+          ) > 0.001
+        for: 30m
         labels:
           severity: warning
         annotations:
-          summary: "Valid API-key authentication is failing above 5 percent"
-          description: "The SLA auth denominator (apexmail_auth_credential_attempts_total, mechanism=api_key) shows non-authenticated outcomes exceeding 5 percent of authenticated attempts for 15 minutes. Inspect the outcome labels for the failure class before assuming an incident."
-          runbook_url: "https://apexmail.ee/docs/alerts#api-auth-valid-credential-failure-rate"
+          summary: "Valid-credential authentication availability below the 99.9 percent SLA"
+          description: "The auth service SLI (successes over successes-plus-service-errors) spent 30 minutes above a 0.1 percent failure rate. This is the SLA 2.4 denominator; credential rejection outcomes are excluded by construction."
+          runbook_url: "https://apexmail.ee/docs/alerts#api-auth-success-rate-below-sla"
 
       - alert: OutboundThrottleDeferralAgeHigh
         expr: apexmail_outbound_mta_throttle_deferred_age_seconds > 3600

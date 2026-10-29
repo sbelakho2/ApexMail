@@ -1,5 +1,5 @@
 //! Compliance server binary, a long-running service: HTTP API on port 3011
-//! (liveness `GET /health`, readiness `GET /health/ready`), 10 background
+//! (liveness `GET /health`, readiness `GET /health/ready`), 11 background
 //! cron jobs and graceful shutdown (SIGTERM/SIGINT → in-flight requests
 //! drain, DB pool closes).
 //!
@@ -49,6 +49,14 @@
 //!     every `CONSENT_EXPIRY_CHECK_INTERVAL_SECS` (default 3600s). This is
 //!     the job's ONE production driver: before this arm existed the module
 //!     was dead code and expired consents were never revoked.
+//! 11. SOC 2 stale-attestation sweep, daily. Every in-scope control whose
+//!     `next_attestation_at` passed or whose required evidence set is
+//!     incomplete/stale is re-derived and persisted as
+//!     `stale_attestation_sweep` rows in `soc2_evidence_collection_runs`
+//!     (external audit 6 remediation #16: stale evidence must be impossible
+//!     to ignore, not just derivable on demand). The operator CP listing
+//!     (`GET /v1/admin/compliance/stale-evidence`) reads the same pure query
+//!     live; the alerting observation window remains the owner's decision.
 
 use clap::Parser;
 use observability_service::otlp_exporter::{
@@ -346,7 +354,7 @@ async fn dsr_expiry_tick(state: &AppState) -> DsrExpiryTick {
     tick
 }
 
-/// 10 background cron jobs:
+/// 11 background cron jobs:
 /// 1. GDPR queue processing, every 30s
 /// 2. Secret auto-rotation, every 60min
 /// 3. GDPR request expiry, every 5min
@@ -362,6 +370,10 @@ async fn dsr_expiry_tick(state: &AppState) -> DsrExpiryTick {
 ///     setting, default 3600s). Dead-by-omission fix: `ConsentExpiryJob` was
 ///     declared in `lib.rs` but no production code ever constructed it, so
 ///     expired consents were never revoked. This arm is its only driver.
+/// 11. SOC 2 stale-attestation sweep, daily. Recurrence is the point
+///     (external audit 6 remediation #16: no recurring system swept the
+///     `next_attestation_at` controls, so stale evidence was only visible if
+///     someone thought to ask).
 async fn run_cron_jobs(state: Arc<AppState>, outbox_flusher: DsrOutboxFlusher) {
     let consent_expiry_interval = Duration::from_secs(check_interval_secs());
     info!(
@@ -382,12 +394,13 @@ async fn run_cron_jobs(state: Arc<AppState>, outbox_flusher: DsrOutboxFlusher) {
             ledger: Duration::from_secs(300),
             obligations: Duration::from_secs(86400),
             consent_expiry: consent_expiry_interval,
+            stale_attestations: Duration::from_secs(86400),
         },
     )
     .await;
 }
 
-/// Tick periods for the ten cron jobs, in declaration order. Split from
+/// Tick periods for the eleven cron jobs, in declaration order. Split from
 /// [`run_cron_jobs`] so tests can drive every job arm in milliseconds.
 #[derive(Clone, Copy)]
 struct CronIntervals {
@@ -401,6 +414,7 @@ struct CronIntervals {
     ledger: Duration,
     obligations: Duration,
     consent_expiry: Duration,
+    stale_attestations: Duration,
 }
 
 async fn run_cron_jobs_with_intervals(
@@ -428,6 +442,10 @@ async fn run_cron_jobs_with_intervals(
     // `check_and_revoke_expired` is its one-shot entry for tests/operators.
     let consent_expiry_job = ConsentExpiryJob::new(state.db.clone(), state.audit_logger.clone());
     let mut consent_expiry_ticker = interval(intervals.consent_expiry);
+    // 11: SOC 2 stale-attestation sweep. Daily like the retention sweep: the
+    // attestation cadence is 90 days, so a day of detection latency is noise
+    // while a shorter tick would multiply run rows without new information.
+    let mut stale_attestations_ticker = interval(intervals.stale_attestations);
 
     loop {
         tokio::select! {
@@ -591,6 +609,25 @@ async fn run_cron_jobs_with_intervals(
                     Err(e) => error!(error = %e, "Consent expiry sweep failed"),
                 }
             }
+            _ = stale_attestations_ticker.tick() => {
+                // 11: re-derive every in-scope control's attestation state
+                // and persist one run row per overdue control, so stale
+                // evidence accumulates a visible trail instead of waiting
+                // for someone to ask (audit 6 remediation #16). The sweep
+                // itself is fail-loud: an error is logged here and retried
+                // on the next tick, never reported as a clean pass.
+                match state.soc2.sweep_stale_attestations().await {
+                    Ok(summary) if summary.stale_controls > 0 => {
+                        warn!(
+                            stale = summary.stale_controls,
+                            scanned = summary.controls_scanned,
+                            "SOC2 stale-attestation sweep flagged overdue controls"
+                        );
+                    }
+                    Ok(_) => {}
+                    Err(e) => error!(error = %e, "SOC2 stale-attestation sweep failed"),
+                }
+            }
         }
     }
 }
@@ -664,7 +701,7 @@ mod tests {
         };
         let outbox_flusher = DsrOutboxFlusher::new(state.db.clone(), config.gdpr.clone());
 
-        // All ten tickers fire their first tick immediately and then every
+        // All eleven tickers fire their first tick immediately and then every
         // 5 ms: one loop pass exercises every job arm against real SQL.
         let task = tokio::spawn(run_cron_jobs_with_intervals(
             state.clone(),
@@ -680,6 +717,7 @@ mod tests {
                 ledger: Duration::from_millis(5),
                 obligations: Duration::from_millis(5),
                 consent_expiry: Duration::from_millis(5),
+                stale_attestations: Duration::from_millis(5),
             },
         ));
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -736,7 +774,7 @@ mod tests {
             .expect("seed consent");
         }
 
-        // Only the consent-expiry arm is fast; the other nine still fire
+        // Only the consent-expiry arm is fast; the other ten still fire
         // their immediate first tick once, exactly as the job matrix proves.
         let task = tokio::spawn(run_cron_jobs_with_intervals(
             state.clone(),
@@ -752,6 +790,7 @@ mod tests {
                 ledger: Duration::from_secs(3600),
                 obligations: Duration::from_secs(3600),
                 consent_expiry: Duration::from_millis(5),
+                stale_attestations: Duration::from_secs(3600),
             },
         ));
         // The first tick fires immediately. Poll for the effect instead of

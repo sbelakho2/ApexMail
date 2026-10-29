@@ -1408,6 +1408,9 @@ services:
       # OutboundMtaPendingOldestAgeSlo as dead rules with zero coverage on
       # the only component draining outbound_relay_ledger.
       OUTBOUND_MTA_HEALTH_ADDR: 0.0.0.0:8093
+      # Deferred outbound mail (sustained provider throttle) expires honestly
+      # at this deadline instead of parking forever (relay deadline arm).
+      OUTBOUND_THROTTLE_DEFER_DEADLINE_SECS: ${OUTBOUND_THROTTLE_DEFER_DEADLINE_SECS:-21600}
       OUTBOUND_MTA_POLL_SECS: "5"
       OUTBOUND_MTA_BATCH_SIZE: "100"
       OUTBOUND_MTA_MAX_ATTEMPTS: "12"

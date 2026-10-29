@@ -99,7 +99,7 @@ Source of truth: `docs/development/capability-registry.json` (ladder: implemente
 
 ## 4b. Schema migrations
 
-`services/mail-server/migrations/`: **247 `*.sql` files**, latest `275_dedicated_tenant_product_line.sql` (regenerated as the `ls | tail`).
+`services/mail-server/migrations/`: **250 `*.sql` files**, latest `278_dedicated_host_execution.sql` (regenerated as the `ls | tail`).
 
 `tools/migrations/`: 35 `*.sql` files.
 

@@ -685,11 +685,15 @@ def validate_marketing_data(catalog: dict[str, ParsedPlan], errors: list[str]) -
 # plus the DedicatedTenant floor in compliance/deployment_products.rs). The
 # marketing data table is the only NON-Rust mirror that restates them, so its
 # values are pinned here, structurally, exactly like the PLANS rows.
-# (name -> (eur_cents, usd_cents))
-EXPECTED_PRODUCT_LINES: dict[str, tuple[int, int]] = {
-    "compliance": (99_000, 109_000),        # €990/mo, USD 1,090/mo (annual)
-    "platform": (99_000, 109_000),          # base, plus the usage fees below
-    "dedicated_tenant": (400_000, 450_000), # from €4,000/mo, from USD 4,500/mo
+# (name -> (eur_cents, usd_cents or None)). None = the line is SOLD IN EUR
+# ONLY: the billing engine refuses USD for it (no authoritative USD price
+# book — Dedicated Tenant USD setup fees are unquotable), so the public
+# data must say "EUR contract pricing" and never a USD figure it cannot
+# bill (external audit 6, remediation #5).
+EXPECTED_PRODUCT_LINES: dict[str, tuple[int, int | None]] = {
+    "compliance": (99_000, 109_000),         # €990/mo, USD 1,090/mo (annual)
+    "platform": (99_000, 109_000),           # base, plus the usage fees below
+    "dedicated_tenant": (400_000, None),     # from €4,000/mo, EUR contract only
 }
 PLATFORM_RATES = {
     "overage_eur_cents_per_1k": 30,     # €0.30 per 1,000 above 1M
@@ -733,9 +737,18 @@ def validate_contract_lines(errors: list[str]) -> None:
             errors,
         )
         check(
-            f"${usd_cents // 100:,}" in str(row.get("usd_display", "")),
+            (
+                usd_cents is not None
+                and f"${usd_cents // 100:,}" in str(row.get("usd_display", ""))
+            )
+            or (
+                usd_cents is None
+                and "EUR contract pricing" in str(row.get("usd_display", ""))
+                and "$" not in str(row.get("usd_display", ""))
+            ),
             f"pricing.json contract_lines {line_id}.usd_display is missing "
-            f"${usd_cents // 100:,}: {row.get('usd_display')!r}",
+            f"{'$' + format(usd_cents // 100, ',') if usd_cents is not None else 'the EUR-contract marker (USD is not billable for this line)'}: "
+            f"{row.get('usd_display')!r}",
             errors,
         )
     platform = str(lines.get("platform", {}).get("eur_display", ""))

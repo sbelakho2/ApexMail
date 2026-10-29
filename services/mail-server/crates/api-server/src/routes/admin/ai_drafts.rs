@@ -31,8 +31,21 @@
 //! effect-less path (a refused approval of an unroutable draft, whose claim
 //! rolls back) records its evidence in its own committed write before the
 //! error response.
+//!
+//! Sixth external audit (item 7), the Mailbot review UX completion: this
+//! module is also where the shared cores the tenant surface
+//! (`/v1/ai/drafts`) re-uses live —
+//! * `approve_draft_core_scoped_with_edit`: Edit & Send, an optional edited
+//!   reply that goes out through the SAME claim/admission/queueing/audit
+//!   path, with `edited` + the char edit distance on the audit record;
+//! * `escalate_draft_core_scoped`: tenant escalation, a flag on a
+//!   still-pending draft that this operator listing surfaces FIRST and
+//!   filterable (`?escalated=true`);
+//! * `regenerate_draft_core_scoped`: versioned regeneration through the
+//!   ai-service's env-gated generation backend (honest 503 when gated,
+//!   never a fabricated draft), the old version superseded, never deleted.
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -57,6 +70,22 @@ struct DraftDto {
     subject: String,
     draft_reply: String,
     received_at: String,
+    /// Tenant-escalated drafts surface FIRST in the operator queue (sixth
+    /// external audit, item 7): a tenant that escalated a draft asked for
+    /// operator attention explicitly.
+    escalated: bool,
+    escalated_at: Option<String>,
+    escalated_by: Option<String>,
+}
+
+/// The operator listing's optional filter. `?escalated=true` restricts the
+/// queue to tenant-escalated drafts; absent lists everything (escalated
+/// first).
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AdminDraftsQuery {
+    #[serde(default)]
+    escalated: Option<bool>,
 }
 
 /// The CP drafts list, with the defense-in-depth tenant scope.
@@ -66,13 +95,19 @@ struct DraftDto {
 /// queue. Any other caller, reachable only if the gate were ever bypassed —
 /// is restricted by `tenant_id = $2` inside the SQL itself, so another
 /// tenant's rows can never be selected, whatever the middleware did.
+/// `$3` is the escalated-only filter (sixth external audit, item 7).
+/// Ordering: tenant-escalated drafts first (newest escalation first), then
+/// the FIFO queue by `received_at`.
 const LIST_DRAFTS_SQL: &str = r#"
-        SELECT id, tenant_id, from_email, subject, ai_response, received_at
+        SELECT id, tenant_id, from_email, subject, ai_response, received_at,
+               escalated_at, escalated_by
         FROM inbound_messages
         WHERE pending_approval = true
           AND ai_response IS NOT NULL
           AND ($1 OR tenant_id = $2)
-        ORDER BY received_at ASC
+          AND (NOT $3 OR escalated_at IS NOT NULL)
+        ORDER BY (escalated_at IS NULL) ASC, escalated_at DESC NULLS LAST,
+                 received_at ASC
         LIMIT 100
 "#;
 
@@ -84,9 +119,11 @@ const LIST_DRAFTS_SQL: &str = r#"
 async fn list_drafts(
     State(state): State<AppState>,
     auth: AuthUser,
+    Query(query): Query<AdminDraftsQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     require_scopes(&auth, &["*"])?;
     let scope = draft_scope(&state, &auth).await?;
+    let escalated_only = query.escalated.unwrap_or(false);
 
     let rows: Vec<(
         String,
@@ -95,22 +132,30 @@ async fn list_drafts(
         Option<String>,
         Option<String>,
         chrono::DateTime<chrono::Utc>,
+        Option<chrono::DateTime<chrono::Utc>>,
+        Option<String>,
     )> = sqlx::query_as(LIST_DRAFTS_SQL)
         .bind(scope.is_system_tenant)
         .bind(&scope.tenant_id)
+        .bind(escalated_only)
         .fetch_all(&state.db)
         .await?;
 
     let drafts: Vec<DraftDto> = rows
         .into_iter()
-        .map(|(id, tenant, from, subject, reply, ts)| DraftDto {
-            id,
-            tenant_id: tenant.unwrap_or_default(),
-            from_email: from.unwrap_or_default(),
-            subject: subject.unwrap_or_default(),
-            draft_reply: reply.unwrap_or_default(),
-            received_at: ts.to_rfc3339(),
-        })
+        .map(
+            |(id, tenant, from, subject, reply, ts, escalated_at, escalated_by)| DraftDto {
+                id,
+                tenant_id: tenant.unwrap_or_default(),
+                from_email: from.unwrap_or_default(),
+                subject: subject.unwrap_or_default(),
+                draft_reply: reply.unwrap_or_default(),
+                received_at: ts.to_rfc3339(),
+                escalated: escalated_at.is_some(),
+                escalated_at: escalated_at.map(|at| at.to_rfc3339()),
+                escalated_by,
+            },
+        )
         .collect();
 
     Ok(Json(
@@ -160,6 +205,24 @@ impl DraftDecisionSurface {
             Self::Tenant => "tenant.ai_draft.approval_refused",
         }
     }
+
+    /// Escalation (sixth external audit, item 7): the tenant flagged a
+    /// still-pending draft for operator attention.
+    fn escalated_action(self) -> &'static str {
+        match self {
+            Self::ControlPlane => "control_plane.ai_draft.escalated",
+            Self::Tenant => "tenant.ai_draft.escalated",
+        }
+    }
+
+    /// Regeneration (sixth external audit, item 7): a NEW draft version was
+    /// generated and the old one superseded.
+    fn regenerated_action(self) -> &'static str {
+        match self {
+            Self::ControlPlane => "control_plane.ai_draft.regenerated",
+            Self::Tenant => "tenant.ai_draft.regenerated",
+        }
+    }
 }
 
 /// Merge one caller's evidence fields into the decision metadata. Extras are
@@ -201,10 +264,88 @@ async fn draft_scope(state: &AppState, auth: &AuthUser) -> Result<DraftDecisionS
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ApproveBody {
     /// Operator note recorded in the audit log.
     #[serde(default)]
     pub note: String,
+    /// Edit & Send (sixth external audit, item 7): when supplied, the EDITED
+    /// content is what gets sent through the same consent/claims/audit core.
+    #[serde(default)]
+    pub reply_text: Option<String>,
+    #[serde(default)]
+    pub reply_html: Option<String>,
+}
+
+/// The caller-supplied Edit & Send payload (sixth external audit, item 7):
+/// an optional edited reply that REPLACES the generated draft text at send
+/// time. `new` normalizes the wire fields: `Ok(None)` means no edit was
+/// supplied (the stored draft is sent verbatim, the previous behaviour), a
+/// `Some(edit)` is validated — an edit may change the reply, NEVER empty it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DraftApprovalEdit {
+    pub reply_text: String,
+    pub reply_html: Option<String>,
+}
+
+impl DraftApprovalEdit {
+    pub fn new(
+        reply_text: Option<String>,
+        reply_html: Option<String>,
+    ) -> Result<Option<Self>, ApiError> {
+        if reply_text.is_none() && reply_html.is_none() {
+            return Ok(None);
+        }
+        let text = reply_text.unwrap_or_default().trim().to_string();
+        if text.is_empty() {
+            return Err(ApiError::Validation(vec![
+                "replyText must not be empty: an edit may change the reply, never remove it".into(),
+            ]));
+        }
+        let html = match reply_html {
+            Some(html) => {
+                let html = html.trim().to_string();
+                if html.is_empty() {
+                    return Err(ApiError::Validation(vec![
+                        "replyHtml, when supplied, must not be empty".into(),
+                    ]));
+                }
+                Some(html)
+            }
+            None => None,
+        };
+        Ok(Some(Self {
+            reply_text: text,
+            reply_html: html,
+        }))
+    }
+}
+
+/// The char-level edit distance (Levenshtein) between the stored generated
+/// draft and the edited reply — the simple "how much did the human change"
+/// telemetry field the audit record carries (sixth external audit, item 7).
+/// Both inputs are bounded; beyond the cap the length delta is the honest
+/// bounded-cost answer (drafts are hard-truncated well below it anyway).
+pub(crate) fn char_edit_distance(original: &str, edited: &str) -> i64 {
+    const MAX_CHARS: usize = 8192;
+    let source: Vec<char> = original.chars().collect();
+    let target: Vec<char> = edited.chars().collect();
+    if source.len() > MAX_CHARS || target.len() > MAX_CHARS {
+        return (source.len() as i64 - target.len() as i64).abs();
+    }
+    let mut previous: Vec<i64> = (0..=target.len() as i64).collect();
+    let mut current: Vec<i64> = vec![0; target.len() + 1];
+    for (row, source_char) in source.iter().enumerate() {
+        current[0] = row as i64 + 1;
+        for (column, target_char) in target.iter().enumerate() {
+            let substitution_cost = i64::from(source_char != target_char);
+            current[column + 1] = (previous[column + 1] + 1)
+                .min(current[column] + 1)
+                .min(previous[column] + substitution_cost);
+        }
+        std::mem::swap(&mut previous, &mut current);
+    }
+    previous[target.len()]
 }
 
 /// Atomically claim a pending draft inside an open transaction: the
@@ -269,8 +410,25 @@ async fn approve_draft(
     body: Option<Json<ApproveBody>>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     require_scopes(&auth, &["*"])?;
-    let note = body.map(|Json(b)| b.note).unwrap_or_default();
-    approve_draft_core(&state, &auth, &id, &note).await
+    let (note, edit) = body
+        .map(|Json(body)| {
+            let edit = DraftApprovalEdit::new(body.reply_text, body.reply_html)?;
+            Ok::<_, ApiError>((body.note, edit))
+        })
+        .transpose()?
+        .unwrap_or_else(|| (String::new(), None));
+    let scope = draft_scope(&state, &auth).await?;
+    approve_draft_core_scoped_with_edit(
+        &state,
+        &auth,
+        &scope,
+        &id,
+        &note,
+        edit.as_ref(),
+        DraftDecisionSurface::ControlPlane,
+        &serde_json::json!({}),
+    )
+    .await
 }
 
 /// The approval flow, shared by the JSON API and the control-plane review
@@ -312,6 +470,27 @@ pub(crate) async fn approve_draft_core_scoped(
     scope: &DraftDecisionScope,
     id: &str,
     note: &str,
+    surface: DraftDecisionSurface,
+    extra_metadata: &serde_json::Value,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    approve_draft_core_scoped_with_edit(state, auth, scope, id, note, None, surface, extra_metadata)
+        .await
+}
+
+/// Edit & Send arm of the shared approval core (sixth external audit, item
+/// 7): `edit = Some(..)` sends the EDITED content instead of the stored
+/// draft through the EXACT same claim/admission/suppression/queueing/audit
+/// path — there is no forked send pipeline for edited replies. The stored
+/// `ai_response` stays as generated (provenance for the edit-distance
+/// telemetry); the approval audit records `edited` plus the char edit
+/// distance between the generated draft and the content actually sent.
+pub(crate) async fn approve_draft_core_scoped_with_edit(
+    state: &AppState,
+    auth: &AuthUser,
+    scope: &DraftDecisionScope,
+    id: &str,
+    note: &str,
+    edit: Option<&DraftApprovalEdit>,
     surface: DraftDecisionSurface,
     extra_metadata: &serde_json::Value,
 ) -> Result<Json<serde_json::Value>, ApiError> {
@@ -370,7 +549,18 @@ pub(crate) async fn approve_draft_core_scoped(
     let from_email = from_email.unwrap_or_default();
     let subject = subject.unwrap_or_default();
     let inbound_body_text = inbound_body_text.unwrap_or_default();
-    let reply = reply.unwrap_or_default();
+    let stored_reply = reply.unwrap_or_default();
+    // Edit & Send (sixth external audit, item 7): the edited content, when
+    // supplied, is what gets sent and what the risk classifier reads. The
+    // distance telemetry is measured against the STORED generated draft.
+    let (reply, edited, edit_distance_chars) = match edit {
+        Some(edit) => (
+            edit.reply_text.clone(),
+            true,
+            Some(char_edit_distance(&stored_reply, &edit.reply_text)),
+        ),
+        None => (stored_reply, false, None),
+    };
 
     // WP F9: the approval records the draft's risk class alongside the
     // decision. The class comes from the SAME deterministic classifier the
@@ -608,10 +798,16 @@ pub(crate) async fn approve_draft_core_scoped(
     } else {
         subject.clone()
     };
-    let reply_html: String = crate::routes::helpers::html_escape(&reply)
-        .split("\n\n")
-        .map(|paragraph| format!("<p>{}</p>", paragraph.replace('\n', "<br/>")))
-        .collect();
+    // Edit & Send: a supplied `replyHtml` is the reviewer's presentation and
+    // rides the SAME shared transactional shell; without one the (possibly
+    // edited) text is rendered paragraph by paragraph exactly as before.
+    let reply_html: String = match edit.and_then(|edit| edit.reply_html.as_deref()) {
+        Some(html) => html.to_string(),
+        None => crate::routes::helpers::html_escape(&reply)
+            .split("\n\n")
+            .map(|paragraph| format!("<p>{}</p>", paragraph.replace('\n', "<br/>")))
+            .collect(),
+    };
     let html_body = crate::routes::system_sender::render_transactional_email(
         &crate::routes::system_sender::TransactionalEmail {
             document_title: &heading,
@@ -704,6 +900,12 @@ pub(crate) async fn approve_draft_core_scoped(
                 "routedTenantId": tenant_id.clone(),
                 "recipient": from_email.clone(),
                 "queuedMessageId": message_uuid.to_string(),
+                // Sixth external audit (item 7), Edit & Send telemetry: every
+                // approval records whether the sent content was edited and,
+                // when it was, the char edit distance from the generated
+                // draft to what actually went out.
+                "edited": edited,
+                "editDistanceChars": edit_distance_chars,
                 // Fourth external audit (P0): the SERVICE classification of this
                 // release, the deterministic purpose of the inbound message and
                 // its risk. The delivery class is the audit's durable answer to
@@ -740,11 +942,15 @@ pub(crate) async fn approve_draft_core_scoped(
         draft_id = %id,
         tenant_id = %tenant_id,
         note = %note,
+        edited = edited,
+        edit_distance_chars = edit_distance_chars.unwrap_or(0),
         "AI reply draft APPROVED and queued"
     );
     Ok(Json(serde_json::json!({
         "approved": true,
         "queued_message_id": message_uuid.to_string(),
+        "edited": edited,
+        "edit_distance_chars": edit_distance_chars,
     })))
 }
 
@@ -846,6 +1052,9 @@ pub(crate) async fn reject_draft_core_scoped(
             serde_json::json!({
                 "note": note.clone(),
                 "routedTenantId": routed_tenant_id,
+                // Sixth external audit (item 7), uniform terminal-action
+                // telemetry: a rejection is never an edited send.
+                "edited": false,
             }),
             extra_metadata,
         ),
@@ -861,6 +1070,396 @@ pub(crate) async fn reject_draft_core_scoped(
         "AI reply draft REJECTED"
     );
     Ok(Json(serde_json::json!({ "rejected": true })))
+}
+
+// ─── Sixth external audit (item 7): escalation + regeneration cores ──────
+
+/// Mark a still-pending draft ESCALATED for operator attention (sixth
+/// external audit, item 7). Escalation is a flag, not a terminal decision:
+/// the draft stays pending and approvable/rejectable on both surfaces, it
+/// just surfaces FIRST in the operator queue (`LIST_DRAFTS_SQL`) and stays
+/// filterable (`?escalated=true`). The escalator identity and the optional
+/// STRUCTURED reason are recorded on the row and in the audit entry, which
+/// commits atomically with the flag write.
+const ESCALATE_DRAFT_SQL: &str = r#"
+    UPDATE inbound_messages
+    SET escalated_at = NOW(),
+        escalated_by = $2,
+        escalation_reason = COALESCE($3::jsonb, escalation_reason)
+    WHERE id = $1
+      AND pending_approval = true
+      AND ai_response IS NOT NULL
+      AND ($4 OR tenant_id = $5)
+    RETURNING tenant_id, escalated_at, draft_version
+"#;
+
+/// The escalator identity for the row: the acting user, else the API key
+/// (prefixed so a machine escalation is never mistaken for a user id), else
+/// the acting tenant.
+fn escalator_identity(auth: &AuthUser) -> String {
+    if let Some(user_id) = auth.user_id.as_deref() {
+        return user_id.to_string();
+    }
+    if let Some(api_key_id) = auth.api_key_id.as_deref() {
+        return format!("api_key:{api_key_id}");
+    }
+    format!("tenant:{}", auth.tenant_id)
+}
+
+/// The shared escalation core, same shape as the approve/reject cores: the
+/// tenant surface pins the authenticated tenant; a future operator route
+/// resolves the system scope. Re-escalation updates the flag (the newest
+/// escalator and reason win) and appends another audit entry.
+pub(crate) async fn escalate_draft_core_scoped(
+    state: &AppState,
+    auth: &AuthUser,
+    scope: &DraftDecisionScope,
+    id: &str,
+    reason: Option<&serde_json::Value>,
+    surface: DraftDecisionSurface,
+    extra_metadata: &serde_json::Value,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let id = id.to_string();
+    let escalator = escalator_identity(auth);
+    let mut tx = state.db.begin().await?;
+
+    let escalated: Option<(Option<String>, chrono::DateTime<chrono::Utc>, i32)> =
+        sqlx::query_as(ESCALATE_DRAFT_SQL)
+            .bind(&id)
+            .bind(&escalator)
+            .bind(reason)
+            .bind(scope.is_system_tenant)
+            .bind(&scope.tenant_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+
+    let Some((routed_tenant_id, escalated_at, draft_version)) = escalated else {
+        // Nothing matched: unknown, foreign or already-handled draft. The
+        // transaction drops, nothing was written, and the refusal is
+        // indistinguishable from a missing row (the cross-tenant contract).
+        return Err(ApiError::NotFound(
+            "draft not found or already handled".into(),
+        ));
+    };
+
+    log_draft_audit_in_tx(
+        &mut tx,
+        state.config.environment.is_production(),
+        auth,
+        surface.escalated_action(),
+        &id,
+        merge_audit_metadata(
+            serde_json::json!({
+                "routedTenantId": routed_tenant_id,
+                "escalatedBy": escalator.clone(),
+                "escalatedAt": escalated_at.to_rfc3339(),
+                "draftVersion": draft_version,
+                "reason": reason.cloned().unwrap_or(serde_json::Value::Null),
+                // Uniform terminal-action telemetry (item 7).
+                "edited": false,
+            }),
+            extra_metadata,
+        ),
+    )
+    .await?;
+
+    tx.commit().await?;
+
+    tracing::info!(
+        draft_id = %id,
+        escalator = %escalator,
+        "AI reply draft ESCALATED to the operator queue"
+    );
+    Ok(Json(serde_json::json!({
+        "escalated": true,
+        "escalated_by": escalator,
+        "escalated_at": escalated_at.to_rfc3339(),
+        "draft_id": id,
+    })))
+}
+
+/// Resolve the mailbot draft-generation backend for regeneration (sixth
+/// external audit, item 7). The generation pipeline (guards, grounding,
+/// verifier, LLM) lives in the ai-service's env-gated email agent
+/// (`AI_EMAIL_AGENT_ENABLED`, default OFF) — the api-server NEVER fabricates
+/// a draft. When the deployment has the backend unconfigured or gated off,
+/// the honest answer is a named 503, never a fake draft.
+pub(crate) fn mailbot_generation_backend(state: &AppState) -> Result<String, ApiError> {
+    let base_url = state.config.ai_service_base_url.trim().to_string();
+    if base_url.is_empty() {
+        return Err(ApiError::ServiceUnavailable(
+            "regeneration is unavailable: the ai-service generation backend is not \
+             configured in this deployment (AI_SERVICE_BASE_URL is empty); this surface \
+             never fabricates a draft. Approve with edits, or reject with a structured \
+             reason."
+                .into(),
+        ));
+    }
+    let agent_enabled = std::env::var("AI_EMAIL_AGENT_ENABLED")
+        .map(|value| value == "true" || value == "1")
+        .unwrap_or(false);
+    if !agent_enabled {
+        return Err(ApiError::ServiceUnavailable(
+            "regeneration is unavailable: the mailbot draft-generation agent is \
+             env-gated off in this deployment (AI_EMAIL_AGENT_ENABLED is not enabled); \
+             this surface never fabricates a draft. Approve with edits, or reject with \
+             a structured reason."
+                .into(),
+        ));
+    }
+    Ok(base_url)
+}
+
+/// Read the LIVE draft that regeneration replaces (tenant-pinned, pending,
+/// never superseded). Foreign/missing ids match nothing (404), exactly like
+/// the approve/reject claims.
+const REGENERATE_SOURCE_SQL: &str = r#"
+    SELECT tenant_id, from_email, to_email, subject, body_text, body_html,
+           message_id_header, headers, classification, classification_confidence,
+           suggested_action, ai_response, draft_version
+    FROM inbound_messages
+    WHERE id = $1
+      AND pending_approval = true
+      AND ai_response IS NOT NULL
+      AND superseded_by IS NULL
+      AND ($2 OR tenant_id = $3)
+"#;
+
+/// Retire the superseded draft: NEVER deleted, its approval/audit lineage
+/// stays answerable. The conditional claim makes exactly one regeneration
+/// the winner across concurrent callers.
+const SUPERSEDE_DRAFT_SQL: &str = r#"
+    UPDATE inbound_messages
+    SET pending_approval = false, processed_at = NOW(), superseded_by = $2
+    WHERE id = $1
+      AND pending_approval = true
+      AND superseded_by IS NULL
+      AND ($3 OR tenant_id = $4)
+    RETURNING tenant_id
+"#;
+
+/// The new draft version: a full copy of the inbound message with the
+/// regenerated reply, `draft_version = old + 1`, pending review again.
+const INSERT_REGENERATED_DRAFT_SQL: &str = r#"
+    INSERT INTO inbound_messages
+        (id, tenant_id, from_email, to_email, subject, body_text, body_html,
+         message_id_header, headers, classification, classification_confidence,
+         suggested_action, ai_response, ai_tokens_used, pending_approval,
+         processed, processed_at, received_at, is_verp_reply, draft_version)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
+            true, true, NOW(), NOW(), false, $15)
+"#;
+
+/// The shared regeneration core (sixth external audit, item 7):
+///
+/// 1. the source draft must be a LIVE pending draft of the caller's scope
+///    (404 otherwise, the cross-tenant contract);
+/// 2. the generation backend must be available — the SAME pipeline the
+///    mailbot runs (the ai-service email agent) re-runs the draft
+///    generation for this inbound message over HTTP; when the deployment
+///    env-gates it, the answer is an honest 503 naming the gate, NEVER a
+///    fabricated draft;
+/// 3. one transaction inserts the NEW version row and supersedes the old
+///    one (retired, never deleted), with the audit entry committing
+///    atomically.
+pub(crate) async fn regenerate_draft_core_scoped(
+    state: &AppState,
+    auth: &AuthUser,
+    scope: &DraftDecisionScope,
+    id: &str,
+    surface: DraftDecisionSurface,
+    extra_metadata: &serde_json::Value,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let id = id.to_string();
+
+    // 1. The source draft, tenant-pinned: a foreign or missing id is a 404
+    //    before any availability answer leaks whether the backend is on.
+    let source: Option<(
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<serde_json::Value>,
+        Option<String>,
+        Option<f64>,
+        Option<serde_json::Value>,
+        Option<String>,
+        i32,
+    )> = sqlx::query_as(REGENERATE_SOURCE_SQL)
+        .bind(&id)
+        .bind(scope.is_system_tenant)
+        .bind(&scope.tenant_id)
+        .fetch_optional(&state.db)
+        .await?;
+    let Some((
+        tenant_id,
+        from_email,
+        to_email,
+        subject,
+        body_text,
+        body_html,
+        message_id_header,
+        headers,
+        classification,
+        classification_confidence,
+        suggested_action,
+        _previous_reply,
+        draft_version,
+    )) = source
+    else {
+        return Err(ApiError::NotFound("draft not found".into()));
+    };
+    let tenant_id = tenant_id.unwrap_or_default();
+    let subject = subject.unwrap_or_default();
+    let body_text = body_text.unwrap_or_default();
+
+    // 2. The generation backend: honestly unavailable is a named 503.
+    let base_url = mailbot_generation_backend(state)?;
+
+    // 3. Re-run the SAME generation pipeline: the ai-service's env-gated
+    //    email agent owns the guards, the grounding facts, the verifier and
+    //    the LLM. The api-server only carries the draft over — it never
+    //    generates, so a failed/unreachable/refusing backend is a 503 with
+    //    the reason, never a canned reply.
+    let mut request = state
+        .http_client
+        .post(format!("{base_url}/email-agent/drafts/{id}/regenerate"))
+        .json(&serde_json::json!({
+            "draftId": &id,
+            "tenantId": &tenant_id,
+            "subject": &subject,
+            "bodyText": &body_text,
+            "headers": &headers,
+        }))
+        .timeout(std::time::Duration::from_secs(60));
+    if let Some(token) = state.config.internal_service_token.as_deref() {
+        request = request.header("x-api-key", token);
+    }
+    request = request.header("x-apexmail-tenant-id", &tenant_id);
+    let response = request.send().await.map_err(|error| {
+        tracing::warn!(error = %error, draft_id = %id, "regenerate: generation service unreachable");
+        ApiError::ServiceUnavailable(
+            "regeneration is unavailable: the generation service cannot be reached; no draft \
+             was fabricated"
+                .into(),
+        )
+    })?;
+    let status = response.status();
+    if status != axum::http::StatusCode::OK {
+        tracing::warn!(status = %status, draft_id = %id, "regenerate: generation service refused");
+        return Err(ApiError::ServiceUnavailable(format!(
+            "regeneration is unavailable: the generation service answered HTTP {status}; no \
+             draft was fabricated"
+        )));
+    }
+    let generated: serde_json::Value = response.json().await.map_err(|error| {
+        tracing::warn!(error = %error, draft_id = %id, "regenerate: malformed service response");
+        ApiError::ServiceUnavailable(
+            "regeneration is unavailable: the generation service returned a malformed \
+             response; no draft was fabricated"
+                .into(),
+        )
+    })?;
+    let reply_text = generated
+        .get("replyText")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .ok_or_else(|| {
+            ApiError::ServiceUnavailable(
+                "regeneration is unavailable: the generation service returned no draft text; \
+                 no draft was fabricated"
+                    .into(),
+            )
+        })?
+        .to_string();
+    let tokens_used = generated
+        .get("tokensUsed")
+        .and_then(|value| value.as_i64())
+        .unwrap_or(0) as i32;
+
+    // 4. The version swap: insert the new version, retire the old one, audit
+    //    — one transaction.
+    let new_id = apexmail_lib::id::generate_id("inb", 22);
+    let new_version = draft_version.saturating_add(1);
+    let mut tx = state.db.begin().await?;
+    sqlx::query(INSERT_REGENERATED_DRAFT_SQL)
+        .bind(&new_id)
+        .bind(&tenant_id)
+        .bind(&from_email)
+        .bind(&to_email)
+        .bind(&subject)
+        .bind(&body_text)
+        .bind(&body_html)
+        .bind(&message_id_header)
+        .bind(&headers)
+        .bind(&classification)
+        .bind(classification_confidence)
+        .bind(&suggested_action)
+        .bind(&reply_text)
+        .bind(tokens_used)
+        .bind(new_version)
+        .execute(&mut *tx)
+        .await?;
+    let superseded: Option<(Option<String>,)> = sqlx::query_as(SUPERSEDE_DRAFT_SQL)
+        .bind(&id)
+        .bind(&new_id)
+        .bind(scope.is_system_tenant)
+        .bind(&scope.tenant_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+    if superseded.is_none() {
+        // A concurrent decision consumed the draft between the read and the
+        // swap: roll the new version back with everything else.
+        let _ = tx.rollback().await;
+        return Err(ApiError::NotFound(
+            "draft not found or already handled".into(),
+        ));
+    }
+
+    log_draft_audit_in_tx(
+        &mut tx,
+        state.config.environment.is_production(),
+        auth,
+        surface.regenerated_action(),
+        &id,
+        merge_audit_metadata(
+            serde_json::json!({
+                "routedTenantId": tenant_id,
+                "oldDraftId": id.clone(),
+                "oldDraftVersion": draft_version,
+                "newDraftId": new_id.clone(),
+                "newDraftVersion": new_version,
+                "supersededBy": new_id.clone(),
+                // Uniform terminal-action telemetry (item 7).
+                "edited": false,
+            }),
+            extra_metadata,
+        ),
+    )
+    .await?;
+    tx.commit().await?;
+
+    tracing::info!(
+        draft_id = %id,
+        new_draft_id = %new_id,
+        draft_version = new_version,
+        "AI reply draft REGENERATED; old version superseded (never deleted)"
+    );
+    Ok(Json(serde_json::json!({
+        "draft": {
+            "id": new_id,
+            "draft_version": new_version,
+            "supersedes": id,
+            "received_from": from_email.clone().unwrap_or_default(),
+            "subject": subject,
+            "draft_reply": reply_text,
+            "pending_approval": true,
+        },
+    })))
 }
 
 // Keep StatusCode import used uniformly.
@@ -1375,7 +1974,15 @@ mod approval_db_tests {
             -- Stored headers the automated-mail detector reads (fifth
             -- external audit): the claim RETURNS this JSONB object, so the
             -- fixture must carry it or every claim dies 42703.
-            headers          JSONB
+            headers          JSONB,
+            -- Mailbot review UX (migration 276, sixth external audit item
+            -- 7): the operator listing selects/Orders by the escalation
+            -- flag and the regeneration lineage columns.
+            draft_version    INTEGER NOT NULL DEFAULT 1,
+            superseded_by    VARCHAR(26),
+            escalated_at     TIMESTAMPTZ,
+            escalated_by     VARCHAR(255),
+            escalation_reason JSONB
         )"#;
 
     /// The claim and reject statements must never regain a `::uuid` cast:
@@ -1420,6 +2027,13 @@ mod approval_db_tests {
             "tenant_id",
             "from_email",
             "headers",
+            // Migration 276 (sixth external audit, item 7): the listing and
+            // the escalation/regeneration statements read these.
+            "draft_version",
+            "superseded_by",
+            "escalated_at",
+            "escalated_by",
+            "escalation_reason",
         ] {
             assert!(
                 INBOUND_MESSAGES_DDL.contains(column),
@@ -1652,12 +2266,16 @@ mod approval_db_tests {
             Option<String>,
             Option<String>,
             chrono::DateTime<chrono::Utc>,
+            Option<chrono::DateTime<chrono::Utc>>,
+            Option<String>,
         );
 
-        // LIST as tenant A: A's row is visible, B's never.
+        // LIST as tenant A: A's row is visible, B's never. The third bind is
+        // the escalated-only filter (off: the full queue).
         let listed: Vec<ListRow> = sqlx::query_as(LIST_DRAFTS_SQL)
             .bind(false)
             .bind("tenant-a")
+            .bind(false)
             .fetch_all(&pool)
             .await
             .expect("tenant-scoped list");
@@ -1705,6 +2323,7 @@ mod approval_db_tests {
         let all: Vec<ListRow> = sqlx::query_as(LIST_DRAFTS_SQL)
             .bind(true)
             .bind("system")
+            .bind(false)
             .fetch_all(&pool)
             .await
             .expect("system-tenant list");

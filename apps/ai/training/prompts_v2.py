@@ -82,102 +82,77 @@ FEATURES_BY_PLAN = f"""\
 # ═══════════════════════════════════════════════════════════════════════════════
 # TOOL DEFINITIONS (matches training data exactly)
 # ═══════════════════════════════════════════════════════════════════════════════
+# DERIVED, never hand-coded (audit-6 #9): the tool list renders from the REAL
+# registry the runtime executes — CHAT_READ_ONLY_TOOLS in services/mail-server/
+# crates/ai-service/src/chat.rs ("a tool_call whose name is not here is NEVER
+# executed"). The old write/destructive lists here (cancel_subscription,
+# delete_account, create_campaign, …) named tools the assistant never had; they
+# are gone, and canonical_truth.truth_problems_in_text() fails any corpus that
+# reintroduces them.
 
-TOOL_DEFINITIONS = """\
-## Tools you can call
-When you need to take an action or look up data, emit a tool call block:
 
-```tool_call
-{"tool": "TOOL_NAME", "params": {...}}
-```
+def _render_tool_definitions() -> str:
+    import re as _re
 
-After you emit a tool call, the system will execute it and return the result. You MUST wait for the result before providing your final answer. Use the result to give specific, data-driven advice.
+    from canonical_truth import read_only_tools
 
-### Read-only tools (safe, call freely)
-- **get_account_info**: Get customer's plan, usage, limits
-- **get_domain_status**: Check domain verification and DNS records — params: {domain}
-- **get_domain_health**: Full domain health check (SPF, DKIM, DMARC, MX) — params: {domain}
-- **list_domains**: List all customer domains with status
-- **get_message_status**: Look up a specific message's delivery status — params: {message_id}
-- **get_message_events**: Get all events for a message — params: {message_id}
-- **search_events**: Search events by recipient, type, or date — params: {email?, event_type?, from_date?, to_date?}
-- **get_bounce_details**: Get bounce details for a message — params: {message_id}
-- **get_suppression_status**: Check if an email is on suppression list — params: {email}
-- **list_suppressions**: List suppressed emails — params: {page?, reason?}
-- **get_deliverability_report**: Get deliverability score and details
-- **get_analytics_dashboard**: Get sending stats overview — params: {period?}
-- **get_campaign_stats**: Get stats for a campaign — params: {campaign_name}
-- **list_campaigns**: List all campaigns
-- **list_templates**: List all templates
-- **list_webhooks**: List configured webhooks
-- **get_webhook_deliveries**: Get webhook delivery history — params: {webhook_id}
-- **list_automations**: List automations
-- **list_contacts**: List/search contacts — params: {query?, tag?, page?}
-- **check_blocklist**: Check if IP/domain is on blocklists — params: {ip_or_domain}
-- **get_dns_records**: Get required DNS records for a domain — params: {domain}
-- **get_usage_stats**: Get current month usage vs limits
+    lines = [
+        "## Tools you can call",
+        "When you need to look something up or compute something, emit a tool call block:",
+        "",
+        "```tool_call",
+        '{"tool": "TOOL_NAME", "params": {...}}',
+        "```",
+        "",
+        "After you emit a tool call, the system will execute it and return the result. You MUST wait for the result before providing your final answer. Use the result to give specific, data-driven advice.",
+        "",
+        "### Read-only tools — the COMPLETE list (no tool exists outside it)",
+        "",
+        "These are the only tools you can execute. They are read-only: they compute",
+        "answers from canonical data. They never read tenant databases and never",
+        "change anything.",
+        "",
+    ]
+    for name, example in read_only_tools():
+        payload = _re.search(r"\{.*\}", example)
+        rendered = payload.group(0) if payload else f'{{"tool":"{name}"}}'
+        lines.append(f"- **{name}** — `{rendered}`")
+    lines += [
+        "",
+        "### No write, destructive, or account tools exist",
+        "You CANNOT cancel subscriptions, delete accounts, create or modify campaigns,",
+        "templates, contacts, webhooks, automations, or API keys, and you cannot change",
+        "plans or billing — no tool for any of that exists. Never emit or promise a",
+        "tool_call for such an action. These are SELF-SERVICE in the customer's",
+        "Dashboard (Billing, Account Settings, Contacts, etc.), or handled by our team",
+        "at support@apexmail.ee. Say so plainly, point to the exact Dashboard page, and",
+        "confirm what the customer wants to achieve.",
+        "",
+        "### Never handle — always escalate to support@apexmail.ee",
+        "- Refunds or billing disputes",
+        "- Payment method changes (direct user to Dashboard → Billing; escalate if issues)",
+        "- Subscription cancellation and account deletion (self-service in the Dashboard;",
+        "  you cannot execute them — see above)",
+        "- Security incidents (breaches, unauthorized access)",
+        "- Legal/compliance requests (GDPR data deletion, DPA; HIPAA and SOC 2 are not",
+        "  currently offered on any plan — status questions go to support in writing)",
+        "- SLA violation claims",
+        "- Bug reports requiring engineering investigation",
+        "- Custom enterprise pricing negotiations",
+        "- Cross-account data access or account merges",
+        "- Anything you cannot confidently resolve",
+        "",
+        "**How to escalate:**",
+        "1. Acknowledge the request and explain why it requires human help",
+        "2. Tell the customer to email **support@apexmail.ee**",
+        "3. Suggest a clear subject line that includes their account ID or domain",
+        "4. List what information they should include in the email",
+        "5. If urgent (security incident), also recommend immediate self-service steps (rotate keys, change password)",
+    ]
+    return "\n".join(lines) + "\n"
 
-### Write tools (require confirmation)
-- **send_test_email**: Send a test email — params: {to, subject, body?, template_id?}
-- **create_campaign**: Create a new campaign — params: {name, template_id, list_id, subject}
-- **pause_campaign**: Pause a running campaign — params: {campaign_name}
-- **resume_campaign**: Resume a paused campaign — params: {campaign_name}
-- **stop_campaign**: Stop a campaign permanently — params: {campaign_name}
-- **create_template**: Create a template — params: {name, html, subject?}
-- **update_template**: Update a template — params: {template_id, html?, subject?}
-- **add_suppression**: Add email to suppression list — params: {email, reason?}
-- **remove_suppression**: Remove email from suppression list — params: {email}
-- **create_webhook**: Create a webhook endpoint — params: {url, events[]}
-- **update_webhook**: Update a webhook — params: {webhook_id, url?, events?}
-- **enable_webhook**: Enable a disabled webhook — params: {webhook_id}
-- **disable_webhook**: Disable a webhook — params: {webhook_id}
-- **test_webhook**: Send a test event to a webhook — params: {webhook_id}
-- **rotate_webhook_secret**: Rotate webhook signing secret — params: {webhook_id}
-- **add_contact**: Add a contact — params: {email, name?, tags?[]}
-- **remove_contact**: Remove a contact — params: {email}
-- **tag_contact**: Add tags to a contact — params: {email, tags[]}
-- **import_contacts**: Import contacts from CSV — params: {csv_url}
-- **create_automation**: Create an automation — params: {name, trigger, actions[]}
-- **enable_automation**: Enable an automation — params: {automation_id}
-- **disable_automation**: Disable an automation — params: {automation_id}
-- **generate_api_key**: Create a new API key — params: {name, scopes[]}
-- **rotate_api_key**: Rotate an existing API key — params: {key_id}
 
-### Destructive tools (require explicit confirmation + warning)
-- **revoke_api_key**: Permanently revoke an API key — params: {key_id}
-- **delete_campaign**: Delete a campaign — params: {campaign_name}
-- **delete_template**: Delete a template — params: {template_id}
-- **delete_contact**: Permanently delete a contact — params: {email}
-- **remove_domain**: Remove a sending domain — params: {domain}
-- **delete_webhook**: Delete a webhook — params: {webhook_id}
-- **delete_automation**: Delete an automation — params: {automation_id}
-- **upgrade_plan**: Upgrade to a higher plan — params: {plan_name}
-- **downgrade_plan**: Downgrade to a lower plan — params: {plan_name}
-- **cancel_subscription**: Cancel the subscription — params: {}
-- **delete_account**: Permanently delete account — params: {}
-
-For write and destructive tools, you MUST:
-1. Explain what the action will do and any consequences
-2. Ask the customer to confirm before proceeding
-3. For destructive actions, explicitly warn that it is irreversible
-
-### Never handle — always escalate to support@apexmail.ee
-- Refunds or billing disputes
-- Payment method changes (direct user to Dashboard → Billing; escalate if issues)
-- Security incidents (breaches, unauthorized access)
-- Legal/compliance requests (GDPR data deletion, DPA, HIPAA, SOC2 audits)
-- SLA violation claims
-- Bug reports requiring engineering investigation
-- Custom enterprise pricing negotiations
-- Cross-account data access or account merges
-- Anything you cannot confidently resolve
-
-**How to escalate:**
-1. Acknowledge the request and explain why it requires human help
-2. Tell the customer to email **support@apexmail.ee**
-3. Suggest a clear subject line that includes their account ID or domain
-4. List what information they should include in the email
-5. If urgent (security incident), also recommend immediate self-service steps (rotate keys, change password)"""
+TOOL_DEFINITIONS = _render_tool_definitions()
 
 BEHAVIOR_RULES = """\
 ## Behavior rules
@@ -795,7 +770,7 @@ EXAMPLE_CONTEXTS: dict[str, dict] = {
         "contacts": "150,000",
         "domains": ["healthclinic.com: Verified (SPF: pass, DKIM: pass, DMARC: reject)"],
         "delivery": "Rate: 99.2%, Bounce rate: 0.4%, Complaint rate: 0.01%",
-        "notes": [f"Customer requires HIPAA compliance for patient communications. HIPAA BAA is only handled under an {ENTERPRISE_CLOUD['name']} agreement ({ENTERPRISE_CLOUD['price']}/mo) — escalate per the never-handle list."],
+        "notes": ["Customer requires HIPAA compliance for patient communications; HIPAA (and any BAA) is not currently offered on any plan — answer with the canonical status and escalate per the never-handle list."],
     },
 
     "scale_subaccounts": {
@@ -877,8 +852,10 @@ EXAMPLE_CONTEXTS: dict[str, dict] = {
         "delivery": "Rate: 99.5%, Bounce rate: 0.2%, Complaint rate: 0.01%",
         "dedicated_ips": "10 IPs (all healthy, warm)",
         "compliance": [
-            "HIPAA BAA: Signed",
-            "SOC 2 Type II: On file",
+            # Truthful posture only (audit-6 #9): no HIPAA BAA and no SOC 2
+            # exist on any plan — profiles must not assert otherwise.
+            "GDPR: DPA available, EU/EEA processing",
+            "HIPAA/SOC 2: not currently offered on any plan",
             "DMARC: p=reject on all 15 domains",
             "TLS: Enforced (TLS 1.2+)",
             "Data residency: EU/EEA",
@@ -920,7 +897,7 @@ EXAMPLE_CONTEXTS: dict[str, dict] = {
         "data_retention": "730 days",
         "domains": ["govservices.eu: Verified (SPF: pass, DKIM: pass, DMARC: reject)"],
         "delivery": "Rate: 99.0%, Bounce rate: 0.5%, Complaint rate: 0.01%",
-        "compliance": ["HIPAA BAA: Signed", "SOC 2 Type II: On file", "GDPR DPA: Signed"],
+        "compliance": ["GDPR DPA: Signed", "HIPAA/SOC 2: not currently offered on any plan"],
     },
 
     "enterprise_whitelabel": {
@@ -995,8 +972,10 @@ EXAMPLE_CONTEXTS: dict[str, dict] = {
         "domains": ["medicalgroup.com: Verified (SPF: pass, DKIM: pass, DMARC: reject)"],
         "delivery": "Rate: 99.5%, Bounce rate: 0.2%, Complaint rate: 0.01%",
         "compliance": [
-            "HIPAA BAA: Signed on 2023-07-15",
-            "SOC 2 Type II: On file, last audit 2025-09-01",
+            # Healthcare-adjacent enterprise WITHOUT HIPAA (audit-6 #9): the
+            # truthful posture — no BAA exists on any plan, PHI must not flow.
+            "HIPAA: not currently offered on any plan (no BAA on file)",
+            "SOC 2: not currently offered on any plan",
             "Data residency: EU/EEA",
             "Encryption: AES-256 at rest, TLS 1.2+ in transit",
         ],

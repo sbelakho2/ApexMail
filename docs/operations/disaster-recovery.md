@@ -123,6 +123,18 @@ The pieces, and what each does:
   archive failures, a stale archive (more than 2 h since the last segment
   landed) and a documented spool-growth follow-up.
 
+A timed drill makes the quarterly exercise executable evidence instead of
+manual timing. `tools/pitr_drill.sh --out drill.json` boots a throwaway
+postgres whose archive command ships encrypted segments to a local offsite
+directory, writes rows, and seals a physical base backup; it then destroys
+the source and measures `pg-pitr-restore.sh` recovering everything from the
+offsite ciphertext alone. The JSON it writes records per-phase durations,
+the measured `total_rto_s`, the replay LSN, and `verified` true only when
+the restored row counts and checksum match the pre-destruction truth. File
+it with the drill records; the production cadence stays the quarterly one
+defined in [Disaster Recovery Testing](disaster-recovery-testing.md), run
+on a scratch host and never against the live cluster.
+
 ### Operator enablement checklist
 
 1. Provision an offsite WAL target reachable by rsync over ssh, e.g.

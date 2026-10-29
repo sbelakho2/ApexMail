@@ -406,6 +406,22 @@ def webhook():
 
 ---
 
+## Ordering and Delivery Guarantees
+
+Webhooks are **at-least-once and may arrive out of order**. The worker
+starts deliveries concurrently (up to five in flight per tenant), so even
+when event A is created before event B, a fast B can reach an endpoint
+before a slow A. ApexMail does not serialize deliveries per endpoint: one
+slow webhook must not head-of-line-block a tenant's other events.
+
+Receivers must treat event delivery as a concurrent stream:
+
+- deduplicate by the event `id`: a crash between delivery success and
+  queue acknowledgement can replay an event;
+- order by the payload `timestamp` when order matters, because
+  `message.delivered` can legitimately precede `message.accepted`;
+- never infer state transitions from arrival order.
+
 ## Retry Policy
 
 Retries follow one fixed schedule shared by every webhook. There is no per-webhook exponential backoff.

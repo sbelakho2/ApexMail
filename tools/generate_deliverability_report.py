@@ -315,7 +315,7 @@ def render_partial(report: dict[str, object]) -> str:
         rows.append(f"          <tr>{cells_html}</tr>")
     table = "\n".join(rows)
     methodology_link = (
-        '<a class="underline" href="/performance-methodology/#13-recipient-server-acceptance-rate">'
+        '<a class="apex-link" href="/performance-methodology/#13-recipient-server-acceptance-rate">'
         "section 1.3 of the methodology</a>"
     )
     if status == "measured":
@@ -337,7 +337,7 @@ def render_partial(report: dict[str, object]) -> str:
             reason = "the delivery event store could not be read at build time"
         headline = (
             f"<strong>Insufficient data to publish a rate for the last {window_days} days.</strong> "
-            f"The counters below are zero because {reason} — this page therefore makes "
+            f"The counters below are zero because {reason}, this page therefore makes "
             f"<strong>no</strong> delivery-rate claim. The query and its definitions are ready "
             f"({methodology_link}) and the table fills in as events arrive."
         )
@@ -347,12 +347,12 @@ def render_partial(report: dict[str, object]) -> str:
 {{# `{report['query_version']}`, window {window['start']} → {window['end']}). #}}
 {{# `--check` in the validate stage fails on drift. #}}
 
-<section class="py-12 bg-surface-100 border-b border-surface-200" id="deliverability-report">
+<section class="py-12 border-b" id="deliverability-report">
   <div class="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8">
-    <h2 class="text-xl font-semibold text-surface-950 mb-3">Published Deliverability Report</h2>
-    <p class="text-sm text-surface-600 mb-6">{headline}</p>
-    <div class="overflow-x-auto">
-      <table class="w-full text-left text-sm">
+    <h2 class="mb-3 apex-h2">Published Deliverability Report</h2>
+    <p class="mb-6">{headline}</p>
+    <div class="apex-table-wrap" tabindex="0" role="region" aria-label="Published deliverability report by routing mode">
+      <table class="w-full table-fixed apex-table">
         <thead>
           <tr>
             <th class="py-2 pr-4">Routing mode</th>
@@ -370,7 +370,7 @@ def render_partial(report: dict[str, object]) -> str:
         </tbody>
       </table>
     </div>
-    <p class="text-xs text-surface-500 mt-4">Source: {source['database']}.{source['table']} via {source['url_host']} · window {window['days']} days · artifact: apps/marketing-zola/data/deliverability-report.json</p>
+    <p class="mt-4">Source: {source['database']}.{source['table']} via {source['url_host']}, window {window['days']} days, artifact: apps/marketing-zola/data/deliverability-report.json</p>
   </div>
 </section>
 """

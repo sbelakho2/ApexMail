@@ -52,6 +52,26 @@ SURFACES = (
 # inside the crate's own upstream layout; the Rust crate never reads it at
 # build time, so excluding it keeps the mirror PHP-free without forking the
 # crate's path. Re-check this list on every advance.
+#
+# MIRROR-INTERNAL PHP/SYMFONY REFERENCES — REPORT-ONLY REGISTER (audit-6
+# #10, tagged here as the ONE place outside the mirror): the upstream bytes
+# inside the parity-locked surfaces still NAME the removed PHP tree in
+# comments, fixture vectors, tooling and baselines. They are upstream
+# truth, they are NOT ApexMail assumptions, and they must never be edited
+# here (byte parity). Census at tagging (grep -rli
+# 'kiwicaptcha-php|kiwicaptcha-risk-php|symfony'):
+#   * packages/kiwicaptcha/ — 24 files, 356 refs (src/{widget,redis_verify,
+#     challenge}.rs, tests/{wire_hostile_corpus,pentest_wave6,cross_language,
+#     pentest_wave7_crypto}.rs + fixture JSONs, tools/*.php/.sh/.mjs/.json
+#     incl. the upstream docs-lint baseline, README.md, design/README.md);
+#   * protocol/ — 9 files, 12 refs (risk-v1/README.md + pricing-vectors.json,
+#     risk-v2/identity.json, decision-v1/corpus.json, rsw-identity-v1/
+#     fixtures.json, telemetry-v1/{payload,client-perf-p1}.json,
+#     solution-token-v1/{wire-hostile,wire-signature}-corpus.json);
+#   * packages/kiwicaptcha-risk/src/redis.rs — 1 ref;
+#   * packages/kiwicaptcha-wasm/{build.sh,SECURITY.md} — 4 refs.
+# These counts MOVE with every --apply; the register is a census anchor,
+# not a parity contract — refresh it when an advance materially shifts it.
 EXCLUDES = (
     "packages/kiwicaptcha/integrations/",
 )

@@ -377,6 +377,11 @@ pub struct PlacementCohort {
     pub observed_units: i64,
     /// Planned units with NO observation — explicitly unresolved.
     pub missing_units: i64,
+    /// False when the observation store claims more units than the cohort
+    /// planned (corruption or a cohort bug): the missing-data bound is
+    /// REFUSED (None) instead of clamped, so an invalid interval can never
+    /// be published from mismatched populations.
+    pub consistent: bool,
 }
 
 /// Measured seed placements by folder.

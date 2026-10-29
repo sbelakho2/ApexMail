@@ -893,7 +893,7 @@ pub mod test_support {
         pub fn age_row(&self, send_unit: &str, age: chrono::Duration) {
             let now = chrono::Utc::now();
             self.with_entries::<()>(|entries| {
-                for (_, row) in entries.iter_mut() {
+                for row in entries.values_mut() {
                     if row.send_unit == send_unit {
                         row.created_at -= age;
                         row.next_attempt_at = now;

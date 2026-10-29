@@ -1039,20 +1039,91 @@ pub fn classify_all(
     body: &str,
     headers: Option<&serde_json::Value>,
 ) -> Classification {
+    classify_all_with_evidence(subject, body, headers).0
+}
+
+/// The concrete structural evidence behind one matched purpose label, for
+/// review surfaces that must SHOW why a label fired (sixth external audit,
+/// Mailbot review UX item 4): the rule markers that literally matched the
+/// subject+body, and — for the `automated` label — WHICH machine-mail signal
+/// (a stored header kind or a subject-line template prefix) produced it.
+///
+/// Everything here is derived by the SAME matching pass as
+/// [`classify_all`]; nothing is re-classified or invented.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PurposeEvidence {
+    /// The matched purpose label.
+    pub purpose: InboundPurpose,
+    /// The rule markers (keyword/phrase table entries) that literally matched
+    /// the lowercased subject+body, in table order. Empty only for a label
+    /// that matched via structural (non-text) evidence.
+    pub matched_markers: Vec<String>,
+    /// The machine-mail header evidence kind (`auto_submitted`,
+    /// `precedence`, `autoreply_header`, `null_return_path`,
+    /// `dsn_content_type`) when the `automated` label came from a stored
+    /// header. `None` for every text rule and for the subject template.
+    pub machine_header_evidence: Option<&'static str>,
+    /// True when the `automated` label came from an autoresponder subject-line
+    /// template prefix instead of a header.
+    pub subject_template: bool,
+}
+
+/// [`classify_all`] plus the structural evidence for every matched label:
+/// ONE matching implementation serves both, so the evidence a review surface
+/// renders can never drift from the verdict the policy consumed (sixth
+/// external audit, Mailbot review UX item 4: "matched purposes with their
+/// evidence — the classifier's structural evidence/headers").
+pub fn classify_all_with_evidence(
+    subject: &str,
+    body: &str,
+    headers: Option<&serde_json::Value>,
+) -> (Classification, Vec<PurposeEvidence>) {
     let lower_subject = subject.trim().to_lowercase();
     let lower_body = body.trim().to_lowercase();
     let combined = format!("{lower_subject}\n{lower_body}");
 
     let mut purposes = Vec::new();
-    if machine_mail_evidence(headers).is_some() || has_automated_subject_prefix(&lower_subject) {
+    let mut evidence = Vec::new();
+    let machine_header = machine_mail_evidence(headers);
+    let subject_template = has_automated_subject_prefix(&lower_subject);
+    if machine_header.is_some() || subject_template {
         purposes.push(InboundPurpose::Automated);
+        evidence.push(PurposeEvidence {
+            purpose: InboundPurpose::Automated,
+            matched_markers: Vec::new(),
+            machine_header_evidence: machine_header,
+            subject_template,
+        });
     }
     for (purpose, markers) in RULE_ORDER {
-        if markers.iter().any(|marker| combined.contains(marker)) && !purposes.contains(&purpose) {
+        let matched: Vec<String> = markers
+            .iter()
+            .filter(|marker| combined.contains(*marker))
+            .map(|marker| (*marker).to_string())
+            .collect();
+        if !matched.is_empty() && !purposes.contains(&purpose) {
             purposes.push(purpose);
+            evidence.push(PurposeEvidence {
+                purpose,
+                matched_markers: matched,
+                machine_header_evidence: None,
+                subject_template: false,
+            });
         }
     }
-    Classification::from_purposes(purposes)
+    // The uncertainty label (`Other`, added by `Classification::from_purposes`
+    // for an empty match set) also carries its evidence entry: an EMPTY
+    // marker list is exactly its evidence ("nothing matched"), so a review
+    // surface can iterate evidence in lockstep with the label set.
+    if evidence.is_empty() {
+        evidence.push(PurposeEvidence {
+            purpose: InboundPurpose::Other,
+            matched_markers: Vec::new(),
+            machine_header_evidence: None,
+            subject_template: false,
+        });
+    }
+    (Classification::from_purposes(purposes), evidence)
 }
 
 /// Thin single-label wrapper for callers that only need the primary purpose
@@ -1778,5 +1849,53 @@ mod tests {
             classify("Why do my emails bounce?", "our sends bounce"),
             (no_headers.primary, no_headers.risk)
         );
+    }
+
+    /// Sixth external audit (Mailbot review UX item 4): the evidence view can
+    /// never drift from the verdict. Every evidence label is a classification
+    /// label, every evidence marker literally occurs in the input, and the
+    /// `automated` label names its machine-mail signal (header kind or
+    /// subject template).
+    #[test]
+    fn evidence_never_drifts_from_the_classification() {
+        let (classification, evidence) = classify_all_with_evidence(
+            "Refund and legal notice",
+            "We demand a refund and our lawyer will call. This is a legal notice.",
+            Some(&json!({"auto-submitted": "auto-replied"})),
+        );
+        let evidence_labels: Vec<InboundPurpose> =
+            evidence.iter().map(|item| item.purpose).collect();
+        assert_eq!(evidence_labels, classification.purposes);
+        assert_eq!(classification.primary, InboundPurpose::Automated);
+        let automated = &evidence[0];
+        assert_eq!(automated.machine_header_evidence, Some("auto_submitted"));
+        assert!(!automated.subject_template);
+        let refund = evidence
+            .iter()
+            .find(|item| item.purpose == InboundPurpose::Refund)
+            .expect("the refund label carries its evidence");
+        assert_eq!(refund.matched_markers, vec!["refund".to_string()]);
+        let legal = evidence
+            .iter()
+            .find(|item| item.purpose == InboundPurpose::Legal)
+            .expect("the legal label carries its evidence");
+        assert!(legal.matched_markers.contains(&"lawyer".to_string()));
+        assert!(legal.matched_markers.contains(&"legal notice".to_string()));
+
+        // The subject-template arm: no headers, the machine prefix on the
+        // subject line alone is structural evidence.
+        let (_, evidence) = classify_all_with_evidence("Out of office: away", "I am away.", None);
+        assert_eq!(evidence.len(), 1);
+        assert_eq!(evidence[0].purpose, InboundPurpose::Automated);
+        assert!(evidence[0].subject_template);
+        assert_eq!(evidence[0].machine_header_evidence, None);
+
+        // Unmatched text carries exactly the uncertainty label.
+        let (classification, evidence) =
+            classify_all_with_evidence("Re: notes", "Thanks for the context, noted.", None);
+        assert_eq!(classification.purposes, vec![InboundPurpose::Other]);
+        assert_eq!(evidence.len(), 1);
+        assert_eq!(evidence[0].purpose, InboundPurpose::Other);
+        assert!(evidence[0].matched_markers.is_empty());
     }
 }

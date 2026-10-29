@@ -1,9 +1,9 @@
 //! Tenant management endpoints.
 //!
 
-use axum::extract::{Query, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
-use axum::routing::get;
+use axum::routing::{get, patch};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -24,6 +24,46 @@ pub fn router() -> Router<AppState> {
         // nest in app.rs) so it is reachable through the single
         // `/v1/admin/tenants` nest.
         .nest("/domains", super::domains::router())
+        // External audit 6 remediation #6: the control-plane twin of the
+        // self-service surface (routes::settings) — an operator changes ANY
+        // tenant's SMTP credential message class without a database edit.
+        // Same `/v1/admin/tenants` nest, so no new app.rs wiring either.
+        .route(
+            "/:tenant_id/smtp-credentials/:id/message-class",
+            patch(update_smtp_credential_message_class),
+        )
+        // External audit 6 remediation #15: the control-plane READ of a
+        // tenant's onboarding state (the tenant's own surface is
+        // GET /v1/onboarding). Read-only, same guards as every sibling.
+        .route("/:tenant_id/onboarding", get(get_tenant_onboarding))
+}
+
+/// The control-plane view of one tenant's onboarding machine state — the
+/// operator's answer to "where is this customer stuck?" without a
+/// database query (audit 6, #15).
+async fn get_tenant_onboarding(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(tenant_id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    crate::middleware::auth::require_scopes(&auth, &["*"])?;
+    crate::middleware::auth::require_system_tenant(&state, &auth).await?;
+
+    let row: (String, Option<String>, chrono::DateTime<chrono::Utc>) = sqlx::query_as(
+        "SELECT onboarding_state, onboarding_note, onboarding_updated_at \
+         FROM tenants WHERE id = $1",
+    )
+    .bind(&tenant_id)
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or_else(|| ApiError::NotFound("tenant not found".into()))?;
+
+    Ok(Json(json!({
+        "tenantId": tenant_id,
+        "state": row.0,
+        "note": row.1,
+        "updatedAt": row.2.to_rfc3339(),
+    })))
 }
 
 // ─── Types ─────────────────────────────────────────────────────
@@ -590,6 +630,41 @@ async fn delete_tenant(
     }
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// `PATCH /v1/admin/tenants/:tenant_id/smtp-credentials/:id/message-class`,
+/// the control-plane half of SMTP credential message-class management
+/// (external audit 6 remediation #6; migration 272's `users.message_class`).
+///
+/// The self-service twin lives at `/v1/settings/smtp-credentials/...`
+/// (`routes::settings`); both call the SAME mutation core
+/// (`routes::settings::apply_message_class_change`) so validation, tenant
+/// pinning, persistence and the transactional audit entry cannot drift. The
+/// `tenant_id` here is the path parameter (the tenant that OWNS the
+/// credential), never the operator's own tenant; an unknown tenant or a
+/// credential outside it is the same honest 404.
+async fn update_smtp_credential_message_class(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path((tenant_id, credential_id)): Path<(String, String)>,
+    Json(body): Json<crate::routes::settings::UpdateMessageClassRequest>,
+) -> Result<Json<crate::routes::settings::SmtpCredentialRow>, ApiError> {
+    crate::middleware::auth::require_scopes(&auth, &["*"])?;
+    // Per-handler system-tenant double-check, like every sibling here.
+    crate::middleware::auth::require_system_tenant(&state, &auth).await?;
+
+    let credential_id = crate::routes::settings::parse_credential_id(&credential_id)?;
+    let row = crate::routes::settings::apply_message_class_change(
+        &state,
+        &tenant_id,
+        credential_id,
+        body.message_class,
+        crate::routes::settings::MessageClassSurface::ControlPlane,
+        auth.user_id.as_deref(),
+    )
+    .await?;
+
+    Ok(Json(row))
 }
 
 /// Actor-attributed tenant audit (P2-2): the acting operator's tenant AND
@@ -1523,5 +1598,162 @@ mod adversarial_tests {
         let scoped = AdvEnv::over(pool.clone(), key).await;
         let (status, _body) = scoped.get("/v1/admin/tenants").await;
         assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+
+    // ── PATCH /v1/admin/tenants/:tenant_id/smtp-credentials/:id/message-class
+
+    /// Seed an SMTP-capable user (a password-bearing `users` row — the
+    /// credential the MTA submission path authenticates) in `tenant_id`,
+    /// returning its uuid string.
+    async fn seed_smtp_credential(pool: &sqlx::PgPool, tenant_id: &str) -> String {
+        let id = uuid::Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO users (id, tenant_id, email, name, password_hash, role, status, email_verified)
+             VALUES ($1::uuid, $2, $3, 'SMTP Credential', $4, 'member', 'active', true)",
+        )
+        .bind(id)
+        .bind(tenant_id)
+        .bind(format!("smtp-{id}@example.com"))
+        .bind(apexmail_lib::hash_password("correct horse battery staple").expect("hash password"))
+        .execute(pool)
+        .await
+        .expect("seed smtp credential user");
+        id.to_string()
+    }
+
+    /// The operator surface does what the audit-6 remediation asks: changes
+    /// any tenant's credential class without a database edit, persists it
+    /// (SELECT round-trip) and leaves the control-plane audit entry on the
+    /// TARGET tenant's trail.
+    #[tokio::test]
+    async fn admin_message_class_patch_updates_persists_and_audits() {
+        let Some(pool) = crate::test_db::canonical_pool("admin_smtp_class_ok").await else {
+            return;
+        };
+        let env = AdvEnv::admin(pool.clone()).await;
+        let tenant = seed_tenant(&pool, "smtp").await;
+        let credential = seed_smtp_credential(&pool, &tenant).await;
+
+        let (status, body) = env
+            .patch(
+                &format!("/v1/admin/tenants/{tenant}/smtp-credentials/{credential}/message-class"),
+                r#"{"messageClass":"transactional"}"#,
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["id"], credential.as_str());
+        assert_eq!(body["message_class"], "transactional");
+
+        // The class actually persists (SELECT round-trip, not the echo).
+        let stored: String = sqlx::query_scalar(
+            "SELECT message_class FROM users WHERE id = $1::uuid AND tenant_id = $2",
+        )
+        .bind(&credential)
+        .bind(&tenant)
+        .fetch_one(&pool)
+        .await
+        .expect("stored class");
+        assert_eq!(stored, "transactional");
+
+        // Audit entry on the TARGET tenant's trail, tagged control-plane.
+        let (action, details): (String, serde_json::Value) = sqlx::query_as(
+            "SELECT action, details FROM audit_logs \
+             WHERE tenant_id = $1 \
+               AND action = 'control_plane.smtp_credential.message_class_updated'",
+        )
+        .bind(&tenant)
+        .fetch_one(&pool)
+        .await
+        .expect("audit row");
+        assert_eq!(action, "control_plane.smtp_credential.message_class_updated");
+        assert_eq!(details["previous_message_class"], "marketing");
+        assert_eq!(details["new_message_class"], "transactional");
+        assert_eq!(details["surface"], "control_plane");
+    }
+
+    /// Invalid enum is a 422; a credential of ANOTHER tenant (or an unknown
+    /// one) is an honest 404 that writes nothing.
+    #[tokio::test]
+    async fn admin_message_class_patch_rejects_bad_values_and_cross_tenant_ids() {
+        let Some(pool) = crate::test_db::canonical_pool("admin_smtp_class_refuse").await else {
+            return;
+        };
+        let env = AdvEnv::admin(pool.clone()).await;
+        let tenant = seed_tenant(&pool, "smtp").await;
+        let other_tenant = seed_tenant(&pool, "oxo").await;
+        let credential = seed_smtp_credential(&pool, &tenant).await;
+        let foreign_credential = seed_smtp_credential(&pool, &other_tenant).await;
+        let unknown = uuid::Uuid::new_v4().to_string();
+
+        // Invalid vocabulary never reaches the UPDATE.
+        let (status, _body) = env
+            .patch(
+                &format!("/v1/admin/tenants/{tenant}/smtp-credentials/{credential}/message-class"),
+                r#"{"messageClass":"banana"}"#,
+            )
+            .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+
+        // Unknown credential: 404.
+        let (status, _body) = env
+            .patch(
+                &format!("/v1/admin/tenants/{tenant}/smtp-credentials/{unknown}/message-class"),
+                r#"{"messageClass":"service"}"#,
+            )
+            .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+
+        // A real credential that belongs to a DIFFERENT tenant than the path
+        // names: still a 404, and neither row changes.
+        let (status, _body) = env
+            .patch(
+                &format!(
+                    "/v1/admin/tenants/{tenant}/smtp-credentials/{foreign_credential}/message-class"
+                ),
+                r#"{"messageClass":"service"}"#,
+            )
+            .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        for (id, owner) in [(&credential, &tenant), (&foreign_credential, &other_tenant)] {
+            let stored: String = sqlx::query_scalar(
+                "SELECT message_class FROM users WHERE id = $1::uuid AND tenant_id = $2",
+            )
+            .bind(id)
+            .bind(owner)
+            .fetch_one(&pool)
+            .await
+            .expect("stored class");
+            assert_eq!(stored, "marketing", "a refused PATCH must not write");
+        }
+    }
+
+    /// A customer tenant's own wildcard key is NOT an operator: the system
+    /// tenant gate refuses the control-plane surface.
+    #[tokio::test]
+    async fn admin_message_class_patch_requires_the_system_tenant() {
+        let Some(pool) = crate::test_db::canonical_pool("admin_smtp_class_gate").await else {
+            return;
+        };
+        let (customer_env, customer_tenant) = AdvEnv::tenant(pool.clone(), &["*"]).await;
+        let credential = seed_smtp_credential(&pool, &customer_tenant).await;
+
+        let (status, body) = customer_env
+            .patch(
+                &format!(
+                    "/v1/admin/tenants/{customer_tenant}/smtp-credentials/{credential}/message-class"
+                ),
+                r#"{"messageClass":"transactional"}"#,
+            )
+            .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+        let stored: String = sqlx::query_scalar(
+            "SELECT message_class FROM users WHERE id = $1::uuid AND tenant_id = $2",
+        )
+        .bind(&credential)
+        .bind(&customer_tenant)
+        .fetch_one(&pool)
+        .await
+        .expect("stored class");
+        assert_eq!(stored, "marketing", "a refused PATCH must not write");
     }
 }

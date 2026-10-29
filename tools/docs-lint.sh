@@ -135,21 +135,20 @@ if [ ! -d "$ROOT/docs" ]; then
   exit 0
 fi
 
-# The scan covers only the five kiwicaptcha package families and the
-# repository's human-facing root text; other packages/ entries (the
-# sdk families, the packages index) are never scanned. The root-level
-# roots are presence-gated: tests/browser (the Playwright specs and
-# the fixture router) and protocol/ (the design docs) are
-# product-repository trees, and .github/workflows/ carries the CI
-# workflow prose; each is scanned only when present (find over a
-# missing root yields nothing), and the workflow prose is additionally
-# gated on the product identity marker like the product root files:
-# an unrelated repository's own workflows are never scanned. The
-# product root files (README.md, SECURITY.md) exist only in the
-# product repository — they are scanned only when present and
-# carrying the product identity marker (first line "# KiwiCaptcha",
-# the marker the product CI's repo-sanity job enforces), so an
-# unrelated repository root README is never picked up.
+# Scan scope (Rust-only KiwiCaptcha cleanup, owner directive 2026-10-28):
+# the platform's human-facing documentation under docs/ plus the marketing
+# site's content tree. The KiwiCaptcha package trees are NOT scanned here —
+# the PHP packages (kiwicaptcha-php, kiwicaptcha-risk-php, the Symfony
+# integrations/) were removed from the product surface on 2026-10-28 and
+# the surviving Rust mirror (packages/kiwicaptcha*, protocol/) is
+# byte-parity-locked upstream content (tools/kiwi_mirror_advance.py
+# --check), linted by its own upstream gate, never edited here. The old
+# scan roots that assumed the PHP product tree (the kiwicaptcha package
+# families, tests/browser, protocol/, .github/workflows) are gone with it.
+# The product root files (README.md, SECURITY.md) are scanned only when
+# present and carrying the product identity marker (first line
+# "# ApexMail", the marker the product CI's repo-sanity job enforces), so
+# an unrelated repository root README is never picked up.
 # Human-facing prose spans the platform docs AND the marketing site's
 # content tree (owner directive 2026-10-25: "docs lint has to be applied
 # everywhere"). Marketing markdown is prose in four locales, so it follows

@@ -842,6 +842,12 @@ pub fn router(state: Arc<AppState>) -> Router {
         // Dedicated Tenant provisioning (the plan's code-side half)
         .route("/deployments/:id/bundle", post(deploy_bundle))
         .route("/deployments/:id/transition", post(deploy_transition))
+        // The physical host execution behind `validated → provisioned`
+        // (separate prefix: /deployments/:id/provision is the legacy route).
+        .route(
+            "/ent/private-deployments/:id/provision",
+            post(deploy_provision_dedicated),
+        )
         .route(
             "/deployments/tenant/:tenant_id/monthly-review",
             get(deploy_monthly_review),
@@ -3398,6 +3404,83 @@ async fn deploy_transition(
         }
     }
     service_result(result)
+}
+
+/// Map a host-execution refusal to the honest HTTP status: the operator
+/// gate refusal is a 403 carrying the instruction, a missing provider
+/// credential is a 409 naming the env var, provider trouble is a 502, and
+/// lifecycle/record refusals are a 409 with the typed message.
+fn exec_error_response(
+    error: &crate::dedicated_exec::ExecError,
+) -> (StatusCode, Json<serde_json::Value>) {
+    use crate::dedicated_exec::ExecError;
+    let status = match error {
+        ExecError::NotEnabled => StatusCode::FORBIDDEN,
+        ExecError::MissingCredential => StatusCode::CONFLICT,
+        ExecError::NotFound(_) => StatusCode::NOT_FOUND,
+        ExecError::InvalidState { .. } | ExecError::TransitionRefused { .. } => StatusCode::CONFLICT,
+        ExecError::Provider { .. }
+        | ExecError::Transport(_)
+        | ExecError::ProviderResponse(_) => StatusCode::BAD_GATEWAY,
+        ExecError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
+    };
+    err_json(status, &error.to_string())
+}
+
+/// Execute the PHYSICAL host creation for a dedicated-tenant deployment in
+/// the `validated` state: the provider server-create call behind the manual
+/// `validated → provisioned` step. Gated on `DT_PROVISIONING_ENABLED=1` and
+/// `HETZNER_API_TOKEN` (403 with the instruction / 409 naming the env var
+/// when either is missing), idempotent (a row that already carries a
+/// provider host answers AlreadyExists without a second create call), and
+/// the lifecycle transition still runs through `transition_dedicated` with
+/// every authorize gate intact. The path carries the `ent/private-deployments`
+/// prefix because `/deployments/:id/provision` is the legacy generic
+/// private-deploy route.
+async fn deploy_provision_dedicated(
+    State(state): State<S>,
+    Extension(auth): Extension<AuthContext>,
+    connect_info: Option<axum::extract::ConnectInfo<std::net::SocketAddr>>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> impl IntoResponse {
+    // Audit F8: control-plane mutation, admin or the dedicated-tenants scope.
+    if let Some(e) = require_scope(&auth, SCOPE_DEDICATED_TENANTS_WRITE) {
+        return e;
+    }
+    let existing = state.private_deploy.get(id).await;
+    if let Some(e) = guard_resource_tenant(&auth, &existing).await {
+        return e;
+    }
+    let tenant_id = match existing.as_ref().ok().and_then(|r| r.data.as_ref()) {
+        Some(record) => record.tenant_id.clone(),
+        None => String::new(),
+    };
+    let outcome = match state.private_deploy.execute_host_provision(id).await {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            tracing::warn!(deployment_id = %id, error = %error, "dedicated tenant host execution refused");
+            return exec_error_response(&error);
+        }
+    };
+    // Audit F7: the physical host creation is the act that makes the tenant
+    // real at the provider, it belongs in the tamper-evident trail.
+    if let Err(error) = audit_server_action(
+        &state,
+        &tenant_id,
+        &auth,
+        connect_info,
+        &headers,
+        "dedicated_tenant.host_provisioned",
+        "private_deployment",
+        Some(&id.to_string()),
+        serde_json::to_value(&outcome).unwrap_or_else(|_| serde_json::json!({})),
+    )
+    .await
+    {
+        tracing::error!(error = %error, "failed to audit dedicated_tenant.host_provisioned");
+    }
+    ok_json(outcome)
 }
 
 /// The per-tenant monthly review packet (JSON; the markdown render is in the
@@ -6932,6 +7015,7 @@ mod rbac_scope_guards {
             ("ip_allocate", "SCOPE_DEDICATED_IPS_WRITE"),
             ("deploy_bundle", "SCOPE_DEDICATED_TENANTS_WRITE"),
             ("deploy_transition", "SCOPE_DEDICATED_TENANTS_WRITE"),
+            ("deploy_provision_dedicated", "SCOPE_DEDICATED_TENANTS_WRITE"),
         ]
     }
 

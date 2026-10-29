@@ -68,3 +68,30 @@ line_hash = "3a140cd5b48ac885"
 reason = "entitlements model documentation naming the FeatureClass"
 owner = "owner"
 expires = "2026-11-06"
+
+[[allow]]
+path = "tools/check_marketing_pages.py"
+line = 15
+marker = "TODO"
+line_hash = "a92f45643766f514"
+reason = "inherent self-reference: the gate's docstring names the placeholder markers it detects"
+owner = "owner"
+expires = "2026-11-12"
+
+[[allow]]
+path = "tools/check_marketing_pages.py"
+line = 15
+marker = "FIXME"
+line_hash = "a92f45643766f514"
+reason = "inherent self-reference: the gate's docstring names the placeholder markers it detects"
+owner = "owner"
+expires = "2026-11-12"
+
+[[allow]]
+path = "tools/check_marketing_pages.py"
+line = 155
+marker = "TODO"
+line_hash = "e47244526c53205d"
+reason = "drift-injection fixture: the self-test's seeded defect the gate must catch (absence-assertion, same class as migration_tests.rs)"
+owner = "owner"
+expires = "2026-11-12"

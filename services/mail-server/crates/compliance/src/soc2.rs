@@ -10,6 +10,10 @@
 //!     in `soc2_control_evidence` with the canonical period it covers.
 //!   * A run-tracker (`soc2_evidence_collection_runs`) for the cron worker so
 //!     ops can see which controls passed automated evidence collection.
+//!   * A stale-attestation sweep (`stale_evidence_controls` for the pure
+//!     query, `sweep_stale_attestations` for the persisting entry point)
+//!     that flags every in-scope control whose `next_attestation_at` has
+//!     passed or whose required evidence set is incomplete/stale.
 //!
 //! Database schema lives in migration `039_soc2_hipaa_trust_portal.sql`.
 //!
@@ -169,6 +173,47 @@ pub struct AttestationState {
     pub missing: Vec<String>,
     pub stale: Vec<String>,
     pub invalid: Vec<String>,
+}
+
+/// One control the stale-evidence sweep flags: its attestation deadline has
+/// passed, or its required evidence set can no longer attest it under the
+/// same latest-row rules `recompute_attestation` applies.
+///
+/// `missing` are required evidence types with no row at all, `stale` are
+/// required types whose LATEST row predates the cadence cutoff, `invalid`
+/// are required types whose latest row fails its SHA-256 integrity check.
+///
+/// `days_overdue` is whole days past the control's due date: when
+/// `next_attestation_at` is set, days past it; otherwise, when a stale
+/// evidence row exists, days past that row's own freshness deadline
+/// (`collected_at` + cadence). A never-evidenced control carries `0` — there
+/// is no date to be overdue against; the `missing` list is the finding.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StaleControlFinding {
+    pub control_id: String,
+    pub category: String,
+    pub title: String,
+    pub owner: String,
+    pub next_attestation_at: Option<DateTime<Utc>>,
+    pub missing: Vec<String>,
+    pub stale: Vec<String>,
+    pub invalid: Vec<String>,
+    pub days_overdue: i64,
+}
+
+/// Outcome of one `sweep_stale_attestations` run.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StaleAttestationSweepSummary {
+    pub swept_at: DateTime<Utc>,
+    /// In-scope controls the sweep evaluated.
+    pub controls_scanned: usize,
+    /// How many of them were flagged.
+    pub stale_controls: usize,
+    pub findings: Vec<StaleControlFinding>,
+    /// Rows persisted into `soc2_evidence_collection_runs` (one per stale
+    /// control); zero means nothing was flagged, not that the write failed —
+    /// a failed write propagates as `Err`.
+    pub run_rows_written: u64,
 }
 
 /// Evidence types produced by the automated collectors below. Anything else
@@ -1018,6 +1063,206 @@ impl Soc2Service {
             stale,
             invalid,
         })
+    }
+
+    /// PURE query (external audit 6 remediation #16): every in-scope control
+    /// whose `next_attestation_at` is in the past OR whose required evidence
+    /// set is incomplete/stale/invalid, evaluated with the SAME latest-row
+    /// rules `recompute_attestation` uses — every required type must have a
+    /// row, the LATEST row must re-hash and be collected within the cadence.
+    ///
+    /// The controls catalog is global (no tenant column), so there is no
+    /// tenant selector. Deferred / not-applicable controls are excluded: they
+    /// are deliberately outside the attestation cadence. Nothing is written;
+    /// a control whose attested deadline still lies in the future AND whose
+    /// evidence set is complete/fresh is not returned even if the stored
+    /// timestamps have drifted forward, because both checks are OR-ed — a
+    /// future date cannot rescue a stale evidence set.
+    pub async fn stale_evidence_controls(
+        &self,
+        now: DateTime<Utc>,
+    ) -> Result<Vec<StaleControlFinding>, String> {
+        let controls: Vec<Control> = sqlx::query_as::<_, ControlRow>(
+            "SELECT id, control_id, category, title, description, owner, status,
+                    evidence_required, automation, last_attested_at,
+                    next_attestation_at, created_at, updated_at
+             FROM soc2_controls
+             WHERE status = 'in_scope'
+             ORDER BY control_id",
+        )
+        .fetch_all(&self.db)
+        .await
+        .map_err(|e| format!("DB error: {e}"))?
+        .into_iter()
+        .map(Into::into)
+        .collect();
+
+        if controls.is_empty() {
+            return Ok(Vec::new());
+        }
+        let control_ids: Vec<String> = controls.iter().map(|c| c.control_id.clone()).collect();
+
+        // Latest evidence row per (control, type) across the catalog — the
+        // same DISTINCT ON shape recompute_attestation applies per control.
+        let rows: Vec<EvidenceRow> = sqlx::query_as(
+            "SELECT id, control_id, evidence_type, source, payload, sha256_hash,
+                    storage_url, period_start, period_end, collected_at, collected_by
+             FROM (
+                 SELECT DISTINCT ON (control_id, evidence_type)
+                        id, control_id, evidence_type, source, payload, sha256_hash,
+                        storage_url, period_start, period_end, collected_at, collected_by
+                 FROM soc2_control_evidence
+                 WHERE control_id = ANY($1::text[])
+                 ORDER BY control_id, evidence_type, collected_at DESC, id DESC
+             ) latest",
+        )
+        .bind(&control_ids)
+        .fetch_all(&self.db)
+        .await
+        .map_err(|e| format!("DB error: {e}"))?;
+
+        let by_control_type: HashMap<(&str, &str), &EvidenceRow> = rows
+            .iter()
+            .map(|row| ((row.control_id.as_str(), row.evidence_type.as_str()), row))
+            .collect();
+
+        let cutoff = now - Duration::days(self.attestation_period_days);
+        let period_days = self.attestation_period_days;
+        let mut findings = Vec::new();
+        for control in &controls {
+            let required = required_evidence_types(control)?;
+            let mut missing = Vec::new();
+            let mut stale = Vec::new();
+            let mut invalid = Vec::new();
+            // Days past the oldest applicable due date derivable from the
+            // evidence itself (used only when no next_attestation_at exists).
+            let mut evidence_overdue_days: Vec<i64> = Vec::new();
+
+            for evidence_type in &required {
+                match by_control_type.get(&(control.control_id.as_str(), evidence_type.as_str())) {
+                    None => missing.push(evidence_type.clone()),
+                    Some(row) => {
+                        let recomputed = payload_sha256(&row.payload)?;
+                        if row.sha256_hash != recomputed {
+                            invalid.push(evidence_type.clone());
+                        }
+                        if row.collected_at < cutoff {
+                            stale.push(evidence_type.clone());
+                            // The row's own freshness deadline was
+                            // collected_at + cadence.
+                            evidence_overdue_days
+                                .push((now - row.collected_at).num_days() - period_days);
+                        }
+                    }
+                }
+            }
+
+            let deadline_passed = control
+                .next_attestation_at
+                .is_some_and(|next| next < now);
+            if !deadline_passed && missing.is_empty() && stale.is_empty() && invalid.is_empty() {
+                continue;
+            }
+
+            let days_overdue = if let Some(next) = control.next_attestation_at {
+                (now - next).num_days().max(0)
+            } else {
+                evidence_overdue_days.iter().copied().max().unwrap_or(0).max(0)
+            };
+
+            findings.push(StaleControlFinding {
+                control_id: control.control_id.clone(),
+                category: control.category.clone(),
+                title: control.title.clone(),
+                owner: control.owner.clone(),
+                next_attestation_at: control.next_attestation_at,
+                missing,
+                stale,
+                invalid,
+                days_overdue,
+            });
+        }
+        Ok(findings)
+    }
+
+    /// The recurring sweep entry point (compliance-server cron job 11, or any
+    /// operator/worker caller): refreshes the stale-control view and persists
+    /// the findings where the rest of the evidence machinery already writes —
+    /// one `soc2_evidence_collection_runs` row per stale control
+    /// (`evidence_type = 'stale_attestation_sweep'`, status `failed`, the
+    /// per-control detail in `error`), so an overdue control is exactly as
+    /// visible as a failed collector and NO new table is needed.
+    ///
+    /// Idempotent detection (re-running reports the same stale set); the run
+    /// rows accumulate exactly like collector run rows do. DB errors
+    /// PROPAGATE — a sweep that could not read or write is never reported as
+    /// a clean pass.
+    pub async fn sweep_stale_attestations(&self) -> Result<StaleAttestationSweepSummary, String> {
+        let started = Instant::now();
+        let now = Utc::now();
+        let findings = self.stale_evidence_controls(now).await?;
+        let controls_scanned = self.count_in_scope_controls().await?;
+        let mut run_rows_written = 0u64;
+
+        for finding in &findings {
+            let detail = format!(
+                "missing=[{}] stale=[{}] invalid=[{}] days_overdue={} next_attestation_at={}",
+                finding.missing.join(","),
+                finding.stale.join(","),
+                finding.invalid.join(","),
+                finding.days_overdue,
+                finding
+                    .next_attestation_at
+                    .map(|next| next.to_rfc3339())
+                    .unwrap_or_else(|| "none".to_string()),
+            );
+            let res = sqlx::query(
+                "INSERT INTO soc2_evidence_collection_runs
+                   (control_id, evidence_type, run_at, status,
+                    items_collected, duration_ms, error)
+                 VALUES ($1,'stale_attestation_sweep',$2,'failed',0,$3,$4)",
+            )
+            .bind(&finding.control_id)
+            .bind(now)
+            .bind(started.elapsed().as_millis() as i32)
+            .bind(&detail)
+            .execute(&self.db)
+            .await
+            .map_err(|e| format!("DB error: {e}"))?;
+            run_rows_written += res.rows_affected();
+        }
+
+        let summary = StaleAttestationSweepSummary {
+            swept_at: now,
+            controls_scanned,
+            stale_controls: findings.len(),
+            findings,
+            run_rows_written,
+        };
+        if summary.stale_controls > 0 {
+            warn!(
+                stale = summary.stale_controls,
+                scanned = summary.controls_scanned,
+                "SOC2 stale-attestation sweep flagged overdue controls"
+            );
+        } else {
+            info!(
+                scanned = summary.controls_scanned,
+                "SOC2 stale-attestation sweep clean"
+            );
+        }
+        Ok(summary)
+    }
+
+    /// In-scope control count for the sweep summary (the sweep denominator).
+    async fn count_in_scope_controls(&self) -> Result<usize, String> {
+        let (count,): (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM soc2_controls WHERE status = 'in_scope'",
+        )
+        .fetch_one(&self.db)
+        .await
+        .map_err(|e| format!("DB error: {e}"))?;
+        Ok(count as usize)
     }
 
     /// Latest evidence row per `(evidence_type, period_start, period_end)`.

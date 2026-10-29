@@ -1358,6 +1358,26 @@ stage_main() {
             || return "$CI_EXIT_FAIL"
     fi
 
+    # Real-model evaluation lane (sixth external audit, remediation #8):
+    # the corpus contract always runs (graded goldens must be sound); the
+    # REAL-MODEL replay runs only with AI_MODEL_API_KEY + a non-mock
+    # AI_MODEL_ENDPOINT, otherwise real-model-eval.json records NOT
+    # EXECUTED (never a healthy result). The readiness expectation rows for
+    # the Mailbot/Console corpora record the INFRASTRUCTURE as landed; the
+    # run itself is credential-gated.
+    _re_flag="${CI_REAL_MODEL_EVAL_CHECK:-required}"
+    _re_st=$(lane_tool_status python3 real-model-eval "$_re_flag")
+    case $_re_st in
+        fail) return "$CI_EXIT_FAIL" ;;
+        skip) return "$CI_EXIT_OK" ;;
+    esac
+    if ci_dry; then
+        ci_info "dry-run: real-model eval lane (corpus contract + credential-gated replay)"
+    else
+        ci_check "real-model eval lane" bash tools/run_real_model_eval.sh --out "$RUN_DIR/real-model-eval" \
+            || return "$CI_EXIT_FAIL"
+    fi
+
     ci_ephem_cleanup
     ci_info "test: all suites green"
     return "$CI_EXIT_OK"

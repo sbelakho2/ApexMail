@@ -4754,11 +4754,13 @@ mod residual_arms {
 
     /// Two events for the SAME message, same webhook, enqueued with
     /// `message.delivered` created BEFORE `message.accepted` (the platform
-    /// observed delivery first). One claim pass takes BOTH, oldest first,
-    /// and BOTH are delivered independently in created_at order: no
-    /// per-message state machine drops the older event.
+    /// observed delivery first). One claim pass takes BOTH and BOTH are
+    /// delivered: no per-message state machine drops the older event.
+    /// This does NOT promise receiver-observed ordering — deliveries are
+    /// concurrent per tenant, and consumers must order/dedupe by event id
+    /// and timestamp (the documented at-least-once, unordered contract).
     #[tokio::test]
-    async fn reordered_events_both_deliver_independently_in_created_at_order()
+    async fn reordered_events_both_deliver_no_state_is_dropped()
     -> Result<(), Box<dyn std::error::Error>> {
         let Some(pool) = test_pool("wh_reorder").await else {
             return Ok(());
@@ -4849,8 +4851,15 @@ mod residual_arms {
             .iter()
             .map(|request| String::from_utf8_lossy(&request.body).to_string())
             .collect();
-        assert!(wire[0].contains("delivered"), "the older event goes first: {wire:?}");
-        assert!(wire[1].contains("accepted"), "the newer event follows: {wire:?}");
+        // BOTH events on the wire, in SOME order — the delivery calls run
+        // sequentially in this test, but the production worker dispatches
+        // concurrently per tenant, so receiver-observed order is NOT a
+        // contract. Consumers order/dedupe by event id + timestamp.
+        assert!(
+            wire.iter().any(|body| body.contains("delivered"))
+                && wire.iter().any(|body| body.contains("accepted")),
+            "both events delivered (unordered contract): {wire:?}"
+        );
 
         // Both queue rows are consumed and both events are recorded
         // independently (two delivery rows, one per event).

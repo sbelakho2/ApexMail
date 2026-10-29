@@ -66,14 +66,17 @@ Throughput limits apply to all plans; the *uptime credit* regime in
 |--------|--------|-------------------|
 | Auth success rate | ≥ 99.9% of valid credential attempts | Rolling 7-day window |
 
-The commitment's own denominator is `apexmail_auth_credential_attempts_total`
-on the `apexmail-api` job: `mechanism="api_key"` with
-`outcome="authenticated"` counts valid credential attempts, and the sibling
-outcomes (`invalid`, `expired`, `tenant_mismatch`) carry the failure reasons.
-The published page-level 2xx share under `/v1/auth/` (from
-`apexmail_http_requests_total`, `path_pattern=~"/v1/auth/.*"`) remains the
-lower-bound convenience view. SMTP submission auth failures are observable
-as `mta.auth.failure` on the `apexmail-mta` job.
+The commitment's measure is `apexmail_auth_service_attempts_total` on the
+`apexmail-api` job (`mechanism="api_key"`): `outcome="succeeded"` over ALL
+attempts (successes plus `outcome="error"` ApexMail-side failures such as
+DB/Redis outages or corrupt scopes). Customer-caused outcomes (invalid,
+expired, tenant-mismatched keys) are deliberately excluded — a bad key is
+not a service outage — and are observable separately as the credential
+funnel `apexmail_auth_credential_attempts_total`. The published page-level
+2xx share under `/v1/auth/` (from `apexmail_http_requests_total`,
+`path_pattern=~"/v1/auth/.*"`) remains the lower-bound convenience view.
+SMTP submission auth failures are observable as `mta.auth.failure` on the
+`apexmail-mta` job.
 
 ---
 

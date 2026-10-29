@@ -460,6 +460,153 @@ ci_blessing_sign() {
     printf '%s' "$1" | openssl dgst -sha256 -hmac "$_cbs_key" 2>/dev/null | awk '{print $NF}'
 }
 
+# --- asymmetric blessing (Ed25519; external audit remediation #12) ---------------
+# The shared-secret HMAC above means EVERY host that can verify can also MINT
+# a blessing. The preferred mode is asymmetric (blessings carry
+# "signatureAlg":"ed25519"): the CI machine signs with an Ed25519 PRIVATE key
+# and production hosts verify with the PUBLIC key ONLY — a fully compromised
+# deploy host can verify blessings but can never forge one. The HMAC path
+# stays honoured during the transition (blessings without signatureAlg).
+
+# ci_blessing_secret_key — CI side: the PATH of an openssl-readable Ed25519
+# private key. Resolution order:
+#   1. CI_BLESSING_SIGNING_KEY_FILE — a PEM file, or a RAW 32-byte seed file
+#      (wrapped on the fly into the fixed Ed25519 PKCS#8 DER, which is the
+#      only form `openssl pkeyutl` accepts);
+#   2. CI_BLESSING_SIGNING_KEY whose VALUE is itself a PEM key (tests — the
+#      same variable holds the legacy HMAC shared secret, so a non-PEM value
+#      is IGNORED here and both modes may be configured side by side).
+# Prints nothing when no usable key is configured. When the key had to be
+# materialised into a temp file its path is left in _CI_BLESSING_KEY_TMP for
+# the caller (ci_blessing_sign_payload) to remove after use.
+ci_blessing_secret_key() {
+    _CI_BLESSING_KEY_TMP=''
+    if [ -n "${CI_BLESSING_SIGNING_KEY_FILE:-}" ]; then
+        if [ ! -r "$CI_BLESSING_SIGNING_KEY_FILE" ]; then
+            ci_err "CI_BLESSING_SIGNING_KEY_FILE is set but not readable ($CI_BLESSING_SIGNING_KEY_FILE) — no Ed25519 blessing signature"
+            return 0
+        fi
+        if [ "$(head -c 10 "$CI_BLESSING_SIGNING_KEY_FILE" 2>/dev/null)" = '-----BEGIN' ]; then
+            if command -v openssl >/dev/null 2>&1 && \
+                ! openssl pkey -in "$CI_BLESSING_SIGNING_KEY_FILE" -noout >/dev/null 2>&1; then
+                ci_err "CI_BLESSING_SIGNING_KEY_FILE is not a parsable key ($CI_BLESSING_SIGNING_KEY_FILE) — no Ed25519 blessing signature"
+                return 0
+            fi
+            printf '%s' "$CI_BLESSING_SIGNING_KEY_FILE"
+            return 0
+        fi
+        # RAW 32-byte seed: PKCS#8 DER for an Ed25519 key is the fixed 16-byte
+        # prefix 302e020100300506032b657004220420 plus the 32 seed bytes.
+        _cbsk_pem=$(mktemp "${TMPDIR:-/tmp}/apexmail-bless.XXXXXX") || return 0
+        {
+            printf -- '-----BEGIN PRIVATE KEY-----\n'
+            { printf '\060\056\002\001\000\060\005\006\003\053\145\160\004\042\004\040'
+              head -c 32 "$CI_BLESSING_SIGNING_KEY_FILE"; } | openssl base64 -A 2>/dev/null | fold -w 64
+            printf -- '\n-----END PRIVATE KEY-----\n'
+        } >"$_cbsk_pem"
+        if command -v openssl >/dev/null 2>&1 && \
+            openssl pkey -in "$_cbsk_pem" -noout >/dev/null 2>&1; then
+            _CI_BLESSING_KEY_TMP=$_cbsk_pem
+            printf '%s' "$_cbsk_pem"
+            return 0
+        fi
+        rm -f "$_cbsk_pem"
+        ci_err "CI_BLESSING_SIGNING_KEY_FILE is neither a PEM key nor a RAW 32-byte Ed25519 seed ($CI_BLESSING_SIGNING_KEY_FILE)"
+        return 0
+    fi
+    if [ -n "${CI_BLESSING_SIGNING_KEY:-}" ]; then
+        case $(printf '%s' "$CI_BLESSING_SIGNING_KEY" | head -n1) in
+            '-----BEGIN'*)
+                _cbsk_pem=$(mktemp "${TMPDIR:-/tmp}/apexmail-bless.XXXXXX") || return 0
+                printf '%s\n' "$CI_BLESSING_SIGNING_KEY" >"$_cbsk_pem"
+                _CI_BLESSING_KEY_TMP=$_cbsk_pem
+                printf '%s' "$_cbsk_pem"
+                return 0
+                ;;
+        esac
+    fi
+    return 0
+}
+
+# ci_blessing_public_key — deploy side: the base64 raw 32-byte Ed25519 PUBLIC
+# key from CI_BLESSING_VERIFY_PUBLIC_KEY, or the first line of
+# CI_BLESSING_VERIFY_PUBLIC_KEY_FILE. Nothing when unset (the host then
+# refuses every ed25519 blessing — fail closed).
+ci_blessing_public_key() {
+    if [ -n "${CI_BLESSING_VERIFY_PUBLIC_KEY:-}" ]; then
+        printf '%s' "$CI_BLESSING_VERIFY_PUBLIC_KEY" | tr -d ' \t\r\n'
+        return 0
+    fi
+    if [ -n "${CI_BLESSING_VERIFY_PUBLIC_KEY_FILE:-}" ] && [ -r "$CI_BLESSING_VERIFY_PUBLIC_KEY_FILE" ]; then
+        head -n1 "$CI_BLESSING_VERIFY_PUBLIC_KEY_FILE" | tr -d ' \t\r\n'
+    fi
+}
+
+# ci_blessing_ed25519_ok — true when the host openssl can do Ed25519 (the
+# asymmetric path needs OpenSSL 3.x+; LibreSSL/1.1.x-era builds cannot).
+ci_blessing_ed25519_ok() {
+    command -v openssl >/dev/null 2>&1 || return 1
+    openssl list -signature-algorithms 2>/dev/null | grep -q 'ED25519' && return 0
+    # LibreSSL and very old OpenSSL have no `list -signature-algorithms` —
+    # probe by generating (and discarding) a throwaway key.
+    _be_tmp=$(mktemp "${TMPDIR:-/tmp}/apexmail-bless.XXXXXX") || return 1
+    openssl genpkey -algorithm ed25519 -out "$_be_tmp" >/dev/null 2>&1 || { rm -f "$_be_tmp"; return 1; }
+    rm -f "$_be_tmp"
+    return 0
+}
+
+# ci_blessing_sign_payload <payload> — Ed25519 signature over the canonical
+# blessing string, single-line base64. Empty when no private key is
+# configured or the signature could not be produced (the caller decides how
+# to treat it, exactly like ci_blessing_sign); a configured-but-unsupported
+# openssl is reported loudly via ci_err.
+ci_blessing_sign_payload() {
+    command -v openssl >/dev/null 2>&1 || return 0
+    _cbsp_key=$(ci_blessing_secret_key)
+    [ -n "$_cbsp_key" ] || return 0
+    if ! ci_blessing_ed25519_ok; then
+        [ -z "${_CI_BLESSING_KEY_TMP:-}" ] || rm -f "$_CI_BLESSING_KEY_TMP"
+        _CI_BLESSING_KEY_TMP=''
+        ci_err "Ed25519 blessing key configured but $(openssl version 2>/dev/null || printf 'this openssl') lacks Ed25519 support — install OpenSSL 3.x+ (the blessing stays unsigned and verifying hosts refuse it)"
+        return 0
+    fi
+    _cbsp_dir=$(mktemp -d "${TMPDIR:-/tmp}/apexmail-bless.XXXXXX") || return 0
+    printf '%s' "$1" >"$_cbsp_dir/payload"
+    openssl pkeyutl -sign -inkey "$_cbsp_key" -rawin -in "$_cbsp_dir/payload" 2>/dev/null \
+        | base64 | tr -d '\n\r'
+    rm -rf "$_cbsp_dir"
+    [ -z "${_CI_BLESSING_KEY_TMP:-}" ] || rm -f "$_CI_BLESSING_KEY_TMP"
+    _CI_BLESSING_KEY_TMP=''
+    return 0
+}
+
+# ci_blessing_verify_payload <payload> <sig-b64> <pub-b64> — verify an
+# Ed25519 signature over the canonical string against the base64 raw 32-byte
+# public key. Exit code only (0 verified, non-zero refused); every failure
+# mode — wrong key, tampered content, malformed base64 — runs the same
+# command path and only the exit code differs.
+ci_blessing_verify_payload() {
+    _cbv_payload=$1 _cbv_sig=$2 _cbv_pub=$3
+    command -v openssl >/dev/null 2>&1 || return 1
+    [ -n "$_cbv_payload" ] && [ -n "$_cbv_sig" ] && [ -n "$_cbv_pub" ] || return 1
+    _cbv_dir=$(mktemp -d "${TMPDIR:-/tmp}/apexmail-bless.XXXXXX") || return 1
+    # SubjectPublicKeyInfo DER for Ed25519 is the fixed 12-byte header
+    # 302a300506032b6570032100 plus the 32 key bytes; the header's base64
+    # (MCowBQYDK2VwAyEA) is a whole number of quadruples, so prefixing the
+    # key's base64 stays valid base64 for the -d round trip.
+    printf 'MCowBQYDK2VwAyEA%s' "$(printf '%s' "$_cbv_pub" | tr -d ' \t\r\n')" \
+        | openssl base64 -d -A >"$_cbv_dir/pub.der" 2>/dev/null || { rm -rf "$_cbv_dir"; return 1; }
+    printf '%s' "$_cbv_sig" | tr -d ' \t\r\n' | openssl base64 -d -A >"$_cbv_dir/sig.bin" 2>/dev/null \
+        || { rm -rf "$_cbv_dir"; return 1; }
+    printf '%s' "$_cbv_payload" >"$_cbv_dir/payload"
+    _cbv_rc=0
+    openssl pkeyutl -verify -pubin -keyform DER -inkey "$_cbv_dir/pub.der" \
+        -sigfile "$_cbv_dir/sig.bin" -rawin -in "$_cbv_dir/payload" \
+        >/dev/null 2>&1 || _cbv_rc=$?
+    rm -rf "$_cbv_dir"
+    return "$_cbv_rc"
+}
+
 gate_blessing_refusal() {
     _gbr_runs=$1
     _gbr_head=$2
@@ -511,27 +658,59 @@ gate_blessing_refusal() {
                 ;;
         esac
     done
-    # I20: the blessing must be SIGNED by the CI machine's key and FRESH.
+    # I20: the blessing must be SIGNED by the CI machine and FRESH.
     # Unsigned/mismatched blessings are refused outright; a host without the
-    # key refuses everything (fail closed — provision the shared key, see
-    # .env.production.example). Replay of an old blessing is bounded by the
-    # freshness window (CI_BLESSING_MAX_AGE_SECS, default 7 days).
+    # matching verification material refuses everything (fail closed).
+    # signatureAlg selects the mode (external audit #12): "ed25519" verifies
+    # asymmetrically with the CI machine's PUBLIC key ONLY (the host can
+    # verify but never mint); anything else (or no field — a transition-era
+    # blessing) falls back to the legacy shared-secret HMAC. Replay of an old
+    # blessing is bounded by the freshness window (CI_BLESSING_MAX_AGE_SECS,
+    # default 7 days).
     _gbr_sig=$(sed -n 's/.*"signature":"\([^"]*\)".*/\1/p' "$_gbr_file" | head -n1)
+    _gbr_alg=$(sed -n 's/.*"signatureAlg":"\([^"]*\)".*/\1/p' "$_gbr_file" | head -n1)
     _gbr_completed=$(sed -n 's/.*"completedAt":"\([^"]*\)".*/\1/p' "$_gbr_file" | head -n1)
-    _gbr_key=$(ci_blessing_key)
-    if [ -z "$_gbr_key" ]; then
-        printf '%s' "no CI_BLESSING_SIGNING_KEY configured on this host — every blessing is unverifiable (provision the shared key; .env.production.example)"
-        return 0
-    fi
     if [ -z "$_gbr_sig" ]; then
         printf '%s' "the blessing is UNSIGNED — only blessings signed by the CI machine's key deploy"
         return 0
     fi
-    _gbr_expect=$(ci_blessing_sign "$(ci_blessing_canonical "$_gbr_sha" "$_gbr_config" "$_gbr_stages" "$_gbr_lanes" "$_gbr_completed")")
-    if [ -z "$_gbr_expect" ] || [ "$_gbr_sig" != "$_gbr_expect" ]; then
-        printf '%s' "the blessing signature does not verify (tampered fields or a different key) — the CI machine must re-run and re-push"
-        return 0
-    fi
+    case $_gbr_alg in
+        ed25519)
+            # Asymmetric mode: production needs ONLY the public key — never
+            # the private one (provision CI_BLESSING_VERIFY_PUBLIC_KEY, see
+            # .env.production.example).
+            _gbr_pub=$(ci_blessing_public_key)
+            if [ -z "$_gbr_pub" ]; then
+                printf '%s' "no CI_BLESSING_VERIFY_PUBLIC_KEY configured on this host — every ed25519 blessing is unverifiable (provision the CI machine's PUBLIC key; .env.production.example)"
+                return 0
+            fi
+            if ! ci_blessing_ed25519_ok; then
+                printf '%s' "this host's openssl lacks Ed25519 support — cannot verify the blessing (install OpenSSL 3.x+)"
+                return 0
+            fi
+            if ! ci_blessing_verify_payload \
+                "$(ci_blessing_canonical "$_gbr_sha" "$_gbr_config" "$_gbr_stages" "$_gbr_lanes" "$_gbr_completed")" \
+                "$_gbr_sig" "$_gbr_pub"; then
+                printf '%s' "the blessing signature does not verify (tampered fields or a different key) — the CI machine must re-run and re-push"
+                return 0
+            fi
+            ;;
+        *)
+            # Legacy shared-secret HMAC path — still honoured during the
+            # transition (hosts provisioned with CI_BLESSING_SIGNING_KEY keep
+            # verifying; pre-asymmetric blessings carry no signatureAlg).
+            _gbr_key=$(ci_blessing_key)
+            if [ -z "$_gbr_key" ]; then
+                printf '%s' "no CI_BLESSING_SIGNING_KEY configured on this host — every blessing is unverifiable (provision the shared key, or move to CI_BLESSING_VERIFY_PUBLIC_KEY; .env.production.example)"
+                return 0
+            fi
+            _gbr_expect=$(ci_blessing_sign "$(ci_blessing_canonical "$_gbr_sha" "$_gbr_config" "$_gbr_stages" "$_gbr_lanes" "$_gbr_completed")")
+            if [ -z "$_gbr_expect" ] || [ "$_gbr_sig" != "$_gbr_expect" ]; then
+                printf '%s' "the blessing signature does not verify (tampered fields or a different key) — the CI machine must re-run and re-push"
+                return 0
+            fi
+            ;;
+    esac
     _gbr_age=$(python3 - "$_gbr_completed" <<'PYAGE' 2>/dev/null || echo -1
 import datetime, sys
 try:

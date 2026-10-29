@@ -181,6 +181,9 @@ apps/ai/training/**/*.pt
 /data/
 /test_output.txt
 tools/contrast-audit/node_modules/
+# Generated on demand by apps/ai/training/generate_gap_training.py (deleted
+# from tracking in the Massive Cleaning; never commit the regrowth).
+apps/ai/training/data/train_agent.jsonl
 tests/journeys/node_modules/
 tests/journeys/journey-out/
 dump.rdb

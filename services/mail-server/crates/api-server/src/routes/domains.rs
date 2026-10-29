@@ -430,6 +430,17 @@ async fn create_domain(
 
     tx.commit().await?;
 
+    // Onboarding hook (sixth external audit #15): creating a domain advances
+    // the tenant's onboarding machine (invited → configuring_domain). The
+    // create above already committed — attempt_onboarding_event logs and
+    // continues on ANY error, so bookkeeping can never fail it.
+    let _ = crate::routes::onboarding::attempt_onboarding_event(
+        &state.db,
+        &auth.tenant_id,
+        crate::routes::onboarding::OnboardingEvent::DomainCreated,
+    )
+    .await;
+
     Ok((
         StatusCode::CREATED,
         Json(DomainResponse {
@@ -567,7 +578,23 @@ async fn verify_domain(
 ) -> Result<Json<VerifyResponse>, ApiError> {
     require_scopes(&auth, &["domains:write"])?;
 
-    verify_domain_for_tenant(&state, &auth.tenant_id, &id).await
+    let response = verify_domain_for_tenant(&state, &auth.tenant_id, &id).await?;
+
+    // Onboarding hook (sixth external audit #15): a verification that
+    // actually VERIFIED advances the machine (verifying_dns →
+    // sending_ready); a still-"pending" run is no fact about onboarding, so
+    // it fires nothing. The verify answer above already stands —
+    // attempt_onboarding_event logs and continues on ANY error.
+    if response.0.status == "verified" {
+        let _ = crate::routes::onboarding::attempt_onboarding_event(
+            &state.db,
+            &auth.tenant_id,
+            crate::routes::onboarding::OnboardingEvent::DomainVerified,
+        )
+        .await;
+    }
+
+    Ok(response)
 }
 
 /// Verify a domain using the same locked DNS, DKIM, and SES readiness path as
@@ -1025,6 +1052,17 @@ async fn get_dns_records(
     .fetch_optional(&state.db)
     .await?
     .ok_or_else(|| ApiError::NotFound("domain not found".into()))?;
+
+    // Onboarding hook (sixth external audit #15): REQUESTING the DNS
+    // records is the configuring_domain → verifying_dns step (the tenant
+    // has created the domain and is now told what to point at). Log-and-
+    // continue: a record listing never breaks on the machine's account.
+    let _ = crate::routes::onboarding::attempt_onboarding_event(
+        &state.db,
+        &auth.tenant_id,
+        crate::routes::onboarding::OnboardingEvent::DnsLookup,
+    )
+    .await;
 
     let selector = effective_dkim_selector(row.dkim_selector.as_deref()).to_string();
     let public_key = row

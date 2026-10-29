@@ -352,3 +352,143 @@ async fn missing_planned_units_stay_explicit_and_bound_the_rate() {
 
     pool.close().await;
 }
+
+/// Audit 6: a placement test created BEFORE the window re-observed today
+/// must NOT enter measured counts — its test is not in the frozen cohort,
+/// so the numerator and denominator can never describe different worlds.
+#[tokio::test]
+async fn old_test_reobserved_today_never_enters_the_window() {
+    let Some(pool) = canonical_pool("cohort_old_test").await else {
+        eprintln!("skipping: set TEST_DATABASE_URL to run DB-backed test");
+        return;
+    };
+    let simple = Uuid::new_v4().simple().to_string();
+    let tenant = format!("t{}", &simple[..25]);
+    let (provider_id,): (Uuid,) = sqlx::query_as(
+        "SELECT id FROM seed_providers WHERE name = 'gmail'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let (account_id,): (Uuid,) = sqlx::query_as(
+        "INSERT INTO seed_accounts (provider_id, email) VALUES ($1, $2) RETURNING id",
+    )
+    .bind(provider_id)
+    .bind(format!("{}@seed.example", Uuid::new_v4().simple()))
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    // The test was created 40 days ago (outside the 30-day window)...
+    let (test_id,): (Uuid,) = sqlx::query_as(
+        "INSERT INTO placement_tests (tenant_id, name, from_email, subject, seed_accounts_used, created_at) \
+         VALUES ($1, 'old', 'sender@apex.example', 'seed', $2, NOW() - interval '40 days') RETURNING id",
+    )
+    .bind(&tenant)
+    .bind(vec![account_id])
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    // ...but its result row is FRESH (checked today).
+    sqlx::query(
+        "INSERT INTO placement_results (test_id, seed_account_id, inbox_type, checked_at) \
+         VALUES ($1, $2, 'inbox', NOW())",
+    )
+    .bind(test_id)
+    .bind(account_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let summary = InboxPlacementService::new(pool.clone())
+        .get_placement_summary(&tenant, 30)
+        .await
+        .expect("summary");
+
+    assert_eq!(summary.cohort.planned_units, 0, "the old test is not in the cohort");
+    assert_eq!(summary.cohort.observed_units, 0, "its fresh observation does not count");
+    assert_eq!(summary.measured.inbox, 0, "the numerator stays empty");
+    assert_eq!(summary.inbox_fraction_bounds, None);
+
+    pool.close().await;
+}
+
+/// Audit 6: a corrupted observation store (more observed units than the
+/// cohort planned) must REFUSE the bound, not clamp it.
+#[tokio::test]
+async fn inconsistent_cohort_refuses_the_bound_instead_of_clamping() {
+    let Some(pool) = canonical_pool("cohort_inconsistent").await else {
+        eprintln!("skipping: set TEST_DATABASE_URL to run DB-backed test");
+        return;
+    };
+    let simple = Uuid::new_v4().simple().to_string();
+    let tenant = format!("t{}", &simple[..25]);
+    let (provider_id,): (Uuid,) = sqlx::query_as(
+        "SELECT id FROM seed_providers WHERE name = 'gmail'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let (account_id,): (Uuid,) = sqlx::query_as(
+        "INSERT INTO seed_accounts (provider_id, email) VALUES ($1, $2) RETURNING id",
+    )
+    .bind(provider_id)
+    .bind(format!("{}@seed.example", Uuid::new_v4().simple()))
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let (second_account_id,): (Uuid,) = sqlx::query_as(
+        "INSERT INTO seed_accounts (provider_id, email) VALUES ($1, $2) RETURNING id",
+    )
+    .bind(provider_id)
+    .bind(format!("{}@seed.example", Uuid::new_v4().simple()))
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    // The test PLANNED two units, both observed...
+    let (test_id,): (Uuid,) = sqlx::query_as(
+        "INSERT INTO placement_tests (tenant_id, name, from_email, subject, seed_accounts_used) \
+         VALUES ($1, 'shrunk', 'sender@apex.example', 'seed', $2) RETURNING id",
+    )
+    .bind(&tenant)
+    .bind(vec![account_id, second_account_id])
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    for account in [account_id, second_account_id] {
+        sqlx::query(
+            "INSERT INTO placement_results (test_id, seed_account_id, inbox_type, checked_at) \
+             VALUES ($1, $2, 'inbox', NOW())",
+        )
+        .bind(test_id)
+        .bind(account)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    // ...then the plan was post-hoc SHRUNK below the observed set (the
+    // corruption class: seed_accounts_used edited after observations).
+    sqlx::query("UPDATE placement_tests SET seed_accounts_used = $2 WHERE id = $1")
+        .bind(test_id)
+        .bind(vec![account_id])
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let summary = InboxPlacementService::new(pool.clone())
+        .get_placement_summary(&tenant, 30)
+        .await
+        .expect("summary");
+
+    assert_eq!(summary.cohort.planned_units, 1);
+    assert!(
+        summary.cohort.observed_units > summary.cohort.planned_units,
+        "the corruption is visible in the cohort itself"
+    );
+    assert!(!summary.cohort.consistent, "the inconsistency is surfaced");
+    assert_eq!(
+        summary.inbox_fraction_bounds, None,
+        "no bound may be published from mismatched populations"
+    );
+
+    pool.close().await;
+}
