@@ -46,11 +46,15 @@ ignore = [
     # (0.2.11 is the last); revisit when typst/hayagriva drop serde_yaml.
     "RUSTSEC-2024-0449",
 
-    # ── hickory-proto (RUSTSEC-2026-0119) ────────────────────────────────
-    # Hickory-proto 0.24.x is pulled in by hickory-resolver for DNS. The
-    # O(n²) name compression CPU exhaustion only affects malicious DNS
-    # responses; ApexMail uses trusted DNS resolvers. Tracked in #DEP-02.
-    "RUSTSEC-2026-0119",
+    # NOTE (DEP-6 sweep, 2026-10-29): the hickory-proto 0.24 (0119),
+    # rustls 0.21 (0346/0349), rustls-webpki 0.101 (0098/0099/0104) and
+    # zip 2.x (0367/0368/0369) entries were removed together with their
+    # packages: mail-auth 0.15/mail-send 0.6 moved hickory to 0.26 and
+    # removed zip, calamine 0.37 moved to zip 9, and disabling the AWS SDK's
+    # legacy `rustls` feature removed rustls 0.21 + rustls-webpki 0.101.
+    # `cargo tree` shows only rustls 0.23.46 / rustls-webpki 0.103.16 /
+    # hickory-proto 0.26.1 / zip 9.0.5. An advisory for the old versions now
+    # fails the audit again if they reappear.
 
     # NOTE (audit SM14 F11): RUSTSEC-2024-0437 (protobuf < 2.28) was removed
     # here to match ci/pipeline.conf CI_CARGO_AUDIT_IGNORES, which dropped it
@@ -65,27 +69,14 @@ ignore = [
     # expose a timing oracle over the network. Tracked in #SEC-42.
     "RUSTSEC-2023-0071",
 
-    # ── rustls-webpki 0.101.x (RUSTSEC-2026-0098/0099/0104) ──────────
-    # Pulled in by older rustls 0.22.x. The 0.103.x version used by rustls
-    # 0.23.x is updated to 0.103.13. Remaining 0.101.x advisories cannot be
-    # updated due to semver constraints. Tracked in #DEP-04.
-    "RUSTSEC-2026-0098",  # rustls-webpki: Name constraints for URI names
-    "RUSTSEC-2026-0099",  # rustls-webpki: Wildcard name constraints
-    "RUSTSEC-2026-0104",  # rustls-webpki: CRL parsing reachable panic
-
     # ── quick-xml <0.41 (RUSTSEC-2026-0194/0195) — LOCKSTEP with
     #    ci/pipeline.conf CI_CARGO_AUDIT_IGNORES (same justification there).
-    # Five transitive copies <0.41 via the typst 0.14 ecosystem
-    # (calamine/citationberg/plist) and mail-auth 0.4 (via mail-send 0.4).
-    # The direct workspace copy IS patched (0.41). Revisit on typst 0.15 /
-    # mail-send 0.6.
+    # One transitive 0.38.4 copy remains via citationberg 0.7 → hayagriva →
+    # typst 0.15.1 (pdf-renderer); it parses operator-shipped CSL style XML,
+    # never tenant input. The workspace copy is patched (0.41/0.42). The
+    # DATED waiver with the exact call path lives in .cargo/audit.toml.
     "RUSTSEC-2026-0194",  # quick-xml: quadratic duplicate-attribute parsing
     "RUSTSEC-2026-0195",  # quick-xml: unbounded NsReader allocation DoS
-
-    # ── h2 0.3.x (RUSTSEC-2026-0258) ─────────────────────────────────
-    # Transitive via aws-smithy-http-client (AWS SDK); no fixed 0.3.x
-    # exists; our h2 0.4 copy IS patched (>=0.4.16). Revisit on SDK refresh.
-    "RUSTSEC-2026-0258",
 
     # ── Unmaintained crates (reviewed, low impact) ───────────────────────
     # bincode (RUSTSEC-2025-0141) — used for internal serialization in
@@ -131,30 +122,11 @@ ignore = [
     # with serial_test's standard key types. Revisit on serial_test upgrade.
     "RUSTSEC-2026-0205",
 
-    # ── 2026-10-17 advisory refresh (new DB entries, triaged) ───────────
-    # zip 2.4.2 (RUSTSEC-2026-0367/0368/0369): the vulnerable APIs are
-    # `ZipArchive::extract` / `ZipStreamReader::extract` (symlink escape,
-    # SUID/SGID preservation). The remaining 2.4.2 copies are transitive and
-    # READ-ONLY in memory: mail-auth DMARC/TLS-RPT report parsing
-    # (ZipArchive::new + by_index) and calamine XLSX reading (by_index; no
-    # extract call). The ONE attacker-facing archive extractor —
-    # crates/sandbox — is upgraded to zip 9.0.5 and covered by its 99-test
-    # suite (bounded in-memory extraction; never writes to the filesystem).
-    # Revisit when mail-auth/calamine lift their zip 2 range.
-    "RUSTSEC-2026-0367",  # zip: SUID/SGID preservation on extract
-    "RUSTSEC-2026-0368",  # zip: extract() symlink escape
-    "RUSTSEC-2026-0369",  # zip: permissions applied through symlinks
-    # rustls 0.21.12 (RUSTSEC-2026-0346/0349): EOL line pinned by
-    # aws-smithy-http-client 1.5.0 (AWS SDK) and hickory-proto 0.24.4 (via
-    # mail-auth 0.5.1 / mail-send 0.4.9). No 0.21.x fix exists; the fix is a
-    # 0.23 major for BOTH parents. Our 0.23 copy IS patched (0.23.46) — the
-    # same two advisories against 0.23.45 were fixed by that update. The
-    # Debug advisory requires Debug-formatting TLS session values (we never
-    # log them); the downgrade requires a hostile server on connections we
-    # open to AWS/known resolvers. Tracked with the AWS SDK + mail-auth
-    # majors.
-    "RUSTSEC-2026-0346",  # rustls 0.21: Debug exposes TLS secrets
-    "RUSTSEC-2026-0349",  # rustls 0.21: ServerHello downgrade
+    # NOTE (DEP-6 sweep, 2026-10-29): the 2026-10-17 zip 2.x entries
+    # (0367/0368/0369) and rustls 0.21 entries (0346/0349) were removed with
+    # the packages — calamine 0.37 uses zip 9, mail-auth 0.15/mail-send 0.6
+    # no longer pull zip, and the AWS SDK legacy `rustls` feature is disabled.
+    # crates/sandbox keeps its own direct zip 9.0.5 dependency.
 ]
 
 # ── Duplicate version tracking ───────────────────────────────────────────────
@@ -170,10 +142,8 @@ multiple-versions = "warn"
 wildcards = "allow"
 deny = []
 skip-tree = [
-    # rustls 0.21 pulled in transitively via hickory-resolver 0.24
-    # (trust-dns-resolver → hickory-resolver → hickory-proto → rustls 0.21)
-    # Track https://github.com/hickory-dns/hickory-dns for upgrade.
-    { name = "rustls", version = "0.21.12", depth = 1 },
+    # rustls 0.21 entry removed 2026-10-29 (DEP-6): the only remaining
+    # rustls in Cargo.lock is 0.23.46.
     # hashbrown is vendored by many crates as an internal dep
     { name = "hashbrown", version = "0.12", depth = 1 },
     { name = "hashbrown", version = "0.14", depth = 1 },

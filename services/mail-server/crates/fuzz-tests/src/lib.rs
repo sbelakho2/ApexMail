@@ -20,6 +20,10 @@
 
 #![deny(unsafe_code)]
 
+// The parser drivers shared by the libFuzzer targets (crates/fuzz-tests/fuzz)
+// and the deterministic fuzz-lite smoke test (tests/fuzz_smoke.rs).
+pub mod fuzz_api;
+
 use rand::rngs::StdRng;
 use rand::Rng;
 use rand::SeedableRng;

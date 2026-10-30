@@ -11,7 +11,7 @@ mkt_page_mode = "trust"
 
 ## The promise, and the honest boundary
 
-ApexMail is an EU company (Bel Consulting OÜ, Tallinn, Estonia). The shared cloud runs on EU data centres in Finland. EU-only routing is a real, one-setting mode: every send leaves through ApexMail's own EU MTAs, a send with no own-MTA route is held rather than rerouted, and every accepted message carries an Ed25519-signed routing receipt that any third party can verify against the published public key.
+ApexMail is an EU company (Bel Consulting OÜ, Tallinn, Estonia). The shared cloud runs on EU data centres in the EEA. EU-only routing is a real, one-setting mode: every send leaves through ApexMail's own EU MTAs, a send with no own-MTA route is held rather than rerouted, and every accepted message carries an Ed25519-signed routing receipt that any third party can verify against the published public key.
 
 The honest boundary belongs on the same screen: ApexMail's **default** routing is Global, and Global sends are delivered through Amazon Web Services' SES in its configured EU regions, EU regions of a US company, which may include Germany, covered by the AWS Data Processing Agreement and, where applicable, EU Standard Contractual Clauses. The sentence "your mail never touches a US-controlled provider" is true **under EU-only routing**; it is not true of a Global account, and this site does not claim it platform-wide. The [data location matrix](/data-locations/) states the same scope for storage as this page states for transport.
 
@@ -23,7 +23,7 @@ Evidence: the [Terms](/terms/) name the contracting entity and governing law; th
 
 ## EU data centres
 
-The default shared deployment runs on ApexMail-managed EU infrastructure (Finland). Core service data, account data, hashed API keys, sender and recipient addresses, message content, attachments, delivery events and logs, support tickets, analytics and backups, is processed and replicated inside the EEA, with no third-country transfer for those categories. The genuine exceptions are named rather than hidden: optional OAuth sign-in (Google, GitHub) and payment processing (Mollie B.V.) are separated out in the matrix with their own transfer safeguards.
+The default shared deployment runs on ApexMail-managed EU infrastructure. Core service data, account data, hashed API keys, sender and recipient addresses, message content, attachments, delivery events and logs, support tickets, analytics and backups, is processed and replicated inside the EEA, with no third-country transfer for those categories. The genuine exceptions are named rather than hidden: optional OAuth sign-in (Google, GitHub) and payment processing (Mollie B.V.) are separated out in the matrix with their own transfer safeguards.
 
 Evidence: the [data location matrix](/data-locations/) lists the primary, backup and processing region for each data category; the [subprocessor register](/subprocessors/) names the entities and their processing and storage countries.
 
@@ -73,7 +73,7 @@ Evidence: both endpoints are live, unauthenticated surfaces of the public API; t
 
 ## What EU-only removes from the subprocessor chain
 
-The [subprocessor register](/subprocessors/) is generated from the deployment's own configuration, so the listed set cannot drift from what actually runs. Under EU-only routing, the Amazon Web Services SES entry does not carry a tenant's mail: the message leaves exclusively through ApexMail's own MTAs, operated on ApexMail-managed EU infrastructure (Finland). The remaining entries are payments (Mollie B.V., Amsterdam) and optional OAuth sign-in (Google, GitHub), each with its processing country and transfer mechanism stated on the register.
+The [subprocessor register](/subprocessors/) is generated from the deployment's own configuration, so the listed set cannot drift from what actually runs. Under EU-only routing, the Amazon Web Services SES entry does not carry a tenant's mail: the message leaves exclusively through ApexMail's own MTAs, operated on ApexMail-managed EU infrastructure. The remaining entries are payments (Mollie B.V., Amsterdam) and optional OAuth sign-in (Google, GitHub), each with its processing country and transfer mechanism stated on the register.
 
 In other words: under EU-only, no US-controlled third party carries the mail. Under Global, AWS SES does, in an EU region, under AWS's DPA and SCCs, and the register says exactly that.
 

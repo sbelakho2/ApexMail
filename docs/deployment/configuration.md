@@ -179,7 +179,7 @@ SES, dedicated IP and domain-signing configuration.
 | `SNS_DEV_SIGNING_KEY_PEM` | `(empty)` | **Dev-only** local SNS signing anchor (RSA public key PEM, `\n`-escaped); ignored in production. |
 | `SYSTEM_SENDER_BOOTSTRAP_ON_STARTUP` | `false` | — |
 | `HETZNER_API_TOKEN` | `***` | Your Hetzner API token |
-| `HETZNER_DEFAULT_LOCATION` | `fsn1` | — |
+| `HETZNER_DEFAULT_LOCATION` | `hel1` | Helsinki; every other provider location is refused |
 | `HETZNER_MTA_SERVER_ID` | `(empty)` | — |
 
 ### OAuth / SSO

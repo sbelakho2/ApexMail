@@ -29,9 +29,9 @@ use crate::{
     control,
     crm::CrmBackend,
     discovery::{
-        attempt_solve, default_sources, list_blocked_sources, list_host_health,
-        review_blocked_source, set_host_solver_optin, BlockedReviewAction, DiscoveryJobRunner,
-        DiscoveryQuery, SolverConfig,
+        default_sources, lift_host_exclusion, list_blocked_sources, list_host_exclusion_audit,
+        list_host_health, review_blocked_source, BlockedReviewAction, DiscoveryJobRunner,
+        DiscoveryQuery,
     },
     dispatcher::ProductionCampaignDispatcher,
     enrichment::EnrichmentService,
@@ -178,10 +178,11 @@ pub fn router(state: AppState) -> Router {
         .route("/discovery/jobs", post(create_discovery_job))
         .route("/discovery/jobs/:id", get(get_discovery_job))
         .route("/discovery/jobs/:id/run", post(run_discovery_job))
-        // ── Blocked sources & scraping health (migration 258) ──────────────
-        // The CAPTCHA-ready surface: what got blocked (with the evidence),
-        // what the engine is backing off from, whose host may use the
-        // operator's solver hook, and the audited solve attempt itself.
+        // ── Blocked sources & scraping health (migrations 258/289) ────────
+        // The honest block surface: what got blocked (with the evidence),
+        // what the engine is backing off from, and which hosts are excluded
+        // permanently. A review decision closes a queue row; it never lifts
+        // an exclusion. The owner-only lift and its audit log are separate.
         .route(
             "/discovery/blocked-sources",
             get(list_scrape_blocked_sources),
@@ -190,14 +191,18 @@ pub fn router(state: AppState) -> Router {
             "/discovery/blocked-sources/:id/review",
             post(review_scrape_blocked_source),
         )
-        .route(
-            "/discovery/blocked-sources/:id/solve",
-            post(solve_scrape_blocked_source),
-        )
         .route("/discovery/hosts", get(list_scrape_host_health))
         .route(
-            "/discovery/hosts/:host/solver-optin",
-            post(set_scrape_solver_optin),
+            "/discovery/host-exclusions",
+            get(list_scrape_host_exclusions),
+        )
+        // Owner-only: this service is the platform owner's system-tenant
+        // surface, authenticated by the internal token + tenant middleware.
+        // The handler additionally requires the owner identity and a written
+        // reason, and stores both in the exclusion audit log.
+        .route(
+            "/discovery/hosts/:host/exclusion/lift",
+            post(lift_scrape_host_exclusion),
         )
         // ── Control surface ────────────────────────────────────────────────
         // The authenticated read/steer API the ApexMail control plane proxies
@@ -1092,60 +1097,9 @@ async fn review_scrape_blocked_source(
     .await
 }
 
-/// Optional body of a solve attempt.
-#[derive(Debug, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct SolveBody {
-    #[serde(default)]
-    operator: Option<String>,
-}
-
-/// `POST /discovery/blocked-sources/:id/solve`, attempt the operator-gated
-/// solver hook. Every attempt (including every refusal) is audited; the hook
-/// itself is disabled unless `SCRAPE_CAPTCHA_SOLVER_URL` is configured AND
-/// the host has been opted in through `/discovery/hosts/:host/solver-optin`.
-async fn solve_scrape_blocked_source(
-    State(state): State<Arc<AppState>>,
-    tenant_id: TenantId,
-    Path(id): Path<Uuid>,
-    body: Option<Json<SolveBody>>,
-) -> Result<Json<serde_json::Value>, SalesError> {
-    let tenant_id = tenant_id.0;
-    let span = tracing::info_span!(
-        "solve_scrape_blocked_source",
-        tenant_id = %tenant_id,
-        blocked_source_id = %id,
-        operation = "solve_scrape_blocked_source"
-    );
-    async move {
-        // The solve retry goes through the same hardened client as a normal
-        // fetch, hydrated with this tenant's persisted backoff windows so a
-        // restart cannot hand the solver a free pass around the backoff.
-        let client =
-            crate::discovery::ScrapeClient::new(crate::discovery::ScrapeConfig::from_env())
-                .map_err(|error| {
-                    SalesError::ServiceUnavailable(format!(
-                        "the scrape client could not be constructed: {error}"
-                    ))
-                })?;
-        crate::discovery::hydrate_registry(&state.db, &tenant_id, &client.host_health()).await?;
-
-        let solver = SolverConfig::from_env();
-        let operator = body
-            .as_ref()
-            .and_then(|Json(body)| body.operator.as_deref())
-            .map(str::trim)
-            .filter(|value| !value.is_empty());
-        let report = attempt_solve(&state.db, &client, &tenant_id, id, &solver, operator).await?;
-        Ok(Json(serde_json::json!({ "solve": report })))
-    }
-    .instrument(span)
-    .await
-}
-
 /// `GET /discovery/hosts`, persistent per-host scraping health: consecutive
-/// blocks, the backoff window, the last classification/status and the solver
-/// opt-in.
+/// blocks, the backoff window, the 429 streak, the last classification/status
+/// and the permanent exclusion state.
 async fn list_scrape_host_health(
     State(state): State<Arc<AppState>>,
     tenant_id: TenantId,
@@ -1169,39 +1123,96 @@ async fn list_scrape_host_health(
     .await
 }
 
-/// Body of a solver opt-in change.
+/// Query for the exclusion audit listing.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct SolverOptInBody {
-    enabled: bool,
-    /// Who enabled it, required (the opt-in is a deliberate operator act and
-    /// is stored with the host).
-    operator: String,
+struct HostExclusionAuditQuery {
+    #[serde(default)]
+    host: Option<String>,
+    #[serde(default)]
+    limit: Option<i64>,
 }
 
-/// `POST /discovery/hosts/:host/solver-optin`, enable or revoke this host's
-/// eligibility for the solver hook. Disabling never deletes the audit trail.
-async fn set_scrape_solver_optin(
+/// `GET /discovery/host-exclusions`, the written record of every automatic
+/// host exclusion and every owner lift (the audit log behind the permanent
+/// exclusion state).
+async fn list_scrape_host_exclusions(
     State(state): State<Arc<AppState>>,
     tenant_id: TenantId,
-    Path(host): Path<String>,
-    Json(body): Json<SolverOptInBody>,
+    Query(q): Query<HostExclusionAuditQuery>,
 ) -> Result<Json<serde_json::Value>, SalesError> {
     let tenant_id = tenant_id.0;
     let span = tracing::info_span!(
-        "set_scrape_solver_optin",
+        "list_scrape_host_exclusions",
         tenant_id = %tenant_id,
-        host = %host,
-        operation = "set_scrape_solver_optin"
+        operation = "list_scrape_host_exclusions"
     );
     async move {
-        let row = set_host_solver_optin(&state.db, &tenant_id, &host, body.enabled, &body.operator)
-            .await?;
+        let host = q
+            .host
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_ascii_lowercase);
+        let rows = list_host_exclusion_audit(
+            &state.db,
+            &tenant_id,
+            host.as_deref(),
+            q.limit.unwrap_or(100),
+        )
+        .await?;
+        Ok(Json(serde_json::json!({
+            "tenantId": tenant_id,
+            "count": rows.len(),
+            "exclusions": rows,
+        })))
+    }
+    .instrument(span)
+    .await
+}
+
+/// Body of an owner lift.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LiftHostExclusionBody {
+    /// The owner performing the lift. Required: an unattributed lift of a
+    /// permanent decision is not auditable.
+    owner: String,
+    /// Why the exclusion is being lifted. Required and stored verbatim in
+    /// `sales_scrape_host_exclusion_audit`.
+    reason: String,
+}
+
+/// `POST /discovery/hosts/:host/exclusion/lift`, the ONLY way a permanent
+/// host exclusion ends.
+///
+/// The whole route surface is the platform owner's system-tenant admin API
+/// (internal token + tenant middleware, see [`require_service_token`]); this
+/// handler adds the content requirement: a non-empty owner identity and a
+/// written reason, both written to the exclusion audit log. There is no
+/// setting, job payload or review action that can lift an exclusion.
+async fn lift_scrape_host_exclusion(
+    State(state): State<Arc<AppState>>,
+    tenant_id: TenantId,
+    Path(host): Path<String>,
+    Json(body): Json<LiftHostExclusionBody>,
+) -> Result<Json<serde_json::Value>, SalesError> {
+    let tenant_id = tenant_id.0;
+    let span = tracing::info_span!(
+        "lift_scrape_host_exclusion",
+        tenant_id = %tenant_id,
+        host = %host,
+        operation = "lift_scrape_host_exclusion"
+    );
+    async move {
+        let row =
+            lift_host_exclusion(&state.db, &tenant_id, &host, &body.owner, &body.reason).await?;
         Ok(Json(serde_json::json!({
             "host": row.host,
-            "solverEnabled": row.solver_enabled,
-            "solverEnabledAt": row.solver_enabled_at,
-            "solverEnabledBy": row.solver_enabled_by,
+            "excludedAt": row.excluded_at,
+            "exclusionReason": row.exclusion_reason,
+            "liftedBy": body.owner.trim(),
+            "liftedReason": body.reason.trim(),
         })))
     }
     .instrument(span)
@@ -3405,15 +3416,12 @@ mod tests {
         for request in [
             Request::get("/discovery/blocked-sources"),
             Request::get("/discovery/hosts"),
+            Request::get("/discovery/host-exclusions"),
             Request::post(format!(
                 "/discovery/blocked-sources/{}/review",
                 Uuid::new_v4()
             )),
-            Request::post(format!(
-                "/discovery/blocked-sources/{}/solve",
-                Uuid::new_v4()
-            )),
-            Request::post("/discovery/hosts/example.com/solver-optin"),
+            Request::post("/discovery/hosts/example.com/exclusion/lift"),
         ] {
             let response = app
                 .clone()
@@ -3451,55 +3459,52 @@ mod tests {
             .unwrap();
         assert_eq!(bad_state.status(), StatusCode::BAD_REQUEST);
 
-        // The solver opt-in demands an operator identity (a missing field is
-        // the extractor's 422; an empty one is the handler's 400).
-        let optin = app
+        // The owner lift demands both an owner identity and a written reason
+        // (a missing field is the extractor's 422; an empty one is the
+        // handler's 400).
+        let missing_reason = app
             .clone()
             .oneshot(
-                Request::post("/discovery/hosts/example.com/solver-optin")
+                Request::post("/discovery/hosts/example.com/exclusion/lift")
                     .header("x-api-key", "test-key")
                     .header("x-tenant-id", config::SYSTEM_TENANT_ID)
                     .header("content-type", "application/json")
-                    .body(Body::from(r#"{"enabled":true}"#))
+                    .body(Body::from(r#"{"owner":"owner@apexmail.ee"}"#))
                     .unwrap(),
             )
             .await
             .unwrap();
         assert!(matches!(
-            optin.status(),
+            missing_reason.status(),
             StatusCode::BAD_REQUEST | StatusCode::UNPROCESSABLE_ENTITY
         ));
 
-        let empty_operator = app
+        let empty_owner = app
             .clone()
             .oneshot(
-                Request::post("/discovery/hosts/example.com/solver-optin")
+                Request::post("/discovery/hosts/example.com/exclusion/lift")
                     .header("x-api-key", "test-key")
                     .header("x-tenant-id", config::SYSTEM_TENANT_ID)
                     .header("content-type", "application/json")
-                    .body(Body::from(r#"{"enabled":true,"operator":"   "}"#))
+                    .body(Body::from(r#"{"owner":"   ","reason":"reviewed"}"#))
                     .unwrap(),
             )
             .await
             .unwrap();
-        assert_eq!(empty_operator.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(empty_owner.status(), StatusCode::BAD_REQUEST);
 
-        // A solve attempt against an unknown id is refused as invalid input.
-        let solve = app
+        let empty_reason = app
             .oneshot(
-                Request::post(format!(
-                    "/discovery/blocked-sources/{}/solve",
-                    Uuid::new_v4()
-                ))
-                .header("x-api-key", "test-key")
-                .header("x-tenant-id", config::SYSTEM_TENANT_ID)
-                .header("content-type", "application/json")
-                .body(Body::from(r#"{"operator":"operator@apexmail.ee"}"#))
-                .unwrap(),
+                Request::post("/discovery/hosts/example.com/exclusion/lift")
+                    .header("x-api-key", "test-key")
+                    .header("x-tenant-id", config::SYSTEM_TENANT_ID)
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"owner":"owner@apexmail.ee","reason":"  "}"#))
+                    .unwrap(),
             )
             .await
             .unwrap();
-        assert_ne!(solve.status(), StatusCode::NOT_FOUND);
+        assert_eq!(empty_reason.status(), StatusCode::BAD_REQUEST);
     }
 
     /// `POST /discovery/jobs/:id/run` exists and validates the tenant before

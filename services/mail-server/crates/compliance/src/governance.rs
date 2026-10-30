@@ -730,13 +730,20 @@ struct SubprocessorSeed {
 /// Subprocessors substantiated from the deployment configuration. Contract
 /// specifics (signature dates, references) are Legal/Procurement input and
 /// are deliberately absent.
+///
+/// DP-5: the SES transport is configured by `AWS_REGION`, which is
+/// `eu-west-1` (Ireland) in BOTH env examples and in the compose defaults —
+/// the same region docs/compliance/vendor-register.md documents. The seed
+/// previously asserted `us-east-1`, contradicting the deployment; the
+/// gateway test below pins the seed to the configured region so a US region
+/// can never be seeded for an EU mail pipeline.
 const SEEDED_SUBPROCESSORS: &[SubprocessorSeed] = &[SubprocessorSeed {
     id: "SP-AWS-SES",
     name: "Amazon Web Services (SES)",
     service: "Email delivery for the platform's own transactional/system mail (EMAIL_TRANSPORT_TYPE=ses, \
               domains.ses_verified).",
-    locations: &["us-east-1"],
-    source: ".env.example (AWS_REGION=us-east-1, EMAIL_TRANSPORT_TYPE=ses), \
+    locations: &["eu-west-1"],
+    source: ".env.example (AWS_REGION=eu-west-1, EMAIL_TRANSPORT_TYPE=ses), \
              domains.ses_verified columns, crates/compliance/src/dsr_outbox_flush.rs sender contract",
 }];
 
@@ -751,11 +758,11 @@ struct TransferSeed {
 /// Transfers substantiated from configuration. Mechanism/adequacy are Legal
 /// input and stay `undetermined` until recorded.
 const SEEDED_TRANSFERS: &[TransferSeed] = &[TransferSeed {
-    id: "TIA-AWS-SES-US",
+    id: "TIA-AWS-SES-EU",
     activity_id: "PA-MESSAGE-EVENTS",
-    country: "US",
-    entity: "Amazon Web Services, Inc. (SES, us-east-1)",
-    source: ".env.example (AWS_REGION=us-east-1, EMAIL_TRANSPORT_TYPE=ses)",
+    country: "IE",
+    entity: "Amazon Web Services, Inc. (SES, eu-west-1)",
+    source: ".env.example (AWS_REGION=eu-west-1, EMAIL_TRANSPORT_TYPE=ses)",
 }];
 
 /// Seed the registry. Idempotent (`ON CONFLICT DO NOTHING`): records edited
@@ -1044,6 +1051,49 @@ mod tests {
                 seed.source.contains(".env.example"),
                 "subprocessor {} must cite its configuration source",
                 seed.id
+            );
+        }
+    }
+
+    /// DP-5: the seeded SES region must be the region the deployment actually
+    /// configures (and the vendor register documents), never a US region.
+    #[test]
+    fn seeded_ses_region_matches_the_configured_region() {
+        fn aws_region(env_file: &str) -> &str {
+            env_file
+                .lines()
+                .find_map(|line| line.trim().strip_prefix("AWS_REGION="))
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .expect("AWS_REGION must be configured in the env examples")
+        }
+
+        let dev_region = aws_region(include_str!("../../../../../.env.example"));
+        let prod_region = aws_region(include_str!("../../../../../.env.production.example"));
+        assert_eq!(dev_region, "eu-west-1");
+        assert_eq!(prod_region, "eu-west-1");
+
+        for seed in SEEDED_SUBPROCESSORS {
+            assert_eq!(
+                seed.locations,
+                &[dev_region],
+                "the seeded {} location must match AWS_REGION",
+                seed.id
+            );
+            assert!(
+                seed.locations
+                    .iter()
+                    .all(|location| !location.starts_with("us-")),
+                "{} must never be seeded with a US region",
+                seed.id
+            );
+        }
+        for transfer in SEEDED_TRANSFERS {
+            assert_eq!(transfer.country, "IE", "the SES transfer is intra-EEA");
+            assert!(
+                !transfer.id.ends_with("-US") && !transfer.entity.contains("us-"),
+                "the transfer record must not name a US region: {:?}",
+                transfer.id
             );
         }
     }

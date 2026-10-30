@@ -882,7 +882,9 @@ pub async fn load_webhook_health(state: &AppState) -> Result<WebhookHealth, ApiE
     let db = &state.db;
     let now = Utc::now();
     let mut out = WebhookHealth {
-        configured: billing_service::mollie_client::MollieClient::from_env().is_ok(),
+        // The configured-provider question is the REGISTRY's (fail closed),
+        // never a named wire client's.
+        configured: billing_service::payments::registry::from_env().is_ok(),
         ..Default::default()
     };
     if table_exists(db, "mollie_webhook_events").await? {
@@ -929,8 +931,10 @@ pub async fn load_webhook_health(state: &AppState) -> Result<WebhookHealth, ApiE
 }
 
 async fn load_settlements() -> SettlementsView {
-    let client = match billing_service::mollie_client::MollieClient::from_env() {
-        Ok(client) => client,
+    // The neutral boundary's settlement surface: the configured adapter
+    // answers, so a provider switch changes this console view too.
+    let provider = match billing_service::payments::registry::from_env() {
+        Ok(provider) => provider,
         Err(_) => {
             return SettlementsView {
                 configured: false,
@@ -939,22 +943,22 @@ async fn load_settlements() -> SettlementsView {
             }
         }
     };
-    match client.list_settlements(None).await {
+    match provider.list_settlements().await {
         Ok(settlements) => SettlementsView {
             configured: true,
             error: None,
             settlements: settlements
                 .iter()
                 .map(|settlement| SettlementRow {
-                    id: settlement.id.clone(),
-                    status: settlement.status.clone(),
-                    amount_cents: settlement.amount.as_ref().map(|m| m.cents).unwrap_or(0),
-                    currency: settlement
-                        .amount
-                        .as_ref()
-                        .map(|m| m.currency.clone())
-                        .unwrap_or_else(|| "EUR".into()),
-                    settled_at: settlement.settled_at.clone(),
+                    id: settlement.provider_settlement_id.clone(),
+                    status: if settlement.settled_at.is_some() {
+                        "paid".to_string()
+                    } else {
+                        "pending".to_string()
+                    },
+                    amount_cents: settlement.amount_minor,
+                    currency: settlement.currency.clone(),
+                    settled_at: settlement.settled_at.map(|at| at.to_rfc3339()),
                 })
                 .collect(),
         },

@@ -71,10 +71,14 @@ use super::engine::{
     sweep_open_attempts_with, verify_against_obligation, ObservedPayment, UNRESOLVED_ATTEMPT_STATE,
 };
 use super::{
-    Checkout, CheckoutRequest, Dispute, DisputeState, Payment, PaymentProvider, PaymentState,
-    ProviderCapabilities, ProviderError, Refund, RefundRequest, RefundState, SavedMethodCharge,
-    Settlement,
+    Checkout, CheckoutRequest, CustomerRequest, Dispute, DisputeState, Payment, PaymentProvider,
+    PaymentState, ProviderCapabilities, ProviderCustomer, ProviderError, Refund, RefundRequest,
+    RefundState, SavedMethodCharge, SavedMethodRef, Settlement,
 };
+
+/// The deterministic ids the checkout/activation harness stores.
+pub const CONFORMANCE_CUSTOMER_ID: &str = "conf_customer";
+pub const CONFORMANCE_METHOD_ID: &str = "conf_method";
 
 /// The matrix ids and names, in report order.
 pub const MATRIX: [(u8, &str); 18] = [
@@ -308,6 +312,30 @@ impl PaymentProvider for ConformanceProvider {
             currency: request.currency.to_ascii_uppercase(),
             created_at: None,
         })
+    }
+
+    /// Deterministic customer for the checkout/activation harness: the
+    /// double records nothing provider-side, it only answers the two ids the
+    /// activation stores.
+    async fn ensure_customer(
+        &self,
+        _request: CustomerRequest,
+    ) -> Result<ProviderCustomer, ProviderError> {
+        Ok(ProviderCustomer {
+            provider: self.name.to_string(),
+            provider_customer_id: CONFORMANCE_CUSTOMER_ID.to_string(),
+        })
+    }
+
+    /// The completed checkout's reusable card for the activation harness.
+    async fn fetch_saved_method_for_payment(
+        &self,
+        _provider_payment_id: &str,
+    ) -> Result<Option<SavedMethodRef>, ProviderError> {
+        Ok(Some(SavedMethodRef {
+            provider_customer_id: CONFORMANCE_CUSTOMER_ID.to_string(),
+            provider_method_id: CONFORMANCE_METHOD_ID.to_string(),
+        }))
     }
 
     async fn charge_saved_method(

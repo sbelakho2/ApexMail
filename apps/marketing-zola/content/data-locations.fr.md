@@ -15,24 +15,24 @@ Les entrées Dedicated Tenant et BYOC ci-dessous décrivent un modèle uniquemen
 
 | # | Catégorie de données | Emplacement principal par défaut | Sauvegarde / Réplica par défaut | Région de traitement par défaut | Garantie de transfert |
 |---|---|---|---|---|---|
-| 1 | Données de compte (nom, email, entreprise, adresse) | Centre de données UE, Finlande | Centre de données UE, Finlande (site secondaire) | EEE (aucun transfert vers un pays tiers) | Traitement intra-EEE ; les règles de transfert du chapitre V du RGPD ne s'appliquent pas |
-| 2 | Clés API (hachées) | Centre de données UE, Finlande | Centre de données UE, Finlande (site secondaire) | EEE (aucun transfert vers un pays tiers) | Traitement intra-EEE ; les règles de transfert du chapitre V du RGPD ne s'appliquent pas |
-| 3 | Adresses d'expéditeur et de destinataire | Centre de données UE, Finlande | Centre de données UE, Finlande (site secondaire) | EEE (aucun transfert vers un pays tiers) | Traitement intra-EEE ; les règles de transfert du chapitre V du RGPD ne s'appliquent pas |
-| 4 | Contenu des messages (objet, corps, en-têtes) | Centre de données UE, Finlande | Centre de données UE, Finlande (site secondaire) | EEE (aucun transfert vers un pays tiers) | Traitement intra-EEE ; les règles de transfert du chapitre V du RGPD ne s'appliquent pas |
-| 5 | Pièces jointes | Centre de données UE, Finlande | Centre de données UE, Finlande (site secondaire) | EEE (aucun transfert vers un pays tiers) | Traitement intra-EEE ; les règles de transfert du chapitre V du RGPD ne s'appliquent pas |
-| 6 | Événements et journaux (livraison, ouverture, clic, rebond) | Centre de données UE, Finlande | Centre de données UE, Finlande (site secondaire) | EEE (aucun transfert vers un pays tiers) | Traitement intra-EEE ; les règles de transfert du chapitre V du RGPD ne s'appliquent pas |
-| 7 | Authentification (jetons OAuth, secrets MFA) | Centre de données UE, Finlande ; Google LLC / GitHub, Inc. (OAuth) | Géré par le fournisseur | EEE (principal) ; États-Unis pour les fournisseurs OAuth | CCT (fournisseurs OAuth) |
-| 8 | Facturation (factures, transactions, jetons de paiement) | Centre de données UE, Finlande ; Mollie B.V. (Pays-Bas, UE) | Géré par le fournisseur au sein de l'UE | EEE (ApexMail et Mollie) ; réseaux de cartes selon le DPA Mollie | Traitement intra-EEE (Mollie B.V., Amsterdam) |
-| 9 | Tickets de support | Centre de données UE, Finlande | Centre de données UE, Finlande (site secondaire) | EEE (aucun transfert vers un pays tiers) | Traitement intra-EEE ; les règles de transfert du chapitre V du RGPD ne s'appliquent pas |
-| 10 | Analytique (métriques de livraison agrégées, engagement) | Centre de données UE, Finlande | Centre de données UE, Finlande (site secondaire) | EEE (aucun transfert vers un pays tiers) | Traitement intra-EEE ; les règles de transfert du chapitre V du RGPD ne s'appliquent pas |
-| 11 | Journaux de sécurité (pistes d'audit, journaux d'accès) | Centre de données UE, Finlande | Centre de données UE, Finlande (site secondaire) | EEE (aucun transfert vers un pays tiers) | Traitement intra-EEE ; les règles de transfert du chapitre V du RGPD ne s'appliquent pas |
-| 12 | Sauvegardes (base de données, instantanés de stockage de fichiers) | Centre de données UE, Finlande | Centre de données UE, Finlande (stockage à froid chiffré) | EEE par défaut | Traitement intra-EEE |
+| 1 | Données de compte (nom, email, entreprise, adresse) | Centre de données UE, EEE | Centre de données UE, EEE (site secondaire) | EEE (aucun transfert vers un pays tiers) | Traitement intra-EEE ; les règles de transfert du chapitre V du RGPD ne s'appliquent pas |
+| 2 | Clés API (hachées) | Centre de données UE, EEE | Centre de données UE, EEE (site secondaire) | EEE (aucun transfert vers un pays tiers) | Traitement intra-EEE ; les règles de transfert du chapitre V du RGPD ne s'appliquent pas |
+| 3 | Adresses d'expéditeur et de destinataire | Centre de données UE, EEE | Centre de données UE, EEE (site secondaire) | EEE (aucun transfert vers un pays tiers) | Traitement intra-EEE ; les règles de transfert du chapitre V du RGPD ne s'appliquent pas |
+| 4 | Contenu des messages (objet, corps, en-têtes) | Centre de données UE, EEE | Centre de données UE, EEE (site secondaire) | EEE (aucun transfert vers un pays tiers) | Traitement intra-EEE ; les règles de transfert du chapitre V du RGPD ne s'appliquent pas |
+| 5 | Pièces jointes | Centre de données UE, EEE | Centre de données UE, EEE (site secondaire) | EEE (aucun transfert vers un pays tiers) | Traitement intra-EEE ; les règles de transfert du chapitre V du RGPD ne s'appliquent pas |
+| 6 | Événements et journaux (livraison, ouverture, clic, rebond) | Centre de données UE, EEE | Centre de données UE, EEE (site secondaire) | EEE (aucun transfert vers un pays tiers) | Traitement intra-EEE ; les règles de transfert du chapitre V du RGPD ne s'appliquent pas |
+| 7 | Authentification (jetons OAuth, secrets MFA) | Centre de données UE, EEE ; Google LLC / GitHub, Inc. (OAuth) | Géré par le fournisseur | EEE (principal) ; États-Unis pour les fournisseurs OAuth | CCT (fournisseurs OAuth) |
+| 8 | Facturation (factures, transactions, jetons de paiement) | Centre de données UE, EEE ; Mollie B.V. (Pays-Bas, UE) | Géré par le fournisseur au sein de l'UE | EEE (ApexMail et Mollie) ; réseaux de cartes selon le DPA Mollie | Traitement intra-EEE (Mollie B.V., Amsterdam) |
+| 9 | Tickets de support | Centre de données UE, EEE | Centre de données UE, EEE (site secondaire) | EEE (aucun transfert vers un pays tiers) | Traitement intra-EEE ; les règles de transfert du chapitre V du RGPD ne s'appliquent pas |
+| 10 | Analytique (métriques de livraison agrégées, engagement) | Centre de données UE, EEE | Centre de données UE, EEE (site secondaire) | EEE (aucun transfert vers un pays tiers) | Traitement intra-EEE ; les règles de transfert du chapitre V du RGPD ne s'appliquent pas |
+| 11 | Journaux de sécurité (pistes d'audit, journaux d'accès) | Centre de données UE, EEE | Centre de données UE, EEE (site secondaire) | EEE (aucun transfert vers un pays tiers) | Traitement intra-EEE ; les règles de transfert du chapitre V du RGPD ne s'appliquent pas |
+| 12 | Sauvegardes (base de données, instantanés de stockage de fichiers) | Centre de données UE, EEE | Centre de données UE, EEE (stockage à froid chiffré) | EEE par défaut | Traitement intra-EEE |
 
 ## Emplacements des sous-traitants
 
 | Sous-traitant | Finalité | Emplacement | Garantie de transfert |
 |---|---|---|---|
-| Fournisseur d'infrastructure UE | Infrastructure principale (calcul, stockage, réseau) | Finlande (UE) | Traitement intra-EEE ; les règles de transfert du chapitre V du RGPD ne s'appliquent pas |
+| Fournisseur d'infrastructure UE | Infrastructure principale (calcul, stockage, réseau) | UE (EEE) | Traitement intra-EEE ; les règles de transfert du chapitre V du RGPD ne s'appliquent pas |
 | Amazon Web Services, Inc. (AWS S3) | Stockage d'objets de télémétrie lorsqu'il est activé | Région S3 configurée (par défaut : `eu-central-1`) | Traitement intra-EEE et la garantie de transfert applicable |
 | Amazon Web Services, Inc. (AWS SES) | Transport de livraison d'email lorsqu'il est activé | Région SES configurée | Traitement intra-EEE et la garantie de transfert applicable |
 | Mollie B.V. | Traitement des paiements | Pays-Bas (UE) ; les réseaux de cartes traitent à l'échelle mondiale selon le DPA Mollie | Traitement intra-UE (Mollie B.V., Amsterdam) |

@@ -4,7 +4,7 @@ description = "ApexMail subprocessor register, third-party vendors processing cu
 template = "prose.html"
 
 [extra]
-last_updated = "2026-10-24"
+last_updated = "2026-10-29"
 +++
 <!-- GENERATED FILE, do not edit by hand: `python3 tools/generate_subprocessors.py` renders this page from the
      deployment configuration (compose + env). `--check` fails the validate stage on drift. -->
@@ -13,7 +13,7 @@ last_updated = "2026-10-24"
 
 This page lists third-party vendors engaged by Bel Consulting OÜ (trading as ApexMail) that may process customer personal data in the course of providing the ApexMail service. This register is maintained in accordance with Article 28 of the GDPR and Section 5 of the ApexMail Data Processing Agreement. It is generated from the deployment's own configuration, so the listed set and locations cannot drift from what the deployment actually runs.
 
-Under EU-only routing the AWS SES entry carries no tenant's mail: messages leave exclusively through ApexMail's own MTAs on ApexMail-managed EU infrastructure (Finland). EU-only routing and its evidence, including the distinction from the Global default, which uses AWS SES in its EU region, are set out on the [EU sovereignty page](/eu-sovereign/).
+Under EU-only routing the AWS SES entry carries no tenant's mail: messages leave exclusively through ApexMail's own MTAs on ApexMail-managed EU infrastructure. EU-only routing and its evidence, including the distinction from the Global default, which uses AWS SES in its EU region, are set out on the [EU sovereignty page](/eu-sovereign/).
 
 ### Infrastructure Subprocessors
 
@@ -21,8 +21,9 @@ The following third-party entities process customer personal data on behalf of A
 
 | Legal Entity | Brand | Service | Purpose | Data Categories | Processing Country | Storage Country | Corporate Country | Transfer Mechanism | Required |
 |---|---|---|---|---|---|---|---|---|---|
-| EU infrastructure provider (named in the customer DPA subprocessor annex) | Infrastructure provider | Cloud hosting (compute, storage, networking) | Core service data in the default shared deployment | Finland | Finland | EU/EEA | Intra-EEA processing; GDPR Chapter V transfer rules do not apply | Yes. Active facility: Helsinki, Finland (EU/EEA). |
-| Amazon Web Services, Inc. | AWS SES | Email-delivery transport when enabled (EMAIL_TRANSPORT_TYPE=ses) | Email content and recipient addresses in transit | Ireland | Ireland | USA | EU Standard Contractual Clauses (AWS DPA) | No, only when the active deployment uses the SES transport. Active only while EMAIL_TRANSPORT_TYPE=ses; dedicated IP transfers ride ApexMail's own EU MTAs. AWS EU regions may include Germany; ApexMail's own hosting is in Finland. |
+| EU infrastructure provider (named in the customer DPA annex) | Infrastructure provider | Cloud hosting (compute, storage, networking) | Core service data in the default shared deployment | EU/EEA | EU/EEA | EU/EEA | Intra-EEA processing; GDPR Chapter V transfer rules do not apply | Yes |
+| Amazon Web Services, Inc. | AWS SES | Email-delivery transport when enabled (EMAIL_TRANSPORT_TYPE=ses) | Email content and recipient addresses in transit | Ireland | Ireland | USA | EU Standard Contractual Clauses (AWS DPA) | No, only when the active deployment uses the SES transport. Active only while EMAIL_TRANSPORT_TYPE=ses; dedicated IP transfers ride ApexMail's own EU MTAs. AWS EU regions may include Germany; ApexMail's own hosting is EU infrastructure. |
+| AI model runtime (configured endpoint) | AI inference | AI-assisted triage, drafting and support when enabled (AI_MODEL_ENABLED=true) | Message metadata and content excerpts submitted for AI-assisted analysis | EU/EEA (configured endpoint) | EU/EEA (configured endpoint) | EU/EEA | Configured EU/EEA inference endpoint; intra-EEA processing | No, only when AI_MODEL_ENABLED=true and AI_MODEL_ENDPOINT names an EU/EEA runtime. Listed as a possible processor: inactive unless AI_MODEL_ENABLED=true; the configured endpoint must be an EU/EEA runtime. |
 | Mollie B.V. | Mollie | Payment processing, subscription management, invoicing | Payment card details (tokenized, ApexMail never receives full card numbers), billing address, transaction metadata | Netherlands | Netherlands | Netherlands | Contracting entity is EU-established (Mollie B.V., Amsterdam); card scheme networks process globally under the Mollie Data Processing Agreement; PCI DSS Level 1 certified | Yes, required for paid plans |
 
 ### Payment processor
@@ -31,13 +32,13 @@ Mollie B.V. is a payment institution supervised by De Nederlandsche Bank (DNB), 
 
 ### Self-Hosted Infrastructure (not third-party subprocessors)
 
-The following software is deployed and managed by ApexMail on ApexMail-managed EU infrastructure (Finland). The software publishers do not process customer data.
+The following software is deployed and managed by ApexMail on ApexMail-managed EU infrastructure. The software publishers do not process customer data.
 
 | Software | Purpose | Data Categories | Processing Country | Storage Country | Notes |
 |---|---|---|---|---|---|
-| ClickHouse (open-source) | Analytics database (delivery events, opens, clicks, bounce/complaint data) | Delivery events, open/click events, bounce/complaint data | ApexMail EU region (Finland) | ApexMail EU region (Finland) |region | Self-hosted by ApexMail on ApexMail-managed EU infrastructure (Finland); ClickHouse, Inc. does not process customer data. |
-| Redis (open-source) | In-memory cache (session tokens, rate-limit counters) | Session tokens, rate-limit counters | ApexMail EU region (Finland) | ApexMail EU region (Finland) |region | Self-hosted by ApexMail on ApexMail-managed EU infrastructure (Finland); Redis Ltd. does not process customer data. |
-| Grafana / Loki / Tempo / Prometheus (open-source) | Observability stack (dashboards, logs, traces, metrics) | Operational telemetry (logs, traces, metrics) | ApexMail EU region (Finland) | ApexMail EU region (Finland) |region | Self-hosted by ApexMail on ApexMail-managed EU infrastructure (Finland); the software publishers do not process customer data. |
+| ClickHouse (open-source) | Analytics database (delivery events, opens, clicks, bounce/complaint data) | Delivery events, open/click events, bounce/complaint data | ApexMail EU region (EEA) | ApexMail EU region (EEA) |region | Self-hosted by ApexMail on ApexMail-managed EU infrastructure; ClickHouse, Inc. does not process customer data. |
+| Redis (open-source) | In-memory cache (session tokens, rate-limit counters) | Session tokens, rate-limit counters | ApexMail EU region (EEA) | ApexMail EU region (EEA) |region | Self-hosted by ApexMail on ApexMail-managed EU infrastructure; Redis Ltd. does not process customer data. |
+| Grafana / Loki / Tempo / Prometheus (open-source) | Observability stack (dashboards, logs, traces, metrics) | Operational telemetry (logs, traces, metrics) | ApexMail EU region (EEA) | ApexMail EU region (EEA) |region | Self-hosted by ApexMail on ApexMail-managed EU infrastructure; the software publishers do not process customer data. |
 
 ### Notification
 
@@ -54,3 +55,4 @@ If you object to a new subprocessor on reasonable data protection grounds, conta
 | 2026-07-29 | Initial publication | Subprocessor register published with the EU infrastructure provider, AWS (S3/SES, when enabled), Google (OAuth), GitHub (OAuth) and Mollie (payments). ClickHouse and Redis are self-hosted software, not subprocessors (see above). |
 | 2026-10-15 | Register generated from deployment configuration | The register is now rendered by tools/generate_subprocessors.py from the compose + env deployment configuration, with a validate-stage gate that fails on drift and a zero-US check (sovereign_chain_zero_us) over the active set. Mollie's location column now names the contracting entity (Mollie B.V., Amsterdam) instead of the card-network processing footprint. |
 | 2026-10-24 | Mollie legal identity stated in full | The register now states Mollie B.V.'s registered office (Keizersgracht 126, 1015 CW Amsterdam, The Netherlands) and its supervision by De Nederlandsche Bank (DNB) as a payment institution. Payment processing is in the Netherlands (EU); card-scheme networks may process data globally under Mollie's Data Processing Agreement. |
+| 2026-10-29 | Hosting location withheld from the public register; AI runtime disclosed | The infrastructure provider is now named only as the EU infrastructure provider identified in the customer DPA annex; its country and facility are disclosed only in that annex and in the internal registers. The register also lists the AI model runtime (AI_MODEL_ENDPOINT), which the zero-US check now covers, so an AI endpoint cannot be engaged outside the EU/EEA unnoticed. |

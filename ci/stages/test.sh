@@ -30,7 +30,14 @@
 #      release run
 #   6b. coverage ratchet: cargo llvm-cov nextest --workspace →
 #      $RUN_DIR/coverage.lcov; OVERALL line coverage compared against
-#      ci/coverage-baseline.txt (below = FAIL, CI_COVERAGE_CHECK)
+#      ci/coverage-baseline.txt (below = FAIL, CI_COVERAGE_CHECK —
+#      REQUIRED since the T2 flip). The same pass writes coverage.json and
+#      runs the per-crate floors + tier-1 diff coverage checker
+#      (ci/coverage-floors.toml, CI_COVERAGE_FLOORS_CHECK, REQUIRED).
+#   6c. fuzz-lite smoke (T7): tools/run_fuzz_nightly.sh --smoke — committed
+#      corpora + fixed seeded inputs through every parser driver. The
+#      nightly libFuzzer engine is NOT here; ci/pipeline.sh --fuzz-nightly
+#      runs it once per UTC day.
 #   7. the six SDK lanes (python/go/java/ruby/php/typescript — CI_SDK_CHECK)
 #   8. the satellite Rust crates (CI_SATELLITE_CHECK)
 #   9. static lint gates: shellcheck/hadolint/py_compile
@@ -448,6 +455,40 @@ run_coverage_gate() {
         ci_lane_record coverage-ratchet ok
         ci_info "PASS: workspace line coverage $_cov_pct% (baseline $_cov_base%) — lcov artifact: $_cov_lcov"
         ci_info "ratchet: if this is above the baseline, raise ci/coverage-baseline.txt to $_cov_pct in the SAME PR — that is a PR-positive action, not a concession"
+
+        # --- T2: REQUIRED per-crate floors + tier-1 diff coverage --------------
+        # The workspace number above is the coarse ratchet. ci/coverage-floors.toml
+        # holds per-crate LINE and REGION floors: a crate below its floor, a
+        # floored crate with no measurement, a LOWERED floor without a dated
+        # test.coverage-floors waiver, or a changed tier-1 line no test executed
+        # fails the stage (tools/check_coverage_floors.py).
+        #
+        # Region floors need llvm-cov's export JSON. `cargo llvm-cov report`
+        # reuses the SAME instrumented run's profile data (no second test run);
+        # the JSON is written next to the lcov artifact. A failure to produce it
+        # fails closed when a non-zero region floor exists.
+        _cov_json=$RUN_DIR/coverage.json
+        _cov_json_arg=''
+        if (cd "$WS" && ci_run_logged env CARGO_TERM_COLOR=never \
+                cargo llvm-cov report \
+                --ignore-filename-regex '/(target|\.cargo|\.rustup)/' \
+                --json --output-path "$_cov_json"); then
+            _cov_json_arg="--json $_cov_json"
+        else
+            ci_warn "coverage: cargo llvm-cov report --json failed — region floors cannot be evaluated from this run"
+        fi
+        # shellcheck disable=SC2086  # _cov_json_arg is an intentional word list
+        if ! (cd "$REPO_ROOT" && ci_check "coverage floors" \
+                python3 tools/check_coverage_floors.py \
+                --report "$_cov_lcov" $_cov_json_arg \
+                --base-ref "${CI_COVERAGE_BASE_REF:-HEAD~1}"); then
+            if [ "${CI_COVERAGE_FLOORS_CHECK:-required}" = advisory ]; then
+                ci_warn "ADVISORY: per-crate coverage floors failed (CI_COVERAGE_FLOORS_CHECK=advisory triage window)"
+            else
+                ci_err "FAIL: per-crate coverage floors / tier-1 diff coverage (tools/check_coverage_floors.py)"
+                return "$CI_EXIT_FAIL"
+            fi
+        fi
         return "$CI_EXIT_OK"
     fi
     ci_lane_record coverage-ratchet fail
@@ -1248,6 +1289,34 @@ run_dogfood_lane() {
     return "$CI_EXIT_OK"
 }
 
+# --- fuzz-lite smoke (T7) ------------------------------------------------------------
+# The nightly engine (tools/run_fuzz_nightly.sh, 10 minutes per target) is too
+# expensive for every gate run, but CI must PROVE the harness works: --smoke
+# runs the deterministic fuzz-lite test (crates/fuzz-tests/tests/fuzz_smoke.rs)
+# over every committed corpus + a fixed seeded input set through the SAME
+# parser drivers the libFuzzer targets call. A panic is a crash-class finding.
+# Tooling: stable cargo/nextest only (libFuzzer/nightly are nightly-mode only).
+run_fuzz_smoke() {
+    _fs_flag="${CI_FUZZ_SMOKE_CHECK:-required}"
+    if ci_dry; then
+        ci_info "dry-run: fuzz-lite smoke (tools/run_fuzz_nightly.sh --smoke)"
+        return "$CI_EXIT_OK"
+    fi
+    if bash "$REPO_ROOT/tools/run_fuzz_nightly.sh" --smoke >>"$CI_STAGE_LOG" 2>&1; then
+        ci_lane_record fuzz-smoke ok
+        ci_info "PASS: fuzz-lite smoke (committed corpora + fixed inputs, every parser driver)"
+    else
+        ci_lane_record fuzz-smoke fail
+        if [ "$_fs_flag" = advisory ]; then
+            ci_warn "ADVISORY: fuzz-lite smoke failed (CI_FUZZ_SMOKE_CHECK=advisory triage window) — see $CI_STAGE_LOG"
+            return "$CI_EXIT_OK"
+        fi
+        ci_err "FAIL: fuzz-lite smoke — a parser driver panicked on a corpus/generated input (log: $CI_STAGE_LOG); run tools/run_fuzz_nightly.sh --smoke"
+        return "$CI_EXIT_FAIL"
+    fi
+    return "$CI_EXIT_OK"
+}
+
 stage_main() {
     ensure_marketing_output
 
@@ -1298,6 +1367,9 @@ stage_main() {
     cargo_tool_gates
     run_cargo_tests
     run_coverage_gate
+    # T7: deterministic fuzz-lite smoke (the nightly engine stays out of the
+    # gate line; it is driven by `ci/pipeline.sh run --fuzz-nightly`).
+    run_fuzz_smoke
     run_static_lint_gates
     run_pre_commit_lane
     run_sdk_tests

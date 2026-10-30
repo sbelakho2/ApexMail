@@ -8054,7 +8054,6 @@ mod dispatch_fcrdns_auth_tests {
     use crate::auth::test_dns::{resolver_at, DnsAnswer, MockDns};
     use sqlx::PgPool;
     use std::collections::HashMap;
-    use std::net::SocketAddr;
     use tokio::io::AsyncWriteExt;
 
     fn public_ip() -> IpAddr {
@@ -8089,26 +8088,10 @@ mod dispatch_fcrdns_auth_tests {
     }
 
     fn dmarc_enforcing_authenticator(port: u16, enforce_dmarc: bool) -> Arc<EmailAuthenticator> {
-        // Point BOTH the mail-auth SPF/DKIM resolver (its own bundled hickory
-        // 0.24 stack) and the DMARC TXT resolver (the workspace hickory 0.26
-        // resolver) at the same loopback UDP mock.
-        use mail_auth::hickory_resolver::config::{
-            NameServerConfig, NameServerConfigGroup, Protocol as McProtocol, ResolverConfig,
-            ResolverOpts,
-        };
-        let mut group = NameServerConfigGroup::new();
-        group.push(NameServerConfig::new(
-            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
-            McProtocol::Udp,
-        ));
-        let config = ResolverConfig::from_parts(None, vec![], group);
-        let mut opts = ResolverOpts::default();
-        opts.attempts = 1;
-        opts.timeout = Duration::from_millis(500);
-        opts.try_tcp_on_error = false;
-        opts.cache_size = 0;
-        let mail_auth_resolver =
-            mail_auth::Resolver::with_capacity(config, opts, 0).expect("mail-auth resolver");
+        // Point BOTH the mail-auth 0.15 SPF/DKIM resolver and the DMARC TXT
+        // resolver (the workspace hickory 0.26 resolver) at the same loopback
+        // UDP mock.
+        let mail_auth_resolver = crate::auth::test_dns::mail_auth_at(port);
         Arc::new(EmailAuthenticator::with_injected_resolvers(
             crate::config::EmailAuthConfig {
                 require_spf: false,

@@ -65,16 +65,25 @@ pub const REQUIRED_TABLES: &[&str] = &[
     "sales_outcomes",
     "sales_experiments",
     "sales_experiment_arms",
+    "sales_experiment_outcomes",
+    // Experiment science (migration 290): the metric registry, the
+    // primary-outcome trial ledger, the propensity assignment log, the
+    // guardrail pause table and the randomized holdout ledger.
+    "sales_experiment_metrics",
+    "sales_experiment_contact_trials",
+    "sales_experiment_assignments",
+    "sales_experiment_arm_pauses",
+    "sales_experiment_holdout_accounts",
     // Discovery.
     "sales_discovery_jobs",
     "sales_discovery_candidates",
     "sales_source_runs",
     // Scrape challenge readiness (migration 258): the blocked-source review
-    // queue, persistent per-host health/backoff with the solver opt-in, and
-    // the solver audit trail.
+    // queue, persistent per-host health/backoff and the permanent host
+    // exclusion state (migration 289) with its audit log.
     "sales_scrape_blocked_sources",
     "sales_scrape_host_health",
-    "sales_scrape_solver_audit",
+    "sales_scrape_host_exclusion_audit",
     // Legal gate.
     "sales_jurisdiction_policies",
     "sales_contact_policy_decisions",
@@ -99,9 +108,25 @@ pub const REQUIRED_COLUMNS: &[(&str, &str)] = &[
     ("sales_leads", "last_reply_at"),
     ("sales_discovery_candidates", "contact_email"),
     ("sales_discovery_candidates", "fetched_at"),
+    // Migration 289: the Article 14 source-notice flag for named persons.
+    ("sales_discovery_candidates", "source_notice_required"),
+    // Migration 289: the permanent host exclusion state.
+    ("sales_scrape_host_health", "consecutive_429"),
+    ("sales_scrape_host_health", "excluded_at"),
+    ("sales_scrape_host_health", "exclusion_reason"),
     ("sales_settings", "scoring_weights"),
     ("sales_settings", "schedule"),
     ("sales_settings", "notifications"),
+    // Migration 290: the experiment-science write path.
+    ("sales_experiments", "primary_metric"),
+    ("sales_experiments", "primary_metric_version"),
+    ("sales_experiments", "holdout_share"),
+    ("sales_experiments", "sequential_method"),
+    ("sales_experiment_outcomes", "contact_id"),
+    ("sales_experiment_outcomes", "kind"),
+    ("sales_experiment_outcomes", "value_eur"),
+    ("sales_step_executions", "arm_propensity"),
+    ("sales_enrollments", "arm_propensity"),
 ];
 
 /// Tables that must NOT exist any more.

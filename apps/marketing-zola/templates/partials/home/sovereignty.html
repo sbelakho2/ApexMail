@@ -35,7 +35,7 @@
         </tr>
         <tr>
           <td class="apex-key">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_sovereignty"] and i18n_data[l]["home_sovereignty"]["point_2_title"] %}{{ i18n_data[l]["home_sovereignty"]["point_2_title"] }}{% else %}EU data centres{% endif %}</td>
-          <td class="break-words">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_sovereignty"] and i18n_data[l]["home_sovereignty"]["point_2_desc"] %}{{ i18n_data[l]["home_sovereignty"]["point_2_desc"] }}{% else %}Finnish data centres; core service data is processed and replicated inside the EEA.{% endif %}</td>
+          <td class="break-words">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_sovereignty"] and i18n_data[l]["home_sovereignty"]["point_2_desc"] %}{{ i18n_data[l]["home_sovereignty"]["point_2_desc"] }}{% else %}EU data centres; core service data is processed and replicated inside the EEA.{% endif %}</td>
           <td><a href="{{ lp }}/data-locations/">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_sovereignty"] and i18n_data[l]["home_sovereignty"]["point_2_link"] %}{{ i18n_data[l]["home_sovereignty"]["point_2_link"] }}{% else %}Data location matrix{% endif %}</a></td>
         </tr>
         <tr>
@@ -57,7 +57,7 @@
   <div class="apex-notice mt-8">
     <b class="apex-notice__legend">Scope</b>
     <p>
-      {% if i18n_data and i18n_data[l] and i18n_data[l]["home_sovereignty"] and i18n_data[l]["home_sovereignty"]["note"] %}{{ i18n_data[l]["home_sovereignty"]["note"] | safe }}{% else %}The Global default delivers through AWS SES in its EU regions, which may include Germany, EU regions of a US company; ApexMail's own hosting is in Finland. EU-only routing removes that transport; the full comparison is on <a href="/eu-sovereign/">the sovereignty page</a>.{% endif %}
+      {% if i18n_data and i18n_data[l] and i18n_data[l]["home_sovereignty"] and i18n_data[l]["home_sovereignty"]["note"] %}{{ i18n_data[l]["home_sovereignty"]["note"] | safe }}{% else %}The Global default delivers through AWS SES in its EU regions, which may include Germany, EU regions of a US company; ApexMail's own hosting is EU infrastructure. EU-only routing removes that transport; the full comparison is on <a href="/eu-sovereign/">the sovereignty page</a>.{% endif %}
     </p>
   </div>
   <p class="mt-6">

@@ -19,3 +19,35 @@ max_input_size = 65536
 [fuzz.fuzz_imap_response]
 max_total_time = 600
 max_input_size = 65536
+
+# T7 parser targets. Command/record/token inputs are small; MIME and
+# template sources get 64 KiB like the other wire parsers.
+[fuzz.fuzz_smtp_command]
+max_input_size = 8192
+
+[fuzz.fuzz_smtp_envelope]
+max_input_size = 8192
+
+[fuzz.fuzz_mime_message]
+max_input_size = 65536
+
+[fuzz.fuzz_dkim_signature]
+max_input_size = 16384
+
+[fuzz.fuzz_spf_record]
+max_input_size = 16384
+
+[fuzz.fuzz_dmarc_record]
+max_input_size = 16384
+
+[fuzz.fuzz_webhook_signature]
+max_input_size = 16384
+
+[fuzz.fuzz_template_source]
+max_input_size = 65536
+
+[fuzz.fuzz_csv_report]
+max_input_size = 65536
+
+[fuzz.fuzz_tracking_token]
+max_input_size = 8192

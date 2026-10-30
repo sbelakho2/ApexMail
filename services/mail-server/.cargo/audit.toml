@@ -1,37 +1,51 @@
 # =============================================================================
-# ApexMail — cargo-audit configuration
+# ApexMail — cargo-audit configuration + DATED advisory waivers
 # =============================================================================
-# This file is kept for reference. cargo-audit does not support a --config
-# flag; use individual --ignore flags instead (see rust-check.yml and
-# security-audit.yml).
+# cargo-audit (0.22+) reads this file from the workspace root and applies
+# [advisories].ignore to every run (CI, pre-commit, manual). The DATED waiver
+# metadata is validated by tools/check_audit_waivers.py, which the CI audit
+# lanes run on every invocation and which FAILS on:
+#   * an expired waiver (<=90 days from `written`),
+#   * a waiver whose package/version is no longer in Cargo.lock (obsolete),
+#   * an id in [advisories].ignore without a waiver block (undated ignore),
+#   * a waiver block without its id (orphan).
 #
-# The advisories listed here must match the --ignore flags in CI
-# (ci/pipeline.conf CI_CARGO_AUDIT_IGNORES is the authoritative ledger —
-# `ci/pipeline.sh selftest` asserts deny.toml equality; keep all four
-# ledgers in EXACT lockstep when triaging a new advisory):
-#   --ignore RUSTSEC-2026-0258
-#   --ignore RUSTSEC-2026-0194
-#   --ignore RUSTSEC-2026-0195
-#   --ignore RUSTSEC-2026-0119
-#   --ignore RUSTSEC-2023-0071
-#   --ignore RUSTSEC-2026-0098
-#   --ignore RUSTSEC-2026-0099
-#   --ignore RUSTSEC-2026-0104
-#   --ignore RUSTSEC-2025-0141
-#   --ignore RUSTSEC-2025-0057
-#   --ignore RUSTSEC-2024-0384
-#   --ignore RUSTSEC-2024-0436
-#   --ignore RUSTSEC-2024-0370
-#   --ignore RUSTSEC-2025-0134
-#   --ignore RUSTSEC-2024-0320
-#   --ignore RUSTSEC-2023-0086
-#   --ignore RUSTSEC-2026-0002
-#   --ignore RUSTSEC-2026-0192
-#   --ignore RUSTSEC-2026-0206
-#   --ignore RUSTSEC-2026-0205
-#   --ignore RUSTSEC-2026-0367
-#   --ignore RUSTSEC-2026-0368
-#   --ignore RUSTSEC-2026-0369
-#   --ignore RUSTSEC-2026-0346
-#   --ignore RUSTSEC-2026-0349
+# Waiver block format — immediately BEFORE its id in the ignore array:
+#   # waiver: package="<name>" version="<locked version>" written="YYYY-MM-DD" expires="YYYY-MM-DD"
+#   # reason: <why this advisory is accepted>
+#   # reachable: yes|no: <exact call path, or why no shipped path reaches it>
+#
+# The historic WARNING-class ledger (unmaintained/unsound notices) stays in
+# ci/pipeline.conf CI_CARGO_AUDIT_IGNORES, kept in EXACT lockstep with
+# deny.toml and scripts/security-audit.sh by `ci/pipeline.sh selftest` step 9.
+#
+# Cleared in the October-2026 sweep (2026-10-29) and therefore NOT waived:
+# webpki-roots >=1.0.10, rustls-webpki 0.103.16, the zip>=9 / zstd>=0.14.3
+# chain (calamine 0.37, mail-auth 0.15, mail-send 0.6 without dkim),
+# crypto-bigint 0.7.10 (aws-sigv4 1.6.4, xml-sec 0.1.23) and ctutils 0.4.7.
+# The rustls 0.21 + rustls-webpki 0.101 duplicate was removed by disabling
+# the AWS SDK's legacy `rustls` feature.
 # =============================================================================
+
+[advisories]
+ignore = [
+    # waiver: package="lopdf" version="0.34.0" written="2026-10-29" expires="2027-01-27"
+    # reason: Stack overflow via deeply nested PDF objects. No production path: lopdf arrives only through pdf-extract, a DEV-dependency of pdf-renderer, and that check parses PDFs this repository generated itself. Revisit when pdf-extract lifts its lopdf range (>=0.42 fixes it).
+    # reachable: no: pdf-renderer dev-dependency only (pdf-extract 0.8.2 -> lopdf 0.34.0); no normal/build dependency edge and no request path in any shipped image.
+    "RUSTSEC-2026-0187",
+
+    # waiver: package="quick-xml" version="0.38.4" written="2026-10-29" expires="2027-01-27"
+    # reason: Quadratic start-tag attribute scan. The remaining <0.41 copy is pulled by citationberg 0.7 (typst 0.15.1) inside pdf-renderer; the workspace's own quick-xml copies are 0.41/0.42 and patched. citationberg parses CSL citation styles shipped with the operator image, not tenant-supplied XML. Revisit on the typst release that moves citationberg to quick-xml >=0.41.
+    # reachable: yes (restricted): pdf-renderer -> typst 0.15.1 -> typst-library -> hayagriva 0.10.1 -> citationberg 0.7.0 -> quick-xml 0.38.4. Only operator-shipped CSL style XML is parsed; tenant document content never reaches NsReader attribute scanning.
+    "RUSTSEC-2026-0194",
+
+    # waiver: package="quick-xml" version="0.38.4" written="2026-10-29" expires="2027-01-27"
+    # reason: Unbounded namespace-declaration allocation in NsReader (memory-exhaustion DoS). Same single citationberg/typst path as RUSTSEC-2026-0194; only operator-shipped CSL styles are parsed, so tenant input cannot size this allocation. Revisit on the typst release that moves citationberg to quick-xml >=0.41.
+    # reachable: yes (restricted): pdf-renderer -> typst 0.15.1 -> typst-library -> hayagriva 0.10.1 -> citationberg 0.7.0 -> quick-xml 0.38.4; no tenant-controlled namespace declarations reach it.
+    "RUSTSEC-2026-0195",
+
+    # waiver: package="rsa" version="0.9.10" written="2026-10-29" expires="2027-01-27"
+    # reason: Marvin attack: timing side channel in RSA decryption. ApexMail uses RSA only for DKIM signing/verification (PKCS#1 v1.5 signatures, never decryption), so the vulnerable decrypt path is not on any request surface. No fixed release exists. Tracked as SEC-42.
+    # reachable: yes (signatures only): worker-processors/src/email/transport.rs::build_dkim_signer (mail-auth rust-crypto -> rsa 0.9.10 RsaKey::sign) and mta/src/auth/email_authentication.rs (mail-auth DKIM verification). No RSA decryption or private-key oracle is exposed.
+    "RUSTSEC-2023-0071",
+]

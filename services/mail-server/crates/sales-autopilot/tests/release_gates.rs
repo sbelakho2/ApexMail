@@ -1460,18 +1460,20 @@ async fn gate_10_reward_projection_moves_the_posterior_once_and_replay_is_a_noop
     );
 
     let after = read_arm(variant.clone()).await;
+    // S1: the reward lands on the LEDGER and marks the contact trial; the
+    // posterior recomputes only when the 14-day window matures.
     assert_eq!(
-        after.0,
-        before.0 + 0.5,
-        "one positive_reply must add its reward to alpha exactly once"
+        after.0, before.0,
+        "rewards do not move alpha before maturity"
     );
+    assert_eq!(after.1, before.1, "rewards do not move beta");
+    assert_eq!(after.2, before.2, "no trial has matured yet");
+    assert_eq!(after.3, before.3, "no matured success yet");
     assert_eq!(
-        after.1, before.1,
-        "beta must not move for a positive reward"
+        after.4,
+        before.4 + 1,
+        "a reply is an exposure event: the contact counter moves once"
     );
-    assert_eq!(after.2, before.2 + 1, "one informative trial");
-    assert_eq!(after.3, before.3 + 1, "one success");
-    assert_eq!(after.4, before.4 + 1, "one attributed contact");
     let processed: Option<chrono::DateTime<chrono::Utc>> =
         sqlx::query_scalar("SELECT reward_processed_at FROM sales_outcomes WHERE id = $1")
             .bind(outcome_id)
@@ -1520,6 +1522,25 @@ async fn gate_10_reward_projection_moves_the_posterior_once_and_replay_is_a_noop
         after,
         "a replayed outcome through the projector must leave the posterior unchanged"
     );
+
+    // Closing the window is the ONE posterior move, and it happens once.
+    sales_autopilot::experiments::mature_due_contact_trials(
+        &db,
+        experiment_id,
+        chrono::Utc::now() + chrono::Duration::days(15),
+    )
+    .await
+    .expect("mature the contact windows");
+    let matured = read_arm(variant.clone()).await;
+    assert_eq!(
+        matured.0,
+        before.0 + 1.0,
+        "maturity adds exactly one success"
+    );
+    assert_eq!(matured.1, before.1, "one success and one matured contact");
+    assert_eq!(matured.2, before.2 + 1, "exactly one matured trial");
+    assert_eq!(matured.3, before.3 + 1, "exactly one success");
+    assert_eq!(matured.4, before.4 + 1, "exactly one attributed contact");
 
     common::cleanup_tenant(&db, &tenant_id).await;
 }

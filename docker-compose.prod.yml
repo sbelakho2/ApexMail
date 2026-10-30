@@ -270,7 +270,7 @@ services:
     # the wal-archive overlay, so the cap must apply to every primary run —
     # an abandoned standby slot with no bound fills the primary's disk.
     # Same env var + default as deploy/docker-compose.wal-archive.yml's
-    # archive_command (which REPLACES this command when that overlay is
+    # WAL-archive command (which REPLACES this command when that overlay is
     # included — it carries the identical flag).
     command:
       - postgres

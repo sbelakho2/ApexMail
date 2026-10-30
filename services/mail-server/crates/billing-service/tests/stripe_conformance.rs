@@ -821,6 +821,7 @@ async fn checkout_sessions_are_payment_mode_with_the_metadata_contract() {
             method_hint: None,
             provider_customer_id: None,
             provider_method_id: None,
+            save_method: true,
             idempotency_key: "checkout_key_1".to_string(),
         })
         .await
@@ -856,6 +857,7 @@ async fn a_checkout_without_a_redirect_url_refuses() {
             method_hint: None,
             provider_customer_id: None,
             provider_method_id: None,
+            save_method: false,
             idempotency_key: "checkout_key_2".to_string(),
         })
         .await

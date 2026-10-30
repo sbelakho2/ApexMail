@@ -137,6 +137,27 @@ pub(crate) fn resolver_at(port: u16) -> TokioResolver {
     resolver
 }
 
+/// A mail-auth resolver pointed at an already-running mock's port.
+///
+/// mail-auth 0.15 re-exports hickory-resolver 0.26 — the same crate version
+/// the workspace uses through the `trust_dns_resolver` alias — so the config
+/// types unify and the auth stack no longer links a second DNS/runtime.
+pub(crate) fn mail_auth_at(port: u16) -> mail_auth::MessageAuthenticator {
+    let mut nameserver = NameServerConfig::udp(IpAddr::V4(Ipv4Addr::LOCALHOST));
+    if let Some(connection) = nameserver.connections.first_mut() {
+        connection.port = port;
+    }
+    let config =
+        trust_dns_resolver::config::ResolverConfig::from_parts(None, vec![], vec![nameserver]);
+    let mut opts = trust_dns_resolver::config::ResolverOpts::default();
+    opts.attempts = 1;
+    opts.timeout = std::time::Duration::from_millis(500);
+    opts.try_tcp_on_error = false;
+    opts.cache_size = 0;
+    mail_auth::MessageAuthenticator::new(config, opts)
+        .expect("mail-auth resolver pointed at the mock port")
+}
+
 /// Build the wire response for one incoming query per the rule table.
 /// Exposed so tests can run their OWN UDP mock with a mutable rule table
 /// (the fixed `MockDns` cannot change answers mid-test).

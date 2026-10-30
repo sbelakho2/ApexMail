@@ -29,6 +29,17 @@ pub struct PlanRow {
     /// Annual price in US dollar CENTS (10 monthly payments, same rule as
     /// the EUR ladder).
     pub price_yearly_usd_cents: i64,
+    /// OPTIONAL consumer GROSS prices (V30 Option A): the VAT-inclusive
+    /// price the consumer is shown and charged, one headline per plan
+    /// (net varies by destination country). `None` means "not yet set by
+    /// the owner": the consumer quote falls back to net + destination VAT
+    /// (Option B). These are OWNER-SET business facts, never derived or
+    /// invented here — a value appears only when the owner publishes the
+    /// consumer price card.
+    pub consumer_gross_monthly_cents: Option<i64>,
+    pub consumer_gross_yearly_cents: Option<i64>,
+    pub consumer_gross_monthly_usd_cents: Option<i64>,
+    pub consumer_gross_yearly_usd_cents: Option<i64>,
     /// Included emails per month (-1 = unlimited).
     pub email_limit: i64,
     /// Included API calls per month (-1 = unlimited).
@@ -74,6 +85,10 @@ pub const PLANS: &[PlanRow] = &[
         price_yearly_cents: 0,
         price_monthly_usd_cents: 0,
         price_yearly_usd_cents: 0,
+        consumer_gross_monthly_cents: None,
+        consumer_gross_yearly_cents: None,
+        consumer_gross_monthly_usd_cents: None,
+        consumer_gross_yearly_usd_cents: None,
         email_limit: 3_000,
         api_call_limit: 30_000,
         max_retention_days: 7,
@@ -93,6 +108,10 @@ pub const PLANS: &[PlanRow] = &[
         price_yearly_cents: 20_000,
         price_monthly_usd_cents: 2_000,
         price_yearly_usd_cents: 20_000,
+        consumer_gross_monthly_cents: None,
+        consumer_gross_yearly_cents: None,
+        consumer_gross_monthly_usd_cents: None,
+        consumer_gross_yearly_usd_cents: None,
         email_limit: 50_000,
         api_call_limit: 500_000,
         max_retention_days: 30,
@@ -112,6 +131,10 @@ pub const PLANS: &[PlanRow] = &[
         price_yearly_cents: 89_000,
         price_monthly_usd_cents: 9_900,
         price_yearly_usd_cents: 99_000,
+        consumer_gross_monthly_cents: None,
+        consumer_gross_yearly_cents: None,
+        consumer_gross_monthly_usd_cents: None,
+        consumer_gross_yearly_usd_cents: None,
         email_limit: 150_000,
         api_call_limit: 2_000_000,
         max_retention_days: 60,
@@ -131,6 +154,10 @@ pub const PLANS: &[PlanRow] = &[
         price_yearly_cents: 229_000,
         price_monthly_usd_cents: 24_900,
         price_yearly_usd_cents: 249_000,
+        consumer_gross_monthly_cents: None,
+        consumer_gross_yearly_cents: None,
+        consumer_gross_monthly_usd_cents: None,
+        consumer_gross_yearly_usd_cents: None,
         email_limit: 500_000,
         api_call_limit: 5_000_000,
         max_retention_days: 90,
@@ -150,6 +177,10 @@ pub const PLANS: &[PlanRow] = &[
         price_yearly_cents: 699_000,
         price_monthly_usd_cents: 74_900,
         price_yearly_usd_cents: 749_000,
+        consumer_gross_monthly_cents: None,
+        consumer_gross_yearly_cents: None,
+        consumer_gross_monthly_usd_cents: None,
+        consumer_gross_yearly_usd_cents: None,
         email_limit: 2_000_000,
         api_call_limit: 20_000_000,
         max_retention_days: 365,
@@ -169,6 +200,10 @@ pub const PLANS: &[PlanRow] = &[
         price_yearly_cents: 1_750_000,
         price_monthly_usd_cents: 195_000,
         price_yearly_usd_cents: 1_950_000,
+        consumer_gross_monthly_cents: None,
+        consumer_gross_yearly_cents: None,
+        consumer_gross_monthly_usd_cents: None,
+        consumer_gross_yearly_usd_cents: None,
         email_limit: 5_000_000,
         api_call_limit: -1,
         max_retention_days: 730,
@@ -189,6 +224,10 @@ pub const PLANS: &[PlanRow] = &[
         price_yearly_cents: 0,
         price_monthly_usd_cents: 0,
         price_yearly_usd_cents: 0,
+        consumer_gross_monthly_cents: None,
+        consumer_gross_yearly_cents: None,
+        consumer_gross_monthly_usd_cents: None,
+        consumer_gross_yearly_usd_cents: None,
         email_limit: -1,
         api_call_limit: -1,
         max_retention_days: 30,

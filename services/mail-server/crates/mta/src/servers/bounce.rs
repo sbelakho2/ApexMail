@@ -817,8 +817,11 @@ impl BounceServer {
         .fetch_optional(&self.pool)
         .await?;
 
-        Ok(row
-            .filter(|(tenant, recipient, _platform)| !tenant.is_empty() && !recipient.is_empty()))
+        Ok(
+            row.filter(|(tenant, recipient, _platform)| {
+                !tenant.is_empty() && !recipient.is_empty()
+            }),
+        )
     }
 
     /// Clean up old unmatched bounces.
@@ -2169,8 +2172,14 @@ mod tests {
             "messageId is the platform messages.id"
         );
         // Every pre-existing key is still present and unchanged.
-        assert_eq!(payload["bounce_id"].as_str(), Some(bounce_id.to_string().as_str()));
-        assert_eq!(payload["original_recipient"].as_str(), Some("user@example.test"));
+        assert_eq!(
+            payload["bounce_id"].as_str(),
+            Some(bounce_id.to_string().as_str())
+        );
+        assert_eq!(
+            payload["original_recipient"].as_str(),
+            Some("user@example.test")
+        );
         assert_eq!(payload["bounce_type"], "Hard");
         assert_eq!(payload["subtype"], "no-mailbox");
         assert_eq!(payload["authoritative"], true);
@@ -3443,9 +3452,7 @@ mod adversarial_db_tests {
         let legacy = queued
             .iter()
             .map(|(_, payload)| &payload["data"])
-            .find(|data| {
-                data["original_message_id"].as_str() == Some(legacy_queue_id_str.as_str())
-            })
+            .find(|data| data["original_message_id"].as_str() == Some(legacy_queue_id_str.as_str()))
             .expect("legacy bounce event queued");
         assert_eq!(
             legacy["messageId"].as_str(),

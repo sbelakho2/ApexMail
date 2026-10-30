@@ -26,6 +26,7 @@
 //!   (`source_url`, `fetched_at`, and the body's SHA-256 as the snapshot
 //!   hash).
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
 use sha2::{Digest, Sha256};
@@ -37,6 +38,7 @@ use super::job::{normalize_email, sanitize_domain};
 use super::provider::{
     DiscoveredCandidate, DiscoveryError, DiscoveryPage, DiscoveryQuery, DiscoverySource,
 };
+use crate::legal_policy::resolve_jurisdiction;
 
 /// Source id persisted in `sales_discovery_candidates.source`.
 pub const PUBLIC_WEB_SOURCE_ID: &str = "public_web";
@@ -243,12 +245,172 @@ impl DiscoverySource for PublicWebSource {
             }
         }
 
+        apply_source_email_policy(&self.db, &mut candidates).await?;
+
         Ok(DiscoveryPage {
             candidates,
             next_cursor: None,
             cost_eur: 0.0,
         })
     }
+}
+
+// ---------------------------------------------------------------------------
+// mailto: policy (role vs named person, GDPR Art. 14)
+// ---------------------------------------------------------------------------
+
+/// Local parts that identify a role or distribution mailbox, never a named
+/// person. This list is deliberately explicit and closed: a person's address
+/// (`first.last@`, `jdoe@`) is not role-shaped merely because it is on a
+/// company domain, and a role mailbox stays storable without a personal-data
+/// assessment.
+pub const ROLE_MAILBOXES: &[&str] = &[
+    "abuse",
+    "accounts",
+    "admin",
+    "billing",
+    "careers",
+    "contact",
+    "enquiries",
+    "enquiry",
+    "hello",
+    "help",
+    "hr",
+    "info",
+    "jobs",
+    "legal",
+    "mail",
+    "marketing",
+    "office",
+    "press",
+    "privacy",
+    "sales",
+    "security",
+    "support",
+    "team",
+    "webmaster",
+    "welcome",
+];
+
+/// Is this address a role/distribution mailbox (`info@`, `sales@`, …)?
+///
+/// The local part is split on `.`, `_` and `-`; it is a role address when
+/// EVERY segment is a known role word (so `press.office@` is a role). A mix
+/// (`info.john@`) or an unknown word (`jdoe@`) is not: the conservative
+/// answer is "this may be a named person".
+pub fn is_role_address(email: &str) -> bool {
+    let Some(local) = email.split('@').next() else {
+        return false;
+    };
+    // Sub-addressing (`sales+eu@`) is still the same role mailbox.
+    let local = local.split('+').next().unwrap_or(local);
+    let segments: Vec<String> = local
+        .split(['.', '_', '-'])
+        .map(|segment| segment.trim().to_ascii_lowercase())
+        .filter(|segment| !segment.is_empty())
+        .collect();
+    !segments.is_empty()
+        && segments
+            .iter()
+            .all(|segment| ROLE_MAILBOXES.contains(&segment.as_str()))
+}
+
+/// Is this address a named person's (or otherwise non-role) mailbox?
+pub fn is_named_person_address(email: &str) -> bool {
+    !is_role_address(email)
+}
+
+/// May a named person's address found on a public page be STORED for this
+/// jurisdiction?
+///
+/// Only an authoritative `allowed` row for `(jurisdiction, email,
+/// b2b_professional)` permits storage. `approval_required` and `prohibited`
+/// both mean "do not store": the address is discarded rather than kept for a
+/// later approval (a stored address is already the personal-data processing
+/// the policy gates). No row, an unapproved row or an out-of-window row
+/// fails closed exactly like the legal gate does.
+pub async fn named_person_email_allowed(
+    db: &PgPool,
+    jurisdiction: &str,
+) -> Result<bool, DiscoveryError> {
+    let decision: Option<String> = sqlx::query_scalar(
+        "SELECT decision FROM sales_jurisdiction_policies \
+         WHERE jurisdiction = $1 AND channel = 'email' AND contact_type = 'b2b_professional' \
+           AND approved_by IS NOT NULL AND approved_at IS NOT NULL \
+           AND valid_from <= NOW() AND (valid_until IS NULL OR valid_until > NOW()) \
+         ORDER BY version DESC LIMIT 1",
+    )
+    .bind(jurisdiction)
+    .fetch_optional(db)
+    .await
+    .map_err(|error| {
+        DiscoveryError::Internal(format!("jurisdiction policy lookup failed: {error}"))
+    })?;
+    Ok(decision
+        .as_deref()
+        .map(|value| value.trim().eq_ignore_ascii_case("allowed"))
+        .unwrap_or(false))
+}
+
+/// Enforce the `mailto:` policy on one page's candidates.
+///
+/// * a role mailbox is kept unchanged (no personal-data processing);
+/// * a named person's address is stored ONLY when the resolved jurisdiction
+///   has an authoritative `allowed` policy row. When it is stored, the
+///   candidate carries `source_notice_required = true`: the first email to
+///   that person must contain the GDPR Article 14 source notice;
+/// * otherwise the address is dropped (the candidate itself survives, so
+///   company-level evidence is not lost).
+///
+/// The jurisdiction is resolved with full confidence from the explicit
+/// `addressCountry` value the page stated; a candidate with no stated
+/// country resolves to `UNKNOWN` and therefore fails closed.
+pub async fn apply_source_email_policy(
+    db: &PgPool,
+    candidates: &mut [DiscoveredCandidate],
+) -> Result<(), DiscoveryError> {
+    let mut verdicts: HashMap<String, bool> = HashMap::new();
+    for candidate in candidates.iter_mut() {
+        let Some(email) = candidate.contact_email.clone() else {
+            continue;
+        };
+        if is_role_address(&email) {
+            continue;
+        }
+        let jurisdiction = resolve_jurisdiction(candidate.jurisdiction.as_deref(), 1.0);
+        let allowed = match verdicts.get(&jurisdiction) {
+            Some(allowed) => *allowed,
+            None => {
+                let allowed = named_person_email_allowed(db, &jurisdiction).await?;
+                verdicts.insert(jurisdiction, allowed);
+                allowed
+            }
+        };
+        if allowed {
+            candidate.source_notice_required = true;
+        } else {
+            candidate.contact_email = None;
+            candidate.source_notice_required = false;
+        }
+    }
+    Ok(())
+}
+
+/// The GDPR Article 14 source notice the first email to a named person must
+/// carry. The templates that render the first touch live outside this crate's
+/// discovery module; this is the canonical text and the part of the notice
+/// that changes per contact (the document the personal data came from).
+pub fn article14_source_notice(source_url: Option<&str>) -> String {
+    let source = source_url
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("your organisation's public website");
+    format!(
+        "We obtained your business contact details from {source}. We use them only to \
+         contact you about our service; you can object at any time with the unsubscribe \
+         link below, and our privacy notice explains your rights: {}",
+        crate::dispatcher::PRIVACY_NOTICE_URL
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -294,6 +456,7 @@ pub fn extract_candidates(page: &ScrapedPage, max_candidates: usize) -> Vec<Disc
                 .as_deref()
                 .and_then(|url| sanitize_domain(Some(url))),
             contact_email: email,
+            source_notice_required: false,
             jurisdiction: node.country.clone(),
             jurisdiction_confidence: if node.country.is_some() { 0.5 } else { 0.0 },
             confidence: 0.6,
@@ -316,6 +479,7 @@ pub fn extract_candidates(page: &ScrapedPage, max_candidates: usize) -> Vec<Disc
             company_name: None,
             domain,
             contact_email: Some(email),
+            source_notice_required: false,
             jurisdiction: None,
             jurisdiction_confidence: 0.0,
             confidence: 0.4,
@@ -533,4 +697,74 @@ fn mailto_emails(html: &str) -> Vec<String> {
         }
     }
     emails
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn role_mailboxes_are_recognized_and_named_people_are_not() {
+        for role in [
+            "info@acme.ee",
+            "Sales@Acme.ee",
+            "contact@acme.ee",
+            "press.office@acme.ee",
+            "sales+eu@acme.ee",
+            "hr_team@acme.ee",
+        ] {
+            assert!(is_role_address(role), "{role} must be a role address");
+            assert!(!is_named_person_address(role));
+        }
+        for named in [
+            "jane.doe@acme.ee",
+            "jdoe@acme.ee",
+            "info.john@acme.ee",
+            "sales.mary@acme.ee",
+        ] {
+            assert!(
+                !is_role_address(named),
+                "{named} must be treated as a person"
+            );
+            assert!(is_named_person_address(named));
+        }
+    }
+
+    #[test]
+    fn article14_notice_names_the_source_document() {
+        let notice = article14_source_notice(Some("https://acme.ee/about/team"));
+        assert!(notice.contains("https://acme.ee/about/team"));
+        assert!(notice.contains("unsubscribe"));
+        assert!(
+            notice.contains(crate::dispatcher::PRIVACY_NOTICE_URL),
+            "the Article 14 notice must link the privacy notice"
+        );
+        assert!(article14_source_notice(None).contains("public website"));
+    }
+
+    #[test]
+    fn extraction_keeps_role_addresses_and_named_ones_before_the_policy() {
+        // The pure extractor records the address; the async policy is what
+        // drops a named person's address. This pins that separation.
+        let page = ScrapedPage {
+            url: "https://acme.ee/team".to_string(),
+            status: 200,
+            content_type: "text/html".to_string(),
+            body: r#"<a href="mailto:info@acme.ee">Info</a>
+                      <a href="mailto:jane.doe@acme.ee">Jane</a>"#
+                .to_string(),
+            body_bytes: 0,
+            sha256: "0".repeat(64),
+            fetched_at: chrono::Utc::now(),
+            attempts: 1,
+        };
+        let candidates = extract_candidates(&page, 10);
+        assert_eq!(candidates.len(), 2);
+        assert!(candidates
+            .iter()
+            .any(|candidate| candidate.contact_email.as_deref() == Some("jane.doe@acme.ee")));
+        assert!(candidates
+            .iter()
+            .all(|candidate| !candidate.source_notice_required));
+    }
 }

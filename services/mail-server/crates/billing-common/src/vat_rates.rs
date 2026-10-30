@@ -28,40 +28,106 @@ const DEFAULT_EU_COUNTRIES: &[&str] = &[
     "LT", "LU", "MT", "NL", "PL", "PT", "RO", "SK", "SI", "ES", "SE",
 ];
 
-/// Default standard VAT rates for all 27 EU member states.
+/// One standard-rate period: `(country, rate percent, effective from)`.
+///
+/// The table is DATED so a statutory change is a data edit, not a code edit:
+/// every lookup resolves the row in force at the tax point (the invoice date
+/// / supply date), never merely the row at fleet-build time.
+///
+/// # Sources and UNVERIFIED baselines (V30/MON-3)
+///
+/// * Romania: 19 % until 2025-07-31, **21 % from 2025-08-01** (Law 141/2025;
+///   the audit finding MON-3 said 19 % was stale).
+/// * Estonia: 20 % until 2023-12-31, 22 % in 2024, **24 % from 2025-07-01**.
+/// * Finland: 24 % until 2024-08-31, **25.5 % from 2024-09-01**.
+/// * Slovakia: 20 % until 2024-12-31, **23 % from 2025-01-01**.
+/// * Czechia: 21 % is the standard rate since 2024-01-01 (20 % before).
+/// * Every other baseline is the rate in force on 2020-01-01; the exact
+///   historical effective dates for those rows were NOT re-verified in this
+///   wave (flagged UNVERIFIED) and only matter for back-dated invoices.
 ///
 /// Rates are percent and may be fractional: Finland's standard rate has been
 /// 25.5 % since 1 September 2024 and must not be rounded, overcharging a
 /// statutory rate is a legal defect, not a cosmetic one.
-const DEFAULT_VAT_RATES: &[(&str, f64)] = &[
-    ("AT", 20.0),
-    ("BE", 21.0),
-    ("BG", 20.0),
-    ("HR", 25.0),
-    ("CY", 19.0),
-    ("CZ", 21.0),
-    ("DK", 25.0),
-    ("EE", 24.0),
-    ("FI", 25.5),
-    ("FR", 20.0),
-    ("DE", 19.0),
-    ("GR", 24.0),
-    ("HU", 27.0),
-    ("IE", 23.0),
-    ("IT", 22.0),
-    ("LV", 21.0),
-    ("LT", 21.0),
-    ("LU", 17.0),
-    ("MT", 18.0),
-    ("NL", 21.0),
-    ("PL", 23.0),
-    ("PT", 23.0),
-    ("RO", 19.0),
-    ("SK", 23.0),
-    ("SI", 22.0),
-    ("ES", 21.0),
-    ("SE", 25.0),
+const DEFAULT_VAT_RATE_PERIODS: &[(&str, f64, (i32, u32, u32))] = &[
+    ("AT", 20.0, (2020, 1, 1)),
+    ("BE", 21.0, (2020, 1, 1)),
+    ("BG", 20.0, (2020, 1, 1)),
+    ("HR", 25.0, (2020, 1, 1)),
+    ("CY", 19.0, (2020, 1, 1)),
+    ("CZ", 20.0, (2020, 1, 1)),
+    ("CZ", 21.0, (2024, 1, 1)),
+    ("DK", 25.0, (2020, 1, 1)),
+    ("EE", 20.0, (2020, 1, 1)),
+    ("EE", 22.0, (2024, 1, 1)),
+    ("EE", 24.0, (2025, 7, 1)),
+    ("FI", 24.0, (2020, 1, 1)),
+    ("FI", 25.5, (2024, 9, 1)),
+    ("FR", 20.0, (2020, 1, 1)),
+    ("DE", 19.0, (2020, 1, 1)),
+    ("GR", 24.0, (2020, 1, 1)),
+    ("HU", 27.0, (2020, 1, 1)),
+    ("IE", 23.0, (2020, 1, 1)),
+    ("IT", 22.0, (2020, 1, 1)),
+    ("LV", 21.0, (2020, 1, 1)),
+    ("LT", 21.0, (2020, 1, 1)),
+    ("LU", 17.0, (2020, 1, 1)),
+    ("MT", 18.0, (2020, 1, 1)),
+    ("NL", 21.0, (2020, 1, 1)),
+    ("PL", 23.0, (2020, 1, 1)),
+    ("PT", 23.0, (2020, 1, 1)),
+    ("RO", 19.0, (2020, 1, 1)),
+    ("RO", 21.0, (2025, 8, 1)),
+    ("SK", 20.0, (2020, 1, 1)),
+    ("SK", 23.0, (2025, 1, 1)),
+    ("SI", 22.0, (2020, 1, 1)),
+    ("ES", 21.0, (2020, 1, 1)),
+    ("SE", 25.0, (2020, 1, 1)),
 ];
+
+/// The dated standard-rate table as `(country, rate, effective_from)`,
+/// parsed once. `effective_from` for the pre-2024 baselines is the table's
+/// documented 2020-01-01 floor (see [`DEFAULT_VAT_RATE_PERIODS`]).
+pub static VAT_RATE_PERIODS: LazyLock<Vec<(String, f64, NaiveDate)>> = LazyLock::new(|| {
+    DEFAULT_VAT_RATE_PERIODS
+        .iter()
+        .map(|&(country, rate, (year, month, day))| {
+            (
+                country.to_string(),
+                rate,
+                NaiveDate::from_ymd_opt(year, month, day)
+                    .expect("the dated rate table is statically valid"),
+            )
+        })
+        .collect()
+});
+
+/// The dated rate table exposed for tooling/tests: `(country, rate,
+/// effective_from)` rows, in table order.
+pub fn vat_rate_periods() -> &'static [(String, f64, NaiveDate)] {
+    &VAT_RATE_PERIODS
+}
+
+/// Today's standard rates per country (the LAST row per country in the dated
+/// table, before environment overrides).
+fn latest_default_rates() -> Vec<(&'static str, f64)> {
+    let mut latest: std::collections::HashMap<&'static str, (f64, NaiveDate)> =
+        std::collections::HashMap::new();
+    for &(country, rate, (year, month, day)) in DEFAULT_VAT_RATE_PERIODS {
+        let effective = NaiveDate::from_ymd_opt(year, month, day)
+            .expect("the dated rate table is statically valid");
+        match latest.get(country) {
+            Some((_, current)) if *current >= effective => {}
+            _ => {
+                latest.insert(country, (rate, effective));
+            }
+        }
+    }
+    DEFAULT_EU_COUNTRIES
+        .iter()
+        .filter_map(|code| latest.get(*code).map(|&(rate, _)| (*code, rate)))
+        .collect()
+}
 
 // ---------------------------------------------------------------------------
 // Lazy statics
@@ -99,9 +165,9 @@ pub static EU_VAT_RATES: LazyLock<HashMap<String, f64>> =
 /// overrides win per key; every country the payload omits keeps its default
 /// rate. Unparseable pairs are skipped rather than aborting the whole map.
 fn merged_vat_rates(env_raw: Option<&str>) -> HashMap<String, f64> {
-    let mut map: HashMap<String, f64> = DEFAULT_VAT_RATES
-        .iter()
-        .map(|&(code, rate)| (code.to_string(), rate))
+    let mut map: HashMap<String, f64> = latest_default_rates()
+        .into_iter()
+        .map(|(code, rate)| (code.to_string(), rate))
         .collect();
     if let Some(raw) = env_raw {
         for pair in raw.split(',') {
@@ -132,9 +198,50 @@ pub fn is_eu_country(country: &str) -> bool {
 ///
 /// Returns `None` for non-EU countries.
 ///
-/// This is a convenience wrapper around [`EU_VAT_RATES`].
+/// This is a convenience wrapper around [`EU_VAT_RATES`] (today's rate).
 pub fn get_eu_vat_rate(country: &str) -> Option<f64> {
     EU_VAT_RATES.get(&country.to_uppercase()).copied()
+}
+
+/// The standard VAT rate (%) in force for `country` on `at` (the tax point).
+///
+/// Resolution: an `EU_VAT_RATES` environment override wins for every date
+/// (the operator explicitly pinned it); otherwise the LATEST dated table row
+/// whose `effective_from <= at` applies. A date before the table's earliest
+/// row for that country uses the earliest row (the documented 2020-01-01
+/// floor), which only matters for back-dated invoices.
+pub fn get_eu_vat_rate_on(country: &str, at: NaiveDate) -> Option<f64> {
+    let code = country.trim().to_uppercase();
+    if let Ok(raw) = std::env::var("EU_VAT_RATES") {
+        for pair in raw.split(',') {
+            let mut parts = pair.split('=');
+            if let (Some(key), Some(value)) = (parts.next(), parts.next()) {
+                if key.trim().eq_ignore_ascii_case(&code) {
+                    if let Ok(rate) = value.trim().parse::<f64>() {
+                        return Some(rate);
+                    }
+                }
+            }
+        }
+    }
+    let mut applicable: Option<(f64, NaiveDate)> = None;
+    let mut earliest: Option<(f64, NaiveDate)> = None;
+    for (country_code, rate, effective_from) in vat_rate_periods() {
+        if country_code != &code {
+            continue;
+        }
+        let is_earlier = earliest.is_none_or(|(_, date)| *effective_from < date);
+        if is_earlier {
+            earliest = Some((*rate, *effective_from));
+        }
+        if *effective_from <= at {
+            let is_later = applicable.is_none_or(|(_, date)| *effective_from > date);
+            if is_later {
+                applicable = Some((*rate, *effective_from));
+            }
+        }
+    }
+    applicable.or(earliest).map(|(rate, _)| rate)
 }
 
 /// Round-half-up VAT in integer cents for a rate in percent (possibly
@@ -159,6 +266,30 @@ pub fn vat_amount_half_up(amount_cents: i64, rate_percent: f64) -> i64 {
     };
     // Only a nonsense rate × near-i64-bound amount can leave the i64 range;
     // clamp instead of wrapping the tax.
+    i64::try_from(vat).unwrap_or(if vat < 0 { i64::MIN } else { i64::MAX })
+}
+
+/// The VAT INCLUDED in a gross amount for a rate in percent, in integer
+/// cents, rounded half-up (away from zero).
+///
+/// This is the Option A (gross-first) arithmetic: the consumer price is the
+/// fixed gross, so `VAT = gross × rate / (100 + rate)` and
+/// `net = gross − VAT` — exactly, never by rounding a separately computed
+/// net back up (at 21 % on €24.80 a net-first recomputation yields €4.31 and
+/// a total of €24.81, drifting off the displayed price).
+pub fn vat_amount_inclusive_half_up(gross_cents: i64, rate_percent: f64) -> i64 {
+    let rate_tenths = (rate_percent * 10.0).round() as i64;
+    let denominator = 1000 + rate_tenths;
+    if denominator <= 0 {
+        return 0;
+    }
+    let denominator = i128::from(denominator);
+    let product = i128::from(gross_cents) * i128::from(rate_tenths);
+    let vat = if product < 0 {
+        -((-product + denominator / 2) / denominator)
+    } else {
+        (product + denominator / 2) / denominator
+    };
     i64::try_from(vat).unwrap_or(if vat < 0 { i64::MIN } else { i64::MAX })
 }
 
@@ -562,8 +693,9 @@ pub fn calculate_vat_with_evidence(
     let country = country.to_uppercase();
 
     if country == "EE" {
-        let amt = vat_amount_half_up(subtotal, ESTONIA_VAT_RATE);
-        return (ESTONIA_VAT_RATE, amt);
+        let rate = get_eu_vat_rate_on(&country, at).unwrap_or(ESTONIA_VAT_RATE);
+        let amt = vat_amount_half_up(subtotal, rate);
+        return (rate, amt);
     }
 
     if EU_COUNTRIES.contains(&country) {
@@ -571,10 +703,10 @@ pub fn calculate_vat_with_evidence(
             // EU B2B, reverse charge (0 %) against authoritative evidence.
             return (0.0, 0);
         }
-        // EU B2C (or unverified B2B), destination-country VAT. An explicit
-        // map miss goes through the deployed policy (audit item 3d): never
-        // again a silent Estonian rate.
-        let rate = match EU_VAT_RATES.get(&country).copied() {
+        // EU B2C (or unverified B2B), destination-country VAT AT THE TAX
+        // POINT. An explicit map miss goes through the deployed policy
+        // (audit item 3d): never again a silent Estonian rate.
+        let rate = match get_eu_vat_rate_on(&country, at) {
             Some(rate) => rate,
             None => {
                 let fallback_rate =
@@ -659,7 +791,7 @@ pub fn calculate_vat_strict_with_evidence(
         if vat_number.is_some_and(|vat| reverse_charge_authorised(&upper, vat, evidence, at)) {
             return Ok((0.0, 0));
         }
-        let rate = EU_VAT_RATES.get(&upper).copied().map_or_else(
+        let rate = get_eu_vat_rate_on(&upper, at).map_or_else(
             || resolve_map_miss_rate(&upper, VatMapMissPolicy::Error, &VAT_FALLBACK_COUNTRY),
             Ok,
         )?;
@@ -690,6 +822,133 @@ pub fn calculate_vat_strict(
         None,
         chrono::Utc::now().date_naive(),
     )
+}
+
+// ---------------------------------------------------------------------------
+// The list-price rule (V30 / MON-10)
+// ---------------------------------------------------------------------------
+
+/// One price quote on a NET list price. Catalog prices are net business
+/// prices; VAT is ADDED on top for every non-reverse-charge sale, never
+/// extracted from the list price.
+///
+/// | Customer | Net | VAT | Gross |
+/// |---|---|---|---|
+/// | Business, EU, verified cross-border VAT | list | 0 (reverse charge) | list |
+/// | Business, EE or unverified | list | destination/EE rate | list + VAT |
+/// | Business, non-EU | list | 0 | list |
+/// | Consumer | list | destination rate | list + VAT (one displayed total) |
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct VatQuote {
+    pub net_cents: i64,
+    pub vat_cents: i64,
+    pub gross_cents: i64,
+    pub vat_rate: f64,
+    /// True only for a verified intra-EU business supply (0 % with a
+    /// reverse-charge notation); a non-EU zero-rated supply is not a
+    /// reverse charge.
+    pub reverse_charge: bool,
+}
+
+impl VatQuote {
+    /// The quote for a zero/negative price (no VAT, no charge).
+    pub fn zero() -> Self {
+        Self {
+            net_cents: 0,
+            vat_cents: 0,
+            gross_cents: 0,
+            vat_rate: 0.0,
+            reverse_charge: false,
+        }
+    }
+}
+
+/// Quote a NET list price for the buyer described by `business`/`country`/
+/// `vat_number`. `evidence` is the persisted VIES evidence (reverse charge
+/// never relies on the structural shape alone). `at` is the tax point.
+///
+/// This is the V30 rule for BUSINESSES and for the Option B consumer
+/// fallback: the list price is the net amount in every branch. An owner-set
+/// consumer GROSS card takes precedence for consumers — see
+/// [`quote_consumer_gross`] / [`quote_purchase`].
+/// Businesses abroad with verified VAT pay the list price (reverse charge);
+/// Estonian/unverified businesses pay list + VAT; consumers pay list + their
+/// destination VAT as one total. Nothing is ever extracted from the list.
+/// Quote a CONSUMER GROSS price (V30 Option A): the fixed VAT-inclusive
+/// headline the customer sees is charged exactly, and the invoice derives
+/// the net by extracting the destination VAT from that gross.
+pub fn quote_consumer_gross(gross_cents: i64, country: &str, at: NaiveDate) -> VatQuote {
+    if gross_cents <= 0 {
+        return VatQuote::zero();
+    }
+    let upper = country.trim().to_uppercase();
+    let rate = if upper == "EE" {
+        get_eu_vat_rate_on(&upper, at).unwrap_or(ESTONIA_VAT_RATE)
+    } else if is_eu_country(&upper) {
+        match get_eu_vat_rate_on(&upper, at) {
+            Some(rate) => rate,
+            None => get_eu_vat_rate(&VAT_FALLBACK_COUNTRY).unwrap_or(ESTONIA_VAT_RATE),
+        }
+    } else {
+        // Non-EU consumers: outside the scope of EU VAT.
+        0.0
+    };
+    let vat_cents = vat_amount_inclusive_half_up(gross_cents, rate);
+    VatQuote {
+        net_cents: gross_cents - vat_cents,
+        vat_cents,
+        gross_cents,
+        vat_rate: rate,
+        reverse_charge: false,
+    }
+}
+
+/// The one quote entry point for a purchase: a consumer with an owner-set
+/// gross card is charged that gross exactly (Option A); otherwise the net
+/// list price rule applies (businesses always, and consumers when the owner
+/// has not set a gross card — Option B, net + destination VAT shown as one
+/// total).
+pub fn quote_purchase(
+    net_cents: i64,
+    consumer_gross_cents: Option<i64>,
+    country: &str,
+    business: bool,
+    vat_number: Option<&str>,
+    evidence: Option<&VatValidationEvidence>,
+    at: NaiveDate,
+) -> VatQuote {
+    if !business {
+        if let Some(gross) = consumer_gross_cents.filter(|gross| *gross > 0) {
+            return quote_consumer_gross(gross, country, at);
+        }
+    }
+    quote_list_price(net_cents, country, business, vat_number, evidence, at)
+}
+
+pub fn quote_list_price(
+    net_cents: i64,
+    country: &str,
+    business: bool,
+    vat_number: Option<&str>,
+    evidence: Option<&VatValidationEvidence>,
+    at: NaiveDate,
+) -> VatQuote {
+    if net_cents <= 0 {
+        return VatQuote::zero();
+    }
+    let upper = country.trim().to_uppercase();
+    // Consumers never reverse-charge, whatever number the form carried.
+    let vat = if business { vat_number } else { None };
+    let (rate, vat_cents) = calculate_vat_with_evidence(net_cents, &upper, vat, evidence, at);
+    let reverse_charge =
+        business && rate == 0.0 && vat_cents == 0 && upper != "EE" && is_eu_country(&upper);
+    VatQuote {
+        net_cents,
+        vat_cents,
+        gross_cents: net_cents + vat_cents,
+        vat_rate: rate,
+        reverse_charge,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -748,7 +1007,9 @@ mod tests {
 
     #[test]
     fn all_eu_countries_have_vat_rates() {
-        for &(code, expected_rate) in DEFAULT_VAT_RATES {
+        let latest = latest_default_rates();
+        assert_eq!(latest.len(), 27);
+        for (code, expected_rate) in latest {
             assert!(
                 EU_COUNTRIES.contains(code),
                 "Country {code} missing from EU_COUNTRIES"
@@ -758,9 +1019,34 @@ mod tests {
                 Some(expected_rate),
                 "VAT rate mismatch for {code}"
             );
+            assert_eq!(
+                get_eu_vat_rate_on(code, d(2026, 10, 29)),
+                Some(expected_rate),
+                "the dated table must resolve today's rate for {code}"
+            );
         }
         // Verify the count is exactly 27
         assert_eq!(EU_COUNTRIES.len(), 27);
+    }
+
+    #[test]
+    fn dated_rate_table_resolves_romania_and_the_recent_changes() {
+        // MON-3/V2: Romania's standard rate is 21 % from 2025-08-01.
+        assert_eq!(get_eu_vat_rate_on("RO", d(2025, 7, 31)), Some(19.0));
+        assert_eq!(get_eu_vat_rate_on("RO", d(2025, 8, 1)), Some(21.0));
+        assert_eq!(get_eu_vat_rate("RO"), Some(21.0));
+        // Estonia 22 % in 2024, 24 % from 2025-07-01.
+        assert_eq!(get_eu_vat_rate_on("EE", d(2024, 6, 30)), Some(22.0));
+        assert_eq!(get_eu_vat_rate_on("EE", d(2025, 7, 1)), Some(24.0));
+        // Finland 25.5 % from 2024-09-01, fractional and NOT rounded.
+        assert_eq!(get_eu_vat_rate_on("FI", d(2024, 8, 31)), Some(24.0));
+        assert_eq!(get_eu_vat_rate_on("FI", d(2024, 9, 1)), Some(25.5));
+        // Slovakia 23 % from 2025-01-01.
+        assert_eq!(get_eu_vat_rate_on("SK", d(2024, 12, 31)), Some(20.0));
+        assert_eq!(get_eu_vat_rate_on("SK", d(2025, 1, 1)), Some(23.0));
+        // A country with a single baseline row resolves for every date.
+        assert_eq!(get_eu_vat_rate_on("DE", d(1999, 1, 1)), Some(19.0));
+        assert_eq!(get_eu_vat_rate_on("US", d(2026, 1, 1)), None);
     }
 
     // ------------------------------------------------------------------
@@ -773,7 +1059,7 @@ mod tests {
     fn partial_vat_rate_override_keeps_defaults_for_unlisted_countries() {
         let merged = merged_vat_rates(Some("FI=26"));
         // All 27 defaults survive…
-        assert_eq!(merged.len(), DEFAULT_VAT_RATES.len());
+        assert_eq!(merged.len(), 27);
         // …the overridden key wins…
         assert_eq!(merged.get("FI").copied(), Some(26.0));
         // …and an unlisted key keeps its built-in rate.
@@ -784,7 +1070,7 @@ mod tests {
     #[test]
     fn vat_rate_override_parser_skips_garbage_pairs_without_nuking_defaults() {
         let merged = merged_vat_rates(Some("not-a-pair,XX=abc,DE=19"));
-        assert_eq!(merged.len(), DEFAULT_VAT_RATES.len());
+        assert_eq!(merged.len(), 27);
         assert_eq!(merged.get("DE").copied(), Some(19.0));
         // "XX=abc" fails to parse and must not insert a key at all.
         assert_eq!(merged.get("XX"), None);
@@ -794,8 +1080,10 @@ mod tests {
     #[test]
     fn vat_rate_override_absent_yields_verbatim_defaults() {
         let merged = merged_vat_rates(None);
-        assert_eq!(merged.len(), DEFAULT_VAT_RATES.len());
+        assert_eq!(merged.len(), 27);
         assert_eq!(merged.get("FI").copied(), Some(25.5));
+        // MON-3: Romania is 21 %, never the stale 19 %.
+        assert_eq!(merged.get("RO").copied(), Some(21.0));
     }
 
     #[test]
@@ -1259,6 +1547,132 @@ mod tests {
         // yields the documented defaults.)
         assert_eq!(*VAT_MAP_MISS_POLICY, VatMapMissPolicy::FallbackCountry);
         assert_eq!(*VAT_FALLBACK_COUNTRY, "EE");
+    }
+
+    #[test]
+    fn quote_list_price_adds_vat_and_never_extracts_it() {
+        let at = d(2026, 10, 29);
+        // Estonian business: €100 list + 24 % = €124 charged, €100 net.
+        let estonian = quote_list_price(10_000, "EE", true, Some("EE100591102"), None, at);
+        assert_eq!(estonian.net_cents, 10_000);
+        assert_eq!(estonian.vat_cents, 2_400);
+        assert_eq!(estonian.gross_cents, 12_400);
+        assert!(!estonian.reverse_charge);
+        // German business with VIES evidence: €100 charged, 0 VAT.
+        let evidence = valid_vies_evidence("DE123456789", "DE", d(2026, 1, 1), None);
+        let german = quote_list_price(10_000, "DE", true, Some("DE123456789"), Some(&evidence), at);
+        assert_eq!(german.net_cents, 10_000);
+        assert_eq!(german.vat_cents, 0);
+        assert_eq!(german.gross_cents, 10_000);
+        assert!(german.reverse_charge);
+        // German business WITHOUT evidence: list + 19 % (fail closed).
+        let unverified = quote_list_price(10_000, "DE", true, Some("DE123456789"), None, at);
+        assert_eq!(unverified.net_cents, 10_000);
+        assert_eq!(unverified.vat_cents, 1_900);
+        assert_eq!(unverified.gross_cents, 11_900);
+        assert!(!unverified.reverse_charge);
+        // French consumer: list + 20 % = one €120 total.
+        let consumer = quote_list_price(10_000, "FR", false, None, None, at);
+        assert_eq!(consumer.net_cents, 10_000);
+        assert_eq!(consumer.vat_cents, 2_000);
+        assert_eq!(consumer.gross_cents, 12_000);
+        // A consumer carrying a VAT number still pays destination VAT.
+        let consumer_with_number = quote_list_price(
+            10_000,
+            "DE",
+            false,
+            Some("DE123456789"),
+            Some(&evidence),
+            at,
+        );
+        assert_eq!(consumer_with_number.vat_cents, 1_900);
+        assert!(!consumer_with_number.reverse_charge);
+        // Non-EU business: list price, no VAT.
+        let swiss = quote_list_price(10_000, "CH", true, None, None, at);
+        assert_eq!(swiss.gross_cents, 10_000);
+        assert_eq!(swiss.vat_cents, 0);
+        assert!(!swiss.reverse_charge);
+    }
+
+    #[test]
+    fn quote_consumer_gross_charges_the_headline_and_extracts_vat_gross_first() {
+        let at = d(2026, 10, 29);
+        // The memo's illustrative €24.80 gross.
+        let cases = [
+            ("EE", 480, 2_000),
+            ("DE", 396, 2_084),
+            ("FR", 413, 2_067),
+            ("ES", 430, 2_050),
+            ("IT", 447, 2_033),
+            ("NL", 430, 2_050),
+            ("FI", 504, 1_976),
+            ("RO", 430, 2_050),
+            ("SK", 464, 2_016),
+            ("HU", 527, 1_953),
+            ("LU", 360, 2_120),
+        ];
+        for (country, vat, net) in cases {
+            let quote = quote_consumer_gross(2_480, country, at);
+            assert_eq!(quote.gross_cents, 2_480, "{country}: gross is the headline");
+            assert_eq!(quote.vat_cents, vat, "{country}: gross-first VAT");
+            assert_eq!(quote.net_cents, net, "{country}: derived net");
+            assert_eq!(
+                quote.net_cents + quote.vat_cents,
+                2_480,
+                "{country}: net + VAT reconciles to the charged gross"
+            );
+        }
+        // 21 % is the memo's rounding nuance: gross-first gives 4.30, not
+        // the 4.31 a net-first recomputation would produce.
+        let rou = quote_consumer_gross(2_480, "RO", at);
+        assert_eq!((rou.net_cents, rou.vat_cents), (2_050, 430));
+        // A net-first recomputation would say 431 and break the total; the
+        // charged gross stays 2480 and the invoice uses the gross-first 430.
+        assert_eq!(vat_amount_half_up(rou.net_cents, 21.0), 431);
+        // Non-EU consumers pay the headline with no EU VAT.
+        let swiss = quote_consumer_gross(2_480, "CH", at);
+        assert_eq!((swiss.net_cents, swiss.vat_cents), (2_480, 0));
+    }
+
+    #[test]
+    fn quote_purchase_prefers_the_owner_set_consumer_gross_and_falls_back_to_net_plus_vat() {
+        let at = d(2026, 10, 29);
+        // Option A: consumer gross 2480 is charged exactly in every country.
+        for country in ["EE", "DE", "FR", "HU"] {
+            let quote = quote_purchase(2_000, Some(2_480), country, false, None, None, at);
+            assert_eq!(quote.gross_cents, 2_480, "{country}: Option A gross");
+        }
+        // Option B fallback: no owner-set gross, net + destination VAT.
+        let quote = quote_purchase(2_000, None, "FR", false, None, None, at);
+        assert_eq!(
+            (quote.net_cents, quote.vat_cents, quote.gross_cents),
+            (2_000, 400, 2_400)
+        );
+        // A business is NEVER put on the consumer gross card.
+        let evidence = valid_vies_evidence("DE123456789", "DE", d(2026, 1, 1), None);
+        let business = quote_purchase(
+            2_000,
+            Some(2_480),
+            "DE",
+            true,
+            Some("DE123456789"),
+            Some(&evidence),
+            at,
+        );
+        assert_eq!(
+            (business.net_cents, business.vat_cents, business.gross_cents),
+            (2_000, 0, 2_000),
+            "a verified business pays net under reverse charge"
+        );
+    }
+
+    #[test]
+    fn quote_list_price_uses_the_rate_in_force_at_the_tax_point() {
+        // A Romanian invoice dated 2025-07-15 is 19 %; from 2025-08-01 it is 21 %.
+        let before = quote_list_price(10_000, "RO", true, None, None, d(2025, 7, 15));
+        assert_eq!(before.vat_cents, 1_900);
+        let after = quote_list_price(10_000, "RO", true, None, None, d(2025, 8, 1));
+        assert_eq!(after.vat_cents, 2_100);
     }
 
     #[test]

@@ -154,6 +154,12 @@ const FETCH_WEBHOOK_JOBS_SQL: &str = r#"
                 (w.retry_policy->>'backoffMultiplier')::float as "backoffMultiplier"
             FROM claimed_jobs cj
             JOIN webhooks w ON w.id = cj.webhook_id
+            -- Delivery order: `RETURNING` order from the claim CTE is
+            -- undefined, so the DELIVERY order is fixed here. This sorts only
+            -- the already-LIMITed batch (the inner ORDER BY + partial index
+            -- still decide WHICH rows claim), keeping FIFO real rather than
+            -- planner-dependent.
+            ORDER BY cj.created_at ASC
             "#;
 
 /// Webhook processor.
@@ -4468,8 +4474,8 @@ mod residual_arms {
     /// and visible for reconciliation, while a well-formed sibling row for
     /// the same webhook delivers normally.
     #[tokio::test]
-    async fn claim_never_claims_a_queue_row_from_another_tenant()
-    -> Result<(), Box<dyn std::error::Error>> {
+    async fn claim_never_claims_a_queue_row_from_another_tenant(
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let Some(pool) = test_pool("wh_tenant_guard").await else {
             return Ok(());
         };
@@ -4548,11 +4554,12 @@ mod residual_arms {
             .clone();
         assert_eq!(requests.len(), 1, "only the matching row reaches the wire");
         assert_eq!(delivery_rows(&pool, &webhook_id).await, 1);
-        let (delivered_tenant, delivered_payload): (String, serde_json::Value) =
-            sqlx::query_as("SELECT tenant_id, payload FROM webhook_deliveries WHERE webhook_id = $1")
-                .bind(&webhook_id)
-                .fetch_one(&pool)
-                .await?;
+        let (delivered_tenant, delivered_payload): (String, serde_json::Value) = sqlx::query_as(
+            "SELECT tenant_id, payload FROM webhook_deliveries WHERE webhook_id = $1",
+        )
+        .bind(&webhook_id)
+        .fetch_one(&pool)
+        .await?;
         assert_eq!(
             delivered_tenant, tenant,
             "only the webhook's own tenant is ever recorded as delivered"
@@ -4585,15 +4592,15 @@ mod residual_arms {
     #[test]
     fn next_retry_delay_ms_is_the_fixed_ladder_exactly() {
         let ladder: [(i32, i64); 9] = [
-            (1, 30_000),      // 30s
-            (2, 120_000),     // 2m
-            (3, 600_000),     // 10m
-            (4, 1_800_000),   // 30m
-            (5, 3_600_000),   // 1h
-            (6, 10_800_000),  // 3h
-            (7, 21_600_000),  // 6h
-            (8, 43_200_000),  // 12h
-            (9, 86_400_000),  // 24h
+            (1, 30_000),     // 30s
+            (2, 120_000),    // 2m
+            (3, 600_000),    // 10m
+            (4, 1_800_000),  // 30m
+            (5, 3_600_000),  // 1h
+            (6, 10_800_000), // 3h
+            (7, 21_600_000), // 6h
+            (8, 43_200_000), // 12h
+            (9, 86_400_000), // 24h
         ];
         for (attempt, expected_ms) in ladder {
             let job = WebhookJob {
@@ -4642,8 +4649,8 @@ mod residual_arms {
     /// retryable failure at attempt 10 dead-letters the row instead of
     /// scheduling the clamped final rung yet again.
     #[tokio::test]
-    async fn tenth_attempt_exhaustion_dead_letters_instead_of_scheduling()
-    -> Result<(), Box<dyn std::error::Error>> {
+    async fn tenth_attempt_exhaustion_dead_letters_instead_of_scheduling(
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let Some(pool) = test_pool("wh_ladder_exhaustion").await else {
             return Ok(());
         };
@@ -4674,13 +4681,10 @@ mod residual_arms {
         };
         let processor = processor(pool.clone(), orch_config());
         processor
-            .handle_failure(&job, WebhookDeliveryResult::failure(
-                None,
-                5,
-                "connect timeout".to_string(),
-                None,
-                None,
-            ))
+            .handle_failure(
+                &job,
+                WebhookDeliveryResult::failure(None, 5, "connect timeout".to_string(), None, None),
+            )
             .await
             .expect("handle the final failure");
 
@@ -4689,13 +4693,15 @@ mod residual_arms {
             None,
             "the 10th attempt is consumed, never rescheduled"
         );
-        let (recorded_attempt, error): (i32, Option<String>) = sqlx::query_as(
-            "SELECT attempt, error FROM webhook_deliveries WHERE webhook_id = $1",
-        )
-        .bind(&webhook_id)
-        .fetch_one(&pool)
-        .await?;
-        assert_eq!(recorded_attempt, 10, "exhaustion dead-letters at attempt 10");
+        let (recorded_attempt, error): (i32, Option<String>) =
+            sqlx::query_as("SELECT attempt, error FROM webhook_deliveries WHERE webhook_id = $1")
+                .bind(&webhook_id)
+                .fetch_one(&pool)
+                .await?;
+        assert_eq!(
+            recorded_attempt, 10,
+            "exhaustion dead-letters at attempt 10"
+        );
         assert_eq!(error.as_deref(), Some("connect timeout"));
         pool.close().await;
         Ok(())
@@ -4760,8 +4766,8 @@ mod residual_arms {
     /// concurrent per tenant, and consumers must order/dedupe by event id
     /// and timestamp (the documented at-least-once, unordered contract).
     #[tokio::test]
-    async fn reordered_events_both_deliver_no_state_is_dropped()
-    -> Result<(), Box<dyn std::error::Error>> {
+    async fn reordered_events_both_deliver_no_state_is_dropped(
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let Some(pool) = test_pool("wh_reorder").await else {
             return Ok(());
         };
@@ -4830,7 +4836,10 @@ mod residual_arms {
             let result = processor
                 .deliver_webhook(job, &serialized, &ip_target(&stub))
                 .await;
-            assert!(result.success, "each event delivers independently: {result:?}");
+            assert!(
+                result.success,
+                "each event delivers independently: {result:?}"
+            );
             let dedup_key = processor.dedup_key(job);
             processor
                 .record_delivery_outcome(job, &dedup_key, &mut conn, breaker.as_ref(), result)

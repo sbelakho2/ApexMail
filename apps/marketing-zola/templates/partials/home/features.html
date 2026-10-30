@@ -1,7 +1,8 @@
 {# Features section, ARK indexed ledger (lane T). The four capability
    cards are a ruled ledger now: crimson index number, capability, what it
-   does. Copy is unchanged; only the rendering moved from the ruled table
-   to the .apex-ledger--indexed vocabulary. #}
+   does. Copy follows docs/development/capability-registry.json: only
+   advertised capabilities are named; roadmap transport capabilities stay
+   off the card until their delivery-path wiring ships. #}
 <section class="apex-mkt-section" aria-label="Capabilities">
   <div class="apex-mkt-container">
   <span class="apex-mkt-kicker">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_features"] and i18n_data[l]["home_features"]["eyebrow"] %}{{ i18n_data[l]["home_features"]["eyebrow"] }}{% else %}Capabilities{% endif %}</span>
@@ -20,7 +21,7 @@
       <span class="apex-index">02</span>
       <div>
         <h3 class="apex-h3">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_features"] and i18n_data[l]["home_features"]["card_2_title"] %}{{ i18n_data[l]["home_features"]["card_2_title"] }}{% else %}Enterprise Security{% endif %}</h3>
-        <p class="apex-meta mt-1">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_features"] and i18n_data[l]["home_features"]["card_2_desc"] %}{{ i18n_data[l]["home_features"]["card_2_desc"] }}{% else %}AES-256 encryption at rest, TLS 1.2+ required for API/SMTP, TLS 1.3 preferred where supported. DKIM, SPF, DMARC, DANE, and MTA-STS built in.{% endif %}</p>
+        <p class="apex-meta mt-1">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_features"] and i18n_data[l]["home_features"]["card_2_desc"] %}{{ i18n_data[l]["home_features"]["card_2_desc"] }}{% else %}Message content encrypted at rest with AES-256-GCM. TLS 1.2+ required for API/SMTP, TLS 1.3 preferred where supported. DKIM, SPF and DMARC built in.{% endif %}</p>
       </div>
     </div>
     <div>

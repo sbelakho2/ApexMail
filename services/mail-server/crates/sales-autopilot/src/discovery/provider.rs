@@ -72,6 +72,12 @@ pub struct DiscoveredCandidate {
     /// Normalized contact email, when the source yielded one.
     #[serde(default)]
     pub contact_email: Option<String>,
+    /// True when this address belongs to a named person (not a role mailbox)
+    /// and the jurisdiction policy allowed storing it. The first email to
+    /// such a contact must carry the GDPR Article 14 source notice naming
+    /// where the personal data came from. Persisted on the candidate row.
+    #[serde(default)]
+    pub source_notice_required: bool,
     pub jurisdiction: Option<String>,
     #[serde(default)]
     pub jurisdiction_confidence: f32,
@@ -152,7 +158,6 @@ impl DiscoveryError {
             FetchError::InvalidUrl { url, detail } => {
                 DiscoveryError::InvalidInput(format!("invalid fetch URL {url}: {detail}"))
             }
-            FetchError::InvalidSolveMaterial { detail } => DiscoveryError::Internal(detail),
             FetchError::Transport { detail } => DiscoveryError::Unavailable(detail),
             FetchError::Blocked(evidence) => DiscoveryError::Unavailable(evidence.detail),
         }
@@ -273,6 +278,7 @@ impl FixtureSource {
             company_name: Some(company_name.to_string()),
             domain: None,
             contact_email: None,
+            source_notice_required: false,
             jurisdiction: None,
             jurisdiction_confidence: 0.0,
             confidence: 0.5,

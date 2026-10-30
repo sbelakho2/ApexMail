@@ -983,6 +983,7 @@ async fn upsert_candidates(
     let mut company_names: Vec<Option<String>> = Vec::with_capacity(candidates.len());
     let mut domains: Vec<Option<String>> = Vec::with_capacity(candidates.len());
     let mut contact_emails: Vec<Option<String>> = Vec::with_capacity(candidates.len());
+    let mut source_notice_required: Vec<bool> = Vec::with_capacity(candidates.len());
     let mut jurisdictions: Vec<Option<String>> = Vec::with_capacity(candidates.len());
     let mut jurisdiction_confidences: Vec<f64> = Vec::with_capacity(candidates.len());
     let mut snapshot_hashes: Vec<Option<String>> = Vec::with_capacity(candidates.len());
@@ -996,6 +997,7 @@ async fn upsert_candidates(
         company_names.push(sanitize_company_name(candidate.company_name.as_deref()));
         domains.push(sanitize_domain(candidate.domain.as_deref()));
         contact_emails.push(candidate.contact_email.as_deref().and_then(normalize_email));
+        source_notice_required.push(candidate.source_notice_required);
         jurisdictions.push(sanitize_jurisdiction(candidate.jurisdiction.as_deref()));
         jurisdiction_confidences.push(clamp_confidence(candidate.jurisdiction_confidence));
         snapshot_hashes.push(sanitize_snapshot_hash(
@@ -1011,27 +1013,32 @@ async fn upsert_candidates(
     let inserted: Vec<bool> = sqlx::query_scalar(
         "INSERT INTO sales_discovery_candidates (
             id, tenant_id, job_id, source, source_url, company_name, account_domain,
-            contact_email, jurisdiction, jurisdiction_confidence, raw_snapshot_hash,
-            confidence, fetched_at, refresh_expires_at, discovered_at, created_at
+            contact_email, source_notice_required, jurisdiction, jurisdiction_confidence,
+            raw_snapshot_hash, confidence, fetched_at, refresh_expires_at, discovered_at,
+            created_at
          )
          SELECT id, $2, $3, $4, source_url, company_name, account_domain, contact_email,
-                jurisdiction, jurisdiction_confidence, raw_snapshot_hash, confidence,
-                fetched_at, refresh_expires_at, NOW(), NOW()
+                source_notice_required, jurisdiction, jurisdiction_confidence,
+                raw_snapshot_hash, confidence, fetched_at, refresh_expires_at, NOW(), NOW()
          FROM unnest($1::uuid[], $5::text[], $6::text[], $7::text[], $8::text[],
-                     $9::text[], $10::float8[], $11::text[], $12::float8[],
-                     $13::timestamptz[], $14::timestamptz[])
+                     $9::boolean[], $10::text[], $11::float8[], $12::text[],
+                     $13::float8[], $14::timestamptz[], $15::timestamptz[])
               AS batch(id, source_url, company_name, account_domain, contact_email,
-                       jurisdiction, jurisdiction_confidence, raw_snapshot_hash,
-                       confidence, fetched_at, refresh_expires_at)
+                       source_notice_required, jurisdiction, jurisdiction_confidence,
+                       raw_snapshot_hash, confidence, fetched_at, refresh_expires_at)
          WHERE EXISTS (
              SELECT 1 FROM sales_discovery_jobs
-             WHERE id = $3 AND tenant_id = $2 AND lease_token = $15
+             WHERE id = $3 AND tenant_id = $2 AND lease_token = $16
          )
          ON CONFLICT (tenant_id, source, source_url) WHERE source_url IS NOT NULL
          DO UPDATE SET
             company_name = COALESCE(EXCLUDED.company_name, sales_discovery_candidates.company_name),
             account_domain = COALESCE(EXCLUDED.account_domain, sales_discovery_candidates.account_domain),
             contact_email = COALESCE(EXCLUDED.contact_email, sales_discovery_candidates.contact_email),
+            source_notice_required = (
+                sales_discovery_candidates.source_notice_required
+                OR EXCLUDED.source_notice_required
+            ),
             jurisdiction = COALESCE(EXCLUDED.jurisdiction, sales_discovery_candidates.jurisdiction),
             jurisdiction_confidence = GREATEST(
                 sales_discovery_candidates.jurisdiction_confidence,
@@ -1051,6 +1058,7 @@ async fn upsert_candidates(
     .bind(&company_names)
     .bind(&domains)
     .bind(&contact_emails)
+    .bind(&source_notice_required)
     .bind(&jurisdictions)
     .bind(&jurisdiction_confidences)
     .bind(&snapshot_hashes)
@@ -1658,6 +1666,7 @@ mod tests {
             company_name: Some(format!("Recording {domain}")),
             domain: Some(domain.to_string()),
             contact_email: None,
+            source_notice_required: false,
             jurisdiction: Some("US".to_string()),
             jurisdiction_confidence: 0.9,
             confidence: 0.9,

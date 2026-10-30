@@ -45,9 +45,9 @@ use std::time::Duration;
 use chrono::{DateTime, TimeZone, Utc};
 
 use super::{
-    Checkout, CheckoutRequest, Dispute, DisputeState, Payment, PaymentProvider, PaymentState,
-    ProviderCapabilities, ProviderError, Refund, RefundRequest, RefundState, SavedMethodCharge,
-    Settlement,
+    Checkout, CheckoutRequest, CustomerRequest, Dispute, DisputeState, Payment, PaymentProvider,
+    PaymentState, ProviderCapabilities, ProviderCustomer, ProviderError, Refund, RefundRequest,
+    RefundState, SavedMethodCharge, SavedMethodRef, Settlement,
 };
 
 /// The adapter's stable name (the registry's `stripe` value).
@@ -232,6 +232,23 @@ impl StripeClient {
         idempotency_key: &str,
     ) -> Result<serde_json::Value, ProviderError> {
         self.send(self.post_form("checkout/sessions", pairs, Some(idempotency_key)))
+            .await
+    }
+
+    /// `POST /v1/customers` — the provider customer object saved methods
+    /// belong to. `Idempotency-Key` is our per-tenant customer key, so a
+    /// retried checkout cannot mint two customers.
+    pub(crate) async fn create_customer(
+        &self,
+        name: &str,
+        email: &str,
+        idempotency_key: &str,
+    ) -> Result<serde_json::Value, ProviderError> {
+        let pairs = vec![
+            ("name".to_string(), name.to_string()),
+            ("email".to_string(), email.to_string()),
+        ];
+        self.send(self.post_form("customers", pairs, Some(idempotency_key)))
             .await
     }
 
@@ -638,6 +655,84 @@ fn metadata_string(document: &serde_json::Value, key: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+/// The form body of a `POST /v1/checkout/sessions` request. Pure (and
+/// unit-tested) so the V34 wire shape is pinned without HTTP:
+///
+/// * `mode=payment` — NEVER a Stripe subscription (ApexMail owns the
+///   schedule);
+/// * `payment_intent_data[setup_future_usage]=off_session` whenever the
+///   caller asks to save the method, so the completed checkout leaves a
+///   card the renewal worker can charge with no browser;
+/// * a pre-created customer rides `customer=<id>`; otherwise
+///   `customer_creation=always` makes Stripe create one (the two fields are
+///   mutually exclusive on Stripe's wire).
+pub(crate) fn checkout_form_pairs(
+    request: &CheckoutRequest,
+) -> Result<Vec<(String, String)>, ProviderError> {
+    // Stripe refuses a session without a success URL: the neutral
+    // request's redirect IS that URL, and its absence is a caller
+    // contract breach (fail closed, never an invented URL).
+    let success_url = request
+        .redirect_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+        .ok_or_else(|| {
+            ProviderError::Config(
+                "stripe: a checkout session requires a success (redirect) URL; \
+                 refusing to invent one"
+                    .to_string(),
+            )
+        })?;
+    let mut metadata = request.metadata.clone();
+    if let Some(object) = metadata.as_object_mut() {
+        object.insert(
+            "idempotency_key".to_string(),
+            serde_json::Value::String(request.idempotency_key.clone()),
+        );
+    }
+    // OUR reference for the obligation (`invoice:{uuid}`), also in the
+    // dedicated `client_reference_id` field for provider-side joins.
+    let client_reference_id = metadata_string(&metadata, "reference")
+        .filter(|reference| !reference.is_empty())
+        .unwrap_or_else(|| request.idempotency_key.clone());
+    let mut pairs = vec![
+        ("mode".to_string(), "payment".to_string()),
+        ("success_url".to_string(), success_url.to_string()),
+        ("client_reference_id".to_string(), client_reference_id),
+        ("line_items[0][quantity]".to_string(), "1".to_string()),
+        (
+            "line_items[0][price_data][currency]".to_string(),
+            request.currency.trim().to_ascii_lowercase(),
+        ),
+        (
+            "line_items[0][price_data][unit_amount]".to_string(),
+            request.amount_minor.to_string(),
+        ),
+        (
+            "line_items[0][price_data][product_data][name]".to_string(),
+            request.description.clone(),
+        ),
+    ];
+    if request.save_method {
+        pairs.push((
+            "payment_intent_data[setup_future_usage]".to_string(),
+            "off_session".to_string(),
+        ));
+    }
+    match request
+        .provider_customer_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+    {
+        Some(customer) => pairs.push(("customer".to_string(), customer.to_string())),
+        None => pairs.push(("customer_creation".to_string(), "always".to_string())),
+    }
+    pairs.extend(metadata_form_pairs(&metadata));
+    Ok(pairs)
+}
+
 // ---------------------------------------------------------------------------
 // The boundary implementation
 // ---------------------------------------------------------------------------
@@ -712,52 +807,7 @@ impl PaymentProvider for StripeProvider {
     /// `tenant_id`, `idempotency_key`) so the engine's reconciliation is
     /// provider-blind.
     async fn create_checkout(&self, request: CheckoutRequest) -> Result<Checkout, ProviderError> {
-        // Stripe refuses a session without a success URL: the neutral
-        // request's redirect IS that URL, and its absence is a caller
-        // contract breach (fail closed, never an invented URL).
-        let success_url = request
-            .redirect_url
-            .as_deref()
-            .map(str::trim)
-            .filter(|url| !url.is_empty())
-            .ok_or_else(|| {
-                ProviderError::Config(
-                    "stripe: a checkout session requires a success (redirect) URL; \
-                     refusing to invent one"
-                        .to_string(),
-                )
-            })?;
-        let mut metadata = request.metadata.clone();
-        if let Some(object) = metadata.as_object_mut() {
-            object.insert(
-                "idempotency_key".to_string(),
-                serde_json::Value::String(request.idempotency_key.clone()),
-            );
-        }
-        // OUR reference for the obligation (`invoice:{uuid}`), also in the
-        // dedicated `client_reference_id` field for provider-side joins.
-        let client_reference_id = metadata_string(&metadata, "reference")
-            .filter(|reference| !reference.is_empty())
-            .unwrap_or_else(|| request.idempotency_key.clone());
-        let mut pairs = vec![
-            ("mode".to_string(), "payment".to_string()),
-            ("success_url".to_string(), success_url.to_string()),
-            ("client_reference_id".to_string(), client_reference_id),
-            ("line_items[0][quantity]".to_string(), "1".to_string()),
-            (
-                "line_items[0][price_data][currency]".to_string(),
-                request.currency.trim().to_ascii_lowercase(),
-            ),
-            (
-                "line_items[0][price_data][unit_amount]".to_string(),
-                request.amount_minor.to_string(),
-            ),
-            (
-                "line_items[0][price_data][product_data][name]".to_string(),
-                request.description.clone(),
-            ),
-        ];
-        pairs.extend(metadata_form_pairs(&metadata));
+        let pairs = checkout_form_pairs(&request)?;
         let session = self
             .client
             .create_checkout_session(pairs, &request.idempotency_key)
@@ -772,6 +822,54 @@ impl PaymentProvider for StripeProvider {
             currency: request.currency.to_ascii_uppercase(),
             created_at: seconds_at(session.get("created")),
         })
+    }
+
+    /// `POST /v1/customers` (our per-tenant idempotency key).
+    async fn ensure_customer(
+        &self,
+        request: CustomerRequest,
+    ) -> Result<ProviderCustomer, ProviderError> {
+        let document = self
+            .client
+            .create_customer(
+                &request.name,
+                &request.email,
+                &format!("customer_{}", request.tenant_id),
+            )
+            .await?;
+        let id = string_at(&document, "/id").filter(|id| !id.is_empty());
+        let Some(id) = id else {
+            return Err(ProviderError::Malformed(
+                "stripe returned a customer without an id".to_string(),
+            ));
+        };
+        Ok(ProviderCustomer {
+            provider: PROVIDER_NAME.to_string(),
+            provider_customer_id: id,
+        })
+    }
+
+    /// Read the reusable card a COMPLETED checkout captured: the
+    /// PaymentIntent's `payment_method` + `customer` (the pair the renewal
+    /// worker charges off-session). A session/`mode=payment` checkout saves
+    /// the card only when `setup_future_usage=off_session` was requested;
+    /// absence is an honest `None` (the activation refunds and reports).
+    async fn fetch_saved_method_for_payment(
+        &self,
+        provider_payment_id: &str,
+    ) -> Result<Option<SavedMethodRef>, ProviderError> {
+        let intent = self
+            .client
+            .get_payment_intent(provider_payment_id.trim(), false)
+            .await?;
+        let customer = string_at(&intent, "/customer").filter(|id| !id.is_empty());
+        let method = string_at(&intent, "/payment_method").filter(|id| !id.is_empty());
+        Ok(customer
+            .zip(method)
+            .map(|(customer, method)| SavedMethodRef {
+                provider_customer_id: customer,
+                provider_method_id: method,
+            }))
     }
 
     /// `POST /v1/payment_intents` with `payment_method=…`, `confirm=true`,
@@ -1098,6 +1196,64 @@ mod tests {
             PaymentState::Canceled
         );
         assert!(map_session_status("who-knows").is_err());
+    }
+
+    fn checkout_request(save_method: bool, customer: Option<&str>) -> CheckoutRequest {
+        CheckoutRequest {
+            amount_minor: 12_400,
+            currency: "EUR".to_string(),
+            description: "ApexMail Developer".to_string(),
+            redirect_url: Some("https://app.apexmail.ee/settings/billing".to_string()),
+            webhook_url: None,
+            metadata: serde_json::json!({"tenant_id": "t1", "reference": "checkout:t1"}),
+            method_hint: None,
+            provider_customer_id: customer.map(str::to_string),
+            provider_method_id: None,
+            save_method,
+            idempotency_key: "checkout_t1_starter".to_string(),
+        }
+    }
+
+    /// V34 wire shape: a checkout that saves the method MUST ask Stripe for
+    /// off-session future usage and MUST create (or reuse) a customer; it
+    /// must never become a subscription session.
+    #[test]
+    fn checkout_wire_shape_saves_the_card_and_creates_a_customer() {
+        let pairs = checkout_form_pairs(&checkout_request(true, None)).expect("pairs");
+        let has = |key: &str, value: &str| pairs.iter().any(|(k, v)| k == key && v == value);
+        assert!(has("mode", "payment"));
+        assert!(has(
+            "payment_intent_data[setup_future_usage]",
+            "off_session"
+        ));
+        assert!(has("customer_creation", "always"));
+        assert!(
+            !pairs.iter().any(|(k, _)| k == "customer"),
+            "customer_creation and customer are mutually exclusive"
+        );
+        assert!(
+            !pairs.iter().any(|(_, v)| v == "subscription"),
+            "Stripe is payments-only: never mode=subscription"
+        );
+
+        // A pre-created customer is reused; customer_creation disappears.
+        let pairs = checkout_form_pairs(&checkout_request(true, Some("cus_123"))).expect("pairs");
+        let has = |key: &str, value: &str| pairs.iter().any(|(k, v)| k == key && v == value);
+        assert!(has("customer", "cus_123"));
+        assert!(!pairs.iter().any(|(k, _)| k == "customer_creation"));
+        assert!(has(
+            "payment_intent_data[setup_future_usage]",
+            "off_session"
+        ));
+
+        // A checkout that does not save the method asks for neither.
+        let pairs = checkout_form_pairs(&checkout_request(false, None)).expect("pairs");
+        assert!(!pairs
+            .iter()
+            .any(|(k, _)| k == "payment_intent_data[setup_future_usage]"));
+        assert!(!pairs
+            .iter()
+            .any(|(k, _)| k == "payment_intent_data[setup_future_usage][0]"));
     }
 
     #[test]

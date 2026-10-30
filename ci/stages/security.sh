@@ -19,6 +19,23 @@
 #
 # Tool policy: missing tools fail CLOSED on the deploy host, warn elsewhere
 # (ci_have_tool in lib.sh).
+#
+# DAILY cargo-audit lane (security.cargo-audit-daily, DEP-6/V32):
+#   * `cargo_audit_daily` clones the RustSec advisory database FRESH into the
+#     run dir for every due invocation (cargo audit --db), then fails on any
+#     vulnerability not covered by the two reviewed ledgers
+#     (CI_CARGO_AUDIT_IGNORES + the DATED waivers in .cargo/audit.toml).
+#   * It runs from every regular security-stage run AND from
+#     `ci/pipeline.sh run --daily`, which the 5-minute host timer invokes
+#     (ci/units/apexmail-pipeline.service ExecStart). A PASS writes the UTC
+#     date to ci/runs/.last-daily-audit; same-day invocations record the lane
+#     ok from that marker (no network, no clone), so the 5-minute poll stays
+#     cheap while the advisory database is refreshed at least once a day.
+#     A failure leaves no marker and fails the run, so the next timer tick
+#     retries. CI_DAILY_AUDIT_FORCE=1 re-runs it on demand.
+#   * The dated-waiver ledger is validated by tools/check_audit_waivers.py on
+#     every audit run: an expired (>90 days) or obsolete waiver FAILS the
+#     lane instead of being ignored silently.
 # =============================================================================
 set -eu
 
@@ -78,27 +95,64 @@ gitleaks_scan() {
 }
 
 # --- cargo audit (security-audit.yml, ignore list in lockstep) -----------------------
+# cargo_audit_ignore_flags — the shared ignore set for both audit lanes.
+# Sets CA_IGNORE_FLAGS (a --ignore word list) and CA_IGNORE_COUNT from:
+#   1. CI_CARGO_AUDIT_IGNORES — the historic reviewed ledger in pipeline.conf
+#      (kept in EXACT lockstep with deny.toml and scripts/security-audit.sh by
+#      `ci/pipeline.sh selftest` step 9);
+#   2. services/mail-server/.cargo/audit.toml — DATED waivers, validated here
+#      by tools/check_audit_waivers.py. An expired/malformed waiver, or one
+#      whose package/version is no longer in Cargo.lock, returns non-zero and
+#      therefore FAILS the lane (fail closed: never run with an unverified
+#      ignore set).
+cargo_audit_ignore_flags() {
+    CA_IGNORE_FLAGS=''
+    CA_IGNORE_COUNT=0
+    _caif_seen=' '
+    for _caif_id in $CI_CARGO_AUDIT_IGNORES; do
+        case $_caif_seen in *" $_caif_id "*) continue ;; esac
+        _caif_seen="$_caif_seen$_caif_id "
+        CA_IGNORE_FLAGS="$CA_IGNORE_FLAGS --ignore $_caif_id"
+        CA_IGNORE_COUNT=$((CA_IGNORE_COUNT + 1))
+    done
+    _caif_file="$WS/.cargo/audit.toml"
+    [ -f "$_caif_file" ] || return "$CI_EXIT_OK"
+    if ! command -v python3 >/dev/null 2>&1; then
+        ci_err "python3 missing — cannot validate the dated audit waivers in $_caif_file (fail closed)"
+        return "$CI_EXIT_FAIL"
+    fi
+    _caif_ids=$(python3 "$REPO_ROOT/tools/check_audit_waivers.py" --print-ignores) || {
+        ci_err "cargo-audit waiver ledger FAILED — fix or remove the expired/stale entries in $_caif_file"
+        return "$CI_EXIT_FAIL"
+    }
+    _caif_dated=0
+    for _caif_id in $_caif_ids; do
+        _caif_dated=$((_caif_dated + 1))
+        case $_caif_seen in *" $_caif_id "*) continue ;; esac
+        _caif_seen="$_caif_seen$_caif_id "
+        CA_IGNORE_FLAGS="$CA_IGNORE_FLAGS --ignore $_caif_id"
+        CA_IGNORE_COUNT=$((CA_IGNORE_COUNT + 1))
+    done
+    ci_info "cargo audit ledgers: ${CA_IGNORE_COUNT} reviewed ignores (${_caif_dated} dated, expiry enforced)"
+    return "$CI_EXIT_OK"
+}
+
 cargo_audit() {
     ci_have_tool cargo-audit || return "$CI_EXIT_OK"
     if ci_dry; then
         ci_info "check (dry-run): cargo audit"
         return "$CI_EXIT_OK"
     fi
-    _ign=''
-    _ign_n=0
-    for _id in $CI_CARGO_AUDIT_IGNORES; do
-        _ign="$_ign --ignore $_id"
-        _ign_n=$((_ign_n + 1))
-    done
-    ci_info "cargo audit (${_ign_n} reviewed RUSTSEC ignores) — vulnerability-class advisories fail the run; unmaintained/unsound/yanked WARNING-class notices are logged but do not gate"
+    cargo_audit_ignore_flags || return "$CI_EXIT_FAIL"
+    ci_info "cargo audit (${CA_IGNORE_COUNT} reviewed RUSTSEC ignores) — vulnerability-class advisories fail the run; unmaintained/unsound/yanked WARNING-class notices are logged but do not gate"
     _ca_rc=0
-    # shellcheck disable=SC2086  # _ign is an intentional flag word list
+    # shellcheck disable=SC2086  # CA_IGNORE_FLAGS is an intentional flag word list
     (cd "$WS" && # --deny vulnerabilities: real advisories fail the run (after the
     # reviewed --ignore list); unmaintained/unsound/yanked WARNING-class
     # notices are logged but do not gate deploys — that is upgrade-policy
     # tracking, not a deploy blocker (2026-08-23: the warning set churns
     # weekly; see pipeline.conf justifications).
-cargo audit $_ign >"$RUN_DIR/cargo-audit.txt" 2>&1) || _ca_rc=$?
+cargo audit $CA_IGNORE_FLAGS >"$RUN_DIR/cargo-audit.txt" 2>&1) || _ca_rc=$?
     if [ "$_ca_rc" -eq 0 ]; then
         ci_info "PASS: cargo audit"
         return "$CI_EXIT_OK"
@@ -109,6 +163,56 @@ cargo audit $_ign >"$RUN_DIR/cargo-audit.txt" 2>&1) || _ca_rc=$?
         return "$CI_EXIT_OK"
     fi
     ci_err "FAIL: cargo audit — vulnerabilities beyond the reviewed ignore list (report: $RUN_DIR/cargo-audit.txt)"
+    return "$CI_EXIT_FAIL"
+}
+
+# --- cargo audit daily (DEP-6: fresh advisory database, once per UTC day) ------------
+# Lane id: cargo-audit-daily (row security.cargo-audit-daily in
+# ci/required-lanes.txt). Trigger and scheduling contract live in the stage
+# header: every regular security run, plus `ci/pipeline.sh run --daily` from
+# the 5-minute host timer. Same-day invocations after a PASS record the lane
+# ok from ci/runs/.last-daily-audit without touching the network.
+cargo_audit_daily() {
+    _cad_marker=${CI_DAILY_AUDIT_MARKER:-$CI_ROOT/runs/.last-daily-audit}
+    _cad_today=$(date -u +%Y-%m-%d)
+    if [ "${CI_DAILY_AUDIT_FORCE:-0}" != 1 ] && [ -f "$_cad_marker" ] \
+        && [ "$(head -n 1 "$_cad_marker" 2>/dev/null)" = "$_cad_today" ]; then
+        ci_info "cargo audit daily: already PASSED today ($_cad_today, marker $_cad_marker) — lane recorded from the marker"
+        ci_lane_record cargo-audit-daily ok
+        return "$CI_EXIT_OK"
+    fi
+    ci_have_tool cargo-audit || return "$CI_EXIT_OK"
+    if ci_dry; then
+        ci_info "check (dry-run): cargo audit daily (FRESH advisory database)"
+        return "$CI_EXIT_OK"
+    fi
+    cargo_audit_ignore_flags || return "$CI_EXIT_FAIL"
+    # Fresh database, per run: cargo-audit clones the RustSec repository into
+    # the run dir. The shared ~/.cargo/advisory-db cache is deliberately NOT
+    # used — a stale cache must never be able to make the daily lane green.
+    _cad_db="$RUN_DIR/advisory-db"
+    ci_info "cargo audit daily: fetching a FRESH RustSec advisory database (clone into $_cad_db)"
+    _cad_rc=0
+    # shellcheck disable=SC2086  # CA_IGNORE_FLAGS is an intentional flag word list
+    (cd "$WS" && cargo audit --db "$_cad_db" $CA_IGNORE_FLAGS) \
+        >"$RUN_DIR/cargo-audit-daily.txt" 2>&1 || _cad_rc=$?
+    if [ "$_cad_rc" -eq 0 ]; then
+        mkdir -p "$(dirname "$_cad_marker")"
+        # Only a PASS writes the marker: a failed audit retries on the next
+        # timer tick instead of waiting for tomorrow.
+        printf '%s\n%s\n' "$_cad_today" "${CI_SHA:-unknown}" >"$_cad_marker"
+        ci_info "PASS: cargo audit daily (fresh database)"
+        ci_lane_record cargo-audit-daily ok
+        return "$CI_EXIT_OK"
+    fi
+    grep -E '^(Crate|Version|ID|Solution):' "$RUN_DIR/cargo-audit-daily.txt" 2>/dev/null | head -60 >>"$CI_STAGE_LOG" || true
+    if [ "${CI_CARGO_AUDIT_DAILY_CHECK:-required}" = advisory ]; then
+        ci_warn "ADVISORY: cargo audit daily reports unignored vulnerabilities or an invalid waiver ledger (report: $RUN_DIR/cargo-audit-daily.txt)"
+        ci_lane_record cargo-audit-daily fail
+        return "$CI_EXIT_OK"
+    fi
+    ci_err "FAIL: cargo audit daily — unignored vulnerability or invalid waiver ledger (report: $RUN_DIR/cargo-audit-daily.txt)"
+    ci_lane_record cargo-audit-daily fail
     return "$CI_EXIT_FAIL"
 }
 
@@ -389,8 +493,17 @@ cargo_outdated() {
 }
 
 stage_main() {
+    # `ci/pipeline.sh run --daily` (the host timer path) runs ONLY the daily
+    # audit lane. Same-day no-ops exit through the marker check, so the
+    # 5-minute poll pays a shell start and nothing else.
+    if [ "${CI_DAILY_AUDIT_ONLY:-0}" = 1 ]; then
+        cargo_audit_daily || return "$CI_EXIT_FAIL"
+        ci_info "security: daily cargo-audit lane complete"
+        return "$CI_EXIT_OK"
+    fi
     gitleaks_scan
     cargo_audit
+    cargo_audit_daily
     cargo_vet
     semgrep_sast
     migration_validation

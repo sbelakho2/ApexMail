@@ -389,6 +389,15 @@ validate_repo_gates() {
         # (migrations 001-268, dated audits, trained tokenizer vocabularies).
         ci_check "legacy processor" python3 tools/check_legacy_processor.py
         ci_check "legacy processor self-test" python3 tools/check_legacy_processor.py --self-test
+        # Lawful sourcing (audit S10): the CAPTCHA-solver hook is deleted and
+        # no setting may re-enable it. The gate scans the sales-autopilot
+        # crate, env examples, compose files and migrations above 287 for the
+        # removed identifiers and for solving-service/proxy vocabulary. The
+        # `solver` word is matched whole-word only, because `resolver` is
+        # legitimate; the removal migration 288 is the enumerated exception.
+        ci_check "no scraping bypass" python3 tools/check_no_bypass.py
+        ci_check "no scraping bypass self-test" \
+            python3 tools/check_no_bypass.py --self-test
         # Payment neutrality (seventh external audit P0-A, step 10):
         # production code outside the payments boundary
         # (billing-service/src/payments/**, mollie_client.rs,
@@ -406,6 +415,17 @@ validate_repo_gates() {
             || return "$CI_EXIT_FAIL"
         ci_check "payment neutrality self-test" \
             python3 tools/check_payment_neutrality.py --self-test
+        # Provider fixture gate (30 Oct audit, V28/V29): Mollie's documented
+        # status sets only (the seven payment statuses; the refund object's
+        # own set; NO chargeback status field), and every recurring/renewal
+        # webhook fixture must carry the metadata renew_subscription_locked
+        # actually sends. The --self-test proves an invented `refunded`
+        # payment status, a chargeback status field and empty recurring
+        # metadata are each caught. REQUIRED and fail-closed.
+        ci_check "provider fixtures" python3 tools/check_provider_fixtures.py \
+            || return "$CI_EXIT_FAIL"
+        ci_check "provider fixtures self-test" \
+            python3 tools/check_provider_fixtures.py --self-test
         ci_check "ARK design law" python3 tools/check_ark_law.py
         ci_check "ARK authority mirror" python3 tools/check_ark_mirror.py
         ci_check "tool selftest inventory" \
@@ -689,6 +709,29 @@ validate_repo_gates() {
             python3 "$REPO_ROOT/tools/check_public_artifacts.py"
         ci_check "public artifacts gate self-test" \
             python3 "$REPO_ROOT/tools/check_public_artifacts.py" --self-test
+        # Hosting-location boundary (audit WEB-9): no hosting country, city,
+        # data-centre, facility code or infrastructure-provider name may
+        # appear on ANY public surface, in all four published languages —
+        # templates, content sources, data/i18n.json and the BUILT public/
+        # output. The location is a contractual fact disclosed in the
+        # customer DPA annex and the internal registers, never on the
+        # website. --self-test seeds each language's term and proves the
+        # scan rejects it; the built tree is scanned too.
+        ci_check "public hosting locations" \
+            python3 "$REPO_ROOT/tools/check_public_artifacts.py" --hosting-locations
+        ci_check "public hosting locations self-test" \
+            python3 "$REPO_ROOT/tools/check_public_artifacts.py" --hosting-locations-self-test
+        # Every provisioned server is in Helsinki (audit DP-8): the
+        # enterprise executor and the dedicated-IP provider default to hel1,
+        # `HETZNER_DEFAULT_LOCATION` may only confirm hel1, and any other
+        # location is a typed refusal. This gate scans non-test Rust,
+        # compose/env defaults and docs for other provider locations;
+        # internal operations docs, the vendor register/DPA annex and
+        # migration history are the enumerated allowlists. --self-test
+        # proves a seeded fsn1 fails in code, compose, env and docs.
+        ci_check "hosting locations" python3 "$REPO_ROOT/tools/check_hosting_locations.py"
+        ci_check "hosting locations self-test" \
+            python3 "$REPO_ROOT/tools/check_hosting_locations.py" --self-test
         # External route census (audit E16a): the nginx configs ARE the
         # external boundary; every parsed route must be classified in the
         # committed manifest (docs/operations/route-census.json), no manifest
@@ -966,6 +1009,13 @@ zola_gates() {
     (cd apps/marketing-zola && rm -rf public && "$_zg_zola" build) >>"$CI_STAGE_LOG" 2>&1 \
         || { ci_err "zola build failed"; return "$CI_EXIT_FAIL"; }
     [ -f apps/marketing-zola/public/index.html ] || { ci_err "zola build produced no index.html"; return "$CI_EXIT_FAIL"; }
+
+    # Hosting-location boundary over the BUILT output (audit WEB-9): the
+    # source scan runs in validate_repo_gates; this post-build repeat proves
+    # the rendered pages carry no hosting country/city/facility/provider
+    # name either (a template or data change can materialise only here).
+    python3 tools/check_public_artifacts.py --hosting-locations >>"$CI_STAGE_LOG" 2>&1 \
+        || { ci_err "the built site carries a hosting-location disclosure (WEB-9)"; return "$CI_EXIT_FAIL"; }
 
     # Forbidden patterns (legal-identity.yml forbidden-patterns job): scans
     # the BUILT output, so it must run AFTER the zola build — it previously

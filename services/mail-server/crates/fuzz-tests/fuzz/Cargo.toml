@@ -20,6 +20,11 @@ prost = "0.13"
 
 mail-proto = { path = "../../mail-proto" }
 imap-proto = { path = "../../imap-proto-patched" }
+# The workspace crate whose `fuzz_api` drivers call the REAL production
+# parsers. The libFuzzer targets and the deterministic fuzz-lite smoke test
+# (crates/fuzz-tests/tests/fuzz_smoke.rs) share these functions, so the smoke
+# lane exercises the same code the nightly engine fuzzes.
+fuzz-tests = { path = ".." }
 
 # Prevent this subproject from printing long stack traces for expected
 # timeouts; keep everything else at cargo-fuzz defaults.
@@ -36,6 +41,76 @@ bench = false
 [[bin]]
 name = "fuzz_imap_response"
 path = "fuzz_targets/fuzz_imap_response.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_smtp_command"
+path = "fuzz_targets/fuzz_smtp_command.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_smtp_envelope"
+path = "fuzz_targets/fuzz_smtp_envelope.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_mime_message"
+path = "fuzz_targets/fuzz_mime_message.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_dkim_signature"
+path = "fuzz_targets/fuzz_dkim_signature.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_spf_record"
+path = "fuzz_targets/fuzz_spf_record.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_dmarc_record"
+path = "fuzz_targets/fuzz_dmarc_record.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_webhook_signature"
+path = "fuzz_targets/fuzz_webhook_signature.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_template_source"
+path = "fuzz_targets/fuzz_template_source.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_csv_report"
+path = "fuzz_targets/fuzz_csv_report.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_tracking_token"
+path = "fuzz_targets/fuzz_tracking_token.rs"
 test = false
 doc = false
 bench = false

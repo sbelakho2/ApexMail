@@ -488,6 +488,9 @@ excluded() {
     /\/vendor\// || /\/node_modules\// || /\/target\// || /\/pkg\// || /\/assets\// || /\/resources\// || /\/Resources\/public\// || /\/\.venv\// || /\/\.pytest_cache\// || /\/\.git\// { next }
     # Generated and protocol-heavy trees: not human prose.
     /docs\/api\/openapi/ { next }
+    # Research reference material (legal/tax memos with statute citations
+    # and quotations): evidence documents, not shippable product prose.
+    /docs\/research\// { next }
     # Dogfood and audit reports narrate remediation history by design.
     /docs\/dogfood\// || /docs\/audit\// { next }
     { print }

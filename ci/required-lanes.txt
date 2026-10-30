@@ -15,8 +15,11 @@
 # check fails CI.
 #
 # Not listed here, deliberately:
-#   * test.coverage-ratchet and validate.claim-expiry — recorded every run,
-#     but advisory by declared default;
+#   * validate.claim-expiry — recorded every run, but advisory by declared
+#     default. (test.coverage-ratchet LEFT this list on 2026-10-30: T2 flipped
+#     CI_COVERAGE_CHECK to required, so the ratchet lane now gates a blessing
+#     and its row lives below. test.coverage-floors and test.fuzz-smoke are
+#     the T2/T7 rows added with it.)
 #   * checks with DYNAMIC labels (per-image trivy scans, the dogfood live
 #     battery) — recorded with their concrete per-run ids;
 #   * deploy-line stages (images/migrate/deploy/verify/notify) — verified by
@@ -60,6 +63,8 @@ validate.eval-corpora-vs-canonical-facts
 validate.external-route-census
 validate.forbidden-patterns
 validate.homepage-metrics-backed-by-their-artifact
+validate.hosting-locations
+validate.hosting-locations-self-test
 validate.image-pinning-checker-committed-fixtures
 validate.invariant-and-expectations-registry
 validate.invariant-registry-self-test
@@ -83,6 +88,8 @@ validate.marketing-serving-whitelist
 validate.marketing-wcag-contrast-heuristic
 validate.migration-sql-lint
 validate.no-generated-artifacts-tracked
+validate.no-scraping-bypass
+validate.no-scraping-bypass-self-test
 validate.outbound-delivery-contract
 validate.pg-pitr-restore-self-test
 validate.pg-wal-archive-self-test
@@ -96,8 +103,12 @@ validate.production-env-contract
 validate.production-env-contract-values
 validate.production-env-forwarding
 validate.production-mollie-payment-wiring
+validate.provider-fixtures
+validate.provider-fixtures-self-test
 validate.public-artifacts-allowlist
 validate.public-artifacts-gate-self-test
+validate.public-hosting-locations
+validate.public-hosting-locations-self-test
 validate.repo-map-up-to-date
 validate.risk-lua-parity
 validate.rollback-plan-present
@@ -139,6 +150,9 @@ ui.ui-terminology-gate-j
 # Test-stage lanes:
 
 test.canary-lane-real-mail-qualification
+test.coverage-floors
+test.coverage-ratchet
+test.fuzz-smoke
 test.real-model-eval-lane
 test.cargo-deny
 test.cargo-machete
@@ -168,6 +182,7 @@ test.workspace-suite
 #
 # Security-stage lanes:
 
+security.cargo-audit-daily
 security.cargo-vet
 security.migrator-apply-clean-db
 security.migrator-apply-idempotency

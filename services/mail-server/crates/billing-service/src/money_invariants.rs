@@ -553,6 +553,10 @@ fn is_vat_rate_context(line: &str) -> bool {
         || line.contains("Option<f64>")
         // Rate-typed tuple returns, e.g. (f64, Option<&str>) bucket keys.
         || line.contains("(f64,")
+        // The dated VAT rate table returns country/rate pairs and a
+        // country→rate map; both are rate containers, never money.
+        || line.contains("&'static str, f64")
+        || line.contains("HashMap<String, f64>")
         // Percent contexts: usage-, uptime-, margin-, breach- and
         // threshold-percent computations (ratios, not amounts).
         || line.contains("percent")

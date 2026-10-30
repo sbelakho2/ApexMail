@@ -488,6 +488,29 @@ pub fn start_periodic_jobs(state: std::sync::Arc<AppState>) {
                 }
             }
 
+            // MON-9/V29 (daily): re-fetch every recently settled payment and
+            // reconcile its provider refunds and chargebacks against
+            // amountRefunded / amountChargedBack. A dashboard refund or a
+            // chargeback whose webhook was lost still reaches the books
+            // (refund facts + credit notes; dispute ledger/VAT + tenant hold).
+            match crate::mollie_webhooks::sweep_payment_money_movements(sla_state.as_ref()).await {
+                Ok(stats) if stats == crate::mollie_webhooks::MoneyMovementStats::default() => {}
+                Ok(stats) => info!(
+                    payments_examined = stats.payments_examined,
+                    refunds_recorded = stats.refunds_recorded,
+                    credit_notes_created = stats.credit_notes_created,
+                    chargebacks_recorded = stats.chargebacks_recorded,
+                    chargebacks_reversed = stats.chargebacks_reversed,
+                    tenants_paused = stats.tenants_paused,
+                    tenants_restored = stats.tenants_restored,
+                    mismatches = stats.mismatches,
+                    "payment money-movement reconciliation sweep completed"
+                ),
+                Err(error_message) => {
+                    error!(error = %error_message, "failed to sweep payment money movements");
+                }
+            }
+
             // ToS 6.4 wallet-credit expiry (12 months), see
             // expire_stale_wallet_credits.
             match expire_stale_wallet_credits(sla_state.as_ref()).await {

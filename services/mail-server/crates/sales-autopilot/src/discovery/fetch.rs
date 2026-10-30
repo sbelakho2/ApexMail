@@ -19,15 +19,21 @@
 //!   [`classify_response`]; the rules are a fixed decision table, not
 //!   heuristics on vibes, and each challenge family has a fixture pinning it
 //!   (`tests/scrape_challenges.rs`).
-//! * **No bypass.** There is no built-in solver, no cookie injection, no
-//!   "disable robots" switch. The opt-in solver hook lives in
-//!   [`super::blocked`] and is disabled unless an operator configures it AND
-//!   opts the host in; even then it performs exactly one retry through this
-//!   module's ordinary policy gates.
+//! * **No bypass.** There is no challenge solving, no cookie injection, no
+//!   proxy rotation or residential exit pool, no stealth browser, no
+//!   "disable robots" switch and no path behind a login. The only response
+//!   to a block is to back off and, for the permanent-exclusion reasons
+//!   below, to leave the host alone for good.
 //! * **Politeness and robots.** Per-host minimum interval, optional
 //!   `Crawl-delay`, and `robots.txt` evaluation (RFC 9309 shape: 4xx means
 //!   allow, 5xx or an unreachable robots.txt means DISALLOW, fail closed).
 //!   Robots is not configurable off.
+//! * **Permanent host exclusion.** A CAPTCHA page, a robots.txt disallow,
+//!   HTTP 401/403 or three 429 responses in a row mark the host excluded for
+//!   good. The state is persisted in `sales_scrape_host_health` and enforced
+//!   before the first byte of the next attempt (not even `robots.txt` is
+//!   fetched again); only the owner can lift it, with a written reason in the
+//!   exclusion audit log.
 //! * **Bounded everything.** Total and connect timeouts, bounded retries
 //!   with exponential backoff plus jitter on transient outcomes only, a
 //!   response size cap, a content-type allowlist, and a redirect policy that
@@ -115,9 +121,9 @@ impl FetchClassification {
         )
     }
 
-    /// Only transient blocks are retried. A CAPTCHA is never auto-retried
-    /// (an operator must opt in to solving), and a policy block is never
-    /// retried at all.
+    /// Only transient blocks are retried. A CAPTCHA is never retried and a
+    /// policy block is never retried at all; a CAPTCHA also excludes the
+    /// host permanently.
     pub fn is_retryable(self) -> bool {
         matches!(self, Self::BlockedTransient)
     }
@@ -740,18 +746,57 @@ fn env_duration_ms(name: &str, default: Duration) -> Duration {
 // Host health (politeness + backoff), shared across a process
 // ---------------------------------------------------------------------------
 
+/// Number of consecutive 429 responses that excludes a host permanently.
+pub const RATE_LIMIT_EXCLUSION_THRESHOLD: u32 = 3;
+
+/// Exclusion reasons persisted in `sales_scrape_host_health.exclusion_reason`.
+/// The vocabulary is deliberately closed: every value is a condition the
+/// owner's policy says must end public fetching for that host.
+pub const EXCLUSION_CAPTCHA: &str = "captcha";
+/// `robots.txt` disallowed the requested path.
+pub const EXCLUSION_ROBOTS_DISALLOW: &str = "robots_disallow";
+/// The server answered HTTP 401 (credentials required).
+pub const EXCLUSION_HTTP_401: &str = "http_401";
+/// The server answered HTTP 403 (access forbidden).
+pub const EXCLUSION_HTTP_403: &str = "http_403";
+/// Three 429 responses in a row (rate-limit exclusion).
+pub const EXCLUSION_HTTP_429_REPEATED: &str = "http_429_repeated";
+
+/// The permanent-exclusion reason for one block, if it is an exclusion
+/// condition. 451 and other policy statuses are NOT exclusions: the owner's
+/// sourcing policy names CAPTCHA, robots disallow, 401/403 and three
+/// consecutive 429s.
+pub fn exclusion_reason(
+    classification: FetchClassification,
+    status: Option<u16>,
+) -> Option<&'static str> {
+    match (classification, status) {
+        (FetchClassification::BlockedCaptcha, _) => Some(EXCLUSION_CAPTCHA),
+        (FetchClassification::BlockedPolicy, None) => Some(EXCLUSION_ROBOTS_DISALLOW),
+        (FetchClassification::BlockedPolicy, Some(401)) => Some(EXCLUSION_HTTP_401),
+        (FetchClassification::BlockedPolicy, Some(403)) => Some(EXCLUSION_HTTP_403),
+        _ => None,
+    }
+}
+
 /// Persisted per-host state (mirrors `sales_scrape_host_health`).
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct HostState {
     pub host: String,
     pub consecutive_blocks: u32,
     pub total_blocks: u64,
+    /// Consecutive 429 responses; reset by any other outcome. Reaching
+    /// [`RATE_LIMIT_EXCLUSION_THRESHOLD`] excludes the host permanently.
+    pub consecutive_429: u32,
     pub last_classification: Option<FetchClassification>,
     pub last_status: Option<u16>,
     pub last_blocked_at: Option<DateTime<Utc>>,
     pub last_success_at: Option<DateTime<Utc>>,
     pub blocked_until: Option<DateTime<Utc>>,
-    pub solver_enabled: bool,
+    /// Set once, never cleared by a fetch. Only
+    /// [`super::blocked::lift_host_exclusion`] clears it (owner-only).
+    pub excluded_at: Option<DateTime<Utc>>,
+    pub exclusion_reason: Option<String>,
 }
 
 impl HostState {
@@ -760,12 +805,29 @@ impl HostState {
             host: host.to_string(),
             consecutive_blocks: 0,
             total_blocks: 0,
+            consecutive_429: 0,
             last_classification: None,
             last_status: None,
             last_blocked_at: None,
             last_success_at: None,
             blocked_until: None,
-            solver_enabled: false,
+            excluded_at: None,
+            exclusion_reason: None,
+        }
+    }
+
+    /// Is this host permanently excluded from fetching?
+    pub fn is_excluded(&self) -> bool {
+        self.exclusion_reason.is_some()
+    }
+
+    /// Apply a permanent exclusion unless one is already recorded. The first
+    /// reason wins: the state is permanent, so later failures must not
+    /// rewrite the historical cause.
+    fn exclude_for(&mut self, reason: &str, now: DateTime<Utc>) {
+        if !self.is_excluded() {
+            self.exclusion_reason = Some(reason.to_string());
+            self.excluded_at = Some(now);
         }
     }
 }
@@ -844,17 +906,40 @@ impl HostHealthRegistry {
             .insert(host.to_string(), tokio::time::Instant::now() + interval);
     }
 
-    /// A successful fetch clears the backoff window and the failure streak.
+    /// A successful fetch clears the backoff window, the failure streak and
+    /// the 429 streak. It deliberately does NOT clear a permanent exclusion:
+    /// only the owner can lift that.
     pub fn note_success(&self, host: &str) -> HostState {
         let mut inner = self.inner.lock();
         let state = inner
             .entry(host.to_string())
             .or_insert_with(|| HostState::new(host));
         state.consecutive_blocks = 0;
+        state.consecutive_429 = 0;
         state.last_classification = Some(FetchClassification::Ok);
         state.last_success_at = Some(Utc::now());
         state.blocked_until = None;
         self.blocked_until_instant.lock().remove(host);
+        state.clone()
+    }
+
+    /// Record one 429 response that will be retried. The final 429 of a
+    /// fetch goes through [`Self::note_blocked_with_floor`]; this method is
+    /// called for the intermediate attempts so the "three in a row"
+    /// exclusion counts every observed response exactly once.
+    pub fn note_rate_limited(&self, host: &str) -> HostState {
+        let mut inner = self.inner.lock();
+        let state = inner
+            .entry(host.to_string())
+            .or_insert_with(|| HostState::new(host));
+        let now = Utc::now();
+        state.consecutive_429 = state.consecutive_429.saturating_add(1);
+        state.last_classification = Some(FetchClassification::BlockedTransient);
+        state.last_status = Some(429);
+        state.last_blocked_at = Some(now);
+        if state.consecutive_429 >= RATE_LIMIT_EXCLUSION_THRESHOLD {
+            state.exclude_for(EXCLUSION_HTTP_429_REPEATED, now);
+        }
         state.clone()
     }
 
@@ -882,11 +967,27 @@ impl HostHealthRegistry {
         let state = inner
             .entry(host.to_string())
             .or_insert_with(|| HostState::new(host));
+        let now = Utc::now();
         state.consecutive_blocks = state.consecutive_blocks.saturating_add(1);
         state.total_blocks = state.total_blocks.saturating_add(1);
         state.last_classification = Some(classification);
         state.last_status = status;
-        state.last_blocked_at = Some(Utc::now());
+        state.last_blocked_at = Some(now);
+
+        // The 429 streak counts every response: reset it on any outcome
+        // that is not a 429, and grow it on a 429. The third consecutive
+        // response is the permanent-exclusion trigger.
+        if status == Some(429) {
+            state.consecutive_429 = state.consecutive_429.saturating_add(1);
+            if state.consecutive_429 >= RATE_LIMIT_EXCLUSION_THRESHOLD {
+                state.exclude_for(EXCLUSION_HTTP_429_REPEATED, now);
+            }
+        } else {
+            state.consecutive_429 = 0;
+        }
+        if let Some(reason) = exclusion_reason(classification, status) {
+            state.exclude_for(reason, now);
+        }
 
         // A robots disallow is a stable condition; a backoff window would
         // not change it, so it must not grow the host's penalty.
@@ -944,14 +1045,20 @@ impl HostHealthRegistry {
         self.backoff_window(attempt.max(1))
     }
 
-    /// Operator opt-in, mirrored to the database by [`super::blocked`].
-    pub fn set_solver_enabled(&self, host: &str, enabled: bool) -> HostState {
+    /// Clear a permanent exclusion. This is owner-only policy, exposed
+    /// through [`super::blocked::lift_host_exclusion`], which is the only
+    /// caller; the registry itself trusts that the owner decision and its
+    /// written reason were already recorded.
+    pub fn lift_exclusion(&self, host: &str) -> Option<HostState> {
         let mut inner = self.inner.lock();
-        let state = inner
-            .entry(host.to_string())
-            .or_insert_with(|| HostState::new(host));
-        state.solver_enabled = enabled;
-        state.clone()
+        let state = inner.get_mut(host)?;
+        state.excluded_at = None;
+        state.exclusion_reason = None;
+        state.consecutive_blocks = 0;
+        state.consecutive_429 = 0;
+        state.blocked_until = None;
+        self.blocked_until_instant.lock().remove(host);
+        Some(state.clone())
     }
 }
 
@@ -1144,7 +1251,7 @@ impl ScrapedPage {
 }
 
 /// The structured, persistable form of one blocked fetch, the evidence the
-/// review queue stores and the solver hook receives.
+/// review queue stores.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BlockedEvidence {
@@ -1202,8 +1309,6 @@ pub enum FetchError {
     BodyTooLarge { url: String, limit_bytes: usize },
     #[error("invalid fetch url {url}: {detail}")]
     InvalidUrl { url: String, detail: String },
-    #[error("invalid solve material: {detail}")]
-    InvalidSolveMaterial { detail: String },
 }
 
 impl std::fmt::Display for BlockedEvidence {
@@ -1244,7 +1349,7 @@ impl FetchError {
             | Self::ContentTypeRejected { url, .. }
             | Self::BodyTooLarge { url, .. }
             | Self::InvalidUrl { url, .. } => Some(url),
-            Self::Transport { .. } | Self::InvalidSolveMaterial { .. } => None,
+            Self::Transport { .. } => None,
         }
     }
 }
@@ -1319,10 +1424,15 @@ impl ScrapeClient {
         self.health.clone()
     }
 
-    /// Fetch one document under the full policy (backoff, robots, politeness,
-    /// bounded retries, size and type caps, challenge classification).
+    /// Fetch one document under the full policy (exclusion, backoff, robots,
+    /// politeness, bounded retries, size and type caps, challenge
+    /// classification).
     pub async fn fetch(&self, url: &str) -> Result<ScrapedPage, FetchError> {
         let target = TargetUrl::parse(url)?;
+        // The exclusion gate is FIRST: an excluded host receives no request
+        // at all, not even a robots.txt fetch. This is what makes the
+        // exclusion permanent and observable in the fixture hit counter.
+        self.check_excluded(&target)?;
         self.check_backoff(&target).await?;
 
         // robots.txt first: a disallowed path must not produce a request,
@@ -1359,6 +1469,24 @@ impl ScrapeClient {
                     let retryable =
                         classification.is_retryable() && attempts <= self.config.max_retries;
                     if retryable {
+                        // Count every observed 429, including the attempts
+                        // that are about to be retried, so "three 429s in a
+                        // row" is measured on responses and not on final
+                        // outcomes only. Reaching the threshold stops the
+                        // retry loop immediately: an excluded host gets no
+                        // further request.
+                        if evidence.http_status == Some(429) {
+                            let state = self.health.note_rate_limited(&evidence.host);
+                            if state.is_excluded() {
+                                let mut blocked = *evidence;
+                                blocked.markers.push("host_excluded".to_string());
+                                blocked.detail = format!(
+                                    "{} (excluded permanently after {} consecutive 429s; no further request)",
+                                    blocked.detail, state.consecutive_429
+                                );
+                                return Err(FetchError::Blocked(Box::new(blocked)));
+                            }
+                        }
                         let window = self
                             .health
                             .backoff_window_for(attempts)
@@ -1384,6 +1512,12 @@ impl ScrapeClient {
                         blocked.detail,
                         backoff_display(&state)
                     );
+                    if let Some(reason) = &state.exclusion_reason {
+                        blocked.markers.push("host_excluded".to_string());
+                        blocked.detail.push_str(&format!(
+                            " (host excluded permanently: {reason}; no further request)"
+                        ));
+                    }
                     return Err(FetchError::Blocked(Box::new(blocked)));
                 }
                 Err(FetchError::Transport { detail: _ }) if attempts <= self.config.max_retries => {
@@ -1417,64 +1551,27 @@ impl ScrapeClient {
         }
     }
 
-    /// Exactly ONE attempt with operator-provided solve material (a cookie or
-    /// extra same-host headers). Used only by the audited solver retry: it
-    /// still obeys robots, politeness and the per-host backoff, nothing
-    /// bypasses the policy, but it never retries internally.
-    pub async fn fetch_once_with_solve_material(
-        &self,
-        url: &str,
-        cookie: Option<&str>,
-        extra_headers: &[(String, String)],
-    ) -> Result<ScrapedPage, FetchError> {
-        let target = TargetUrl::parse(url)?;
-        let cookie = cookie.map(validate_header_value).transpose()?;
-        let mut headers: Vec<(String, String)> = Vec::new();
-        if let Some(cookie) = &cookie {
-            headers.push(("Cookie".to_string(), cookie.clone()));
-        }
-        for (name, value) in extra_headers {
-            validate_header_name(name)?;
-            let value = validate_header_value(value)?;
-            headers.push((name.clone(), value));
-        }
-
-        self.check_backoff(&target).await?;
-        let rules = self.robots_rules(&target).await;
-        if !rules.allows(target.request_path()) {
-            return Err(FetchError::Blocked(Box::new(BlockedEvidence {
-                classification: FetchClassification::BlockedPolicy,
-                url: target.url.clone(),
-                host: target.host.clone(),
-                http_status: None,
-                markers: vec!["robots_disallow".to_string()],
-                detail: "robots.txt disallows this path for this user agent".to_string(),
-                retry_after_seconds: None,
-                fetched_at: Utc::now(),
-            })));
-        }
-        let interval = self.effective_interval(&rules);
-        self.health.wait_turn(&target.host, interval).await;
-
-        match self.send_once(&target, &headers).await {
-            Ok(page) => {
-                self.health.note_success(&target.host);
-                Ok(ScrapedPage {
-                    attempts: 1,
-                    ..page
-                })
-            }
-            Err(FetchError::Blocked(evidence)) => {
-                self.health.note_blocked_with_floor(
-                    &evidence.host,
-                    evidence.classification,
-                    evidence.http_status,
-                    evidence.retry_after().unwrap_or_default(),
-                );
-                Err(FetchError::Blocked(evidence))
-            }
-            Err(other) => Err(other),
-        }
+    /// Refuse an excluded host BEFORE any request (including `robots.txt`).
+    /// The refusal is a `blocked_policy` block with the `host_excluded`
+    /// marker, so the review queue and the run ledger record why nothing was
+    /// sent.
+    fn check_excluded(&self, target: &TargetUrl) -> Result<(), FetchError> {
+        let Some(state) = self.health.snapshot(&target.host) else {
+            return Ok(());
+        };
+        let Some(reason) = state.exclusion_reason else {
+            return Ok(());
+        };
+        Err(FetchError::Blocked(Box::new(BlockedEvidence {
+            classification: FetchClassification::BlockedPolicy,
+            url: target.url.clone(),
+            host: target.host.clone(),
+            http_status: state.last_status,
+            markers: vec!["host_excluded".to_string()],
+            detail: format!("host is permanently excluded ({reason}); no request was sent"),
+            retry_after_seconds: None,
+            fetched_at: Utc::now(),
+        })))
     }
 
     fn effective_interval(&self, rules: &RobotsRules) -> Duration {
@@ -1807,45 +1904,6 @@ fn backoff_display(state: &HostState) -> String {
         .blocked_until
         .map(|until| until.to_rfc3339())
         .unwrap_or_else(|| "no window (stable block)".to_string())
-}
-
-/// Reject header/cookie material that could break the request or inject a
-/// second header (CR/LF) or smuggle unbounded data.
-fn validate_header_value(value: &str) -> Result<String, FetchError> {
-    let value = value.trim().to_string();
-    if value.is_empty() {
-        return Err(FetchError::InvalidSolveMaterial {
-            detail: "empty header/cookie value".to_string(),
-        });
-    }
-    if value.len() > 4_096 {
-        return Err(FetchError::InvalidSolveMaterial {
-            detail: "header/cookie value longer than 4096 bytes".to_string(),
-        });
-    }
-    if value
-        .chars()
-        .any(|c| c == '\r' || c == '\n' || c.is_control())
-    {
-        return Err(FetchError::InvalidSolveMaterial {
-            detail: "header/cookie value contains control characters (CR/LF injection)".to_string(),
-        });
-    }
-    Ok(value)
-}
-
-fn validate_header_name(name: &str) -> Result<(), FetchError> {
-    if name.is_empty()
-        || name.len() > 128
-        || !name
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-    {
-        return Err(FetchError::InvalidSolveMaterial {
-            detail: format!("invalid header name {name:?}"),
-        });
-    }
-    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -2310,6 +2368,104 @@ Disallow: /nope/
             "a stable policy disallow must not be treated as a load problem"
         );
         assert!(registry.backoff_until("example.com").is_none());
+        // A robots disallow is a permanent exclusion, not just a backoff.
+        assert_eq!(
+            state.exclusion_reason.as_deref(),
+            Some(EXCLUSION_ROBOTS_DISALLOW)
+        );
+        assert!(state.excluded_at.is_some());
+    }
+
+    #[test]
+    fn exclusion_reasons_are_closed_and_sticky() {
+        let registry = HostHealthRegistry::new(Arc::new(ScrapeConfig::default()));
+        // A CAPTCHA excludes immediately.
+        let state = registry.note_blocked(
+            "captcha.example",
+            FetchClassification::BlockedCaptcha,
+            Some(403),
+        );
+        assert_eq!(state.exclusion_reason.as_deref(), Some(EXCLUSION_CAPTCHA));
+        // A later, different failure never rewrites the first cause.
+        let state = registry.note_blocked(
+            "captcha.example",
+            FetchClassification::BlockedPolicy,
+            Some(401),
+        );
+        assert_eq!(state.exclusion_reason.as_deref(), Some(EXCLUSION_CAPTCHA));
+        // Nor does a success clear it.
+        let state = registry.note_success("captcha.example");
+        assert!(state.is_excluded());
+
+        assert_eq!(
+            exclusion_reason(FetchClassification::BlockedPolicy, Some(401)),
+            Some(EXCLUSION_HTTP_401)
+        );
+        assert_eq!(
+            exclusion_reason(FetchClassification::BlockedPolicy, Some(403)),
+            Some(EXCLUSION_HTTP_403)
+        );
+        assert_eq!(
+            exclusion_reason(FetchClassification::BlockedPolicy, Some(451)),
+            None
+        );
+        assert_eq!(
+            exclusion_reason(FetchClassification::BlockedTransient, Some(429)),
+            None
+        );
+        assert_eq!(
+            exclusion_reason(FetchClassification::BlockedCaptcha, Some(200)),
+            Some(EXCLUSION_CAPTCHA)
+        );
+    }
+
+    #[test]
+    fn three_429s_in_a_row_exclude_the_host() {
+        let registry = HostHealthRegistry::new(Arc::new(ScrapeConfig::default()));
+        let first = registry.note_blocked(
+            "limited.example",
+            FetchClassification::BlockedTransient,
+            Some(429),
+        );
+        assert_eq!(first.consecutive_429, 1);
+        assert!(!first.is_excluded());
+        let second = registry.note_blocked(
+            "limited.example",
+            FetchClassification::BlockedTransient,
+            Some(429),
+        );
+        assert_eq!(second.consecutive_429, 2);
+        assert!(!second.is_excluded());
+        let third = registry.note_blocked(
+            "limited.example",
+            FetchClassification::BlockedTransient,
+            Some(429),
+        );
+        assert_eq!(third.consecutive_429, 3);
+        assert_eq!(
+            third.exclusion_reason.as_deref(),
+            Some(EXCLUSION_HTTP_429_REPEATED)
+        );
+
+        // A non-429 outcome between responses resets the streak.
+        registry.note_success("other.example");
+        registry.note_blocked(
+            "other.example",
+            FetchClassification::BlockedTransient,
+            Some(429),
+        );
+        registry.note_blocked(
+            "other.example",
+            FetchClassification::BlockedTransient,
+            Some(429),
+        );
+        let reset = registry.note_blocked(
+            "other.example",
+            FetchClassification::BlockedTransient,
+            Some(503),
+        );
+        assert_eq!(reset.consecutive_429, 0);
+        assert!(!reset.is_excluded());
     }
 
     #[tokio::test(start_paused = true)]
@@ -2319,23 +2475,25 @@ Disallow: /nope/
             host: "example.com".to_string(),
             consecutive_blocks: 3,
             total_blocks: 9,
+            consecutive_429: 0,
             last_classification: Some(FetchClassification::BlockedCaptcha),
             last_status: Some(403),
             last_blocked_at: Some(Utc::now()),
             last_success_at: None,
             blocked_until: Some(Utc::now() + chrono::Duration::seconds(30)),
-            solver_enabled: true,
+            excluded_at: Some(Utc::now()),
+            exclusion_reason: Some(EXCLUSION_CAPTCHA.to_string()),
         });
         assert!(registry.backoff_until("example.com").is_some());
         assert_eq!(registry.snapshot("example.com").unwrap().total_blocks, 9);
-        assert!(registry.snapshot("example.com").unwrap().solver_enabled);
+        assert!(registry.snapshot("example.com").unwrap().is_excluded());
 
         tokio::time::advance(Duration::from_secs(31)).await;
         // The instant has passed, but the snapshot still reports the state.
         assert!(registry.snapshot("example.com").unwrap().total_blocks == 9);
     }
 
-    // --- URL and solve-material validation ---
+    // --- URL validation ---
 
     #[test]
     fn url_validation_refuses_credentials_and_foreign_schemes() {
@@ -2360,18 +2518,6 @@ Disallow: /nope/
         assert_eq!(target.request_path(), "/a/b?q=1");
         let bare = TargetUrl::parse("https://registry.example").unwrap();
         assert_eq!(bare.request_path(), "/");
-    }
-
-    #[test]
-    fn solve_material_rejects_header_injection() {
-        assert!(validate_header_value("session=abc123").is_ok());
-        assert!(validate_header_value("").is_err());
-        assert!(validate_header_value("a=b\r\nX-Evil: 1").is_err());
-        assert!(validate_header_value("a=b\nX-Evil: 1").is_err());
-        assert!(validate_header_value(&"a".repeat(5_000)).is_err());
-        assert!(validate_header_name("X-Solver-Token").is_ok());
-        assert!(validate_header_name("X Solver: 1").is_err());
-        assert!(validate_header_name("X-Evil\r\n").is_err());
     }
 
     #[test]

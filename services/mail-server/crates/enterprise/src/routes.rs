@@ -3417,6 +3417,9 @@ fn exec_error_response(
     let status = match error {
         ExecError::NotEnabled | ExecError::ConfigMissing { .. } => StatusCode::FORBIDDEN,
         ExecError::MissingCredential => StatusCode::CONFLICT,
+        // DP-8: a hosting location other than hel1 is an invalid request (or
+        // a refused deployment configuration), never silently relocated.
+        ExecError::LocationRefused { .. } => StatusCode::BAD_REQUEST,
         ExecError::NotFound(_) => StatusCode::NOT_FOUND,
         ExecError::InvalidState { .. } | ExecError::TransitionRefused { .. } => {
             StatusCode::CONFLICT

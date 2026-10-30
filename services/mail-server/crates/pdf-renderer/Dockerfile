@@ -1,4 +1,4 @@
-FROM rust:1.93-bookworm AS builder
+FROM rust:1.98-bookworm AS builder
 
 # bash + pipefail: the manifest-stub RUN pipes grep|sed|while — without
 # pipefail a failed grep would be masked by the loop's success.

@@ -982,18 +982,22 @@ def validate_entitlement_boundaries(errors: list[str]) -> None:
         errors,
     )
     for needle in (
-        # The Mollie checkout keeps every safety boundary: the client-supplied
-        # priceId resolves server-side to an active self-serve plan, the
-        # customer is a real Mollie object, the payment carries server-set
-        # tenant/plan metadata and `sequenceType: first`, and creates are
+        # The V34 neutral checkout keeps every safety boundary: the
+        # client-supplied priceId resolves server-side to an active
+        # self-serve plan, the provider resolves through the registry (fail
+        # closed), the customer is a real provider object on the neutral
+        # ledger, the checkout asks the adapter to SAVE the card, the
+        # payment carries server-set tenant/plan metadata, and creates are
         # idempotent so a retry cannot mint a second payment.
         "active_plan_checkout_target",
         "is_active = true",
         "SELF_SERVE_CHECKOUT_PLAN_IDS.contains",
-        '"tenant_id": auth.tenant_id.clone(),',
-        '"plan_name": plan_name.clone(),',
-        "get_or_create_mollie_customer_id",
-        'sequence_type: Some("first".into()),',
+        "state.payments.resolve()",
+        "ensure_provider_customer",
+        "create_checkout(",
+        "save_method: true",
+        '"tenant_id": tenant_id,',
+        '"plan_name": plan_name,',
         "idempotency_key: format!",
         '"code": "CHECKOUT_REQUIRED"',
         # External audit 15 Oct, H1: cancellation is a local state change, not

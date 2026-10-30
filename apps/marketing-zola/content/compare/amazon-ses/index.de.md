@@ -27,7 +27,7 @@ verdict_points = ["Verwaltete E-Mail-Infrastruktur mit API, Ereignissen und Supp
 # "none" (the winner_badge macro renders them as a spanned em-dash).
 comparison_sections = [
   { title = "EWR-DATENVERARBEITUNG", rows = [
-    { feature = "Primäre Hosting-Region", apex = 'EU-Rechenzentren in Finnland; Kerndaten werden im EWR verarbeitet. Global-Zustellungen laufen über AWS SES in dessen EU-Regionen (die Deutschland umfassen können), EU-Regionen eines US-Unternehmens; EU-only-Routing entfernt diesen Transport (<a href="/de/eu-sovereign/">Details</a>)', comp = 'Mehrere Regionen, darunter EU (Irland eu-west-1, Frankfurt eu-central-1 usw.)<sup><a href="#src-ses1">1</a></sup>', winner = "none" },
+    { feature = "Primäre Hosting-Region", apex = 'EU-Rechenzentren im EWR; Kerndaten werden im EWR verarbeitet. Global-Zustellungen laufen über AWS SES in dessen EU-Regionen (die Deutschland umfassen können), EU-Regionen eines US-Unternehmens; EU-only-Routing entfernt diesen Transport (<a href="/de/eu-sovereign/">Details</a>)', comp = 'Mehrere Regionen, darunter EU (Irland eu-west-1, Frankfurt eu-central-1 usw.)<sup><a href="#src-ses1">1</a></sup>', winner = "none" },
     { feature = "EU-only-Routing", apex = 'Ja, eine Einstellung: jede Nachricht verlässt das System über die eigenen EU-MTAs von ApexMail; der Drittanbieter-Transport entfällt, und eine nicht verfügbare eigene MTA-Route hält die Nachricht zurück (<a href="/de/eu-sovereign/">so funktioniert es</a>)', comp = 'Nicht angeboten, die Regionsauswahl ändert nur, von wo SES sendet; die Zustellung läuft weiterhin über AWS SES<sup><a href="#src-ses1">1</a></sup>', winner = "none" },
     { feature = "EWR-Datenverarbeitung standardmäßig", apex = 'EU/EWR-orientierte Standardkonfiguration; aktive Standorte sind vereinbarungsspezifisch', comp = 'Verfügbar, muss explizit konfiguriert werden; Regionsauswahl je Sende-Domain erforderlich<sup><a href="#src-ses1">1</a></sup>', winner = "none" },
     { feature = "AVV-Verfügbarkeit", apex = 'Verfügbar im Rahmen der anwendbaren ApexMail-Vereinbarung', comp = 'Verfügbar, AWS-AVV (Artifact) mit SCCs<sup><a href="#src-ses2">2</a></sup>', winner = "none" }
@@ -59,7 +59,7 @@ comparison_sections = [
     { feature = "Reine Kosten pro E-Mail", apex = 'Siehe den aktuellen öffentlichen Katalog und Checkout für die anwendbaren Nutzungsbedingungen', comp = '€0.09 (US$0.10)/1.000 E-Mails, niedrigste Kosten pro Nachricht unter den großen Anbietern<sup><a href="#src-ses10">10</a></sup>', winner = "competitor" },
     { feature = "AWS-Ökosystem-Integration", apex = 'Eigenständige Plattform mit API-Integration', comp = 'Tiefe Integration mit AWS-Diensten: Lambda, S3, CloudWatch, SNS, SQS, IAM, KMS, Organizations<sup><a href="#src-ses3">3</a></sup>', winner = "competitor" },
     { feature = "Maximales Sendevolumen", apex = 'Business unterstützt bis zu 2 Millionen E-Mails/Monat; Enterprise-Konditionen sind vertraglich vereinbart', comp = 'Praktisch unbegrenzt, begrenzt durch Konto-Sendelimits, die mit der Reputation automatisch skalieren<sup><a href="#src-ses6">6</a></sup>', winner = "none" },
-    { feature = "Globale Regionen", apex = 'Finnland (EWR-Fokus)', comp = '22+ AWS-Regionen weltweit, darunter USA, EU, APAC, Südamerika<sup><a href="#src-ses1">1</a></sup>', winner = "competitor" }
+    { feature = "Globale Regionen", apex = 'EWR (EU-Fokus)', comp = '22+ AWS-Regionen weltweit, darunter USA, EU, APAC, Südamerika<sup><a href="#src-ses1">1</a></sup>', winner = "competitor" }
   ]}
 ]
 

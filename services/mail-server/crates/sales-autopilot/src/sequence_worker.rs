@@ -69,7 +69,7 @@ use crate::decision_engine::{self, DecisionContext};
 use crate::dispatcher::{
     compose_reply_html, fetch_template, render_for_recipient_with_footer, render_outreach_footer,
     send_idempotency_key, EnqueueOutcome, FooterReason, OutreachFooter,
-    ProductionCampaignDispatcher, RenderedMessage, SendIdentity,
+    ProductionCampaignDispatcher, RenderedMessage, SendIdentity, PRIVACY_NOTICE_URL,
 };
 use crate::enrichment::EnrichmentService;
 use crate::experiments::{
@@ -1673,6 +1673,9 @@ pub async fn select_and_persist_variant(
     let account_id: Option<Uuid> = row
         .try_get("account_id")
         .map_err(|error| SalesError::Database(error.to_string()))?;
+    let contact_id: Uuid = row
+        .try_get("contact_id")
+        .map_err(|error| SalesError::Database(error.to_string()))?;
     let step_kind: String = row
         .try_get("step_kind")
         .map_err(|error| SalesError::Database(error.to_string()))?;
@@ -1740,6 +1743,11 @@ pub async fn select_and_persist_variant(
         .and_then(|value| value.as_str())
         .map(|value| value.to_string());
 
+    let segment = icp_segment
+        .as_deref()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
     let dimensions = ExperimentContext {
         icp_segment,
         country: contact_country.or(account_country),
@@ -1768,6 +1776,7 @@ pub async fn select_and_persist_variant(
             0.0
         },
         explicit_exploration_override: false,
+        account_id,
     };
 
     let engine = ExperimentEngine::new(db.clone());
@@ -1784,6 +1793,21 @@ pub async fn select_and_persist_variant(
         .select_variant(tenant_id, &experiment, &context)
         .await?;
 
+    // S3/S2: a suppressed selection (holdout account, or every arm paused by
+    // a guardrail) is a terminal skip, never a fallback send.
+    if selection.suppressed.is_some() {
+        return Ok(Some(selection));
+    }
+
+    // S4: the ACTUAL propensity the sampler used, logged with the decision.
+    let arm_propensity = selection
+        .propensities
+        .iter()
+        .find(|propensity| propensity.variant == selection.variant)
+        .map(|propensity| propensity.probability)
+        .filter(|probability| *probability > 0.0 && probability.is_finite())
+        .unwrap_or(1.0);
+
     // Persist BEFORE the dispatcher is called: the variant must survive an
     // enqueue failure so the outcome can be attributed.
     let mut tx = db
@@ -1791,12 +1815,14 @@ pub async fn select_and_persist_variant(
         .await
         .map_err(|error| SalesError::Database(error.to_string()))?;
     let updated_step = sqlx::query(
-        "UPDATE sales_step_executions SET variant = $2, updated_at = NOW() \
+        "UPDATE sales_step_executions \
+         SET variant = $2, arm_propensity = $4, updated_at = NOW() \
          WHERE id = $1 AND tenant_id = $3",
     )
     .bind(step_execution_id)
     .bind(&selection.variant)
     .bind(tenant_id)
+    .bind(arm_propensity)
     .execute(&mut *tx)
     .await
     .map_err(|error| SalesError::Database(error.to_string()))?
@@ -1808,13 +1834,15 @@ pub async fn select_and_persist_variant(
     }
     let updated_enrollment = sqlx::query(
         "UPDATE sales_enrollments \
-         SET experiment_id = $2, experiment_variant = $3, updated_at = NOW() \
+         SET experiment_id = $2, experiment_variant = $3, arm_propensity = $5, \
+             updated_at = NOW() \
          WHERE id = $1 AND tenant_id = $4",
     )
     .bind(enrollment_id)
     .bind(selection.experiment_id)
     .bind(&selection.variant)
     .bind(tenant_id)
+    .bind(arm_propensity)
     .execute(&mut *tx)
     .await
     .map_err(|error| SalesError::Database(error.to_string()))?
@@ -1827,6 +1855,28 @@ pub async fn select_and_persist_variant(
     tx.commit()
         .await
         .map_err(|error| SalesError::Database(error.to_string()))?;
+
+    // The assignment ledger is idempotent per step execution. A failure here
+    // is logged rather than dead-lettering an already-persisted decision: the
+    // propensity columns on the step/enrollment remain the durable record.
+    if let Err(error) = engine
+        .record_assignment(
+            tenant_id,
+            selection.experiment_id,
+            Some(step_execution_id),
+            &selection,
+            account_id,
+            Some(contact_id),
+            Some(&segment),
+        )
+        .await
+    {
+        tracing::warn!(
+            step_execution_id = %step_execution_id,
+            error = %error,
+            "experiment assignment/propensity log failed; step and enrollment propensities are authoritative"
+        );
+    }
 
     tracing::info!(
         step_execution_id = %step_execution_id,
@@ -2275,6 +2325,11 @@ impl SequenceStepHandler {
             .await
             {
                 Ok(Some(selection)) => {
+                    if let Some(reason) = selection.suppressed {
+                        // S3 holdout / S2 guardrail: no sending for this
+                        // decision. A skip is terminal, not a retry.
+                        return self.skip(ctx.step_execution_id, &reason).await;
+                    }
                     ctx.variant = selection.variant;
                 }
                 Ok(None) => {
@@ -2359,7 +2414,11 @@ impl SequenceStepHandler {
             },
             unsubscribe_link: &client.unsubscribe_link,
             postal_address: None,
-            privacy_url: None,
+            // V27/WEB-8: every first-touch email links the prospects section
+            // of the privacy notice. The footer renderer makes the link
+            // unconditional; naming the constant here keeps the worker source
+            // auditable (see the footer enforcement test below).
+            privacy_url: PRIVACY_NOTICE_URL,
         };
         let mut rendered = match &plan.content {
             PlannedContent::Strategy { subject, body } => {
@@ -3015,6 +3074,15 @@ mod tests {
                 "_with_footer(&template, &recipient, footer)"
             )),
             "the template arm must render through render_for_recipient_with_footer"
+        );
+
+        // V27/WEB-8: the worker's footer (shared by both content arms, hence
+        // by every first-touch template) must name the canonical privacy
+        // notice; the renderer makes the link unconditional, and this line
+        // keeps the worker from replacing it with an empty value.
+        assert!(
+            source.contains("privacy_url: PRIVACY_NOTICE_URL"),
+            "the sequence send path must link the privacy notice on every first touch"
         );
 
         // Both arms run before the only external enqueue in this module.

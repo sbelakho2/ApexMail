@@ -122,8 +122,8 @@ gates = ["T12"]
 id = "I15"
 statement = "No parser panics on any input"
 code = ["mta", "imap-server", "mail-proto", "edge-cases", "webhook handlers"]
-test_anchors = ["tools/check_rust_panic_paths.py"]
-plan_test_today = "2 fuzz targets, never run; check_rust_panic_paths"
+test_anchors = ["tools/check_rust_panic_paths.py", "services/mail-server/crates/fuzz-tests/tests/fuzz_smoke.rs"]
+plan_test_today = "T7 landed 2026-10-30: 12 coverage-guided fuzz targets under crates/fuzz-tests/fuzz (SMTP command/envelope, MIME, DKIM/SPF/DMARC, IMAP response, protobuf, webhook signature, template, CSV, tracking token) with committed corpora; tools/run_fuzz_nightly.sh runs each for 10 min nightly (ci/pipeline.sh --fuzz-nightly) and turns every crash into a committed corpus seed + generated regression test. The deterministic fuzz-lite smoke (test.fuzz-smoke) runs the same parser drivers over the corpora in the normal lane; check_rust_panic_paths keeps the static panic-path sweep."
 gates = ["T7"]
 
 [[invariant]]
@@ -224,3 +224,27 @@ code = ["mta inbound.rs (group_recipients_by_tenant + queue_inbound_events_for_t
 test_anchors = ["services/mail-server/crates/mta/tests/inbound_recipient_isolation.rs"]
 plan_test_today = "inbound_recipient_isolation.rs seeds two tenants + a cross-tenant envelope and asserts the grouping and BOTH queued webhook payloads carry only their own recipients"
 gates = ["V13"]
+
+[[invariant]]
+id = "I28"
+statement = "A recurring charge settles only its own renewal invoice; it never activates a plan, issues another invoice or restarts a period"
+code = ["billing-service plan_billing.rs (renew_subscription_locked issues the local invoice BEFORE charging; reconcile_provider_renewal_payment settles the attempt's obligation and advances the period exactly one interval)", "billing-service mollie_webhooks.rs (sequenceType routed FIRST: recurring -> renewal reconciliation, never checkout activation)"]
+test_anchors = ["services/mail-server/crates/billing-service/tests/coverage_adversarial.rs", "services/mail-server/crates/billing-service/src/plan_billing.rs", "services/mail-server/crates/billing-service/src/mollie_webhooks.rs"]
+plan_test_today = "Landed with the Mollie wave (V28): renewal_webhook_paid_late_settles_only_its_own_invoice_across_orderings (coverage_adversarial.rs, `cargo nextest run -p billing-service renewal_webhook`) is the property over six orderings of {worker tick, webhook delivery, repair sweep} including duplicate/late deliveries: a late recurring payment settles the renewal invoice the worker created, creates no other invoice, never activates, and leaves the period end exactly one interval later. notification_arm_routes_authorisation_by_success_and_sequence_type pins recurring->RenewalAuthorisation vs checkout->CheckoutActivation; recurring_authorisation_settles_allocates_and_recovers_dunning proves settlement + dunning recovery; reconcile_provider_renewal_payment refuses to create an invoice or advance for an unknown contract/no-obligation payment."
+gates = ["V28", "T4"]
+
+[[invariant]]
+id = "I29"
+statement = "Every refund and chargeback recorded at the provider is recorded locally within 24 hours, whoever started it, exactly once"
+code = ["billing-service payments/engine.rs (record_refund_fact upsert keyed (provider, provider_refund_id), monotonic to succeeded; observe_dispute upsert keyed (provider, provider_dispute_id) + neutral event facts + idempotent journal postings)", "billing-service mollie_webhooks.rs / provider sweep (dashboard-initiated refunds and chargebacks surface as provider objects, never as our own request echoes)"]
+test_anchors = ["services/mail-server/crates/billing-service/tests/invariants_property.rs"]
+plan_test_today = "invariants_property.rs (I29): proptest over scripts of provider-side refund create/update/duplicate, chargeback open/reverse and out-of-order events x sweep schedules {none, one, two, three} on a synthetic clock. A scripted provider double (the conformance double pattern) exposes provider-as-of state; each sweep invokes the ENGINE functions the webhook/repair paths call (record_refund_fact / observe_dispute). Asserts: exactly one payment_provider_refunds / payment_disputes row per provider object, the row state equals the provider's current state, every event seen by the first sweep within 24h is recorded by that sweep, duplicate sweeps change nothing, and each observed dispute outcome has exactly one payment_provider_events fact and one idempotent journal entry. Committed proptest regression file under tests/proptest-regressions/."
+gates = ["V29", "T4"]
+
+[[invariant]]
+id = "I30"
+statement = "Every server ApexMail provisions is in Helsinki (hel1), or provisioning refuses with a typed error; no request is ever sent to the provider for another location"
+code = ["enterprise dedicated_exec.rs (resolve_provider_location + provider_location; DEFAULT_PROVIDER_LOCATION = hel1; HETZNER_DEFAULT_LOCATION must itself be hel1; any other location/region is ExecError::LocationRefused)", "enterprise dedicated_tenant.rs (provider_location_is_permitted; no per-contract location column exists — config-only enforcement)"]
+test_anchors = ["services/mail-server/crates/enterprise/tests/invariants_property.rs"]
+plan_test_today = "invariants_property.rs (I30): proptest over all combinations of (plan-region-shaped strings from EEA/EU tokens, hel1, every other known provider location, empty/garbage) x HETZNER_DEFAULT_LOCATION {unset, empty, hel1, HEL1, padded hel1, fsn1, nbg1, random} x contract-location {none}, plus a DB-backed create-path property that drives execute_host_provision_via against a loopback provider double and asserts the captured POST /servers body always carries location \"hel1\" — a non-hel1 env or region makes ZERO create POSTs and returns the typed LocationRefused. The contract-location dimension is proven vacuous: a test asserts ent_private_deployments has no location column, so no per-contract location can authorize another site."
+gates = ["V31", "T4"]

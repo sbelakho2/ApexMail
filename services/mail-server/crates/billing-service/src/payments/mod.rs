@@ -235,6 +235,14 @@ pub struct Settlement {
     pub settled_at: Option<DateTime<Utc>>,
 }
 
+/// The neutral trait-object handles domain modules may hold: a shared
+/// provider (renewal worker, request state) and a borrowed one (a function
+/// that only calls the boundary). Naming these aliases keeps the neutral
+/// vocabulary OUTSIDE the adapter layer free of `dyn ...Provider`
+/// construction syntax (the neutrality lint reserves it for `payments/`).
+pub type SharedProvider = std::sync::Arc<dyn PaymentProvider>;
+pub type ProviderRef<'a> = &'a dyn PaymentProvider;
+
 /// One normalized provider event fact. This is the promotion target of the
 /// webhook normalizer nucleus; adapters emit these once the event pipeline
 /// lands (a later staged step).
@@ -298,7 +306,36 @@ pub struct CheckoutRequest {
     pub method_hint: Option<String>,
     pub provider_customer_id: Option<String>,
     pub provider_method_id: Option<String>,
+    /// Ask the provider to capture a REUSABLE method for later off-session
+    /// charges (V34). Mollie uses the `first` sequence (a mandate); Stripe
+    /// sets `payment_intent_data[setup_future_usage]=off_session`. Without
+    /// this the renewal worker has nothing to charge.
+    pub save_method: bool,
     pub idempotency_key: String,
+}
+
+/// Create (or resolve) a provider customer object bound to a tenant.
+#[derive(Debug, Clone)]
+pub struct CustomerRequest {
+    pub tenant_id: String,
+    pub name: String,
+    pub email: String,
+    pub idempotency_key: String,
+}
+
+/// The provider customer object a tenant's saved methods belong to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderCustomer {
+    pub provider: String,
+    pub provider_customer_id: String,
+}
+
+/// The reusable credential a completed checkout captured (the pair the
+/// renewal worker charges off-session).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SavedMethodRef {
+    pub provider_customer_id: String,
+    pub provider_method_id: String,
 }
 
 /// Charge a stored credential now, with no browser involved.
@@ -374,6 +411,34 @@ pub trait PaymentProvider: Send + Sync {
 
     /// Create a hosted checkout for a customer to complete in a browser.
     async fn create_checkout(&self, request: CheckoutRequest) -> Result<Checkout, ProviderError>;
+
+    /// Create (or resolve) the provider customer object a tenant's saved
+    /// methods belong to. Providers that create the customer as part of the
+    /// checkout itself may refuse; providers that need a customer before the
+    /// checkout (Mollie mandates) implement it. The caller persists the
+    /// returned id in the neutral `payment_provider_customers` table.
+    async fn ensure_customer(
+        &self,
+        request: CustomerRequest,
+    ) -> Result<ProviderCustomer, ProviderError> {
+        let _ = request;
+        Err(ProviderError::Config(format!(
+            "{}: provider customers are not created before checkout by this adapter",
+            self.provider_name()
+        )))
+    }
+
+    /// The reusable credential a COMPLETED checkout captured, for the
+    /// activation to store in `payment_credentials`. Providers whose payment
+    /// fact already carries the method (Mollie's mandate) answer `Ok(None)`
+    /// and the caller uses the fact's own ids.
+    async fn fetch_saved_method_for_payment(
+        &self,
+        provider_payment_id: &str,
+    ) -> Result<Option<SavedMethodRef>, ProviderError> {
+        let _ = provider_payment_id;
+        Ok(None)
+    }
 
     /// Charge a stored credential now (no browser, no checkout page).
     async fn charge_saved_method(

@@ -83,3 +83,6 @@ tracing-log = "0.2"
 # DB-backed tests bootstrap through the REAL production migrator (audit F01):
 # a green test means the code works against the deploy-time schema.
 migrator = { path = "../migrator" }
+# I30 property test (tests/invariants_property.rs): the hosting-location
+# resolution matrix is a property, not a handful of example cells.
+proptest = "1.4"

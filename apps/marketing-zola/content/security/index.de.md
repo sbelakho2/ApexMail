@@ -73,7 +73,7 @@ Die Systemintegrität wird durch automatisierte, wiederkehrende Prüfungen im ge
 
 ## Infrastruktursicherheit
 
-- Europäische Cloud-Infrastruktur (Compute, Storage und Networking) in Finnland (EU); die gesamte Infrastrukturverarbeitung bleibt innerhalb des EWR.
+- Europäische Cloud-Infrastruktur (Compute, Storage und Networking) in der EU/EWR; die gesamte Infrastrukturverarbeitung bleibt innerhalb des EWR.
 - CIS-gehärtete Debian/Ubuntu-Betriebssysteme.
 - Automatisierte Sicherheitspatches mit gestaffelter Einführung.
 - Deklarative, versionskontrollierte Bereitstellung: Der gesamte Stack ist in Docker-Compose-Dateien definiert und wird über die selbst gehostete CI-Pipeline ausgerollt.

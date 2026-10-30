@@ -1699,8 +1699,9 @@ mod db_tests {
             "every generated registry row is public (the page is public)"
         );
         assert!(
-            seed.subprocessors.iter().any(|s| s.name
-                == "EU infrastructure provider (named in the customer DPA subprocessor annex)"),
+            seed.subprocessors
+                .iter()
+                .any(|s| s.name == "EU infrastructure provider (named in the customer DPA annex)"),
             "the infrastructure provider (public name withheld by owner
             directive; disclosed in the customer DPA annex) must be present"
         );

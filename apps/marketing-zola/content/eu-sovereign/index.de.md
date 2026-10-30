@@ -10,7 +10,7 @@ og_image = "/images/og-image.png"
 
 ## Das Versprechen, und die offene Grenze
 
-ApexMail ist ein EU-Unternehmen (Bel Consulting OÜ, Tallinn, Estland). Die gemeinsame Cloud läuft in EU-Rechenzentren in Finnland. EU-only-Routing ist ein echter Modus mit einer Einstellung: Jede Nachricht verlässt das System über die eigenen EU-MTAs von ApexMail, ein Versand ohne eigene MTA-Route wird angehalten statt umgeleitet, und jede angenommene Nachricht trägt einen Ed25519-signierten Routing-Beleg, den jede dritte Partei mit dem veröffentlichten öffentlichen Schlüssel prüfen kann.
+ApexMail ist ein EU-Unternehmen (Bel Consulting OÜ, Tallinn, Estland). Die gemeinsame Cloud läuft in EU-Rechenzentren im EWR. EU-only-Routing ist ein echter Modus mit einer Einstellung: Jede Nachricht verlässt das System über die eigenen EU-MTAs von ApexMail, ein Versand ohne eigene MTA-Route wird angehalten statt umgeleitet, und jede angenommene Nachricht trägt einen Ed25519-signierten Routing-Beleg, den jede dritte Partei mit dem veröffentlichten öffentlichen Schlüssel prüfen kann.
 
 Die offene Grenze gehört auf dieselbe Seite: Das **Standard**-Routing von ApexMail ist Global, und Global-Zustellungen laufen über Amazon Web Services' SES in der konfigurierten EU-Region, eine EU-Region eines US-Unternehmens, abgedeckt durch den AWS-Auftragsverarbeitungsvertrag und, soweit anwendbar, EU-Standardvertragsklauseln. Der Satz „Ihre Mail berührt nie einen US-kontrollierten Anbieter" gilt **unter EU-only-Routing**; für ein Global-Konto gilt er nicht, und diese Website behauptet ihn nicht plattformweit. Die [Datenstandort-Matrix](/de/data-locations/) formuliert für die Speicherung denselben Umfang, den diese Seite für den Transport formuliert.
 
@@ -22,7 +22,7 @@ Belege: Die [AGB](/de/terms/) nennen Vertragspartner und anwendbares Recht; die 
 
 ## EU-Rechenzentren
 
-Die mitgelieferte gemeinsame Bereitstellung läuft auf von ApexMail verwalteter EU-Infrastruktur (Finnland). Kern-Servicedaten, Kontodaten, gehashte API-Schlüssel, Absender- und Empfängeradressen, Nachrichteninhalte, Anhänge, Zustellereignisse und -protokolle, Support-Tickets, Analytik und Backups, werden innerhalb des EWR verarbeitet und repliziert, ohne Drittlandübermittlung für diese Kategorien. Die tatsächlichen Ausnahmen werden benannt statt verborgen: optionale OAuth-Anmeldung (Google, GitHub) und Zahlungsabwicklung (Mollie B.V.) sind in der Matrix mit ihren eigenen Übermittlungsgarantien gesondert aufgeführt.
+Die mitgelieferte gemeinsame Bereitstellung läuft auf von ApexMail verwalteter EU-Infrastruktur. Kern-Servicedaten, Kontodaten, gehashte API-Schlüssel, Absender- und Empfängeradressen, Nachrichteninhalte, Anhänge, Zustellereignisse und -protokolle, Support-Tickets, Analytik und Backups, werden innerhalb des EWR verarbeitet und repliziert, ohne Drittlandübermittlung für diese Kategorien. Die tatsächlichen Ausnahmen werden benannt statt verborgen: optionale OAuth-Anmeldung (Google, GitHub) und Zahlungsabwicklung (Mollie B.V.) sind in der Matrix mit ihren eigenen Übermittlungsgarantien gesondert aufgeführt.
 
 Belege: Die [Datenstandort-Matrix](/de/data-locations/) listet für jede Datenkategorie primären Standort, Backup und Verarbeitungsregion; das [Unterauftragsverarbeiter-Register](/de/subprocessors/) nennt die Unternehmen sowie ihre Verarbeitungs- und Speicherländer.
 
@@ -72,7 +72,7 @@ Belege: Beide Endpunkte sind live und unauthentifizierte Oberflächen der öffen
 
 ## Was EU-only aus der Unterauftragsverarbeiter-Kette entfernt
 
-Das [Unterauftragsverarbeiter-Register](/de/subprocessors/) wird aus der Konfiguration der Bereitstellung selbst erzeugt; die gelistete Menge kann daher nicht von dem abweichen, was tatsächlich läuft. Unter EU-only-Routing trägt der Eintrag Amazon Web Services SES keine Mail eines Mandanten: Die Nachricht verlässt das System ausschließlich über die eigenen MTAs von ApexMail auf von ApexMail verwalteter EU-Infrastruktur (Finnland). Die übrigen Einträge sind Zahlungen (Mollie B.V., Amsterdam) und optionale OAuth-Anmeldung (Google, GitHub), jeweils mit Verarbeitungsland und Übermittlungsmechanismus im Register ausgewiesen.
+Das [Unterauftragsverarbeiter-Register](/de/subprocessors/) wird aus der Konfiguration der Bereitstellung selbst erzeugt; die gelistete Menge kann daher nicht von dem abweichen, was tatsächlich läuft. Unter EU-only-Routing trägt der Eintrag Amazon Web Services SES keine Mail eines Mandanten: Die Nachricht verlässt das System ausschließlich über die eigenen MTAs von ApexMail auf von ApexMail verwalteter EU-Infrastruktur. Die übrigen Einträge sind Zahlungen (Mollie B.V., Amsterdam) und optionale OAuth-Anmeldung (Google, GitHub), jeweils mit Verarbeitungsland und Übermittlungsmechanismus im Register ausgewiesen.
 
 Anders gesagt: Unter EU-only trägt keine US-kontrollierte dritte Partei die Mail. Unter Global tut dies AWS SES, in EU-Regionen (die Deutschland umfassen können), unter dem AWS-AVV und den SCCs, und genau das sagt das Register.
 

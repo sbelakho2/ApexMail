@@ -129,26 +129,15 @@ ALLOWLIST_TOML = """
 # were retired from every api-server/compliance surface, so the grants for
 # cross_tenant, dashboard, growth_analytics, insights, predictive_analytics,
 # revenue, sse and entitlements were DELETED — those files no longer trip
-# any marker. Only the files still naming the processor in PRODUCTION code
-# carry a grant below.
-[[file_grant]]
-path = "services/mail-server/crates/api-server/src/routes/admin/billing_ops.rs"
-reason = "admin ops wire-client liveness checks (webhook health / settlements); retire with N-10"
-expires = "2027-04-27"
-
+# any marker. The V34/MON-11 wave landed the api-server checkout, customer
+# onboarding, console checkout, webhook/settlement health and refunds on the
+# provider boundary, so the billing.rs / web.rs / billing_ops.rs grants are
+# GONE too: api-server production code is scanned with no exceptions. Only
+# the files still naming the processor in PRODUCTION code carry a grant
+# below.
 [[file_grant]]
 path = "services/mail-server/crates/api-server/src/routes/admin/mollie_settlements.rs"
 reason = "settlement import drives the wire client directly; retire with N-10/N-12"
-expires = "2027-04-27"
-
-[[file_grant]]
-path = "services/mail-server/crates/api-server/src/routes/billing.rs"
-reason = "checkout customer mapping on the mollie_customers wire ledger + wire-client calls; retire with N-02/N-10"
-expires = "2027-04-27"
-
-[[file_grant]]
-path = "services/mail-server/crates/api-server/src/routes/web.rs"
-reason = "console billing surface drives the wire client; retire with N-10"
 expires = "2027-04-27"
 
 [[file_grant]]

@@ -36,8 +36,16 @@ newest 30 runs.
 
 ## What the timer does every 5 minutes
 
-`apexmail-pipeline.service` runs `ci/pipeline.sh run`:
+`apexmail-pipeline.service` runs
+`ci/pipeline.sh run --lock-wait 0 --skip-unchanged --daily`:
 
+0. **daily cargo-audit** (`--daily`, before the stage line) — on the first
+   timer tick of each UTC day, clone a fresh RustSec advisory database
+   (`cargo audit --db <run>/advisory-db`). The run fails on any
+   vulnerability not covered by the reviewed ignore ledger or a dated
+   waiver. A pass writes `ci/runs/.last-daily-audit`; later ticks that day
+   no-op, so the 5-minute poll stays cheap. A failure leaves no marker, so
+   the next tick retries. Force it with `CI_DAILY_AUDIT_FORCE=1`.
 1. **fetch** — `git fetch origin main` over the deploy key; refuses to build
    anything not pushed to origin/main.
 2. **validate / test / security** — the CI lane (all gates from the former
@@ -61,6 +69,8 @@ a red build. Only one run executes at a time (lock).
 | CI only, no deploy | `ci/pipeline.sh run --skip-deploy` |
 | Validate a branch before merge (any machine) | `ci/check-pr.sh <branch-or-sha>` |
 | Ad-hoc security audit | `ci/pipeline.sh run --stages security` |
+| Daily audit now (fresh advisory DB) | `CI_DAILY_AUDIT_FORCE=1 ci/pipeline.sh run --daily --stages notify` |
+| Inspect dated advisory waivers | `python3 tools/check_audit_waivers.py` (fails on expiry/staleness) |
 | Manual rollback | see `deploy/rollback-plan.md` (images are tagged `:<sha>` locally) |
 | Bypass a wedged run | `systemctl stop apexmail-pipeline.service`, remove `ci/runs/.locks/` |
 

@@ -9,8 +9,9 @@
 use async_trait::async_trait;
 use aws_sdk_sesv2::types::{Destination, EmailContent, RawMessage};
 use aws_sdk_sesv2::Client as SesClient;
-use mail_send::mail_auth::common::crypto::{RsaKey, Sha256};
-use mail_send::mail_auth::dkim::DkimSigner;
+use mail_auth::crypto::{RsaKey, Sha256};
+use mail_auth::dkim::DkimSigner;
+use mail_auth::headers::HeaderWriter;
 use mail_send::mail_builder::headers::address::Address;
 use mail_send::mail_builder::headers::text::Text;
 use mail_send::mail_builder::MessageBuilder;
@@ -441,15 +442,14 @@ enum OutgoingMailFrom {
 async fn send_outgoing<T>(
     client: &mut mail_send::SmtpClient<T>,
     outgoing: Outgoing<'_>,
-    signer: &Option<DkimSigner<RsaKey<Sha256>, mail_send::mail_auth::dkim::Done>>,
+    signer: &Option<DkimSigner<RsaKey<Sha256>, mail_auth::signer::Ready>>,
 ) -> ProcessorResult<()>
 where
     T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
     match outgoing {
         Outgoing::Builder(message) => match signer {
-            Some(signer) => client
-                .send_signed(message, signer)
+            Some(signer) => send_signed_local(client, message, signer)
                 .await
                 .map_err(SmtpTransport::map_smtp_error),
             None => client
@@ -458,8 +458,7 @@ where
                 .map_err(SmtpTransport::map_smtp_error),
         },
         Outgoing::Envelope(message) => match signer {
-            Some(signer) => client
-                .send_signed(message, signer)
+            Some(signer) => send_signed_local(client, message, signer)
                 .await
                 .map_err(SmtpTransport::map_smtp_error),
             None => client
@@ -468,6 +467,39 @@ where
                 .map_err(SmtpTransport::map_smtp_error),
         },
     }
+}
+
+/// `send_signed` without mail-send's `dkim` feature.
+///
+/// mail-send's dkim feature enables mail-auth's `report` default, which pulls
+/// zip 8.6 — RUSTSEC-2026-0367/68/69 are only fixed in zip >= 9. The local
+/// signer (mail-auth with `rust-crypto`, no zip) signs the body, prepends the
+/// DKIM-Signature header and sends the result exactly as mail-send's
+/// `send_signed` does.
+async fn send_signed_local<'x, T>(
+    client: &mut mail_send::SmtpClient<T>,
+    message: impl mail_send::smtp::message::IntoMessage<'x>,
+    signer: &DkimSigner<RsaKey<Sha256>, mail_auth::signer::Ready>,
+) -> Result<(), mail_send::Error>
+where
+    T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    use mail_send::smtp::message::Message;
+
+    let message = message.into_message()?;
+    let signature = signer
+        .sign(message.body.as_ref())
+        .map_err(|_| mail_send::Error::MissingCredentials)?;
+    let mut signed_message = Vec::with_capacity(message.body.len() + 64);
+    signature.write_header(&mut signed_message);
+    signed_message.extend_from_slice(message.body.as_ref());
+    client
+        .send(Message {
+            mail_from: message.mail_from,
+            rcpt_to: message.rcpt_to,
+            body: signed_message.into(),
+        })
+        .await
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -630,7 +662,10 @@ impl SmtpTransport {
     }
 
     fn smtp_builder(&self) -> ProcessorResult<SmtpClientBuilder<String>> {
+        // mail-send 0.6 builds the TLS connector eagerly and reports failure
+        // through the Result (0.4 returned the builder directly).
         let mut builder = SmtpClientBuilder::new(self.config.host.clone(), self.config.port)
+            .map_err(ProcessorError::Transport)?
             .implicit_tls(self.config.secure && self.config.port == 465);
 
         match (&self.config.username, &self.config.password) {
@@ -652,7 +687,7 @@ impl SmtpTransport {
                 // local `pw` is dropped. However, `pw.to_string()` below creates a
                 // non-zeroized copy that is moved *into* mail-send's internals via
                 // Credentials::Plain. This is a known limitation of the mail-send
-                // API (0.4.x) which takes plain String for `secret`. The credential
+                // API (0.6.x) which takes plain String for `secret`. The credential
                 // redaction in `map_smtp_error()` mitigates the leak risk.
                 let pw: Zeroizing<String> = password.clone();
                 builder = builder.credentials(Credentials::Plain {
@@ -753,7 +788,7 @@ impl SmtpTransport {
     fn build_dkim_signer(
         &self,
         config: &DkimConfig,
-    ) -> ProcessorResult<DkimSigner<RsaKey<Sha256>, mail_send::mail_auth::dkim::Done>> {
+    ) -> ProcessorResult<DkimSigner<RsaKey<Sha256>, mail_auth::signer::Ready>> {
         build_dkim_signer(config)
     }
 }
@@ -764,10 +799,16 @@ impl SmtpTransport {
 /// delivers the message verbatim).
 pub(crate) fn build_dkim_signer(
     config: &DkimConfig,
-) -> ProcessorResult<DkimSigner<RsaKey<Sha256>, mail_send::mail_auth::dkim::Done>> {
+) -> ProcessorResult<DkimSigner<RsaKey<Sha256>, mail_auth::signer::Ready>> {
+    use rustls_pki_types::pem::PemObject;
+    use rustls_pki_types::PrivateKeyDer;
+
     let private_key = config.private_key.trim();
-    let key = RsaKey::<Sha256>::from_rsa_pem(private_key)
-        .or_else(|_| RsaKey::<Sha256>::from_pkcs8_pem(private_key))
+    // mail-auth 0.15 takes DER; parse PKCS#1 ("RSA PRIVATE KEY") or PKCS#8
+    // ("PRIVATE KEY") PEM here (the old from_rsa_pem/from_pkcs8_pem pair).
+    let key_der = PrivateKeyDer::from_pem_slice(private_key.as_bytes())
+        .map_err(|e| ProcessorError::Dkim(format!("Invalid DKIM key: {e}")))?;
+    let key = RsaKey::<Sha256>::from_key_der(key_der)
         .map_err(|e| ProcessorError::Dkim(format!("Invalid DKIM key: {e}")))?;
 
     Ok(DkimSigner::from_key(key)
@@ -791,7 +832,7 @@ impl EmailTransport for SmtpTransport {
 
     /// FALSE, honestly: `SmtpTransport` injects the
     /// [`APEXMAIL_ROUTE_HEADER`] routing metadata, but the pinned mail-send
-    /// 0.4.x client returns only `Result<()>` for DATA, so the end-of-DATA
+    /// 0.6.x client returns only `Result<()>` for DATA, so the end-of-DATA
     /// reply carrying the agreed [`APEXMAIL_SOURCE_IP_REPLY_HEADER`] cannot be
     /// parsed, and the relay side of the contract is NOT implemented in this
     /// repository (`crates/mta` has no outgoing relay connector). Binding
@@ -933,7 +974,7 @@ impl EmailTransport for SmtpTransport {
         };
 
         // The relay accepted the message. `actual_source_ip` is `None`
-        // because the pinned mail-send 0.4.x API returns only `Result<()>`
+        // because the pinned mail-send 0.6.x API returns only `Result<()>`
         // for DATA, it does not surface the end-of-DATA reply, so the
         // agreed relay report ([`APEXMAIL_SOURCE_IP_REPLY_HEADER`]) cannot
         // be parsed yet. That is why `supports_source_binding()` is false:

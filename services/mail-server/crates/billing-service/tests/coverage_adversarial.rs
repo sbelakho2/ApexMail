@@ -3023,6 +3023,33 @@ async fn seed_billing_address(h: &Harness, tenant: &str, country: &str) {
     .expect("seed billing address");
 }
 
+async fn seed_reverse_charge_business(h: &Harness, tenant: &str) {
+    // V30: a verified cross-border EU business pays the NET list price
+    // (reverse charge). The evidence row is what authorises the 0 % rate.
+    sqlx::query(
+        "INSERT INTO billing_addresses (tenant_id, company_name, vat_number, address_line1, \
+            city, postal_code, country, is_business) \
+         VALUES ($1, $2, 'DE123456789', 'Test 1', 'Berlin', '10115', 'DE', TRUE) \
+         ON CONFLICT (tenant_id) DO UPDATE SET country = 'DE', vat_number = 'DE123456789', \
+            is_business = TRUE",
+    )
+    .bind(tenant)
+    .bind(format!("Coverage {tenant} GmbH"))
+    .execute(&h.pool)
+    .await
+    .expect("seed reverse-charge billing address");
+    sqlx::query(
+        "INSERT INTO vat_validation_evidence \
+            (tenant_id, vat_number, country, source, requested_at, valid, response_hash, valid_from) \
+         VALUES ($1, 'DE123456789', 'DE', 'VIES', NOW() - INTERVAL '1 day', TRUE, \
+            'coverage-evidence', CURRENT_DATE - 1)",
+    )
+    .bind(tenant)
+    .execute(&h.pool)
+    .await
+    .expect("seed VIES evidence");
+}
+
 async fn seed_billing_period(
     h: &Harness,
     tenant: &str,
@@ -3654,6 +3681,8 @@ async fn mock_handler(
         .unwrap_or_else(|| {
             if path.ends_with("/refunds") {
                 (200, r#"{"_embedded":{"refunds":[]}}"#.to_string())
+            } else if path.ends_with("/chargebacks") {
+                (200, r#"{"_embedded":{"chargebacks":[]}}"#.to_string())
             } else {
                 (404, r#"{"title":"Not Found"}"#.to_string())
             }
@@ -3730,22 +3759,35 @@ fn payment_document(
 }
 
 /// A recurring charge against a stored mandate for `invoice_id`.
+///
+/// The metadata mirrors what `renew_subscription_locked` ACTUALLY sends
+/// (`tenant_id`, `plan_name`, `interval`, `reference`): the fixture this
+/// replaces carried only a reference, which is exactly why MON-8 shipped.
 fn recurring_payment(
     payment_id: &str,
     invoice_id: Uuid,
     cents: i64,
     tenant: Option<&str>,
 ) -> serde_json::Value {
-    let mut metadata = serde_json::json!({ "reference": format!("invoice:{invoice_id}") });
-    if let Some(tenant) = tenant {
-        metadata["tenant_id"] = serde_json::json!(tenant);
+    let tenant = tenant.unwrap_or("cst_cov");
+    let mut metadata = serde_json::json!({
+        "reference": format!("invoice:{invoice_id}"),
+        "tenant_id": tenant,
+        "plan_name": "growth",
+        "interval": "monthly",
+    });
+    if tenant.is_empty() {
+        metadata
+            .as_object_mut()
+            .expect("object")
+            .remove("tenant_id");
     }
     payment_document(
         payment_id,
         "paid",
         cents,
         Some("recurring"),
-        tenant.unwrap_or("cst_cov"),
+        tenant,
         Some("mdt_cov"),
         metadata,
     )
@@ -4461,11 +4503,13 @@ db_test!(
 
         // The FIRST payment binds the OWNER's subscription: the fetch produces
         // both an informational authorisation and the RECURRING_CONTRACT fact.
+        // No obligation reference: a first payment that names an invoice is a
+        // SETTLEMENT (MON-8), not this test's mandate-binding subject.
         mock.publish_payment(&first_payment(
             "tr_cov_bind_owner",
             owner,
             "mdt_cov_owner",
-            Some(invoice_id),
+            None,
         ));
         expect_mollie_ok(&app, "tr_cov_bind_owner").await;
         let bound: Option<String> = sqlx::query_scalar(
@@ -6702,7 +6746,7 @@ db_test!(
     |h| {
         let mock = mock_mollie_api();
         seed_tenant(&h, "cov_activate", "free").await;
-        seed_billing_address(&h, "cov_activate", "EE").await;
+        seed_reverse_charge_business(&h, "cov_activate").await;
         // No subscription-create route is registered: the activation must
         // mint NO provider object (renewal is local). If it did call the
         // provider, the dynamic mint route would fire and `created` below
@@ -6767,7 +6811,21 @@ db_test!(
         assert_eq!(invoice_status, "paid");
         assert_eq!(total, 2_000, "the invoice totals the collected gross");
         assert_eq!(net + vat, total, "net + VAT is exactly the charge");
-        assert!(vat > 0, "an Estonian charge carries VAT");
+        assert_eq!(net, 2_000, "the net is the catalog list price");
+        assert_eq!(
+            vat, 0,
+            "a verified cross-border EU business is reverse-charged (V30)"
+        );
+
+        // V34: the provider customer is bound on the NEUTRAL ledger.
+        let customers: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM payment_provider_customers \
+         WHERE tenant_id = 'cov_activate' AND provider_customer_id = 'cst_cov_activate'",
+        )
+        .fetch_one(&h.pool)
+        .await
+        .expect("provider customer");
+        assert_eq!(customers, 1);
 
         let (allocations, allocated): (i64, i64) = sqlx::query_as(
         "SELECT count(*), COALESCE(sum(amount_cents), 0)::bigint FROM invoice_payment_allocations \
@@ -6830,7 +6888,7 @@ db_test!(
         )
         .await
         .expect_err("a mismatched charge must be refused");
-        assert!(error.contains("refusing to grant"), "{error}");
+        assert!(error.to_string().contains("refusing to grant"), "{error}");
         let underpaid_invoices: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM invoices WHERE mollie_payment_id = 'tr_cov_underpaid'",
         )
@@ -6838,6 +6896,76 @@ db_test!(
         .await
         .expect("underpaid invoice count");
         assert_eq!(underpaid_invoices, 0);
+    }
+);
+
+db_test!(
+    activation_refuses_a_payment_id_already_on_the_attempts_ledger,
+    |h| {
+        let _mock = mock_mollie_api();
+        seed_tenant(&h, "cov_attempt_refused", "free").await;
+        seed_reverse_charge_business(&h, "cov_attempt_refused").await;
+        // MON-8: this payment id is already a recorded charge attempt (the
+        // renewal worker's in-flight charge). It is NOT a checkout.
+        sqlx::query(
+            "INSERT INTO payment_attempts \
+                 (tenant_id, provider, provider_payment_id, state, amount_minor, \
+                  currency, purpose, obligation_ref, idempotency_key, attempt_no) \
+             VALUES ($1, 'mollie', 'tr_already_attempted', 'succeeded', 2_000, 'EUR', \
+                     'renewal', 'invoice:00000000-0000-0000-0000-0000000000ff', \
+                     'payment:invoice:00000000-0000-0000-0000-0000000000ff:1', 1)",
+        )
+        .bind("cov_attempt_refused")
+        .execute(&h.pool)
+        .await
+        .expect("seed the attempt");
+
+        let error = billing_service::plan_billing::activate_from_paid_checkout(
+            &h.pool,
+            "tr_already_attempted",
+            "cov_attempt_refused",
+            "starter",
+            "monthly",
+            "EUR",
+            2_000,
+            Some("cst_attempt_refused"),
+            Some("mdt_attempt_refused"),
+        )
+        .await
+        .expect_err("an attempted payment must not activate");
+        match error {
+            billing_service::plan_billing::ActivationError::PaymentAlreadyAttempted {
+                ref payment_id,
+                ..
+            } => assert_eq!(payment_id, "tr_already_attempted"),
+            other => panic!("expected PaymentAlreadyAttempted, got {other:?}"),
+        }
+        let invoices: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM invoices WHERE tenant_id = $1")
+                .bind("cov_attempt_refused")
+                .fetch_one(&h.pool)
+                .await
+                .expect("invoices");
+        assert_eq!(
+            invoices, 0,
+            "no invoice is issued for the refused activation"
+        );
+        let subscriptions: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM subscription_state WHERE tenant_id = $1")
+                .bind("cov_attempt_refused")
+                .fetch_one(&h.pool)
+                .await
+                .expect("subscriptions");
+        assert_eq!(subscriptions, 0, "no subscription row is invented");
+        let incidents: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM finance_incidents \
+             WHERE kind = 'activation_payment_already_attempted' \
+               AND mollie_payment_id = 'tr_already_attempted' AND status = 'open'",
+        )
+        .fetch_one(&h.pool)
+        .await
+        .expect("incident");
+        assert_eq!(incidents, 1, "the operator sees the refusal");
     }
 );
 
@@ -6880,7 +7008,7 @@ db_test!(
     |h| {
         let mock = mock_mollie_api();
         seed_tenant(&h, "cov_renew", "free").await;
-        seed_billing_address(&h, "cov_renew", "EE").await;
+        seed_reverse_charge_business(&h, "cov_renew").await;
         billing_service::plan_billing::activate_from_paid_checkout(
             &h.pool,
             "tr_cov_renew_first",
@@ -7053,12 +7181,340 @@ db_test!(
     }
 );
 
+// ---------------------------------------------------------------------------
+// I28 (V28): "a recurring charge settles only its own renewal invoice; it
+// never activates a plan, issues another invoice or restarts a period" —
+// property over the ORDER of {worker tick, webhook delivery, repair sweep},
+// including duplicate and late webhook deliveries.
+// ---------------------------------------------------------------------------
+
+db_test!(
+    renewal_webhook_paid_late_settles_only_its_own_invoice_across_orderings,
+    |h| {
+        const DUE_START: &str = "2026-09-01T00:00:00+00:00";
+        const DUE_END: &str = "2026-10-01T00:00:00+00:00";
+        const EXPECTED_END: &str = "2026-11-01T00:00:00+00:00";
+        let mock = mock_mollie_api();
+        let app = billing_service::routes::router(h.state.clone());
+        // The worker's stored-mandate charge is a SEPA direct debit: the
+        // provider accepts it and answers `pending` (money moves in days).
+        mock.route(
+            "/v2/payments",
+            200,
+            r#"{"id": "tr_i28_late_{seq}", "status": "pending"}"#.to_string(),
+        );
+
+        // Every ordering starts after the worker already opened the invoice
+        // and the charge is in flight (that IS the worker tick); each row
+        // permutes the LATER deliveries, duplicates included.
+        let orderings: [&[&str]; 6] = [
+            &["webhook", "sweep"],
+            &["sweep", "webhook"],
+            &["webhook", "webhook", "sweep"],
+            &["sweep", "webhook", "webhook"],
+            &["sweep", "webhook", "sweep"],
+            &["sweep", "sweep", "webhook", "webhook"],
+        ];
+        let now: DateTime<Utc> = "2026-10-15T00:00:00Z".parse().expect("fixed now");
+
+        for (index, ordering) in orderings.iter().enumerate() {
+            let tenant = format!("cov_i28_{index}");
+            seed_tenant(&h, &tenant, "free").await;
+            seed_reverse_charge_business(&h, &tenant).await;
+            // The tenant's reverse-charge evidence predates the renewal tax
+            // point (the seeded row is "valid since yesterday", which would
+            // not cover the fixed 2026-10-15 tick).
+            sqlx::query(
+                "UPDATE vat_validation_evidence SET valid_from = DATE '2026-01-01' \
+                 WHERE tenant_id = $1",
+            )
+            .bind(&tenant)
+            .execute(&h.pool)
+            .await
+            .expect("age the reverse-charge evidence");
+            billing_service::plan_billing::activate_from_paid_checkout(
+                &h.pool,
+                &format!("tr_i28_first_{index}"),
+                &tenant,
+                "starter",
+                "monthly",
+                "EUR",
+                2_000,
+                Some(&format!("cst_i28_{index}")),
+                Some(&format!("mdt_i28_{index}")),
+            )
+            .await
+            .expect("activation");
+            // The period the worker is about to renew.
+            sqlx::query(
+                "UPDATE subscription_state \
+                 SET billing_cycle_start = $2::timestamptz, billing_cycle_end = $3::timestamptz \
+                 WHERE tenant_id = $1",
+            )
+            .bind(&tenant)
+            .bind(DUE_START)
+            .bind(DUE_END)
+            .execute(&h.pool)
+            .await
+            .expect("cycle seed");
+
+            // THE WORKER TICK: invoice first, then a claimed in-flight charge.
+            let renewed = billing_service::plan_billing::renew_due_subscriptions_with(
+                &h.state,
+                renewal_provider().await,
+                now,
+            )
+            .await
+            .expect("worker tick");
+            assert_eq!(renewed, 0, "a pending charge settles nothing yet");
+
+            let attempt: Option<(String, String)> = sqlx::query_as(
+                "SELECT provider_payment_id, obligation_ref FROM payment_attempts \
+                 WHERE tenant_id = $1 AND purpose = 'renewal'",
+            )
+            .bind(&tenant)
+            .fetch_optional(&h.pool)
+            .await
+            .expect("the worker's renewal attempt query");
+            let Some((payment_id, obligation_ref)) = attempt else {
+                let incidents: Vec<(String, serde_json::Value)> = sqlx::query_as(
+                    "SELECT kind, detail FROM finance_incidents WHERE tenant_id = $1",
+                )
+                .bind(&tenant)
+                .fetch_all(&h.pool)
+                .await
+                .expect("incidents");
+                let cycle: (String, DateTime<Utc>, Option<i64>, Option<DateTime<Utc>>) =
+                    sqlx::query_as(
+                        "SELECT status, billing_cycle_end, renewal_attempts::bigint, \
+                                renewal_locked_at \
+                         FROM subscription_state WHERE tenant_id = $1",
+                    )
+                    .bind(&tenant)
+                    .fetch_one(&h.pool)
+                    .await
+                    .expect("cycle");
+                let due: i64 = sqlx::query_scalar(
+                    "SELECT COUNT(*) FROM subscription_state s \
+                     WHERE s.status = 'active' AND s.billing_cycle_end IS NOT NULL \
+                       AND s.billing_cycle_end <= $1",
+                )
+                .bind(now)
+                .fetch_one(&h.pool)
+                .await
+                .expect("due count");
+                let invoices: Vec<String> = sqlx::query_scalar(
+                    "SELECT id::text || ' ' || status::text || ' ' || \
+                            COALESCE(period_start::text, '-') || '..' || \
+                            COALESCE(period_end::text, '-') || ' ' || \
+                            COALESCE(total, amount, 0)::bigint \
+                         FROM invoices WHERE tenant_id = $1 ORDER BY created_at",
+                )
+                .bind(&tenant)
+                .fetch_all(&h.pool)
+                .await
+                .expect("invoices");
+                panic!(
+                    "order {index}: the worker opened no renewal attempt; cycle={cycle:?} \
+                     due={due} now={now} incidents={incidents:?} invoices={invoices:?}"
+                );
+            };
+            let renewal_invoice: Uuid = obligation_ref
+                .strip_prefix("invoice:")
+                .and_then(|id| id.parse().ok())
+                .expect("invoice obligation ref");
+            let (invoice_total, invoice_start, invoice_end): (i64, DateTime<Utc>, DateTime<Utc>) =
+                sqlx::query_as(
+                    "SELECT COALESCE(total, amount, 0)::bigint, period_start, period_end \
+                     FROM invoices WHERE id = $1",
+                )
+                .bind(renewal_invoice)
+                .fetch_one(&h.pool)
+                .await
+                .expect("renewal invoice");
+            assert_eq!(invoice_total, 2_000);
+            assert_eq!(invoice_start, DUE_END.parse::<DateTime<Utc>>().unwrap());
+            assert_eq!(invoice_end, EXPECTED_END.parse::<DateTime<Utc>>().unwrap());
+
+            // The provider document the late SEPA payment settles as: the
+            // REAL metadata `renew_subscription_locked` sends.
+            let mut paid = payment_document(
+                &payment_id,
+                "paid",
+                invoice_total,
+                Some("recurring"),
+                &format!("cst_i28_{index}"),
+                Some(&format!("mdt_i28_{index}")),
+                serde_json::json!({
+                    "tenant_id": tenant,
+                    "plan_name": "starter",
+                    "interval": "monthly",
+                    "reference": obligation_ref,
+                }),
+            );
+            paid["paidAt"] = serde_json::json!("2026-10-15T12:00:00+00:00");
+            mock.publish_payment(&paid);
+            // Let the repair sweep treat the in-flight claim as stale.
+            sqlx::query(
+                "UPDATE payment_attempts SET updated_at = NOW() - INTERVAL '10 minutes' \
+                 WHERE tenant_id = $1 AND purpose = 'renewal'",
+            )
+            .bind(&tenant)
+            .execute(&h.pool)
+            .await
+            .expect("age the attempt");
+
+            for action in *ordering {
+                match *action {
+                    "webhook" => expect_mollie_ok(&app, &payment_id).await,
+                    "sweep" => {
+                        let provider = renewal_provider().await;
+                        billing_service::payments::engine::sweep_open_attempts_with(
+                            &h.state,
+                            provider.as_ref(),
+                        )
+                        .await
+                        .expect("repair sweep");
+                    }
+                    "tick" => {
+                        billing_service::plan_billing::renew_due_subscriptions_with(
+                            &h.state,
+                            renewal_provider().await,
+                            now,
+                        )
+                        .await
+                        .expect("worker tick");
+                    }
+                    other => panic!("unknown action {other}"),
+                }
+            }
+
+            // Convergence: a late duplicate delivery and one more tick must
+            // change nothing.
+            expect_mollie_ok(&app, &payment_id).await;
+            billing_service::plan_billing::renew_due_subscriptions_with(
+                &h.state,
+                renewal_provider().await,
+                now,
+            )
+            .await
+            .expect("convergence tick");
+
+            // ── I28 invariants, for EVERY ordering ─────────────────────
+            let invoices: Vec<(Uuid, String)> =
+                sqlx::query_as("SELECT id, status::text FROM invoices WHERE tenant_id = $1")
+                    .bind(&tenant)
+                    .fetch_all(&h.pool)
+                    .await
+                    .expect("invoices");
+            assert_eq!(
+                invoices.len(),
+                2,
+                "order {index} ({ordering:?}): the activation invoice + the ONE renewal invoice, \
+                 got {invoices:?}"
+            );
+            assert!(
+                invoices.iter().all(|(_, status)| status == "paid"),
+                "order {index}: both invoices are paid, got {invoices:?}"
+            );
+            let allocations: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM invoice_payment_allocations \
+                 WHERE tenant_id = $1",
+            )
+            .bind(&tenant)
+            .fetch_one(&h.pool)
+            .await
+            .expect("allocations");
+            assert_eq!(
+                allocations, 2,
+                "order {index}: one allocation per payment, no double settlement"
+            );
+            let renewal_allocations: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM invoice_payment_allocations WHERE invoice_id = $1",
+            )
+            .bind(renewal_invoice)
+            .fetch_one(&h.pool)
+            .await
+            .expect("renewal allocations");
+            assert_eq!(renewal_allocations, 1, "order {index}");
+
+            // The plan was NEVER re-activated: one subscription row, the
+            // tenant plan unchanged, exactly one activation audit.
+            let (cycle_start, cycle_end, status, plan): (
+                DateTime<Utc>,
+                DateTime<Utc>,
+                String,
+                Option<String>,
+            ) = sqlx::query_as(
+                "SELECT billing_cycle_start, billing_cycle_end, status, plan \
+                 FROM subscription_state WHERE tenant_id = $1",
+            )
+            .bind(&tenant)
+            .fetch_one(&h.pool)
+            .await
+            .expect("subscription row");
+            assert_eq!(
+                cycle_start,
+                DUE_END.parse::<DateTime<Utc>>().unwrap(),
+                "order {index}: the period starts where the previous one ended"
+            );
+            assert_eq!(
+                cycle_end,
+                EXPECTED_END.parse::<DateTime<Utc>>().unwrap(),
+                "order {index}: exactly ONE interval after the previous period, never `now`"
+            );
+            assert_eq!(status, "active", "order {index}");
+            assert_eq!(plan.as_deref(), Some("starter"), "order {index}");
+            let subscription_rows: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM subscription_state WHERE tenant_id = $1")
+                    .bind(&tenant)
+                    .fetch_one(&h.pool)
+                    .await
+                    .expect("subscription rows");
+            assert_eq!(subscription_rows, 1, "order {index}: no replaced row");
+            let tenant_plan: String = sqlx::query_scalar("SELECT plan FROM tenants WHERE id = $1")
+                .bind(&tenant)
+                .fetch_one(&h.pool)
+                .await
+                .expect("tenant plan");
+            assert_eq!(
+                tenant_plan, "starter",
+                "order {index}: the plan never moved"
+            );
+            let activations: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM audit_logs \
+                 WHERE tenant_id = $1 AND action = 'billing.subscription_activated'",
+            )
+            .bind(&tenant)
+            .fetch_one(&h.pool)
+            .await
+            .expect("activation audits");
+            assert_eq!(
+                activations, 1,
+                "order {index}: the late renewal payment never activated a plan"
+            );
+            let pending: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM invoices WHERE tenant_id = $1 \
+                 AND status IN ('draft', 'pending')",
+            )
+            .bind(&tenant)
+            .fetch_one(&h.pool)
+            .await
+            .expect("open invoices");
+            assert_eq!(
+                pending, 0,
+                "order {index}: no renewal invoice is left unpayable"
+            );
+        }
+    }
+);
+
 db_test!(
     renewal_dunning_opens_new_attempts_and_marks_past_due_after_three_failures,
     |h| {
         let mock = mock_mollie_api();
         seed_tenant(&h, "cov_dunning", "free").await;
-        seed_billing_address(&h, "cov_dunning", "EE").await;
+        seed_reverse_charge_business(&h, "cov_dunning").await;
         billing_service::plan_billing::activate_from_paid_checkout(
             &h.pool,
             "tr_cov_dunning_first",
@@ -7423,7 +7879,7 @@ db_test!(
     |h| {
         let _mock = mock_mollie_api();
         seed_tenant(&h, "cov_race", "free").await;
-        seed_billing_address(&h, "cov_race", "EE").await;
+        seed_reverse_charge_business(&h, "cov_race").await;
 
         let pool_a = h.pool.clone();
         let pool_b = h.pool.clone();
@@ -7497,7 +7953,10 @@ fn race_activation(
 ) -> std::pin::Pin<
     Box<
         dyn std::future::Future<
-                Output = Result<billing_service::plan_billing::ActivationOutcome, String>,
+                Output = Result<
+                    billing_service::plan_billing::ActivationOutcome,
+                    billing_service::plan_billing::ActivationError,
+                >,
             > + Send,
     >,
 > {
@@ -8505,6 +8964,36 @@ impl billing_service::payments::conformance::ConformanceScripting for MollieConf
             12 => {
                 // POST /v2/payments/{id}/refunds: the handler echoes the
                 // requested amount and mints distinct ids.
+            }
+            13..=15 => {
+                // The documented chargeback object has NO status field:
+                //  * opened  -> no settlementAmount and no reversal yet;
+                //  * lost    -> settlementAmount/settlementId present;
+                //  * won     -> reversedAt present.
+                let mut chargeback = serde_json::json!({
+                    "id": format!("chb_conf_{}", ctx.arm),
+                    "paymentId": ctx.provider_payment_hint,
+                    "amount": { "currency": ctx.currency, "value": amount },
+                    "createdAt": "2026-10-29T10:00:00+00:00",
+                    "reversedAt": null,
+                });
+                if ctx.arm >= 14 {
+                    chargeback["settlementAmount"] = serde_json::json!({
+                        "currency": ctx.currency,
+                        "value": format!("-{amount}"),
+                    });
+                    chargeback["settlementId"] = serde_json::json!("stl_conf_cb");
+                }
+                if ctx.arm == 15 {
+                    chargeback["reversedAt"] = serde_json::json!("2026-11-02T09:00:00+00:00");
+                }
+                let body = serde_json::json!({
+                    "_embedded": { "chargebacks": [chargeback] }
+                });
+                routes.insert(
+                    format!("/v2/payments/{}/chargebacks", ctx.provider_payment_hint),
+                    (200, body.to_string()),
+                );
             }
             17 => {
                 let settlements = serde_json::json!({

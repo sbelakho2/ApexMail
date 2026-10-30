@@ -72,3 +72,7 @@ tokio = { version = "1", features = ["full", "test-util"] }
 # Test infra shared by the workspace (throwaway-Redis spawner): see
 # migrator::test_support — used by src/test_support.rs unit tests.
 migrator = { path = "../migrator" }
+# I29 property test (tests/invariants_property.rs): the audit's T4 demands a
+# property over provider-side refund/chargeback scripts x sweep schedules,
+# not another example-based case.
+proptest = "1.4"

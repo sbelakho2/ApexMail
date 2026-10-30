@@ -21,7 +21,15 @@ Environment=PATH=/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/
 Environment=CI_RUN_FROM_SYSTEMD=1
 # --skip-unchanged: the 5-minute poll becomes a no-op in seconds when
 # origin/main has not moved since the last green run (fetch stage detects it).
-ExecStart=/opt/apexmail/ci/pipeline.sh run --lock-wait 0 --skip-unchanged
+# --daily: before the stage line, run the fresh-RustSec-DB cargo-audit lane.
+# It no-ops after the first PASS each UTC day (ci/runs/.last-daily-audit), so
+# the 5-minute poll stays cheap while the advisory DB is refreshed daily even
+# on days when --skip-unchanged would otherwise end the run immediately.
+# --fuzz-nightly: drive tools/run_fuzz_nightly.sh (each libFuzzer target for
+# CI_FUZZ_SECONDS, default 600). Same once-per-UTC-day marker shape
+# (ci/runs/.last-fuzz-nightly); a crash commits its artifact + generated
+# regression test and FAILS the lane (CI_FUZZ_NIGHTLY_CHECK gates it).
+ExecStart=/opt/apexmail/ci/pipeline.sh run --lock-wait 0 --skip-unchanged --daily --fuzz-nightly
 # Hardening that a root oneshot still allows:
 NoNewPrivileges=no
 PrivateTmp=true

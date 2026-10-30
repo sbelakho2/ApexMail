@@ -32,7 +32,7 @@
     <div class="apex-mkt-container">
     <div class="apex-section-head">
       <h2 class="apex-h2">Plans</h2>
-      <span class="apex-section-aside">Operational controls: audit logs, GDPR workflows, SAML SSO, contract review</span>
+      <span class="apex-section-aside">Operational controls: audit logs, GDPR workflows, OIDC SSO; SAML on request; contract review</span>
     </div>
     <p class="apex-meta">Prices per workspace and month. Included volume resets monthly; overage applies per 1,000 emails above the plan volume. Every new account also receives a one-time {{ launch.emails_display }}-email launch allowance for its first {{ launch.window_days }} days.</p>
 
@@ -123,7 +123,34 @@
       </table>
     </div>
 
-    <p class="apex-footnote mt-6">Annual subscriptions are billed at {{ pricing_data.annual_billing_months }}&times; the monthly price (about {{ pricing_data.annual_savings_percent }}% less than twelve monthly payments); the Annual column shows that yearly total divided by twelve. Enterprise Cloud requires an annual contract; a second Business dedicated IP is assigned where traffic justifies it. All totals exclude VAT.</p>
+    <p class="apex-footnote mt-6">Annual subscriptions are billed at {{ pricing_data.annual_billing_months }}&times; the monthly price (about {{ pricing_data.annual_savings_percent }}% less than twelve monthly payments); the Annual column shows that yearly total divided by twelve. Enterprise Cloud requires an annual contract; a second Business dedicated IP is assigned where traffic justifies it.</p>
+
+    {# ── VAT basis for the two audiences (V30 / MON-10) ───────────── #}
+    {# Business prices are NET; consumers are shown and charged ONE     #}
+    {# VAT-inclusive total per billing period before they pay. The      #}
+    {# consumer headline is the owner-set gross card when published;    #}
+    {# otherwise the total is net + destination VAT at checkout.       #}
+    <div class="apex-panel mt-4" data-pricing-vat-basis>
+      <p class="apex-meta">
+        <strong>{% if i18n_data and i18n_data[l] and i18n_data[l]["pricing"] and i18n_data[l]["pricing"]["vat_basis_business"] %}{{ i18n_data[l]["pricing"]["vat_basis_business"] }}{% else %}Business prices exclude VAT.{% endif %}</strong>
+        {% if i18n_data and i18n_data[l] and i18n_data[l]["pricing"] and i18n_data[l]["pricing"]["vat_basis_consumer"] %}{{ i18n_data[l]["pricing"]["vat_basis_consumer"] }}{% else %}Consumers see the total including VAT before paying.{% endif %}
+        {% if i18n_data and i18n_data[l] and i18n_data[l]["pricing"] and i18n_data[l]["pricing"]["vat_basis_note"] %}{{ i18n_data[l]["pricing"]["vat_basis_note"] }}{% else %}The price shown to consumers includes VAT; the applicable rate depends on the buyer's country and appears on the invoice. Annual prices are shown as the total per billing period.{% endif %}
+      </p>
+      {# The owner-set consumer gross card, when published. Absent until the
+         owner sets a price; the rule above still applies (net + destination
+         VAT shown as one total at checkout). #}
+      {% set_global has_consumer_gross = false %}
+      {% for plan in pricing_data.plans %}
+        {% if plan.consumer_gross_display %}{% set_global has_consumer_gross = true %}{% endif %}
+      {% endfor %}
+      {% if has_consumer_gross %}
+      <ul class="apex-meta">
+        {% for plan in pricing_data.plans %}
+          {% if plan.consumer_gross_display %}<li>{{ plan.name }}: {{ plan.consumer_gross_display }} {% if i18n_data and i18n_data[l] and i18n_data[l]["pricing"] and i18n_data[l]["pricing"]["vat_included_label"] %}{{ i18n_data[l]["pricing"]["vat_included_label"] }}{% else %}incl. VAT{% endif %}</li>{% endif %}
+        {% endfor %}
+      </ul>
+      {% endif %}
+    </div>
     </div>
   </div>
 
@@ -185,7 +212,7 @@
           <tr>
             <th scope="row" class="apex-key">Enterprise Cloud</th>
             <td class="apex-num">from €1,750/mo, annual contract</td>
-            <td class="break-words">Contractual features on shared-adjacent infrastructure: {{ p_enterprise.included_volume_display }} emails/month, SSO, white-label, 730-day event retention, CSM, 99.9% SLA with tiered credits.</td>
+            <td class="break-words">Contractual features on shared-adjacent infrastructure: {{ p_enterprise.included_volume_display }} emails/month, OIDC SSO (SAML on request), white-label, 730-day event retention, CSM, 99.9% SLA with tiered credits.</td>
             <td><a href="{{ lp }}/contact/sales/" class="apex-btn apex-btn--sm">Contact sales</a></td>
           </tr>
           <tr>

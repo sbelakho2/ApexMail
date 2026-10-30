@@ -11,10 +11,10 @@
 # =============================================================================
 
 # ── Stage 1: dependency cache ──────────────────────────────────────────────────
-FROM rust:1.97.1-slim-bookworm AS deps
+FROM rust:1.98-slim-bookworm AS deps
 
 # Build-time packages needed by ring / openssl-sys / etc.
-# Builder-stage toolchain deps; the rust:1.97.1-slim base pin governs
+# Builder-stage toolchain deps; the rust:1.98-slim base pin governs
 # reproducibility, and pinning against the moving bookworm pool would break
 # on every distro point release.
 # hadolint ignore=DL3008

@@ -78,7 +78,7 @@ The term "System Integrity Controls" refers to the combination of these controls
 
 ## Infrastructure Security
 
-- European cloud infrastructure (compute, storage, and networking) located in Finland (EU); all infrastructure processing stays within the EEA.
+- European cloud infrastructure (compute, storage, and networking) located in the EU/EEA; all infrastructure processing stays within the EEA.
 - CIS-hardened Debian/Ubuntu operating systems.
 - Automated security patching with staged rollout.
 - Declarative, version-controlled deployment: the entire stack is defined in Docker Compose files and deployed by the self-hosted CI pipeline.

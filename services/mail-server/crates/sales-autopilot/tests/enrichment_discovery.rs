@@ -112,6 +112,7 @@ fn candidate(source_url: &str) -> DiscoveredCandidate {
         company_name: Some("Fixture Co".into()),
         domain: Some("fixture.example".into()),
         contact_email: None,
+        source_notice_required: false,
         jurisdiction: Some("EE".into()),
         jurisdiction_confidence: 0.9,
         confidence: 0.7,

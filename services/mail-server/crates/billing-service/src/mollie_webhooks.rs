@@ -213,15 +213,24 @@ struct ProviderAdditionalData {
     /// The Mollie subscription (`sub_…`) that created the payment, when any.
     #[serde(default)]
     subscription_id: Option<String>,
-    /// `first` / `recurring` / `oneoff`, Mollie's sequenceType.
+    /// `first` / `recurring` / `oneoff`, Mollie's sequenceType. Preserved
+    /// verbatim: routing is decided by sequenceType FIRST (MON-8), so a
+    /// filtered value would erase the distinction between a checkout
+    /// (`first`/`oneoff`) and a stored-mandate charge (`recurring`).
     #[serde(default)]
     sequence_type: Option<String>,
-    /// The provider status verbatim (`paid`, `refunded`, `charged_back`, …).
+    /// The provider status verbatim: Mollie's documented payment statuses
+    /// only (`open` | `canceled` | `pending` | `authorized` | `expired` |
+    /// `failed` | `paid`). Refund facts carry the refund object's own status
+    /// here.
     #[serde(default)]
     status: Option<String>,
     /// How much of the payment has been refunded (cents).
     #[serde(default)]
     amount_refunded: Option<i64>,
+    /// How much of the payment has been charged back (cents).
+    #[serde(default)]
+    amount_charged_back: Option<i64>,
     /// `metadata` from the payment (tenant_id, invoice_id, …).
     #[serde(default)]
     metadata: Option<HashMap<String, String>>,
@@ -334,9 +343,87 @@ impl ProviderNotification {
 // Mollie object → normalized event
 // ---------------------------------------------------------------------------
 
+/// Where a PAID payment may go. The routing matrix is decided by
+/// `sequenceType` FIRST (MON-8/V28), never by `plan_name` alone:
+///
+/// | sequenceType        | obligation ref | subscriptionId | route |
+/// |---------------------|----------------|----------------|-------|
+/// | `recurring`         | yes            | —              | [`Self::RenewalObligation`] (settle ITS invoice, never activate) |
+/// | `recurring`         | no             | yes            | [`Self::ProviderContractRenewal`] (repair-only reconcile) |
+/// | `recurring`         | no             | no             | [`Self::RecurringWithoutObligation`] (incident, never activate) |
+/// | `first` / `oneoff`  | yes            | —              | [`Self::RenewalObligation`] (settle its own invoice, never activate) |
+/// | `first` / `oneoff`  | no             | —              | [`Self::CheckoutActivation`] |
+/// | absent / unknown    | no + plan      | —              | [`Self::CheckoutWithoutSequence`] (refused, never activate) |
+/// | absent / unknown    | no, no plan    | —              | [`Self::CheckoutAuthorisation`] (informational) |
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PaidPaymentRoute {
+    /// Settle the local invoice named by `metadata.reference`.
+    RenewalObligation,
+    /// A provider subscription charge with no local obligation reference.
+    ProviderContractRenewal,
+    /// A first/one-off checkout for a catalog plan: the ONLY activation.
+    CheckoutActivation,
+    /// A paid plan payment with no sequenceType: NEVER an activation.
+    CheckoutWithoutSequence,
+    /// A recurring charge with no obligation: never an activation.
+    RecurringWithoutObligation,
+    /// Informational authorisation (never an entitlement event).
+    CheckoutAuthorisation,
+}
+
+/// The pure routing matrix (unit- and property-tested without a database).
+fn route_paid_payment(
+    sequence_type: Option<&str>,
+    has_obligation_reference: bool,
+    has_plan_metadata: bool,
+    has_subscription_id: bool,
+) -> PaidPaymentRoute {
+    let sequence = sequence_type
+        .map(str::trim)
+        .map(str::to_ascii_lowercase)
+        .filter(|value| !value.is_empty());
+    match sequence.as_deref() {
+        Some("recurring") => {
+            if has_obligation_reference {
+                // THE MON-8 FIX: a recurring charge settles its own renewal
+                // obligation. plan_name metadata on it is NOT an activation
+                // signal, it is the worker's own bookkeeping.
+                PaidPaymentRoute::RenewalObligation
+            } else if has_subscription_id {
+                PaidPaymentRoute::ProviderContractRenewal
+            } else {
+                PaidPaymentRoute::RecurringWithoutObligation
+            }
+        }
+        Some("first") | Some("oneoff") => {
+            if has_obligation_reference {
+                PaidPaymentRoute::RenewalObligation
+            } else if has_plan_metadata {
+                PaidPaymentRoute::CheckoutActivation
+            } else {
+                PaidPaymentRoute::CheckoutAuthorisation
+            }
+        }
+        _ => {
+            if has_obligation_reference {
+                PaidPaymentRoute::RenewalObligation
+            } else if has_plan_metadata {
+                PaidPaymentRoute::CheckoutWithoutSequence
+            } else {
+                PaidPaymentRoute::CheckoutAuthorisation
+            }
+        }
+    }
+}
+
 /// Normalize a fetched Mollie payment. `None` when the status carries no
 /// fact this module acts on (`open`, `pending`, `authorized`: the money has
 /// not moved, and an authorization is not a settlement).
+///
+/// ONLY the seven documented payment statuses are read. `refunded` and
+/// `charged_back` are NOT payment statuses (MON-9): a refunded payment stays
+/// `paid`, and chargebacks are enumerated from their own endpoint by the
+/// reconciliation.
 fn notifications_from_payment(
     payment: &crate::mollie_client::Payment,
 ) -> Vec<ProviderNotification> {
@@ -369,20 +456,25 @@ fn notifications_from_payment(
                 .map(str::to_string)
         })
         .unwrap_or_default();
-    // ONLY a stored-mandate charge ("recurring") settles an invoice. A
-    // `first`/`oneoff` payment is a checkout: it mints a mandate but carries
-    // no recurring obligation, so the dispatch must not send it down the
-    // invoice-settlement path (that would dead-letter every checkout).
-    let recurring_sequence = sequence_type
-        .clone()
-        .filter(|value| value.eq_ignore_ascii_case("recurring"));
+    let has_obligation_reference = parse_merchant_reference_invoice_id(&reference).is_some()
+        || reference.trim().starts_with("dedicated_ip:");
+    let has_plan_metadata = payment
+        .metadata
+        .get("plan_name")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .is_some_and(|value| !value.is_empty());
     let additional = ProviderAdditionalData {
         customer_id: payment.customer_id.clone(),
         mandate_id: payment.mandate_id.clone(),
         subscription_id: payment.subscription_id.clone(),
-        sequence_type: recurring_sequence,
+        sequence_type: sequence_type.clone(),
         status: Some(payment.status.clone()),
         amount_refunded: payment.amount_refunded.as_ref().map(|money| money.cents),
+        amount_charged_back: payment
+            .amount_charged_back
+            .as_ref()
+            .map(|money| money.cents),
         metadata: Some(metadata),
     };
     let base =
@@ -408,34 +500,52 @@ fn notifications_from_payment(
             }
         };
 
-    let has_plan_metadata = payment
-        .metadata
-        .get("plan_name")
-        .and_then(|value| value.as_str())
-        .map(str::trim)
-        .is_some_and(|value| !value.is_empty());
     let mut events = Vec::new();
     match payment.status.as_str() {
         "paid" => {
-            // A Mollie subscription charge (the provider collects the plan
-            // period) and a checkout that activates the plan are DISTINCT
-            // facts; both also carry a mandate.
-            if payment.subscription_id.is_some() && has_plan_metadata {
-                events.push(base(
+            // sequenceType FIRST (MON-8): a recurring charge for a renewal
+            // obligation settles that obligation; it never becomes a
+            // checkout activation just because the worker's metadata
+            // carries plan_name.
+            match route_paid_payment(
+                sequence_type.as_deref(),
+                has_obligation_reference,
+                has_plan_metadata,
+                payment.subscription_id.is_some(),
+            ) {
+                PaidPaymentRoute::RenewalObligation => events.push(base(
+                    "RENEWAL_SETTLEMENT",
+                    true,
+                    amount,
+                    payment.paid_at.clone(),
+                )),
+                PaidPaymentRoute::ProviderContractRenewal => events.push(base(
                     "SUBSCRIPTION_PAYMENT",
                     true,
                     amount,
                     payment.paid_at.clone(),
-                ));
-            } else if has_plan_metadata && payment.subscription_id.is_none() {
-                events.push(base(
+                )),
+                PaidPaymentRoute::CheckoutActivation => events.push(base(
                     "CHECKOUT_ACTIVATION",
                     true,
                     amount,
                     payment.paid_at.clone(),
-                ));
-            } else {
-                events.push(base("AUTHORISATION", true, amount, payment.paid_at.clone()));
+                )),
+                PaidPaymentRoute::CheckoutWithoutSequence => events.push(base(
+                    "CHECKOUT_WITHOUT_SEQUENCE",
+                    true,
+                    amount,
+                    payment.paid_at.clone(),
+                )),
+                PaidPaymentRoute::RecurringWithoutObligation => events.push(base(
+                    "RECURRING_WITHOUT_OBLIGATION",
+                    true,
+                    amount,
+                    payment.paid_at.clone(),
+                )),
+                PaidPaymentRoute::CheckoutAuthorisation => {
+                    events.push(base("AUTHORISATION", true, amount, payment.paid_at.clone()))
+                }
             }
             // A `first` payment that produced a mandate is the recurring
             // contract: record the stored method once so dunning can charge
@@ -455,19 +565,6 @@ fn notifications_from_payment(
             } else {
                 events.push(base("AUTHORISATION", false, amount, None));
             }
-        }
-        "refunded" => {
-            let refunded = payment
-                .amount_refunded
-                .as_ref()
-                .map(|money| ProviderAmount {
-                    value: Some(money.cents),
-                    currency: Some(money.currency.clone()),
-                });
-            events.push(base("REFUND", true, refunded.or(amount), None));
-        }
-        "charged_back" => {
-            events.push(base("CHARGEBACK", true, amount, None));
         }
         // open / pending / authorized: nothing has settled.
         _ => {}
@@ -577,27 +674,29 @@ fn stable_event_id(
 /// tested without a database.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum NotificationArm {
-    /// `AUTHORISATION` success without a recurring sequence: checkout
-    /// authorisation (informational; never an entitlement event).
+    /// `AUTHORISATION` success without a sequence type: informational
+    /// authorisation (never an entitlement event).
     CheckoutAuthorisation,
-    /// `AUTHORISATION` success with `sequenceType: recurring`: settles the
-    /// local invoice named by the payment's invoice reference.
-    RecurringAuthorisation,
+    /// A paid payment that names a local obligation: settle THAT invoice,
+    /// never activate (MON-8).
+    RenewalSettlement,
     /// `AUTHORISATION` success=false: dunning/refusal path.
     AuthorisationRefused,
     /// `RECURRING_CONTRACT` / `recurring.token.created`.
     TokenCreated,
-    /// A paid checkout for a catalog plan: activates the plan, mints the
-    /// Mollie subscription and issues the paid plan invoice.
+    /// A paid checkout for a catalog plan: activates the plan.
     CheckoutActivation,
+    /// A paid plan payment with NO sequenceType: REFUSED (never activate).
+    CheckoutWithoutSequence,
+    /// A recurring charge with no obligation reference: REFUSED (never
+    /// activate; a finance incident is raised).
+    RecurringWithoutObligation,
     /// A Mollie subscription charge settled the next period.
     SubscriptionRenewal,
     /// A Mollie subscription charge failed (the provider retries its own).
     SubscriptionPaymentFailed,
     Refund,
     RefundFailed,
-    Chargeback,
-    ChargebackReversed,
     Unknown,
 }
 
@@ -605,8 +704,14 @@ fn notification_arm(item: &ProviderNotification) -> NotificationArm {
     match item.event_code.trim() {
         "AUTHORISATION" => {
             if item.success_is_true() {
-                if item.sequence_type().is_some() {
-                    NotificationArm::RecurringAuthorisation
+                // An `AUTHORISATION` that names an obligation (the old
+                // normalized code for a recurring charge, still present on
+                // deadletter replays) settles it; anything else is an
+                // informational checkout authorisation.
+                if parse_merchant_reference_invoice_id(&item.reference).is_some()
+                    || item.reference.trim().starts_with("dedicated_ip:")
+                {
+                    NotificationArm::RenewalSettlement
                 } else {
                     NotificationArm::CheckoutAuthorisation
                 }
@@ -614,19 +719,21 @@ fn notification_arm(item: &ProviderNotification) -> NotificationArm {
                 NotificationArm::AuthorisationRefused
             }
         }
+        "RENEWAL_SETTLEMENT" => NotificationArm::RenewalSettlement,
         "RECURRING_CONTRACT" | "recurring.token.created" => NotificationArm::TokenCreated,
         "CHECKOUT_ACTIVATION" => NotificationArm::CheckoutActivation,
+        "CHECKOUT_WITHOUT_SEQUENCE" => NotificationArm::CheckoutWithoutSequence,
+        "RECURRING_WITHOUT_OBLIGATION" => NotificationArm::RecurringWithoutObligation,
         "SUBSCRIPTION_PAYMENT" => NotificationArm::SubscriptionRenewal,
         "SUBSCRIPTION_PAYMENT_FAILED" => NotificationArm::SubscriptionPaymentFailed,
         "REFUND" => NotificationArm::Refund,
         "REFUND_FAILED" => NotificationArm::RefundFailed,
-        "CHARGEBACK" => NotificationArm::Chargeback,
-        "CHARGEBACK_REVERSED" => NotificationArm::ChargebackReversed,
         _ => NotificationArm::Unknown,
     }
 }
 
 async fn handle_notification(state: &AppState, item: &ProviderNotification) -> Result<(), String> {
+    let arm = notification_arm(item);
     // Audit step 8: every PAYMENT fact (refund facts carry the refund id in
     // `provider_payment_id` and are excluded) is ledged through the GENERIC
     // engine's observation core: the neutral attempts/events tables update,
@@ -634,7 +741,16 @@ async fn handle_notification(state: &AppState, item: &ProviderNotification) -> R
     // provider payment id by obligation reference, and the SAME core the
     // repair sweep uses stays warm. Best effort by design: observation
     // never settles anything and must not fail the webhook arm.
-    if item.original_payment_id.is_none() {
+    //
+    // A CHECKOUT is the exception: observing it would write the checkout
+    // payment onto `payment_attempts`, and activation must be able to refuse
+    // a payment id that is ALREADY an attempt (MON-8). A checkout is not a
+    // charge attempt until activation commits it.
+    let checkout_arm = matches!(
+        arm,
+        NotificationArm::CheckoutActivation | NotificationArm::CheckoutWithoutSequence
+    );
+    if item.original_payment_id.is_none() && !checkout_arm {
         if let Some(status) = item
             .additional
             .as_ref()
@@ -667,14 +783,18 @@ async fn handle_notification(state: &AppState, item: &ProviderNotification) -> R
             }
         }
     }
-    match notification_arm(item) {
+    match arm {
         NotificationArm::CheckoutAuthorisation => handle_checkout_authorisation(state, item).await,
-        NotificationArm::RecurringAuthorisation => {
-            handle_recurring_authorisation(state, item).await
-        }
+        NotificationArm::RenewalSettlement => handle_renewal_settlement(state, item).await,
         NotificationArm::AuthorisationRefused => handle_authorisation_refused(state, item).await,
         NotificationArm::TokenCreated => handle_token_created(state, item).await,
         NotificationArm::CheckoutActivation => handle_checkout_activation(state, item).await,
+        NotificationArm::CheckoutWithoutSequence => {
+            handle_checkout_without_sequence(state, item).await
+        }
+        NotificationArm::RecurringWithoutObligation => {
+            handle_recurring_without_obligation(state, item).await
+        }
         NotificationArm::SubscriptionRenewal => handle_subscription_renewal(state, item).await,
         NotificationArm::SubscriptionPaymentFailed => {
             handle_subscription_payment_failed(state, item).await
@@ -685,14 +805,6 @@ async fn handle_notification(state: &AppState, item: &ProviderNotification) -> R
         }
         NotificationArm::RefundFailed => {
             record_money_event(state, item, MoneyEventKind::RefundFailed).await;
-            Ok(())
-        }
-        NotificationArm::Chargeback => {
-            record_money_event(state, item, MoneyEventKind::Chargeback).await;
-            Ok(())
-        }
-        NotificationArm::ChargebackReversed => {
-            record_money_event(state, item, MoneyEventKind::ChargebackReversed).await;
             Ok(())
         }
         NotificationArm::Unknown => {
@@ -720,6 +832,196 @@ fn parse_merchant_reference_invoice_id(reference: &str) -> Option<Uuid> {
         .map(str::trim)
         .unwrap_or(reference);
     Uuid::parse_str(candidate).ok()
+}
+
+/// A paid payment that names a local obligation (any sequenceType) settles
+/// THAT invoice and nothing else (MON-8/V28).
+///
+/// * When the obligation is a renewal the LOCAL worker opened (an attempt
+///   row with `purpose = 'renewal'` and this obligation reference), the
+///   settlement runs through [`crate::plan_billing::settle_renewal_obligation`]:
+///   engine observe -> verify -> settle against the worker's own invoice,
+///   then the cycle moves to exactly the period that invoice covers. It
+///   NEVER activates a plan, issues another invoice or restarts a period.
+/// * Otherwise (an overage/usage invoice, a dedicated-IP charge, a legacy
+///   normalized fact) the generic invoice settlement runs unchanged.
+async fn handle_renewal_settlement(
+    state: &AppState,
+    item: &ProviderNotification,
+) -> Result<(), String> {
+    // A recurring add-on charge has no local invoice: the dedicated-IP row
+    // IS the obligation (its activation was recorded when the charge was
+    // accepted).
+    if item.reference.trim().starts_with("dedicated_ip:") {
+        info!(
+            reference = %item.reference,
+            provider_payment_id = %item.provider_payment_id,
+            "mollie recurring add-on charge settled; the add-on row owns the obligation"
+        );
+        return Ok(());
+    }
+    let Some(local_invoice_id) = parse_merchant_reference_invoice_id(&item.reference) else {
+        return Err(format!(
+            "PAYMENT {} reference {:?} does not name a local invoice (expected \
+             `invoice:{{uuid}}` or a bare uuid), refusing to settle an unidentifiable obligation",
+            item.provider_payment_id, item.reference
+        ));
+    };
+    let is_renewal_attempt: bool = sqlx::query_scalar(
+        "SELECT EXISTS(
+             SELECT 1 FROM payment_attempts
+             WHERE provider = 'mollie'
+               AND obligation_ref = $1
+               AND purpose = 'renewal'
+         )",
+    )
+    .bind(item.reference.trim())
+    .fetch_one(&state.db)
+    .await
+    .map_err(|error| format!("renewal attempt lookup failed: {error}"))?;
+    if !is_renewal_attempt {
+        return settle_invoice_obligation(state, item).await;
+    }
+
+    let Some(charged_cents) = item.amount_value() else {
+        return Err(format!(
+            "RENEWAL payment {} for {local_invoice_id} carries no amount.value, refusing to \
+             settle an unverifiable charge",
+            item.provider_payment_id
+        ));
+    };
+    let Some(local) = load_local_invoice_for_settlement(state, local_invoice_id).await? else {
+        return Err(format!(
+            "RENEWAL payment {} references local invoice {local_invoice_id} which does not \
+             exist, refusing to settle an unknown obligation",
+            item.provider_payment_id
+        ));
+    };
+    let tenant_id = settlement_tenant(state, item, local.id, &local.tenant_id).await?;
+    // The tax-truth gate stays in force on the late payment: the worker's
+    // invoice is the local tax decision and the charge must match it.
+    let tax_snapshot_id =
+        validate_and_snapshot_mollie_tax(state, item, &local, charged_cents).await?;
+    let invoice_row_id = crate::plan_billing::settle_renewal_obligation(
+        &state.db,
+        "mollie",
+        item.provider_payment_id.trim(),
+        item.reference.trim(),
+        Some(&tenant_id),
+        charged_cents.max(0),
+        item.amount_currency(),
+    )
+    .await?
+    .ok_or_else(|| {
+        format!(
+            "renewal settlement for {} returned no invoice",
+            item.provider_payment_id
+        )
+    })?;
+
+    crate::accounting_postings::post_invoice_issued(&state.db, invoice_row_id).await;
+    if let Some(snapshot_id) = tax_snapshot_id {
+        if let Err(error) = sqlx::query(
+            "UPDATE invoices SET mollie_tax_snapshot_id = $2, updated_at = NOW() WHERE id = $1",
+        )
+        .bind(invoice_row_id)
+        .bind(snapshot_id)
+        .execute(&state.db)
+        .await
+        {
+            warn!(
+                invoice_id = %invoice_row_id,
+                snapshot_id = %snapshot_id,
+                error = %error,
+                "failed to link mollie tax snapshot onto the renewal invoice"
+            );
+        }
+    }
+    if let Err(error) = crate::vat_recognition::materialize_invoice_recognition_by_id(
+        &state.db,
+        invoice_row_id,
+        Utc::now(),
+    )
+    .await
+    {
+        warn!(
+            invoice_id = %invoice_row_id,
+            error = %error,
+            "failed to materialize VAT recognition after the late renewal settlement"
+        );
+    }
+    // The invoice this tenant failed on is now paid: clear exactly the
+    // billing hold the failure history justifies.
+    crate::maintenance::mark_payment_recovered(
+        state,
+        &tenant_id,
+        Some(&invoice_row_id.to_string()),
+    )
+    .await?;
+    info!(
+        tenant_id = %tenant_id,
+        invoice_id = %invoice_row_id,
+        mollie_payment_id = %item.provider_payment_id,
+        charged_cents,
+        "late renewal payment settled its own invoice; the plan was not re-activated and no new invoice was issued"
+    );
+    Ok(())
+}
+
+/// A paid plan payment with NO sequenceType is refused: activation accepts
+/// only `first`/`oneoff` checkouts with no obligation reference (MON-8).
+async fn handle_checkout_without_sequence(
+    state: &AppState,
+    item: &ProviderNotification,
+) -> Result<(), String> {
+    let tenant = tenant_for_event(state, item).await?;
+    crate::plan_billing::raise_billing_incident(
+        &state.db,
+        "checkout_activation_without_sequence",
+        "high",
+        tenant.as_deref(),
+        Some(item.provider_payment_id.trim()),
+        serde_json::json!({
+            "paymentId": item.provider_payment_id.trim(),
+            "reference": item.reference.trim(),
+            "action": "a paid plan payment carried no sequenceType; activation accepts only first/oneoff checkouts and was refused",
+        }),
+    )
+    .await;
+    Err(format!(
+        "CHECKOUT payment {} carries plan metadata but no sequenceType; activation accepts only \
+         first/oneoff checkouts — refused",
+        item.provider_payment_id
+    ))
+}
+
+/// A recurring charge with NO obligation reference is refused: it is never a
+/// checkout activation, and a finance incident is raised for the operator.
+async fn handle_recurring_without_obligation(
+    state: &AppState,
+    item: &ProviderNotification,
+) -> Result<(), String> {
+    let tenant = tenant_for_event(state, item).await?;
+    crate::plan_billing::raise_billing_incident(
+        &state.db,
+        "recurring_payment_without_obligation",
+        "high",
+        tenant.as_deref(),
+        Some(item.provider_payment_id.trim()),
+        serde_json::json!({
+            "paymentId": item.provider_payment_id.trim(),
+            "reference": item.reference.trim(),
+            "currency": item.amount_currency(),
+            "amountMinorUnits": item.amount_value(),
+            "action": "a recurring charge names no local obligation; it was never treated as a checkout activation and nothing was settled",
+        }),
+    )
+    .await;
+    Err(format!(
+        "RECURRING payment {} names no local obligation reference; it is not a checkout \
+         activation and nothing was settled",
+        item.provider_payment_id
+    ))
 }
 
 /// A paid checkout for a catalog plan: the documented flow is
@@ -974,15 +1276,17 @@ fn currencies_match(left: &str, right: &str) -> bool {
 // writer no longer exists outside the engine core and the operation id is
 // `payments::engine::operation_id` everywhere.
 
-/// Convert the old `handle_invoice_paid`: a successful recurring
-/// `AUTHORISATION` settles the LOCAL invoice named by
-/// `merchantReference = invoice:{uuid}` with `amount.value` (minor units) as
-/// the verified charge. The settlement itself runs the GENERIC ENGINE CORE
-/// (observe -> verify -> settle, N-10 step 10) — no money-deciding logic
-/// lives in this module — and the tax-truth snapshot gate (ApexMail's own
-/// computation validated against the charge) still records the immutable
-/// evidence before any settlement can run.
-async fn handle_recurring_authorisation(
+/// The GENERIC obligation settlement: a paid payment that names a local
+/// invoice which is NOT a renewal attempt settles that invoice with
+/// `amount.value` (minor units) as the verified charge. The settlement runs
+/// the GENERIC ENGINE CORE (observe -> verify -> settle, N-10 step 10) — no
+/// money-deciding logic lives in this module — and the tax-truth snapshot
+/// gate records the immutable evidence before any settlement can run.
+///
+/// Renewal obligations take [`handle_renewal_settlement`]'s path instead
+/// (which also moves the local period); this function never advances a
+/// subscription.
+async fn settle_invoice_obligation(
     state: &AppState,
     item: &ProviderNotification,
 ) -> Result<(), String> {
@@ -1416,12 +1720,15 @@ async fn handle_token_created(state: &AppState, item: &ProviderNotification) -> 
 }
 
 /// Provider-initiated money movement worth a durable audit record.
+///
+/// Chargebacks are NOT a payment-status money event any more (MON-9):
+/// Mollie never sends `charged_back` as a payment status, and the
+/// chargeback reconciliation records its fact, ledger and VAT adjustment
+/// through `payments::engine::observe_dispute` instead.
 #[derive(Debug, Clone, Copy)]
 enum MoneyEventKind {
     Refund,
     RefundFailed,
-    Chargeback,
-    ChargebackReversed,
 }
 
 impl MoneyEventKind {
@@ -1429,8 +1736,6 @@ impl MoneyEventKind {
         match self {
             Self::Refund => "refund",
             Self::RefundFailed => "refund_failed",
-            Self::Chargeback => "chargeback",
-            Self::ChargebackReversed => "chargeback_reversed",
         }
     }
 
@@ -1438,8 +1743,6 @@ impl MoneyEventKind {
         match self {
             Self::Refund => "billing.mollie_refund_recorded",
             Self::RefundFailed => "billing.mollie_refund_failed",
-            Self::Chargeback => "billing.mollie_chargeback_recorded",
-            Self::ChargebackReversed => "billing.mollie_chargeback_reversed",
         }
     }
 
@@ -1564,6 +1867,723 @@ async fn record_money_event(state: &AppState, item: &ProviderNotification, event
         amount_minor_units = ?item.amount_value(),
         "mollie money event recorded for reconciliation"
     );
+}
+
+// ---------------------------------------------------------------------------
+// MON-9 / V29: refunds and chargebacks reach the books
+// ---------------------------------------------------------------------------
+//
+// Mollie NEVER sends `refunded` / `charged_back` as payment statuses: a
+// refund keeps the payment `paid` (and calls the payment webhook), and a
+// chargeback is a separate `chb_…` object. The ONLY honest way to see either
+// is to fetch
+//
+//     GET /v2/payments/{id}/refunds
+//     GET /v2/payments/{id}/chargebacks
+//
+// and reconcile them against the payment's own `amountRefunded` /
+// `amountChargedBack`. That happens on EVERY `tr_` webhook and in the daily
+// sweep ([`sweep_payment_money_movements`]). A dashboard refund therefore
+// produces its neutral refund fact, a credit note (with the statutory VAT
+// adjustment) and the reconciliation; a chargeback produces the dispute
+// fact, the ledger/VAT debit, a tenant hold and a finance incident; a
+// reversal restores the hold and resolves the incident.
+
+/// What one payment's money-movement reconciliation changed.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct MoneyMovementStats {
+    pub payments_examined: u64,
+    pub refunds_recorded: u64,
+    pub credit_notes_created: u64,
+    pub chargebacks_recorded: u64,
+    pub chargebacks_reversed: u64,
+    pub tenants_paused: u64,
+    pub tenants_restored: u64,
+    pub mismatches: u64,
+}
+
+/// The local invoice a payment settled (the credit-note target).
+#[derive(Debug, Clone)]
+struct ReconciliationInvoice {
+    id: Uuid,
+    tenant_id: String,
+    currency: String,
+    total_cents: i64,
+}
+
+/// Resolve the local invoice a payment paid: the metadata's `invoice_id`,
+/// the `reference`, or the settlement allocation's operation id. Cross-
+/// tenant results are refused (the credit note must never credit someone
+/// else's ledger).
+async fn reconciliation_invoice(
+    state: &AppState,
+    payment: &crate::mollie_client::Payment,
+) -> Result<Option<ReconciliationInvoice>, String> {
+    let mut invoice_id: Option<Uuid> = payment
+        .metadata
+        .get("invoice_id")
+        .and_then(|value| value.as_str())
+        .and_then(|value| Uuid::parse_str(value.trim()).ok())
+        .or_else(|| {
+            payment
+                .metadata
+                .get("reference")
+                .and_then(|value| value.as_str())
+                .and_then(parse_merchant_reference_invoice_id)
+        });
+    if invoice_id.is_none() {
+        let operation_id = crate::payments::engine::operation_id("mollie", &payment.id);
+        invoice_id = sqlx::query_scalar::<_, Uuid>(
+            "SELECT invoice_id FROM invoice_payment_allocations WHERE operation_id = $1 LIMIT 1",
+        )
+        .bind(&operation_id)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(|error| format!("refund invoice lookup failed: {error}"))?;
+    }
+    let Some(invoice_id) = invoice_id else {
+        return Ok(None);
+    };
+    let row: Option<(String, String, i64)> = sqlx::query_as(
+        "SELECT tenant_id, currency, COALESCE(total, amount, 0)::bigint \
+         FROM invoices WHERE id = $1",
+    )
+    .bind(invoice_id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|error| format!("refund invoice read failed: {error}"))?;
+    let Some((tenant_id, currency, total_cents)) = row else {
+        return Ok(None);
+    };
+    if let Some(attributed) = payment
+        .metadata
+        .get("tenant_id")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        if attributed != tenant_id {
+            return Err(format!(
+                "payment {} is attributed to tenant {attributed} but its invoice {invoice_id} \
+                 belongs to tenant {tenant_id}, cross-tenant reconciliation refused",
+                payment.id
+            ));
+        }
+    }
+    Ok(Some(ReconciliationInvoice {
+        id: invoice_id,
+        tenant_id,
+        currency,
+        total_cents,
+    }))
+}
+
+/// The tenant a payment's money movements belong to (metadata first, then
+/// the attempts ledger).
+async fn reconciliation_tenant(
+    state: &AppState,
+    payment: &crate::mollie_client::Payment,
+) -> Result<Option<String>, String> {
+    if let Some(tenant) = payment
+        .metadata
+        .get("tenant_id")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return Ok(Some(tenant.to_string()));
+    }
+    sqlx::query_scalar::<_, String>(
+        "SELECT tenant_id FROM payment_attempts \
+         WHERE provider = 'mollie' AND provider_payment_id = $1 LIMIT 1",
+    )
+    .bind(payment.id.trim())
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|error| format!("refund tenant lookup failed: {error}"))
+}
+
+/// Record one reconciled refund + credit note. Returns `Ok(true)` when a
+/// credit note was created (or replayed), `Ok(false)` when there was
+/// nothing legitimate to credit (an unpaid invoice is reported, never
+/// force-credited).
+async fn record_refund_credit_note(
+    state: &AppState,
+    payment: &crate::mollie_client::Payment,
+    refund_id: &str,
+    amount_cents: i64,
+    currency: &str,
+) -> Result<bool, String> {
+    if amount_cents <= 0 {
+        return Ok(false);
+    }
+    let Some(invoice) = reconciliation_invoice(state, payment).await? else {
+        crate::plan_billing::raise_billing_incident(
+            &state.db,
+            "refund_without_local_invoice",
+            "high",
+            reconciliation_tenant(state, payment).await?.as_deref(),
+            Some(payment.id.trim()),
+            serde_json::json!({
+                "paymentId": payment.id.trim(),
+                "providerRefundId": refund_id,
+                "amountMinor": amount_cents,
+                "currency": currency,
+                "action": "the refund fact is recorded but no local invoice could be resolved for its credit note",
+            }),
+        )
+        .await;
+        return Ok(false);
+    };
+    if !currencies_match(currency, &invoice.currency) {
+        crate::plan_billing::raise_billing_incident(
+            &state.db,
+            "refund_currency_mismatch",
+            "high",
+            Some(&invoice.tenant_id),
+            Some(payment.id.trim()),
+            serde_json::json!({
+                "paymentId": payment.id.trim(),
+                "providerRefundId": refund_id,
+                "refundCurrency": currency,
+                "invoiceCurrency": invoice.currency,
+                "action": "no credit note was issued in a different currency",
+            }),
+        )
+        .await;
+        return Ok(false);
+    }
+    if invoice.total_cents > 0 && amount_cents > invoice.total_cents {
+        crate::plan_billing::raise_billing_incident(
+            &state.db,
+            "refund_exceeds_invoice",
+            "high",
+            Some(&invoice.tenant_id),
+            Some(payment.id.trim()),
+            serde_json::json!({
+                "paymentId": payment.id.trim(),
+                "providerRefundId": refund_id,
+                "refundMinor": amount_cents,
+                "invoiceTotalMinor": invoice.total_cents,
+                "action": "the refund fact is recorded but exceeds the invoice total; no credit note was issued",
+            }),
+        )
+        .await;
+        return Ok(false);
+    }
+    let input = crate::credit_notes::CreateCreditNoteInput {
+        invoice_id: invoice.id,
+        amount: amount_cents,
+        reason: format!("Mollie refund {refund_id} reconciled from the payment webhook"),
+        tenant_id: invoice.tenant_id.clone(),
+        idempotency_key: format!("mollie_refund:{refund_id}"),
+    };
+    match crate::credit_notes::create_credit_note(&state.db, input).await {
+        Ok(_) => {
+            info!(
+                tenant_id = %invoice.tenant_id,
+                invoice_id = %invoice.id,
+                provider_refund_id = %refund_id,
+                amount_cents,
+                "mollie refund recorded with a credit note (VAT adjustment posted)"
+            );
+            Ok(true)
+        }
+        Err(crate::credit_notes::CreditNoteError::InvoiceNotCreditable { status, .. }) => {
+            crate::plan_billing::raise_billing_incident(
+                &state.db,
+                "refund_on_non_creditable_invoice",
+                "high",
+                Some(&invoice.tenant_id),
+                Some(payment.id.trim()),
+                serde_json::json!({
+                    "paymentId": payment.id.trim(),
+                    "providerRefundId": refund_id,
+                    "invoiceId": invoice.id,
+                    "invoiceStatus": status,
+                    "action": "the refund fact is recorded but the invoice cannot be credited in its current state",
+                }),
+            )
+            .await;
+            Ok(false)
+        }
+        Err(error) => Err(format!(
+            "credit note for refund {refund_id} on invoice {} failed: {error}",
+            invoice.id
+        )),
+    }
+}
+
+/// Pause the tenant's sending on a received chargeback: a billing hold plus a
+/// finance incident. Idempotent (a replayed chargeback adds nothing).
+async fn apply_chargeback_hold(
+    state: &AppState,
+    tenant_id: Option<&str>,
+    payment_id: &str,
+    dispute: &crate::payments::Dispute,
+) -> Result<bool, String> {
+    let Some(tenant_id) = tenant_id else {
+        crate::plan_billing::raise_billing_incident(
+            &state.db,
+            "chargeback_without_tenant",
+            "critical",
+            None,
+            Some(payment_id),
+            serde_json::json!({
+                "paymentId": payment_id,
+                "providerDisputeId": dispute.provider_dispute_id,
+                "amountMinor": dispute.amount_minor,
+                "currency": dispute.currency,
+                "action": "the chargeback fact is recorded but no tenant could be attributed; no sending pause was applied",
+            }),
+        )
+        .await;
+        return Ok(false);
+    };
+    let mut tx = state
+        .db
+        .begin()
+        .await
+        .map_err(|error| format!("chargeback hold transaction failed: {error}"))?;
+    sqlx::query(
+        r#"
+        INSERT INTO tenant_restrictions (tenant_id, kind, reason, actor_type, actor_id)
+        VALUES ($1, 'billing', $2, 'system', $3)
+        ON CONFLICT (tenant_id, kind) WHERE cleared_at IS NULL DO NOTHING
+        "#,
+    )
+    .bind(tenant_id)
+    .bind(format!(
+        "chargeback {}: {} {} taken back",
+        dispute.provider_dispute_id, dispute.amount_minor, dispute.currency
+    ))
+    .bind(&dispute.provider_dispute_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(|error| format!("chargeback billing restriction failed: {error}"))?;
+    // Sending stops for a suspended tenant; `pending` verification is never
+    // overwritten (the same rule the dunning suspension uses).
+    let paused = sqlx::query(
+        "UPDATE tenants SET status = 'suspended', updated_at = NOW() \
+         WHERE id = $1 AND status <> 'pending' AND status <> 'suspended'",
+    )
+    .bind(tenant_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(|error| format!("chargeback tenant pause failed: {error}"))?
+    .rows_affected()
+        > 0;
+    append_audit_log(
+        &mut tx,
+        tenant_id,
+        "billing.mollie_chargeback_recorded",
+        "payment_dispute",
+        Some(&dispute.provider_dispute_id),
+        serde_json::json!({
+            "paymentId": payment_id,
+            "disputeId": dispute.provider_dispute_id,
+            "state": "lost",
+            "amountMinor": dispute.amount_minor,
+            "currency": dispute.currency,
+            "reason": dispute.reason,
+            "sendingPaused": paused,
+        }),
+        Utc::now(),
+    )
+    .await
+    .map_err(|error| format!("chargeback hold audit failed: {error}"))?;
+    tx.commit()
+        .await
+        .map_err(|error| format!("chargeback hold commit failed: {error}"))?;
+
+    crate::plan_billing::raise_billing_incident(
+        &state.db,
+        "chargeback_received",
+        "high",
+        Some(tenant_id),
+        Some(payment_id),
+        serde_json::json!({
+            "paymentId": payment_id,
+            "providerDisputeId": dispute.provider_dispute_id,
+            "amountMinor": dispute.amount_minor,
+            "currency": dispute.currency,
+            "reason": dispute.reason,
+            "action": "chargeback received: the ledger and VAT were debited, the tenant's sending is paused and the dispute needs evidence or acceptance",
+        }),
+    )
+    .await;
+    warn!(
+        tenant_id = %tenant_id,
+        payment_id = %payment_id,
+        dispute_id = %dispute.provider_dispute_id,
+        amount_minor = dispute.amount_minor,
+        "mollie chargeback received: tenant paused and finance incident raised"
+    );
+    Ok(paused)
+}
+
+/// Restore the tenant on a chargeback reversal: clear ONLY the
+/// chargeback-attributed billing hold, and only once no other unresolved
+/// chargeback remains for the tenant.
+async fn restore_chargeback_hold(
+    state: &AppState,
+    tenant_id: Option<&str>,
+    payment_id: &str,
+    dispute: &crate::payments::Dispute,
+) -> Result<bool, String> {
+    let Some(tenant_id) = tenant_id else {
+        return Ok(false);
+    };
+    let mut tx = state
+        .db
+        .begin()
+        .await
+        .map_err(|error| format!("chargeback reversal transaction failed: {error}"))?;
+    let cleared = sqlx::query(
+        r#"
+        UPDATE tenant_restrictions
+        SET cleared_at = NOW(),
+            cleared_by = 'chargeback_reversal',
+            cleared_reason = $3
+        WHERE tenant_id = $1
+          AND kind = 'billing'
+          AND cleared_at IS NULL
+          AND reason LIKE 'chargeback%'
+          AND NOT EXISTS (
+              SELECT 1 FROM payment_disputes d
+              WHERE d.tenant_id = $1 AND d.state IN ('opened', 'lost')
+          )
+        "#,
+    )
+    .bind(tenant_id)
+    .bind(payment_id)
+    .bind(format!(
+        "chargeback {} reversed by the provider",
+        dispute.provider_dispute_id
+    ))
+    .execute(&mut *tx)
+    .await
+    .map_err(|error| format!("chargeback restriction clear failed: {error}"))?
+    .rows_affected()
+        > 0;
+    let restored = if cleared {
+        sqlx::query(
+            r#"
+            UPDATE tenants
+            SET status = 'active', updated_at = NOW()
+            WHERE id = $1
+              AND status = 'suspended'
+              AND NOT EXISTS (
+                  SELECT 1 FROM tenant_restrictions tr
+                  WHERE tr.tenant_id = $1 AND tr.cleared_at IS NULL
+              )
+              AND NOT EXISTS (
+                  SELECT 1 FROM abuse_reports ar
+                  WHERE ar.tenant_id = $1
+                    AND ar.status IN ('open', 'investigating', 'confirmed')
+              )
+            "#,
+        )
+        .bind(tenant_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| format!("chargeback tenant restore failed: {error}"))?
+        .rows_affected()
+            > 0
+    } else {
+        false
+    };
+    append_audit_log(
+        &mut tx,
+        tenant_id,
+        "billing.mollie_chargeback_reversed",
+        "payment_dispute",
+        Some(&dispute.provider_dispute_id),
+        serde_json::json!({
+            "paymentId": payment_id,
+            "disputeId": dispute.provider_dispute_id,
+            "state": "won",
+            "amountMinor": dispute.amount_minor,
+            "currency": dispute.currency,
+            "holdCleared": cleared,
+            "sendingRestored": restored,
+        }),
+        Utc::now(),
+    )
+    .await
+    .map_err(|error| format!("chargeback reversal audit failed: {error}"))?;
+    tx.commit()
+        .await
+        .map_err(|error| format!("chargeback reversal commit failed: {error}"))?;
+
+    sqlx::query(
+        "UPDATE finance_incidents \
+         SET status = 'resolved', resolved_at = NOW(), \
+             resolution_note = 'chargeback reversed by the provider; hold cleared' \
+         WHERE kind = 'chargeback_received' AND mollie_payment_id = $1 AND status = 'open' \
+           AND NOT EXISTS ( \
+               SELECT 1 FROM payment_disputes d \
+               WHERE d.provider_payment_id = $1 AND d.state IN ('opened', 'lost'))",
+    )
+    .bind(payment_id)
+    .execute(&state.db)
+    .await
+    .map_err(|error| format!("chargeback incident resolution failed: {error}"))?;
+    warn!(
+        tenant_id = %tenant_id,
+        payment_id = %payment_id,
+        dispute_id = %dispute.provider_dispute_id,
+        "mollie chargeback reversed: hold cleared and incident resolved"
+    );
+    Ok(restored)
+}
+
+/// Reconcile ONE payment's refunds and chargebacks against the payment's own
+/// `amountRefunded` / `amountChargedBack`. Idempotent end to end: refund
+/// facts use (provider, refund id), credit notes their provider refund id,
+/// disputes their chargeback id, and the holds their restriction/dispute
+/// state.
+async fn reconcile_payment_money_movements(
+    state: &AppState,
+    payment: &crate::mollie_client::Payment,
+) -> Result<MoneyMovementStats, String> {
+    let client = crate::mollie_client::MollieClient::from_env()
+        .map_err(|error| format!("refund reconciliation cannot fetch: {error}"))?;
+    let mut stats = MoneyMovementStats {
+        payments_examined: 1,
+        ..Default::default()
+    };
+    let tenant_id = reconciliation_tenant(state, payment).await?;
+
+    // 1. Refunds: record every fact, then credit the succeeded ones.
+    let refunds = client
+        .payment_refunds(&payment.id)
+        .await
+        .map_err(|error| format!("payment {} refunds fetch failed: {error}", payment.id))?;
+    let mut provider_refunded_cents = 0i64;
+    for refund in &refunds {
+        let refund_state = match crate::payments::mollie_provider::map_refund_status(&refund.status)
+        {
+            Ok(state) => state,
+            Err(error) => {
+                crate::plan_billing::raise_billing_incident(
+                    &state.db,
+                    "refund_status_unmapped",
+                    "high",
+                    tenant_id.as_deref(),
+                    Some(payment.id.trim()),
+                    serde_json::json!({
+                        "paymentId": payment.id.trim(),
+                        "providerRefundId": refund.id,
+                        "status": refund.status,
+                        "error": error.to_string(),
+                        "action": "a provider refund carried an unmapped status; nothing was guessed",
+                    }),
+                )
+                .await;
+                stats.mismatches += 1;
+                continue;
+            }
+        };
+        let Some(amount) = refund.amount.as_ref() else {
+            warn!(
+                payment_id = %payment.id,
+                refund_id = %refund.id,
+                "mollie refund carries no amount, not recorded"
+            );
+            stats.mismatches += 1;
+            continue;
+        };
+        if !matches!(refund_state, crate::payments::RefundState::Failed) {
+            provider_refunded_cents += amount.cents.max(0);
+        }
+        let neutral = crate::payments::Refund {
+            provider: "mollie".to_string(),
+            provider_refund_id: refund.id.clone(),
+            provider_payment_id: payment.id.clone(),
+            state: refund_state,
+            amount_minor: amount.cents,
+            currency: amount.currency.clone(),
+            created_at: refund
+                .raw
+                .get("createdAt")
+                .and_then(|value| value.as_str())
+                .and_then(|text| DateTime::parse_from_rfc3339(text).ok())
+                .map(|time| time.with_timezone(&Utc)),
+        };
+        crate::payments::engine::record_refund_fact(&state.db, &neutral).await?;
+        stats.refunds_recorded += 1;
+        if matches!(refund_state, crate::payments::RefundState::Succeeded)
+            && record_refund_credit_note(state, payment, &refund.id, amount.cents, &amount.currency)
+                .await?
+        {
+            stats.credit_notes_created += 1;
+        }
+    }
+    let expected_refunded = payment
+        .amount_refunded
+        .as_ref()
+        .map(|money| money.cents)
+        .unwrap_or(0)
+        .max(0);
+    if provider_refunded_cents != expected_refunded {
+        stats.mismatches += 1;
+        crate::plan_billing::raise_billing_incident(
+            &state.db,
+            "refund_total_mismatch",
+            "high",
+            tenant_id.as_deref(),
+            Some(payment.id.trim()),
+            serde_json::json!({
+                "paymentId": payment.id.trim(),
+                "amountRefundedCents": expected_refunded,
+                "refundsListedCents": provider_refunded_cents,
+                "action": "the payment's amountRefunded and the refund listing disagree; the refund facts are recorded, the difference needs reconciliation",
+            }),
+        )
+        .await;
+        warn!(
+            payment_id = %payment.id,
+            amount_refunded = expected_refunded,
+            refunds_listed = provider_refunded_cents,
+            "RECONCILIATION INCIDENT: Mollie amountRefunded disagrees with the refund listing"
+        );
+    }
+
+    // 2. Chargebacks: observe every dispute fact, then hold/restore.
+    let chargebacks = client
+        .payment_chargebacks(&payment.id)
+        .await
+        .map_err(|error| format!("payment {} chargebacks fetch failed: {error}", payment.id))?;
+    let mut charged_back_cents = 0i64;
+    for chargeback in &chargebacks {
+        let dispute = match crate::payments::mollie_provider::neutral_dispute(chargeback.clone()) {
+            Ok(dispute) => dispute,
+            Err(error) => {
+                crate::plan_billing::raise_billing_incident(
+                    &state.db,
+                    "chargeback_unreadable",
+                    "high",
+                    tenant_id.as_deref(),
+                    Some(payment.id.trim()),
+                    serde_json::json!({
+                        "paymentId": payment.id.trim(),
+                        "providerDisputeId": chargeback.id,
+                        "error": error.to_string(),
+                    }),
+                )
+                .await;
+                stats.mismatches += 1;
+                continue;
+            }
+        };
+        crate::payments::engine::observe_dispute(&state.db, "mollie", &dispute).await?;
+        match dispute.state {
+            crate::payments::DisputeState::Opened => {
+                stats.chargebacks_recorded += 1;
+            }
+            crate::payments::DisputeState::Lost => {
+                charged_back_cents += dispute.amount_minor.max(0);
+                stats.chargebacks_recorded += 1;
+                if apply_chargeback_hold(state, tenant_id.as_deref(), &payment.id, &dispute).await?
+                {
+                    stats.tenants_paused += 1;
+                }
+            }
+            crate::payments::DisputeState::Won => {
+                stats.chargebacks_reversed += 1;
+                if restore_chargeback_hold(state, tenant_id.as_deref(), &payment.id, &dispute)
+                    .await?
+                {
+                    stats.tenants_restored += 1;
+                }
+            }
+        }
+    }
+    let expected_charged_back = payment
+        .amount_charged_back
+        .as_ref()
+        .map(|money| money.cents)
+        .unwrap_or(0)
+        .max(0);
+    if charged_back_cents != expected_charged_back {
+        stats.mismatches += 1;
+        crate::plan_billing::raise_billing_incident(
+            &state.db,
+            "chargeback_total_mismatch",
+            "high",
+            tenant_id.as_deref(),
+            Some(payment.id.trim()),
+            serde_json::json!({
+                "paymentId": payment.id.trim(),
+                "amountChargedBackCents": expected_charged_back,
+                "chargebacksListedCents": charged_back_cents,
+                "action": "the payment's amountChargedBack and the chargeback listing disagree; the dispute facts are recorded, the difference needs reconciliation",
+            }),
+        )
+        .await;
+        warn!(
+            payment_id = %payment.id,
+            amount_charged_back = expected_charged_back,
+            chargebacks_listed = charged_back_cents,
+            "RECONCILIATION INCIDENT: Mollie amountChargedBack disagrees with the chargeback listing"
+        );
+    }
+    Ok(stats)
+}
+
+/// The DAILY sweep: every recently settled payment is re-fetched WITH
+/// PROVIDER AUTHENTICATION and reconciled for refunds and chargebacks, so a
+/// dashboard action whose webhook was lost still reaches the books.
+pub async fn sweep_payment_money_movements(state: &AppState) -> Result<MoneyMovementStats, String> {
+    let Ok(client) = crate::mollie_client::MollieClient::from_env() else {
+        return Ok(MoneyMovementStats::default());
+    };
+    let payment_ids: Vec<String> = sqlx::query_scalar(
+        "SELECT provider_payment_id FROM payment_attempts \
+         WHERE provider = 'mollie' \
+           AND provider_payment_id IS NOT NULL AND provider_payment_id <> '' \
+           AND state = 'succeeded' \
+           AND updated_at > NOW() - INTERVAL '120 days' \
+         ORDER BY updated_at DESC \
+         LIMIT 200",
+    )
+    .fetch_all(&state.db)
+    .await
+    .map_err(|error| format!("money-movement sweep load failed: {error}"))?;
+    let mut total = MoneyMovementStats::default();
+    for payment_id in payment_ids {
+        let payment = match client.get_payment(&payment_id).await {
+            Ok(payment) => payment,
+            Err(crate::mollie_client::MollieError::Rejected { status: 404, .. }) => continue,
+            Err(error) => {
+                warn!(
+                    payment_id = %payment_id,
+                    error = %error,
+                    "money-movement sweep fetch failed; the next daily pass retries"
+                );
+                continue;
+            }
+        };
+        match reconcile_payment_money_movements(state, &payment).await {
+            Ok(stats) => {
+                total.payments_examined += stats.payments_examined;
+                total.refunds_recorded += stats.refunds_recorded;
+                total.credit_notes_created += stats.credit_notes_created;
+                total.chargebacks_recorded += stats.chargebacks_recorded;
+                total.chargebacks_reversed += stats.chargebacks_reversed;
+                total.tenants_paused += stats.tenants_paused;
+                total.tenants_restored += stats.tenants_restored;
+                total.mismatches += stats.mismatches;
+            }
+            Err(error) => warn!(
+                payment_id = %payment_id,
+                error = %error,
+                "money-movement reconciliation failed; the next daily pass retries"
+            ),
+        }
+    }
+    Ok(total)
 }
 
 // ---------------------------------------------------------------------------
@@ -2178,12 +3198,13 @@ async fn process_webhook(
         ProcessWebhookError::RetryLater(format!("Mollie webhook cannot verify: {error}"))
     })?;
 
-    let (payment_id, events) = if object_id.starts_with("tr_") {
+    let (payment, events) = if object_id.starts_with("tr_") {
         let payment = client
             .get_payment(&object_id)
             .await
             .map_err(|error| provider_fetch_error(&object_id, error))?;
-        (payment.id.clone(), notifications_from_payment(&payment))
+        let events = notifications_from_payment(&payment);
+        (payment, events)
     } else {
         // A refund webhook: Mollie needs the payment id to fetch it, and only
         // our own creation record knows it.
@@ -2214,7 +3235,7 @@ async fn process_webhook(
         let events = notification_from_refund(&payment, refund)
             .into_iter()
             .collect();
-        (payment_id, events)
+        (payment, events)
     };
 
     let mut items_processed = 0usize;
@@ -2226,7 +3247,20 @@ async fn process_webhook(
             ItemOutcome::Duplicate => items_duplicate += 1,
         }
     }
-    let _ = payment_id;
+    // MON-9/V29: every payment webhook (and every refund webhook, through
+    // its parent payment) reconciles the provider's refunds and chargebacks
+    // against `amountRefunded` / `amountChargedBack`. Runs AFTER the
+    // settlement arms so a credit note always finds its paid invoice;
+    // idempotent, so a retried delivery replays nothing.
+    if let Err(error) = reconcile_payment_money_movements(state, &payment).await {
+        // A transient failure must make Mollie retry; the claim rows already
+        // processed above are duplicates on the retry, which then runs the
+        // reconciliation again.
+        return Err(ProcessWebhookError::RetryLater(format!(
+            "money-movement reconciliation for {} failed: {error}",
+            payment.id
+        )));
+    }
     Ok(ProcessWebhookResult {
         items_processed,
         items_duplicate,
@@ -3841,6 +4875,9 @@ mod wire_test_helpers {
 
     /// A recurring AUTHORISATION fact for `invoice:{uuid}` attributed to
     /// `tenant` (the Mollie customer id in ApexMail is the tenant binding).
+    /// The metadata mirrors what `renew_subscription_locked` ACTUALLY sends
+    /// (`tenant_id`, `plan_name`, `interval`, `reference`): a fixture with
+    /// empty metadata is what let MON-8 ship.
     pub(crate) fn recurring_authorisation(
         payment_id: &str,
         invoice_id: Uuid,
@@ -3856,12 +4893,45 @@ mod wire_test_helpers {
         additional.status = Some(if success { "paid" } else { "failed" }.into());
         if let Some(tenant) = tenant {
             additional.customer_id = Some(tenant.to_string());
-            additional
-                .metadata
-                .get_or_insert_with(HashMap::new)
-                .insert("tenant_id".into(), tenant.to_string());
+        }
+        let metadata = additional.metadata.get_or_insert_with(HashMap::new);
+        metadata.insert("reference".into(), item.reference.clone());
+        if let Some(tenant) = tenant {
+            metadata.insert("tenant_id".into(), tenant.to_string());
+            metadata.insert("plan_name".into(), "growth".into());
+            metadata.insert("interval".into(), "monthly".into());
         }
         item
+    }
+
+    /// A wire-level payment document shaped EXACTLY like the one the local
+    /// renewal worker's charge produces (MON-8/V28): the worker's real
+    /// metadata keys, `sequenceType: recurring`, `paid`.
+    pub(crate) fn renewal_worker_payment(
+        payment_id: &str,
+        invoice_id: Uuid,
+        tenant: &str,
+        plan: &str,
+        interval: &str,
+        amount_cents: i64,
+    ) -> Payment {
+        payment(
+            payment_id,
+            "paid",
+            Some(amount_cents),
+            "EUR",
+            Some("recurring"),
+            Some(tenant),
+            Some("mdt_renewal"),
+            Some("2026-10-24T10:00:00+00:00"),
+            None,
+            serde_json::json!({
+                "tenant_id": tenant,
+                "plan_name": plan,
+                "interval": interval,
+                "reference": format!("invoice:{invoice_id}"),
+            }),
+        )
     }
 
     /// A RECURRING_CONTRACT fact binding `mandate_id` for `tenant`.
@@ -4011,7 +5081,9 @@ mod tests {
     #[test]
     fn a_recurring_payment_is_only_an_authorisation() {
         // A stored-mandate charge is not a new contract: one EVENT, no
-        // second RECURRING_CONTRACT delivery.
+        // second RECURRING_CONTRACT delivery. With no obligation reference
+        // it is REFUSED as an incident (MON-8) — never a checkout
+        // activation and never a silent informational authorisation.
         let recurring = payment(
             "tr_recurring",
             "paid",
@@ -4026,8 +5098,12 @@ mod tests {
         );
         let events = notifications_from_payment(&recurring);
         assert_eq!(events.len(), 1);
-        assert_eq!(events[0].event_code, "AUTHORISATION");
+        assert_eq!(events[0].event_code, "RECURRING_WITHOUT_OBLIGATION");
         assert_eq!(events[0].sequence_type(), Some("recurring"));
+        assert_eq!(
+            notification_arm(&events[0]),
+            NotificationArm::RecurringWithoutObligation
+        );
     }
 
     #[test]
@@ -4058,78 +5134,167 @@ mod tests {
         }
     }
 
+    /// MON-8/V28: the routing matrix is decided by sequenceType FIRST. A
+    /// recurring charge that carries the worker's real metadata (the exact
+    /// fixture built from `renew_subscription_locked`) settles its own
+    /// obligation and can NEVER become a checkout activation.
     #[test]
-    fn refunded_payment_is_a_refund_with_the_refunded_subtotal() {
-        let refunded = payment(
-            "tr_refunded",
-            "refunded",
-            Some(12_400),
+    fn renewal_webhook_routes_by_sequence_type_first() {
+        let invoice_id = Uuid::parse_str("01234567-89ab-cdef-0123-456789abcdef").expect("uuid");
+        let renewal = renewal_worker_payment(
+            "tr_renewal_late",
+            invoice_id,
+            "tenant_1",
+            "growth",
+            "monthly",
+            2_000,
+        );
+        let events = notifications_from_payment(&renewal);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event_code, "RENEWAL_SETTLEMENT");
+        assert_eq!(
+            notification_arm(&events[0]),
+            NotificationArm::RenewalSettlement
+        );
+        // The fixture really carries the worker's metadata keys.
+        let metadata = events[0]
+            .additional
+            .as_ref()
+            .and_then(|data| data.metadata.as_ref())
+            .expect("metadata");
+        for key in ["tenant_id", "plan_name", "interval", "reference"] {
+            assert!(metadata.contains_key(key), "missing {key}");
+        }
+
+        // A recurring payment with the same plan metadata but NO obligation
+        // reference is the exact MON-8 shape (plan_name + no subscription
+        // id): it is refused as an incident and never activates.
+        let no_reference = payment(
+            "tr_recurring_no_ref",
+            "paid",
+            Some(2_000),
             "EUR",
             Some("recurring"),
-            Some("cst_1"),
-            Some("mdt_1"),
-            Some("2026-10-24T10:00:00+00:00"),
-            Some(4_000),
-            serde_json::json!({}),
-        );
-        let events = notifications_from_payment(&refunded);
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].event_code, "REFUND");
-        assert_eq!(events[0].success.as_deref(), Some("true"));
-        assert_eq!(
-            events[0].amount_value(),
-            Some(4_000),
-            "the refunded subtotal is the fact, not the original charge"
-        );
-        assert_eq!(
-            events[0]
-                .additional
-                .as_ref()
-                .and_then(|data| data.amount_refunded),
-            Some(4_000)
-        );
-        assert_eq!(notification_arm(&events[0]), NotificationArm::Refund);
-    }
-
-    #[test]
-    fn refunded_payment_without_a_refunded_subtotal_keeps_the_charge() {
-        let refunded = payment(
-            "tr_refunded_full",
-            "refunded",
-            Some(12_400),
-            "EUR",
-            None,
-            Some("cst_1"),
-            None,
-            Some("2026-10-24T10:00:00+00:00"),
-            None,
-            serde_json::json!({}),
-        );
-        let events = notifications_from_payment(&refunded);
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].event_code, "REFUND");
-        assert_eq!(events[0].amount_value(), Some(12_400));
-    }
-
-    #[test]
-    fn charged_back_payment_is_a_chargeback() {
-        let charged_back = payment(
-            "tr_chargeback",
-            "charged_back",
-            Some(2_900),
-            "EUR",
-            Some("recurring"),
-            Some("cst_1"),
+            Some("tenant_1"),
             Some("mdt_1"),
             Some("2026-10-24T10:00:00+00:00"),
             None,
-            serde_json::json!({}),
+            serde_json::json!({ "tenant_id": "tenant_1", "plan_name": "growth", "interval": "monthly" }),
         );
-        let events = notifications_from_payment(&charged_back);
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].event_code, "CHARGEBACK");
-        assert_eq!(events[0].success.as_deref(), Some("true"));
-        assert_eq!(notification_arm(&events[0]), NotificationArm::Chargeback);
+        let events = notifications_from_payment(&no_reference);
+        assert_eq!(events[0].event_code, "RECURRING_WITHOUT_OBLIGATION");
+        assert_eq!(
+            notification_arm(&events[0]),
+            NotificationArm::RecurringWithoutObligation
+        );
+
+        // Only a first/oneoff checkout with NO obligation reference and plan
+        // metadata activates.
+        let checkout = payment(
+            "tr_checkout",
+            "paid",
+            Some(2_000),
+            "EUR",
+            Some("first"),
+            Some("tenant_1"),
+            Some("mdt_1"),
+            Some("2026-10-24T10:00:00+00:00"),
+            None,
+            serde_json::json!({ "tenant_id": "tenant_1", "plan_name": "growth", "interval": "monthly" }),
+        );
+        let events = notifications_from_payment(&checkout);
+        assert_eq!(events[0].event_code, "CHECKOUT_ACTIVATION");
+
+        // Without sequenceType a paid plan payment never activates.
+        let no_sequence = payment(
+            "tr_no_sequence",
+            "paid",
+            Some(2_000),
+            "EUR",
+            None,
+            Some("tenant_1"),
+            Some("mdt_1"),
+            Some("2026-10-24T10:00:00+00:00"),
+            None,
+            serde_json::json!({ "tenant_id": "tenant_1", "plan_name": "growth" }),
+        );
+        let events = notifications_from_payment(&no_sequence);
+        assert_eq!(events[0].event_code, "CHECKOUT_WITHOUT_SEQUENCE");
+        assert_eq!(
+            notification_arm(&events[0]),
+            NotificationArm::CheckoutWithoutSequence
+        );
+    }
+
+    /// Exhaustive property over the routing inputs: activation is reachable
+    /// ONLY through `first`/`oneoff` + no obligation reference + plan
+    /// metadata; an obligation reference ALWAYS settles the obligation; a
+    /// recurring payment never activates.
+    #[test]
+    fn renewal_webhook_activation_is_never_reachable_with_an_obligation_or_recurring() {
+        let sequences = [
+            None,
+            Some("first"),
+            Some("oneoff"),
+            Some("recurring"),
+            Some("bogus"),
+        ];
+        for sequence in sequences {
+            for has_reference in [false, true] {
+                for has_plan in [false, true] {
+                    for has_subscription in [false, true] {
+                        let route =
+                            route_paid_payment(sequence, has_reference, has_plan, has_subscription);
+                        let activation_possible =
+                            matches!(sequence, Some("first") | Some("oneoff"))
+                                && !has_reference
+                                && has_plan;
+                        assert_eq!(
+                            route == PaidPaymentRoute::CheckoutActivation,
+                            activation_possible,
+                            "activation decision drifted for sequence={sequence:?} \
+                             ref={has_reference} plan={has_plan} sub={has_subscription}"
+                        );
+                        if has_reference {
+                            assert_eq!(
+                                route,
+                                PaidPaymentRoute::RenewalObligation,
+                                "an obligation reference must always settle the obligation"
+                            );
+                        }
+                        if sequence == Some("recurring") && !has_reference {
+                            assert_ne!(route, PaidPaymentRoute::CheckoutActivation);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// MON-9: `refunded` and `charged_back` are NOT Mollie payment statuses.
+    /// A fetched payment with either produces NO normalized fact — the
+    /// refund/chargeback facts come from their own endpoints. Re-adding
+    /// these arms is what hid dashboard refunds and chargebacks.
+    #[test]
+    fn refunded_and_charged_back_are_not_payment_statuses() {
+        for status in ["refunded", "charged_back"] {
+            let stale = payment(
+                "tr_stale_status",
+                status,
+                Some(12_400),
+                "EUR",
+                Some("recurring"),
+                Some("cst_1"),
+                Some("mdt_1"),
+                Some("2026-10-24T10:00:00+00:00"),
+                Some(4_000),
+                serde_json::json!({ "reference": "invoice:01234567-89ab-cdef-0123-456789abcdef" }),
+            );
+            assert!(
+                notifications_from_payment(&stale).is_empty(),
+                "{status} must never be read as a payment fact"
+            );
+        }
     }
 
     #[test]
@@ -4508,7 +5673,7 @@ mod tests {
         );
         assert_eq!(
             notification_arm(&recurring),
-            NotificationArm::RecurringAuthorisation
+            NotificationArm::RenewalSettlement
         );
 
         let refused = recurring_authorisation(
@@ -4536,8 +5701,16 @@ mod tests {
             ("RECURRING_CONTRACT", NotificationArm::TokenCreated),
             ("REFUND", NotificationArm::Refund),
             ("REFUND_FAILED", NotificationArm::RefundFailed),
-            ("CHARGEBACK", NotificationArm::Chargeback),
-            ("CHARGEBACK_REVERSED", NotificationArm::ChargebackReversed),
+            ("RENEWAL_SETTLEMENT", NotificationArm::RenewalSettlement),
+            ("CHECKOUT_ACTIVATION", NotificationArm::CheckoutActivation),
+            (
+                "CHECKOUT_WITHOUT_SEQUENCE",
+                NotificationArm::CheckoutWithoutSequence,
+            ),
+            (
+                "RECURRING_WITHOUT_OBLIGATION",
+                NotificationArm::RecurringWithoutObligation,
+            ),
             ("ORDER_CLOSED", NotificationArm::Unknown),
             ("  REFUND  ", NotificationArm::Refund),
         ] {
@@ -4555,13 +5728,16 @@ mod tests {
         assert!(!matches!(
             notification_arm(&item),
             NotificationArm::CheckoutAuthorisation
-                | NotificationArm::RecurringAuthorisation
+                | NotificationArm::RenewalSettlement
                 | NotificationArm::AuthorisationRefused
                 | NotificationArm::TokenCreated
+                | NotificationArm::CheckoutActivation
+                | NotificationArm::CheckoutWithoutSequence
+                | NotificationArm::RecurringWithoutObligation
+                | NotificationArm::SubscriptionRenewal
+                | NotificationArm::SubscriptionPaymentFailed
                 | NotificationArm::Refund
                 | NotificationArm::RefundFailed
-                | NotificationArm::Chargeback
-                | NotificationArm::ChargebackReversed
         ));
     }
 
@@ -4572,8 +5748,10 @@ mod tests {
             "RECURRING_CONTRACT",
             "REFUND",
             "REFUND_FAILED",
-            "CHARGEBACK",
-            "CHARGEBACK_REVERSED",
+            "RENEWAL_SETTLEMENT",
+            "CHECKOUT_ACTIVATION",
+            "CHECKOUT_WITHOUT_SEQUENCE",
+            "RECURRING_WITHOUT_OBLIGATION",
         ] {
             let item = event(event_code, true, 1);
             assert_ne!(notification_arm(&item), NotificationArm::Unknown);
@@ -5443,13 +6621,13 @@ mod coverage_adversarial {
         /// Publish the provider document a webhook fetch will return for a
         /// normalized fact.
         fn publish_payment(&self, item: &ProviderNotification) {
-            let status = item
-                .provider_status()
-                .unwrap_or_else(|| match item.event_code.as_str() {
-                    "CHARGEBACK" => "charged_back",
-                    _ if item.success_is_true() => "paid",
-                    _ => "failed",
-                });
+            let status = item.provider_status().unwrap_or_else(|| {
+                if item.success_is_true() {
+                    "paid"
+                } else {
+                    "failed"
+                }
+            });
             let additional = item.additional.clone().unwrap_or_default();
             let mut metadata: serde_json::Map<String, serde_json::Value> = additional
                 .metadata
@@ -5459,9 +6637,12 @@ mod coverage_adversarial {
                 .map(|(key, value)| (key, serde_json::Value::String(value)))
                 .collect();
             if !item.reference.trim().is_empty() {
-                metadata
-                    .entry("reference")
-                    .or_insert_with(|| serde_json::Value::String(item.reference.clone()));
+                // The fact's reference is authoritative for the mock wire
+                // document: tests mutate it to model a provider-side change.
+                metadata.insert(
+                    "reference".to_string(),
+                    serde_json::Value::String(item.reference.clone()),
+                );
             }
             let mut document = serde_json::json!({
                 "id": item.provider_payment_id,
@@ -5491,10 +6672,25 @@ mod coverage_adversarial {
                     "value": money_value(refunded),
                 });
             }
+            if let Some(charged_back) = additional.amount_charged_back {
+                let currency = item.amount_currency().unwrap_or("EUR");
+                document["amountChargedBack"] = serde_json::json!({
+                    "currency": currency,
+                    "value": money_value(charged_back),
+                });
+            }
             self.route(
                 &format!("/v2/payments/{}", item.provider_payment_id),
                 200,
                 document.to_string(),
+            );
+        }
+
+        fn publish_chargebacks(&self, payment_id: &str, chargebacks: &[serde_json::Value]) {
+            self.route(
+                &format!("/v2/payments/{payment_id}/chargebacks"),
+                200,
+                serde_json::json!({ "_embedded": { "chargebacks": chargebacks } }).to_string(),
             );
         }
 
@@ -5556,6 +6752,8 @@ mod coverage_adversarial {
             .unwrap_or_else(|| {
                 if path.ends_with("/refunds") {
                     (200, r#"{"_embedded":{"refunds":[]}}"#.to_string())
+                } else if path.ends_with("/chargebacks") {
+                    (200, r#"{"_embedded":{"chargebacks":[]}}"#.to_string())
                 } else {
                     (404, r#"{"title":"Not Found"}"#.to_string())
                 }
@@ -6505,7 +7703,9 @@ mod coverage_adversarial {
                 .await
                 .expect_err("unidentifiable reference");
             assert!(
-                error.message().contains("does not name a local invoice"),
+                error
+                    .message()
+                    .contains("names no local obligation reference"),
                 "{}",
                 error.message()
             );
@@ -8629,10 +9829,11 @@ mod coverage_adversarial {
     });
 
     // ===================================================================
-    // Money events: refund / failed refund / chargeback.
+    // Money events: refund / failed refund (chargebacks are dispute facts,
+    // never payment-status money events — MON-9).
     // ===================================================================
 
-    env_test!(refund_and_chargeback_events_are_audited_never_5xx, |env| {
+    env_test!(refund_events_are_audited_never_5xx, |env| {
         let tenant = "swadv_money";
         seed_tenant(env, tenant, "growth", "active").await;
         let invoice_id = Uuid::new_v4();
@@ -8641,8 +9842,6 @@ mod coverage_adversarial {
         for (payment_id, event_code) in [
             ("tr_refund", "REFUND"),
             ("tr_refund_failed", "REFUND_FAILED"),
-            ("tr_chargeback", "CHARGEBACK"),
-            ("tr_chargeback_reversed", "CHARGEBACK_REVERSED"),
         ] {
             let mut item = event(event_code, true, 1_000);
             item.provider_payment_id = payment_id.into();
@@ -8664,8 +9863,6 @@ mod coverage_adversarial {
         let actions: Vec<&str> = audits.iter().map(|row| row.0.as_str()).collect();
         assert!(actions.contains(&"billing.mollie_refund_recorded"));
         assert!(actions.contains(&"billing.mollie_refund_failed"));
-        assert!(actions.contains(&"billing.mollie_chargeback_recorded"));
-        assert!(actions.contains(&"billing.mollie_chargeback_reversed"));
         let status: String = sqlx::query_scalar("SELECT status FROM invoices WHERE id = $1")
             .bind(invoice_id)
             .fetch_one(&env.pool)
@@ -8680,6 +9877,337 @@ mod coverage_adversarial {
             .await
             .expect("an unresolvable refund is acknowledged (never 5xx)");
     });
+
+    // ===================================================================
+    // MON-9/V29: dashboard refunds and chargebacks reach the books.
+    // ===================================================================
+
+    /// Settle one local invoice through a recurring webhook so the refund /
+    /// chargeback tests start from a paid, allocated invoice.
+    async fn settle_paid_invoice(
+        env: &Env,
+        tenant: &str,
+        payment_id: &str,
+        invoice_id: Uuid,
+        total_cents: i64,
+    ) {
+        let item = recurring_authorisation(payment_id, invoice_id, total_cents, true, Some(tenant));
+        mock().publish_payment(&item);
+        let response = post_webhook(&env.state, format!("id={payment_id}").as_bytes()).await;
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "the charge must settle before the refund/chargeback test"
+        );
+    }
+
+    // A dashboard-style refund: the payment STAYS `paid`, a refund object
+    // exists, and the payment carries `amountRefunded`. One webhook (one
+    // sweep) must produce exactly one credit note, its ledger entries and
+    // the VAT adjustment — and a redelivery must add nothing.
+    env_test!(
+        mollie_chargeback_dashboard_refund_reaches_the_books_once,
+        |env| {
+            let _mock = mock().base_url.clone();
+            let tenant = "swadv_dash_refund";
+            seed_tenant(env, tenant, "growth", "active").await;
+            let invoice_id = Uuid::new_v4();
+            // 800 net + 200 VAT = 1 000 charged: the credit note's VAT split is
+            // observable.
+            seed_local_invoice(env, tenant, invoice_id, 800, 200, 1_000, "eur").await;
+            let payment_id = "tr_dash_refund";
+            settle_paid_invoice(env, tenant, payment_id, invoice_id, 1_000).await;
+
+            // The dashboard refund: payment stays `paid`, amountRefunded=400,
+            // one refund object in `refunded`.
+            let mut refunded =
+                recurring_authorisation(payment_id, invoice_id, 1_000, true, Some(tenant));
+            refunded
+                .additional
+                .as_mut()
+                .expect("additional")
+                .amount_refunded = Some(400);
+            mock().publish_payment(&refunded);
+            mock().publish_refunds(
+                payment_id,
+                &[serde_json::json!({
+                    "id": "re_dash_1",
+                    "paymentId": payment_id,
+                    "status": "refunded",
+                    "amount": { "currency": "EUR", "value": "4.00" },
+                    "createdAt": "2026-10-25T10:00:00+00:00"
+                })],
+            );
+
+            let response = post_webhook(&env.state, format!("id={payment_id}").as_bytes()).await;
+            assert_eq!(response.status(), StatusCode::OK);
+
+            let (refund_state, refund_amount): (String, i64) = sqlx::query_as(
+                "SELECT state, amount_minor FROM payment_provider_refunds \
+             WHERE provider = 'mollie' AND provider_refund_id = 're_dash_1'",
+            )
+            .fetch_one(&env.pool)
+            .await
+            .expect("refund fact");
+            assert_eq!(refund_state, "succeeded");
+            assert_eq!(refund_amount, 400);
+
+            let credit_notes: Vec<(Uuid, i64, i64, i64, String)> = sqlx::query_as(
+                "SELECT id, amount, COALESCE(debt_reduction_cents, amount)::bigint, \
+                    COALESCE(refunded_cents, 0)::bigint, currency \
+             FROM credit_notes WHERE invoice_id = $1",
+            )
+            .bind(invoice_id)
+            .fetch_all(&env.pool)
+            .await
+            .expect("credit notes");
+            assert_eq!(credit_notes.len(), 1, "exactly one credit note");
+            let (credit_note_id, amount, debt_reduction, refunded_cents, currency) =
+                credit_notes[0].clone();
+            assert_eq!(amount, 400);
+            assert_eq!(debt_reduction, 0, "the invoice was paid: no debt remains");
+            assert_eq!(refunded_cents, 400);
+            assert_eq!(currency.to_ascii_uppercase(), "EUR");
+
+            // The statutory ledger: the credit note's refund part posts a
+            // balanced entry whose VAT line carries the proportional adjustment
+            // (200/1 000 of 400 = 80).
+            let (debits, credits): (i64, i64) = sqlx::query_as(
+                "SELECT COALESCE(SUM(l.debit_cents), 0)::bigint, \
+                    COALESCE(SUM(l.credit_cents), 0)::bigint \
+             FROM journal_entries e JOIN journal_lines l ON l.entry_id = e.id \
+             WHERE e.idempotency_key = $1",
+            )
+            .bind(format!("credit_note:{credit_note_id}:refund"))
+            .fetch_one(&env.pool)
+            .await
+            .expect("credit note journal");
+            assert_eq!((debits, credits), (400, 400));
+            let vat_lines: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM journal_entries e JOIN journal_lines l ON l.entry_id = e.id \
+             WHERE e.idempotency_key = $1 AND l.vat_cents = 80",
+            )
+            .bind(format!("credit_note:{credit_note_id}:refund"))
+            .fetch_one(&env.pool)
+            .await
+            .expect("VAT adjustment line");
+            assert_eq!(
+                vat_lines, 1,
+                "the credit note reverses its proportional VAT"
+            );
+
+            // The invoice stays paid (a refund is not a payment-state change)
+            // and its settlement allocation is untouched.
+            let (status, allocations): (String, i64) = sqlx::query_as(
+                "SELECT (SELECT status FROM invoices WHERE id = $1), \
+                    (SELECT COUNT(*) FROM invoice_payment_allocations WHERE invoice_id = $1)",
+            )
+            .bind(invoice_id)
+            .fetch_one(&env.pool)
+            .await
+            .expect("invoice after refund");
+            assert_eq!(status, "paid");
+            assert_eq!(allocations, 1);
+
+            // Redelivering the same webhook is idempotent: no second credit
+            // note, no second refund fact.
+            let response = post_webhook(&env.state, format!("id={payment_id}").as_bytes()).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let credit_note_count: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM credit_notes WHERE invoice_id = $1")
+                    .bind(invoice_id)
+                    .fetch_one(&env.pool)
+                    .await
+                    .expect("credit note count");
+            assert_eq!(credit_note_count, 1);
+            let refund_rows: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM payment_provider_refunds \
+             WHERE provider = 'mollie' AND provider_payment_id = $1",
+            )
+            .bind(payment_id)
+            .fetch_one(&env.pool)
+            .await
+            .expect("refund rows");
+            assert_eq!(refund_rows, 1);
+        }
+    );
+
+    // A received chargeback pauses the tenant and raises a finance incident;
+    // the provider's reversal restores both. The dispute ledger and VAT are
+    // booked on the way in and mirrored on the way out.
+    env_test!(
+        mollie_chargeback_received_pauses_and_reversal_restores,
+        |env| {
+            let _mock = mock().base_url.clone();
+            let tenant = "swadv_chargeback";
+            seed_tenant(env, tenant, "growth", "active").await;
+            let invoice_id = Uuid::new_v4();
+            seed_local_invoice(env, tenant, invoice_id, 800, 200, 1_000, "eur").await;
+            let payment_id = "tr_chargeback_1";
+            settle_paid_invoice(env, tenant, payment_id, invoice_id, 1_000).await;
+
+            // The chargeback: the payment stays `paid`, amountChargedBack=400,
+            // and the chargeback object carries no status — settlementAmount /
+            // settlementId prove the finalized deduction.
+            let mut charged =
+                recurring_authorisation(payment_id, invoice_id, 1_000, true, Some(tenant));
+            charged
+                .additional
+                .as_mut()
+                .expect("additional")
+                .amount_charged_back = Some(400);
+            mock().publish_payment(&charged);
+            mock().publish_chargebacks(
+                payment_id,
+                &[serde_json::json!({
+                    "id": "chb_lost_1",
+                    "paymentId": payment_id,
+                    "amount": { "currency": "EUR", "value": "4.00" },
+                    "settlementAmount": { "currency": "EUR", "value": "-4.00" },
+                    "settlementId": "stl_cb_1",
+                    "createdAt": "2026-10-25T10:00:00+00:00",
+                    "reversedAt": null,
+                    "reason": { "code": "AC01", "description": "Account identifier incorrect" }
+                })],
+            );
+
+            let response = post_webhook(&env.state, format!("id={payment_id}").as_bytes()).await;
+            assert_eq!(response.status(), StatusCode::OK);
+
+            let dispute_state: String = sqlx::query_scalar(
+                "SELECT state FROM payment_disputes \
+             WHERE provider = 'mollie' AND provider_dispute_id = 'chb_lost_1'",
+            )
+            .fetch_one(&env.pool)
+            .await
+            .expect("dispute row");
+            assert_eq!(dispute_state, "lost");
+            let tenant_status: String =
+                sqlx::query_scalar("SELECT status FROM tenants WHERE id = $1")
+                    .bind(tenant)
+                    .fetch_one(&env.pool)
+                    .await
+                    .expect("tenant status");
+            assert_eq!(
+                tenant_status, "suspended",
+                "a received chargeback pauses the tenant's sending"
+            );
+            let holds: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM tenant_restrictions \
+             WHERE tenant_id = $1 AND kind = 'billing' AND cleared_at IS NULL",
+            )
+            .bind(tenant)
+            .fetch_one(&env.pool)
+            .await
+            .expect("billing hold");
+            assert_eq!(holds, 1);
+            let incidents: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM finance_incidents \
+             WHERE kind = 'chargeback_received' AND tenant_id = $1 AND status = 'open'",
+            )
+            .bind(tenant)
+            .fetch_one(&env.pool)
+            .await
+            .expect("finance incident");
+            assert_eq!(incidents, 1);
+
+            // The ledger: the LOST dispute posts a balanced debit with its VAT
+            // share (200/1 000 of 400 = 80).
+            let (debits, credits): (i64, i64) = sqlx::query_as(
+                "SELECT COALESCE(SUM(l.debit_cents), 0)::bigint, \
+                    COALESCE(SUM(l.credit_cents), 0)::bigint \
+             FROM journal_entries e JOIN journal_lines l ON l.entry_id = e.id \
+             WHERE e.idempotency_key = 'dispute:chb_lost_1:lost'",
+            )
+            .fetch_one(&env.pool)
+            .await
+            .expect("dispute journal");
+            assert_eq!((debits, credits), (400, 400));
+            let vat_lines: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM journal_entries e JOIN journal_lines l ON l.entry_id = e.id \
+             WHERE e.idempotency_key = 'dispute:chb_lost_1:lost' AND l.vat_cents = 80",
+            )
+            .fetch_one(&env.pool)
+            .await
+            .expect("dispute VAT line");
+            assert_eq!(vat_lines, 1);
+
+            // The provider reverses the chargeback: amountChargedBack drops to
+            // zero and the object carries reversedAt.
+            let mut reversed =
+                recurring_authorisation(payment_id, invoice_id, 1_000, true, Some(tenant));
+            reversed
+                .additional
+                .as_mut()
+                .expect("additional")
+                .amount_charged_back = Some(0);
+            mock().publish_payment(&reversed);
+            mock().publish_chargebacks(
+                payment_id,
+                &[serde_json::json!({
+                    "id": "chb_lost_1",
+                    "paymentId": payment_id,
+                    "amount": { "currency": "EUR", "value": "4.00" },
+                    "settlementAmount": { "currency": "EUR", "value": "-4.00" },
+                    "settlementId": "stl_cb_1",
+                    "createdAt": "2026-10-25T10:00:00+00:00",
+                    "reversedAt": "2026-10-27T09:00:00+00:00"
+                })],
+            );
+            let response = post_webhook(&env.state, format!("id={payment_id}").as_bytes()).await;
+            assert_eq!(response.status(), StatusCode::OK);
+
+            let dispute_state: String = sqlx::query_scalar(
+                "SELECT state FROM payment_disputes \
+             WHERE provider = 'mollie' AND provider_dispute_id = 'chb_lost_1'",
+            )
+            .fetch_one(&env.pool)
+            .await
+            .expect("dispute row after reversal");
+            assert_eq!(dispute_state, "won");
+            let tenant_status: String =
+                sqlx::query_scalar("SELECT status FROM tenants WHERE id = $1")
+                    .bind(tenant)
+                    .fetch_one(&env.pool)
+                    .await
+                    .expect("tenant status after reversal");
+            assert_eq!(
+                tenant_status, "active",
+                "a reversal restores the tenant's sending"
+            );
+            let holds: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM tenant_restrictions \
+             WHERE tenant_id = $1 AND kind = 'billing' AND cleared_at IS NULL",
+            )
+            .bind(tenant)
+            .fetch_one(&env.pool)
+            .await
+            .expect("billing hold after reversal");
+            assert_eq!(holds, 0);
+            let open_incidents: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM finance_incidents \
+             WHERE kind = 'chargeback_received' AND tenant_id = $1 AND status = 'open'",
+            )
+            .bind(tenant)
+            .fetch_one(&env.pool)
+            .await
+            .expect("finance incident after reversal");
+            assert_eq!(
+                open_incidents, 0,
+                "the incident is resolved, not duplicated"
+            );
+            let (debits, credits): (i64, i64) = sqlx::query_as(
+                "SELECT COALESCE(SUM(l.debit_cents), 0)::bigint, \
+                    COALESCE(SUM(l.credit_cents), 0)::bigint \
+             FROM journal_entries e JOIN journal_lines l ON l.entry_id = e.id \
+             WHERE e.idempotency_key = 'dispute:chb_lost_1:won'",
+            )
+            .fetch_one(&env.pool)
+            .await
+            .expect("restoration journal");
+            assert_eq!((debits, credits), (400, 400));
+        }
+    );
 
     // ===================================================================
     // Dedicated-IP auto-provisioning (local servers).

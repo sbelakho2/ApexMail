@@ -183,7 +183,7 @@ async fn handle_stripe_webhook(
         }
     };
     for fact in &facts {
-        if let Err(message) = dispatch_stripe_fact(&state.db, fact).await {
+        if let Err(message) = dispatch_stripe_fact(&state, fact).await {
             tracing::error!(
                 event_id = event_id.as_deref().unwrap_or(""),
                 %message,
@@ -211,12 +211,13 @@ async fn handle_stripe_webhook(
 /// already wrote stays open for reconciliation, and a retry would refuse
 /// identically. A failed WRITE (DB error) is the only retryable error.
 async fn dispatch_stripe_fact(
-    db: &sqlx::PgPool,
+    state: &AppState,
     fact: &billing_service::payments::stripe_events::NormalizedFact,
 ) -> Result<(), String> {
     use billing_service::payments::engine;
     use billing_service::payments::engine::VerifyError;
     use billing_service::payments::stripe_events::NormalizedFact;
+    let db = &state.db;
     match fact {
         NormalizedFact::Payment(observed) => {
             engine::observe_payment(db, observed).await?;
@@ -281,6 +282,90 @@ async fn dispatch_stripe_fact(
                 settlement,
             )
             .await
+        }
+        // V34: a COMPLETED checkout runs the SAME activation the Mollie
+        // paid-checkout path runs — catalog amount check against the V30
+        // gross, local subscription, paid invoice, provider customer and the
+        // reusable card on the neutral credentials ledger. Stripe used to
+        // settle an invoice here and never activate a plan.
+        NormalizedFact::CheckoutCompleted(checkout) => {
+            let Some(tenant_id) = checkout.tenant_id.as_deref() else {
+                tracing::error!(
+                    provider_checkout_id = %checkout.provider_checkout_id,
+                    "stripe completed checkout carries no tenant metadata; acknowledged without activation"
+                );
+                return Ok(());
+            };
+            let Some(plan_name) = checkout.plan_name.as_deref() else {
+                tracing::error!(
+                    provider_checkout_id = %checkout.provider_checkout_id,
+                    tenant_id = %tenant_id,
+                    "stripe completed checkout carries no plan metadata; acknowledged without activation"
+                );
+                return Ok(());
+            };
+            let Some(amount_minor) = checkout.amount_minor else {
+                tracing::error!(
+                    provider_checkout_id = %checkout.provider_checkout_id,
+                    tenant_id = %tenant_id,
+                    "stripe completed checkout carries no amount; acknowledged without activation"
+                );
+                return Ok(());
+            };
+            let interval = checkout.interval.as_deref().unwrap_or("monthly");
+            let currency = checkout.currency.as_deref().unwrap_or("EUR");
+            let provider = state
+                .payments
+                .resolve()
+                .map_err(|error| format!("payment provider unavailable: {error}"))?;
+            // The reusable card: the PaymentIntent carries the method; a
+            // provider/transport failure is RETRYABLE (returning Ok here
+            // would activate and refund a perfectly chargeable customer).
+            let saved = provider
+                .fetch_saved_method_for_payment(&checkout.provider_payment_id)
+                .await
+                .map_err(|error| {
+                    format!(
+                        "stripe completed checkout {}: reading the saved method failed: {error}",
+                        checkout.provider_payment_id
+                    )
+                })?;
+            let customer_id = saved
+                .as_ref()
+                .map(|method| method.provider_customer_id.clone())
+                .or_else(|| checkout.provider_customer_id.clone());
+            let method_id = saved
+                .as_ref()
+                .map(|method| method.provider_method_id.clone());
+            let outcome = billing_service::plan_billing::activate_from_paid_checkout_with(
+                db,
+                provider,
+                &checkout.provider_payment_id,
+                tenant_id,
+                plan_name,
+                interval,
+                currency,
+                amount_minor,
+                customer_id.as_deref(),
+                method_id.as_deref(),
+            )
+            .await
+            .map_err(|error| {
+                format!(
+                    "stripe completed checkout {} for tenant {tenant_id} failed to activate: {error}",
+                    checkout.provider_payment_id
+                )
+            })?;
+            tracing::info!(
+                tenant_id = %tenant_id,
+                plan = %plan_name,
+                interval = %interval,
+                invoice_id = ?outcome.invoice_id,
+                subscription_id = ?outcome.subscription_id,
+                already_active = outcome.already_active,
+                "stripe completed checkout ran the plan activation (local renewal; card saved)"
+            );
+            Ok(())
         }
     }
 }
@@ -817,6 +902,15 @@ struct CheckoutSessionBody {
     price_id: String,
     success_url: String,
     cancel_url: String,
+    /// V30: the buyer's declaration. `business` defaults to the stored
+    /// billing address; `country` is required when neither the request nor
+    /// the address carries one (consumer totals depend on it).
+    #[serde(default)]
+    business: Option<bool>,
+    #[serde(default)]
+    country: Option<String>,
+    #[serde(default)]
+    vat_number: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1245,34 +1339,79 @@ fn resolve_billing_email(settings_raw: &str, address_email: Option<String>) -> O
     })
 }
 
-pub(crate) async fn get_or_create_mollie_customer_id(
+/// The buyer's tax declaration supplied with a self-serve checkout (V30).
+#[derive(Debug, Clone, Default)]
+pub(crate) struct CheckoutTaxDeclarationInput {
+    pub business: Option<bool>,
+    pub country: Option<String>,
+    pub vat_number: Option<String>,
+}
+
+/// A started checkout: the provider session and the money the customer was
+/// shown (and will be charged).
+#[derive(Debug, Clone)]
+pub(crate) struct SelfServeCheckout {
+    pub provider: String,
+    pub provider_payment_id: String,
+    pub redirect_url: String,
+    pub net_cents: i64,
+    pub vat_cents: i64,
+    pub gross_cents: i64,
+    pub vat_rate: f64,
+    pub reverse_charge: bool,
+    pub currency: String,
+}
+
+/// Why a checkout could not start. `BadRequest` is the customer's to fix
+/// (missing country/billing email); `Failed` is ours (provider/DB).
+#[derive(Debug, Clone)]
+pub(crate) enum CheckoutStartError {
+    BadRequest(String),
+    Failed,
+}
+
+/// Resolve (or create) the provider customer bound to a tenant, through the
+/// NEUTRAL `payment_provider_customers` ledger and the adapter's
+/// `ensure_customer`. Serialized per tenant so a concurrent checkout cannot
+/// mint two customer objects. The provider's id is all the checkout needs;
+/// the activation stores it again (idempotently) with the credential.
+pub(crate) async fn ensure_provider_customer(
     state: &AppState,
+    provider: &dyn billing_service::payments::PaymentProvider,
     tenant_id: &str,
-) -> Result<String, String> {
+) -> Result<String, CheckoutStartError> {
+    let provider_name = provider.provider_name();
     let mut tx = state
         .db
         .begin()
         .await
-        .map_err(|error| format!("Failed to open billing transaction: {error}"))?;
-
+        .map_err(|error| {
+            tracing::error!(tenant_id = %tenant_id, error = %error, "checkout customer: transaction failed");
+            CheckoutStartError::Failed
+        })?;
     sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1))")
-        .bind(tenant_id)
+        .bind(format!("payment_customer:{tenant_id}:{provider_name}"))
         .execute(&mut *tx)
         .await
-        .map_err(|error| format!("Failed to acquire Mollie customer lock: {error}"))?;
+        .map_err(|error| {
+            tracing::error!(tenant_id = %tenant_id, error = %error, "checkout customer: lock failed");
+            CheckoutStartError::Failed
+        })?;
 
-    if let Some(mollie_customer_id) = sqlx::query_scalar::<_, String>(
-        "SELECT mollie_customer_id FROM mollie_customers WHERE tenant_id = $1",
+    if let Some(customer_id) = sqlx::query_scalar::<_, String>(
+        "SELECT provider_customer_id FROM payment_provider_customers \
+         WHERE tenant_id = $1 AND provider = $2 ORDER BY created_at DESC LIMIT 1",
     )
     .bind(tenant_id)
+    .bind(provider_name)
     .fetch_optional(&mut *tx)
     .await
-    .map_err(|error| format!("Failed to query Mollie customer: {error}"))?
-    {
-        tx.commit()
-            .await
-            .map_err(|error| format!("Failed to close billing transaction: {error}"))?;
-        return Ok(mollie_customer_id);
+    .map_err(|error| {
+        tracing::error!(tenant_id = %tenant_id, error = %error, "checkout customer: lookup failed");
+        CheckoutStartError::Failed
+    })? {
+        tx.commit().await.map_err(|_| CheckoutStartError::Failed)?;
+        return Ok(customer_id);
     }
 
     let Some((tenant_name, settings_raw, address_email)) =
@@ -1285,55 +1424,250 @@ pub(crate) async fn get_or_create_mollie_customer_id(
         .bind(tenant_id)
         .fetch_optional(&mut *tx)
         .await
-        .map_err(|error| format!("Failed to query tenant for Mollie checkout: {error}"))?
+        .map_err(|error| {
+            tracing::error!(tenant_id = %tenant_id, error = %error, "checkout customer: tenant lookup failed");
+            CheckoutStartError::Failed
+        })?
     else {
-        return Err("Tenant not found".into());
+        return Err(CheckoutStartError::BadRequest(
+            "The billing account could not be found.".to_string(),
+        ));
     };
 
-    // The Mollie customer's email IS the invoice identity: prefer the explicit
-    // billing contact, then the sending-address fallback, then the billing
-    // address's email (the one an invoice would carry).
+    // The provider customer's email IS the invoice identity: prefer the
+    // explicit billing contact, then the sending-address fallback, then the
+    // billing address's email (the one an invoice would carry). Without one
+    // the invoice/checkout cannot be issued.
     let Some(email) = resolve_billing_email(&settings_raw, address_email) else {
-        return Err("No billing email configured".into());
+        return Err(CheckoutStartError::BadRequest(
+            "Add a billing email in the billing settings before checkout.".to_string(),
+        ));
     };
 
-    // Mollie customers are real objects (`cst_…`): the recurring mandate and
-    // every stored-mandate charge hang off this id. Created once per tenant
-    // under the advisory lock above, so a concurrent checkout cannot mint
-    // two customers.
-    let mollie = billing_service::mollie_client::MollieClient::from_env()
-        .map_err(|error| format!("Mollie is not configured: {error}"))?;
-    let customer = mollie
-        .create_customer(&tenant_name, &email, &format!("customer_{tenant_id}"))
+    let customer = provider
+        .ensure_customer(billing_service::payments::CustomerRequest {
+            tenant_id: tenant_id.to_string(),
+            name: tenant_name,
+            email,
+            idempotency_key: format!("customer_{tenant_id}"),
+        })
         .await
-        .map_err(|error| format!("Failed to create the Mollie customer: {error}"))?;
-    if customer.id.is_empty() {
-        return Err("Mollie returned a customer without an id".into());
-    }
-    let customer_id = customer.id;
+        .map_err(|error| {
+            tracing::error!(
+                tenant_id = %tenant_id,
+                provider = %provider_name,
+                error = %error,
+                "checkout customer: provider creation failed"
+            );
+            CheckoutStartError::Failed
+        })?;
 
     sqlx::query(
         r#"
-        INSERT INTO mollie_customers (
-            id, tenant_id, mollie_customer_id, email, name, created_at, updated_at
-        ) VALUES (
-            gen_random_uuid(), $1, $2, $3, $4, NOW(), NOW()
-        )
+        INSERT INTO payment_provider_customers (tenant_id, provider, provider_customer_id, created_at)
+        VALUES ($1, $2, $3, NOW())
+        ON CONFLICT (provider, provider_customer_id) DO NOTHING
         "#,
     )
     .bind(tenant_id)
-    .bind(&customer_id)
-    .bind(&email)
-    .bind(&tenant_name)
+    .bind(provider_name)
+    .bind(&customer.provider_customer_id)
     .execute(&mut *tx)
     .await
-    .map_err(|error| format!("Failed to persist the Mollie customer: {error}"))?;
+    .map_err(|error| {
+        tracing::error!(tenant_id = %tenant_id, error = %error, "checkout customer: persist failed");
+        CheckoutStartError::Failed
+    })?;
 
-    tx.commit()
+    tx.commit().await.map_err(|_| CheckoutStartError::Failed)?;
+    Ok(customer.provider_customer_id)
+}
+
+/// Start a self-serve checkout through the PROVIDER BOUNDARY (V34/MON-11).
+///
+/// One path for both the JSON checkout and the console form: resolve the
+/// catalog NET price, persist/verify the buyer's tax declaration (VIES
+/// BEFORE the payment so the amount is right the first time), quote the
+/// gross (V30), resolve the neutral provider through the registry, obtain the
+/// provider customer, and `create_checkout` with `save_method=true` so the
+/// completed checkout leaves a card the local renewal worker can charge.
+///
+/// No production path here names an adapter: the state's provider handle is
+/// the registry (or a test-installed double).
+pub(crate) async fn start_self_serve_checkout(
+    state: &AppState,
+    tenant_id: &str,
+    plan_name: &str,
+    interval: &str,
+    success_url: String,
+    source: &str,
+    input: CheckoutTaxDeclarationInput,
+) -> Result<SelfServeCheckout, CheckoutStartError> {
+    if !SELF_SERVE_CHECKOUT_PLAN_IDS.contains(&plan_name) {
+        return Err(CheckoutStartError::BadRequest(
+            "That plan cannot be purchased through checkout.".to_string(),
+        ));
+    }
+    let Some(plan_row) = platform_catalog::plan_by_name(plan_name) else {
+        return Err(CheckoutStartError::BadRequest(
+            "That plan cannot be purchased through checkout.".to_string(),
+        ));
+    };
+    let yearly = interval.eq_ignore_ascii_case("yearly");
+    let currency = resolve_tenant_billing_currency(state, tenant_id).await;
+    let in_usd = currency.eq_ignore_ascii_case("USD");
+    let net_cents = match (in_usd, yearly) {
+        (true, true) => plan_row.price_yearly_usd_cents,
+        (true, false) => plan_row.price_monthly_usd_cents,
+        (false, true) => plan_row.price_yearly_cents,
+        (false, false) => plan_row.price_monthly_cents,
+    };
+    if net_cents <= 0 {
+        return Err(CheckoutStartError::BadRequest(
+            "That plan is not self-serve billable.".to_string(),
+        ));
+    }
+    // V30 Option A: the owner-set consumer GROSS card for this
+    // plan/interval/currency, when published. `None` keeps the Option B
+    // fallback (net + destination VAT shown as one total).
+    let consumer_gross_cents = match (in_usd, yearly) {
+        (true, true) => plan_row.consumer_gross_yearly_usd_cents,
+        (true, false) => plan_row.consumer_gross_monthly_usd_cents,
+        (false, true) => plan_row.consumer_gross_yearly_cents,
+        (false, false) => plan_row.consumer_gross_monthly_cents,
+    }
+    .filter(|cents| *cents > 0);
+
+    // The declaration: explicit checkout fields win, then the stored billing
+    // address. A consumer total needs a destination country, so a checkout
+    // without one is refused rather than charged an invented rate.
+    let existing = billing_service::tax::load_tenant_tax_subject(&state.db, tenant_id)
         .await
-        .map_err(|error| format!("Failed to commit Mollie shopper transaction: {error}"))?;
+        .map_err(|error| {
+            tracing::error!(tenant_id = %tenant_id, error = %error, "checkout: tax subject lookup failed");
+            CheckoutStartError::Failed
+        })?;
+    let business = input
+        .business
+        .unwrap_or_else(|| existing.as_ref().is_some_and(|subject| subject.business));
+    let country = input
+        .country
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| existing.as_ref().map(|subject| subject.country.clone()))
+        .ok_or_else(|| {
+            CheckoutStartError::BadRequest(
+                "A billing country is required to calculate VAT before payment.".to_string(),
+            )
+        })?;
+    let vat_number = if business {
+        input
+            .vat_number
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| existing.and_then(|subject| subject.vat_number))
+    } else {
+        None
+    };
+    let declaration = billing_service::tax::CheckoutTaxDeclaration {
+        business,
+        country,
+        vat_number,
+    };
+    let validator =
+        billing_service::tax::ViesValidator::new(state.db.clone(), state.http_client.clone());
+    let quote = billing_service::tax::resolve_checkout_quote(
+        &state.db,
+        tenant_id,
+        &declaration,
+        net_cents,
+        consumer_gross_cents,
+        Utc::now().date_naive(),
+        Some(&validator),
+    )
+    .await
+    .map_err(|error| {
+        if error.contains("two-letter") {
+            CheckoutStartError::BadRequest("Select a two-letter billing country code.".to_string())
+        } else {
+            tracing::error!(tenant_id = %tenant_id, error = %error, "checkout: VAT quote failed");
+            CheckoutStartError::Failed
+        }
+    })?;
 
-    Ok(customer_id)
+    // The provider resolves through the registry (fail closed).
+    let provider = state.payments.resolve().map_err(|error| {
+        tracing::error!(tenant_id = %tenant_id, error = %error, "checkout: payment provider unavailable");
+        CheckoutStartError::Failed
+    })?;
+    let customer_id = ensure_provider_customer(state, provider.as_ref(), tenant_id).await?;
+
+    let checkout = provider
+        .create_checkout(billing_service::payments::CheckoutRequest {
+            amount_minor: quote.gross_cents,
+            currency: currency.clone(),
+            description: format!("ApexMail {}", plan_row.display_name),
+            redirect_url: Some(success_url),
+            webhook_url: None,
+            metadata: serde_json::json!({
+                "tenant_id": tenant_id,
+                "plan_name": plan_name,
+                "interval": if yearly { "yearly" } else { "monthly" },
+                "source": source,
+                "business": declaration.business,
+                "country": declaration.country,
+                "vat_number": declaration.vat_number,
+                // The money facts the activation re-verifies against the
+                // persisted declaration (never trusted on its own).
+                "net_cents": quote.net_cents,
+                "vat_cents": quote.vat_cents,
+                "gross_cents": quote.gross_cents,
+                "reverse_charge": quote.reverse_charge,
+            }),
+            method_hint: None,
+            provider_customer_id: Some(customer_id),
+            provider_method_id: None,
+            // V34: capture a reusable method for the local renewal worker.
+            save_method: true,
+            // Deterministic per (tenant, plan, interval, currency, amount,
+            // source): a retried request replays the same provider session,
+            // while a changed VAT amount or currency mints a new one.
+            idempotency_key: format!(
+                "checkout_{tenant_id}_{plan_name}_{}_{}_{}_{}",
+                if yearly { "yearly" } else { "monthly" },
+                currency.to_ascii_uppercase(),
+                quote.gross_cents,
+                source
+            ),
+        })
+        .await
+        .map_err(|error| {
+            tracing::error!(
+                tenant_id = %tenant_id,
+                provider = %provider.provider_name(),
+                error = %error,
+                "checkout: provider create_checkout failed"
+            );
+            CheckoutStartError::Failed
+        })?;
+    let Some(url) = checkout.redirect_url.clone() else {
+        tracing::error!(
+            tenant_id = %tenant_id,
+            provider_payment_id = %checkout.provider_payment_id,
+            "checkout: the provider returned no checkout URL"
+        );
+        return Err(CheckoutStartError::Failed);
+    };
+
+    Ok(SelfServeCheckout {
+        provider: checkout.provider,
+        provider_payment_id: checkout.provider_payment_id,
+        redirect_url: url,
+        net_cents: quote.net_cents,
+        vat_cents: quote.vat_cents,
+        gross_cents: quote.gross_cents,
+        vat_rate: quote.vat_rate,
+        reverse_charge: quote.reverse_charge,
+        currency: checkout.currency,
+    })
 }
 
 fn parse_query_date(value: &str) -> Option<chrono::DateTime<Utc>> {
@@ -3306,51 +3640,24 @@ async fn create_checkout_session(
     // customer. The price must map to an active ApexMail plan in our catalog,
     // which prevents cross-product purchases and makes the plan selection
     // independently verifiable when the webhook arrives.
-    let (plan_name, yearly) = match active_plan_checkout_target(&state.db, price_id).await? {
-        Some(target) => target,
-        None => {
-            return Ok((
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({ "error": "Unsupported priceId" })),
-            )
-                .into_response())
-        }
-    };
-    // Mollie sends amounts inline as decimal strings; the local amount is the
-    // canonical
-    // platform-catalog price for the matched interval, never a client input,
-    // never a provider-side price object.
-    let Some(plan_row) = platform_catalog::plan_by_name(&plan_name) else {
-        return Ok((
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "error": "Unsupported priceId" })),
-        )
-            .into_response());
-    };
-    // Currency follows the tenant's billing currency (the plan doc: cards in
-    // either currency; SEPA Direct Debit for EU customers). The USD list
-    // lives on the same catalog row, one source, two currencies.
-    let checkout_currency = resolve_tenant_billing_currency(&state, &auth.tenant_id).await;
-    let checkout_in_usd = checkout_currency.eq_ignore_ascii_case("USD");
-    let amount_cents = if checkout_in_usd {
-        if yearly {
-            plan_row.price_yearly_usd_cents
-        } else {
-            plan_row.price_monthly_usd_cents
-        }
-    } else if yearly {
-        plan_row.price_yearly_cents
-    } else {
-        plan_row.price_monthly_cents
-    };
-    let currency_code = if checkout_in_usd { "USD" } else { "EUR" };
-    if amount_cents <= 0 {
-        return Ok((
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "error": "Plan is not self-serve billable" })),
-        )
-            .into_response());
-    }
+    // The price-id mapping prefers the CONFIGURED provider's catalog row,
+    // but its KIND needs no credentials: a request with an unknown price is
+    // a 400 even on a deployment whose provider is misconfigured (the
+    // provider itself fails closed later, before any money moves).
+    let preferred_provider = billing_service::payments::kind_from_env()
+        .map(|kind| kind.name())
+        .unwrap_or("mollie");
+    let (plan_name, yearly) =
+        match active_plan_checkout_target(&state.db, preferred_provider, price_id).await? {
+            Some(target) => target,
+            None => {
+                return Ok((
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({ "error": "Unsupported priceId" })),
+                )
+                    .into_response())
+            }
+        };
     let interval_label = if yearly { "yearly" } else { "monthly" };
 
     if !is_allowed_billing_redirect_url(&body.success_url, state.config.environment) {
@@ -3368,68 +3675,52 @@ async fn create_checkout_session(
             .into_response());
     }
 
-    // Configuration first: a deployment without Mollie credentials must fail
-    // closed BEFORE any local write (no customer onboarding row for a
-    // checkout that can never reach the provider).
-    let mollie = match billing_service::mollie_client::MollieClient::from_env() {
-        Ok(mollie) => mollie,
-        Err(error) => {
-            tracing::error!(tenant_id = %auth.tenant_id, error = %error, "Failed to initialize Mollie client for checkout");
-            return Ok(billing_operation_failed_response());
-        }
-    };
-
-    let customer_id = match get_or_create_mollie_customer_id(&state, &auth.tenant_id).await {
-        Ok(customer_id) => customer_id,
-        Err(error) => {
-            tracing::error!(tenant_id = %auth.tenant_id, error = %error, "Failed to resolve the Mollie customer for checkout");
-            return Ok(billing_operation_failed_response());
-        }
-    };
-
-    let link = match mollie
-        .create_payment(billing_service::mollie_client::CreatePayment {
-            amount: billing_service::mollie_client::Money::new(currency_code, amount_cents),
-            description: format!("ApexMail {}", plan_row.display_name),
-            redirect_url: body.success_url.clone(),
-            // The webhook URL is derived from APP_BASE_URL by the client.
-            webhook_url: None,
-            metadata: serde_json::json!({
-                "tenant_id": auth.tenant_id.clone(),
-                "plan_name": plan_name.clone(),
-                "interval": interval_label,
-                "price_id": price_id,
-            }),
-            // Mollie's own method picker: card, iDEAL, SEPA Direct Debit and
-            // the rest of the profile's methods. Forcing a method list would
-            // silently exclude the customer's favourite.
-            method: None,
-            customer_id: Some(customer_id.clone()),
-            mandate_id: None,
-            // `first` mints the mandate that later recurring charges and the
-            // subscription use.
-            sequence_type: Some("first".into()),
-            // Deterministic idempotency key so a retried checkout request
-            // (client timeout, network blip) cannot mint duplicate payments.
-            idempotency_key: format!("checkout_{}_{}_{}", auth.tenant_id, plan_name, price_id),
-        })
-        .await
+    // One provider-boundary path: tax declaration + VIES before the payment,
+    // the V30 gross quote, the registry-resolved provider and a checkout that
+    // saves the card. No adapter is named here.
+    let checkout = match start_self_serve_checkout(
+        &state,
+        &auth.tenant_id,
+        &plan_name,
+        interval_label,
+        body.success_url.clone(),
+        "api_checkout",
+        CheckoutTaxDeclarationInput {
+            business: body.business,
+            country: body.country.clone(),
+            vat_number: body.vat_number.clone(),
+        },
+    )
+    .await
     {
-        Ok(link) => link,
-        Err(error) => {
-            tracing::error!(tenant_id = %auth.tenant_id, error = %error, "Failed to create the Mollie payment");
-            return Ok(billing_operation_failed_response());
+        Ok(checkout) => checkout,
+        Err(CheckoutStartError::BadRequest(message)) => {
+            return Ok((
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": message })),
+            )
+                .into_response())
         }
-    };
-
-    let Some(url) = link.checkout_url else {
-        tracing::error!(tenant_id = %auth.tenant_id, payment_id = %link.id, "Mollie payment returned without a checkout URL");
-        return Ok(billing_operation_failed_response());
+        Err(CheckoutStartError::Failed) => return Ok(billing_operation_failed_response()),
     };
 
     Ok(billing_success_response(serde_json::json!({
-        "sessionId": link.id,
-        "url": url,
+        "sessionId": checkout.provider_payment_id,
+        "url": checkout.redirect_url,
+        "provider": checkout.provider,
+        // The ONE total the customer was shown and will be charged. Business
+        // charges are net (reverse charge) or net + VAT; consumers always see
+        // the VAT-inclusive total here.
+        "currency": checkout.currency,
+        "netCents": checkout.net_cents,
+        "vatCents": checkout.vat_cents,
+        "amountCents": checkout.gross_cents,
+        // The VAT facts the customer is shown before paying: the rate and
+        // whether this sale is a verified reverse charge. A business whose
+        // VAT number could not be verified is charged VAT (no reverse
+        // charge), so the console can explain the total.
+        "vatRate": checkout.vat_rate,
+        "reverseCharge": checkout.reverse_charge,
     })))
 }
 
@@ -3445,22 +3736,27 @@ async fn create_checkout_session(
 /// with the checkout session.
 async fn active_plan_checkout_target(
     pool: &sqlx::PgPool,
+    provider_name: &str,
     price_id: &str,
 ) -> Result<Option<(String, bool)>, sqlx::Error> {
     // N-02 RESOLVED (beta authority inversion): the price id resolves
     // through the NEUTRAL provider_catalog_mappings table (migration 279),
-    // never through provider-tagged plan columns.
+    // never through provider-tagged plan columns. V34: the CONFIGURED
+    // provider's mapping wins, with another provider's mapping for the same
+    // code accepted as a fallback (a provider switch must not orphan the
+    // published price ids).
     sqlx::query_as::<_, (String, bool)>(
         r#"
         SELECT p.name, m.billing_interval = 'yearly' AS yearly
         FROM provider_catalog_mappings m
         JOIN plans p ON p.name = m.catalog_key AND p.is_active = true
-        WHERE m.provider = 'mollie'
-          AND m.provider_price_code = $1
+        WHERE m.provider_price_code = $1
+        ORDER BY (m.provider = $2) DESC, m.provider
         LIMIT 1
         "#,
     )
     .bind(price_id)
+    .bind(provider_name)
     .fetch_optional(pool)
     .await
     .map(|row| {
@@ -3481,15 +3777,19 @@ async fn create_portal_session(
             .into_response());
     }
 
+    // A provider customer exists only after a checkout has been started at
+    // least once; the portal (which is the console billing page) is offered
+    // only then, exactly as before.
     let shopper_exists = sqlx::query_scalar::<_, String>(
-        "SELECT mollie_customer_id FROM mollie_customers WHERE tenant_id = $1",
+        "SELECT provider_customer_id FROM payment_provider_customers \
+         WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT 1",
     )
     .bind(&auth.tenant_id)
     .fetch_optional(&state.db)
     .await?
     .is_some();
     if !shopper_exists {
-        tracing::error!(tenant_id = %auth.tenant_id, "Mollie portal requested before shopper onboarding");
+        tracing::error!(tenant_id = %auth.tenant_id, "portal requested before payment-customer onboarding");
         return Ok(billing_operation_failed_response());
     }
 
@@ -8640,7 +8940,16 @@ mod adversarial_tests {
 
         let valid_url = "https://app.apexmail.ee/billing/complete";
         let checkout_body = |price: &str, success: &str, cancel: &str| {
-            json!({"priceId": price, "successUrl": success, "cancelUrl": cancel}).to_string()
+            json!({
+                "priceId": price,
+                "successUrl": success,
+                "cancelUrl": cancel,
+                // V30: a consumer total needs a destination country; a
+                // non-EU consumer keeps the amount at the net list price.
+                "business": false,
+                "country": "CH",
+            })
+            .to_string()
         };
 
         // Missing billing:write scope.
@@ -8737,12 +9046,13 @@ mod adversarial_tests {
         // the standard error envelope; the message is preserved.
         assert_eq!(body["error"]["code"], "INTERNAL_ERROR");
         assert_eq!(body["error"]["message"], "Operation failed");
-        let customers: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM mollie_customers WHERE tenant_id = $1")
-                .bind(&tenant)
-                .fetch_one(&pool)
-                .await
-                .unwrap();
+        let customers: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM payment_provider_customers WHERE tenant_id = $1",
+        )
+        .bind(&tenant)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
         assert_eq!(customers, 0);
 
         // Tenant without any billing email: refused before Mollie.
@@ -8805,6 +9115,17 @@ mod adversarial_tests {
         seed_checkout_plan(&pool, "pro").await;
         let (tenant, write_key) = tenant_with_key(&pool, "pro", &["billing:write"]).await;
         set_billing_email(&pool, &tenant, json!({"billingEmail": "billing@acme.test"})).await;
+        // V30: the buyer's destination country is a checkout fact. A
+        // non-EU consumer pays the net list price (no EU VAT).
+        sqlx::query(
+            "INSERT INTO billing_addresses (tenant_id, country, email, is_business) \
+             VALUES ($1, 'CH', 'billing@acme.test', FALSE) \
+             ON CONFLICT (tenant_id) DO UPDATE SET country = 'CH', email = 'billing@acme.test'",
+        )
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .expect("seed billing address");
         let env = env_for(pool.clone(), write_key).await;
         let valid_url = "https://app.apexmail.ee/billing/complete";
         let body =
@@ -8826,8 +9147,9 @@ mod adversarial_tests {
             body_resp["data"]["url"], "https://www.mollie.com/checkout/tr_mock_1",
             "the checkout URL comes from _links.checkout.href"
         );
-        let (customer_id, name, email): (String, String, String) = sqlx::query_as(
-            "SELECT mollie_customer_id, name, email FROM mollie_customers WHERE tenant_id = $1",
+        let customer_id: String = sqlx::query_scalar(
+            "SELECT provider_customer_id FROM payment_provider_customers \
+             WHERE tenant_id = $1 AND provider = 'mollie'",
         )
         .bind(&tenant)
         .fetch_one(&pool)
@@ -8835,10 +9157,8 @@ mod adversarial_tests {
         .unwrap();
         assert_eq!(
             customer_id, "cst_mock_1",
-            "the tenant binds the real Mollie customer id"
+            "the tenant binds the real Mollie customer id on the neutral ledger"
         );
-        assert_eq!(name, "adversarial billing");
-        assert_eq!(email, "billing@acme.test");
         {
             let state = mock.lock().unwrap();
             assert_eq!(state.customer_calls, 1);
@@ -8872,8 +9192,8 @@ mod adversarial_tests {
             );
             assert_eq!(
                 checkout["idempotencyKey"],
-                format!("checkout_{tenant}_pro_price_ck_m"),
-                "deterministic dedupe key"
+                format!("checkout_{tenant}_pro_monthly_EUR_8900_api_checkout"),
+                "deterministic dedupe key (provider, plan, interval, amount, source)"
             );
             assert!(
                 checkout.get("mollieVersion").is_none(),
@@ -8928,12 +9248,13 @@ mod adversarial_tests {
         // only the payment call repeats.
         let (status, body_resp) = post_json(&env, "/v1/billing/checkout", &body).await;
         assert_eq!(status, StatusCode::OK, "{body_resp}");
-        let customer_rows: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM mollie_customers WHERE tenant_id = $1")
-                .bind(&tenant)
-                .fetch_one(&pool)
-                .await
-                .unwrap();
+        let customer_rows: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM payment_provider_customers WHERE tenant_id = $1",
+        )
+        .bind(&tenant)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
         assert_eq!(
             customer_rows, 1,
             "a retried checkout never duplicates the customer"
@@ -9004,8 +9325,8 @@ mod adversarial_tests {
 
         // With a customer row the portal resolves to our own console page.
         sqlx::query(
-            "INSERT INTO mollie_customers (id, tenant_id, mollie_customer_id, created_at)
-             VALUES (gen_random_uuid(), $1, $1, NOW())",
+            "INSERT INTO payment_provider_customers (tenant_id, provider, provider_customer_id, created_at)
+             VALUES ($1, 'mollie', $1, NOW())",
         )
         .bind(&portal_tenant)
         .execute(&pool)
@@ -11521,8 +11842,8 @@ mod adversarial_tests {
         let _guard = lock_mollie_env().await;
         let _key = EnvRestore::set("MOLLIE_API_KEY", None);
         sqlx::query(
-            "INSERT INTO mollie_customers (id, tenant_id, mollie_customer_id, created_at)
-             VALUES (gen_random_uuid(), $1, $1, NOW())",
+            "INSERT INTO payment_provider_customers (tenant_id, provider, provider_customer_id, created_at)
+             VALUES ($1, 'mollie', $1, NOW())",
         )
         .bind(auth.tenant_id.as_str())
         .execute(&state.db)
@@ -12160,6 +12481,181 @@ mod adversarial_tests {
         assert_eq!(
             allocations_after_replay, 1,
             "a replay must never allocate twice"
+        );
+    }
+    // ------------------------------------------------------------------
+    // V34/MON-11: the whole self-serve checkout through the provider
+    // boundary — a scripted provider double installed on the app state, a
+    // registry-shaped checkout that saves the card, the completed-checkout
+    // fact running the REAL activation (catalog amount check against the
+    // V30 gross, local subscription, paid invoice, provider customer and
+    // credential), and a void refunding through the SAME adapter.
+    // ------------------------------------------------------------------
+    #[tokio::test]
+    async fn checkout_provider_completed_fact_activates_and_void_refunds_through_the_adapter() {
+        use billing_service::invoices::{void_invoice_with, VoidInvoiceInput};
+        use billing_service::payments::conformance::ConformanceProvider;
+        use billing_service::payments::stripe_events::{CheckoutCompleted, NormalizedFact};
+        use std::sync::Arc;
+
+        let Some(pool) = pool_for("checkout_provider").await else {
+            return;
+        };
+        let tenant = unique_id();
+        seed_tenant(&pool, &tenant, "free").await;
+        seed_plan(
+            &pool,
+            "starter",
+            2_000,
+            20_000,
+            50_000,
+            500_000,
+            &tenant_features(),
+            Some("price_starter_monthly"),
+            Some("price_starter_yearly"),
+            true,
+        )
+        .await;
+        // An Estonian BUSINESS: the V30 rule charges list 2000 + 24 % = 2480.
+        sqlx::query(
+            "INSERT INTO billing_addresses (tenant_id, company_name, vat_number, address_line1, \
+                city, postal_code, country, email, is_business) \
+             VALUES ($1, 'Checkout OÜ', 'EE100591102', 'Test 1', 'Tallinn', '10111', 'EE', \
+                'billing@example.com', TRUE) \
+             ON CONFLICT (tenant_id) DO UPDATE SET country = 'EE', vat_number = 'EE100591102', \
+                is_business = TRUE, email = 'billing@example.com'",
+        )
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .expect("seed billing address");
+
+        let state = crate::app::test_support::test_state_over(pool.clone()).await;
+        let provider = Arc::new(ConformanceProvider::new("stripe"));
+        provider.script_refund(
+            "re_conf_1",
+            "pi_conf_1",
+            billing_service::payments::RefundState::Succeeded,
+            2_480,
+        );
+        state.payments.install(provider.clone());
+        let env = Env {
+            app: build_app(state.clone()),
+            key: seed_key(&pool, &tenant, &["billing:write"]).await,
+        };
+
+        let body = json!({
+            "priceId": "price_starter_monthly",
+            "successUrl": "https://app.apexmail.ee/settings/billing?checkout=success",
+            "cancelUrl": "https://app.apexmail.ee/settings/billing",
+            "business": true,
+            "country": "EE",
+            "vatNumber": "EE100591102",
+        });
+        let (status, response) = post_json(&env, "/v1/billing/checkout", &body.to_string()).await;
+        assert_eq!(status, StatusCode::OK, "checkout: {response}");
+        // The customer was shown ONE total: list net + Estonian VAT.
+        assert_eq!(response["data"]["amountCents"], 2_480, "{response}");
+        assert_eq!(response["data"]["netCents"], 2_000, "{response}");
+        assert_eq!(response["data"]["vatCents"], 480, "{response}");
+        assert_eq!(response["data"]["provider"], "stripe", "{response}");
+        assert!(
+            response["data"]["url"]
+                .as_str()
+                .is_some_and(|url| !url.is_empty()),
+            "{response}"
+        );
+
+        // The completed-checkout FACT (Stripe's checkout.session.completed,
+        // "stripe" is the provider on the double) runs the existing
+        // activation, exactly like the Mollie paid-checkout arm.
+        let fact = NormalizedFact::CheckoutCompleted(CheckoutCompleted {
+            provider: "stripe".to_string(),
+            provider_payment_id: "pi_conf_1".to_string(),
+            provider_checkout_id: "cs_conf_1".to_string(),
+            tenant_id: Some(tenant.clone()),
+            plan_name: Some("starter".to_string()),
+            interval: Some("monthly".to_string()),
+            amount_minor: Some(2_480),
+            currency: Some("EUR".to_string()),
+            provider_customer_id: Some("conf_customer".to_string()),
+        });
+        dispatch_stripe_fact(&state, &fact)
+            .await
+            .expect("the completed checkout activates the plan");
+
+        let plan: String = sqlx::query_scalar("SELECT plan FROM tenants WHERE id = $1")
+            .bind(&tenant)
+            .fetch_one(&pool)
+            .await
+            .expect("tenant plan");
+        assert_eq!(plan, "starter", "the tenant plan is granted");
+
+        let (sub_status,): (String,) = sqlx::query_as(
+            "SELECT status FROM subscription_state WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT 1",
+        )
+        .bind(&tenant)
+        .fetch_one(&pool)
+        .await
+        .expect("subscription");
+        assert_eq!(sub_status, "active");
+
+        let (invoice_id, invoice_status, net, vat, total): (uuid::Uuid, String, i64, i64, i64) =
+            sqlx::query_as(
+                "SELECT id, status::text, subtotal, vat_total, total FROM invoices \
+                 WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT 1",
+            )
+            .bind(&tenant)
+            .fetch_one(&pool)
+            .await
+            .expect("invoice");
+        assert_eq!(invoice_status, "paid");
+        assert_eq!((net, vat, total), (2_000, 480, 2_480));
+
+        // The card and customer landed on the NEUTRAL ledgers.
+        let (credential_provider, method): (String, String) = sqlx::query_as(
+            "SELECT provider, provider_method_id FROM payment_credentials WHERE tenant_id = $1",
+        )
+        .bind(&tenant)
+        .fetch_one(&pool)
+        .await
+        .expect("credential");
+        assert_eq!(credential_provider, "stripe");
+        assert_eq!(method, "conf_method");
+        let provider_customer: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM payment_provider_customers WHERE tenant_id = $1 AND provider = 'stripe'",
+        )
+        .bind(&tenant)
+        .fetch_one(&pool)
+        .await
+        .expect("provider customer");
+        assert_eq!(provider_customer, 1);
+
+        // A void of the paid invoice refunds through the SAME injected
+        // adapter (the allocation's operation id resolves the payment).
+        let voided = void_invoice_with(
+            &pool,
+            provider.clone(),
+            VoidInvoiceInput {
+                tenant_id: tenant.clone(),
+                invoice_id,
+                reason: "operator void".to_string(),
+                idempotency_key: "void-checkout-provider-1".to_string(),
+            },
+        )
+        .await
+        .expect("void refunds through the adapter");
+        assert_eq!(format!("{:?}", voided.status), "Void");
+        let refund: (String, String, i64) = sqlx::query_as(
+            "SELECT provider, provider_refund_id, amount_minor FROM payment_provider_refunds \
+             WHERE provider = 'stripe' AND provider_payment_id = 'pi_conf_1'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("refund ledger");
+        assert_eq!(
+            refund,
+            ("stripe".to_string(), "re_conf_1".to_string(), 2_480)
         );
     }
 }

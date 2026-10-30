@@ -1443,7 +1443,9 @@ pub struct DedicatedIpProvider {
     client: Client,
     api_token: String,
     db: PgPool,
-    /// Default Hetzner location for new IPs (e.g., "fsn1", "nbg1", "hel1").
+    /// Default Hetzner location for new IPs. Every ApexMail server runs in
+    /// Helsinki; `HETZNER_DEFAULT_LOCATION` may confirm `hel1` but a value
+    /// naming another location is refused by [`Self::from_env`].
     default_location: String,
     /// MTA server ID to assign floating IPs to. `None` means attachment is
     /// impossible: provisioning fails closed and releases the floating IP
@@ -1452,6 +1454,29 @@ pub struct DedicatedIpProvider {
     /// API root for Hetzner calls. The production constant; loopback mocks
     /// in tests.
     api_base: String,
+}
+
+/// The one Hetzner location ApexMail allocates in (DP-8). Every dedicated IP
+/// and every Dedicated Tenant host runs in Helsinki.
+pub const APEXMAIL_PROVIDER_LOCATION: &str = "hel1";
+
+/// Resolve `HETZNER_DEFAULT_LOCATION` (DP-8): unset or blank uses `hel1`,
+/// `hel1` is accepted in any case, and any other location is refused with a
+/// message naming the variable. Pure over the raw env value so the refusal is
+/// testable without mutating the process environment.
+fn configured_default_location(raw: Option<&str>) -> Result<String, String> {
+    let value = raw
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(APEXMAIL_PROVIDER_LOCATION);
+    if value.eq_ignore_ascii_case(APEXMAIL_PROVIDER_LOCATION) {
+        Ok(APEXMAIL_PROVIDER_LOCATION.to_string())
+    } else {
+        Err(format!(
+            "HETZNER_DEFAULT_LOCATION={value:?} refused: every ApexMail server is provisioned in \
+             {APEXMAIL_PROVIDER_LOCATION} (Helsinki); no per-contract location override exists"
+        ))
+    }
 }
 
 impl DedicatedIpProvider {
@@ -1501,7 +1526,7 @@ impl DedicatedIpProvider {
     #[cfg(test)]
     pub(crate) fn new_for_tests(api_base: &str, db: PgPool) -> Self {
         let mut provider =
-            Self::new("hetzner-test-token".into(), db, "fsn1".into(), Some(42)).expect("provider");
+            Self::new("hetzner-test-token".into(), db, "hel1".into(), Some(42)).expect("provider");
         provider.api_base = api_base.to_string();
         provider
     }
@@ -1516,13 +1541,25 @@ impl DedicatedIpProvider {
 
     /// [`Self::from_env`] with an injectable HTTP-client factory (same
     /// rationale as [`Self::new_with_client_builder`]).
+    ///
+    /// The location is enforced (DP-8): all dedicated IPs are allocated in
+    /// Helsinki. An unset/blank `HETZNER_DEFAULT_LOCATION` uses `hel1`; a
+    /// value naming any other location refuses to construct the provider
+    /// (loud error, `None`) rather than allocate outside Helsinki.
     fn from_env_with_client_builder<F>(db: PgPool, build_client: F) -> Option<Self>
     where
         F: FnOnce() -> Result<Client, reqwest::Error>,
     {
         let api_token = std::env::var("HETZNER_API_TOKEN").ok()?;
-        let default_location =
-            std::env::var("HETZNER_DEFAULT_LOCATION").unwrap_or_else(|_| "fsn1".to_string());
+        let default_location = match configured_default_location(
+            std::env::var("HETZNER_DEFAULT_LOCATION").ok().as_deref(),
+        ) {
+            Ok(location) => location,
+            Err(message) => {
+                error!(%message, "dedicated IP provisioning disabled: refusing a non-hel1 hosting location");
+                return None;
+            }
+        };
         let mta_server_id = std::env::var("HETZNER_MTA_SERVER_ID")
             .ok()
             .and_then(|s| s.parse().ok());
@@ -2305,6 +2342,23 @@ mod tests {
     }
 
     // ── State machine tests ────────────────────────────────────
+
+    #[test]
+    fn configured_default_location_is_hel1_and_refuses_other_locations() {
+        assert_eq!(configured_default_location(None).unwrap(), "hel1");
+        assert_eq!(configured_default_location(Some("")).unwrap(), "hel1");
+        assert_eq!(configured_default_location(Some("  ")).unwrap(), "hel1");
+        assert_eq!(configured_default_location(Some("hel1")).unwrap(), "hel1");
+        assert_eq!(configured_default_location(Some(" HEL1 ")).unwrap(), "hel1");
+        for other in ["fsn1", "nbg1", "ash", "hil", "sin"] {
+            let error = configured_default_location(Some(other))
+                .expect_err("a non-hel1 location must refuse");
+            assert!(
+                error.contains("HETZNER_DEFAULT_LOCATION"),
+                "the refusal must name the variable: {error}"
+            );
+        }
+    }
 
     #[test]
     fn test_state_machine_happy_path_advances_one_step() {
@@ -4053,13 +4107,21 @@ mod db_tests {
             std::env::set_var("HETZNER_API_TOKEN", "hetzner-token");
             let provider =
                 DedicatedIpProvider::from_env(pool.clone()).expect("configured provider");
-            assert_eq!(provider.default_location, "fsn1");
+            assert_eq!(provider.default_location, "hel1");
             assert_eq!(provider.mta_server_id, None);
 
+            // DP-8: a configured non-hel1 location is REFUSED, never applied.
             std::env::set_var("HETZNER_DEFAULT_LOCATION", "nbg1");
             std::env::set_var("HETZNER_MTA_SERVER_ID", "1234");
+            assert!(
+                DedicatedIpProvider::from_env(pool.clone()).is_none(),
+                "HETZNER_DEFAULT_LOCATION=nbg1 must refuse to construct the provider"
+            );
+
+            // An explicit hel1 (any case) is honoured.
+            std::env::set_var("HETZNER_DEFAULT_LOCATION", "HEL1");
             let provider = DedicatedIpProvider::from_env(pool.clone()).unwrap();
-            assert_eq!(provider.default_location, "nbg1");
+            assert_eq!(provider.default_location, "hel1");
             assert_eq!(provider.mta_server_id, Some(1234));
 
             // A malformed server id degrades to "attachment impossible" (None)

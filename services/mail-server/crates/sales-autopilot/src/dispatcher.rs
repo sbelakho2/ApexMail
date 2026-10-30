@@ -48,6 +48,16 @@ use billing_service::send_admission::{
 };
 
 use crate::campaigns::DispatchRecipient;
+
+/// Canonical public privacy notice for outreach (V27/WEB-8).
+///
+/// The footer renderer appends this link to every outbound sales message, so a
+/// first-touch template can never ship without it. The URL is the privacy
+/// notice, which carries the prospects section in all four site languages; the
+/// `lp` locale prefix is resolved by the site, and one canonical English URL is
+/// deliberate: a footer link must work for every recipient regardless of the
+/// sender's locale.
+pub const PRIVACY_NOTICE_URL: &str = "https://apexmail.ee/privacy/";
 use crate::config::DispatchConfig;
 use crate::types::SalesError;
 
@@ -594,27 +604,31 @@ pub struct OutreachFooter<'a> {
     pub reason: FooterReason<'a>,
     pub unsubscribe_link: &'a str,
     pub postal_address: Option<&'a str>,
-    pub privacy_url: Option<&'a str>,
+    /// The privacy notice this message links. Required: the renderer always
+    /// emits it, so no template or caller can omit the disclosure. Pass
+    /// [`PRIVACY_NOTICE_URL`] unless a jurisdiction policy resolved a
+    /// different authoritative URL.
+    pub privacy_url: &'a str,
 }
 
 /// Render the truthfulness-aware footer for one outbound sales message.
 ///
 /// Returns `(html, text)`. The caller supplies the reason, and the wording
 /// follows from it, the footer can never claim a signup that did not happen.
+/// The privacy-notice link is unconditional (V27/WEB-8): it is part of every
+/// footer, not an optional caller extra.
 pub fn render_outreach_footer(footer: &OutreachFooter<'_>) -> (String, String) {
     let mut disclosure = String::new();
     if let Some(address) = footer.postal_address {
         disclosure.push_str(escape_html(address).as_str());
     }
-    if let Some(privacy) = footer.privacy_url {
-        if !disclosure.is_empty() {
-            disclosure.push_str(" &middot; ");
-        }
-        disclosure.push_str(&format!(
-            "<a href=\"{}\" style=\"color:#666\">Privacy</a>",
-            escape_html(privacy)
-        ));
+    if !disclosure.is_empty() {
+        disclosure.push_str(" &middot; ");
     }
+    disclosure.push_str(&format!(
+        "<a href=\"{}\" style=\"color:#666\">Privacy</a>",
+        escape_html(footer.privacy_url)
+    ));
 
     let reason_html = match &footer.reason {
         FooterReason::BusinessContact { basis } => format!(
@@ -661,9 +675,7 @@ pub fn render_outreach_footer(footer: &OutreachFooter<'_>) -> (String, String) {
     if let Some(address) = footer.postal_address {
         text.push_str(&format!("\n{address}"));
     }
-    if let Some(privacy) = footer.privacy_url {
-        text.push_str(&format!("\nPrivacy: {privacy}"));
-    }
+    text.push_str(&format!("\nPrivacy: {}", footer.privacy_url));
     text.push('\n');
 
     (html, text)
@@ -684,7 +696,7 @@ fn default_footer<'a>(
         },
         unsubscribe_link: &recipient.unsubscribe_link,
         postal_address: None,
-        privacy_url: None,
+        privacy_url: PRIVACY_NOTICE_URL,
     }
 }
 
@@ -2826,7 +2838,7 @@ mod tests {
             reason: FooterReason::ConsentedRelationship,
             unsubscribe_link: "https://x/u/2",
             postal_address: Some("Tallinn, Estonia"),
-            privacy_url: Some("https://apexmail.ee/privacy"),
+            privacy_url: "https://apexmail.ee/privacy",
         });
         assert!(html.contains("opted in"));
         assert!(html.contains("Tallinn, Estonia"));
@@ -2842,7 +2854,7 @@ mod tests {
                 reason: FooterReason::ConsentedRelationship,
                 unsubscribe_link: "https://x/u/2",
                 postal_address: None,
-                privacy_url: None,
+                privacy_url: PRIVACY_NOTICE_URL,
             },
         )
         .unwrap();
@@ -2877,7 +2889,7 @@ mod tests {
                 reason,
                 unsubscribe_link: link,
                 postal_address: Some("Tallinn, Estonia"),
-                privacy_url: Some("https://apexmail.ee/privacy"),
+                privacy_url: "https://apexmail.ee/privacy",
             });
             for body in [&html, &text] {
                 assert!(
@@ -2928,7 +2940,7 @@ mod tests {
                     reason,
                     unsubscribe_link: &recipient.unsubscribe_link,
                     postal_address: None,
-                    privacy_url: None,
+                    privacy_url: PRIVACY_NOTICE_URL,
                 },
             )
             .expect("a template with both bodies renders");
@@ -2940,6 +2952,103 @@ mod tests {
             assert!(text.contains(&recipient.unsubscribe_link));
             assert!(html.contains("Unsubscribe</a>"));
             assert!(text.contains("Unsubscribe:"));
+        }
+    }
+
+    /// V27/WEB-8: every first-touch template must link the privacy notice.
+    ///
+    /// A sequence's first touch is the first email a prospect receives, and
+    /// templates are tenant data (the platform `templates` table), so the
+    /// guarantee has to live in the renderer rather than in any one template.
+    /// This test enumerates every template shape the renderer supports and
+    /// every footer reason; both bodies must always carry the canonical
+    /// privacy link, and the default (unconfigured-policy) render path must
+    /// too. A template shape that loses the link fails here.
+    #[test]
+    fn every_first_touch_template_carries_the_privacy_notice_link() {
+        let recipient = DispatchRecipient::new(
+            "first.touch@prospect.example",
+            "https://apexmail.example/u/token-first-touch",
+        );
+        let templates = [
+            (
+                "html and text bodies",
+                Some("<html><body><p>Hello {{first_name}}</p></body></html>".to_string()),
+                Some("Hello {{first_name}}".to_string()),
+            ),
+            (
+                "html body only",
+                Some("<html><body><p>Hello</p></body></html>".to_string()),
+                None,
+            ),
+            ("text body only", None, Some("Hello".to_string())),
+        ];
+        let reasons = [
+            FooterReason::BusinessContact {
+                basis: "your organisation appears to be a potential fit.",
+            },
+            FooterReason::ConsentedRelationship,
+            FooterReason::AccountNotification,
+        ];
+
+        for (shape, html_body, text_body) in templates {
+            let template = TemplateContent {
+                subject: "Hello".into(),
+                html_body,
+                text_body,
+            };
+            for reason in &reasons {
+                let rendered = render_for_recipient_with_footer(
+                    &template,
+                    &recipient,
+                    OutreachFooter {
+                        sender_identity: "ApexMail OÜ",
+                        reason: reason.clone(),
+                        unsubscribe_link: &recipient.unsubscribe_link,
+                        postal_address: None,
+                        privacy_url: PRIVACY_NOTICE_URL,
+                    },
+                )
+                .expect("first-touch template renders");
+                let bodies: Vec<&String> = [rendered.html.as_ref(), rendered.text.as_ref()]
+                    .into_iter()
+                    .flatten()
+                    .collect();
+                assert!(
+                    !bodies.is_empty(),
+                    "{shape}: a first-touch render has no body"
+                );
+                for body in bodies {
+                    assert!(
+                        body.contains(PRIVACY_NOTICE_URL),
+                        "{shape}: the first-touch footer must link the privacy notice"
+                    );
+                    assert!(
+                        body.to_ascii_lowercase().contains("privacy"),
+                        "{shape}: the privacy link must be labelled"
+                    );
+                }
+            }
+        }
+
+        // The default render path (no policy context) is what a caller gets
+        // when it has not resolved a jurisdiction policy: it must carry the
+        // link as well, never a bare body.
+        let default_template = TemplateContent {
+            subject: "Hello".into(),
+            html_body: Some("<p>Hello</p>".into()),
+            text_body: Some("Hello".into()),
+        };
+        let rendered = render_for_recipient(&default_template, &recipient, "ApexMail OÜ")
+            .expect("default footer renders");
+        for body in [rendered.html.as_deref(), rendered.text.as_deref()]
+            .into_iter()
+            .flatten()
+        {
+            assert!(
+                body.contains(PRIVACY_NOTICE_URL),
+                "the default first-touch footer must link the privacy notice"
+            );
         }
     }
 

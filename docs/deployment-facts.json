@@ -39,7 +39,7 @@
    "enforcement_mode": "not-applicable",
    "monitored": false,
    "advertised": false,
-   "evidence": "no archive_command / WAL-archive service in docker-compose*.yml; docs/operations/disaster-recovery.md: 'WAL archiving / PITR \u2014 Not implemented. Recovery point granularity is the last nightly backup (RPO up to ~24 h)'",
+   "evidence": "Enablement shipped and off by default: the default compose files carry no WAL-archive command; the operator-gated overlay deploy/docker-compose.wal-archive.yml sets archive_mode=on and the pg-wal-archive.sh command only when WAL_ARCHIVE_TARGET is set. Managed cloud: off (docs/operations/disaster-recovery.md).",
    "source": "docs/operations/disaster-recovery.md"
   },
   "wal_archiving": {
@@ -50,7 +50,7 @@
    "enforcement_mode": "not-applicable",
    "monitored": false,
    "advertised": false,
-   "evidence": "docs/operations/disaster-recovery.md reality table; no archive_command in any compose file",
+   "evidence": "Enablement shipped and off by default: no WAL-archive command in the default compose files; the operator-gated overlay deploy/docker-compose.wal-archive.yml archives to the offsite target only when WAL_ARCHIVE_TARGET is set (docs/operations/disaster-recovery.md).",
    "source": "docs/operations/disaster-recovery.md"
   },
   "standby_regions": {

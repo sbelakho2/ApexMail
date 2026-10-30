@@ -1,0 +1,1 @@
+MAIL FROM:<sender@example.com> SIZE=1024 BODY=8BITMIME

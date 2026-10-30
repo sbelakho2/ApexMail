@@ -142,7 +142,8 @@ What is seeded: the platform's data stores with purpose, subjects, data
 categories, recipients, controller/processor role, retention class and a
 `source_location` proving the record — plus the statutory retention classes
 (Estonian accounting evidence, seven years) and the one subprocessor +
-transfer the deployment configuration substantiates (AWS SES us-east-1).
+transfer the deployment configuration substantiates (AWS SES eu-west-1,
+Ireland — the configured `AWS_REGION`, matching the vendor register).
 
 What is deliberately left for Legal (never invented in code): every
 lawful-basis record is `basis = NULL, basis_status = 'requires_legal_input'`;

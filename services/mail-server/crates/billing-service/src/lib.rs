@@ -48,6 +48,9 @@ pub mod product_lines;
 pub mod routes;
 pub mod send_admission;
 pub mod subscriptions;
+/// The V30 list-price VAT rule: persist the buyer's declaration, verify VIES
+/// evidence before the payment exists, and re-resolve at every tax point.
+pub mod tax;
 /// Shared harness for in-crate adversarial coverage tests (private canonical
 /// DB clones, schema fault injection, dead Redis pools, Mollie signing).
 #[cfg(test)]

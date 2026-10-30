@@ -63,7 +63,7 @@ line.
 | Webhooks, custom templates, advanced analytics, data export | Starter and above |
 | Custom tracking domain and send-time optimization | Pro and above |
 | A/B testing, audit logs, time-travel debugging, custom retention | Growth and above |
-| SAML SSO, inbound email, template approval workflow, subaccounts | Business and Enterprise Cloud |
+| OIDC SSO (SAML on request), inbound email, template approval workflow, subaccounts | Business and Enterprise Cloud |
 | 99.9% SLA and dedicated CSM | Business (graduated to 30%) and Enterprise Cloud (25%) |
 | White-label, private cloud, and BYOIP capability flags | Enterprise Cloud |
 | EU-only routing (own EU MTAs, no third-party transport) | Enterprise Cloud and the Compliance contract line; €149/$165 per month add-on on Pro and above |

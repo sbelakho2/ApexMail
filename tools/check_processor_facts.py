@@ -42,6 +42,93 @@ MOLLIE_CORPORATE_COUNTRY = "Netherlands"
 # over the owned trees finds no current-state citation of it).
 FORMER_PROCESSOR = "ad" + "yen"
 
+# ── Stripe (the V34/MON-11 provider switch) ─────────────────────────────────
+# The register names ONE payment processor. These are the canonical Stripe
+# facts checked when `.env.production.example` selects stripe in
+# PAYMENT_PROCESSOR_PUBLIC (the public-register selector). They are the
+# counterpart of the Mollie facts below so the gate is provider-aware, not a
+# second gate.
+STRIPE_ENTITY = "Stripe Payments Europe, Ltd."
+STRIPE_REGISTERED_OFFICE = "1 Grand Canal Street Lower"
+STRIPE_POSTCODE = "Dublin 2"
+STRIPE_CORPORATE_COUNTRY = "Ireland"
+STRIPE_SUPERVISOR = "Central Bank of Ireland"
+STRIPE_SUPERVISOR_SHORT = "CBI"
+STRIPE_EU_FACT_TOKENS = ("Ireland", "Irland", "Irlande", "Irlanda", "Dublin")
+
+ENV_EXAMPLE = ROOT / ".env.production.example"
+# The generated register surfaces: the ONLY files a provider switch
+# regenerates. Other legal pages may mention a processor in passing; their
+# own canonical-fact checks stay line-scoped below.
+GENERATED_REGISTER_SURFACES = [
+    ROOT / "apps/marketing-zola/content/subprocessors/index.md",
+    ROOT / "templates/compliance/subprocessors.md",
+]
+
+
+def configured_processor() -> str:
+    """The processor the public register names (PAYMENT_PROCESSOR_PUBLIC,
+    else PAYMENTS_PROVIDER, else mollie)."""
+    values: dict[str, str] = {}
+    if ENV_EXAMPLE.is_file():
+        for raw in ENV_EXAMPLE.read_text(encoding="utf-8").splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            values[key.strip()] = value.split(" #", 1)[0].strip().strip('"').strip("'")
+    for variable in ("PAYMENT_PROCESSOR_PUBLIC", "PAYMENTS_PROVIDER"):
+        value = values.get(variable, "").strip().lower()
+        if value:
+            if value not in ("mollie", "stripe"):
+                raise SystemExit(
+                    f"processor-facts: {variable}={value!r} is not a supported processor"
+                )
+            return value
+    return "mollie"
+
+
+def check_configured_register(check_root: Path) -> list[str]:
+    """The GENERATED register must name the configured processor with its
+    canonical EU facts (and must not name the other one)."""
+    processor = configured_processor()
+    violations: list[str] = []
+    if processor == "mollie":
+        return violations  # check_text already enforces the Mollie facts
+    for surface in GENERATED_REGISTER_SURFACES:
+        path = check_root / surface.relative_to(ROOT)
+        if not path.exists():
+            continue
+        text = path.read_text(encoding="utf-8")
+        if STRIPE_ENTITY not in text:
+            violations.append(
+                f"{path.relative_to(check_root)}: the configured processor {STRIPE_ENTITY!r} "
+                "is not named (run tools/generate_subprocessors.py after the switch)"
+            )
+        if "mollie" in text.lower():
+            violations.append(
+                f"{path.relative_to(check_root)}: the register names both processors; the "
+                "configured processor is Stripe"
+            )
+        lowered = text.lower()
+        if not any(token.lower() in lowered for token in STRIPE_EU_FACT_TOKENS):
+            violations.append(
+                f"{path.relative_to(check_root)}: no Stripe line carries the canonical EU fact "
+                f"({STRIPE_CORPORATE_COUNTRY}/Dublin)"
+            )
+        for fact, label in (
+            (STRIPE_REGISTERED_OFFICE, "registered office"),
+            (STRIPE_POSTCODE, "postcode/city"),
+            (STRIPE_SUPERVISOR, "supervisor"),
+        ):
+            if fact.lower() not in lowered and not (
+                label == "supervisor" and STRIPE_SUPERVISOR_SHORT.lower() in lowered
+            ):
+                violations.append(
+                    f"{path.relative_to(check_root)}: the Stripe {label} ({fact}) is not stated"
+                )
+    return violations
+
 # Localized spellings of the EU fact that may appear on a Mollie line.
 EU_FACT_TOKENS = (
     "Netherlands",
@@ -290,6 +377,11 @@ def run(check_root: Path) -> int:
                     f"processor-facts: {path.relative_to(check_root)}: {violation}",
                     file=sys.stderr,
                 )
+    register_violations = check_configured_register(check_root)
+    if register_violations:
+        failures += len(register_violations)
+        for violation in register_violations:
+            print(f"processor-facts: {violation}", file=sys.stderr)
     if failures:
         print(
             f"processor-facts: {failures} violation(s) — Mollie must be described as "
@@ -298,9 +390,15 @@ def run(check_root: Path) -> int:
             file=sys.stderr,
         )
         return 1
+    processor = configured_processor()
+    facts = (
+        f"Stripe = {STRIPE_ENTITY}, Dublin, {STRIPE_SUPERVISOR}"
+        if processor == "stripe"
+        else f"Mollie = {MOLLIE_ENTITY}, Amsterdam, {MOLLIE_SUPERVISOR}"
+    )
     print(
-        f"processor-facts: clean ({len(SURFACES)} current-state surfaces; Mollie = "
-        f"{MOLLIE_ENTITY}, Amsterdam, {MOLLIE_SUPERVISOR})"
+        f"processor-facts: clean ({len(SURFACES)} current-state surfaces; "
+        f"register processor: {processor}; {facts})"
     )
     return 0
 

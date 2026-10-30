@@ -45,14 +45,14 @@ The current authorised subprocessors are maintained in the [ApexMail Subprocesso
 
 | Sub-processor | Purpose | Location | Transfer Safeguard |
 |---|---|---|---|
-| EU infrastructure provider | Core infrastructure (compute, storage) | Finland (EU) | Intra-EEA processing; GDPR Chapter V transfer rules do not apply |
+| EU infrastructure provider | Core infrastructure (compute, storage) | EU (EEA) | Intra-EEA processing; GDPR Chapter V transfer rules do not apply |
 | Amazon Web Services, Inc. | Telemetry object storage when enabled | Configured S3 region (default: `eu-central-1`) | EU Standard Contractual Clauses (AWS DPA) |
 | Amazon Web Services, Inc. | Email-delivery transport when enabled | Configured SES region | EU Standard Contractual Clauses (AWS DPA) |
 | Google LLC | Optional OAuth authentication | Global (US entity, data processed per OAuth config) | Standard Contractual Clauses |
 | GitHub, Inc. | Optional OAuth authentication | Global (US entity) | Standard Contractual Clauses |
 | Mollie B.V. | Payment processing | Netherlands (EU); card scheme networks process globally under the Mollie DPA | Intra-EEA processing (Mollie B.V., Amsterdam) |
 
-Self-hosted infrastructure (ClickHouse, Redis) runs on ApexMail-managed EU infrastructure (Finland). The upstream open-source publishers do not process customer data.
+Self-hosted infrastructure (ClickHouse, Redis) runs on ApexMail-managed EU infrastructure. The upstream open-source publishers do not process customer data.
 
 ### Payment processor
 

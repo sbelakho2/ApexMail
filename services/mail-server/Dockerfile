@@ -11,17 +11,17 @@
 # starts from fully compiled third-party dependencies. Previously the deps
 # stage COPYed the entire crates tree, invalidating the cache on every commit.
 #
-# Toolchain pin ALIGNED with deploy/Dockerfile.tracking (rust:1.97.1 — the
+# Toolchain pin ALIGNED with deploy/Dockerfile.tracking (rust:1.98 — the
 # newer of the two diverging pins, audit §2 "two Rust toolchain versions
 # across build paths"). CI (ci/pipeline.sh test/validate stages) builds the
 # workspace with this image and will catch any incompatibility.
-FROM rust:1.97.1-slim-bookworm AS chef
+FROM rust:1.98-slim-bookworm AS chef
 
 WORKDIR /app/services/mail-server
 ENV CARGO_TARGET_DIR=/app/target
 
 # Install protobuf compiler for gRPC and native deps.
-# Builder-stage toolchain deps on the pinned rust:1.97.1-slim base; the
+# Builder-stage toolchain deps on the pinned rust:1.98-slim base; the
 # exact apt patch versions are irrelevant to the build output and pinning
 # them against the moving bookworm pool would break on every distro point
 # release.

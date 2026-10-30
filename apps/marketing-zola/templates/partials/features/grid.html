@@ -178,7 +178,7 @@
             <span class="apex-index">18</span>
             <div>
               <span class="apex-em">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["f_encryption_title"] %}{{ i18n_data[l]["features"]["f_encryption_title"] }}{% else %}Data Encryption{% endif %}</span>
-              <p class="apex-meta mt-1">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["f_encryption_desc"] %}{{ i18n_data[l]["features"]["f_encryption_desc"] }}{% else %}AES-256 encryption at rest, TLS 1.2+ required for API/SMTP, TLS 1.3 preferred where supported{% endif %}</p>
+              <p class="apex-meta mt-1">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["f_encryption_desc"] %}{{ i18n_data[l]["features"]["f_encryption_desc"] }}{% else %}Message content encrypted at rest with AES-256-GCM; TLS 1.2+ required for API/SMTP, TLS 1.3 preferred where supported{% endif %}</p>
             </div>
           </div>
           <div>

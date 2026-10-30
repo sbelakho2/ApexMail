@@ -1,6 +1,6 @@
 # Subprocessors
 
-**Last Updated:** 2026-10-24
+**Last Updated:** 2026-10-29
 
 <!-- GENERATED FILE, do not edit by hand: `python3 tools/generate_subprocessors.py` renders this mirror from the
      same deployment-derived register as the public page. The public register at
@@ -16,15 +16,16 @@ A subprocessor is a third-party data processor engaged by ApexMail to process pe
 
 | Subprocessor | Purpose | Data Processed | Location | Transfer Safeguard |
 |---|---|---|---|---|
-| **EU infrastructure provider (named in the customer DPA subprocessor annex)** | Cloud hosting (compute, storage, networking) | Core service data in the default shared deployment | Finland (storage: Finland) | Intra-EEA processing; GDPR Chapter V transfer rules do not apply |
+| **EU infrastructure provider (named in the customer DPA annex)** | Cloud hosting (compute, storage, networking) | Core service data in the default shared deployment | Finland (storage: Finland) | Intra-EEA processing; GDPR Chapter V transfer rules do not apply |
 | **Amazon Web Services, Inc.** | Email-delivery transport when enabled (EMAIL_TRANSPORT_TYPE=ses) | Email content and recipient addresses in transit | Ireland (storage: Ireland) | EU Standard Contractual Clauses (AWS DPA) |
+| **AI model runtime (configured endpoint)** | AI-assisted triage, drafting and support when enabled (AI_MODEL_ENABLED=true) | Message metadata and content excerpts submitted for AI-assisted analysis | EU/EEA (configured endpoint) (storage: EU/EEA (configured endpoint)) | Configured EU/EEA inference endpoint; intra-EEA processing |
 | **Mollie B.V.** | Payment processing, subscription management, invoicing | Payment card details (tokenized, ApexMail never receives full card numbers), billing address, transaction metadata | Netherlands (storage: Netherlands) | Contracting entity is EU-established (Mollie B.V., Amsterdam); card scheme networks process globally under the Mollie Data Processing Agreement; PCI DSS Level 1 certified |
 
 ### Payment processor
 
 Mollie B.V. is a payment institution supervised by De Nederlandsche Bank (DNB), with its registered office at Keizersgracht 126, 1015 CW Amsterdam, The Netherlands. Payment data is processed in the Netherlands (EU); card-scheme networks may process it globally under Mollie's Data Processing Agreement.
 
-Whether an optional subprocessor (OAuth providers, SES, S3 telemetry) is engaged is controlled by the active deployment configuration. This register is generated from that configuration, with a validate-stage gate that fails on drift and a zero-US check over the active set.
+Whether an optional subprocessor (OAuth providers, SES, S3 telemetry, the AI model runtime) is engaged is controlled by the active deployment configuration. This register is generated from that configuration, with a validate-stage gate that fails on drift and a zero-US check over the active set.
 
 ## Self-Hosted Infrastructure (not third-party subprocessors)
 

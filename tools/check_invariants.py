@@ -44,7 +44,10 @@ WP_IDS = {
     *(f"D{i}" for i in range(1, 5)), *(f"E{i}" for i in range(1, 7)),
     *(f"F{i}" for i in range(1, 13)), *(f"G{i}" for i in range(1, 4)),
     *(f"S{i}" for i in range(1, 25)), *(f"T{i}" for i in range(1, 18)),
-    *(f"V{i}" for i in range(1, 28)),
+    # V28/V29 (payments defects) and V31/V35 (Helsinki hosting / public
+    # surface location truth) are the October-30 audit wave: the invariant
+    # ledger cites them by name, so the registry recognises them.
+    *(f"V{i}" for i in range(1, 36)),
 }
 
 

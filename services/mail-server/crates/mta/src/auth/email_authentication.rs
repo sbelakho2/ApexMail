@@ -6,7 +6,8 @@
 use std::net::IpAddr;
 use std::time::Duration;
 
-use mail_auth::{AuthenticatedMessage, DkimResult, Resolver, SpfResult};
+use mail_auth::spf::verify::SpfParameters;
+use mail_auth::{AuthenticatedMessage, DkimResult, MessageAuthenticator, SpfResult};
 use moka::sync::Cache;
 use serde::{Deserialize, Serialize};
 use trust_dns_resolver::TokioResolver;
@@ -170,7 +171,7 @@ enum DmarcLookup {
 
 /// Stateful email authenticator with DNS caching.
 pub struct EmailAuthenticator {
-    resolver: Resolver,
+    resolver: MessageAuthenticator,
     /// #120:Dedicated DNS resolver for DMARC TXT lookups.
     dns_resolver: TokioResolver,
     config: EmailAuthConfig,
@@ -184,7 +185,8 @@ pub struct EmailAuthenticator {
 impl EmailAuthenticator {
     /// Create a new authenticator.
     pub async fn new(config: EmailAuthConfig, hostname: String) -> anyhow::Result<Self> {
-        let resolver = Resolver::new_system_conf().map_err(|e| anyhow::anyhow!("resolver: {e}"))?;
+        let resolver = MessageAuthenticator::new_system_conf()
+            .map_err(|e| anyhow::anyhow!("resolver: {e}"))?;
 
         // #120:Shared DNS resolver for DMARC TXT lookups (avoids per-call allocation).
         // trust-dns 0.26: TokioAsyncResolver::tokio is gone; build a TokioResolver
@@ -225,7 +227,7 @@ impl EmailAuthenticator {
     pub(crate) fn with_injected_resolvers(
         config: EmailAuthConfig,
         hostname: String,
-        resolver: Resolver,
+        resolver: MessageAuthenticator,
         dns_resolver: TokioResolver,
     ) -> Self {
         let spf_cache = Cache::builder()
@@ -343,9 +345,16 @@ impl EmailAuthenticator {
         // O-1.2:Increment SPF cache miss counter
         metrics::counter!("mta.spf_cache.miss").increment(1);
 
+        // mail-auth 0.15: SPF parameters are explicit; `mail_from` checks the
+        // MAIL FROM identity only (the old `verify_spf_sender` semantics).
         let output = self
             .resolver
-            .verify_spf_sender(client_ip, helo, from_domain, mail_from)
+            .verify_spf(SpfParameters::mail_from(
+                client_ip,
+                helo,
+                from_domain,
+                mail_from,
+            ))
             .await;
         let verdict = map_spf_result(&output.result());
         // Transient SPF verdicts (TempError, timeout/SERVFAIL) are NOT
@@ -829,9 +838,8 @@ fn domains_aligned(from_domain: &str, auth_domain: &str, mode: DmarcAlignmentMod
 /// Extract the domain of the first RFC 5322 From address (lowercased).
 fn extract_from_domain(message: &AuthenticatedMessage) -> Option<String> {
     message
-        .froms()
-        .first()
-        .and_then(|addr| addr.rsplit_once('@'))
+        .first_from_address()
+        .rsplit_once('@')
         .map(|(_, d)| d.trim().trim_end_matches('.').to_ascii_lowercase())
         .filter(|d| !d.is_empty())
 }
@@ -920,7 +928,7 @@ mod tests {
     use super::*;
 
     fn test_authenticator(config: EmailAuthConfig, hostname: &str) -> Option<EmailAuthenticator> {
-        let resolver = Resolver::new_system_conf().ok()?;
+        let resolver = MessageAuthenticator::new_system_conf().ok()?;
         // trust-dns 0.26: build the TokioResolver via the builder API; the
         // default builder options equal the old default ResolverOpts.
         let dns_resolver = trust_dns_resolver::Resolver::builder_tokio()
@@ -1870,10 +1878,10 @@ mod wire_gap_tests {
     //! organizational-domain fallback (`sp=` / permerror recovery), every
     //! one of these decides real accept/reject dispositions.
 
-    use super::super::test_dns::{resolver_at, DnsAnswer, MockDns};
+    use super::super::test_dns::{mail_auth_at, resolver_at, DnsAnswer, MockDns};
     use super::*;
     use std::collections::HashMap;
-    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use std::net::{IpAddr, Ipv4Addr};
     use std::sync::Arc;
 
     fn sender_ip() -> IpAddr {
@@ -1881,26 +1889,10 @@ mod wire_gap_tests {
     }
 
     fn authenticator(port: u16, enforce_dmarc: bool) -> EmailAuthenticator {
-        // mail-auth's bundled hickory 0.24 stack (SPF/DKIM) and the
-        // workspace hickory 0.26 resolver (DMARC TXT) both pointed at the
-        // mock: the full authenticate() pipeline, no system resolver.
-        use mail_auth::hickory_resolver::config::{
-            NameServerConfig, NameServerConfigGroup, Protocol as McProtocol, ResolverConfig,
-            ResolverOpts,
-        };
-        let mut group = NameServerConfigGroup::new();
-        group.push(NameServerConfig::new(
-            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
-            McProtocol::Udp,
-        ));
-        let config = ResolverConfig::from_parts(None, vec![], group);
-        let mut opts = ResolverOpts::default();
-        opts.attempts = 1;
-        opts.timeout = Duration::from_millis(500);
-        opts.try_tcp_on_error = false;
-        opts.cache_size = 0;
-        let mail_auth_resolver =
-            mail_auth::Resolver::with_capacity(config, opts, 0).expect("mail-auth resolver");
+        // mail-auth 0.15's SPF/DKIM resolver and the workspace hickory 0.26
+        // resolver (DMARC TXT) both point at the mock: the full
+        // authenticate() pipeline, no system resolver.
+        let mail_auth_resolver = mail_auth_at(port);
         EmailAuthenticator::with_injected_resolvers(
             EmailAuthConfig {
                 require_spf: false,

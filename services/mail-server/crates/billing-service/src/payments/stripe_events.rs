@@ -53,6 +53,29 @@ pub enum NormalizedFact {
     Refund(Refund),
     Dispute(Dispute),
     Settlement(Settlement),
+    /// A COMPLETED hosted checkout: the fact the activation consumes. It
+    /// carries the provider payment (PaymentIntent), the checkout session,
+    /// the provider customer and OUR metadata (tenant/plan/interval), so the
+    /// activation can grant the plan and store the reusable card exactly as
+    /// the Mollie completed-checkout path does.
+    CheckoutCompleted(CheckoutCompleted),
+}
+
+/// The neutral completed-checkout fact (V34).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CheckoutCompleted {
+    pub provider: String,
+    /// The provider PAYMENT id (Stripe PaymentIntent; the session id only
+    /// when the session has no intent yet).
+    pub provider_payment_id: String,
+    /// The hosted checkout session id.
+    pub provider_checkout_id: String,
+    pub tenant_id: Option<String>,
+    pub plan_name: Option<String>,
+    pub interval: Option<String>,
+    pub amount_minor: Option<i64>,
+    pub currency: Option<String>,
+    pub provider_customer_id: Option<String>,
 }
 
 /// Verify a `Stripe-Signature` header over the RAW payload bytes.
@@ -169,7 +192,17 @@ pub fn normalize_event(
     match event_type {
         "checkout.session.completed" => {
             let payment = observed_from_document(provider_name, &object, "checkout session")?;
-            Ok(vec![NormalizedFact::Payment(payment)])
+            let mut facts = vec![NormalizedFact::Payment(payment.clone())];
+            if payment.state == super::PaymentState::Succeeded {
+                facts.push(NormalizedFact::CheckoutCompleted(
+                    checkout_completed_from_document(
+                        provider_name,
+                        &object,
+                        &payment.provider_payment_id,
+                    )?,
+                ));
+            }
+            Ok(facts)
         }
         "payment_intent.succeeded"
         | "payment_intent.processing"
@@ -200,15 +233,39 @@ pub fn normalize_event(
 /// obligation attribution ride the SAME metadata keys every ApexMail charge
 /// writes (`metadata.tenant_id`, `metadata.reference` — the Mollie
 /// contract), so the engine's repair-link works provider-blind.
+/// Read an id that Stripe may deliver either as a bare string or as an
+/// expanded object (`/payment_intent/id`, `/customer/id`).
+fn expandable_id(object: &serde_json::Value, field: &str) -> Option<String> {
+    let value = object.get(field)?;
+    if let Some(id) = value.as_str() {
+        return Some(id).filter(|id| !id.is_empty()).map(str::to_string);
+    }
+    value
+        .get("id")
+        .and_then(|id| id.as_str())
+        .filter(|id| !id.is_empty())
+        .map(str::to_string)
+}
+
 fn observed_from_document(
     provider_name: &str,
     object: &serde_json::Value,
     kind: &'static str,
 ) -> Result<ObservedPayment, String> {
     let id = string_at(object, "/id").filter(|id| !id.is_empty());
-    let Some(id) = id else {
+    let Some(mut id) = id else {
         return Err(format!("a {kind} event object carries no id"));
     };
+    // A checkout session is a CONTAINER for the actual payment: the
+    // PaymentIntent id is the money object a refund and the settlement
+    // allocate against, so it is the id the engine must record (a second
+    // `payment_intent.succeeded` event then dedupes on the same operation
+    // id). The session id is only a fallback for an intent-less session.
+    if kind == "checkout session" {
+        if let Some(intent_id) = expandable_id(object, "payment_intent") {
+            id = intent_id;
+        }
+    }
     let status = string_at(object, "/status").unwrap_or_default();
     // Checkout sessions (complete/expired/open) and payment intents
     // (succeeded/…/canceled) have disjoint state vocabularies; each maps
@@ -236,6 +293,41 @@ fn observed_from_document(
         tenant_id: metadata_string(object, "tenant_id"),
         obligation_ref: metadata_string(object, "reference"),
         purpose: "webhook",
+    })
+}
+
+/// The activation's fact: the completed checkout session's payment id,
+/// customer and OUR metadata. The tenant/plan/interval keys are the SAME
+/// keys every ApexMail checkout writes (`metadata.tenant_id`,
+/// `metadata.plan_name`, `metadata.interval`), so activation is
+/// provider-blind. Missing payment/customer ids are represented as `None`
+/// and the dispatch refuses/refunds — never invented.
+fn checkout_completed_from_document(
+    provider_name: &str,
+    object: &serde_json::Value,
+    provider_payment_id: &str,
+) -> Result<CheckoutCompleted, String> {
+    let checkout_id = string_at(object, "/id").filter(|id| !id.is_empty());
+    let Some(checkout_id) = checkout_id else {
+        return Err("a checkout session event object carries no id".to_string());
+    };
+    let amount_minor = object
+        .get("amount_total")
+        .and_then(|value| value.as_i64())
+        .or_else(|| object.get("amount").and_then(|value| value.as_i64()));
+    let currency = string_at(object, "/currency")
+        .map(|text| text.trim().to_ascii_uppercase())
+        .filter(|text| !text.is_empty());
+    Ok(CheckoutCompleted {
+        provider: provider_name.to_string(),
+        provider_payment_id: provider_payment_id.to_string(),
+        provider_checkout_id: checkout_id,
+        tenant_id: metadata_string(object, "tenant_id"),
+        plan_name: metadata_string(object, "plan_name"),
+        interval: metadata_string(object, "interval"),
+        amount_minor,
+        currency,
+        provider_customer_id: expandable_id(object, "customer"),
     })
 }
 
@@ -349,3 +441,86 @@ fn seconds_at(value: Option<&serde_json::Value>) -> Option<chrono::DateTime<Utc>
 /// The adapter's stable name, re-exported for the route's dispatch call
 /// (`normalize_event(stripe_events::PROVIDER, &event)`).
 pub const PROVIDER: &str = PROVIDER_NAME;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A completed checkout yields BOTH the settlement fact (the money) and
+    /// the activation fact (the plan grant). The payment id is the
+    /// PaymentIntent — the object a refund and the settlement allocate
+    /// against — not the container session id.
+    #[test]
+    fn checkout_session_completed_yields_the_activation_fact() {
+        let event = serde_json::json!({
+            "id": "evt_1",
+            "type": "checkout.session.completed",
+            "data": { "object": {
+                "id": "cs_test_1",
+                "object": "checkout.session",
+                "status": "complete",
+                "amount_total": 2480,
+                "currency": "eur",
+                "payment_intent": "pi_test_1",
+                "customer": "cus_test_1",
+                "metadata": {
+                    "tenant_id": "tenant_1",
+                    "plan_name": "starter",
+                    "interval": "monthly"
+                }
+            }}
+        });
+        let facts = normalize_event(PROVIDER, &event).expect("normalizes");
+        assert_eq!(facts.len(), 2, "payment + completed-checkout fact");
+        match &facts[0] {
+            NormalizedFact::Payment(payment) => {
+                assert_eq!(payment.provider_payment_id, "pi_test_1");
+                assert_eq!(payment.state, super::super::PaymentState::Succeeded);
+                assert_eq!(payment.tenant_id.as_deref(), Some("tenant_1"));
+                assert_eq!(payment.amount_minor, Some(2_480));
+            }
+            other => panic!("expected a payment fact, got {other:?}"),
+        }
+        match &facts[1] {
+            NormalizedFact::CheckoutCompleted(checkout) => {
+                assert_eq!(checkout.provider_payment_id, "pi_test_1");
+                assert_eq!(checkout.provider_checkout_id, "cs_test_1");
+                assert_eq!(checkout.tenant_id.as_deref(), Some("tenant_1"));
+                assert_eq!(checkout.plan_name.as_deref(), Some("starter"));
+                assert_eq!(checkout.interval.as_deref(), Some("monthly"));
+                assert_eq!(checkout.amount_minor, Some(2_480));
+                assert_eq!(checkout.currency.as_deref(), Some("EUR"));
+                assert_eq!(checkout.provider_customer_id.as_deref(), Some("cus_test_1"));
+            }
+            other => panic!("expected a completed-checkout fact, got {other:?}"),
+        }
+    }
+
+    /// An expanded payment_intent object still resolves to its id (Stripe
+    /// may deliver either shape).
+    #[test]
+    fn expanded_payment_intent_and_customer_objects_resolve_to_ids() {
+        let event = serde_json::json!({
+            "id": "evt_2",
+            "type": "checkout.session.completed",
+            "data": { "object": {
+                "id": "cs_test_2",
+                "status": "complete",
+                "amount_total": 1000,
+                "currency": "eur",
+                "payment_intent": { "id": "pi_test_2", "object": "payment_intent" },
+                "customer": { "id": "cus_test_2", "object": "customer" },
+                "metadata": { "tenant_id": "t2", "plan_name": "pro" }
+            }}
+        });
+        let facts = normalize_event(PROVIDER, &event).expect("normalizes");
+        match &facts[1] {
+            NormalizedFact::CheckoutCompleted(checkout) => {
+                assert_eq!(checkout.provider_payment_id, "pi_test_2");
+                assert_eq!(checkout.provider_customer_id.as_deref(), Some("cus_test_2"));
+                assert_eq!(checkout.interval, None);
+            }
+            other => panic!("expected a completed-checkout fact, got {other:?}"),
+        }
+    }
+}

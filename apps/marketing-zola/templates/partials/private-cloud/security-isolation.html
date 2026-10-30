@@ -29,21 +29,21 @@
         <span class="apex-index">02</span>
         <div>
           <h3 class="apex-h3">Encryption at Rest</h3>
-          <p>AES-256 encryption for stored data, with customer-managed key options reviewed for dedicated deployments.</p>
+          <p>AES-256-GCM encryption for stored message content, with customer-managed key options reviewed for dedicated deployments.</p>
         </div>
       </div>
       <div>
         <span class="apex-index">03</span>
         <div>
           <h3 class="apex-h3">Encryption in Transit</h3>
-          <p>TLS 1.2+ enforced, TLS 1.3 preferred on all connections. Opportunistic DANE and MTA-STS for outbound delivery.</p>
+          <p>TLS 1.2+ enforced, TLS 1.3 preferred on all connections. MTA-STS policy publication and DANE validation are roadmap capabilities, not enforced on the managed cloud's mail paths today.</p>
         </div>
       </div>
       <div>
         <span class="apex-index">04</span>
         <div>
           <h3 class="apex-h3">Access Control</h3>
-          <p>SSO/SAML integration, role-based access, IP allowlisting, and mandatory 2FA for all admin operations.</p>
+          <p>OIDC SSO (SAML on request), role-based access, IP allowlisting, and mandatory 2FA for all admin operations.</p>
         </div>
       </div>
       <div>

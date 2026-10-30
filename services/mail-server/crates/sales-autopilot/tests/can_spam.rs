@@ -61,7 +61,7 @@ fn business_footer<'a>(link: &'a str) -> OutreachFooter<'a> {
         },
         unsubscribe_link: link,
         postal_address: Some("1 Example Street, Tallinn"),
-        privacy_url: Some("https://apexmail.example/privacy"),
+        privacy_url: "https://apexmail.example/privacy",
     }
 }
 
@@ -153,7 +153,7 @@ fn footer_escapes_sender_identity_and_basis() {
         },
         unsubscribe_link: "https://x.example/u/a?b=1&c=2",
         postal_address: None,
-        privacy_url: None,
+        privacy_url: "https://apexmail.example/privacy",
     };
     let (html, _) = render_outreach_footer(&footer);
     assert!(

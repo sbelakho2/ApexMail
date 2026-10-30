@@ -52,7 +52,7 @@ La liste actuelle des sous-traitants autorisés est tenue dans le [Registre des 
 | GitHub, Inc. | Authentification OAuth optionnelle | Mondial (entité américaine) | Clauses contractuelles types |
 | Mollie B.V. | Traitement des paiements | Pays-Bas (UE) ; les réseaux de cartes traitent à l'échelle mondiale selon le DPA Mollie | Traitement intra-UE (Mollie B.V., Amsterdam) |
 
-L'infrastructure auto-hébergée (ClickHouse, Redis) s'exécute sur l'infrastructure UE gérée par ApexMail (Finlande). Les éditeurs open source en amont ne traitent pas les données des clients.
+L'infrastructure auto-hébergée (ClickHouse, Redis) s'exécute sur l'infrastructure UE gérée par ApexMail. Les éditeurs open source en amont ne traitent pas les données des clients.
 
 ### Prestataire de paiement
 

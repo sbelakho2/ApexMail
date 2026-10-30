@@ -98,7 +98,15 @@ regex.workspace = true
 moka.workspace = true
 
 # Email protocols (for email processor)
-mail-send = "0.4"
+# `dkim` is deliberately NOT enabled: mail-send's dkim feature enables
+# mail-auth's `report` default (zip 8.6 — RUSTSEC-2026-0367/68/69, fixed only
+# in zip >=9). worker-processors owns the signer directly (mail-auth below)
+# and signs in transport::send_signed_local with the same primitives.
+mail-send = { version = "0.6", default-features = false, features = ["builder", "ring", "tls12"] }
+# Direct DKIM signer (mail-send's dkim path would pull the vulnerable zip).
+mail-auth = { version = "0.15", default-features = false, features = ["rust-crypto"] }
+# DKIM keys arrive as PEM; mail-auth 0.15 consumes DER (PrivateKeyDer).
+rustls-pki-types = "1"
 rustls.workspace = true
 hex = "0.4"
 

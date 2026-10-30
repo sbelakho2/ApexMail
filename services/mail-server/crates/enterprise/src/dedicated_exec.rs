@@ -210,10 +210,15 @@ fn nonempty(value: &str) -> Option<String> {
 }
 
 /// The concrete provider location when the plan's default region is the
-/// abstract EEA area rather than a location slug. `fsn1` (Falkenstein,
-/// Germany) is inside the EEA and is the same default the dedicated-IP
-/// provider uses (`HETZNER_DEFAULT_LOCATION` in api-server's ip_provider).
-const DEFAULT_PROVIDER_LOCATION: &str = "fsn1";
+/// abstract EEA area rather than a location slug. `hel1` (Helsinki) is the
+/// ONE location ApexMail provisions in: hosting stays in the EU/EEA, and the
+/// same default the dedicated-IP provider uses (`HETZNER_DEFAULT_LOCATION`
+/// in api-server's ip_provider).
+///
+/// Contract enforcement is config-only: no per-contract location column
+/// exists, so `HETZNER_DEFAULT_LOCATION` must equal this value and any
+/// explicit other location is a typed refusal ([`ExecError::LocationRefused`]).
+const DEFAULT_PROVIDER_LOCATION: &str = "hel1";
 
 /// The provider create call is a control-plane action, not a hot path: one
 /// bounded timeout, no retries (a retry that created a second host would be
@@ -290,19 +295,56 @@ async fn fetch_server(
     Ok(parsed.server)
 }
 
-/// Map the plan's default region to a provider location slug. A concrete
-/// slug ("fsn1", "nbg1", "hel1") passes through unchanged; the abstract
-/// "EEA" default maps to the documented EEA location.
-fn provider_location(plan_region: &str) -> String {
-    let region = plan_region.trim().to_ascii_lowercase();
-    if region.len() == 4
-        && region.starts_with(|c: char| c.is_ascii_alphabetic())
-        && region.ends_with(|c: char| c.is_ascii_digit())
-    {
-        region
-    } else {
+/// Map the plan's default region to a provider location slug.
+///
+/// Every ApexMail-provisioned host is in Helsinki (`hel1`). The abstract
+/// EEA default (and any EEA country/region token) maps to it; an explicit
+/// `hel1` passes; ANY other location refuses with a typed error because no
+/// per-contract location field exists to authorize it. The configured
+/// `HETZNER_DEFAULT_LOCATION` must itself be `hel1` — a deployment cannot
+/// silently relocate the fleet with an env edit.
+pub fn resolve_provider_location(
+    plan_region: &str,
+    configured_default: &str,
+) -> Result<String, ExecError> {
+    let configured = configured_default.trim().to_ascii_lowercase();
+    let configured = if configured.is_empty() {
         DEFAULT_PROVIDER_LOCATION.to_string()
+    } else {
+        configured
+    };
+    if configured != DEFAULT_PROVIDER_LOCATION {
+        return Err(ExecError::LocationRefused {
+            location: configured,
+            guidance: format!(
+                "HETZNER_DEFAULT_LOCATION must be {DEFAULT_PROVIDER_LOCATION} (Helsinki); every \
+                 ApexMail-provisioned server runs there. No per-contract location field exists, \
+                 so any other configured location is refused"
+            ),
+        });
     }
+
+    let region = plan_region.trim().to_ascii_lowercase();
+    if region.is_empty() || crate::dedicated_tenant::region_is_eea(&region) {
+        return Ok(DEFAULT_PROVIDER_LOCATION.to_string());
+    }
+    if region == DEFAULT_PROVIDER_LOCATION {
+        return Ok(region);
+    }
+    Err(ExecError::LocationRefused {
+        location: region,
+        guidance: format!(
+            "only {DEFAULT_PROVIDER_LOCATION} (Helsinki) is provisioned; no per-contract location \
+             field exists to authorize another provider location"
+        ),
+    })
+}
+
+/// [`resolve_provider_location`] against the deployment's configured default
+/// (`HETZNER_DEFAULT_LOCATION`, default `hel1`).
+fn provider_location(plan_region: &str) -> Result<String, ExecError> {
+    let configured = std::env::var("HETZNER_DEFAULT_LOCATION").unwrap_or_default();
+    resolve_provider_location(plan_region, &configured)
 }
 
 // ── Errors ──────────────────────────────────────────────────────────────
@@ -395,6 +437,12 @@ pub enum ExecError {
         provider_host_id: String,
         message: String,
     },
+
+    /// A hosting location other than Helsinki was requested or configured.
+    /// Every ApexMail server runs in `hel1`; no per-contract location field
+    /// exists to authorize another location, so the execution refuses.
+    #[error("provider location {location:?} refused: {guidance}")]
+    LocationRefused { location: String, guidance: String },
 
     /// Database or catalog failure on our side of the wire.
     #[error("{0}")]
@@ -610,7 +658,7 @@ impl PrivateDeployService {
     /// credential: the control-plane route uses the env-gated entry above,
     /// the tests drive this one against a loopback stub (the same split
     /// api-server's ip_provider uses for its `new_for_tests` constructor).
-    pub(crate) async fn execute_host_provision_via(
+    pub async fn execute_host_provision_via(
         &self,
         deployment_id: Uuid,
         api_base: &str,
@@ -760,7 +808,7 @@ impl PrivateDeployService {
             name: name.clone(),
             server_type: config.server_type.clone(),
             image: config.image.clone(),
-            location: provider_location(&plan.default_region),
+            location: provider_location(&plan.default_region)?,
             ssh_keys: config.ssh_key_names.clone(),
             user_data: config.user_data.clone(),
             labels: serde_json::json!({ "apexmail-dt": deployment_id.to_string() }),
@@ -1290,11 +1338,75 @@ mod tests {
     }
 
     #[test]
-    fn provider_location_passes_slugs_through_and_maps_the_eea_default() {
-        assert_eq!(provider_location("EEA"), DEFAULT_PROVIDER_LOCATION);
-        assert_eq!(provider_location("eu"), DEFAULT_PROVIDER_LOCATION);
-        assert_eq!(provider_location("fsn1"), "fsn1");
-        assert_eq!(provider_location("hel1"), "hel1");
+    fn provider_location_defaults_to_hel1_and_refuses_every_other_location() {
+        // The abstract EEA default and every EEA region token map to hel1.
+        for region in ["EEA", "eu", "europe", "eea", "de", "eu-central-1"] {
+            assert_eq!(
+                resolve_provider_location(region, "hel1").expect(region),
+                "hel1",
+                "region {region:?} must provision in Helsinki"
+            );
+        }
+        assert_eq!(
+            resolve_provider_location("hel1", "hel1").expect("explicit hel1"),
+            "hel1"
+        );
+        // Any other provider location is a typed refusal (no per-contract
+        // location field exists).
+        for other in ["fsn1", "nbg1", "ash", "hil", "us-east-1"] {
+            let error = resolve_provider_location(other, "hel1")
+                .expect_err("a non-hel1 location must refuse");
+            assert!(
+                matches!(error, ExecError::LocationRefused { .. }),
+                "expected LocationRefused for {other}, got {error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn hetzner_default_location_is_honored_and_must_be_hel1() {
+        // Unset/empty honours the documented default (hel1).
+        assert_eq!(
+            resolve_provider_location("EEA", "").expect("empty default"),
+            "hel1"
+        );
+        assert_eq!(
+            resolve_provider_location("EEA", " hel1 ").expect("trimmed default"),
+            "hel1"
+        );
+        // A configured non-hel1 default is refused, never silently applied.
+        let error = resolve_provider_location("EEA", "fsn1")
+            .expect_err("HETZNER_DEFAULT_LOCATION=fsn1 must refuse");
+        assert!(
+            matches!(error, ExecError::LocationRefused { .. }),
+            "expected LocationRefused, got {error:?}"
+        );
+        assert!(
+            error.to_string().contains("HETZNER_DEFAULT_LOCATION"),
+            "the refusal must name the variable: {error}"
+        );
+    }
+
+    #[test]
+    fn dedicated_tenant_dry_run_targets_hel1() {
+        // The dry run: the plan's real default region resolved through the
+        // same production path the create uses, with no provider call.
+        let plan = plan_facts().expect("plan catalog");
+        assert_eq!(plan.default_region, "EEA");
+        let location = resolve_provider_location(&plan.default_region, "hel1")
+            .expect("the Dedicated Tenant dry run must resolve");
+        assert_eq!(location, "hel1", "every provisioned server is in Helsinki");
+        let request = CreateServerRequest {
+            name: "apexmail-dt:dry-run".to_string(),
+            server_type: "cx22".to_string(),
+            image: "ubuntu-24.04".to_string(),
+            location: location.clone(),
+            ssh_keys: vec!["operator".to_string()],
+            user_data: None,
+            labels: serde_json::json!({ "apexmail-dt": "dry-run" }),
+        };
+        let body = serde_json::to_value(&request).expect("serialize create request");
+        assert_eq!(body["location"], "hel1");
     }
 
     #[test]

@@ -28,34 +28,49 @@
 //! There is exactly one Beta sampler in the codebase: [`analytics::sample_beta`]
 //! (Marsaglia–Tsang Gamma), re-used here. No second sampler is written.
 //!
-//! # The reward ladder (§17)
+//! # The reward ladder (§17) and the posterior (S1, audit 30 Oct)
 //!
-//! | outcome | reward | role |
+//! The ladder below still classifies outcomes and carries the monetary
+//! terminal value, but it is **no longer a posterior weight**. The audit's
+//! SAI-2 finding was exactly that reward-weighting: the retained-MRR rung
+//! could move `alpha` by ln(1 + MRR/10) ≈ 6.9 for ONE contact, one contact's
+//! reply, meeting and paid outcomes each moved it, and silence never reached
+//! beta.
+//!
+//! | outcome | classification | posterior role |
 //! |---|---|---|
-//! | `delivered` | `0.0` | operational metric only |
-//! | `open` | `0.0` | informational only, **never a success signal** |
-//! | `click` | `0.05` | weak intent |
-//! | `reply` | `0.2` | modest |
-//! | `positive_reply` | `0.5` | strong |
-//! | `meeting_booked` | `0.7` | stronger |
-//! | `meeting_attended` | `0.8` | stronger |
-//! | `trial` | `0.9` | very strong |
-//! | `paid_subscription` | `1.0` | primary business reward |
-//! | `retained_mrr` | `1.2` | eventual highest value |
-//! | `bounce` | `-0.2` | penalty |
-//! | `complaint` | `-0.5` | penalty |
-//! | `unsubscribe` | `-0.3` | penalty |
+//! | `delivered`, `open` | operational exposure | none (contacts only) |
+//! | `click`, `reply` | weak intent | none |
+//! | `positive_reply`, `meeting_booked` | **primary success** | one matured trial |
+//! | `meeting_attended`, `trial`, `paid_subscription`, `retained_mrr` | revenue / north star | none |
+//! | `bounce`, `complaint`, `unsubscribe` | guardrail harm | none |
 //!
-//! The posterior is a reward-weighted Beta:
+//! The posterior is one Beta over one binary primary outcome per contact per
+//! arm:
 //!
 //! ```text
-//! alpha = 1 + Σ positive rewards      beta = 1 + Σ |negative rewards|
+//! alpha = 1 + successes
+//! beta  = 1 + (matured_contacts - successes)
 //! ```
 //!
-//! `delivered`/`open` move no posterior parameter at all (they increment only
-//! the `contacts` exposure counter). Therefore 10 000 opens cannot promote an
-//! arm over one with real replies, see the release-gate test
-//! `ten_thousand_opens_never_win_an_arm`.
+//! A contact becomes a trial only once its observation window (14 days from
+//! the first touch) has CLOSED; silence is a failure at window close. The
+//! primary-outcome ledger is
+//! `sales_experiment_contact_trials` (migration 290) whose unique key
+//! `(experiment, arm, contact, primary_metric, primary_metric_version)` gives
+//! at most one success per contact: reply + meeting + paid for the same
+//! contact counts ONCE.
+//!
+//! Revenue is deliberately outside the posterior. The engine chooses on
+//! `P(primary success) × expected first-year value`, where the multiplier is
+//! deterministic per arm from the realized revenue ledger
+//! ([`ArmPosterior::choice_score`]). Complaints, unsubscribes and bounces are
+//! S2 guardrails: they increment the harm counter and pause an arm+segment at
+//! the named thresholds in [`crate::scoreboard`], never `beta`.
+//!
+//! `delivered`/`open` move no posterior parameter at all. Therefore 10 000
+//! opens cannot promote an arm over one with real replies, see the release
+//! gate test `ten_thousand_opens_never_win_an_arm`.
 //!
 //! # Contextual selection (§18)
 //!
@@ -99,12 +114,13 @@
 //! beats a premature send), and never chooses an external send when a human
 //! has replied or when outreach cost exceeds expected value.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use rand::rngs::StdRng;
 use rand::SeedableRng;
 use serde::{Deserialize, Serialize};
-use sqlx::{PgPool, Row};
+use sqlx::{PgPool, Postgres, Row, Transaction};
 use uuid::Uuid;
 
 use crate::attribution::OutcomeKind;
@@ -118,6 +134,37 @@ use crate::types::{DecisionAction, SalesError};
 /// authoritative. Below this the global posterior is used (documented hard
 /// shrinkage rule).
 pub const MIN_CONTEXT_SAMPLES: i64 = 25;
+
+/// The S2 primary metric key (seeded in `sales_experiment_metrics`, migration
+/// 290). One binary outcome per contact per arm: a positive reply or a booked
+/// meeting within [`PRIMARY_METRIC_WINDOW_DAYS`] of the first touch.
+pub const PRIMARY_METRIC_KEY: &str = "positive_reply_or_meeting_14d";
+
+/// Frozen version of the primary metric. It is part of the contact-trial
+/// identity, so a future definition change can never rewrite an old trial.
+pub const PRIMARY_METRIC_VERSION: i32 = 1;
+
+/// Frozen primary observation window.
+pub const PRIMARY_METRIC_WINDOW_DAYS: i64 = 14;
+
+/// The S2 north-star metric key (seeded in `sales_experiment_metrics`).
+pub const NORTH_STAR_METRIC_KEY: &str = "won_mrr_per_1000_90d";
+
+/// Frozen version of the north star.
+pub const NORTH_STAR_METRIC_VERSION: i32 = 1;
+
+/// Frozen north-star observation window.
+pub const NORTH_STAR_WINDOW_DAYS: i64 = 90;
+
+/// Default per-segment randomized holdout share (S3).
+pub const DEFAULT_HOLDOUT_SHARE: f64 = 0.05;
+
+/// A hostile holdout share can never exceed half the segment.
+pub const MAX_HOLDOUT_SHARE: f64 = 0.5;
+
+/// Number of Monte-Carlo draws used to estimate each arm's selection
+/// probability (the S4 propensity). Logged with every decision.
+pub const PROPENSITY_DRAWS: usize = 2_000;
 
 /// Maximum length of the sanitized context bucket key.
 pub const MAX_CONTEXT_KEY_LEN: usize = 200;
@@ -308,6 +355,22 @@ impl RewardKind {
         matches!(self, Self::Bounce | Self::Complaint | Self::Unsubscribe)
     }
 
+    /// Revenue-bearing rungs: the north-star metric uses their `value_eur`.
+    /// They never move the posterior.
+    pub fn is_revenue(self) -> bool {
+        matches!(
+            self,
+            Self::Trial | Self::PaidSubscription | Self::RetainedMrr
+        )
+    }
+
+    /// Outcomes that count as the S2 primary success: a positive reply or a
+    /// booked meeting. Every other outcome is either exposure, revenue or
+    /// harm, and none of them is a second success for the same contact.
+    pub fn is_primary_success(self) -> bool {
+        matches!(self, Self::PositiveReply | Self::MeetingBooked)
+    }
+
     /// Operational/informational outcomes: recorded, exposed for budgets, but
     /// never moved into the posterior.
     pub fn is_operational(self) -> bool {
@@ -330,25 +393,40 @@ impl std::fmt::Display for RewardKind {
 // Posteriors
 // ---------------------------------------------------------------------------
 
-/// One arm's reward-weighted Beta posterior, mirroring
+/// One arm's exposure-correct Beta posterior, mirroring
 /// `sales_experiment_arms` (migration 200_sales_autopilot_v2_unification.sql:
-/// 807-825).
+/// 807-825; the meaning of the counters is migration 290).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ArmPosterior {
     pub variant: String,
-    /// `alpha = 1 + Σ positive rewards`; always finite and `> 0` (DB CHECK,
+    /// `alpha = 1 + successes`; always finite and `> 0` (DB CHECK,
     /// migration line 813).
     pub alpha: f64,
-    /// `beta = 1 + Σ |negative rewards|`; always finite and `> 0` (line 815).
+    /// `beta = 1 + (trials - successes)`; always finite and `> 0` (line 815).
     pub beta: f64,
-    /// Informative observations only (click and above). Opens do not count.
+    /// MATURED contacts only: a contact counts only after its 14-day window
+    /// closed. Silence is a failure at window close.
     pub trials: i64,
+    /// Matured contacts with a positive reply or booked meeting inside the
+    /// window. At most one success per contact per arm.
     pub successes: i64,
-    /// Exposure counter: every recorded outcome, including opens.
+    /// Exposure counter: every contacted account, matured or not, including
+    /// operational outcomes.
     pub contacts: i64,
+    /// Guardrail telemetry (complaints + unsubscribes + bounces). Never a
+    /// posterior parameter.
     pub negative_outcomes: i64,
     pub enrichment_cost_eur: f64,
     pub is_control: bool,
+    /// Deterministic expected-first-year-value multiplier from the realized
+    /// revenue ledger. The choice score is `mean() * value_multiplier`;
+    /// revenue never enters `alpha` or `beta`.
+    #[serde(default = "default_value_multiplier")]
+    pub value_multiplier: f64,
+}
+
+fn default_value_multiplier() -> f64 {
+    1.0
 }
 
 impl ArmPosterior {
@@ -363,6 +441,7 @@ impl ArmPosterior {
             negative_outcomes: 0,
             enrichment_cost_eur: 0.0,
             is_control,
+            value_multiplier: 1.0,
         }
     }
 
@@ -372,6 +451,19 @@ impl ArmPosterior {
         } else {
             0.0
         }
+    }
+
+    /// The S1 revenue separation: the arm is chosen on
+    /// `P(primary success) × expected first-year value`. The multiplier is
+    /// deterministic per arm (relative realized revenue, 1.0 when there is no
+    /// revenue evidence) and is NEVER added to alpha.
+    pub fn choice_score(&self) -> f64 {
+        let multiplier = if self.value_multiplier.is_finite() && self.value_multiplier > 0.0 {
+            self.value_multiplier
+        } else {
+            1.0
+        };
+        self.mean() * multiplier
     }
 
     /// 95% credible interval, re-using the analytics normal approximation.
@@ -427,15 +519,34 @@ pub fn validate_posterior(alpha: f64, beta: f64) -> Result<(), SalesError> {
     Ok(())
 }
 
-/// Apply one rung of the ladder to a posterior, validating every input.
+/// The exposure-correct posterior from counts. This is the ONLY formula the
+/// arm rows are allowed to hold (migration 290 proves the invariant):
 ///
-/// * positive reward: `alpha += reward`, `trials += 1`, `successes += 1`;
-/// * negative reward: `beta += |reward|`, `trials += 1`, `negative_outcomes += 1`;
-/// * zero (delivered/open): only `contacts += 1`, the posterior does not move.
-pub fn apply_reward_to_posterior(
-    arm: &mut ArmPosterior,
-    kind: RewardKind,
-) -> Result<(), SalesError> {
+/// ```text
+/// alpha = 1 + successes
+/// beta  = 1 + (matured_contacts - successes)
+/// ```
+pub fn posterior_from_counts(
+    matured_contacts: i64,
+    successes: i64,
+) -> Result<(f64, f64), SalesError> {
+    if matured_contacts < 0 || successes < 0 || successes > matured_contacts {
+        return Err(SalesError::InvalidInput(format!(
+            "exposure-correct posterior requires 0 <= successes <= matured contacts, got \
+             successes={successes}, matured={matured_contacts}"
+        )));
+    }
+    let alpha = 1.0 + successes as f64;
+    let beta = 1.0 + (matured_contacts - successes) as f64;
+    validate_posterior(alpha, beta)?;
+    Ok((alpha, beta))
+}
+
+/// Apply ONE matured contact to a posterior. `success` means a positive
+/// reply or booked meeting inside the window; `false` is silence at window
+/// close (a failure). A contact may be applied at most once: the caller's
+/// contact-trial ledger enforces the identity `(arm, contact, metric)`.
+pub fn apply_matured_contact(arm: &mut ArmPosterior, success: bool) -> Result<(), SalesError> {
     validate_posterior(arm.alpha, arm.beta)?;
     if arm.trials < 0 || arm.successes < 0 || arm.successes > arm.trials {
         return Err(SalesError::InvalidInput(format!(
@@ -443,38 +554,58 @@ pub fn apply_reward_to_posterior(
             arm.variant, arm.trials, arm.successes
         )));
     }
-    let reward = kind.reward();
-    if !reward.is_finite() {
-        return Err(SalesError::InvalidInput(format!(
-            "reward for {kind} must be finite"
-        )));
-    }
-    arm.contacts = arm.contacts.saturating_add(1);
-    if !kind.is_informative() {
-        return Ok(());
-    }
     arm.trials = arm.trials.saturating_add(1);
-    if reward > 0.0 {
-        arm.alpha += reward;
+    arm.contacts = arm.contacts.saturating_add(1);
+    if success {
         arm.successes = arm.successes.saturating_add(1);
-    } else if reward < 0.0 {
-        arm.beta += -reward;
-        arm.negative_outcomes = arm.negative_outcomes.saturating_add(1);
     }
-    validate_posterior(arm.alpha, arm.beta)
+    let (alpha, beta) = posterior_from_counts(arm.trials, arm.successes)?;
+    arm.alpha = alpha;
+    arm.beta = beta;
+    Ok(())
 }
 
-/// Deterministic exploit choice: the arm with the highest posterior mean,
-/// breaking ties control-first then by variant name. Used whenever
-/// exploration is not allowed.
+/// Record one operational exposure (`delivered`/`open`). It increments the
+/// contact counter only: no trial, no alpha, no beta. 10 000 opens therefore
+/// remain a Beta(1, 1) arm.
+pub fn record_operational_exposure(arm: &mut ArmPosterior) -> Result<(), SalesError> {
+    validate_posterior(arm.alpha, arm.beta)?;
+    arm.contacts = arm.contacts.saturating_add(1);
+    Ok(())
+}
+
+/// Does `occurred_at` fall inside the frozen primary window measured from
+/// `first_touch_at`? Equality is inside the window; the outcome exactly at
+/// the boundary freezes as a success.
+pub fn within_primary_window(first_touch_at: DateTime<Utc>, occurred_at: DateTime<Utc>) -> bool {
+    occurred_at >= first_touch_at
+        && occurred_at <= first_touch_at + ChronoDuration::days(PRIMARY_METRIC_WINDOW_DAYS)
+}
+
+/// Does `occurred_at` fall inside the north-star window? Revenue after this
+/// boundary belongs to no arm comparison.
+pub fn within_north_star_window(first_touch_at: DateTime<Utc>, occurred_at: DateTime<Utc>) -> bool {
+    occurred_at >= first_touch_at
+        && occurred_at <= first_touch_at + ChronoDuration::days(NORTH_STAR_WINDOW_DAYS)
+}
+
+/// The maturity instant of a contact's primary window.
+pub fn primary_matures_at(first_touch_at: DateTime<Utc>) -> DateTime<Utc> {
+    first_touch_at + ChronoDuration::days(PRIMARY_METRIC_WINDOW_DAYS)
+}
+
+/// Deterministic exploit choice: the arm with the highest choice score
+/// (`posterior mean × expected first-year value multiplier`), breaking ties
+/// control-first then by variant name. Used whenever exploration is not
+/// allowed.
 pub fn best_arm_index(arms: &[ArmPosterior]) -> Option<usize> {
     arms.iter()
         .enumerate()
         .max_by(|(_, a), (_, b)| {
-            a.mean()
-                .partial_cmp(&b.mean())
+            a.choice_score()
+                .partial_cmp(&b.choice_score())
                 .unwrap_or(std::cmp::Ordering::Equal)
-                // Higher mean wins; control wins a mean tie; then the smaller
+                // Higher score wins; control wins a tie; then the smaller
                 // variant name wins (deterministic).
                 .then_with(|| a.is_control.cmp(&b.is_control))
                 .then_with(|| b.variant.cmp(&a.variant))
@@ -483,8 +614,10 @@ pub fn best_arm_index(arms: &[ArmPosterior]) -> Option<usize> {
 }
 
 /// Monte-Carlo selection probabilities over a set of posteriors, re-using the
-/// single Beta sampler. Deterministic given the OS RNG; tests use wide
-/// tolerances.
+/// single Beta sampler. Each sample is multiplied by the arm's value
+/// multiplier: the sampler explores probability of success, revenue only
+/// ranks the outcome (S1.5). This is the estimator the S4 propensity log
+/// records; deterministic given the OS RNG, tests use wide tolerances.
 pub fn selection_win_probabilities(
     arms: &[ArmPosterior],
     draws: usize,
@@ -509,8 +642,9 @@ pub fn selection_win_probabilities(
                         arm.variant
                     ))
                 })?;
-            if sample > best_sample {
-                best_sample = sample;
+            let score = sample * arm.value_multiplier.max(f64::MIN_POSITIVE);
+            if score > best_sample {
+                best_sample = score;
                 best = index;
             }
         }
@@ -522,7 +656,8 @@ pub fn selection_win_probabilities(
         .collect())
 }
 
-/// Monte-Carlo probability that `challenger` beats `control`.
+/// Monte-Carlo probability that `challenger` beats `control` on the choice
+/// score (probability of success × expected value).
 pub fn probability_challenger_beats(
     control: &ArmPosterior,
     challenger: &ArmPosterior,
@@ -541,7 +676,8 @@ pub fn probability_challenger_beats(
                         "challenger '{}' posterior cannot be sampled: {error}",
                         challenger.variant
                     ))
-                })?;
+                })?
+                * challenger.value_multiplier.max(f64::MIN_POSITIVE);
         let incumbent =
             analytics::campaign_autopilot::sample_beta(&mut rng, control.alpha, control.beta)
                 .map_err(|error| {
@@ -549,7 +685,8 @@ pub fn probability_challenger_beats(
                         "control '{}' posterior cannot be sampled: {error}",
                         control.variant
                     ))
-                })?;
+                })?
+                * control.value_multiplier.max(f64::MIN_POSITIVE);
         if challenge > incumbent {
             wins += 1;
         }
@@ -1159,7 +1296,7 @@ impl ExperimentStatus {
     }
 }
 
-/// One `sales_experiments` row plus its parsed limits.
+/// One `sales_experiments` row plus its parsed limits and S5 registry fields.
 #[derive(Debug, Clone)]
 pub struct Experiment {
     pub id: Uuid,
@@ -1169,6 +1306,19 @@ pub struct Experiment {
     pub status: ExperimentStatus,
     pub context_dimensions: Vec<String>,
     pub budgets: ExplorationBudget,
+    /// S5 registry: the hypothesis under test.
+    pub hypothesis: Option<String>,
+    /// S2 primary metric key/version this experiment reports.
+    pub primary_metric: String,
+    pub primary_metric_version: i32,
+    /// S5 planned sample (per experiment, contacts across arms).
+    pub planned_sample: Option<i64>,
+    pub started_at: Option<DateTime<Utc>>,
+    pub ended_at: Option<DateTime<Utc>>,
+    /// S5 documented sequential method (`msprt`).
+    pub sequential_method: String,
+    /// S3 per-segment randomized holdout share, `0.0..=0.5`.
+    pub holdout_share: f64,
 }
 
 /// Everything `select_variant` needs beyond the experiment row.
@@ -1179,6 +1329,17 @@ pub struct VariantContext {
     pub daily_exploration_pct: f64,
     pub account_expected_value_eur: f64,
     pub explicit_exploration_override: bool,
+    /// Account being decided, when known. Required for the S3 holdout (the
+    /// holdout is assigned by a stable hash of account + segment + registry
+    /// version).
+    pub account_id: Option<Uuid>,
+}
+
+/// One arm's logged selection probability (S4).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ArmPropensity {
+    pub variant: String,
+    pub probability: f64,
 }
 
 /// The selected arm, with the reason it was selected (becomes a Decision
@@ -1198,6 +1359,16 @@ pub struct VariantSelection {
     pub context_bucket: Option<String>,
     pub posterior_mean: f64,
     pub reason: String,
+    /// S4: the ACTUAL probability each arm had of being drawn by this
+    /// decision's sampler. The chosen arm's entry is the propensity logged on
+    /// the assignment and on the step execution.
+    #[serde(default)]
+    pub propensities: Vec<ArmPropensity>,
+    /// `Some(reason)` means NO arm may send for this decision: the account is
+    /// in the S3 holdout, or every arm is paused by an S2 guardrail. The
+    /// caller must skip the send (never fall back to an arbitrary arm).
+    #[serde(default)]
+    pub suppressed: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1231,7 +1402,9 @@ impl ExperimentEngine {
             ));
         }
         let row = sqlx::query(
-            "SELECT id, tenant_id, key, name, status, context, budgets \
+            "SELECT id, tenant_id, key, name, status, context, budgets, \
+                    hypothesis, primary_metric, primary_metric_version, planned_sample, \
+                    started_at, ended_at, sequential_method, holdout_share::float8 AS holdout_share \
              FROM sales_experiments WHERE tenant_id = $1 AND key = $2",
         )
         .bind(tenant_id)
@@ -1246,6 +1419,9 @@ impl ExperimentEngine {
             .map_err(|error| SalesError::Database(error.to_string()))?;
         let budgets: serde_json::Value = row
             .try_get("budgets")
+            .map_err(|error| SalesError::Database(error.to_string()))?;
+        let holdout_share: f64 = row
+            .try_get("holdout_share")
             .map_err(|error| SalesError::Database(error.to_string()))?;
         Ok(Some(Experiment {
             id: row
@@ -1266,6 +1442,28 @@ impl ExperimentEngine {
             ),
             context_dimensions: parse_context_dimensions(&context),
             budgets: ExplorationBudget::from_json(&budgets)?,
+            hypothesis: row
+                .try_get("hypothesis")
+                .map_err(|error| SalesError::Database(error.to_string()))?,
+            primary_metric: row
+                .try_get("primary_metric")
+                .map_err(|error| SalesError::Database(error.to_string()))?,
+            primary_metric_version: row
+                .try_get("primary_metric_version")
+                .map_err(|error| SalesError::Database(error.to_string()))?,
+            planned_sample: row
+                .try_get("planned_sample")
+                .map_err(|error| SalesError::Database(error.to_string()))?,
+            started_at: row
+                .try_get("started_at")
+                .map_err(|error| SalesError::Database(error.to_string()))?,
+            ended_at: row
+                .try_get("ended_at")
+                .map_err(|error| SalesError::Database(error.to_string()))?,
+            sequential_method: row
+                .try_get("sequential_method")
+                .map_err(|error| SalesError::Database(error.to_string()))?,
+            holdout_share: sanitize_holdout_share(holdout_share),
         }))
     }
 
@@ -1457,12 +1655,51 @@ impl ExperimentEngine {
         .await
         .map_err(|error| SalesError::Database(error.to_string()))?;
 
+        // Revenue is a CHOICE MULTIPLIER, never a posterior weight (S1.5).
+        // The multiplier is the arm's realized first-year revenue per
+        // contacted account relative to the experiment's average; 1.0 when
+        // there is no revenue evidence yet.
+        let revenue_rows = sqlx::query(
+            "SELECT variant, \
+                    COALESCE(AVG(value_eur) FILTER ( \
+                        WHERE kind IN ('trial', 'paid_subscription', 'retained_mrr') \
+                          AND value_eur > 0), 0)::float8 AS mean_revenue \
+             FROM sales_experiment_outcomes \
+             WHERE experiment_id = $1 AND tenant_id = $2 \
+             GROUP BY variant",
+        )
+        .bind(experiment_id)
+        .bind(tenant_id)
+        .fetch_all(&self.db)
+        .await
+        .map_err(|error| SalesError::Database(error.to_string()))?;
+        let mut mean_by_variant: HashMap<String, f64> = HashMap::new();
+        for row in revenue_rows {
+            let variant: String = row
+                .try_get("variant")
+                .map_err(|error| SalesError::Database(error.to_string()))?;
+            let mean: f64 = row
+                .try_get("mean_revenue")
+                .map_err(|error| SalesError::Database(error.to_string()))?;
+            mean_by_variant.insert(variant, mean);
+        }
+        let overall_mean = if mean_by_variant.is_empty() {
+            0.0
+        } else {
+            mean_by_variant.values().sum::<f64>() / mean_by_variant.len() as f64
+        };
+
         rows.into_iter()
             .map(|row| {
+                let variant: String = row
+                    .try_get("variant")
+                    .map_err(|error| SalesError::Database(error.to_string()))?;
+                let value_multiplier = revenue_multiplier(
+                    mean_by_variant.get(&variant).copied().unwrap_or(0.0),
+                    overall_mean,
+                );
                 Ok(ArmPosterior {
-                    variant: row
-                        .try_get("variant")
-                        .map_err(|error| SalesError::Database(error.to_string()))?,
+                    variant,
                     alpha: row
                         .try_get("alpha")
                         .map_err(|error| SalesError::Database(error.to_string()))?,
@@ -1487,6 +1724,7 @@ impl ExperimentEngine {
                     is_control: row
                         .try_get("is_control")
                         .map_err(|error| SalesError::Database(error.to_string()))?,
+                    value_multiplier,
                 })
             })
             .collect()
@@ -1533,12 +1771,18 @@ impl ExperimentEngine {
     /// Order of decisions (each documented in [`VariantSelection::reason`]):
     ///
     /// 1. a draft experiment is a configuration error, never send against it;
-    /// 2. a paused/stopped/promoted experiment is exploit-only (best arm);
-    /// 3. [`may_explore`] is enforced before any arm is drawn;
-    /// 4. contextual fallback: a bucket with `< MIN_CONTEXT_SAMPLES` trials
+    /// 2. S3: an account in the stable per-segment holdout receives NO arm and
+    ///    no sending (`suppressed` names the holdout reason);
+    /// 3. S2: arms paused by a guardrail for this segment are excluded; all
+    ///    arms paused suppresses the send rather than falling back;
+    /// 4. a paused/stopped/promoted experiment is exploit-only (best arm);
+    /// 5. [`may_explore`] is enforced before any arm is drawn;
+    /// 6. contextual fallback: a bucket with `< MIN_CONTEXT_SAMPLES` trials
     ///    uses the global posterior; otherwise its own;
-    /// 5. the arm is drawn with Thompson sampling (single Beta sampler), or
-    ///    chosen deterministically in exploit-only mode.
+    /// 7. the arm is drawn with Thompson sampling (single Beta sampler) on
+    ///    `Beta(alpha, beta) × expected first-year value`, or chosen
+    ///    deterministically in exploit-only mode. The win probability vector
+    ///    is the S4 propensity logged on the assignment.
     pub async fn select_variant(
         &self,
         tenant_id: &str,
@@ -1572,6 +1816,74 @@ impl ExperimentEngine {
             }
         }
 
+        let segment = context
+            .dimensions
+            .icp_segment
+            .as_deref()
+            .unwrap_or("")
+            .trim()
+            .to_ascii_lowercase();
+
+        // S3: randomized account-level holdout, stable hash of account +
+        // segment + registry version. A holdout account never receives an arm
+        // and never receives sending while the experiment runs.
+        if let Some(account_id) = context.account_id {
+            if crate::scoreboard::is_holdout(
+                account_id,
+                &segment,
+                experiment.primary_metric_version,
+                experiment.holdout_share,
+            ) {
+                self.record_holdout(tenant_id, experiment.id, account_id, &segment)
+                    .await?;
+                return Ok(suppressed_selection(
+                    experiment,
+                    &arms,
+                    format!(
+                        "S3 holdout: account {account_id} (segment '{}') is in the stable {}% \
+                         holdout for registry version {}; no sending",
+                        if segment.is_empty() {
+                            "unknown"
+                        } else {
+                            &segment
+                        },
+                        (experiment.holdout_share * 100.0).round(),
+                        experiment.primary_metric_version
+                    ),
+                ));
+            }
+        }
+
+        // S2 guardrail pauses (arm + segment). A global ('' segment) pause
+        // also applies. If every arm is paused the experiment must not send.
+        let paused = self
+            .load_paused_arms(tenant_id, experiment.id, &segment)
+            .await?;
+        let arms: Vec<ArmPosterior> = arms
+            .into_iter()
+            .filter(|arm| !paused.contains_key(&arm.variant))
+            .collect();
+        if arms.is_empty() {
+            return Ok(suppressed_selection(
+                experiment,
+                &self.load_arms(tenant_id, experiment.id).await?,
+                format!(
+                    "S2 guardrail: every arm is paused for segment '{}' ({}); no sending until an \
+                     operator clears the pause",
+                    if segment.is_empty() {
+                        "unknown"
+                    } else {
+                        &segment
+                    },
+                    paused
+                        .values()
+                        .map(|reason| reason.as_str())
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                ),
+            ));
+        }
+
         // Exploit-only shortcuts: fail closed to the deterministic best arm.
         if !experiment.status.explores() {
             let index = best_arm_index(&arms).ok_or_else(|| {
@@ -1580,21 +1892,24 @@ impl ExperimentEngine {
                     experiment.key
                 ))
             })?;
-            let arm = &arms[index];
+            let scored = arms[index].choice_score();
             return Ok(VariantSelection {
-                variant: arm.variant.clone(),
+                variant: arms[index].variant.clone(),
                 experiment_id: experiment.id,
-                is_control: arm.is_control,
+                is_control: arms[index].is_control,
                 explore: false,
                 used_context_bucket: false,
                 context_bucket: None,
-                posterior_mean: arm.mean(),
+                posterior_mean: arms[index].mean(),
                 reason: format!(
-                    "experiment status is '{}' (not running): exploit-only on best posterior mean \
-                     {:.4}",
+                    "experiment status is '{}' (not running): exploit-only on best choice score \
+                     {scored:.4} (P(success) {:.4} × value {:.2})",
                     experiment.status.as_str(),
-                    arm.mean()
+                    arms[index].mean(),
+                    arms[index].value_multiplier
                 ),
+                propensities: exploit_propensities(&arms, index),
+                suppressed: None,
             });
         }
 
@@ -1602,20 +1917,21 @@ impl ExperimentEngine {
             let index = best_arm_index(&arms).ok_or_else(|| {
                 SalesError::InvalidInput("experiment has no selectable arm".into())
             })?;
-            let arm = &arms[index];
             return Ok(VariantSelection {
-                variant: arm.variant.clone(),
+                variant: arms[index].variant.clone(),
                 experiment_id: experiment.id,
-                is_control: arm.is_control,
+                is_control: arms[index].is_control,
                 explore: false,
                 used_context_bucket: false,
                 context_bucket: None,
-                posterior_mean: arm.mean(),
+                posterior_mean: arms[index].mean(),
                 reason: format!(
                     "experiment declares {} arms (> {MAX_ARMS_PER_EXPERIMENT}); failing closed to \
                      exploit-only",
                     arms.len()
                 ),
+                propensities: exploit_propensities(&arms, index),
+                suppressed: None,
             });
         }
 
@@ -1635,23 +1951,24 @@ impl ExperimentEngine {
             let index = best_arm_index(&arms).ok_or_else(|| {
                 SalesError::InvalidInput("experiment has no selectable arm".into())
             })?;
-            let arm = &arms[index];
             let reason = verdict
                 .reason()
                 .unwrap_or("exploration not permitted")
                 .to_string();
             return Ok(VariantSelection {
-                variant: arm.variant.clone(),
+                variant: arms[index].variant.clone(),
                 experiment_id: experiment.id,
-                is_control: arm.is_control,
+                is_control: arms[index].is_control,
                 explore: false,
                 used_context_bucket: false,
                 context_bucket: None,
-                posterior_mean: arm.mean(),
+                posterior_mean: arms[index].mean(),
                 reason: format!(
-                    "{reason}; exploit-only on best posterior mean {:.4}",
-                    arm.mean()
+                    "{reason}; exploit-only on best choice score {:.4}",
+                    arms[index].choice_score()
                 ),
+                propensities: exploit_propensities(&arms, index),
+                suppressed: None,
             });
         }
 
@@ -1699,9 +2016,44 @@ impl ExperimentEngine {
                 ),
             };
 
+        // A contextual bucket inherits the same guardrail pauses; an arm
+        // paused in this segment is unselectable in the bucket too.
+        let authoritative: Vec<ArmPosterior> = authoritative
+            .into_iter()
+            .filter(|arm| !paused.contains_key(&arm.variant))
+            .collect();
+        if authoritative.is_empty() {
+            return Ok(suppressed_selection(
+                experiment,
+                &arms,
+                format!(
+                    "S2 guardrail: the authoritative posterior for segment '{}' has no unpaused \
+                     arm; no sending",
+                    if segment.is_empty() {
+                        "unknown"
+                    } else {
+                        &segment
+                    }
+                ),
+            ));
+        }
         for arm in &authoritative {
             validate_posterior(arm.alpha, arm.beta)?;
         }
+
+        // S4: the ACTUAL ex-ante probability each arm is drawn. The same
+        // single Beta sampler and the same value multiplier are used for the
+        // estimate and for the draw.
+        let probabilities = selection_win_probabilities(&authoritative, PROPENSITY_DRAWS)?;
+        let propensities: Vec<ArmPropensity> = authoritative
+            .iter()
+            .zip(probabilities.iter())
+            .map(|(arm, probability)| ArmPropensity {
+                variant: arm.variant.clone(),
+                probability: *probability,
+            })
+            .collect();
+
         let mut rng = StdRng::from_os_rng();
         let mut best = 0usize;
         let mut best_sample = f64::NEG_INFINITY;
@@ -1713,16 +2065,21 @@ impl ExperimentEngine {
                         arm.variant
                     ))
                 })?;
-            if sample > best_sample {
-                best_sample = sample;
+            let score = sample * arm.value_multiplier.max(f64::MIN_POSITIVE);
+            if score > best_sample {
+                best_sample = score;
                 best = index;
             }
         }
         let arm = &authoritative[best];
+        let chosen_propensity = probabilities.get(best).copied().unwrap_or(0.0);
         let reason = format!(
-            "Thompson sampling selected '{}' (posterior mean {:.4}, sampled {:.4}); {bucket_note}",
+            "Thompson sampling selected '{}' (P(success) {:.4}, value multiplier {:.2}, \
+             propensity {:.4}, sampled score {:.4}); {bucket_note}",
             arm.variant,
             arm.mean(),
+            arm.value_multiplier,
+            chosen_propensity,
             best_sample
         );
 
@@ -1735,7 +2092,158 @@ impl ExperimentEngine {
             context_bucket: bucket_key,
             posterior_mean: arm.mean(),
             reason,
+            propensities,
+            suppressed: None,
         })
+    }
+
+    /// Persist the S3 holdout assignment (idempotent by experiment+account).
+    async fn record_holdout(
+        &self,
+        tenant_id: &str,
+        experiment_id: Uuid,
+        account_id: Uuid,
+        segment: &str,
+    ) -> Result<(), SalesError> {
+        sqlx::query(
+            "INSERT INTO sales_experiment_holdout_accounts \
+                 (experiment_id, tenant_id, account_id, segment, registry_version) \
+             SELECT $1, $2, $3, $4, primary_metric_version \
+             FROM sales_experiments WHERE id = $1 AND tenant_id = $2 \
+             ON CONFLICT (experiment_id, account_id) DO NOTHING",
+        )
+        .bind(experiment_id)
+        .bind(tenant_id)
+        .bind(account_id)
+        .bind(segment)
+        .execute(&self.db)
+        .await
+        .map_err(|error| SalesError::Database(error.to_string()))?;
+        Ok(())
+    }
+
+    /// Load the guardrail pauses that apply to `segment` (exact segment or a
+    /// global `''` pause), as `variant -> reason`.
+    async fn load_paused_arms(
+        &self,
+        tenant_id: &str,
+        experiment_id: Uuid,
+        segment: &str,
+    ) -> Result<BTreeMap<String, String>, SalesError> {
+        let rows = sqlx::query(
+            "SELECT variant, reason FROM sales_experiment_arm_pauses \
+             WHERE tenant_id = $1 AND experiment_id = $2 AND (segment = $3 OR segment = '')",
+        )
+        .bind(tenant_id)
+        .bind(experiment_id)
+        .bind(segment)
+        .fetch_all(&self.db)
+        .await
+        .map_err(|error| SalesError::Database(error.to_string()))?;
+        let mut paused = BTreeMap::new();
+        for row in rows {
+            let variant: String = row
+                .try_get("variant")
+                .map_err(|error| SalesError::Database(error.to_string()))?;
+            let reason: String = row
+                .try_get("reason")
+                .map_err(|error| SalesError::Database(error.to_string()))?;
+            paused.insert(variant, reason);
+        }
+        Ok(paused)
+    }
+
+    /// S4: log one arm decision with the actual propensities the sampler used.
+    /// Idempotent per step execution.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn record_assignment(
+        &self,
+        tenant_id: &str,
+        experiment_id: Uuid,
+        step_execution_id: Option<Uuid>,
+        selection: &VariantSelection,
+        account_id: Option<Uuid>,
+        contact_id: Option<Uuid>,
+        segment: Option<&str>,
+    ) -> Result<(), SalesError> {
+        let propensity = selection
+            .propensities
+            .iter()
+            .find(|propensity| propensity.variant == selection.variant)
+            .map(|propensity| propensity.probability)
+            .filter(|probability| *probability > 0.0 && probability.is_finite())
+            .unwrap_or(1.0);
+        let propensities = serde_json::to_value(&selection.propensities).map_err(|error| {
+            SalesError::Internal(anyhow::anyhow!("serialize propensities: {error}"))
+        })?;
+        sqlx::query(
+            "INSERT INTO sales_experiment_assignments \
+                 (tenant_id, experiment_id, step_execution_id, variant, account_id, contact_id, \
+                  segment, context_bucket, propensity, propensities, explore) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) \
+             ON CONFLICT (step_execution_id) WHERE step_execution_id IS NOT NULL DO NOTHING",
+        )
+        .bind(tenant_id)
+        .bind(experiment_id)
+        .bind(step_execution_id)
+        .bind(&selection.variant)
+        .bind(account_id)
+        .bind(contact_id)
+        .bind(segment.unwrap_or(""))
+        .bind(&selection.context_bucket)
+        .bind(propensity)
+        .bind(propensities)
+        .bind(selection.explore)
+        .execute(&self.db)
+        .await
+        .map_err(|error| SalesError::Database(error.to_string()))?;
+        Ok(())
+    }
+
+    /// S5 registry: upsert the full experiment definition. Unlike
+    /// [`Self::ensure_experiment`] (the arm-authoring path), this carries the
+    /// hypothesis, planned sample, start/end and sequential method.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn register_experiment(
+        &self,
+        tenant_id: &str,
+        key: &str,
+        name: &str,
+        hypothesis: &str,
+        arms: &[ArmSpec],
+        context: &serde_json::Value,
+        budgets: &serde_json::Value,
+        planned_sample: Option<i64>,
+    ) -> Result<Uuid, SalesError> {
+        if hypothesis.trim().is_empty() {
+            return Err(SalesError::InvalidInput(
+                "an experiment registry entry requires a hypothesis".into(),
+            ));
+        }
+        if let Some(sample) = planned_sample {
+            if sample <= 0 {
+                return Err(SalesError::InvalidInput(
+                    "planned_sample must be positive".into(),
+                ));
+            }
+        }
+        let id = self
+            .ensure_experiment(tenant_id, key, name, context, budgets)
+            .await?;
+        sqlx::query(
+            "UPDATE sales_experiments \
+             SET hypothesis = $3, planned_sample = $4, updated_at = NOW() \
+             WHERE tenant_id = $1 AND id = $2",
+        )
+        .bind(tenant_id)
+        .bind(id)
+        .bind(hypothesis.trim())
+        .bind(planned_sample)
+        .execute(&self.db)
+        .await
+        .map_err(|error| SalesError::Database(error.to_string()))?;
+        self.ensure_arms(tenant_id, id, arms).await?;
+        Ok(id)
     }
 
     /// Lazily provision the derived context-bucket experiment, inheriting the
@@ -1834,6 +2342,489 @@ pub fn context_bucket_experiment_key(parent_key: &str, bucket_key: &str) -> Stri
     format!("{parent_key}::ctx::{bucket_key}")
 }
 
+/// A selection that must NOT send: the account is in the S3 holdout or every
+/// arm is paused by an S2 guardrail. It still names a bookkeeping variant so
+/// the type is total, but the caller MUST check `suppressed` before sending.
+fn suppressed_selection(
+    experiment: &Experiment,
+    arms: &[ArmPosterior],
+    reason: String,
+) -> VariantSelection {
+    let fallback = arms
+        .iter()
+        .find(|arm| arm.is_control)
+        .or_else(|| arms.first());
+    VariantSelection {
+        variant: fallback
+            .map(|arm| arm.variant.clone())
+            .unwrap_or_else(|| "suppressed".to_string()),
+        experiment_id: experiment.id,
+        is_control: fallback.map(|arm| arm.is_control).unwrap_or(false),
+        explore: false,
+        used_context_bucket: false,
+        context_bucket: None,
+        posterior_mean: fallback.map(ArmPosterior::mean).unwrap_or(0.0),
+        reason: reason.clone(),
+        propensities: Vec::new(),
+        suppressed: Some(reason),
+    }
+}
+
+/// Deterministic selection is certain: the chosen arm has propensity 1.0 and
+/// every other arm 0.0. (The assignment row stores 1.0; IPS never divides by
+/// zero.)
+fn exploit_propensities(arms: &[ArmPosterior], chosen: usize) -> Vec<ArmPropensity> {
+    arms.iter()
+        .enumerate()
+        .map(|(index, arm)| ArmPropensity {
+            variant: arm.variant.clone(),
+            probability: if index == chosen { 1.0 } else { 0.0 },
+        })
+        .collect()
+}
+
+/// Deterministic revenue multiplier for the choice score. `mean_revenue` is
+/// the arm's realized first-year revenue per contacted account and
+/// `overall_mean` the experiment average. With no revenue evidence at all,
+/// every arm is 1.0 (probability alone chooses). A hostile/non-finite input
+/// fails to the neutral 1.0, and the multiplier is bounded to `[0.1, 10.0]`
+/// so one whale cannot dominate selection.
+pub fn revenue_multiplier(mean_revenue: f64, overall_mean: f64) -> f64 {
+    if !mean_revenue.is_finite()
+        || !overall_mean.is_finite()
+        || mean_revenue <= 0.0
+        || overall_mean <= 0.0
+    {
+        return 1.0;
+    }
+    (mean_revenue / overall_mean).clamp(0.1, 10.0)
+}
+
+/// Fail-closed holdout share: non-finite/negative → 0 (no holdout), above
+/// the documented maximum → the maximum.
+pub fn sanitize_holdout_share(share: f64) -> f64 {
+    if !share.is_finite() || share <= 0.0 {
+        0.0
+    } else {
+        share.min(MAX_HOLDOUT_SHARE)
+    }
+}
+
+/// A batch of contact-level outcomes written by the projector (S1).
+///
+/// The primary outcome is resolved from `kind`:
+/// * `positive_reply` / `meeting_booked` inside the contact's 14-day window
+///   mark its single trial successful (once);
+/// * `delivered` / `open` / `click` are exposure only;
+/// * `bounce` / `complaint` / `unsubscribe` are guardrail telemetry;
+/// * revenue rungs are written to the north-star ledger and never move alpha.
+#[derive(Debug, Clone)]
+pub struct ContactOutcomeInput {
+    pub tenant_id: String,
+    pub experiment_id: Uuid,
+    pub variant: String,
+    pub account_id: Option<Uuid>,
+    pub contact_id: Uuid,
+    pub segment: Option<String>,
+    pub kind: RewardKind,
+    pub outcome_key: String,
+    pub value_eur: f64,
+    pub occurred_at: DateTime<Utc>,
+    /// First touch of the contact with this arm. When absent, `occurred_at`
+    /// is used (the earliest event we know about).
+    pub first_touch_at: Option<DateTime<Utc>>,
+}
+
+/// What happened to one contact-level outcome.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContactOutcomeOutcome {
+    /// New event: the ledger row was inserted and the trial updated.
+    Recorded,
+    /// The event key already existed; nothing moved.
+    Replayed,
+}
+
+/// Record a batch of contact-level outcomes, then mature due windows and
+/// recompute the affected arm posteriors from the contact-trial ledger.
+///
+/// This is the ONE posterior write path. `alpha`/`beta` are never incremented
+/// directly: they are recomputed as `1 + successes` and
+/// `1 + (matured - successes)` from `sales_experiment_contact_trials`.
+pub async fn record_contact_outcomes(
+    db: &PgPool,
+    inputs: &[ContactOutcomeInput],
+) -> Result<Vec<Result<ContactOutcomeOutcome, SalesError>>, SalesError> {
+    let mut tx = db
+        .begin()
+        .await
+        .map_err(|error| SalesError::Database(error.to_string()))?;
+    let results = record_contact_outcomes_tx(&mut tx, inputs).await?;
+    tx.commit()
+        .await
+        .map_err(|error| SalesError::Database(error.to_string()))?;
+    Ok(results)
+}
+
+/// Transactional variant of [`record_contact_outcomes`], used by the outcome
+/// projector so ledger/posterior moves commit with the claim markers.
+pub async fn record_contact_outcomes_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    inputs: &[ContactOutcomeInput],
+) -> Result<Vec<Result<ContactOutcomeOutcome, SalesError>>, SalesError> {
+    let mut outcomes: Vec<Option<Result<ContactOutcomeOutcome, SalesError>>> =
+        (0..inputs.len()).map(|_| None).collect();
+    if inputs.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // Validate every input before writing anything for it.
+    for (index, input) in inputs.iter().enumerate() {
+        let mut fail = |error: SalesError| {
+            outcomes[index] = Some(Err(error));
+        };
+        if input.tenant_id.trim().is_empty() {
+            fail(SalesError::InvalidInput("tenant_id is required".into()));
+            continue;
+        }
+        let key = input.outcome_key.trim();
+        if key.is_empty() {
+            fail(SalesError::InvalidInput("outcome_key is required".into()));
+            continue;
+        }
+        if key.len() > MAX_OUTCOME_KEY_LEN {
+            fail(SalesError::InvalidInput(format!(
+                "outcome_key is {} bytes; the maximum is {MAX_OUTCOME_KEY_LEN}",
+                key.len()
+            )));
+            continue;
+        }
+        if input.variant.trim().is_empty() {
+            fail(SalesError::InvalidInput("variant is required".into()));
+            continue;
+        }
+        if !input.value_eur.is_finite() || input.value_eur < 0.0 {
+            fail(SalesError::InvalidInput(format!(
+                "value_eur must be finite and >= 0, got {}",
+                input.value_eur
+            )));
+            continue;
+        }
+        outcomes[index] = None;
+    }
+
+    // Preload arms for existence/tenant validation.
+    let mut tenants: Vec<String> = Vec::new();
+    let mut experiment_ids: Vec<Uuid> = Vec::new();
+    for input in inputs {
+        if !tenants.contains(&input.tenant_id) {
+            tenants.push(input.tenant_id.clone());
+        }
+        if !experiment_ids.contains(&input.experiment_id) {
+            experiment_ids.push(input.experiment_id);
+        }
+    }
+    let arm_rows = sqlx::query(
+        "SELECT e.tenant_id, a.experiment_id, a.variant \
+         FROM sales_experiment_arms a \
+         JOIN sales_experiments e ON e.id = a.experiment_id \
+         WHERE e.tenant_id = ANY($1) AND a.experiment_id = ANY($2)",
+    )
+    .bind(&tenants)
+    .bind(&experiment_ids)
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(|error| SalesError::Database(error.to_string()))?;
+    let mut arms: HashSet<(String, Uuid, String)> = HashSet::new();
+    for row in arm_rows {
+        arms.insert((
+            row.try_get("tenant_id")
+                .map_err(|error| SalesError::Database(error.to_string()))?,
+            row.try_get("experiment_id")
+                .map_err(|error| SalesError::Database(error.to_string()))?,
+            row.try_get("variant")
+                .map_err(|error| SalesError::Database(error.to_string()))?,
+        ));
+    }
+    for (index, input) in inputs.iter().enumerate() {
+        if outcomes[index].is_some() {
+            continue;
+        }
+        if !arms.contains(&(
+            input.tenant_id.clone(),
+            input.experiment_id,
+            input.variant.trim().to_string(),
+        )) {
+            outcomes[index] = Some(Err(SalesError::InvalidInput(format!(
+                "arm '{}' of experiment {} does not exist for tenant {}",
+                input.variant.trim(),
+                input.experiment_id,
+                input.tenant_id
+            ))));
+        }
+    }
+
+    let insertable: Vec<usize> = (0..inputs.len())
+        .filter(|index| outcomes[*index].is_none())
+        .collect();
+
+    // Insert the append-only event ledger. The primary-outcome idempotency is
+    // the contact-trial identity below, not this key.
+    let mut inserted_keys: HashSet<String> = HashSet::new();
+    if !insertable.is_empty() {
+        let keys: Vec<&str> = insertable
+            .iter()
+            .map(|index| inputs[*index].outcome_key.trim())
+            .collect();
+        let experiments: Vec<Uuid> = insertable
+            .iter()
+            .map(|index| inputs[*index].experiment_id)
+            .collect();
+        let tenants: Vec<&str> = insertable
+            .iter()
+            .map(|index| inputs[*index].tenant_id.as_str())
+            .collect();
+        let variants: Vec<&str> = insertable
+            .iter()
+            .map(|index| inputs[*index].variant.trim())
+            .collect();
+        let kinds: Vec<&str> = insertable
+            .iter()
+            .map(|index| inputs[*index].kind.as_str())
+            .collect();
+        let rewards: Vec<f64> = insertable
+            .iter()
+            .map(|index| {
+                inputs[*index]
+                    .kind
+                    .reward_with_value(inputs[*index].value_eur)
+            })
+            .collect();
+        let values: Vec<f64> = insertable
+            .iter()
+            .map(|index| inputs[*index].value_eur)
+            .collect();
+        let contacts: Vec<Uuid> = insertable
+            .iter()
+            .map(|index| inputs[*index].contact_id)
+            .collect();
+        let accounts: Vec<Option<Uuid>> = insertable
+            .iter()
+            .map(|index| inputs[*index].account_id)
+            .collect();
+        let segments: Vec<&str> = insertable
+            .iter()
+            .map(|index| inputs[*index].segment.as_deref().unwrap_or(""))
+            .collect();
+        let occurred: Vec<DateTime<Utc>> = insertable
+            .iter()
+            .map(|index| inputs[*index].occurred_at)
+            .collect();
+        let inserted: Vec<(String,)> = sqlx::query_as(
+            "INSERT INTO sales_experiment_outcomes \
+                 (outcome_key, experiment_id, tenant_id, variant, kind, reward, value_eur, \
+                  contact_id, account_id, segment, primary_metric, primary_metric_version, \
+                  occurred_at, recorded_at) \
+             SELECT t.outcome_key, t.experiment_id, t.tenant_id, t.variant, t.kind, t.reward, \
+                    t.value_eur, t.contact_id, t.account_id, t.segment, \
+                    CASE WHEN t.kind IN ('positive_reply', 'meeting_booked') \
+                         THEN $12 ELSE NULL END, \
+                    CASE WHEN t.kind IN ('positive_reply', 'meeting_booked') \
+                         THEN $13 ELSE NULL END, \
+                    t.occurred_at, NOW() \
+             FROM UNNEST($1::text[], $2::uuid[], $3::text[], $4::text[], $5::text[], \
+                         $6::float8[], $7::float8[], $8::uuid[], $9::uuid[], $10::text[], \
+                         $11::timestamptz[]) \
+                  AS t(outcome_key, experiment_id, tenant_id, variant, kind, reward, value_eur, \
+                       contact_id, account_id, segment, occurred_at) \
+             ON CONFLICT (outcome_key) DO NOTHING \
+             RETURNING outcome_key",
+        )
+        .bind(&keys)
+        .bind(&experiments)
+        .bind(&tenants)
+        .bind(&variants)
+        .bind(&kinds)
+        .bind(&rewards)
+        .bind(&values)
+        .bind(&contacts)
+        .bind(&accounts)
+        .bind(&segments)
+        .bind(&occurred)
+        .bind(PRIMARY_METRIC_KEY)
+        .bind(PRIMARY_METRIC_VERSION)
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(|error| SalesError::Database(error.to_string()))?;
+        inserted_keys.extend(inserted.into_iter().map(|(key,)| key));
+    }
+
+    // Per new event: upsert the contact trial, mark the one success, count
+    // harm telemetry. No alpha/beta arithmetic here.
+    let mut touched: HashSet<(String, Uuid)> = HashSet::new();
+    for index in insertable {
+        let input = &inputs[index];
+        let key = input.outcome_key.trim().to_string();
+        if !inserted_keys.contains(&key) {
+            outcomes[index] = Some(Ok(ContactOutcomeOutcome::Replayed));
+            continue;
+        }
+        touched.insert((input.tenant_id.clone(), input.experiment_id));
+        let first_touch = input.first_touch_at.unwrap_or(input.occurred_at);
+        let first_touch = first_touch.min(input.occurred_at);
+        sqlx::query(
+            "INSERT INTO sales_experiment_contact_trials \
+                 (tenant_id, experiment_id, variant, account_id, contact_id, segment, \
+                  primary_metric, primary_metric_version, first_touch_at, matures_at) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) \
+             ON CONFLICT (experiment_id, variant, contact_id, primary_metric, \
+                          primary_metric_version) DO NOTHING",
+        )
+        .bind(&input.tenant_id)
+        .bind(input.experiment_id)
+        .bind(input.variant.trim())
+        .bind(input.account_id)
+        .bind(input.contact_id)
+        .bind(input.segment.as_deref().unwrap_or(""))
+        .bind(PRIMARY_METRIC_KEY)
+        .bind(PRIMARY_METRIC_VERSION)
+        .bind(first_touch)
+        .bind(first_touch + ChronoDuration::days(PRIMARY_METRIC_WINDOW_DAYS))
+        .execute(&mut **tx)
+        .await
+        .map_err(|error| SalesError::Database(error.to_string()))?;
+
+        if input.kind.is_primary_success() {
+            // Freeze rule: a success only lands while the window is open. A
+            // reply after maturity changes the north star, never the primary
+            // metric.
+            sqlx::query(
+                "UPDATE sales_experiment_contact_trials \
+                 SET success = TRUE, updated_at = NOW() \
+                 WHERE tenant_id = $1 AND experiment_id = $2 AND variant = $3 \
+                   AND contact_id = $4 AND primary_metric = $5 \
+                   AND primary_metric_version = $6 \
+                   AND matured_at IS NULL AND $7::timestamptz <= matures_at \
+                   AND $7::timestamptz >= first_touch_at",
+            )
+            .bind(&input.tenant_id)
+            .bind(input.experiment_id)
+            .bind(input.variant.trim())
+            .bind(input.contact_id)
+            .bind(PRIMARY_METRIC_KEY)
+            .bind(PRIMARY_METRIC_VERSION)
+            .bind(input.occurred_at)
+            .execute(&mut **tx)
+            .await
+            .map_err(|error| SalesError::Database(error.to_string()))?;
+        }
+
+        if input.kind.is_negative() {
+            sqlx::query(
+                "UPDATE sales_experiment_arms \
+                 SET negative_outcomes = negative_outcomes + 1, updated_at = NOW() \
+                 WHERE experiment_id = $1 AND variant = $2",
+            )
+            .bind(input.experiment_id)
+            .bind(input.variant.trim())
+            .execute(&mut **tx)
+            .await
+            .map_err(|error| SalesError::Database(error.to_string()))?;
+        }
+        outcomes[index] = Some(Ok(ContactOutcomeOutcome::Recorded));
+    }
+
+    // Close every due window for the touched experiments, then recompute the
+    // arm posteriors from the trial ledger (this is the S1 model).
+    for (tenant_id, experiment_id) in &touched {
+        mature_due_contact_trials_tx(tx, *experiment_id, Utc::now()).await?;
+        recompute_arm_posteriors_tx(tx, tenant_id, *experiment_id).await?;
+    }
+
+    Ok(outcomes
+        .into_iter()
+        .map(|outcome| outcome.expect("every input has a validation outcome"))
+        .collect())
+}
+
+/// Close every due primary window of one experiment and return how many
+/// trials matured. Public so the outcome projector and tests can age windows
+/// deterministically.
+pub async fn mature_due_contact_trials(
+    db: &PgPool,
+    experiment_id: Uuid,
+    now: DateTime<Utc>,
+) -> Result<u64, SalesError> {
+    let mut tx = db
+        .begin()
+        .await
+        .map_err(|error| SalesError::Database(error.to_string()))?;
+    let matured = mature_due_contact_trials_tx(&mut tx, experiment_id, now).await?;
+    let tenant: Option<String> =
+        sqlx::query_scalar("SELECT tenant_id FROM sales_experiments WHERE id = $1")
+            .bind(experiment_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|error| SalesError::Database(error.to_string()))?;
+    if let Some(tenant) = tenant {
+        recompute_arm_posteriors_tx(&mut tx, &tenant, experiment_id).await?;
+    }
+    tx.commit()
+        .await
+        .map_err(|error| SalesError::Database(error.to_string()))?;
+    Ok(matured)
+}
+
+async fn mature_due_contact_trials_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    experiment_id: Uuid,
+    now: DateTime<Utc>,
+) -> Result<u64, SalesError> {
+    let matured = sqlx::query(
+        "UPDATE sales_experiment_contact_trials \
+         SET matured_at = matures_at, updated_at = NOW() \
+         WHERE experiment_id = $1 AND matured_at IS NULL AND matures_at <= $2",
+    )
+    .bind(experiment_id)
+    .bind(now)
+    .execute(&mut **tx)
+    .await
+    .map_err(|error| SalesError::Database(error.to_string()))?
+    .rows_affected();
+    Ok(matured)
+}
+
+/// Recompute one experiment's arm posteriors from the contact-trial ledger.
+/// This is the only place alpha/beta are written after provisioning.
+pub async fn recompute_arm_posteriors_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    tenant_id: &str,
+    experiment_id: Uuid,
+) -> Result<(), SalesError> {
+    sqlx::query(
+        "UPDATE sales_experiment_arms a \
+         SET trials = s.matured, successes = s.successes, \
+             alpha = 1.0 + s.successes, \
+             beta = 1.0 + (s.matured - s.successes), \
+             contacts = s.contacts, updated_at = NOW() \
+         FROM ( \
+             SELECT variant, \
+                    COUNT(*) FILTER (WHERE matured_at IS NOT NULL)::bigint AS matured, \
+                    COUNT(*) FILTER (WHERE matured_at IS NOT NULL AND success)::bigint AS successes, \
+                    COUNT(DISTINCT contact_id)::bigint AS contacts \
+             FROM sales_experiment_contact_trials \
+             WHERE tenant_id = $1 AND experiment_id = $2 \
+             GROUP BY variant \
+         ) s \
+         WHERE a.tenant_id = $1 AND a.experiment_id = $2 AND a.variant = s.variant",
+    )
+    .bind(tenant_id)
+    .bind(experiment_id)
+    .execute(&mut **tx)
+    .await
+    .map_err(|error| SalesError::Database(error.to_string()))?;
+    Ok(())
+}
+
 /// Parse `sales_experiments.context.dimensions`; absent/invalid means all ten.
 fn parse_context_dimensions(value: &serde_json::Value) -> Vec<String> {
     let known: HashSet<&str> = ExperimentContext::DIMENSIONS.iter().copied().collect();
@@ -1863,13 +2854,18 @@ fn parse_context_dimensions(value: &serde_json::Value) -> Vec<String> {
 // Outcome ledger write path
 // ---------------------------------------------------------------------------
 
-/// Record one outcome against an arm, idempotently.
+/// Record one outcome against an arm, idempotently (audit ledger only).
 ///
-/// `outcome_key` is the logical identity of the observation (for example
-/// `"{step_execution_id}:positive_reply"`); it is the primary key of
-/// `sales_experiment_outcomes` (migration line 830), so replaying it moves the
-/// posterior at most once. The ledger insert and the arm update share one
-/// transaction.
+/// `outcome_key` is the logical identity of the event (for example
+/// `"sales-outcome:{sales_outcomes.id}"`); it is the primary key of
+/// `sales_experiment_outcomes`, so replaying it records at most one event.
+///
+/// This function carries NO contact identity, so it deliberately moves no
+/// posterior parameter: the S1 model counts a contact only through
+/// [`record_contact_outcomes`] (the projector's path), which owns the
+/// `(arm, contact, primary_metric)` trial ledger. An operational outcome
+/// increments exposure and a negative outcome increments the guardrail
+/// counter; neither touches alpha or beta.
 ///
 /// Hostile inputs are rejected before any SQL: an empty/oversized
 /// `outcome_key`, a non-finite or negative `value_eur`, a corrupt arm
@@ -1951,12 +2947,6 @@ pub async fn record_reward(
         )));
     }
 
-    let alpha_inc = if reward > 0.0 { reward } else { 0.0 };
-    let beta_inc = if reward < 0.0 { -reward } else { 0.0 };
-    let trials_inc: i64 = if kind.is_informative() { 1 } else { 0 };
-    let successes_inc: i64 = if reward > 0.0 { 1 } else { 0 };
-    let negative_inc: i64 = if kind.is_negative() { 1 } else { 0 };
-
     let mut tx = db
         .begin()
         .await
@@ -1964,14 +2954,18 @@ pub async fn record_reward(
 
     let inserted = sqlx::query(
         "INSERT INTO sales_experiment_outcomes \
-             (outcome_key, experiment_id, variant, reward, recorded_at) \
-         VALUES ($1, $2, $3, $4, NOW()) \
+             (outcome_key, experiment_id, tenant_id, variant, kind, reward, value_eur, \
+              occurred_at, recorded_at) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), NOW()) \
          ON CONFLICT (outcome_key) DO NOTHING",
     )
     .bind(outcome_key)
     .bind(experiment_id)
+    .bind(tenant_id)
     .bind(variant.trim())
+    .bind(kind.as_str())
     .bind(reward)
+    .bind(value_eur)
     .execute(&mut *tx)
     .await
     .map_err(|error| SalesError::Database(error.to_string()))?
@@ -1979,36 +2973,41 @@ pub async fn record_reward(
         > 0;
 
     if inserted {
-        let updated = sqlx::query(
-            "UPDATE sales_experiment_arms \
-             SET alpha = alpha + $1, beta = beta + $2, trials = trials + $3, \
-                 successes = successes + $4, contacts = contacts + 1, \
-                 negative_outcomes = negative_outcomes + $5, updated_at = NOW() \
-             WHERE experiment_id = $6 AND variant = $7",
-        )
-        .bind(alpha_inc)
-        .bind(beta_inc)
-        .bind(trials_inc)
-        .bind(successes_inc)
-        .bind(negative_inc)
-        .bind(experiment_id)
-        .bind(variant.trim())
-        .execute(&mut *tx)
-        .await
-        .map_err(|error| SalesError::Database(error.to_string()))?
-        .rows_affected();
-        if updated != 1 {
-            return Err(SalesError::Database(format!(
-                "outcome '{outcome_key}': arm '{variant}' of experiment {experiment_id} \
-                 disappeared mid-transaction"
-            )));
+        let (contacts_inc, negative_inc) = if kind.is_operational() {
+            (1_i64, 0_i64)
+        } else if kind.is_negative() {
+            (0, 1)
+        } else {
+            (0, 0)
+        };
+        if contacts_inc != 0 || negative_inc != 0 {
+            let updated = sqlx::query(
+                "UPDATE sales_experiment_arms \
+                 SET contacts = contacts + $1, negative_outcomes = negative_outcomes + $2, \
+                     updated_at = NOW() \
+                 WHERE experiment_id = $3 AND variant = $4",
+            )
+            .bind(contacts_inc)
+            .bind(negative_inc)
+            .bind(experiment_id)
+            .bind(variant.trim())
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| SalesError::Database(error.to_string()))?
+            .rows_affected();
+            if updated != 1 {
+                return Err(SalesError::Database(format!(
+                    "outcome '{outcome_key}': arm '{variant}' of experiment {experiment_id} \
+                     disappeared mid-transaction"
+                )));
+            }
         }
     } else {
         tracing::info!(
             outcome_key,
             experiment_id = %experiment_id,
             variant,
-            "experiment outcome replay, posterior unchanged"
+            "experiment outcome replay, ledger unchanged"
         );
     }
 
@@ -2018,305 +3017,63 @@ pub async fn record_reward(
     Ok(())
 }
 
-/// One reward to write in a batch.
+/// One contact-level outcome to write in a batch (the projector's path).
 #[derive(Debug, Clone)]
 pub struct BatchRewardInput {
     pub tenant_id: String,
     pub experiment_id: Uuid,
     pub variant: String,
+    pub account_id: Option<Uuid>,
+    pub contact_id: Uuid,
+    pub segment: Option<String>,
     pub kind: RewardKind,
     pub outcome_key: String,
     pub value_eur: f64,
+    pub occurred_at: DateTime<Utc>,
+    pub first_touch_at: Option<DateTime<Utc>>,
 }
 
 /// What happened to one batched reward.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BatchRewardOutcome {
-    /// The ledger row was inserted and the arm posterior moved.
+    /// The ledger row was inserted and the contact trial updated.
     Recorded,
-    /// The stable `outcome_key` already existed; the posterior was untouched.
+    /// The stable `outcome_key` already existed; nothing moved.
     Replayed,
 }
 
-/// Rewrite a batch of rewards with a CONSTANT number of statements.
-///
-/// This is the projector's write path: one preload of every distinct arm,
-/// one multi-row ledger INSERT (`ON CONFLICT (outcome_key) DO NOTHING` —
-/// the same exactly-once identity as [`record_reward`]), and one aggregated
-/// arm UPDATE. It takes the caller's transaction, so the projector never
-/// checks a second pool connection out per reward and the ledger/posterior
-/// moves stay in the same transaction as the claim markers.
-///
-/// Per-input contract is identical to [`record_reward`]: hostile inputs are
-/// rejected before any SQL for that input, a missing/corrupt arm fails only
-/// that input, and a replayed `outcome_key` reports [`BatchRewardOutcome::Replayed`]
-/// without moving the posterior.
+/// Write a batch of contact-level outcomes through the ONE posterior path.
+/// The projector calls this inside its claim transaction; the ledger rows and
+/// the recomputed arm posteriors commit together with the claim markers.
 pub async fn record_rewards_batch(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tx: &mut Transaction<'_, Postgres>,
     rewards: &[BatchRewardInput],
 ) -> Result<Vec<Result<BatchRewardOutcome, SalesError>>, SalesError> {
-    if rewards.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let mut outcomes: Vec<Option<Result<BatchRewardOutcome, SalesError>>> =
-        (0..rewards.len()).map(|_| None).collect();
-    let mut validated_reward: Vec<Option<f64>> = vec![None; rewards.len()];
-
-    // 1. Pure input validation (same ladder as record_reward).
-    for (index, input) in rewards.iter().enumerate() {
-        let fail = |outcomes: &mut Vec<Option<Result<BatchRewardOutcome, SalesError>>>,
-                    error: SalesError| {
-            outcomes[index] = Some(Err(error));
-        };
-        if input.tenant_id.trim().is_empty() {
-            fail(
-                &mut outcomes,
-                SalesError::InvalidInput("tenant_id is required".into()),
-            );
-            continue;
-        }
-        let outcome_key = input.outcome_key.trim();
-        if outcome_key.is_empty() {
-            fail(
-                &mut outcomes,
-                SalesError::InvalidInput("outcome_key is required".into()),
-            );
-            continue;
-        }
-        if outcome_key.len() > MAX_OUTCOME_KEY_LEN {
-            fail(
-                &mut outcomes,
-                SalesError::InvalidInput(format!(
-                    "outcome_key is {} bytes; the maximum is {MAX_OUTCOME_KEY_LEN}",
-                    outcome_key.len()
-                )),
-            );
-            continue;
-        }
-        if input.variant.trim().is_empty() {
-            fail(
-                &mut outcomes,
-                SalesError::InvalidInput("variant is required".into()),
-            );
-            continue;
-        }
-        if !input.value_eur.is_finite() || input.value_eur < 0.0 {
-            fail(
-                &mut outcomes,
-                SalesError::InvalidInput(format!(
-                    "value_eur must be finite and >= 0, got {}",
-                    input.value_eur
-                )),
-            );
-            continue;
-        }
-        let reward = input.kind.reward_with_value(input.value_eur);
-        if !reward.is_finite() {
-            fail(
-                &mut outcomes,
-                SalesError::InvalidInput(format!("reward for {} must be finite", input.kind)),
-            );
-            continue;
-        }
-        validated_reward[index] = Some(reward);
-    }
-
-    // 2. Preload every distinct arm ONCE for the batch.
-    let mut tenants: Vec<String> = Vec::new();
-    let mut experiment_ids: Vec<Uuid> = Vec::new();
-    for input in rewards {
-        if !tenants.contains(&input.tenant_id) {
-            tenants.push(input.tenant_id.clone());
-        }
-        if !experiment_ids.contains(&input.experiment_id) {
-            experiment_ids.push(input.experiment_id);
-        }
-    }
-    let arm_rows: Vec<(String, Uuid, String, f64, f64, i64, i64)> = sqlx::query_as(
-        "SELECT e.tenant_id, a.experiment_id, a.variant, a.alpha, a.beta, a.trials, a.successes \
-         FROM sales_experiment_arms a \
-         JOIN sales_experiments e ON e.id = a.experiment_id \
-         WHERE e.tenant_id = ANY($1) AND a.experiment_id = ANY($2)",
-    )
-    .bind(&tenants)
-    .bind(&experiment_ids)
-    .fetch_all(&mut **tx)
-    .await
-    .map_err(|error| SalesError::Database(error.to_string()))?;
-    type ArmKey = (String, Uuid, String);
-    type ArmStats = (f64, f64, i64, i64);
-    let mut arms: std::collections::HashMap<ArmKey, ArmStats> = std::collections::HashMap::new();
-    for (tenant_id, experiment_id, variant, alpha, beta, trials, successes) in arm_rows {
-        arms.insert(
-            (tenant_id, experiment_id, variant),
-            (alpha, beta, trials, successes),
-        );
-    }
-
-    // 3. Arm existence + posterior validation, per input.
-    for (index, input) in rewards.iter().enumerate() {
-        if validated_reward[index].is_none() && outcomes[index].is_some() {
-            continue;
-        }
-        let Some((alpha, beta, trials, successes)) = arms.get(&(
-            input.tenant_id.clone(),
-            input.experiment_id,
-            input.variant.trim().to_string(),
-        )) else {
-            outcomes[index] = Some(Err(SalesError::InvalidInput(format!(
-                "arm '{}' of experiment {} does not exist for tenant {}",
-                input.variant.trim(),
-                input.experiment_id,
-                input.tenant_id
-            ))));
-            validated_reward[index] = None;
-            continue;
-        };
-        if let Err(error) = validate_posterior(*alpha, *beta) {
-            outcomes[index] = Some(Err(error));
-            validated_reward[index] = None;
-            continue;
-        }
-        if *trials < 0 || *successes < 0 || successes > trials {
-            outcomes[index] = Some(Err(SalesError::InvalidInput(format!(
-                "arm '{}' has inconsistent counters: trials={trials}, successes={successes}",
-                input.variant.trim()
-            ))));
-            validated_reward[index] = None;
-        }
-    }
-
-    // 4. ONE multi-row ledger INSERT; RETURNING tells us which keys were new.
-    let insertable: Vec<usize> = (0..rewards.len())
-        .filter(|index| validated_reward[*index].is_some())
+    let inputs: Vec<ContactOutcomeInput> = rewards
+        .iter()
+        .map(|reward| ContactOutcomeInput {
+            tenant_id: reward.tenant_id.clone(),
+            experiment_id: reward.experiment_id,
+            variant: reward.variant.clone(),
+            account_id: reward.account_id,
+            contact_id: reward.contact_id,
+            segment: reward.segment.clone(),
+            kind: reward.kind,
+            outcome_key: reward.outcome_key.clone(),
+            value_eur: reward.value_eur,
+            occurred_at: reward.occurred_at,
+            first_touch_at: reward.first_touch_at,
+        })
         .collect();
-    let mut inserted_keys: std::collections::HashSet<String> = std::collections::HashSet::new();
-    if !insertable.is_empty() {
-        let keys: Vec<&str> = insertable
-            .iter()
-            .map(|index| rewards[*index].outcome_key.trim())
-            .collect();
-        let experiments: Vec<Uuid> = insertable
-            .iter()
-            .map(|index| rewards[*index].experiment_id)
-            .collect();
-        let variants: Vec<&str> = insertable
-            .iter()
-            .map(|index| rewards[*index].variant.trim())
-            .collect();
-        let reward_values: Vec<f64> = insertable
-            .iter()
-            .map(|index| validated_reward[*index].expect("validated reward"))
-            .collect();
-        let inserted: Vec<(String,)> = sqlx::query_as(
-            "INSERT INTO sales_experiment_outcomes \
-                 (outcome_key, experiment_id, variant, reward, recorded_at) \
-             SELECT t.outcome_key, t.experiment_id, t.variant, t.reward, NOW() \
-             FROM UNNEST($1::text[], $2::uuid[], $3::text[], $4::float8[]) \
-                  AS t(outcome_key, experiment_id, variant, reward) \
-             ON CONFLICT (outcome_key) DO NOTHING \
-             RETURNING outcome_key",
-        )
-        .bind(&keys)
-        .bind(&experiments)
-        .bind(&variants)
-        .bind(&reward_values)
-        .fetch_all(&mut **tx)
-        .await
-        .map_err(|error| SalesError::Database(error.to_string()))?;
-        inserted_keys.extend(inserted.into_iter().map(|(key,)| key));
-    }
-
-    // 5. Aggregate every NEW outcome's delta per arm and move the posteriors
-    //    in ONE statement.
-    #[derive(Default)]
-    struct ArmDelta {
-        alpha: f64,
-        beta: f64,
-        trials: i64,
-        successes: i64,
-        contacts: i64,
-        negative: i64,
-    }
-    let mut deltas: BTreeMap<(Uuid, String), ArmDelta> = BTreeMap::new();
-    // A duplicate outcome_key WITHIN the batch is replayed, not counted
-    // twice: the multi-row INSERT inserts it once, exactly like the legacy
-    // sequential loop.
-    let mut counted_keys: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for index in &insertable {
-        let input = &rewards[*index];
-        let key = input.outcome_key.trim().to_string();
-        if !inserted_keys.contains(&key) || !counted_keys.insert(key) {
-            outcomes[*index] = Some(Ok(BatchRewardOutcome::Replayed));
-            continue;
-        }
-        let reward = validated_reward[*index].expect("validated reward");
-        let delta = deltas
-            .entry((input.experiment_id, input.variant.trim().to_string()))
-            .or_default();
-        if reward > 0.0 {
-            delta.alpha += reward;
-            delta.successes += 1;
-        } else if reward < 0.0 {
-            delta.beta += -reward;
-        }
-        if input.kind.is_informative() {
-            delta.trials += 1;
-        }
-        if input.kind.is_negative() {
-            delta.negative += 1;
-        }
-        delta.contacts += 1;
-        outcomes[*index] = Some(Ok(BatchRewardOutcome::Recorded));
-    }
-
-    if !deltas.is_empty() {
-        let experiment_ids: Vec<Uuid> = deltas.keys().map(|(id, _)| *id).collect();
-        let variants: Vec<&str> = deltas.keys().map(|(_, variant)| variant.as_str()).collect();
-        let alpha: Vec<f64> = deltas.values().map(|delta| delta.alpha).collect();
-        let beta: Vec<f64> = deltas.values().map(|delta| delta.beta).collect();
-        let trials: Vec<i64> = deltas.values().map(|delta| delta.trials).collect();
-        let successes: Vec<i64> = deltas.values().map(|delta| delta.successes).collect();
-        let contacts: Vec<i64> = deltas.values().map(|delta| delta.contacts).collect();
-        let negative: Vec<i64> = deltas.values().map(|delta| delta.negative).collect();
-
-        let updated = sqlx::query(
-            "UPDATE sales_experiment_arms a \
-             SET alpha = a.alpha + v.alpha_inc, beta = a.beta + v.beta_inc, \
-                 trials = a.trials + v.trials_inc, successes = a.successes + v.successes_inc, \
-                 contacts = a.contacts + v.contacts_inc, \
-                 negative_outcomes = a.negative_outcomes + v.negative_inc, \
-                 updated_at = NOW() \
-             FROM UNNEST($1::uuid[], $2::text[], $3::float8[], $4::float8[], \
-                         $5::bigint[], $6::bigint[], $7::bigint[], $8::bigint[]) \
-                  AS v(experiment_id, variant, alpha_inc, beta_inc, trials_inc, \
-                       successes_inc, contacts_inc, negative_inc) \
-             WHERE a.experiment_id = v.experiment_id AND a.variant = v.variant",
-        )
-        .bind(&experiment_ids)
-        .bind(&variants)
-        .bind(&alpha)
-        .bind(&beta)
-        .bind(&trials)
-        .bind(&successes)
-        .bind(&contacts)
-        .bind(&negative)
-        .execute(&mut **tx)
-        .await
-        .map_err(|error| SalesError::Database(error.to_string()))?
-        .rows_affected();
-        if updated as usize != deltas.len() {
-            return Err(SalesError::Database(format!(
-                "{} reward arm(s) disappeared mid-transaction",
-                deltas.len() - updated as usize
-            )));
-        }
-    }
-
-    Ok(outcomes
+    let results = record_contact_outcomes_tx(tx, &inputs).await?;
+    Ok(results
         .into_iter()
-        .map(|outcome| outcome.expect("every input has a validation outcome"))
+        .map(|result| {
+            result.map(|outcome| match outcome {
+                ContactOutcomeOutcome::Recorded => BatchRewardOutcome::Recorded,
+                ContactOutcomeOutcome::Replayed => BatchRewardOutcome::Replayed,
+            })
+        })
         .collect())
 }
 
@@ -2762,7 +3519,10 @@ mod tests {
     }
 
     #[test]
-    fn negative_outcomes_are_penalised() {
+    fn guardrail_outcomes_never_move_the_posterior() {
+        // S1.3: complaints, unsubscribes and bounces are S2 guardrails. They
+        // are classified as harm telemetry and are explicitly NOT a primary
+        // success, so they cannot enter alpha or beta.
         for kind in [
             RewardKind::Bounce,
             RewardKind::Complaint,
@@ -2770,40 +3530,37 @@ mod tests {
         ] {
             assert!(kind.is_negative(), "{kind} must be negative");
             assert!(kind.reward() < 0.0);
+            assert!(!kind.is_primary_success(), "{kind} is not a success");
         }
-        let mut with_penalty = arm("control", true);
-        apply_reward_to_posterior(&mut with_penalty, RewardKind::Complaint).unwrap();
         let clean = arm("control", true);
-        assert!(
-            with_penalty.mean() < clean.mean(),
-            "a complaint must lower the posterior mean"
-        );
-        assert_eq!(with_penalty.negative_outcomes, 1);
+        assert_eq!(clean.alpha, 1.0);
+        assert_eq!(clean.beta, 1.0);
+        assert_eq!(clean.negative_outcomes, 0);
     }
 
     #[test]
     fn opens_move_exposure_but_not_the_posterior() {
         let mut open_arm = arm("a", false);
         for _ in 0..10_000 {
-            apply_reward_to_posterior(&mut open_arm, RewardKind::Open).unwrap();
+            record_operational_exposure(&mut open_arm).unwrap();
         }
         assert_eq!(open_arm.alpha, 1.0, "opens must not move alpha");
         assert_eq!(open_arm.beta, 1.0, "opens must not move beta");
-        assert_eq!(open_arm.trials, 0, "opens are not informative trials");
+        assert_eq!(open_arm.trials, 0, "opens are not matured trials");
         assert_eq!(open_arm.contacts, 10_000, "opens do count exposure");
         assert!((open_arm.mean() - 0.5).abs() < 1e-12);
     }
 
-    /// RELEASE GATE (§17): opens can never promote an arm.
+    /// RELEASE GATE (§17/S1): opens can never promote an arm.
     #[test]
     fn ten_thousand_opens_never_win_an_arm() {
         let mut opens = arm("opens_only", false);
         for _ in 0..10_000 {
-            apply_reward_to_posterior(&mut opens, RewardKind::Open).unwrap();
+            record_operational_exposure(&mut opens).unwrap();
         }
         let mut replies = arm("replies", false);
         for _ in 0..5 {
-            apply_reward_to_posterior(&mut replies, RewardKind::Reply).unwrap();
+            apply_matured_contact(&mut replies, true).unwrap();
         }
         assert!(
             replies.mean() > opens.mean(),
@@ -2823,7 +3580,7 @@ mod tests {
     fn delivered_does_not_move_the_posterior_either() {
         let mut delivered = arm("d", false);
         for _ in 0..5_000 {
-            apply_reward_to_posterior(&mut delivered, RewardKind::Delivered).unwrap();
+            record_operational_exposure(&mut delivered).unwrap();
         }
         assert_eq!(delivered.alpha, 1.0);
         assert_eq!(delivered.beta, 1.0);
@@ -2831,20 +3588,62 @@ mod tests {
         assert_eq!(delivered.contacts, 5_000);
     }
 
+    /// S1 DONE-WHEN: arm A at 10 successes in 1,000 matured contacts loses to
+    /// arm B at 2 successes in 10. B must be preferred in at least 95% of
+    /// draws, i.e. the exposure-correct model must not let A's raw volume
+    /// hide a 1% rate against B's 20% rate.
     #[test]
-    fn positive_posterior_mean_is_monotone_in_the_rung() {
-        let mut previous = f64::NEG_INFINITY;
-        for kind in POSITIVE_REWARD_LADDER {
-            let mut posterior = arm("candidate", false);
-            apply_reward_to_posterior(&mut posterior, *kind).unwrap();
-            assert!(
-                posterior.mean() > previous,
-                "posterior mean must increase with the ladder: {} -> {}",
-                kind,
-                posterior.mean()
-            );
-            previous = posterior.mean();
-        }
+    fn arm_b_two_of_ten_beats_arm_a_ten_of_a_thousand_in_at_least_95_percent_of_draws() {
+        let (alpha_a, beta_a) = posterior_from_counts(1_000, 10).expect("A posterior");
+        let (alpha_b, beta_b) = posterior_from_counts(10, 2).expect("B posterior");
+        let arm_a = ArmPosterior::new("a", alpha_a, beta_a, true);
+        let arm_b = ArmPosterior::new("b", alpha_b, beta_b, false);
+        assert!(
+            (arm_b.mean() - 0.25).abs() < 1e-12,
+            "B mean is 2/10: {}",
+            arm_b.mean()
+        );
+        assert!(
+            (arm_a.mean() - 11.0 / 1_002.0).abs() < 1e-12,
+            "A mean is 10/1000 shrunk: {}",
+            arm_a.mean()
+        );
+        let probabilities =
+            selection_win_probabilities(&[arm_a, arm_b], 4_000).expect("selection probabilities");
+        assert!(
+            probabilities[1] >= 0.95,
+            "B (2/10) must beat A (10/1000) in >=95% of draws: {probabilities:?}"
+        );
+    }
+
+    /// S1 DONE-WHEN: one contact that replies, books a meeting AND pays is
+    /// one trial and one success, not three.
+    #[test]
+    fn one_contact_with_reply_meeting_and_paid_counts_once() {
+        let mut arm = arm("candidate", false);
+        // The ledger identity is (arm, contact, primary_metric): the caller
+        // applies the matured contact once, regardless of how many positive
+        // events it produced.
+        apply_matured_contact(&mut arm, true).expect("one matured success");
+        assert_eq!(arm.trials, 1, "one contact is one trial");
+        assert_eq!(arm.successes, 1, "at most one success per contact");
+        assert_eq!(arm.alpha, 2.0);
+        assert_eq!(arm.beta, 1.0);
+        assert_eq!(arm.contacts, 1);
+        // The primary-success classification is exactly two rungs: a reply,
+        // meeting and paid for the same contact collapse to one boolean.
+        assert!(RewardKind::PositiveReply.is_primary_success());
+        assert!(RewardKind::MeetingBooked.is_primary_success());
+        assert!(!RewardKind::PaidSubscription.is_primary_success());
+    }
+
+    #[test]
+    fn posterior_formula_rejects_inconsistent_counts() {
+        assert!(posterior_from_counts(10, 11).is_err());
+        assert!(posterior_from_counts(-1, 0).is_err());
+        assert!(posterior_from_counts(0, -1).is_err());
+        assert_eq!(posterior_from_counts(0, 0).unwrap(), (1.0, 1.0));
+        assert_eq!(posterior_from_counts(10, 3).unwrap(), (4.0, 8.0));
     }
 
     #[test]
@@ -2864,7 +3663,7 @@ mod tests {
                 "alpha={alpha}, beta={beta} must be rejected"
             );
             let mut posterior = ArmPosterior::new("a", alpha, beta, false);
-            assert!(apply_reward_to_posterior(&mut posterior, RewardKind::Reply).is_err());
+            assert!(apply_matured_contact(&mut posterior, true).is_err());
         }
     }
 
@@ -3069,16 +3868,16 @@ mod tests {
         let control = ArmPosterior::new("control", 20.0, 80.0, true);
         let mut candidate = ArmPosterior::new("candidate", 1.0, 1.0, false);
         for _ in 0..100 {
-            apply_reward_to_posterior(&mut candidate, RewardKind::Reply).unwrap();
+            apply_matured_contact(&mut candidate, true).unwrap();
         }
-        // 100 replies: alpha = 21, beta = 1 → clearly beats control.
+        // 100 matured successes: alpha = 101, beta = 1 → clearly beats control.
         let verdict = may_promote_arm(&budget, &control, &candidate, 0.999);
         assert!(verdict.allowed, "{verdict:?}");
 
         // Too few trials.
         let mut thin = ArmPosterior::new("thin", 1.0, 1.0, false);
         for _ in 0..10 {
-            apply_reward_to_posterior(&mut thin, RewardKind::Reply).unwrap();
+            apply_matured_contact(&mut thin, true).unwrap();
         }
         let verdict = may_promote_arm(&budget, &control, &thin, 0.999);
         assert!(!verdict.allowed);
@@ -3087,11 +3886,11 @@ mod tests {
             .iter()
             .any(|r| r.contains("insufficient sample")));
 
-        // Interval does not beat control: 100 penalties leave the arm far
-        // below a control that converts 20% of its contacts.
+        // Interval does not beat control: 100 matured failures leave the arm
+        // far below a control that converts 20% of its contacts.
         let mut weak = ArmPosterior::new("weak", 1.0, 1.0, false);
         for _ in 0..100 {
-            apply_reward_to_posterior(&mut weak, RewardKind::Complaint).unwrap();
+            apply_matured_contact(&mut weak, false).unwrap();
         }
         let verdict = may_promote_arm(&budget, &control, &weak, 0.999);
         assert!(!verdict.allowed);
@@ -4045,8 +4844,9 @@ mod tests {
             .is_err());
     }
 
-    /// The reward projection is exactly-once per `outcome_key`, moves the
-    /// posterior once, and rejects hostile inputs before any write.
+    /// S1 write path: the event ledger is exactly-once per `outcome_key`,
+    /// the contact trial is exactly-once per (arm, contact, metric), and the
+    /// posterior moves only when the window CLOSES.
     #[tokio::test]
     async fn reward_projection_is_exactly_once_and_validates_hostile_inputs() {
         let Some(pool) = live_pool("experiments_reward").await else {
@@ -4074,19 +4874,33 @@ mod tests {
             .await
             .unwrap();
 
+        let contact = Uuid::new_v4();
+        let now = Utc::now();
+        let first_touch = now - ChronoDuration::days(1);
         let outcome_key = format!("step:{}:positive_reply", Uuid::new_v4());
-        record_reward(
-            &pool,
-            &tenant,
-            id,
-            "variant_b",
-            RewardKind::PositiveReply,
-            &outcome_key,
-            0.0,
-        )
-        .await
-        .expect("first projection");
+        let input = ContactOutcomeInput {
+            tenant_id: tenant.clone(),
+            experiment_id: id,
+            variant: "variant_b".into(),
+            account_id: None,
+            contact_id: contact,
+            segment: Some("saas".into()),
+            kind: RewardKind::PositiveReply,
+            outcome_key: outcome_key.clone(),
+            value_eur: 0.0,
+            occurred_at: now,
+            first_touch_at: Some(first_touch),
+        };
+        let results = record_contact_outcomes(&pool, std::slice::from_ref(&input))
+            .await
+            .expect("first projection");
+        assert_eq!(
+            results[0].as_ref().unwrap(),
+            &ContactOutcomeOutcome::Recorded
+        );
 
+        // Before maturity the arm is still at the prior: a success does not
+        // reach alpha until the observation window closes.
         let arm = engine
             .load_arms(&tenant, id)
             .await
@@ -4094,54 +4908,45 @@ mod tests {
             .into_iter()
             .find(|arm| arm.variant == "variant_b")
             .unwrap();
-        assert_eq!(arm.trials, 1);
-        assert_eq!(arm.successes, 1);
-        assert_eq!(arm.alpha, 1.5, "alpha += positive reward");
-        assert_eq!(arm.contacts, 1);
+        assert_eq!(arm.alpha, 1.0, "success is frozen, not applied early");
+        assert_eq!(arm.beta, 1.0);
+        assert_eq!(arm.trials, 0, "an open window is not a trial");
 
-        // Replay: the posterior must not move again.
-        record_reward(
-            &pool,
-            &tenant,
-            id,
-            "variant_b",
-            RewardKind::PositiveReply,
-            &outcome_key,
-            0.0,
-        )
-        .await
-        .expect("replay is a no-op");
-        let arm = engine
-            .load_arms(&tenant, id)
+        // Replay: the event key is a no-op; the trial identity also forbids a
+        // second success for the same contact.
+        let results = record_contact_outcomes(&pool, std::slice::from_ref(&input))
             .await
-            .unwrap()
-            .into_iter()
-            .find(|arm| arm.variant == "variant_b")
-            .unwrap();
-        assert_eq!(arm.trials, 1, "replay must not increment trials");
-        assert_eq!(arm.alpha, 1.5, "replay must not move alpha");
-        let ledger: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*)::bigint FROM sales_experiment_outcomes WHERE experiment_id = $1",
+            .expect("replay is a no-op");
+        assert_eq!(
+            results[0].as_ref().unwrap(),
+            &ContactOutcomeOutcome::Replayed
+        );
+        let trials: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)::bigint FROM sales_experiment_contact_trials \
+             WHERE experiment_id = $1 AND variant = 'variant_b'",
         )
         .bind(id)
         .fetch_one(&pool)
         .await
         .unwrap();
-        assert_eq!(ledger, 1, "exactly one ledger row per outcome key");
+        assert_eq!(trials, 1, "one contact is one trial row");
 
-        // A negative outcome moves beta and the harm counter.
-        let negative_key = format!("step:{}:bounce", Uuid::new_v4());
-        record_reward(
-            &pool,
-            &tenant,
-            id,
-            "variant_b",
-            RewardKind::Bounce,
-            &negative_key,
-            0.0,
-        )
-        .await
-        .unwrap();
+        // A different primary event for the SAME contact (meeting_booked)
+        // cannot create a second success.
+        let meeting = ContactOutcomeInput {
+            kind: RewardKind::MeetingBooked,
+            outcome_key: format!("step:{}:meeting", Uuid::new_v4()),
+            ..input.clone()
+        };
+        record_contact_outcomes(&pool, &[meeting]).await.unwrap();
+
+        // A negative outcome is guardrail telemetry, never beta.
+        let negative = ContactOutcomeInput {
+            kind: RewardKind::Complaint,
+            outcome_key: format!("step:{}:complaint", Uuid::new_v4()),
+            ..input.clone()
+        };
+        record_contact_outcomes(&pool, &[negative]).await.unwrap();
         let arm = engine
             .load_arms(&tenant, id)
             .await
@@ -4149,23 +4954,22 @@ mod tests {
             .into_iter()
             .find(|arm| arm.variant == "variant_b")
             .unwrap();
-        assert_eq!(arm.beta, 1.2);
+        assert_eq!(arm.beta, 1.0, "a complaint must not move beta");
         assert_eq!(arm.negative_outcomes, 1);
-        assert_eq!(arm.trials, 2);
 
-        // An operational outcome (open) records exposure only.
-        let open_key = format!("step:{}:open", Uuid::new_v4());
-        record_reward(
-            &pool,
-            &tenant,
-            id,
-            "variant_b",
-            RewardKind::Open,
-            &open_key,
-            0.0,
-        )
-        .await
-        .unwrap();
+        // Operational exposure is not a trial.
+        let open = ContactOutcomeInput {
+            kind: RewardKind::Open,
+            outcome_key: format!("step:{}:open", Uuid::new_v4()),
+            ..input
+        };
+        record_contact_outcomes(&pool, &[open]).await.unwrap();
+
+        // Closing the window applies the ONE matured success.
+        let matured = mature_due_contact_trials(&pool, id, now + ChronoDuration::days(15))
+            .await
+            .expect("mature");
+        assert_eq!(matured, 1);
         let arm = engine
             .load_arms(&tenant, id)
             .await
@@ -4173,10 +4977,11 @@ mod tests {
             .into_iter()
             .find(|arm| arm.variant == "variant_b")
             .unwrap();
-        assert_eq!(arm.contacts, 3);
-        assert_eq!(arm.trials, 2, "opens are not informative trials");
-        assert_eq!(arm.alpha, 1.5);
-        assert_eq!(arm.beta, 1.2);
+        assert_eq!(arm.trials, 1, "one matured contact");
+        assert_eq!(arm.successes, 1, "at most one success per contact");
+        assert_eq!(arm.alpha, 2.0, "alpha = 1 + successes");
+        assert_eq!(arm.beta, 1.0, "beta = 1 + (matured - successes)");
+        assert_eq!(arm.contacts, 1);
 
         // Hostile inputs are refused before any write.
         let long_key = "k".repeat(MAX_OUTCOME_KEY_LEN + 1);
@@ -4259,7 +5064,7 @@ mod tests {
         .fetch_one(&pool)
         .await
         .unwrap();
-        assert_eq!(ledger_after, 3, "hostile inputs wrote nothing");
+        assert_eq!(ledger_after, 4, "hostile inputs wrote nothing");
 
         // Enrichment spend accumulates on the arm and refuses hostile input.
         record_enrichment_spend(&pool, &tenant, id, "variant_b", 0.25)
@@ -4810,13 +5615,13 @@ mod adversarial_policy_tests {
     }
 
     #[test]
-    fn apply_reward_rejects_inconsistent_counters_and_non_finite_rewards() {
+    fn apply_matured_contact_rejects_inconsistent_counters_and_bad_posteriors() {
         let mut inconsistent = ArmPosterior {
             trials: 3,
             successes: 4,
             ..ArmPosterior::new("control", 1.0, 1.0, true)
         };
-        let error = apply_reward_to_posterior(&mut inconsistent, RewardKind::PositiveReply)
+        let error = apply_matured_contact(&mut inconsistent, true)
             .expect_err("inconsistent counters refused");
         assert!(
             error.to_string().contains("inconsistent counters"),
@@ -4824,21 +5629,27 @@ mod adversarial_policy_tests {
         );
 
         let mut valid = ArmPosterior::new("control", 1.0, 1.0, true);
-        apply_reward_to_posterior(&mut valid, RewardKind::PaidSubscription)
-            .expect("a finite reward applies");
-        assert_eq!(valid.trials, 1, "paid subscription is informative");
-        assert_eq!(valid.successes, 1, "and positive");
+        apply_matured_contact(&mut valid, true).expect("a matured success applies");
+        assert_eq!(valid.trials, 1);
+        assert_eq!(valid.successes, 1);
+        assert_eq!(valid.alpha, 2.0);
+        assert_eq!(valid.beta, 1.0);
+
+        let mut failure = ArmPosterior::new("bold", 1.0, 1.0, false);
+        apply_matured_contact(&mut failure, false).expect("silence is a failure");
+        assert_eq!(failure.trials, 1, "silence matures into a trial");
+        assert_eq!(failure.successes, 0);
+        assert_eq!(failure.alpha, 1.0);
+        assert_eq!(failure.beta, 2.0, "silence reaches beta");
 
         let mut open_only = ArmPosterior::new("bold", 1.0, 1.0, false);
-        open_only.trials = 0;
-        apply_reward_to_posterior(&mut open_only, RewardKind::Delivered)
-            .expect("a non-informative reward still counts the contact");
+        record_operational_exposure(&mut open_only).expect("exposure applies");
         assert_eq!(open_only.contacts, 1, "delivery counts the contact");
-        assert_eq!(open_only.trials, 0, "delivery is not informative");
+        assert_eq!(open_only.trials, 0, "delivery is not a matured trial");
 
         let mut bad_alpha = ArmPosterior::new("broken", 0.0, 1.0, false);
-        let error = apply_reward_to_posterior(&mut bad_alpha, RewardKind::Open)
-            .expect_err("alpha = 0 is not a posterior");
+        let error =
+            record_operational_exposure(&mut bad_alpha).expect_err("alpha = 0 is not a posterior");
         assert!(error.to_string().contains("alpha"), "{error}");
     }
 
@@ -4928,6 +5739,7 @@ mod adversarial_policy_tests {
             daily_exploration_pct: 0.0,
             account_expected_value_eur: 0.0,
             explicit_exploration_override: false,
+            account_id: None,
         };
         let error = engine
             .select_variant("   ", &experiment, &context)
@@ -5017,6 +5829,7 @@ mod adversarial_policy_tests {
             daily_exploration_pct: 0.0,
             account_expected_value_eur: 0.0,
             explicit_exploration_override: false,
+            account_id: None,
         };
         let selection = engine
             .select_variant(&tenant, &experiment, &context)
@@ -5070,6 +5883,7 @@ mod adversarial_policy_tests {
             daily_exploration_pct: 0.0,
             account_expected_value_eur: 0.0,
             explicit_exploration_override: false,
+            account_id: None,
         };
         let selection = engine
             .select_variant(&tenant, &experiment, &context)
@@ -5130,6 +5944,7 @@ mod adversarial_policy_tests {
             daily_exploration_pct: 0.0,
             account_expected_value_eur: 0.0,
             explicit_exploration_override: override_,
+            account_id: None,
         };
 
         // First selection provisions the bucket; its trial count is 0 < 25,
@@ -5209,7 +6024,7 @@ mod adversarial_policy_tests {
             .await
             .expect("arms");
 
-        // Input guards.
+        // Input guards (the audit-only path validates before any write).
         let error = record_reward(
             &pool,
             "  ",
@@ -5271,42 +6086,36 @@ mod adversarial_policy_tests {
             "{error}"
         );
 
-        // A reward applies once per outcome key: a replay is a no-op.
-        record_reward(
-            &pool,
-            &tenant,
+        // The contact-level path: one event key records once, one contact is
+        // one trial, and the posterior applies only at window close.
+        let contact = Uuid::new_v4();
+        let now = Utc::now();
+        let input = ContactOutcomeInput {
+            tenant_id: tenant.clone(),
             experiment_id,
-            "control",
-            RewardKind::PositiveReply,
-            "outcome-1",
-            0.0,
-        )
-        .await
-        .expect("records");
-        let (trials, successes): (i64, i64) = sqlx::query_as(
-            "SELECT trials, successes FROM sales_experiment_arms \
-             WHERE experiment_id = $1 AND variant = 'control'",
-        )
-        .bind(experiment_id)
-        .fetch_one(&pool)
-        .await
-        .expect("arm row");
-        assert_eq!(trials, 1);
-        assert_eq!(successes, 1);
+            variant: "control".into(),
+            account_id: None,
+            contact_id: contact,
+            segment: None,
+            kind: RewardKind::PositiveReply,
+            outcome_key: "outcome-1".into(),
+            value_eur: 0.0,
+            occurred_at: now,
+            first_touch_at: Some(now - ChronoDuration::days(2)),
+        };
+        record_contact_outcomes(&pool, std::slice::from_ref(&input))
+            .await
+            .expect("records");
+        let results = record_contact_outcomes(&pool, &[input])
+            .await
+            .expect("replay");
+        assert_eq!(
+            results[0].as_ref().unwrap(),
+            &ContactOutcomeOutcome::Replayed
+        );
 
-        record_reward(
-            &pool,
-            &tenant,
-            experiment_id,
-            "control",
-            RewardKind::PositiveReply,
-            "outcome-1",
-            0.0,
-        )
-        .await
-        .expect("replay");
-        let (trials, successes): (i64, i64) = sqlx::query_as(
-            "SELECT trials, successes FROM sales_experiment_arms \
+        let (trials, successes, alpha, beta): (i64, i64, f64, f64) = sqlx::query_as(
+            "SELECT trials, successes, alpha, beta FROM sales_experiment_arms \
              WHERE experiment_id = $1 AND variant = 'control'",
         )
         .bind(experiment_id)
@@ -5314,9 +6123,35 @@ mod adversarial_policy_tests {
         .await
         .expect("arm row");
         assert_eq!(
-            (trials, successes),
-            (1, 1),
-            "the same outcome key must never double-count"
+            (trials, successes, alpha, beta),
+            (0, 0, 1.0, 1.0),
+            "nothing moves before maturity and a replay never double-counts"
         );
+
+        mature_due_contact_trials(&pool, experiment_id, now + ChronoDuration::days(15))
+            .await
+            .expect("mature");
+        let (trials, successes, alpha, beta): (i64, i64, f64, f64) = sqlx::query_as(
+            "SELECT trials, successes, alpha, beta FROM sales_experiment_arms \
+             WHERE experiment_id = $1 AND variant = 'control'",
+        )
+        .bind(experiment_id)
+        .fetch_one(&pool)
+        .await
+        .expect("arm row");
+        assert_eq!(
+            (trials, successes, alpha, beta),
+            (1, 1, 2.0, 1.0),
+            "one matured contact, one success, alpha = 1 + successes"
+        );
+        let trials_rows: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)::bigint FROM sales_experiment_contact_trials \
+             WHERE experiment_id = $1 AND variant = 'control'",
+        )
+        .bind(experiment_id)
+        .fetch_one(&pool)
+        .await
+        .expect("count trials");
+        assert_eq!(trials_rows, 1, "the (arm, contact, metric) identity holds");
     }
 }

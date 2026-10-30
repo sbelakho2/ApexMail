@@ -19,6 +19,75 @@ use crate::ses_provider::SesIpProvider;
 /// Cheaply-cloneable handle shared across all request handlers.
 pub type AppState = Arc<AppStateInner>;
 
+/// The one billing provider handle the request handlers use.
+///
+/// Resolved through `billing_service::payments::registry` (fail closed:
+/// `PAYMENTS_PROVIDER`, never empty in production), cached after the first
+/// successful resolution, and installable by the test harness with a
+/// scripted double so the checkout/activation/refund path can be exercised
+/// end to end without a live processor. Handlers never construct an adapter.
+#[derive(Clone, Default)]
+pub struct PaymentProviderHandle {
+    provider: Arc<std::sync::RwLock<Option<Arc<dyn billing_service::payments::PaymentProvider>>>>,
+}
+
+impl PaymentProviderHandle {
+    /// Handle with no installed provider: resolves through the registry on
+    /// first use.
+    pub fn from_registry() -> Self {
+        Self::default()
+    }
+
+    /// A handle pinned to one provider (tests, or an operator-pinned
+    /// deployment).
+    pub fn installed(provider: Arc<dyn billing_service::payments::PaymentProvider>) -> Self {
+        Self {
+            provider: Arc::new(std::sync::RwLock::new(Some(provider))),
+        }
+    }
+
+    /// Pin the provider for this state (tests call this after construction).
+    pub fn install(&self, provider: Arc<dyn billing_service::payments::PaymentProvider>) {
+        *self.provider.write().expect("payment provider handle lock") = Some(provider);
+    }
+
+    /// The provider: the installed one (tests / operator pin), else the
+    /// registry resolved per call. A registry refusal is returned verbatim
+    /// (fail closed). Deliberately NOT cached: a rotated credential or a
+    /// test's environment change takes effect on the next request, and the
+    /// adapter construction is cheap compared with the payment itself.
+    pub fn resolve(
+        &self,
+    ) -> Result<
+        Arc<dyn billing_service::payments::PaymentProvider>,
+        billing_service::payments::RegistryError,
+    > {
+        if let Some(provider) = self
+            .provider
+            .read()
+            .expect("payment provider handle lock")
+            .clone()
+        {
+            return Ok(provider);
+        }
+        billing_service::payments::registry::from_env()
+    }
+}
+
+impl std::fmt::Debug for PaymentProviderHandle {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let installed = self
+            .provider
+            .read()
+            .map(|provider| provider.is_some())
+            .unwrap_or(false);
+        formatter
+            .debug_struct("PaymentProviderHandle")
+            .field("installed", &installed)
+            .finish()
+    }
+}
+
 /// Inner struct holding the database pool, Redis pool, config, and providers.
 pub struct AppStateInner {
     pub db: PgPool,
@@ -46,6 +115,8 @@ pub struct AppStateInner {
     /// Runtime feature-flag evaluation (tenant override → global row →
     /// default), with a bounded TTL cache invalidated by admin writes.
     pub feature_flags: crate::feature_flags::FeatureFlagService,
+    /// The configured payment provider (registry-resolved, test-installable).
+    pub payments: PaymentProviderHandle,
 }
 
 impl AppStateInner {
@@ -186,6 +257,7 @@ impl AppStateInner {
             placement_state,
             resilient,
             feature_flags,
+            payments: PaymentProviderHandle::from_registry(),
         })
     }
 }

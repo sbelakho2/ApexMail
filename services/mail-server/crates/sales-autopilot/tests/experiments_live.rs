@@ -357,7 +357,7 @@ async fn reward_ledger_is_idempotent_and_the_ladder_moves_the_posterior_once() {
     .await
     .expect("conflicting replay must be ignored");
 
-    let (alpha, beta, trials, successes, contacts, negative): (f64, f64, i64, i64, i64, i64) =
+    let (alpha, beta, _trials, _successes, contacts, negative): (f64, f64, i64, i64, i64, i64) =
         sqlx::query_as(
             "SELECT alpha, beta, trials, successes, contacts, negative_outcomes \
              FROM sales_experiment_arms WHERE experiment_id = $1 AND variant = 'control'",
@@ -366,11 +366,13 @@ async fn reward_ledger_is_idempotent_and_the_ladder_moves_the_posterior_once() {
         .fetch_one(&pool)
         .await
         .expect("read arm");
-    assert!((alpha - 1.2).abs() < 1e-9, "alpha {alpha}");
+    // S1: the reward is a LEDGER fact; the posterior moves only when the
+    // contact's window matures, so alpha/beta stay at the prior here.
+    assert!((alpha - 1.0).abs() < 1e-9, "alpha {alpha}");
     assert!((beta - 1.0).abs() < 1e-9, "beta {beta}");
-    assert_eq!(trials, 1, "one logical outcome must be one trial");
-    assert_eq!(successes, 1);
-    assert_eq!(contacts, 1);
+    // S1: a Reply is not an operational/negative exposure, so the counter
+    // columns stay untouched; contacts are recomputed at maturity.
+    assert_eq!(contacts, 0);
     assert_eq!(
         negative, 0,
         "the conflicting complaint replay must not count"
@@ -409,10 +411,10 @@ async fn reward_ledger_is_idempotent_and_the_ladder_moves_the_posterior_once() {
     .fetch_one(&pool)
     .await
     .expect("read arm after opens");
-    assert!((alpha - 1.2).abs() < 1e-9, "opens must not move alpha");
+    assert!((alpha - 1.0).abs() < 1e-9, "opens must not move alpha");
     assert!((beta - 1.0).abs() < 1e-9, "opens must not move beta");
-    assert_eq!(trials, 1, "opens are not informative trials");
-    assert_eq!(contacts, 4, "opens count exposure");
+    assert_eq!(trials, 0, "no window has matured, so no informative trials");
+    assert_eq!(contacts, 3, "opens count exposure");
 }
 
 #[tokio::test]
@@ -529,6 +531,7 @@ async fn sparse_context_bucket_falls_back_to_global_and_a_populated_one_takes_ov
         daily_exploration_pct: 0.0,
         account_expected_value_eur: 0.0,
         explicit_exploration_override: false,
+        account_id: None,
     };
 
     // Sparse bucket: the global posterior is authoritative and is never a

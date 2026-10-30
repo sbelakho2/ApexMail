@@ -107,6 +107,21 @@ impl Money {
             .or_else(|| raw.as_f64().map(|number| format!("{number:.2}")))?;
         Self::parse(currency, &text)
     }
+
+    /// Like [`Money::from_json`], but the provider's NEGATIVE wire amounts
+    /// (a chargeback's `settlementAmount` is "always a negative amount") are
+    /// normalized to their ABSOLUTE minor-unit value. A magnitude is what
+    /// the books record (the direction is the fact's kind, never the sign).
+    fn magnitude_from_json(value: &serde_json::Value) -> Option<Self> {
+        let currency = value.get("currency")?.as_str()?;
+        let raw = value.get("value")?;
+        let text = raw
+            .as_str()
+            .map(str::to_string)
+            .or_else(|| raw.as_f64().map(|number| format!("{number:.2}")))?;
+        let magnitude = text.trim().strip_prefix('-').unwrap_or(text.trim());
+        Self::parse(currency, magnitude)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -116,11 +131,21 @@ impl Money {
 #[derive(Debug, Clone, Default)]
 pub struct Payment {
     pub id: String,
-    /// open | pending | authorized | paid | failed | canceled | expired |
-    /// refunded | charged_back
+    /// Mollie's documented payment statuses ONLY:
+    /// open | canceled | pending | authorized | expired | failed | paid.
+    ///
+    /// `refunded` and `charged_back` are NOT payment statuses (docs.mollie.com,
+    /// Payments API): a refunded payment stays `paid` and a chargeback is a
+    /// separate `chb_…` object. The refund/dispute facts are read from their
+    /// own endpoints ([`MollieClient::payment_refunds`],
+    /// [`MollieClient::payment_chargebacks`]).
     pub status: String,
     pub amount: Option<Money>,
+    /// `amountRefunded`: everything returned so far, in minor units.
     pub amount_refunded: Option<Money>,
+    /// `amountChargedBack`: everything taken back by chargebacks, in minor
+    /// units. Reversed chargebacks are not included by the provider.
+    pub amount_charged_back: Option<Money>,
     /// first | recurring | oneoff (or absent for one-off payments)
     pub sequence_type: Option<String>,
     pub customer_id: Option<String>,
@@ -146,8 +171,35 @@ pub struct Refund {
     pub id: String,
     pub payment_id: String,
     /// queued | pending | processing | refunded | failed | canceled
+    /// (docs.mollie.com, Refunds API `status`).
     pub status: String,
     pub amount: Option<Money>,
+    pub raw: serde_json::Value,
+}
+
+/// One chargeback (`chb_…`) against a payment.
+///
+/// Mollie's chargeback object has NO `status` field (docs.mollie.com,
+/// `GET /v2/payments/{id}/chargebacks`): the state is carried by
+/// `reversedAt` (a reversal happened) and by `settlementAmount`/`settlementId`
+/// (only present once the chargeback was finalized and the money was
+/// deducted). The reason is a `{code, description}` object for SEPA direct
+/// debits and absent otherwise.
+#[derive(Debug, Clone, Default)]
+pub struct Chargeback {
+    pub id: String,
+    pub payment_id: String,
+    /// The amount charged back (positive minor units).
+    pub amount: Option<Money>,
+    /// Deducted from the settlement balance when finalized (negative on the
+    /// wire; normalized to an absolute minor-unit amount here).
+    pub settlement_amount: Option<Money>,
+    /// `true` once the provider has finalized the deduction.
+    pub settled: bool,
+    /// ISO timestamp of the reversal, when the chargeback was reversed.
+    pub reversed_at: Option<String>,
+    pub reason: Option<String>,
+    pub created_at: Option<String>,
     pub raw: serde_json::Value,
 }
 
@@ -489,6 +541,32 @@ impl MollieClient {
             .collect())
     }
 
+    /// Every chargeback of one payment (`GET /v2/payments/{id}/chargebacks`,
+    /// docs.mollie.com). This is the ONLY dispute surface Mollie offers: the
+    /// payment object never carries a `charged_back` status, so the
+    /// reconciliation must enumerate these objects to see a chargeback.
+    pub async fn payment_chargebacks(
+        &self,
+        payment_id: &str,
+    ) -> Result<Vec<Chargeback>, MollieError> {
+        let document = self
+            .send(
+                self.http
+                    .get(self.url(&format!("payments/{payment_id}/chargebacks"))),
+            )
+            .await?;
+        let embedded = document
+            .get("_embedded")
+            .and_then(|value| value.get("chargebacks"))
+            .and_then(|value| value.as_array())
+            .cloned()
+            .unwrap_or_default();
+        Ok(embedded
+            .iter()
+            .map(|chargeback| chargeback_from_json(payment_id, chargeback))
+            .collect())
+    }
+
     pub async fn create_refund(
         &self,
         payment_id: &str,
@@ -793,6 +871,7 @@ pub fn payment_from_json(document: &serde_json::Value) -> Payment {
         status: string_at(document, "/status").unwrap_or_default(),
         amount: document.get("amount").and_then(Money::from_json),
         amount_refunded: document.get("amountRefunded").and_then(Money::from_json),
+        amount_charged_back: document.get("amountChargedBack").and_then(Money::from_json),
         sequence_type: string_at(document, "/sequenceType"),
         customer_id: string_at(document, "/customerId"),
         mandate_id: string_at(document, "/mandateId"),
@@ -819,6 +898,36 @@ pub fn refund_from_json(payment_id: &str, document: &serde_json::Value) -> Refun
         payment_id: string_at(document, "/paymentId").unwrap_or_else(|| payment_id.to_string()),
         status: string_at(document, "/status").unwrap_or_default(),
         amount: document.get("amount").and_then(Money::from_json),
+        raw: document.clone(),
+    }
+}
+
+/// Map one chargeback document. The wire has no `status`: `reversedAt`
+/// decides a reversal, `settlementAmount`/`settlementId` prove the
+/// deduction was finalized, and anything else is still open. `reason` is a
+/// `{code, description}` object for SEPA direct debits (an occasional plain
+/// string in older payloads); the human description wins.
+pub fn chargeback_from_json(payment_id: &str, document: &serde_json::Value) -> Chargeback {
+    let reason = document.get("reason").and_then(|value| {
+        value
+            .get("description")
+            .and_then(|description| description.as_str())
+            .or_else(|| value.get("code").and_then(|code| code.as_str()))
+            .or_else(|| value.as_str())
+            .map(str::to_string)
+    });
+    Chargeback {
+        id: string_at(document, "/id").unwrap_or_default(),
+        payment_id: string_at(document, "/paymentId").unwrap_or_else(|| payment_id.to_string()),
+        amount: document.get("amount").and_then(Money::magnitude_from_json),
+        settlement_amount: document
+            .get("settlementAmount")
+            .and_then(Money::magnitude_from_json),
+        settled: document.get("settlementAmount").is_some()
+            || document.get("settlementId").is_some(),
+        reversed_at: string_at(document, "/reversedAt"),
+        reason,
+        created_at: string_at(document, "/createdAt"),
         raw: document.clone(),
     }
 }
@@ -928,6 +1037,74 @@ mod tests {
         assert_eq!(refund.payment_id, "tr_7UhSN1zuXS");
         assert_eq!(refund.status, "pending");
         assert_eq!(refund.amount, Some(Money::new("EUR", 500)));
+    }
+
+    #[test]
+    fn chargeback_document_reads_reversal_settlement_and_reason() {
+        // The documented chargeback shape (no `status` field): amount is
+        // positive, settlementAmount is negative on the wire.
+        let open = serde_json::json!({
+            "resource": "chargeback",
+            "id": "chb_n9z0tp",
+            "amount": { "currency": "EUR", "value": "10.00" },
+            "paymentId": "tr_7UhSN1zuXS",
+            "createdAt": "2026-10-29T10:00:00+00:00",
+            "reversedAt": null,
+            "reason": { "code": "AC01", "description": "Account identifier incorrect" }
+        });
+        let chargeback = chargeback_from_json("tr_7UhSN1zuXS", &open);
+        assert_eq!(chargeback.id, "chb_n9z0tp");
+        assert_eq!(chargeback.payment_id, "tr_7UhSN1zuXS");
+        assert_eq!(chargeback.amount, Some(Money::new("EUR", 1_000)));
+        assert!(!chargeback.settled, "no settlement amount yet");
+        assert_eq!(chargeback.reversed_at, None);
+        assert_eq!(
+            chargeback.reason.as_deref(),
+            Some("Account identifier incorrect")
+        );
+
+        let settled = serde_json::json!({
+            "id": "chb_settled",
+            "amount": { "currency": "EUR", "value": "10.00" },
+            "settlementAmount": { "currency": "EUR", "value": "-10.00" },
+            "settlementId": "stl_1",
+            "paymentId": "tr_7UhSN1zuXS",
+            "createdAt": "2026-10-29T10:00:00+00:00",
+            "reversedAt": null
+        });
+        let chargeback = chargeback_from_json("tr_7UhSN1zuXS", &settled);
+        assert!(chargeback.settled);
+        assert_eq!(
+            chargeback.settlement_amount,
+            Some(Money::new("EUR", 1_000)),
+            "the negative settlement amount is normalized to its magnitude"
+        );
+
+        let reversed = serde_json::json!({
+            "id": "chb_reversed",
+            "amount": { "currency": "EUR", "value": "10.00" },
+            "reversedAt": "2026-11-02T09:00:00+00:00",
+            "paymentId": "tr_7UhSN1zuXS"
+        });
+        let chargeback = chargeback_from_json("tr_7UhSN1zuXS", &reversed);
+        assert_eq!(
+            chargeback.reversed_at.as_deref(),
+            Some("2026-11-02T09:00:00+00:00")
+        );
+    }
+
+    #[test]
+    fn payment_document_reads_the_charged_back_total_too() {
+        let document = serde_json::json!({
+            "id": "tr_cb",
+            "status": "paid",
+            "amount": { "currency": "EUR", "value": "12.34" },
+            "amountRefunded": { "currency": "EUR", "value": "1.00" },
+            "amountChargedBack": { "currency": "EUR", "value": "2.00" }
+        });
+        let payment = payment_from_json(&document);
+        assert_eq!(payment.amount_refunded, Some(Money::new("EUR", 100)));
+        assert_eq!(payment.amount_charged_back, Some(Money::new("EUR", 200)));
     }
 
     #[test]

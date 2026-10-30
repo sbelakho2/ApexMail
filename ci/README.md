@@ -107,7 +107,7 @@ so the coverage of the old CI can still be audited.
 | Workflow | Verdict | Replaced by / why |
 |---|---|---|
 | `rust-check.yml` | **REPLACED** | `test` stage: cargo fmt --check (`CI_FMT_CHECK`, see §9 F7), clippy `--workspace --all-targets -D warnings`, `cargo test --workspace`, dependency-cycle / security-feature-flag / audit-coverage python gates, cargo-machete + cargo-deny `check advisories bans sources licenses` — REQUIRED lanes via `ci_have_tool` since 2026-09-10 (fail-closed on the deploy host, warn-skip on dev machines; the licenses gate runs off the inventory-driven `services/mail-server/deny.toml` allow list). Secret-scan job → `security` stage (gitleaks). Semgrep SAST job → `security` stage, REQUIRED (see §5). |
-| `security-audit.yml` | **REPLACED** | `security` stage: `cargo audit --deny warnings` with the identical 15-entry RUSTSEC ignore list (keep both lists in lockstep — the justifications live in the old workflow and in `ci/pipeline.conf`). `outdated` job → advisory report only, as upstream (`continue-on-error`). Weekly cadence → the timer runs it on every poll; set `--stages security` for a standalone audit. |
+| `security-audit.yml` | **REPLACED** | `security` stage: `cargo audit`, ignoring only the reviewed `CI_CARGO_AUDIT_IGNORES` ledger (pipeline.conf, exact lockstep with `deny.toml` + `scripts/security-audit.sh` — asserted by `ci/pipeline.sh selftest`) plus the DATED waivers in `services/mail-server/.cargo/audit.toml` (validated by `tools/check_audit_waivers.py`: at most 90 days, expired/stale entries fail the lane). `outdated` job → advisory report only, as upstream (`continue-on-error`). **Daily cadence**: `security.cargo-audit-daily` runs `cargo audit` against a FRESH database cloned into the run dir (`cargo audit --db`), once per UTC day; `ci/pipeline.sh run --daily` is invoked by the host timer (`apexmail-pipeline.service`), and a same-day PASS marker (`ci/runs/.last-daily-audit`) keeps the 5-minute poll cheap. Set `--stages security` for a standalone audit; `CI_DAILY_AUDIT_FORCE=1` forces the daily lane immediately. |
 | `cargo-vet.yml` | **REPLACED** | `security` stage (`ci/stages/security.sh:119-127`): `supply-chain/config.toml` is committed and REQUIRED — if it disappears the lane hard-fails (it is no longer optional-by-absence); otherwise `cargo vet --locked` runs. **Assurance note (coverage audit U-10):** since 2026-10-07 the store imports 9 peer audit sets and reports its own split on every run ("Vetting Succeeded (164 fully audited, 16 partially audited, 586 exempted)"). The 586 exemptions are self-assertions, not reviews — a green run is NOT full provenance; quote the split (policy: `services/mail-server/supply-chain/README.md`). |
 | `sqlx-migration-validation.yml` | **REPLACED** | `security` stage: `migrator --dry-run` (embedded set) + `sqlx migrate run` **twice** against a throwaway `postgres:16-alpine` (clean apply + idempotency — the same two assertions). The chain was broken when this table was written (§9 F1) and the gate ran advisory; the chain is fixed through migration 118 and `CI_MIGRATION_CHECK` is **required** again (a fresh-DB migration failure fails the run). |
 | `deploy.yml` | **REPLACED** | `images` stage builds every canonical target (via `deploy/scripts/deploy.sh --build-only` — the same Dockerfile targets the workflow used), tags `:latest` + `:<sha>` locally (no registry at all). Trivy CRITICAL/HIGH gate on api-server + mta runs post-build in `images` (and pre-deploy in `security` on whatever images exist). Syft SBOM → Trivy SPDX JSON in the run dir (advisory, as upstream). Image-name drift guard job → `validate` stage (ported verbatim). `pr-gate` job (checks API polling) → **cannot replicate without GitHub** — substitute: `ci/check-pr.sh` + the pre-push hook (§4). |
@@ -382,25 +382,37 @@ both required since the first-host triage window ended (2026-10-13).
    (vulnerability IDs) + `trivy-secret.yaml` (`allow-rules` for secret
    values); every entry justified. The jackson entries (sdk-java example
    POM) carry a follow-up: bump jackson to 2.18.8 and delete them.
-4. **Coverage ratchet** (test stage, `run_coverage_gate`) —
-   `cargo llvm-cov nextest --workspace` under the same ephemeral-DB env
-   as the plain test run, lcov artifact (`coverage.lcov`) in the run dir,
+4. **Coverage ratchet + per-crate floors** (test stage, `run_coverage_gate`) —
+   `cargo llvm-cov nextest --workspace` under the same ephemeral-DB env as
+   the plain test run, lcov artifact (`coverage.lcov`) in the run dir,
    OVERALL line coverage compared against `ci/coverage-baseline.txt`
    (single float). Below = FAIL; at-or-above = PASS + the measured value
-   + a nudge to raise the baseline in the same PR. The baseline ships as
-   `0.0` — the FIRST HOST RUN seeds the real value; commit it. Requires
-   cargo-llvm-cov + the `llvm-tools-preview` rustup component +
-   cargo-nextest (all installed by `ci/install.sh`). Flag status
-   (2026-10-13): `CI_COVERAGE_CHECK` is **advisory** — the deploy host has
-   never produced a coverage.lcov (the instrumented pass carries a ~150G
-   scratch-tree precondition and has always been skipped ahead of it), so no
-   measured value exists to raise against; the flip to required belongs to
-   the PR that first records a host measurement at/above the baseline.
+   + a nudge to raise the baseline in the same PR.
+   **T2 (2026-10-30): `CI_COVERAGE_CHECK` is REQUIRED.** The advisory window
+   is closed: a release blessing must not exist without coverage evidence.
    On the gate line (`ci/pipeline.sh run`) the disk precondition is hard:
    `CI_COVERAGE_DISK_REQUIRED` defaults to `1` there, so a runner without
    the headroom fails the test lane instead of silently omitting coverage.
    Standalone stage runs keep the skip-loud default; export `=0` to opt a
    pipeline run out deliberately.
+   The same run also produces llvm-cov export JSON (`coverage.json`, via
+   `cargo llvm-cov report --json` on the same profile data) and runs
+   `tools/check_coverage_floors.py`: required per-crate LINE + REGION floors
+   from `ci/coverage-floors.toml` (`test.coverage-floors`), a raise-only
+   ratchet against the base ref (lowering needs a dated
+   `test.coverage-floors` waiver), and tier-1 diff coverage. The floors file
+   ships every crate at `0.0` by the same convention as the workspace
+   baseline; the first host run with both artifacts runs `--seed` and commits
+   the raised values (raise-only, never lowering).
+   Requires cargo-llvm-cov + the `llvm-tools-preview` rustup component +
+   cargo-nextest (all installed by `ci/install.sh`).
+4b. **Fuzz-lite smoke** (test stage, `tools/run_fuzz_nightly.sh --smoke`) —
+   the deterministic T7 harness proof (`test.fuzz-smoke`): committed parser
+   corpora + a fixed seeded input set through every fuzz driver. The 10-minute
+   per-target libFuzzer engine is NOT on the gate line; it runs once per UTC
+   day from `ci/pipeline.sh run --fuzz-nightly` (host timer, same marker
+   shape as `--daily`) and commits any crash artifact + generated regression
+   test. See `services/mail-server/crates/fuzz-tests/fuzz/README.md`.
 5. **Migration SQL lint** (validate stage, `tools/migration_lint.py`) —
    enterprise conventions over the canonical chain: destructive ops
    guarded, idempotent CREATE TABLE/INDEX, `-- Migration N:` headers, no
@@ -614,15 +626,19 @@ These are **product defects found by this pipeline**, not pipeline bugs:
   config already allowlists `tests/fixtures/` directories, not `tests/*.rs`
   fixture constants) or rotate if any is real. `CI_GITLEAKS_CHECK=advisory`
   exists for a triage window only.
-* **F12 — cargo audit reports unignored vulnerabilities**: with the current
-  15-entry ignore list, `cargo audit --deny warnings` fails on
-  RUSTSEC-2026-0193 / -0213 (ammonia mXSS/XSS, fixes in 4.1.3/4.1.4),
-  RUSTSEC-2026-0204 (crossbeam-epoch, fix 0.9.20), an h2 advisory and more
-  (full list: the stage's `cargo-audit.txt`). security-audit.yml would fail
-  identically today. The gate stays REQUIRED: `cargo update` the affected
-  crates (all have fixes) or extend the reviewed ignore list in
-  `ci/pipeline.conf` AND the old workflow in lockstep.
-  `CI_CARGO_AUDIT_CHECK=advisory` exists for a triage window only.
+* **F12 — cargo audit ledger**: the October-2026 sweep cleared every
+  vulnerability-class advisory (webpki-roots, rustls-webpki 0.103, the zip 2
+  / zstd 0.13 / zstd-safe 7 chain, crypto-bigint 0.5 and ctutils 0.4) and
+  pruned the ignore IDs whose packages left the lock. The remaining
+  vulnerability-class entries are lopdf (dev-only), quick-xml 0.38
+  (citationberg/typst CSL styles) and rsa (DKIM signatures only); each is a
+  DATED waiver in `services/mail-server/.cargo/audit.toml`, at most 90 days.
+  An unignored vulnerability fails the REQUIRED `security` lane; the daily
+  lane re-checks against a freshly cloned advisory database. Triage a new
+  advisory by upgrading, or add a dated waiver (reason + reachable call path)
+  AND the id to `CI_CARGO_AUDIT_IGNORES`/`deny.toml`/`scripts/security-audit.sh`
+  in lockstep. `CI_CARGO_AUDIT_CHECK=advisory` /
+  `CI_CARGO_AUDIT_DAILY_CHECK=advisory` exist for a triage window only.
 * **F13 — `ddos-protection::metrics::tests::random_paths_produce_bounded_
   distinct_labels` fails deterministically**: "distinct labels must stay
   bounded, got 501" (expected ≤ 500) — 6/6 runs under nextest process
@@ -666,7 +682,7 @@ stages:
 | validate | `ci/stages/validate.sh` | compose/env sanity, pipeline-config invariants, repo gates (kiwi isolation, panic paths, outbound-delivery contract, migration lint, …) |
 | docs | `ci/stages/docs.sh` | documentation architecture-truth gates (production runbooks must not teach kubectl/helm/k9s operations; historical/roadmap docs carry an `ARCHITECTURE-TRUTH:` marker) |
 | ui | `ci/stages/ui.sh` | the seven REQUIRED visual-fixture gates (flash copy, form hygiene, a11y, dead links, terminology, strings catalog, marketing token contrast) |
-| test | `ci/stages/test.sh` | `cargo fmt --check`, `clippy --workspace --all-targets -D warnings`, `cargo test --workspace` against the postgres service, machete + deny, coverage ratchet, SDK/satellite/static-lint lanes, dogfood ledger + self-test (§8c), and the three live lanes: journey (isolated stack + journey-deep), canary (isolated stack + the byte-pinned external qualification runner), and real-model eval (corpus contract always; the replay runs under real model credentials and records NOT EXECUTED otherwise) |
+| test | `ci/stages/test.sh` | `cargo fmt --check`, `clippy --workspace --all-targets -D warnings`, `cargo test --workspace` against the postgres service, machete + deny, coverage ratchet + per-crate floors/diff coverage, fuzz-lite smoke, SDK/satellite/static-lint lanes, dogfood ledger + self-test (§8c), and the three live lanes: journey (isolated stack + journey-deep), canary (isolated stack + the byte-pinned external qualification runner), and real-model eval (corpus contract always; the replay runs under real model credentials and records NOT EXECUTED otherwise) |
 | security | `ci/stages/security.sh` | gitleaks (full history), cargo audit, cargo vet, semgrep SAST, fresh-database migration validation, Trivy |
 
 The DB-gated suites really run: the pipeline declares `postgres` + `redis`

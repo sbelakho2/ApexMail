@@ -103,7 +103,9 @@ arc-swap = "1.7"
 # Email protocols
 mail-parser = "0.10"
 mail-builder = "0.3"
-mail-auth = "0.5"
+# 0.15 drops the `report`/zip path entirely (zip 2.4 was RUSTSEC-2026-0367/68/69);
+# rust-crypto keeps DKIM signing on the pure-Rust stack (no aws-lc-sys C build).
+mail-auth = { version = "0.15", default-features = false, features = ["dns-hickory", "rust-crypto"] }
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
@@ -142,8 +144,25 @@ trust-dns-resolver = { package = "hickory-resolver", version = "0.26" }
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
 
 # AWS SDK (SES dedicated IP management)
-aws-config = { version = "1.5", features = ["behavior-version-latest"] }
-aws-sdk-sesv2 = "1.50"
+# default-features = false drops the SDK's legacy `rustls` feature, which
+# forces aws-smithy-runtime/tls-rustls -> rustls 0.21 + rustls-webpki 0.101
+# (EOL, RUSTSEC-2026-0382 has no 0.101 fix). The `default-https-client`
+# feature is the modern hyper 1.x + rustls 0.23 path the workspace already
+# uses; the remaining defaults are listed explicitly so credential
+# resolution (process/SSO) and sigv4a signing are unchanged.
+aws-config = { version = "1.5", default-features = false, features = [
+    "behavior-version-latest",
+    "default-https-client",
+    "rt-tokio",
+    "credentials-process",
+    "sso",
+] }
+aws-sdk-sesv2 = { version = "1.50", default-features = false, features = [
+    "behavior-version-latest",
+    "default-https-client",
+    "rt-tokio",
+    "sigv4a",
+] }
 
 # HTTP Server (axum-based tracking service)
 axum = { version = "0.7", features = ["macros"] }

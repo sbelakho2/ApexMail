@@ -102,6 +102,7 @@ impl DiscoverySource for FirstPartySource {
                     company_name: Some(company),
                     domain: Some(domain),
                     contact_email: None,
+                    source_notice_required: false,
                     jurisdiction: country.clone(),
                     jurisdiction_confidence: if country.is_some() { 0.6 } else { 0.0 },
                     confidence: 0.8,

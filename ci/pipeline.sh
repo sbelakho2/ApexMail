@@ -19,6 +19,15 @@
 #   --advisory a,b     treat these stages as advisory for THIS run
 #   --skip-unchanged   end early when HEAD already completed a green run under
 #                      the current pipeline config (the timer's cheap poll)
+#   --daily            run the once-a-day fresh-DB cargo-audit lane BEFORE the
+#                      stage line (the host timer invokes this; same-day runs
+#                      no-op through ci/runs/.last-daily-audit, so a 5-minute
+#                      poll stays cheap while advisories are re-checked daily)
+#   --fuzz-nightly     run tools/run_fuzz_nightly.sh BEFORE the stage line
+#                      (each libFuzzer target for CI_FUZZ_SECONDS; crashes
+#                      commit a corpus seed + generated regression test).
+#                      Once per UTC day via ci/runs/.last-fuzz-nightly; the
+#                      host timer passes BOTH --daily and --fuzz-nightly.
 #   --dry-run          echo infrastructure actions instead of executing them
 #   --force            proceed even when another run holds the lock
 #   --lock-wait SECS   seconds to wait for the run lock (default 0)
@@ -75,6 +84,12 @@ run options:
   --advisory a,b      these stages may fail without failing the run
   --skip-unchanged    end early when HEAD already passed a green run under the
                       current pipeline config (the timer's cheap poll)
+  --daily             run the once-a-day fresh-DB cargo-audit lane before the
+                      stage line (the host timer passes this; same-day runs
+                      no-op via ci/runs/.last-daily-audit)
+  --fuzz-nightly      run the nightly libFuzzer engine before the stage line
+                      (once per UTC day via ci/runs/.last-fuzz-nightly; each
+                      target runs CI_FUZZ_SECONDS, default 600)
   --dry-run           echo infrastructure actions instead of executing
   --force             run without the pipeline lock
   --lock-wait SECS    wait up to SECS for the lock (default 0)
@@ -249,6 +264,8 @@ cmd_run() {
     _force=0
     _lock_wait=0
     _skip_unchanged=0
+    _daily=0
+    _fuzz_nightly=0
     while [ $# -gt 0 ]; do
         case $1 in
             --stages)        _want=$2; shift 2 ;;
@@ -260,6 +277,8 @@ cmd_run() {
             --force)         _force=1; shift ;;
             --lock-wait)     _lock_wait=$2; shift 2 ;;
             --skip-unchanged) _skip_unchanged=1; shift ;;
+            --daily)         _daily=1; shift ;;
+            --fuzz-nightly)  _fuzz_nightly=1; shift ;;
             *)               ci_die "unknown option: $1 (see --help)" ;;
         esac
     done
@@ -382,6 +401,80 @@ cmd_run() {
         printf '%s\n' "$_es_status"
     }
 
+    # run_daily_audit — `--daily`: execute security.sh's CI_DAILY_AUDIT_ONLY
+    # branch (fresh RustSec advisory DB, once per UTC day) BEFORE the stage
+    # line. This is deliberately outside CI_STAGES: the deploy host's line has
+    # no security stage, yet it must still run the daily audit, and it must
+    # run even when fetch would exit unchanged. The lane itself no-ops after a
+    # same-day PASS (ci/runs/.last-daily-audit), so the 5-minute timer path is
+    # cheap. Prints exactly the status word like execute_stage.
+    run_daily_audit() {
+        _rd_start=$(date +%s)
+        CI_STAGE_LOG="$RUN_DIR/stages/security-daily.log"
+        : >"$CI_STAGE_LOG"
+        export CI_STAGE_LOG
+        export CI_STAGE_NAME=security-daily
+        _rd_tmo=2700
+        eval "_rd_tmo=\${CI_TIMEOUT_security:-2700}"
+        ci_info "── daily lane [security.cargo-audit-daily] start (timeout ${_rd_tmo}s) ──" >&2
+        _rd_rc=0
+        CI_DAILY_AUDIT_ONLY=1 ci_timeout "$_rd_tmo" sh "$CI_DIR/stages/security.sh" \
+            >>"$CI_STAGE_LOG" 2>&1 || _rd_rc=$?
+        _rd_end=$(date +%s)
+        _rd_status=ok
+        [ "$_rd_rc" -ne 0 ] && _rd_status=fail
+        [ "$_rd_rc" -eq "$CI_EXIT_TIMEOUT" ] && _rd_status=timeout
+        manifest_stage security-daily "$_rd_status" "$_rd_rc" "$_rd_start" "$_rd_end"
+        ci_github_status_publish security-daily "$_rd_status"
+        ci_info "── daily lane [security.cargo-audit-daily] $_rd_status (exit $_rd_rc, $(( _rd_end - _rd_start ))s) ──" >&2
+        printf '%s\n' "$_rd_status"
+    }
+
+    # run_fuzz_nightly — `--fuzz-nightly`: drive tools/run_fuzz_nightly.sh
+    # BEFORE the stage line, once per UTC day (marker
+    # ci/runs/.last-fuzz-nightly; CI_FUZZ_FORCE=1 overrides). Same shape as
+    # the deps agent's --daily lane: outside CI_STAGES so a fetch no-op can
+    # never skip it, and cheap on the 5-minute poll after the day's run.
+    # Every crash artifact is committed with a generated regression test by
+    # the script itself; CI_FUZZ_NIGHTLY_CHECK=advisory is a triage window.
+    run_fuzz_nightly() {
+        _fn_start=$(date +%s)
+        CI_STAGE_LOG="$RUN_DIR/stages/fuzz-nightly.log"
+        : >"$CI_STAGE_LOG"
+        export CI_STAGE_LOG
+        export CI_STAGE_NAME=fuzz-nightly
+        _fn_marker=${CI_FUZZ_NIGHTLY_MARKER:-$CI_ROOT/runs/.last-fuzz-nightly}
+        _fn_today=$(date -u '+%Y-%m-%d')
+        _fn_rc=0
+        if [ "${CI_FUZZ_FORCE:-0}" != 1 ] && [ -f "$_fn_marker" ] \
+            && [ "$(cat "$_fn_marker" 2>/dev/null || true)" = "$_fn_today" ]; then
+            ci_info "fuzz nightly: already PASSED today ($_fn_today) — lane recorded from the marker"
+        else
+            ci_info "── nightly lane [tools/run_fuzz_nightly.sh] start (${CI_FUZZ_SECONDS:-600}s/target) ──" >&2
+            CI_FUZZ_SECONDS=${CI_FUZZ_SECONDS:-600}
+            export CI_FUZZ_SECONDS
+            ci_run_logged bash "$CI_ROOT/../tools/run_fuzz_nightly.sh" \
+                --seconds "$CI_FUZZ_SECONDS" \
+                || _fn_rc=$?
+            if [ "$_fn_rc" -eq 0 ] && [ "${CI_DRY_RUN:-0}" != 1 ]; then
+                mkdir -p "$(dirname "$_fn_marker")" 2>/dev/null || true
+                printf '%s\n' "$_fn_today" >"$_fn_marker" 2>/dev/null || true
+            fi
+        fi
+        _fn_end=$(date +%s)
+        _fn_status=ok
+        [ "$_fn_rc" -ne 0 ] && _fn_status=fail
+        [ "$_fn_rc" -eq "$CI_EXIT_TIMEOUT" ] && _fn_status=timeout
+        if [ "$_fn_status" != ok ] && [ "${CI_FUZZ_NIGHTLY_CHECK:-required}" = advisory ]; then
+            ci_warn "ADVISORY: nightly fuzzing found a crash (CI_FUZZ_NIGHTLY_CHECK=advisory triage window) — artifacts + regression tests are committed"
+            _fn_status=ok
+        fi
+        manifest_stage fuzz-nightly "$_fn_status" "$_fn_rc" "$_fn_start" "$_fn_end"
+        ci_github_status_publish fuzz-nightly "$_fn_status"
+        ci_info "── nightly lane [tools/run_fuzz_nightly.sh] $_fn_status (exit $_fn_rc, $(( _fn_end - _fn_start ))s) ──" >&2
+        printf '%s\n' "$_fn_status"
+    }
+
     _overall=ok
     _failed_stage=''
     _last=''
@@ -390,6 +483,31 @@ cmd_run() {
     # requested stage list. execute_stage prints exactly the manifest's
     # status word (ok/skip/advisory-fail/unchanged/timeout/fail).
     _statuses=''
+    if [ "$_daily" = 1 ]; then
+        _daily_status=$(run_daily_audit)
+        _statuses="security-daily=$_daily_status"
+        _last=security-daily
+        case $_daily_status in
+            ok) ;;
+            *)
+                _overall=$_daily_status
+                _failed_stage=security-daily
+                ;;
+        esac
+    fi
+    if [ "$_overall" = ok ] && [ "$_fuzz_nightly" = 1 ]; then
+        _fuzz_status=$(run_fuzz_nightly)
+        _statuses="$_statuses fuzz-nightly=$_fuzz_status"
+        _last=fuzz-nightly
+        case $_fuzz_status in
+            ok) ;;
+            *)
+                _overall=$_fuzz_status
+                _failed_stage=fuzz-nightly
+                ;;
+        esac
+    fi
+    if [ "$_overall" = ok ]; then
     for st in $_run_list; do
         _status=$(execute_stage "$st")
         _statuses="$_statuses $st=$_status"
@@ -410,6 +528,7 @@ cmd_run() {
                 ;;
         esac
     done
+    fi
 
     # The failure reporter always runs (even after a hard failure stopped the
     # line), unless it already ran as the last stage of this run.

@@ -183,6 +183,7 @@ impl DiscoverySource for HttpDiscoverySource {
                         company_name: candidate.company_name,
                         domain: candidate.domain,
                         contact_email: candidate.contact_email,
+                        source_notice_required: false,
                         jurisdiction: candidate.jurisdiction,
                         jurisdiction_confidence: candidate.jurisdiction_confidence,
                         confidence: candidate.confidence,

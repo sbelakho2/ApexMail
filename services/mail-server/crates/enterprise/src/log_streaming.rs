@@ -31,6 +31,11 @@ pub const SECRET_CONFIG_FIELDS: &[&str] = &[
 
 const LOG_STREAM_SECRET_PURPOSE: &str = "enterprise/log-streaming/destination-secrets";
 
+/// Datadog's EU logs intake. The deployment processes EU customer data, so
+/// the EU site is the only allowed intake and the default; the US site
+/// (`datadoghq.com`) is never used.
+const DATADOG_EU_LOGS_INTAKE: &str = "https://http-intake.logs.datadoghq.eu/api/v2/logs";
+
 fn stream_secret_aad(tenant_id: &str) -> Vec<u8> {
     format!("{LOG_STREAM_SECRET_PURPOSE}/tenant:{tenant_id}").into_bytes()
 }
@@ -670,7 +675,7 @@ async fn deliver_heartbeat(stream: &LogStream) -> Result<usize, String> {
                 .get("api_key")
                 .and_then(|v| v.as_str())
                 .ok_or("No Datadog API key")?;
-            let dest = ssrf_guard_url("https://http-intake.logs.datadoghq.com/api/v2/logs").await?;
+            let dest = ssrf_guard_url(DATADOG_EU_LOGS_INTAKE).await?;
             let resp = pinned_client(&dest.host, dest.addr)?
                 .post(dest.url)
                 .header("DD-API-KEY", api_key)
@@ -946,8 +951,9 @@ async fn verify_datadog(stream: &LogStream) -> Result<serde_json::Value, String>
         .ok_or("No Datadog API key")?;
 
     // Datadog's intake host is fixed and public, still route it through the
-    // guard for uniformity (fix F: all destinations verified alike).
-    let dest = ssrf_guard_url("https://http-intake.logs.datadoghq.com/api/v2/logs").await?;
+    // guard for uniformity (fix F: all destinations verified alike). The EU
+    // site is the only allowed intake (DP: EU data residency).
+    let dest = ssrf_guard_url(DATADOG_EU_LOGS_INTAKE).await?;
 
     let resp = pinned_client(&dest.host, dest.addr)?
         .post(dest.url)

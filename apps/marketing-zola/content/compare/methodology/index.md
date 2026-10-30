@@ -23,7 +23,7 @@ Every comparison page discloses:
 | **Monthly volume assumption** | The email volume at which pricing is calculated |
 | **Billing period** | Monthly or annual billing used for price comparison |
 | **Currency** | All prices are shown in EUR. ApexMail prices are published in EUR; when a competitor publishes only USD, the EUR figure is converted at the documented reference rate (1 USD = €0.92, 2026-08-19) and the provider's published USD price is shown in parentheses |
-| **Tax treatment** | All prices exclude VAT unless stated |
+| **Tax treatment** | Business prices exclude VAT (VAT is added at checkout unless an EU business with a valid VAT number is reverse-charged); consumer prices include VAT and are shown as one total per billing period |
 | **Feature definitions** | How each compared feature is defined |
 | **Source policy** | Only public, official documentation and pricing pages |
 | **Update frequency** | Targeted review every 90 days; critical claims reviewed monthly |

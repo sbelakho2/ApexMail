@@ -59,15 +59,54 @@ pub enum RegistryError {
     /// incomplete; the underlying message names what is missing.
     #[error("payment provider setup failed: {0}")]
     ProviderSetup(String),
+    /// `PAYMENTS_PROVIDER` is unset/blank in a PRODUCTION deployment. An
+    /// empty value must never silently select a processor the operator did
+    /// not name (V34/MON-11): production refuses, the local/dev stack keeps
+    /// its convenience default.
+    #[error(
+        "PAYMENTS_PROVIDER is not set in production; refusing to guess a payment provider \
+         (set it explicitly to one of {supported:?})"
+    )]
+    EmptyProviderInProduction { supported: &'static [&'static str] },
+}
+
+/// Whether this process is a PRODUCTION deployment. The same detection the
+/// provider clients use for their live-credential guards
+/// (`ENVIRONMENT`/`APP_ENV` = production).
+pub fn is_production_environment() -> bool {
+    std::env::var("ENVIRONMENT")
+        .map(|value| value.eq_ignore_ascii_case("production"))
+        .unwrap_or(false)
+        || std::env::var("APP_ENV")
+            .map(|value| value.eq_ignore_ascii_case("production"))
+            .unwrap_or(false)
 }
 
 /// Resolve a raw configuration value to a provider kind. Empty (unset or
-/// blank) resolves to the default provider; matching is ASCII
-/// case-insensitive so operator configuration stays forgiving, but nothing
-/// unknown is ever accepted.
+/// blank) resolves to the default provider OUTSIDE production; matching is
+/// ASCII case-insensitive so operator configuration stays forgiving, but
+/// nothing unknown is ever accepted.
 pub fn provider_kind_from_value(raw: &str) -> Result<ProviderKind, RegistryError> {
+    provider_kind_for_environment(raw, false)
+}
+
+/// The environment-aware kind rule: an empty value is a typed refusal in
+/// production and the development default elsewhere.
+pub fn provider_kind_for_environment(
+    raw: &str,
+    production: bool,
+) -> Result<ProviderKind, RegistryError> {
     let trimmed = raw.trim();
-    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("mollie") {
+    if trimmed.is_empty() {
+        return if production {
+            Err(RegistryError::EmptyProviderInProduction {
+                supported: SUPPORTED_PROVIDERS,
+            })
+        } else {
+            Ok(ProviderKind::Mollie)
+        };
+    }
+    if trimmed.eq_ignore_ascii_case("mollie") {
         return Ok(ProviderKind::Mollie);
     }
     if trimmed.eq_ignore_ascii_case("stripe") {
@@ -79,23 +118,36 @@ pub fn provider_kind_from_value(raw: &str) -> Result<ProviderKind, RegistryError
     })
 }
 
-/// The configured provider kind from the environment (default when unset).
+/// The configured provider kind from the environment (default outside
+/// production; a refusal in production).
 pub fn kind_from_env() -> Result<ProviderKind, RegistryError> {
     let raw = std::env::var(PROVIDER_ENV_VAR).unwrap_or_default();
-    provider_kind_from_value(&raw)
+    provider_kind_for_environment(&raw, is_production_environment())
 }
 
 /// The configured provider, constructed and ready. The one entry point
 /// domain modules use; they never name an adapter type.
 pub fn from_env() -> Result<Arc<dyn PaymentProvider>, RegistryError> {
-    from_value(&std::env::var(PROVIDER_ENV_VAR).unwrap_or_default())
+    from_value_in_environment(
+        &std::env::var(PROVIDER_ENV_VAR).unwrap_or_default(),
+        is_production_environment(),
+    )
 }
 
 /// Resolve the provider from a raw configuration VALUE: the exact path
 /// [`from_env`] takes, pure with respect to the environment (tests drive
 /// the fail-closed contract through here without mutating process env).
 pub fn from_value(raw: &str) -> Result<Arc<dyn PaymentProvider>, RegistryError> {
-    match provider_kind_from_value(raw)? {
+    from_value_in_environment(raw, false)
+}
+
+/// Environment-aware [`from_value`]: an empty value refuses in production
+/// before any adapter is constructed.
+pub fn from_value_in_environment(
+    raw: &str,
+    production: bool,
+) -> Result<Arc<dyn PaymentProvider>, RegistryError> {
+    match provider_kind_for_environment(raw, production)? {
         ProviderKind::Mollie => MollieProvider::from_env()
             .map(|provider| Arc::new(provider) as Arc<dyn PaymentProvider>)
             .map_err(|error| RegistryError::ProviderSetup(error.to_string())),
@@ -128,6 +180,51 @@ mod tests {
             ProviderKind::Mollie
         );
         assert_eq!(ProviderKind::Mollie.name(), "mollie");
+    }
+
+    /// V34/MON-11: an empty PAYMENTS_PROVIDER is a convenience default ONLY
+    /// outside production. Production must name the processor explicitly.
+    #[test]
+    fn an_empty_provider_refuses_in_production_and_defaults_in_development() {
+        assert_eq!(
+            provider_kind_for_environment("", false).unwrap(),
+            ProviderKind::Mollie
+        );
+        assert_eq!(
+            provider_kind_for_environment("   ", false).unwrap(),
+            ProviderKind::Mollie
+        );
+        for empty in ["", "   ", "\t"] {
+            match provider_kind_for_environment(empty, true) {
+                Err(RegistryError::EmptyProviderInProduction { supported }) => {
+                    assert_eq!(supported, SUPPORTED_PROVIDERS)
+                }
+                other => panic!("production must refuse an empty provider, got {other:?}"),
+            }
+            match from_value_in_environment(empty, true) {
+                Err(RegistryError::EmptyProviderInProduction { .. }) => {}
+                Ok(_) => {
+                    panic!("production must refuse before construction, but a provider resolved")
+                }
+                Err(other) => panic!("unexpected registry error: {other}"),
+            }
+        }
+        // A named provider is unaffected by the environment.
+        assert_eq!(
+            provider_kind_for_environment("stripe", true).unwrap(),
+            ProviderKind::Stripe
+        );
+        assert_eq!(
+            provider_kind_for_environment("MOLLIE", true).unwrap(),
+            ProviderKind::Mollie
+        );
+        // The refusal text names the env var and the supported set.
+        let message = RegistryError::EmptyProviderInProduction {
+            supported: SUPPORTED_PROVIDERS,
+        }
+        .to_string();
+        assert!(message.contains("PAYMENTS_PROVIDER"));
+        assert!(message.contains("refusing to guess"));
     }
 
     #[test]

@@ -159,9 +159,10 @@ Batches are `POST`ed to `<url>/services/collector/event` with
 }
 ```
 
-Batches are `POST`ed to the fixed Datadog logs intake
-(`https://http-intake.logs.datadoghq.com/api/v2/logs`) with the
-`DD-API-KEY` header.
+Batches are `POST`ed to the fixed Datadog EU logs intake
+(`https://http-intake.logs.datadoghq.eu/api/v2/logs`) with the
+`DD-API-KEY` header. The EU site is the only allowed intake: logs can carry
+customer data, so the US site is never used.
 
 > S3, BigQuery, Snowflake, Kafka, Kinesis and Elasticsearch destinations
 > are **not implemented** — creating a stream with those `destination_type`

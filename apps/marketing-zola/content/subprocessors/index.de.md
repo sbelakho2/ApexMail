@@ -4,13 +4,13 @@ description = "ApexMail-Unterauftragsverarbeiter-Register, die Liste der autoris
 template = "prose.html"
 
 [extra]
-last_updated = "2026-07-29"
+last_updated = "2026-10-29"
 +++
 ## Unterauftragsverarbeiter-Register
 
 Diese Seite listet Drittanbieter auf, die von der Bel Consulting OÜ (handelnd als ApexMail) beauftragt werden und im Rahmen der Erbringung des ApexMail-Dienstes personenbezogene Daten von Kunden verarbeiten können. Dieses Register wird gemäß Artikel 28 der DSGVO und Abschnitt 5 der ApexMail-Auftragsverarbeitungsvereinbarung geführt.
 
-Unter EU-only-Routing trägt der AWS-SES-Eintrag keine Mail eines Mandanten: Nachrichten verlassen das System ausschließlich über die eigenen MTAs von ApexMail auf von ApexMail verwalteter EU-Infrastruktur (Finnland). EU-only-Routing und seine Belege, samt der Unterscheidung zum globalen Standard, der AWS SES in dessen EU-Region nutzt, sind auf der [EU-Souveränitätsseite](/de/eu-sovereign/) dargelegt.
+Unter EU-only-Routing trägt der AWS-SES-Eintrag keine Mail eines Mandanten: Nachrichten verlassen das System ausschließlich über die eigenen MTAs von ApexMail auf von ApexMail verwalteter EU-Infrastruktur. EU-only-Routing und seine Belege, samt der Unterscheidung zum globalen Standard, der AWS SES in dessen EU-Region nutzt, sind auf der [EU-Souveränitätsseite](/de/eu-sovereign/) dargelegt.
 
 ### Infrastruktur-Unterauftragsverarbeiter
 
@@ -18,21 +18,22 @@ Die folgenden Drittunternehmen verarbeiten personenbezogene Daten von Kunden im 
 
 | Juristische Person | Marke | Dienst | Zweck | Datenkategorien | Verarbeitungsland | Speicherland | Unternehmenssitz | Übermittlungsmechanismus | Erforderlich |
 |---|---|---|---|---|---|---|---|---|---|
-| EU-Infrastrukturanbieter (benannt im Unterauftragsverarbeiter-Anhang des Kunden-DPA) | Infrastrukturanbieter | Cloud-Hosting | Compute, Storage, Networking | Kerndienstdaten in der standardmäßigen Shared-Bereitstellung | Finnland | Finnland | EU/EWR | Verarbeitung innerhalb des EWR; die Übermittlungsregeln nach Kapitel V DSGVO gelten nicht | Ja. Aktive Einrichtung: Helsinki, Finnland (EU/EWR). |
+| EU-Infrastrukturanbieter (benannt im Unterauftragsverarbeiter-Anhang des Kunden-DPA) | Infrastrukturanbieter | Cloud-Hosting | Compute, Storage, Networking | Kerndienstdaten in der standardmäßigen Shared-Bereitstellung | EU/EWR | EU/EWR | EU/EWR | Verarbeitung innerhalb des EWR; die Übermittlungsregeln nach Kapitel V DSGVO gelten nicht | Ja. |
 | Amazon Web Services, Inc. | AWS S3 | Telemetrie-Objektspeicher | Telemetrie-Objektspeicher, wenn aktiviert | Loki-Logs und Tempo-Traces können Betriebsmetadaten enthalten | Konfigurierte S3-Region (Standard: `eu-central-1`) | Konfigurierte S3-Region (Standard: `eu-central-1`) | USA | EU-Standardvertragsklauseln (AWS-DPA) | Nein, nur wenn die aktive Bereitstellung S3-Speicher verwendet |
 | Amazon Web Services, Inc. | AWS SES | E-Mail-Zustelltransport | E-Mail-Zustellung, wenn aktiviert | E-Mail-Inhalte und Empfängeradressen | Konfigurierte SES-Region | Konfigurierte SES-Region | USA | EU-Standardvertragsklauseln (AWS-DPA) | Nein, nur wenn die aktive Bereitstellung SES verwendet |
+| KI-Modell-Laufzeit (konfigurierter Endpunkt) | KI-Inferenz | KI-gestützte Triage, Textentwürfe und Support, wenn aktiviert (AI_MODEL_ENABLED=true) | Nachrichtenmetadaten und Inhaltsauszüge, die zur KI-gestützten Analyse übermittelt werden | EU/EWR (konfigurierter Endpunkt) | EU/EWR (konfigurierter Endpunkt) | EU/EWR | Konfigurierter EU/EWR-Inferenzendpunkt; Verarbeitung innerhalb des EWR | Nein, nur wenn AI_MODEL_ENABLED=true und AI_MODEL_ENDPOINT eine EU/EWR-Laufzeit benennt. Als möglicher Auftragsverarbeiter gelistet: inaktiv, solange AI_MODEL_ENABLED nicht true ist; der konfigurierte Endpunkt muss eine EU/EWR-Laufzeit sein. |
 | Google LLC | Google | OAuth-Authentifizierung | Anmeldung über Google OAuth | OAuth-Tokens, E-Mail-Adresse, Name | Global (EU-Daten) | Nutzer mit Sitz im EWR: EWR | USA | Standardvertragsklauseln (SCCs) | Nein, nur wenn der Kunde Google OAuth aktiviert |
 | GitHub, Inc. | GitHub | OAuth-Authentifizierung | Anmeldung über GitHub OAuth | OAuth-Tokens, Benutzername, E-Mail-Adresse | Global (EU-Daten) | Nutzer mit Sitz im EWR: EWR | USA | Standardvertragsklauseln (SCCs) | Nein, nur wenn der Kunde GitHub OAuth aktiviert |
 | Mollie B.V. | Mollie | Zahlungsabwicklung | Abonnement-Abrechnung, Rechnungsstellung, Speicherung von Zahlungsmethoden | Tokens für Zahlungsmethoden, Transaktionsmetadaten, Rechnungsdaten | Niederlande | Niederlande | Niederlande | Vertragspartei mit Sitz in der EU (Mollie B.V., Amsterdam); Kartennetzwerke verarbeiten global gemäß dem Mollie-DPA; PCI DSS Level 1 zertifiziert | Ja, erforderlich für kostenpflichtige Tarife |
 
 ### Selbst gehostete Infrastruktur (keine Drittanbieter-Unterauftragsverarbeiter)
 
-Die folgende Software wird von ApexMail auf von ApexMail verwalteter EU-Infrastruktur (Finnland) bereitgestellt und betrieben. Die Software-Herausgeber verarbeiten keine Kundendaten.
+Die folgende Software wird von ApexMail auf von ApexMail verwalteter EU-Infrastruktur bereitgestellt und betrieben. Die Software-Herausgeber verarbeiten keine Kundendaten.
 
 | Software | Zweck | Datenkategorien | Verarbeitungsland | Speicherland | Hinweise |
 |---|---|---|---|---|---|
-| ClickHouse (Open Source) | Analytik-Datenbank | Zustellereignisse, Öffnungs- und Klickereignisse, Bounce- und Beschwerdedaten | ApexMail-EU-Region (Finnland) | ApexMail-EU-Region (Finnland) | Von ApexMail selbst gehostet auf von ApexMail verwalteter EU-Infrastruktur (Finnland). ClickHouse, Inc. verarbeitet keine Kundendaten. |
-| Redis (Open Source) | In-Memory-Cache | Sitzungstokens, Zähler für Ratenbegrenzung | ApexMail-EU-Region (Finnland) | ApexMail-EU-Region (Finnland) | Von ApexMail selbst gehostet auf von ApexMail verwalteter EU-Infrastruktur (Finnland). Redis Ltd. verarbeitet keine Kundendaten. |
+| ClickHouse (Open Source) | Analytik-Datenbank | Zustellereignisse, Öffnungs- und Klickereignisse, Bounce- und Beschwerdedaten | ApexMail-EU-Region (EWR) | ApexMail-EU-Region (EWR) | Von ApexMail selbst gehostet auf von ApexMail verwalteter EU-Infrastruktur. ClickHouse, Inc. verarbeitet keine Kundendaten. |
+| Redis (Open Source) | In-Memory-Cache | Sitzungstokens, Zähler für Ratenbegrenzung | ApexMail-EU-Region (EWR) | ApexMail-EU-Region (EWR) | Von ApexMail selbst gehostet auf von ApexMail verwalteter EU-Infrastruktur. Redis Ltd. verarbeitet keine Kundendaten. |
 
 ### Zahlungsabwickler
 
@@ -51,3 +52,4 @@ Wenn Sie aus berechtigten datenschutzrechtlichen Gründen Widerspruch gegen eine
 | Datum | Änderung | Beschreibung |
 |---|---|---|
 | 2026-07-29 | Erstveröffentlichung | Unterauftragsverarbeiter-Register veröffentlicht mit dem EU-Infrastrukturanbieter (Infrastruktur), AWS (S3/SES, wenn aktiviert), Google (OAuth), GitHub (OAuth) und Mollie (Zahlungen). ClickHouse und Redis sind selbst gehostete Software und keine Unterauftragsverarbeiter (siehe oben). |
+| 2026-10-29 | Hostingstandort aus dem öffentlichen Register entfernt; KI-Laufzeit aufgenommen | Der Infrastrukturanbieter wird öffentlich nur als im Kunden-DPA-Anhang benannt geführt; Land und Standort stehen nur in diesem Anhang und den internen Registern. Das Register listet außerdem die KI-Modell-Laufzeit (AI_MODEL_ENDPOINT), die von der Zero-US-Prüfung abgedeckt wird. |

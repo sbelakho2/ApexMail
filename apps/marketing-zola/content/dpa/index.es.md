@@ -52,7 +52,7 @@ La lista actual de subencargados autorizados se mantiene en el [Registro de sube
 | GitHub, Inc. | Autenticación OAuth opcional | Global (entidad estadounidense) | Cláusulas Contractuales Tipo |
 | Mollie B.V. | Procesamiento de pagos | Países Bajos (UE); las redes de tarjetas procesan globalmente según el DPA de Mollie | Tratamiento intra-UE (Mollie B.V., Ámsterdam) |
 
-La infraestructura autogestionada (ClickHouse, Redis) se ejecuta en infraestructura de la UE gestionada por ApexMail (Finlandia). Los editores upstream de código abierto no procesan datos de clientes.
+La infraestructura autogestionada (ClickHouse, Redis) se ejecuta en infraestructura de la UE gestionada por ApexMail. Los editores upstream de código abierto no procesan datos de clientes.
 
 ### Procesador de pagos
 

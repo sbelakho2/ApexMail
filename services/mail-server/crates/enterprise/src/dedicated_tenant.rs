@@ -259,6 +259,24 @@ pub fn region_is_eea(region: &str) -> bool {
             .any(|prefix| normalized.starts_with(prefix))
 }
 
+/// Provider location codes this deployment class knows about. Only `hel1`
+/// (Helsinki) is provisioned: every Dedicated Tenant host is built there.
+const PROVIDER_LOCATION_CODES: &[&str] = &["hel1", "fsn1", "nbg1", "ash", "hil", "sin"]; // hosting-gate: allow (the refusal list itself)
+
+/// The one provider location ApexMail provisions in (contract/config-only
+/// enforcement: no per-contract location column exists).
+pub const DEDICATED_PROVIDER_LOCATION: &str = "hel1";
+
+/// Whether a requested region names an acceptable provider location. A
+/// provider-location-shaped region other than `hel1` is refused even when a
+/// contract override reason is recorded: an override can authorize an
+/// application region, not a different physical hosting location.
+pub fn provider_location_is_permitted(region: &str) -> bool {
+    let normalized = region.trim().to_ascii_lowercase();
+    !PROVIDER_LOCATION_CODES.contains(&normalized.as_str())
+        || normalized == DEDICATED_PROVIDER_LOCATION
+}
+
 /// A release SHA is the 40-hex (or ≥7-hex abbreviated) commit id the image
 /// pins are rendered from. Anything else, including "latest", refuses.
 pub fn release_sha_is_valid(sha: &str) -> bool {
@@ -335,7 +353,21 @@ pub fn validate_bundle_request(
         ),
     );
 
-    // 2. Region: EU/EEA by default; anything else needs a recorded reason.
+    // 2. Hosting location: every server is provisioned in Helsinki. A
+    //    provider-location-shaped region other than hel1 is refused even
+    //    under an override (an override may authorize an application
+    //    region, never a different physical location; no per-contract
+    //    location field exists).
+    check(
+        "provider_location_not_hel1",
+        provider_location_is_permitted(&request.region),
+        format!(
+            "region {:?} names a provider location; only {:?} (Helsinki) is provisioned",
+            request.region, DEDICATED_PROVIDER_LOCATION
+        ),
+    );
+
+    // 3. Region: EU/EEA by default; anything else needs a recorded reason.
     let eea = region_is_eea(&request.region);
     match (&request.region_override_reason, eea) {
         (_, true) => check(
@@ -368,7 +400,7 @@ pub fn validate_bundle_request(
         ),
     }
 
-    // 3. Managed IP count: the plan's figure; overrides need a reason and
+    // 4. Managed IP count: the plan's figure; overrides need a reason and
     //    are recorded.
     let count = request.managed_ips.len();
     if count == plan.managed_ip_count {
@@ -404,7 +436,7 @@ pub fn validate_bundle_request(
         );
     }
 
-    // 4. Each managed IP must be a usable literal unicast address, unique.
+    // 5. Each managed IP must be a usable literal unicast address, unique.
     let mut bad_ips: Vec<String> = Vec::new();
     let mut parsed_ips: Vec<IpAddr> = Vec::new();
     for raw in &request.managed_ips {
@@ -437,7 +469,7 @@ pub fn validate_bundle_request(
         },
     );
 
-    // 5. Release SHA: a render-time INPUT. Missing/`latest`/malformed refuses.
+    // 6. Release SHA: a render-time INPUT. Missing/`latest`/malformed refuses.
     check(
         "release_sha_invalid",
         release_sha_is_valid(&request.release_sha),
@@ -447,7 +479,7 @@ pub fn validate_bundle_request(
         ),
     );
 
-    // 6. Setup fee vs the catalog's dedicated-tenant range.
+    // 7. Setup fee vs the catalog's dedicated-tenant range.
     let setup_ok = request
         .setup_fee_cents
         .is_some_and(|fee| (plan.setup_min_cents..=plan.setup_max_cents).contains(&fee));
@@ -464,7 +496,7 @@ pub fn validate_bundle_request(
         ),
     );
 
-    // 7. Minimum term vs the catalog's contract minimum (12 months).
+    // 8. Minimum term vs the catalog's contract minimum (12 months).
     let term_ok = request
         .minimum_term_months
         .is_some_and(|months| months >= plan.minimum_term_months);
@@ -477,7 +509,7 @@ pub fn validate_bundle_request(
         ),
     );
 
-    // 8. Monthly fee is "from €X": at or above the catalog is a deal, below
+    // 9. Monthly fee is "from €X": at or above the catalog is a deal, below
     //    is a contradiction.
     let monthly_ok = request
         .monthly_fee_cents
@@ -493,7 +525,7 @@ pub fn validate_bundle_request(
         ),
     );
 
-    // 9. Named owner (the plan's "named owner").
+    // 10. Named owner (the plan's "named owner").
     check(
         "named_owner_missing",
         !request.named_owner.trim().is_empty(),
@@ -2361,6 +2393,28 @@ mod tests {
         assert_eq!(report.overrides.len(), 1);
         assert_eq!(report.overrides[0].kind, "region");
         assert!(report.overrides[0].reason.contains("DPA addendum"));
+    }
+
+    #[test]
+    fn non_hel1_provider_location_is_refused_even_with_an_override() {
+        let mut bad = request();
+        bad.region = "fsn1".to_string();
+        bad.region_override_reason = Some("customer legal requirement, DPA addendum signed".into());
+        assert_refused(&bad, "provider_location_not_hel1");
+    }
+
+    #[test]
+    fn hel1_is_the_only_permitted_provider_location() {
+        assert_eq!(DEDICATED_PROVIDER_LOCATION, "hel1");
+        assert!(provider_location_is_permitted("hel1"));
+        assert!(provider_location_is_permitted("EEA"));
+        assert!(provider_location_is_permitted("eu-central-1"));
+        for other in ["fsn1", "nbg1", "ash", "hil", "sin"] {
+            assert!(
+                !provider_location_is_permitted(other),
+                "{other} must be refused"
+            );
+        }
     }
 
     #[test]

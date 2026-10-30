@@ -44,7 +44,8 @@ This vendor register is an internal evidence-core draft. It makes no vendor-cert
 |---|---|---|
 | Generated register with drift gate | The committed register must match the deployment-derived truth or validation fails | `tools/generate_subprocessors.py`; invariant I23 in `docs/invariants.toml` |
 | Zero-US check | An active provider set containing a US region is refused (fixture-proven) | `tools/generate_subprocessors.py --self-test`; invariant I23 in `docs/invariants.toml` |
-| Finland hosting and dedicated-IP promise | Hosting and dedicated IP stay in Finland and the public register says so | Invariant I23 in `docs/invariants.toml`; `api-server` `ip_provider.rs` |
+| Finland hosting and dedicated-IP promise | Hosting and dedicated IP stay in Finland; the PUBLIC register names the provider only as the provider identified in the customer DPA annex, while this internal register keeps the country | Invariant I23 in `docs/invariants.toml`; `api-server` `ip_provider.rs` |
+| AI runtime disclosure | The public register lists the AI model runtime behind `AI_MODEL_ENDPOINT`, and the zero-US check refuses a recognisably US inference endpoint | `tools/generate_subprocessors.py`; DP-6 |
 | Customer change notice | New subprocessors announced at least 30 days ahead by register update, admin email and optional subscription | `templates/compliance/subprocessors.md` subprocessor changes section |
 
 ## Reading this register

@@ -17,9 +17,10 @@
 //! hardened client (timeouts, bounded retries, size/content-type caps,
 //! same-host redirects, per-host politeness, robots.txt) that classifies
 //! every response and NEVER hands a challenge/CAPTCHA page to a parser. A
-//! blocked fetch is stored in the blocked-source queue
-//! ([`blocked`]) with its evidence and its host's backoff; the audited
-//! solver hook there is disabled by default and opt-in per host.
+//! blocked fetch is stored in the blocked-source queue ([`blocked`]) with its
+//! evidence and its host's backoff. A CAPTCHA page, a robots.txt disallow,
+//! HTTP 401/403 or three 429s in a row exclude the host permanently; only the
+//! owner can lift an exclusion, with a written reason in the audit log.
 //!
 //! Every source declares the jurisdictions it may lawfully return data for and
 //! the job runner enforces that declaration.
@@ -40,16 +41,18 @@ pub mod provider;
 pub mod public_web;
 
 pub use blocked::{
-    attempt_solve, get_blocked_source, get_host_health, hydrate_registry, list_blocked_sources,
-    list_host_health, record_blocked_fetch, record_host_block, record_host_success,
-    review_blocked_source, set_host_solver_optin, BlockedReviewAction, BlockedSource,
-    HostHealthRow, LeaseFence, SolveReport, SolverConfig, SolverOutcome, BLOCKED_STATE_DISMISSED,
-    BLOCKED_STATE_OPEN, BLOCKED_STATE_SOLVED,
+    get_blocked_source, get_host_health, hydrate_registry, lift_host_exclusion,
+    list_blocked_sources, list_host_exclusion_audit, list_host_health, record_blocked_fetch,
+    record_host_block, record_host_success, review_blocked_source, BlockedReviewAction,
+    BlockedSource, HostExclusionAuditRow, HostHealthRow, LeaseFence, BLOCKED_STATE_DISMISSED,
+    BLOCKED_STATE_OPEN, BLOCKED_STATE_SOLVED, EXCLUSION_AUDIT_EXCLUDED, EXCLUSION_AUDIT_LIFTED,
 };
 pub use fetch::{
-    classify_response, detect_challenge, BlockedEvidence, ChallengeEvidence, ChallengeKind,
-    FetchClassification, FetchError, HostHealthRegistry, HostState, RobotsRules, RobotsState,
-    ScrapeClient, ScrapeConfig, ScrapedPage, MAX_RETRY_AFTER_SECONDS,
+    classify_response, detect_challenge, exclusion_reason, BlockedEvidence, ChallengeEvidence,
+    ChallengeKind, FetchClassification, FetchError, HostHealthRegistry, HostState, RobotsRules,
+    RobotsState, ScrapeClient, ScrapeConfig, ScrapedPage, EXCLUSION_CAPTCHA, EXCLUSION_HTTP_401,
+    EXCLUSION_HTTP_403, EXCLUSION_HTTP_429_REPEATED, EXCLUSION_ROBOTS_DISALLOW,
+    MAX_RETRY_AFTER_SECONDS, RATE_LIMIT_EXCLUSION_THRESHOLD,
 };
 pub use first_party::FirstPartySource;
 pub use http::HttpDiscoverySource;

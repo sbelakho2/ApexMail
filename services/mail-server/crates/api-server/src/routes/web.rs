@@ -5328,97 +5328,43 @@ async fn form_billing_checkout(
         .map(|value| value.trim().to_ascii_lowercase())
         .filter(|value| value == "monthly" || value == "yearly")
         .unwrap_or_else(|| "monthly".to_string());
-    let yearly = interval == "yearly";
-    let Some(plan_row) = platform_catalog::plan_by_name(&plan) else {
-        return redirect_error(
-            "That plan cannot be purchased here.",
-            "/settings/billing",
-            &state.config,
-        );
-    };
-    let currency =
-        crate::routes::billing::resolve_tenant_billing_currency(&state, &user.tenant_id).await;
-    let in_usd = currency.eq_ignore_ascii_case("USD");
-    let amount_cents = match (in_usd, yearly) {
-        (true, true) => plan_row.price_yearly_usd_cents,
-        (true, false) => plan_row.price_monthly_usd_cents,
-        (false, true) => plan_row.price_yearly_cents,
-        (false, false) => plan_row.price_monthly_cents,
-    };
-    if amount_cents <= 0 {
-        return redirect_error(
-            "That plan is not self-serve billable.",
-            "/settings/billing",
-            &state.config,
-        );
-    }
-    let currency_code = if in_usd { "USD" } else { "EUR" };
-
-    // The console form is the documented self-service entry point: it opens a
-    // REAL Mollie checkout and redirects the customer there. The plan changes
-    // only when the webhook verifies the settled payment.
-    let mollie = match billing_service::mollie_client::MollieClient::from_env() {
-        Ok(mollie) => mollie,
-        Err(error) => {
-            tracing::error!(tenant_id = %user.tenant_id, error = %error, "console checkout: Mollie is not configured");
-            return redirect_error(
-                "Payments are temporarily unavailable. Nothing has been charged.",
-                "/settings/billing",
-                &state.config,
-            );
-        }
-    };
-    let customer_id = match crate::routes::billing::get_or_create_mollie_customer_id(
+    // V30: the console asks the buyer whether they are a business and takes
+    // a VAT number (plus the destination country a consumer total needs).
+    // Absent fields fall back to the stored billing declaration.
+    let business = form.get("business").map(|value| {
+        value.eq_ignore_ascii_case("true") || value.eq_ignore_ascii_case("on") || value == "1"
+    });
+    let country = form
+        .get("country")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let vat_number = form
+        .get("vat_number")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let base = state.config.base_url.trim_end_matches('/');
+    let success_url = format!("{base}/settings/billing?checkout=success");
+    match crate::routes::billing::start_self_serve_checkout(
         &state,
         &user.tenant_id,
+        &plan,
+        &interval,
+        success_url,
+        "console_checkout",
+        crate::routes::billing::CheckoutTaxDeclarationInput {
+            business,
+            country,
+            vat_number,
+        },
     )
     .await
     {
-        Ok(customer_id) => customer_id,
-        Err(error) => {
-            tracing::error!(tenant_id = %user.tenant_id, error = %error, "console checkout: customer onboarding failed");
-            return redirect_error(
-                "We could not start the checkout. Nothing has been charged.",
-                "/settings/billing",
-                &state.config,
-            );
+        Ok(checkout) => axum::response::Redirect::to(&checkout.redirect_url).into_response(),
+        Err(crate::routes::billing::CheckoutStartError::BadRequest(message)) => {
+            redirect_error(&message, "/settings/billing", &state.config)
         }
-    };
-    let base = state.config.base_url.trim_end_matches('/');
-    let success_url = format!("{base}/settings/billing?checkout=success");
-    let link = mollie
-        .create_payment(billing_service::mollie_client::CreatePayment {
-            amount: billing_service::mollie_client::Money::new(currency_code, amount_cents),
-            description: format!("ApexMail {}", plan_row.display_name),
-            redirect_url: success_url,
-            webhook_url: None,
-            metadata: serde_json::json!({
-                "tenant_id": user.tenant_id.clone(),
-                "plan_name": plan.clone(),
-                "interval": interval,
-                "source": "console_checkout",
-            }),
-            method: None,
-            customer_id: Some(customer_id),
-            mandate_id: None,
-            sequence_type: Some("first".into()),
-            idempotency_key: format!("console_checkout_{}_{}_{}", user.tenant_id, plan, interval),
-        })
-        .await;
-    match link {
-        Ok(link) => match link.checkout_url {
-            Some(url) => axum::response::Redirect::to(&url).into_response(),
-            None => {
-                tracing::error!(tenant_id = %user.tenant_id, payment_id = %link.id, "console checkout returned no URL");
-                redirect_error(
-                    "The payment provider returned no checkout page. Nothing has been charged.",
-                    "/settings/billing",
-                    &state.config,
-                )
-            }
-        },
-        Err(error) => {
-            tracing::error!(tenant_id = %user.tenant_id, error = %error, "console checkout: payment creation failed");
+        Err(crate::routes::billing::CheckoutStartError::Failed) => {
+            tracing::error!(tenant_id = %user.tenant_id, plan = %plan, "console checkout: start failed");
             redirect_error(
                 "We could not start the checkout. Nothing has been charged.",
                 "/settings/billing",
@@ -18724,7 +18670,10 @@ mod coverage_handler_tests {
             flash_text(&response, &app.config),
             "Choose a plan to upgrade to."
         );
-        let (headers, form) = signed_form(&app.config, &[("plan", "pro")]);
+        let (headers, form) = signed_form(
+            &app.config,
+            &[("plan", "pro"), ("country", "CH"), ("business", "false")],
+        );
         let response = form_billing_checkout(
             State(app.clone()),
             axum::Extension(user.clone()),
@@ -18732,10 +18681,15 @@ mod coverage_handler_tests {
             Form(form),
         )
         .await;
-        // The console form opens a REAL Molllie checkout. Without provider
-        // credentials it refuses honestly and charges nothing.
-        assert!(flash_text(&response, &app.config).contains("Payments are temporarily unavailable"));
-        assert!(flash_text(&response, &app.config).contains("Nothing has been charged."));
+        // The console form opens a REAL checkout through the provider
+        // boundary. Without provider credentials it refuses honestly and
+        // charges nothing (neither a local customer row nor a payment).
+        let flash = flash_text(&response, &app.config);
+        assert!(
+            flash.contains("We could not start the checkout"),
+            "unexpected flash: {flash}"
+        );
+        assert!(flash.contains("Nothing has been charged."));
 
         // External audit 15 Oct, H1: the console cancel form is the REAL
         // state change (period end by default, immediate when chosen), it

@@ -58,6 +58,7 @@ pub mod research;
 pub mod routes;
 pub mod scheduler;
 pub mod schema;
+pub mod scoreboard;
 pub mod scoring;
 pub mod sender_health;
 pub mod sender_pool;

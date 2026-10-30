@@ -68,7 +68,7 @@ GENERATED_BANNER = "GENERATED FILE, do not edit by hand"
 
 # The register's own last-updated date. Bumped by hand when the derived set or
 # the catalog facts change (the tool prints it; --check compares it too).
-REGISTER_LAST_UPDATED = "2026-10-24"
+REGISTER_LAST_UPDATED = "2026-10-29"
 CHANGE_HISTORY = [
     (
         "2026-07-29",
@@ -87,12 +87,21 @@ CHANGE_HISTORY = [
         "processing footprint.",
     ),
     (
-        REGISTER_LAST_UPDATED,
+        "2026-10-24",
         "Mollie legal identity stated in full",
         "The register now states Mollie B.V.'s registered office (Keizersgracht 126, 1015 CW "
         "Amsterdam, The Netherlands) and its supervision by De Nederlandsche Bank (DNB) as a "
         "payment institution. Payment processing is in the Netherlands (EU); card-scheme "
         "networks may process data globally under Mollie's Data Processing Agreement.",
+    ),
+    (
+        REGISTER_LAST_UPDATED,
+        "Hosting location withheld from the public register; AI runtime disclosed",
+        "The infrastructure provider is now named only as the EU infrastructure provider "
+        "identified in the customer DPA annex; its country and facility are disclosed only in "
+        "that annex and in the internal registers. The register also lists the AI model "
+        "runtime (AI_MODEL_ENDPOINT), which the zero-US check now covers, so an AI endpoint "
+        "cannot be engaged outside the EU/EEA unnoticed.",
     ),
 ]
 
@@ -142,7 +151,7 @@ PROCESSOR_CATALOG: list[Processor] = [
         # named entity is disclosed to customers through the DPA subprocessor
         # annex at contract time, not on the website. The internal key stays
         # so env/config derivation and the sovereign-chain check keep working.
-        legal_entity="EU infrastructure provider (named in the customer DPA subprocessor annex)",
+        legal_entity="EU infrastructure provider (named in the customer DPA annex)",
         brand="Infrastructure provider",
         purpose="Cloud hosting (compute, storage, networking)",
         data_categories="Core service data in the default shared deployment",
@@ -199,7 +208,27 @@ PROCESSOR_CATALOG: list[Processor] = [
         default_region="eu-west-1",
         optional_note="Active only while EMAIL_TRANSPORT_TYPE=ses; dedicated IP transfers ride "
         "ApexMail's own EU MTAs. AWS EU regions may include Germany; ApexMail's own "
-        "hosting is in Finland.",
+        "hosting is EU infrastructure.",
+    ),
+    Processor(
+        key="ai_model",
+        # DP-6: the AI runtime behind AI_MODEL_ENDPOINT is a processor the
+        # register was previously blind to. It is listed whether or not the
+        # deployment enables it (the register states "may process"), and the
+        # zero-US check classifies the configured endpoint so a US runtime
+        # cannot be engaged silently.
+        legal_entity="AI model runtime (configured endpoint)",
+        brand="AI inference",
+        purpose="AI-assisted triage, drafting and support when enabled (AI_MODEL_ENABLED=true)",
+        data_categories="Message metadata and content excerpts submitted for AI-assisted analysis",
+        corporate_country="EU/EEA",
+        transfer_basis="Configured EU/EEA inference endpoint; intra-EEA processing",
+        required="No, only when AI_MODEL_ENABLED=true and AI_MODEL_ENDPOINT names an EU/EEA runtime",
+        certifications=[],
+        region_env="AI_MODEL_ENDPOINT",
+        regions={"__enabled__": ("EU/EEA (configured endpoint)", "EU/EEA (configured endpoint)")},
+        optional_note="Listed as a possible processor: inactive unless AI_MODEL_ENABLED=true; "
+        "the configured endpoint must be an EU/EEA runtime.",
     ),
     Processor(
         key="google_oauth",
@@ -245,7 +274,50 @@ PROCESSOR_CATALOG: list[Processor] = [
         region_env="MOLLIE_API_KEY",
         regions={"__enabled__": ("Netherlands", "Netherlands")},
     ),
+    # V34/MON-11: the payment-processor row follows the CONFIGURED provider,
+    # so a provider switch changes the register too. Only ONE payment
+    # processor row is ever active (see is_enabled); this catalog entry makes
+    # the Stripe switch a configuration change, not a code change.
+    Processor(
+        key="stripe",
+        legal_entity="Stripe Payments Europe, Ltd.",
+        brand="Stripe",
+        purpose="Payment processing and payment-method storage",
+        data_categories="Payment card details (tokenized, ApexMail never receives full card "
+        "numbers), billing address, transaction metadata",
+        corporate_country="Ireland",
+        transfer_basis="Contracting entity is EU-established (Stripe Payments Europe, Ltd., "
+        "Dublin); card-scheme networks process globally under the Stripe Data Processing "
+        "Agreement; PCI DSS Level 1 certified",
+        required="Yes, required for paid plans",
+        certifications=["PCI DSS Level 1"],
+        region_env="STRIPE_SECRET_KEY",
+        regions={"__enabled__": ("Ireland", "Ireland")},
+    ),
 ]
+
+# The public register names the processor that CURRENTLY processes payments.
+# `PAYMENT_PROCESSOR_PUBLIC` lets the legal surfaces stay on the live
+# processor while the runtime configuration is prepared for a switch; when
+# the switch goes live, set it equal to PAYMENTS_PROVIDER and regenerate.
+PAYMENT_PROCESSOR_KEYS = ("mollie", "stripe")
+DEFAULT_PAYMENT_PROCESSOR = "mollie"
+
+
+def configured_payment_processor(config: dict[str, str]) -> str:
+    """The processor the PUBLIC register names: PAYMENT_PROCESSOR_PUBLIC,
+    else PAYMENTS_PROVIDER, else Mollie. Unknown values are a hard error (the
+    register must never name a processor the generator cannot describe)."""
+    for variable in ("PAYMENT_PROCESSOR_PUBLIC", "PAYMENTS_PROVIDER"):
+        value = config.get(variable, "").strip().lower()
+        if value:
+            if value not in PAYMENT_PROCESSOR_KEYS:
+                raise SystemExit(
+                    f"generate_subprocessors: {variable}={value!r} is not a supported "
+                    f"payment processor (supported: {PAYMENT_PROCESSOR_KEYS})"
+                )
+            return value
+    return DEFAULT_PAYMENT_PROCESSOR
 
 # Self-hosted software: deployed and managed by ApexMail; the publishers are
 # NOT subprocessors. Derived from the compose services so the list cannot rot.
@@ -260,21 +332,21 @@ SELF_HOSTED = [
         "clickhouse",
         "ClickHouse (open-source)",
         "Analytics database (delivery events, opens, clicks, bounce/complaint data)",
-        "Self-hosted by ApexMail on ApexMail-managed EU infrastructure (Finland); ClickHouse, Inc. does not process "
-        "customer data.",
+        "Self-hosted by ApexMail on ApexMail-managed EU infrastructure; ClickHouse, Inc. does not "
+        "process customer data.",
     ),
     (
         "redis",
         "Redis (open-source)",
         "In-memory cache (session tokens, rate-limit counters)",
-        "Self-hosted by ApexMail on ApexMail-managed EU infrastructure (Finland); Redis Ltd. does not process "
-        "customer data.",
+        "Self-hosted by ApexMail on ApexMail-managed EU infrastructure; Redis Ltd. does not "
+        "process customer data.",
     ),
     (
         "observability",
         "Grafana / Loki / Tempo / Prometheus (open-source)",
         "Observability stack (dashboards, logs, traces, metrics)",
-        "Self-hosted by ApexMail on ApexMail-managed EU infrastructure (Finland); the software publishers do not "
+        "Self-hosted by ApexMail on ApexMail-managed EU infrastructure; the software publishers do not "
         "process customer data.",
     ),
 ]
@@ -329,6 +401,11 @@ def is_enabled(config: dict[str, str], processor: Processor) -> tuple[bool, str 
     """Whether a processor is ACTIVE on this deployment, and the selected raw
     region value when it has one."""
     raw = config.get(processor.region_env, "").strip()
+    if processor.key in PAYMENT_PROCESSOR_KEYS:
+        # Exactly ONE payment-processor row is active: the configured
+        # processor's. The row's location/legal facts come from the catalog,
+        # so a switch swaps the row instead of leaving a stale one behind.
+        return processor.key == configured_payment_processor(config), None
     if processor.region_env == "AWS_REGION":
         # SES is active when the transport is SES AND a region is configured.
         transport = config.get("EMAIL_TRANSPORT_TYPE", "ses").strip().lower() or "ses"
@@ -341,6 +418,11 @@ def is_enabled(config: dict[str, str], processor: Processor) -> tuple[bool, str 
         # The deployment always runs on Hetzner (the compose stack is the
         # deployment); an empty location falls back to the documented default.
         raw = raw or (processor.default_region or "")
+        return True, raw or None
+    if processor.key == "ai_model":
+        # DP-6: "may process" — the AI runtime is listed whether or not the
+        # deployment enables it, so the register cannot omit it. An empty
+        # endpoint is still classified as an EU/EEA expectation.
         return True, raw or None
     if raw == "":
         return False, None
@@ -360,6 +442,11 @@ def resolve_location(
 ) -> tuple[str, str, str | None]:
     """(processing_country, storage_country, region_label). Unknown region
     values are surfaced as UNKNOWN rather than guessed."""
+    if processor.key == "ai_model":
+        # DP-6: the endpoint is a URL, not a region key. Classify it so the
+        # zero-US check has teeth: a US inference endpoint must be refused.
+        country = classify_ai_endpoint(region)
+        return country, country, region
     if "__enabled__" in processor.regions:
         country, storage = processor.regions["__enabled__"]
         return country, storage, None
@@ -367,6 +454,39 @@ def resolve_location(
         country, storage = processor.regions[region]
         return country, storage, region
     return "UNKNOWN", "UNKNOWN", region
+
+
+# Host fragments that identify a US inference runtime. A configured endpoint
+# matching one is classified as United States and refused by the zero-US
+# check; everything else is the EU/EEA runtime the deployment is required to
+# use (AI_MODEL_ENDPOINT in .env.production.example).
+US_AI_ENDPOINT_MARKERS = (
+    "openai.com",
+    "anthropic.com",
+    "us-east",
+    "us-west",
+    "us-central",
+    "us.api",
+    "api.us",
+    "bedrock",
+    "groq.com",
+    "together.ai",
+    "fireworks.ai",
+    "perplexity.ai",
+)
+
+
+def classify_ai_endpoint(endpoint: str | None) -> str:
+    """The AI endpoint's processing country from its URL. Unset means the
+    runtime is disabled and the EU/EEA default is stated; any recognisably US
+    endpoint is classified United States so the sovereign-chain check refuses
+    it."""
+    if not endpoint:
+        return "EU/EEA (configured endpoint)"
+    lowered = endpoint.strip().lower()
+    if any(marker in lowered for marker in US_AI_ENDPOINT_MARKERS):
+        return "United States"
+    return "EU/EEA (configured endpoint)"
 
 
 @dataclass
@@ -409,10 +529,6 @@ def derive_active(config: dict[str, str]) -> list[ActiveEntry]:
         )
         if processor.optional_note:
             entry.notes.append(processor.optional_note)
-        if processor.key == "hetzner":
-            entry.notes.append(
-                "Active facility: Helsinki, Finland (EU/EEA)."
-            )
         active.append(entry)
     return active
 
@@ -463,6 +579,15 @@ def check_sovereign_chain_zero_us(active: list[ActiveEntry]) -> list[str]:
 # ── Rendering ───────────────────────────────────────────────────────────────
 
 
+def public_country(entry: ActiveEntry) -> str:
+    """The country a PUBLIC surface may state. The infrastructure provider's
+    country and facility are contractual facts disclosed in the customer DPA
+    annex, not on the website, so the public register states only EU/EEA."""
+    if entry.processor.key == "hetzner":
+        return "EU/EEA"
+    return entry.processing_country
+
+
 def render_marketing_register(active: list[ActiveEntry], services: set[str]) -> str:
     rows = []
     for entry in active:
@@ -476,8 +601,8 @@ def render_marketing_register(active: list[ActiveEntry], services: set[str]) -> 
                 brand=entry.brand,
                 purpose=entry.processor.purpose,
                 data=entry.processor.data_categories,
-                processing=entry.processing_country,
-                storage=entry.storage_country,
+                processing=public_country(entry),
+                storage=public_country(entry),
                 corporate=entry.processor.corporate_country,
                 transfer=entry.transfer_basis,
                 required=required,
@@ -488,7 +613,7 @@ def render_marketing_register(active: list[ActiveEntry], services: set[str]) -> 
         if service not in services and service != "observability":
             continue
         self_hosted_rows.append(
-            "| {name} | {purpose} | {data} | ApexMail EU region (Finland) | ApexMail EU region (Finland) |"
+            "| {name} | {purpose} | {data} | ApexMail EU region (EEA) | ApexMail EU region (EEA) |"
             "region | {note} |".format(
                 name=name,
                 purpose=purpose,
@@ -514,7 +639,7 @@ last_updated = "{REGISTER_LAST_UPDATED}"
 
 This page lists third-party vendors engaged by Bel Consulting OÜ (trading as ApexMail) that may process customer personal data in the course of providing the ApexMail service. This register is maintained in accordance with Article 28 of the GDPR and Section 5 of the ApexMail Data Processing Agreement. It is generated from the deployment's own configuration, so the listed set and locations cannot drift from what the deployment actually runs.
 
-Under EU-only routing the AWS SES entry carries no tenant's mail: messages leave exclusively through ApexMail's own MTAs on ApexMail-managed EU infrastructure (Finland). EU-only routing and its evidence, including the distinction from the Global default, which uses AWS SES in its EU region, are set out on the [EU sovereignty page](/eu-sovereign/).
+Under EU-only routing the AWS SES entry carries no tenant's mail: messages leave exclusively through ApexMail's own MTAs on ApexMail-managed EU infrastructure. EU-only routing and its evidence, including the distinction from the Global default, which uses AWS SES in its EU region, are set out on the [EU sovereignty page](/eu-sovereign/).
 
 ### Infrastructure Subprocessors
 
@@ -530,7 +655,7 @@ The following third-party entities process customer personal data on behalf of A
 
 ### Self-Hosted Infrastructure (not third-party subprocessors)
 
-The following software is deployed and managed by ApexMail on ApexMail-managed EU infrastructure (Finland). The software publishers do not process customer data.
+The following software is deployed and managed by ApexMail on ApexMail-managed EU infrastructure. The software publishers do not process customer data.
 
 | Software | Purpose | Data Categories | Processing Country | Storage Country | Notes |
 |---|---|---|---|---|---|
@@ -589,7 +714,7 @@ A subprocessor is a third-party data processor engaged by ApexMail to process pe
 
 {MOLLIE_PAYMENT_FACTS_EN}
 
-Whether an optional subprocessor (OAuth providers, SES, S3 telemetry) is engaged is controlled by the active deployment configuration. This register is generated from that configuration, with a validate-stage gate that fails on drift and a zero-US check over the active set.
+Whether an optional subprocessor (OAuth providers, SES, S3 telemetry, the AI model runtime) is engaged is controlled by the active deployment configuration. This register is generated from that configuration, with a validate-stage gate that fails on drift and a zero-US check over the active set.
 
 ## Self-Hosted Infrastructure (not third-party subprocessors)
 
@@ -635,7 +760,7 @@ def render_trust_portal_seed(active: list[ActiveEntry], services: set[str]) -> s
             {
                 "name": entry.name,
                 "purpose": f"{entry.processor.purpose} ({entry.brand})",
-                "location": f"{entry.processing_country}; storage {entry.storage_country}",
+                "location": f"{public_country(entry)}; storage {public_country(entry)}",
                 "data_categories": [d.strip() for d in entry.processor.data_categories.split(",")],
                 "dpa_url": None,
                 "certifications": entry.processor.certifications,
@@ -650,7 +775,7 @@ def render_trust_portal_seed(active: list[ActiveEntry], services: set[str]) -> s
                 "name": f"{name} (self-hosted)",
                 "purpose": f"{purpose}, self-hosted by ApexMail; the publisher is not a "
                 "subprocessor",
-                "location": "ApexMail EU region (Finland)",
+                "location": "ApexMail EU region (EEA)",
                 "data_categories": ["Operational telemetry"],
                 "dpa_url": None,
                 "certifications": [],
@@ -789,6 +914,19 @@ def self_test() -> int:
     else:
         failures.append(
             "the us-east-1 fixture was NOT refused, the zero-US check has no teeth"
+        )
+
+    print("  self-test 2b/3: a US AI endpoint fixture is REFUSED")
+    _, ai_violations = build(
+        deployment_config(
+            ENV_FILES, COMPOSE_FILES, {"AI_MODEL_ENDPOINT": "https://api.openai.com/v1"}
+        )
+    )
+    if any(CHECK_NAME in v and "AI model runtime" in v for v in ai_violations):
+        print(f"    PASS: AI endpoint refused ({len(ai_violations)} violation(s))")
+    else:
+        failures.append(
+            "the US AI endpoint fixture was NOT refused, the AI processor is not covered"
         )
 
     print("  self-test 3/3: --check detects a mutated committed file")

@@ -8,7 +8,7 @@
 //! [`super::transport`]) is NOT complete on either side: `crates/outbound-mta`
 //! owns the recipient-facing connector but exposes no SMTP submission
 //! listener (its daemon only polls the durable queue and serves health), and
-//! the worker's pinned mail-send 0.4.x client returns only `Result<()>` from
+//! the worker's pinned mail-send 0.6.x client returns only `Result<()>` from
 //! DATA, so it cannot read the reply header that would carry the bound IP.
 //!
 //! The MTA's idempotent acceptance protocol DOES already exist as a library
@@ -39,7 +39,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use mail_send::mail_auth::common::headers::HeaderWriter;
+use mail_auth::headers::HeaderWriter;
 use outbound_mta::ledger::{PgLedger, QueuedSubmission, RelayLedger};
 use outbound_mta::mx::DnsMxResolver;
 use outbound_mta::relay::RelayError;

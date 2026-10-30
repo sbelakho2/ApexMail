@@ -21,6 +21,24 @@ serde_json.workspace = true
 chrono.workspace = true
 base64.workspace = true
 
+# T7 parser drivers (src/fuzz_api.rs): the SAME parsers production runs.
+# mta exposes doc-hidden seams over its SMTP command/envelope tokenizers; the
+# MIME parser is the mail-parser call the submission path makes; DKIM/SPF/
+# DMARC are mail-auth's record parsers; the remaining surfaces are the
+# template, tracking and billing webhook-verification crates.
+mta = { path = "../mta" }
+mail-parser = { workspace = true }
+mail-auth = { workspace = true }
+template-renderer = { path = "../template-renderer" }
+tracking-service = { path = "../tracking-service" }
+mail-proto = { path = "../mail-proto" }
+prost = { workspace = true }
+# NOTE: imap-proto-patched is a NESTED workspace (`[workspace]` in its
+# Cargo.toml), so the main workspace cannot depend on it ("multiple
+# workspace roots"). Its parser is fuzzed by the libFuzzer target
+# `fuzz_imap_response` in the separate fuzz subproject; the deterministic
+# smoke test covers the other targets and documents the gap.
+
 # Property-based testing
 proptest = "1.4"
 

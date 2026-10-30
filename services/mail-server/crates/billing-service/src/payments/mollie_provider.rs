@@ -24,9 +24,9 @@ use chrono::{DateTime, Utc};
 use crate::mollie_client::{self, CreatePayment, MollieClient, MollieError, Money};
 
 use super::{
-    Checkout, CheckoutRequest, CredentialState, Dispute, Payment, PaymentProvider, PaymentState,
-    ProviderCapabilities, ProviderError, Refund, RefundRequest, RefundState, SavedMethodCharge,
-    Settlement,
+    Checkout, CheckoutRequest, CredentialState, CustomerRequest, Dispute, DisputeState, Payment,
+    PaymentProvider, PaymentState, ProviderCapabilities, ProviderCustomer, ProviderError, Refund,
+    RefundRequest, RefundState, SavedMethodCharge, Settlement,
 };
 
 /// The adapter's stable name (the registry's `mollie` value).
@@ -83,24 +83,30 @@ impl MollieProvider {
 
 /// Map one Mollie payment status to the neutral state machine.
 ///
+/// The documented set is EXACTLY seven values (docs.mollie.com, Payments
+/// API `status`): `open`, `canceled`, `pending`, `authorized`, `expired`,
+/// `failed`, `paid`.
+///
 /// * `open` -> [`PaymentState::Pending`]: the hosted checkout exists, the
 ///   customer has not acted.
 /// * `pending` / `authorized` -> [`PaymentState::Processing`]: the provider
 ///   is moving (or has reserved) the money with no outcome yet.
 /// * `paid` -> [`PaymentState::Succeeded`].
-/// * `refunded` / `charged_back` -> [`PaymentState::Succeeded`]: THE CHARGE
-///   SUCCEEDED. Returning the money is a separate fact owned by
-///   [`Refund`] / [`Dispute`] objects; relabeling the payment would erase
-///   the revenue event the accounting ledger already posted.
 /// * `expired` -> [`PaymentState::Canceled`]: the customer never acted and
 ///   the window closed; the engine has no separate Expired terminal.
 /// * anything else -> [`ProviderError::UnmappedStatus`]: the engine refuses
 ///   to guess a money state.
+///
+/// `refunded` and `charged_back` are deliberately NOT accepted: Mollie never
+/// sends them as payment statuses (a refunded payment stays `paid`; a
+/// chargeback is a separate `chb_…` object enumerated through
+/// [`PaymentProvider::list_disputes`]). Mapping them here was the MON-9
+/// defect that hid dashboard refunds and chargebacks from the books.
 pub(crate) fn map_payment_status(status: &str) -> Result<PaymentState, ProviderError> {
     match status.trim() {
         "open" => Ok(PaymentState::Pending),
         "pending" | "authorized" => Ok(PaymentState::Processing),
-        "paid" | "refunded" | "charged_back" => Ok(PaymentState::Succeeded),
+        "paid" => Ok(PaymentState::Succeeded),
         "failed" => Ok(PaymentState::Failed),
         "canceled" | "expired" => Ok(PaymentState::Canceled),
         other => Err(ProviderError::UnmappedStatus {
@@ -210,6 +216,54 @@ fn neutral_refund(refund: mollie_client::Refund) -> Result<Refund, ProviderError
     })
 }
 
+/// Map one Mollie chargeback to the neutral dispute machine.
+///
+/// The chargeback object has NO `status` field: its state is carried by
+/// `reversedAt` (a reversal restores the money) and by
+/// `settlementAmount`/`settlementId` (present only once the deduction was
+/// finalized). Anything still open maps to [`DisputeState::Opened`].
+pub(crate) fn chargeback_dispute_state(chargeback: &mollie_client::Chargeback) -> DisputeState {
+    if chargeback
+        .reversed_at
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|value| !value.is_empty())
+    {
+        DisputeState::Won
+    } else if chargeback.settled {
+        DisputeState::Lost
+    } else {
+        DisputeState::Opened
+    }
+}
+
+/// Translate one fetched chargeback into the neutral dispute fact.
+pub(crate) fn neutral_dispute(
+    chargeback: mollie_client::Chargeback,
+) -> Result<Dispute, ProviderError> {
+    let amount = chargeback.amount.clone().ok_or_else(|| {
+        ProviderError::Malformed(format!(
+            "chargeback {} carries no amount; refusing to coerce absence to zero",
+            chargeback.id
+        ))
+    })?;
+    let state = chargeback_dispute_state(&chargeback);
+    Ok(Dispute {
+        provider: PROVIDER_NAME.to_string(),
+        provider_dispute_id: chargeback.id,
+        provider_payment_id: chargeback.payment_id,
+        state,
+        amount_minor: amount.cents,
+        currency: amount.currency,
+        reason: chargeback.reason.clone(),
+        opened_at: chargeback
+            .created_at
+            .as_deref()
+            .and_then(|text| DateTime::parse_from_rfc3339(text).ok())
+            .map(|time| time.with_timezone(&Utc)),
+    })
+}
+
 /// A Mollie settlement object becomes a neutral payout fact: the settled
 /// amount in minor units and the settle date; a settlement that has not
 /// paid out yet simply carries no date (the fact is not a payout until it
@@ -247,18 +301,17 @@ impl PaymentProvider for MollieProvider {
     }
 
     /// Mollie's surface: hosted checkout pages, stored-mandate charging,
-    /// refunds, settlement payouts, and an `Idempotency-Key` honored on
-    /// every mutating call. Mollie's wire offers NO retrievable dispute
-    /// object (chargebacks arrive only as payment statuses), so the
-    /// disputes capability is honestly `false` and
-    /// [`PaymentProvider::list_disputes`] refuses visibly — never a silent
-    /// empty list that would hide a chargeback from reconciliation.
+    /// refunds, settlement payouts, retrievable chargebacks
+    /// (`GET /v2/payments/{id}/chargebacks`) and an `Idempotency-Key`
+    /// honored on every mutating call. Disputes are a real capability: the
+    /// chargeback listing is the only place Mollie exposes them (the payment
+    /// object never carries a `charged_back` status).
     fn capabilities(&self) -> ProviderCapabilities {
         ProviderCapabilities {
             hosted_checkout: true,
             saved_method_charging: true,
             refunds: true,
-            disputes: false,
+            disputes: true,
             payouts: true,
             idempotency_keys: true,
         }
@@ -276,8 +329,10 @@ impl PaymentProvider for MollieProvider {
                 method: request.method_hint,
                 customer_id: request.provider_customer_id,
                 mandate_id: request.provider_method_id,
-                // A checkout is by definition customer-initiated.
-                sequence_type: None,
+                // A checkout is customer-initiated. `save_method` asks for
+                // the FIRST sequence so the payment mints the mandate the
+                // local renewal worker later charges off-session (V34).
+                sequence_type: request.save_method.then(|| "first".to_string()),
                 idempotency_key: request.idempotency_key,
             })
             .await
@@ -297,6 +352,33 @@ impl PaymentProvider for MollieProvider {
             amount_minor: request.amount_minor,
             currency: request.currency.to_ascii_uppercase(),
             created_at: None,
+        })
+    }
+
+    /// `POST /v1/customers` — Mollie needs a real customer object before a
+    /// checkout can mint a mandate; the caller persists the returned id in
+    /// the neutral `payment_provider_customers` table.
+    async fn ensure_customer(
+        &self,
+        request: CustomerRequest,
+    ) -> Result<ProviderCustomer, ProviderError> {
+        let customer = self
+            .client
+            .create_customer(
+                &request.name,
+                &request.email,
+                &format!("customer_{}", request.tenant_id),
+            )
+            .await
+            .map_err(map_error)?;
+        if customer.id.trim().is_empty() {
+            return Err(ProviderError::Malformed(
+                "mollie returned a customer without an id".to_string(),
+            ));
+        }
+        Ok(ProviderCustomer {
+            provider: PROVIDER_NAME.to_string(),
+            provider_customer_id: customer.id,
         })
     }
 
@@ -491,18 +573,22 @@ impl PaymentProvider for MollieProvider {
         Ok(settlements.into_iter().map(neutral_settlement).collect())
     }
 
-    /// Mollie's wire offers no chargeback/dispute retrieval on this
-    /// surface (chargebacks surface only as payment statuses), so this
-    /// adapter refuses VISIBLY. The refusal is the contract for a
-    /// `disputes: false` capability: never a silent empty list, which
-    /// would hide a chargeback from the reconciliation.
+    /// The payment's chargebacks, mapped to neutral dispute facts.
+    ///
+    /// `GET /v2/payments/{id}/chargebacks` is Mollie's documented dispute
+    /// surface. An authentication/transport failure is an `Err` the caller
+    /// must surface (never a silent empty list that would hide a
+    /// chargeback); an empty `_embedded.chargebacks` is a real "no dispute".
     async fn list_disputes(
         &self,
-        _provider_payment_id: &str,
+        provider_payment_id: &str,
     ) -> Result<Vec<Dispute>, ProviderError> {
-        Err(ProviderError::Config(
-            "mollie: dispute retrieval not offered by the provider API".into(),
-        ))
+        let chargebacks = self
+            .client
+            .payment_chargebacks(provider_payment_id)
+            .await
+            .map_err(map_error)?;
+        chargebacks.into_iter().map(neutral_dispute).collect()
     }
 
     async fn revoke_saved_method(
@@ -528,40 +614,48 @@ impl PaymentProvider for MollieProvider {
 mod tests {
     use super::*;
 
-    /// Every payment status the wire client documents maps, and each maps
-    /// to exactly one neutral state (exhaustiveness: adding a Mollie status
-    /// without a mapping fails HERE, not in production).
+    /// Every payment status Mollie documents maps, and each maps to
+    /// exactly one neutral state (exhaustiveness: adding a Mollie status
+    /// without a mapping fails HERE, not in production). The set is the
+    /// documented SEVEN — `refunded`/`charged_back` are not payment
+    /// statuses and must fail closed.
     #[test]
-    fn payment_status_mapping_is_exhaustive() {
+    fn payment_status_mapping_is_exactly_the_seven_documented_statuses() {
         let expected = [
             ("open", PaymentState::Pending),
+            ("canceled", PaymentState::Canceled),
             ("pending", PaymentState::Processing),
             ("authorized", PaymentState::Processing),
-            ("paid", PaymentState::Succeeded),
-            ("refunded", PaymentState::Succeeded),
-            ("charged_back", PaymentState::Succeeded),
-            ("failed", PaymentState::Failed),
-            ("canceled", PaymentState::Canceled),
             ("expired", PaymentState::Canceled),
+            ("failed", PaymentState::Failed),
+            ("paid", PaymentState::Succeeded),
         ];
         for (wire, state) in expected {
             assert_eq!(map_payment_status(wire).unwrap(), state, "{wire}");
         }
-        // Every documented status resolves: the mapping is total over the
-        // documented vocabulary.
         let documented = [
             "open",
+            "canceled",
             "pending",
             "authorized",
-            "paid",
-            "failed",
-            "canceled",
             "expired",
-            "refunded",
-            "charged_back",
+            "failed",
+            "paid",
         ];
+        assert_eq!(documented.len(), 7);
         for status in documented {
             assert!(map_payment_status(status).is_ok(), "{status} must map");
+        }
+        // The MON-9 defect: these were mapped as payment statuses and must
+        // never be again — Mollie sends neither on a payment object.
+        for removed in ["refunded", "charged_back"] {
+            match map_payment_status(removed) {
+                Err(ProviderError::UnmappedStatus { kind, status }) => {
+                    assert_eq!(kind, "payment");
+                    assert_eq!(status, removed);
+                }
+                other => panic!("{removed} must fail closed, got {other:?}"),
+            }
         }
     }
 
@@ -711,27 +805,64 @@ mod tests {
         assert!(capabilities.hosted_checkout);
         assert!(capabilities.saved_method_charging);
         assert!(capabilities.refunds);
-        // Honest: Mollie's wire offers no retrievable dispute object, so
-        // the capability is false and list_disputes refuses visibly.
-        assert!(!capabilities.disputes);
+        // Chargebacks ARE retrievable (GET /v2/payments/{id}/chargebacks),
+        // so the capability is honestly true.
+        assert!(capabilities.disputes);
         assert!(capabilities.payouts);
         assert!(capabilities.idempotency_keys);
     }
 
-    /// The disputes refusal is the `disputes: false` contract: an Err the
-    /// caller must surface, never a silent empty list.
-    #[tokio::test]
-    async fn dispute_retrieval_refuses_visibly() {
-        let provider = MollieProvider::for_tests("http://127.0.0.1:1/v2".into());
-        match provider.list_disputes("tr_example").await {
-            Err(ProviderError::Config(message)) => {
-                assert!(
-                    message.contains("dispute retrieval not offered"),
-                    "{message}"
-                )
-            }
-            other => panic!("expected a Config refusal, got {other:?}"),
-        }
+    /// The chargeback -> neutral dispute mapping is driven by the
+    /// documented fields: `reversedAt` (reversal), finalized settlement
+    /// (lost), otherwise still open. The object carries no status field.
+    #[test]
+    fn chargeback_fields_map_onto_the_neutral_dispute_states() {
+        let opened = mollie_client::chargeback_from_json(
+            "tr_1",
+            &serde_json::json!({
+                "id": "chb_open",
+                "amount": { "currency": "EUR", "value": "10.00" },
+                "paymentId": "tr_1",
+                "createdAt": "2026-10-29T10:00:00+00:00",
+                "reversedAt": null
+            }),
+        );
+        let dispute = neutral_dispute(opened).expect("maps");
+        assert_eq!(dispute.state, DisputeState::Opened);
+        assert_eq!(dispute.amount_minor, 1_000);
+        assert_eq!(dispute.currency, "EUR");
+        assert!(dispute.opened_at.is_some());
+
+        let settled = mollie_client::chargeback_from_json(
+            "tr_1",
+            &serde_json::json!({
+                "id": "chb_lost",
+                "amount": { "currency": "EUR", "value": "10.00" },
+                "settlementAmount": { "currency": "EUR", "value": "-10.00" },
+                "settlementId": "stl_1",
+                "paymentId": "tr_1"
+            }),
+        );
+        assert_eq!(
+            neutral_dispute(settled).expect("maps").state,
+            DisputeState::Lost
+        );
+
+        let reversed = mollie_client::chargeback_from_json(
+            "tr_1",
+            &serde_json::json!({
+                "id": "chb_reversed",
+                "amount": { "currency": "EUR", "value": "10.00" },
+                "settlementAmount": { "currency": "EUR", "value": "-10.00" },
+                "settlementId": "stl_1",
+                "paymentId": "tr_1",
+                "reversedAt": "2026-11-02T09:00:00+00:00"
+            }),
+        );
+        assert_eq!(
+            neutral_dispute(reversed).expect("maps").state,
+            DisputeState::Won
+        );
     }
 
     /// The search refuses an empty key and cannot prove absence on a full
@@ -752,5 +883,16 @@ mod tests {
             .search_payment_by_idempotency_key("usageinv_x_1c")
             .await
             .is_err());
+    }
+
+    /// A chargeback fetch failure is an Err the caller must surface, never
+    /// a silent empty list that would hide the dispute from reconciliation.
+    #[tokio::test]
+    async fn list_disputes_surfaces_transport_failures_never_silence() {
+        let provider = MollieProvider::for_tests("http://127.0.0.1:1/v2".into());
+        match provider.list_disputes("tr_example").await {
+            Err(ProviderError::Unavailable(_)) => {}
+            other => panic!("expected a transport error, got {other:?}"),
+        }
     }
 }

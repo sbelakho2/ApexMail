@@ -1,0 +1,12 @@
+# Proptest regression seeds for I29
+# (tests/invariants_property.rs — refunds/chargebacks recorded exactly once
+# within 24 hours).
+#
+# Proptest appends a seed line here whenever a case fails; the seed replays
+# the exact failing script on the next run, so a crash/regression can never
+# be lost. The file is committed on purpose: a failing provider-event script
+# becomes a permanent regression test before its fix merges.
+#
+# Format (written by proptest): <seed> # shrinks to <scenario>
+cc b72563889ee1afdb42c5aa1af6e4684411eae6c4c7632a392fef3988fcb77226 # shrinks to Scenario { refunds: [], disputes: [DisputeScript { id: 0, opened: 0, resolved: None, amount_minor: 1 }, DisputeScript { id: 0, opened: 0, resolved: None, amount_minor: 1 }], sweeps: [] }
+cc 7af29209b09ec7673c097e38e9a9c6e28f3dbe32b94716fac27134600a28fe55 # shrinks to Scenario { refunds: [], disputes: [DisputeScript { id: 0, opened: 0, resolved: None, amount_minor: 1 }], sweeps: [] }

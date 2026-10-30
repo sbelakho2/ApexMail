@@ -24,7 +24,10 @@
    "apps/marketing-zola/content/security/index.fr.md",
    "apps/marketing-zola/content/architecture.md",
    "templates/compliance/security-measures.md",
-   "templates/compliance/trust-center.md"
+   "templates/compliance/trust-center.md",
+   "apps/marketing-zola/templates/partials/home/features.html",
+   "apps/marketing-zola/templates/partials/home/security.html",
+   "apps/marketing-zola/templates/partials/pricing/plans.html"
   ],
   "marker": "[roadmap]",
   "marker_close": "[/roadmap]",
@@ -251,6 +254,7 @@
    "capability": "enterprise-sso-saml-oidc",
    "crate": "crates/enterprise",
    "stage": "advertised",
+   "on_request": true,
    "evidence": {
     "docker_target": "enterprise",
     "compose_service": "enterprise",
@@ -262,8 +266,12 @@
     "SAML",
     "OIDC",
     "single sign-on",
-    "SSO"
-   ]
+    "SSO",
+    "SAML on request",
+    "OIDC SSO",
+    "SAML SSO"
+   ],
+   "marketing_position": "Public plan copy sells SSO as 'OIDC; SAML on request'. OIDC is the standard self-serve path; SAML is enabled per contract when a customer asks for it. Both protocol flows are wired end to end (see the evidence), so the packaging is a commercial position, not a capability gap: the stage stays advertised because the claim now matches the wired behavior. No pricing or plan copy may present SAML as a self-serve entitlement before V5."
   },
   {
    "capability": "high-availability-failover-service",
@@ -355,7 +363,8 @@
     "DANE",
     "TLSA"
    ],
-   "readme_status_exemption": "the crate-level README documents the WIRED mta daemon as a whole; the honest per-feature status lives in this entry (its consumers are limited to the crates/mta/src/auth re-exports)"
+   "readme_status_exemption": "the crate-level README documents the WIRED mta daemon as a whole; the honest per-feature status lives in this entry (its consumers are limited to the crates/mta/src/auth re-exports)",
+   "marketing_position": "Roadmap capability: the code exists in crates/mta/src/auth, and the public surfaces may name it only inside [roadmap] context. It must not appear on the home features card or in plan copy until the delivery paths consume it and the stage is promoted."
   },
   {
    "capability": "mta-sts-tlsrpt",
@@ -383,7 +392,8 @@
     "TLSRPT",
     "TLS Reporting"
    ],
-   "readme_status_exemption": "the crate-level README documents the WIRED mta daemon as a whole; the honest per-feature status lives in this entry (its consumers are limited to the crates/mta/src/auth re-exports)"
+   "readme_status_exemption": "the crate-level README documents the WIRED mta daemon as a whole; the honest per-feature status lives in this entry (its consumers are limited to the crates/mta/src/auth re-exports)",
+   "marketing_position": "Roadmap capability: the code exists in crates/mta/src/auth, and the public surfaces may name it only inside [roadmap] context. It must not appear on the home features card or in plan copy until the delivery paths consume it and the stage is promoted."
   },
   {
    "capability": "bimi-logo-verification",
@@ -506,7 +516,10 @@
     "metrics": null,
     "explanation": "DKIM signing is applied on the outbound send path of the worker. Genuinely deployed \u2014 marketing naming is honest."
    },
-   "scan_aliases": []
+   "scan_aliases": [
+    "DKIM signing",
+    "DKIM"
+   ]
   },
   {
    "capability": "inbound-email-authentication-spf-dkim-dmarc",
@@ -519,7 +532,11 @@
     "metrics": null,
     "explanation": "SPF/DKIM/DMARC evaluation runs on every inbound message via EmailAuthenticator with a should_accept disposition. Genuinely deployed \u2014 marketing naming is honest."
    },
-   "scan_aliases": []
+   "scan_aliases": [
+    "DKIM",
+    "SPF",
+    "DMARC"
+   ]
   },
   {
    "capability": "rate-limiting",
@@ -567,11 +584,17 @@
    "evidence": {
     "docker_target": "mailstore",
     "compose_service": "mailstore",
-    "call_path": "services/mail-server/crates/mailstore-core/src/encryption.rs (AES-256-GCM message content) + crates/apexmail-lib/src/secret_at_rest.rs + crates/apexmail-lib/src/dkim.rs (AEAD key wrapping)",
+    "call_path": "services/mail-server/crates/mailstore-core/src/storage.rs:869-874 encrypts text_body, html_body and raw_message (the raw RFC5322 message, including its attachment MIME parts) before insert; crates/mailstore-core/src/encryption.rs (AES-256-GCM envelope, AAD-bound); crates/apexmail-lib/src/secret_at_rest.rs + crates/apexmail-lib/src/dkim.rs (AEAD key wrapping)",
     "metrics": null,
-    "explanation": "Application-level AES-256-GCM encryption for stored message content and secrets; volume-level LUKS encryption is an infrastructure-provider control documented in the compliance templates. Genuinely deployed \u2014 marketing naming is honest."
+    "explanation": "Application-level AES-256-GCM encryption covers stored message bodies (text_body, html_body), the raw RFC5322 message (raw_message, which carries the attachment content) and ApexMail-managed secrets. Exact scope: message content only. Message metadata, headers, subject lines and the attachments projection are not covered by the application-level envelope; volume-level LUKS and object-store encryption are infrastructure-provider controls documented in the compliance templates. Marketing may claim 'message content encrypted at rest', never 'all data encrypted at rest'."
    },
-   "scan_aliases": []
+   "scan_aliases": [
+    "encryption at rest",
+    "encrypted at rest",
+    "message content encrypted at rest",
+    "AES-256-GCM",
+    "AES-256"
+   ]
   },
   {
    "capability": "webhook-hmac-signatures",

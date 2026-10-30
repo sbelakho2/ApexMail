@@ -73,7 +73,7 @@ L'intégrité du système est vérifiée par des contrôles automatisés et réc
 
 ## Sécurité de l'infrastructure
 
-- Infrastructure cloud européenne (calcul, stockage et réseau) située en Finlande (UE) ; tout le traitement d'infrastructure reste dans l'EEE.
+- Infrastructure cloud européenne (calcul, stockage et réseau) située en UE (EEE) ; tout le traitement d'infrastructure reste dans l'EEE.
 - Systèmes d'exploitation Debian/Ubuntu renforcés CIS.
 - Correctifs de sécurité automatisés avec déploiement progressif.
 - Déploiement déclaratif et versionné : toute la pile est définie dans des fichiers Docker Compose et déployée par le pipeline CI auto-hébergé.

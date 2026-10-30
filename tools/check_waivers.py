@@ -31,9 +31,13 @@ LANES = REPO / "ci" / "required-lanes.txt"
 MAX_WAIVER_DAYS = 14
 
 # ci_lane_record ids that fail the stage when they fail (required-capable).
-# The coverage-ratchet record is deliberately absent: it lives inside the
-# advisory-default coverage gate and must never refuse a blessing.
-REQUIRED_LANE_RECORDS = {"workspace-suite"}
+# `coverage-ratchet` joined this set on 2026-10-30 with the T2 flip
+# (CI_COVERAGE_CHECK=required). `fuzz-smoke` is the T7 deterministic fuzz-lite
+# lane (tools/run_fuzz_nightly.sh --smoke). `cargo-audit-daily` uses
+# ci_lane_record (not ci_check) because same-day runs short-circuit from the
+# pass marker; CI_CARGO_AUDIT_DAILY_CHECK=required makes its failure fail the
+# security stage.
+REQUIRED_LANE_RECORDS = {"workspace-suite", "cargo-audit-daily", "coverage-ratchet", "fuzz-smoke"}
 
 
 def load_lanes(path: Path) -> set[str]:

@@ -45,19 +45,16 @@ echo "      Working directory: $MAIL_SERVER_DIR"
 cd "$MAIL_SERVER_DIR"
 
 # SEC-17: cargo audit with advisory ignore list
-# This list must match .cargo/audit.toml, deny.toml [_ignore], and
-# ci/pipeline.conf CI_CARGO_AUDIT_IGNORES (the authoritative ledger —
-# `ci/pipeline.sh selftest` asserts deny.toml equality; keep all four
-# ledgers in EXACT lockstep when triaging a new advisory).
+# This list must match deny.toml [advisories].ignore and ci/pipeline.conf
+# CI_CARGO_AUDIT_IGNORES (the authoritative ledger — `ci/pipeline.sh
+# selftest` asserts equality). The DATED waivers live in
+# services/mail-server/.cargo/audit.toml and are validated/added by
+# tools/check_audit_waivers.py (the CI audit lanes do this automatically;
+# the pre-commit hook path below lists the same ids to stay equivalent).
 cargo audit --deny warnings \
-    --ignore RUSTSEC-2026-0258 \
     --ignore RUSTSEC-2026-0194 \
     --ignore RUSTSEC-2026-0195 \
-    --ignore RUSTSEC-2026-0119 \
     --ignore RUSTSEC-2023-0071 \
-    --ignore RUSTSEC-2026-0098 \
-    --ignore RUSTSEC-2026-0099 \
-    --ignore RUSTSEC-2026-0104 \
     --ignore RUSTSEC-2025-0141 \
     --ignore RUSTSEC-2025-0057 \
     --ignore RUSTSEC-2024-0384 \
@@ -72,11 +69,6 @@ cargo audit --deny warnings \
     --ignore RUSTSEC-2026-0205 \
     --ignore RUSTSEC-2026-0187 \
     --ignore RUSTSEC-2024-0449 \
-    --ignore RUSTSEC-2026-0367 \
-    --ignore RUSTSEC-2026-0368 \
-    --ignore RUSTSEC-2026-0369 \
-    --ignore RUSTSEC-2026-0346 \
-    --ignore RUSTSEC-2026-0349 \
     2>&1 | tee "$MAIL_SERVER_DIR/cargo-audit-report.txt"
 
 echo ""

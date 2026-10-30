@@ -10,12 +10,14 @@
 //!   classification, not `succeeded` with zero items);
 //! * robots.txt disallow is a policy block and the page is never requested;
 //! * a blocked URL in a pass stores nothing from that pass;
-//! * the solver hook is disabled → never called; not opted in → never called;
-//!   opted in + success → exactly one retry and the audit row; disabled host
-//!   or failing hook → backoff, and nothing bypasses the backoff;
+//! * a CAPTCHA page excludes its host permanently: the exclusion reason is
+//!   persisted, a second crawl (fresh client, hydrated state) sends NO
+//!   request at all, and only an owner lift with a written reason clears it;
+//! * a discovery run never contacts a host outside the operator allowlist;
 //! * content-type and size caps refuse documents; transient blocks are
 //!   retried, then backed off;
-//! * data quality: normalization, de-duplication and provenance on every row.
+//! * data quality: normalization, de-duplication and provenance on every row,
+//!   including the mailto role/named-person policy and the Article 14 flag.
 
 mod common;
 
@@ -26,11 +28,11 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use sales_autopilot::discovery::{
-    attempt_solve, get_blocked_source, hydrate_registry, list_blocked_sources,
-    record_blocked_fetch, record_host_block, review_blocked_source, set_host_solver_optin,
+    get_blocked_source, hydrate_registry, lift_host_exclusion, list_blocked_sources,
+    list_host_exclusion_audit, record_blocked_fetch, record_host_block, review_blocked_source,
     BlockedEvidence, BlockedReviewAction, DiscoveryJobRunner, DiscoveryQuery, FetchClassification,
-    LeaseFence, PublicWebSource, ScrapeClient, ScrapeConfig, SolverConfig, SolverOutcome,
-    BLOCKED_STATE_OPEN, BLOCKED_STATE_SOLVED,
+    LeaseFence, PublicWebSource, ScrapeClient, ScrapeConfig, BLOCKED_STATE_OPEN,
+    EXCLUSION_AUDIT_EXCLUDED, EXCLUSION_AUDIT_LIFTED, EXCLUSION_CAPTCHA,
 };
 
 // ---------------------------------------------------------------------------
@@ -55,15 +57,6 @@ impl Route {
         }
     }
 
-    fn json(body: &str) -> Self {
-        Self {
-            status: 200,
-            content_type: Some("application/json".to_string()),
-            body: body.to_string(),
-            headers: Vec::new(),
-        }
-    }
-
     fn with_header(mut self, name: &str, value: &str) -> Self {
         self.headers.push((name.to_string(), value.to_string()));
         self
@@ -82,12 +75,11 @@ impl Route {
 #[derive(Debug, Clone)]
 struct Hit {
     path: String,
-    head: String,
 }
 
 /// A scripted HTTP server. `/path` routes may hold a SEQUENCE of responses:
 /// the Nth request to a path gets the Nth route (the last one repeats), which
-/// is how the solver retry test observes the retry.
+/// is how retry and exclusion tests observe the exact request count.
 struct Fixture {
     addr: std::net::SocketAddr,
     hits: Arc<Mutex<Vec<Hit>>>,
@@ -145,7 +137,6 @@ impl Fixture {
                         let index = hits.iter().filter(|hit| hit.path == lookup).count();
                         hits.push(Hit {
                             path: lookup.clone(),
-                            head: head.clone(),
                         });
                         (index, hits.len())
                     };
@@ -196,20 +187,6 @@ impl Fixture {
             .iter()
             .filter(|hit| hit.path == path)
             .count()
-    }
-
-    /// True when any request to `path` carried `needle` in its head.
-    fn any_head_contains(&self, path: &str, needle: &str) -> bool {
-        self.hits
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|hit| hit.path == path)
-            .any(|hit| {
-                hit.head
-                    .to_ascii_lowercase()
-                    .contains(&needle.to_ascii_lowercase())
-            })
     }
 
     fn robots_allow() -> Vec<Route> {
@@ -332,7 +309,7 @@ fn test_scrape_config() -> ScrapeConfig {
 
 async fn cleanup(pool: &PgPool, tenant: &str) {
     for statement in [
-        "DELETE FROM sales_scrape_solver_audit WHERE tenant_id = $1",
+        "DELETE FROM sales_scrape_host_exclusion_audit WHERE tenant_id = $1",
         "DELETE FROM sales_scrape_blocked_sources WHERE tenant_id = $1",
         "DELETE FROM sales_scrape_host_health WHERE tenant_id = $1",
         "DELETE FROM sales_discovery_candidates WHERE tenant_id = $1",
@@ -973,7 +950,7 @@ async fn stale_lease_fence_refuses_queue_writes() {
         .unwrap()
         .is_empty());
 
-    // Without a fence (the solver path) the write lands.
+    // Without a fence (the job-runner-free path) the write lands.
     let id = record_blocked_fetch(&pool, &tenant, "public_web", None, &evidence)
         .await
         .unwrap();
@@ -1125,36 +1102,24 @@ async fn hydration_restores_a_persisted_backoff_window() {
     cleanup(&pool, &tenant).await;
 }
 
-// ---------------------------------------------------------------------------
-// The solver hook
-// ---------------------------------------------------------------------------
-
-/// Build a blocked queue row for a challenge on `page_url`.
-async fn seed_blocked(pool: &PgPool, tenant: &str, page_url: &str, host: &str) -> Uuid {
-    let evidence = BlockedEvidence {
-        classification: FetchClassification::BlockedCaptcha,
-        url: page_url.to_string(),
-        host: host.to_string(),
-        http_status: Some(403),
-        markers: vec!["cloudflare:__cf_chl_opt".to_string()],
-        detail: "fixture".to_string(),
-        retry_after_seconds: None,
-        fetched_at: chrono::Utc::now(),
-    };
-    record_blocked_fetch(pool, tenant, "public_web", None, &evidence)
-        .await
-        .unwrap()
-        .unwrap()
+/// The host part of a loopback fixture URL.
+fn fixture_addr_host(fixture: &Fixture) -> String {
+    fixture.addr.ip().to_string()
 }
 
-/// The hook is DISABLED unless `SCRAPE_CAPTCHA_SOLVER_URL` is configured:
-/// the audit row says so and nothing is called.
+// ---------------------------------------------------------------------------
+// Permanent host exclusion (migration 289)
+// ---------------------------------------------------------------------------
+
+/// A CAPTCHA page excludes its host permanently: the reason is persisted and
+/// audited, and a SECOND crawl (fresh client, hydrated state) sends no
+/// request at all — not even `robots.txt`.
 #[tokio::test]
-async fn solver_disabled_by_default_never_calls_anything() {
-    let Some(pool) = common::test_pool("scrape_solver_disabled").await else {
+async fn captcha_excludes_the_host_permanently_and_a_second_crawl_sends_nothing() {
+    let Some(pool) = common::test_pool("scrape_captcha_exclusion").await else {
         return;
     };
-    let tenant = common::insert_test_tenant(&pool, "nodis").await;
+    let tenant = common::insert_test_tenant(&pool, "excl").await;
     let fixture = Fixture::serve(vec![
         ("/robots.txt", Fixture::robots_allow()),
         (
@@ -1167,421 +1132,257 @@ async fn solver_disabled_by_default_never_calls_anything() {
     ])
     .await;
     let host = fixture_addr_host(&fixture);
-    let blocked_id = seed_blocked(&pool, &tenant, &fixture.url("/page"), &host).await;
+    let page_url = fixture.url("/page");
 
-    let client = ScrapeClient::new(test_scrape_config()).unwrap();
-    // `from_env` with the variable unset is the disabled configuration.
-    let solver = SolverConfig::from_env();
-    assert!(!solver.is_configured());
+    let job =
+        run_public_web_job(&pool, &tenant, vec![page_url.clone()], test_scrape_config()).await;
+    assert_eq!(job.status, "failed");
+    let page_hits = fixture.hit_count("/page");
+    let robots_hits = fixture.hit_count("/robots.txt");
+    assert_eq!(page_hits, 1, "the challenge was observed once");
 
-    let report = attempt_solve(
-        &pool,
-        &client,
-        &tenant,
-        blocked_id,
-        &solver,
-        Some("operator@apexmail.ee"),
-    )
-    .await
-    .unwrap();
-    assert_eq!(report.outcome, SolverOutcome::Disabled);
-    assert!(!report.retried);
+    let hosts = sales_autopilot::discovery::list_host_health(&pool, &tenant, 10)
+        .await
+        .unwrap();
+    assert_eq!(hosts.len(), 1);
+    assert_eq!(
+        hosts[0].exclusion_reason.as_deref(),
+        Some(EXCLUSION_CAPTCHA)
+    );
+    assert!(hosts[0].excluded_at.is_some(), "the exclusion is persisted");
+    assert!(
+        hosts[0].consecutive_429 == 0,
+        "a CAPTCHA is not a rate-limit exclusion"
+    );
+
+    let audit = list_host_exclusion_audit(&pool, &tenant, Some(&host), 10)
+        .await
+        .unwrap();
+    assert_eq!(audit.len(), 1, "the automatic exclusion is audited");
+    assert_eq!(audit[0].action, EXCLUSION_AUDIT_EXCLUDED);
+    assert_eq!(audit[0].actor, "system");
+    assert_eq!(audit[0].reason, EXCLUSION_CAPTCHA);
+
+    // A second crawl uses a NEW source/client (the production per-run shape);
+    // hydration restores the exclusion and the gate fires before any request.
+    let job =
+        run_public_web_job(&pool, &tenant, vec![page_url.clone()], test_scrape_config()).await;
+    assert_eq!(job.status, "failed");
     assert_eq!(
         fixture.hit_count("/page"),
-        0,
-        "the disabled hook must not even fetch the page"
+        page_hits,
+        "an excluded host receives NO further request"
     );
-
-    let (outcome, retried): (String, bool) = sqlx::query_as(
-        "SELECT outcome, retried FROM sales_scrape_solver_audit WHERE tenant_id = $1",
-    )
-    .bind(&tenant)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert_eq!(outcome, "disabled");
-    assert!(!retried);
-    cleanup(&pool, &tenant).await;
-}
-
-/// A configured hook on a host the operator did NOT opt in is still never
-/// called.
-#[tokio::test]
-async fn solver_configured_but_host_not_opted_in_never_calls_the_hook() {
-    let Some(pool) = common::test_pool("scrape_solver_not_opted_in").await else {
-        return;
-    };
-    let tenant = common::insert_test_tenant(&pool, "noopt").await;
-    let fixture = Fixture::serve(vec![
-        ("/robots.txt", Fixture::robots_allow()),
-        (
-            "/page",
-            vec![Route::html(
-                403,
-                &challenge_page("Just a moment...", "<script>__cf_chl_opt</script>"),
-            )],
-        ),
-    ])
-    .await;
-    let solver_fixture = Fixture::serve(vec![(
-        "/solve",
-        vec![Route::json(
-            r#"{"status":"solved","cookie":"cf_clearance=x"}"#,
-        )],
-    )])
-    .await;
-    let host = fixture_addr_host(&fixture);
-    let blocked_id = seed_blocked(&pool, &tenant, &fixture.url("/page"), &host).await;
-
-    let client = ScrapeClient::new(test_scrape_config()).unwrap();
-    let solver = SolverConfig {
-        url: Some(solver_fixture.url("/solve")),
-        token: None,
-        ..SolverConfig::default()
-    };
-    let report = attempt_solve(
-        &pool,
-        &client,
-        &tenant,
-        blocked_id,
-        &solver,
-        Some("operator@apexmail.ee"),
-    )
-    .await
-    .unwrap();
-    assert_eq!(report.outcome, SolverOutcome::HostNotOptedIn);
     assert_eq!(
-        solver_fixture.hit_count("/solve"),
-        0,
-        "the hook is not called"
+        fixture.hit_count("/robots.txt"),
+        robots_hits,
+        "not even robots.txt is fetched again"
     );
-    assert_eq!(fixture.hit_count("/page"), 0, "no retry happened");
+
+    // A direct fresh client refuses with the typed evidence, still without a
+    // request: the exclusion is permanent, not a quiet retry loop.
+    let direct = ScrapeClient::new(test_scrape_config()).unwrap();
+    hydrate_registry(&pool, &tenant, &direct.host_health())
+        .await
+        .unwrap();
+    let refused = direct.fetch(&page_url).await.expect_err("excluded");
+    let evidence = BlockedEvidence::from_fetch_error(&refused).expect("blocked evidence");
+    assert!(evidence.markers.contains(&"host_excluded".to_string()));
+    assert!(evidence.detail.contains(EXCLUSION_CAPTCHA));
+    assert_eq!(fixture.hit_count("/page"), page_hits);
+    assert_eq!(fixture.hit_count("/robots.txt"), robots_hits);
+
     cleanup(&pool, &tenant).await;
 }
 
-/// Opted in + solver success → exactly ONE retry (with the solved cookie)
-/// and the audit row; the queue row is closed as solved.
+/// No discovery request reaches a host outside the operator allowlist: only
+/// the listed URL is fetched, and the other loopback fixture sees zero
+/// requests (not even its robots.txt).
 #[tokio::test]
-async fn solver_success_retries_exactly_once_and_audits() {
-    let Some(pool) = common::test_pool("scrape_solver_success").await else {
+async fn discovery_never_requests_a_host_outside_the_allowlist() {
+    let Some(pool) = common::test_pool("scrape_allowlist_scope").await else {
         return;
     };
-    let tenant = common::insert_test_tenant(&pool, "solve").await;
-    // The solved retry is the ONLY request this fixture sees: the blocked
-    // evidence is seeded (in production it comes from the blocked fetch).
-    let fixture = Fixture::serve(vec![
+    let tenant = common::insert_test_tenant(&pool, "scope").await;
+    let allowed = Fixture::serve(vec![
         ("/robots.txt", Fixture::robots_allow()),
         ("/page", vec![Route::html(200, ORDINARY_PAGE)]),
     ])
     .await;
-    let solver_fixture = Fixture::serve(vec![(
-        "/solve",
-        vec![Route::json(
-            r#"{"status":"solved","cookie":"cf_clearance=fixture-token"}"#,
-        )],
-    )])
+    let forbidden = Fixture::serve(vec![
+        ("/robots.txt", Fixture::robots_allow()),
+        ("/page", vec![Route::html(200, ORDINARY_PAGE)]),
+        ("/outside", vec![Route::html(200, ORDINARY_PAGE)]),
+    ])
     .await;
-    let host = fixture_addr_host(&fixture);
-    let blocked_id = seed_blocked(&pool, &tenant, &fixture.url("/page"), &host).await;
 
-    set_host_solver_optin(&pool, &tenant, &host, true, "operator@apexmail.ee")
-        .await
-        .unwrap();
-
-    let client = ScrapeClient::new(test_scrape_config()).unwrap();
-    let solver = SolverConfig {
-        url: Some(solver_fixture.url("/solve")),
-        token: Some("solver-token".to_string()),
-        ..SolverConfig::default()
-    };
-    let report = attempt_solve(
+    let job = run_public_web_job(
         &pool,
-        &client,
         &tenant,
-        blocked_id,
-        &solver,
-        Some("operator@apexmail.ee"),
+        vec![allowed.url("/page")],
+        test_scrape_config(),
     )
-    .await
-    .unwrap();
+    .await;
+    assert_eq!(job.status, "completed");
+    assert_eq!(allowed.hit_count("/page"), 1);
+    assert_eq!(forbidden.hit_count("/page"), 0);
+    assert_eq!(forbidden.hit_count("/robots.txt"), 0);
+    assert_eq!(forbidden.hit_count("/outside"), 0);
 
-    assert_eq!(report.outcome, SolverOutcome::RetryOk, "{report:?}");
-    assert!(report.retried);
-    assert_eq!(solver_fixture.hit_count("/solve"), 1, "one solve request");
-    assert_eq!(fixture.hit_count("/page"), 1, "exactly ONE retry");
-    assert!(
-        fixture.any_head_contains("/page", "cf_clearance=fixture-token"),
-        "the solved cookie was applied to the retry"
-    );
-    assert!(
-        solver_fixture.any_head_contains("/solve", "bearer solver-token"),
-        "the solver token travels as a bearer header"
-    );
-
-    let (outcome, token_received, retried, retry_classification): (
-        String,
-        bool,
-        bool,
-        Option<String>,
-    ) = sqlx::query_as(
-        "SELECT outcome, token_received, retried, retry_classification
-         FROM sales_scrape_solver_audit WHERE tenant_id = $1",
-    )
-    .bind(&tenant)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert_eq!(outcome, "retry_ok");
-    assert!(token_received);
-    assert!(retried);
-    assert_eq!(retry_classification.as_deref(), Some("ok"));
-
-    let row = get_blocked_source(&pool, &tenant, blocked_id)
-        .await
-        .unwrap();
-    assert_eq!(row.state, BLOCKED_STATE_SOLVED);
-    // The cookie itself is never stored anywhere.
-    let audited_detail: Option<String> =
-        sqlx::query_scalar("SELECT detail FROM sales_scrape_solver_audit WHERE tenant_id = $1")
-            .bind(&tenant)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    assert!(
-        !audited_detail.unwrap_or_default().contains("cf_clearance"),
-        "no cookie material in the audit trail"
-    );
     cleanup(&pool, &tenant).await;
 }
 
-/// A failing hook backs the host off, and the NEXT solve attempt is refused
-/// by that same backoff window: nothing bypasses the per-host backoff.
+/// Only the owner can lift an exclusion, and the lift requires a written
+/// reason. The lift is audited; a second lift has nothing to lift.
 #[tokio::test]
-async fn solver_failure_backs_off_and_backoff_gates_the_next_attempt() {
-    let Some(pool) = common::test_pool("scrape_solver_failure").await else {
+async fn owner_lift_requires_a_written_reason_and_is_audited() {
+    let Some(pool) = common::test_pool("scrape_exclusion_lift").await else {
         return;
     };
-    let tenant = common::insert_test_tenant(&pool, "solvefail").await;
-    let fixture = Fixture::serve(vec![
-        ("/robots.txt", Fixture::robots_allow()),
-        (
-            "/page",
-            vec![Route::html(
-                403,
-                &challenge_page("Just a moment...", "<script>__cf_chl_opt</script>"),
-            )],
-        ),
-    ])
-    .await;
-    let solver_fixture = Fixture::serve(vec![(
-        "/solve",
-        vec![Route::plain(500, Some("text/plain"), "solver is down")],
-    )])
-    .await;
-    let host = fixture_addr_host(&fixture);
-    let blocked_id = seed_blocked(&pool, &tenant, &fixture.url("/page"), &host).await;
-    set_host_solver_optin(&pool, &tenant, &host, true, "operator@apexmail.ee")
-        .await
-        .unwrap();
-
-    let config = ScrapeConfig {
-        backoff_base: std::time::Duration::from_millis(1_000),
-        max_host_block_backoff: std::time::Duration::from_millis(2_000),
-        ..test_scrape_config()
-    };
-    let client = ScrapeClient::new(config).unwrap();
-    let solver = SolverConfig {
-        url: Some(solver_fixture.url("/solve")),
-        token: None,
-        ..SolverConfig::default()
-    };
-
-    let report = attempt_solve(
-        &pool,
-        &client,
-        &tenant,
-        blocked_id,
-        &solver,
-        Some("operator@apexmail.ee"),
-    )
-    .await
-    .unwrap();
-    assert_eq!(report.outcome, SolverOutcome::SolverFailed);
-    assert_eq!(solver_fixture.hit_count("/solve"), 1);
-    assert_eq!(fixture.hit_count("/page"), 0, "no retry without material");
-
-    let blocked_until: Option<chrono::DateTime<chrono::Utc>> = sqlx::query_scalar(
-        "SELECT blocked_until FROM sales_scrape_host_health WHERE tenant_id = $1",
+    let tenant = common::insert_test_tenant(&pool, "lift").await;
+    let host = "excluded.example";
+    sqlx::query(
+        "INSERT INTO sales_scrape_host_health (
+            tenant_id, host, consecutive_blocks, total_blocks, consecutive_429,
+            last_classification, last_status, last_blocked_at, blocked_until,
+            excluded_at, exclusion_reason, updated_at
+         )
+         VALUES ($1, $2, 1, 1, 0, 'blocked_captcha', 403, NOW(), NULL, NOW(), $3, NOW())",
     )
     .bind(&tenant)
-    .fetch_one(&pool)
+    .bind(host)
+    .bind(EXCLUSION_CAPTCHA)
+    .execute(&pool)
     .await
     .unwrap();
-    assert!(
-        blocked_until.unwrap() > chrono::Utc::now(),
-        "a failing hook backs the host off"
-    );
 
-    // The second attempt is refused BEFORE any solver request.
-    let second = attempt_solve(
+    // No owner identity: refused before touching the row.
+    let error = lift_host_exclusion(&pool, &tenant, host, "   ", "reviewed")
+        .await
+        .expect_err("owner required");
+    assert!(error.to_string().contains("owner"), "{error}");
+    // No written reason: refused, an unattributed lift is not auditable.
+    let error = lift_host_exclusion(&pool, &tenant, host, "owner@apexmail.ee", "   ")
+        .await
+        .expect_err("reason required");
+    assert!(error.to_string().contains("written reason"), "{error}");
+
+    let lifted = lift_host_exclusion(
         &pool,
-        &client,
         &tenant,
-        blocked_id,
-        &solver,
-        Some("operator@apexmail.ee"),
+        host,
+        "owner@apexmail.ee",
+        "counsel reviewed the register: the path is public and robots allows it",
     )
     .await
     .unwrap();
-    assert_eq!(second.outcome, SolverOutcome::BackoffActive);
-    assert_eq!(
-        solver_fixture.hit_count("/solve"),
-        1,
-        "the backoff gates the hook itself"
-    );
+    assert_eq!(lifted.excluded_at, None);
+    assert_eq!(lifted.exclusion_reason, None);
+    assert_eq!(lifted.consecutive_429, 0);
 
-    let outcomes: Vec<String> = sqlx::query_scalar(
-        "SELECT outcome FROM sales_scrape_solver_audit WHERE tenant_id = $1 ORDER BY attempted_at",
+    let audit = list_host_exclusion_audit(&pool, &tenant, Some(host), 10)
+        .await
+        .unwrap();
+    assert_eq!(audit.len(), 1);
+    assert_eq!(audit[0].action, EXCLUSION_AUDIT_LIFTED);
+    assert_eq!(audit[0].actor, "owner@apexmail.ee");
+    assert!(audit[0].reason.contains("counsel reviewed"));
+
+    // Nothing left to lift.
+    let error = lift_host_exclusion(&pool, &tenant, host, "owner@apexmail.ee", "again")
+        .await
+        .expect_err("not excluded");
+    assert!(error.to_string().contains("not excluded"), "{error}");
+
+    cleanup(&pool, &tenant).await;
+}
+
+/// mailto: policy — role addresses are kept; a named person's address is
+/// stored only under an authoritative `allowed` policy and then carries the
+/// Article 14 source-notice flag; otherwise the address is dropped.
+#[tokio::test]
+async fn mailto_role_addresses_are_kept_and_named_persons_follow_the_policy() {
+    let Some(pool) = common::test_pool("scrape_mailto_policy").await else {
+        return;
+    };
+    common::ensure_allowed_jurisdiction_policy(&pool).await;
+    let tenant = common::insert_test_tenant(&pool, "mailto").await;
+
+    let page = r#"<!DOCTYPE html><html><head>
+<script type="application/ld+json">{"@type":"Organization","name":"Allowed Person Ltd","url":"https://allowed.example","email":"Jane.Doe@Allowed.example","address":{"addressCountry":"QZ"}}</script>
+<script type="application/ld+json">{"@type":"Organization","name":"EU Person GmbH","url":"https://eu.example","email":"hans.mueller@eu.example","address":{"addressCountry":"DE"}}</script>
+<script type="application/ld+json">{"@type":"Organization","name":"Role Mailbox Ltd","url":"https://role.example","email":"info@role.example","address":{"addressCountry":"DE"}}</script>
+</head><body><a href="mailto:john.smith@bare.example">John Smith</a></body></html>"#;
+    let fixture = Fixture::serve(vec![
+        ("/robots.txt", Fixture::robots_allow()),
+        ("/page", vec![Route::html(200, page)]),
+    ])
+    .await;
+
+    let job = run_public_web_job(
+        &pool,
+        &tenant,
+        vec![fixture.url("/page")],
+        test_scrape_config(),
+    )
+    .await;
+    assert_eq!(job.status, "completed");
+
+    let rows: Vec<(Option<String>, Option<String>, bool)> = sqlx::query_as(
+        "SELECT company_name, contact_email, source_notice_required
+         FROM sales_discovery_candidates WHERE tenant_id = $1",
     )
     .bind(&tenant)
     .fetch_all(&pool)
     .await
     .unwrap();
-    assert_eq!(outcomes, vec!["solver_failed", "backoff_active"]);
 
-    cleanup(&pool, &tenant).await;
-}
-
-/// A non-CAPTCHA block (or a closed row) is not solver-eligible.
-#[tokio::test]
-async fn solver_refuses_ineligible_rows() {
-    let Some(pool) = common::test_pool("scrape_solver_ineligible").await else {
-        return;
-    };
-    let tenant = common::insert_test_tenant(&pool, "inelig").await;
-    let evidence = BlockedEvidence {
-        classification: FetchClassification::BlockedPolicy,
-        url: "https://policy.example/page".to_string(),
-        host: "policy.example".to_string(),
-        http_status: Some(403),
-        markers: vec!["http_403".to_string()],
-        detail: "policy".to_string(),
-        retry_after_seconds: None,
-        fetched_at: chrono::Utc::now(),
-    };
-    let id = record_blocked_fetch(&pool, &tenant, "public_web", None, &evidence)
-        .await
-        .unwrap()
-        .unwrap();
-    set_host_solver_optin(
-        &pool,
-        &tenant,
-        "policy.example",
-        true,
-        "operator@apexmail.ee",
-    )
-    .await
-    .unwrap();
-
-    let client = ScrapeClient::new(test_scrape_config()).unwrap();
-    let solver = SolverConfig {
-        url: Some("http://127.0.0.1:1/solve".to_string()),
-        token: None,
-        ..SolverConfig::default()
-    };
-    let report = attempt_solve(&pool, &client, &tenant, id, &solver, None)
-        .await
-        .unwrap();
-    assert_eq!(report.outcome, SolverOutcome::Ineligible);
-    cleanup(&pool, &tenant).await;
-}
-
-/// Solver material that does not get past the challenge → the retry is
-/// audited as blocked, the queue row stays open with the fresh evidence, and
-/// the host is backed off.
-#[tokio::test]
-async fn solver_retry_blocked_is_audited_and_requeued() {
-    let Some(pool) = common::test_pool("scrape_solver_retry_blocked").await else {
-        return;
-    };
-    let tenant = common::insert_test_tenant(&pool, "retryblk").await;
-    // Every request to the page is the challenge: the solver's material does
-    // not work.
-    let fixture = Fixture::serve(vec![
-        ("/robots.txt", Fixture::robots_allow()),
-        (
-            "/page",
-            vec![Route::html(
-                403,
-                &challenge_page("Just a moment...", "<script>__cf_chl_opt</script>"),
-            )],
-        ),
-    ])
-    .await;
-    let solver_fixture = Fixture::serve(vec![(
-        "/solve",
-        vec![Route::json(
-            r#"{"status":"solved","cookie":"cf_clearance=stale"}"#,
-        )],
-    )])
-    .await;
-    let host = fixture_addr_host(&fixture);
-    let blocked_id = seed_blocked(&pool, &tenant, &fixture.url("/page"), &host).await;
-    set_host_solver_optin(&pool, &tenant, &host, true, "operator@apexmail.ee")
-        .await
-        .unwrap();
-
-    let client = ScrapeClient::new(ScrapeConfig {
-        backoff_base: std::time::Duration::from_millis(1),
-        max_host_block_backoff: std::time::Duration::from_millis(2),
-        ..test_scrape_config()
-    })
-    .unwrap();
-    let solver = SolverConfig {
-        url: Some(solver_fixture.url("/solve")),
-        token: None,
-        ..SolverConfig::default()
-    };
-    let report = attempt_solve(
-        &pool,
-        &client,
-        &tenant,
-        blocked_id,
-        &solver,
-        Some("operator@apexmail.ee"),
-    )
-    .await
-    .unwrap();
-    assert_eq!(report.outcome, SolverOutcome::RetryBlocked);
-    assert!(report.retried);
+    let named_allowed = rows
+        .iter()
+        .find(|row| row.0.as_deref() == Some("Allowed Person Ltd"))
+        .expect("allowed named person row");
     assert_eq!(
-        fixture.hit_count("/page"),
-        1,
-        "exactly one retry, never two"
+        named_allowed.1.as_deref(),
+        Some("jane.doe@allowed.example"),
+        "an authoritative allowed policy permits storing the named person"
+    );
+    assert!(
+        named_allowed.2,
+        "the first email to a named person must carry the Article 14 notice"
     );
 
-    let (outcome, retry_classification): (String, Option<String>) = sqlx::query_as(
-        "SELECT outcome, retry_classification FROM sales_scrape_solver_audit WHERE tenant_id = $1",
-    )
-    .bind(&tenant)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert_eq!(outcome, "retry_blocked");
-    assert_eq!(retry_classification.as_deref(), Some("blocked_captcha"));
-
-    let row = get_blocked_source(&pool, &tenant, blocked_id)
-        .await
-        .unwrap();
+    let eu_named = rows
+        .iter()
+        .find(|row| row.0.as_deref() == Some("EU Person GmbH"))
+        .expect("EU named person row");
     assert_eq!(
-        row.state, BLOCKED_STATE_OPEN,
-        "not solved by a failed solve"
+        eu_named.1, None,
+        "the fail-closed EU policy (approval_required) must not store a named person's address"
     );
-    assert_eq!(row.occurrences, 2, "the blocked retry is fresh evidence");
-    cleanup(&pool, &tenant).await;
-}
+    assert!(!eu_named.2);
 
-/// The host part of a loopback fixture URL.
-fn fixture_addr_host(fixture: &Fixture) -> String {
-    fixture.addr.ip().to_string()
+    let role = rows
+        .iter()
+        .find(|row| row.0.as_deref() == Some("Role Mailbox Ltd"))
+        .expect("role mailbox row");
+    assert_eq!(
+        role.1.as_deref(),
+        Some("info@role.example"),
+        "role addresses are never personal data and stay storable"
+    );
+    assert!(!role.2, "a role mailbox needs no Article 14 notice");
+
+    let bare_named = rows
+        .iter()
+        .find(|row| row.1.as_deref() == Some("john.smith@bare.example"));
+    assert!(
+        bare_named.is_none(),
+        "a bare named person's mailto with no jurisdiction policy fails closed"
+    );
+    assert!(
+        rows.iter().any(|row| row.0.is_none() && row.1.is_none()),
+        "the candidate survives without the personal address"
+    );
+
+    cleanup(&pool, &tenant).await;
 }

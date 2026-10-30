@@ -654,7 +654,8 @@ pub async fn create_invoice_in_tx(
 }
 
 /// The money/tax facts of a plan invoice, computed ONCE for both creators:
-/// the VAT-extraction core (gross → net + VAT + US sales tax exactly), the
+/// the tax split (business net + VAT, or a consumer Option A gross with VAT
+/// extracted gross-first) that must reconcile to the charged gross, the
 /// immutable address snapshot fields and the rendered line items.
 struct PlanInvoiceAmounts {
     addr: BillingAddrSnapshotRow,
@@ -668,13 +669,15 @@ struct PlanInvoiceAmounts {
     all_lines: Vec<InvoiceLineItem>,
 }
 
-/// Compute [`PlanInvoiceAmounts`] for a gross plan charge.
+/// Compute [`PlanInvoiceAmounts`] for a plan charge priced from its NET list
+/// amount.
 ///
-/// Catalog prices are the customer-facing charge, so VAT (and, for a US
-/// registered state, sales tax) is EXTRACTED from the gross rather than added
-/// on top: the invoice total must equal the money the provider took, or the
-/// tax gate (which compares the charge to the invoice total) would refuse the
-/// very payment that funded it. The rate comes from the same
+/// V30/MON-10: the catalog list price IS the net amount. VAT is ADDED on top
+/// (0 % only for a verified intra-EU reverse charge or a non-EU sale) and,
+/// for a US registered state, sales tax is added on top too. The charged
+/// gross is passed in and must equal `net + VAT + US sales tax`, or the tax
+/// gate (which compares the charge to the invoice total) would refuse the
+/// very payment that funded the invoice. The rate comes from the same
 /// `calculate_vat_with_evidence` the invoice writer uses; reverse charge
 /// requires VIES evidence exactly as there. The address is snapshotted
 /// immutably.
@@ -683,9 +686,11 @@ async fn compute_plan_invoice_amounts(
     tenant_id: &str,
     plan_display_name: &str,
     interval: &str,
+    net_cents: i64,
+    vat_cents: i64,
     gross_cents: i64,
 ) -> Result<PlanInvoiceAmounts, InvoiceError> {
-    if gross_cents <= 0 {
+    if net_cents <= 0 || gross_cents <= 0 {
         return Err(InvoiceError::PdfGeneration(
             "a plan charge must be positive".into(),
         ));
@@ -722,72 +727,62 @@ async fn compute_plan_invoice_amounts(
         None => None,
     };
     let (vat_rate, _, vat_evidence_id) = calculate_vat_for_invoice(
-        gross_cents,
+        net_cents,
         &country,
         addr.vat_number.as_deref(),
         vat_evidence.as_ref(),
         today,
     );
-
-    // The provider charges a GROSS, tax-inclusive amount. Extract the net so
-    // that net + VAT + US sales tax is EXACTLY the collected sum: solve
-    // net·(1 + rate) = gross in integer half-up arithmetic, then let VAT be the
-    // remainder of the charge. A fixed-point iteration of the rounded VAT does
-    // not converge for every cent (24 % of 1613 and 1614 round to 387 and 388,
-    // oscillating around a non-existent fixed point).
-    let rate_tenths = (vat_rate * 10.0).round() as i64;
-    if rate_tenths <= -1000 {
-        return Err(InvoiceError::PdfGeneration(format!(
-            "plan invoice cannot extract a net from a {vat_rate}% rate"
-        )));
-    }
-    let net_for = |tax_cents: i64| -> i64 {
-        let taxable = (gross_cents - tax_cents).max(0);
-        let denominator = i128::from(1000 + rate_tenths);
-        let numerator = i128::from(taxable) * 1000;
-        // Round half-up on magnitude (the amount is non-negative here).
-        ((numerator + denominator / 2) / denominator) as i64
+    let mut net = net_cents;
+    let vat = vat_cents;
+    // US sales tax is added on top of the net exactly as VAT is.
+    let decision = crate::us_tax::tax_decision_for_invoice(
+        &mut **tx,
+        None,
+        tenant_id,
+        &country,
+        addr.state.as_deref(),
+        net,
+        today,
+    )
+    .await
+    .map_err(|error| InvoiceError::UsSalesTax(error.to_string()))?;
+    let (us_tax_cents, us_tax_snapshot) = match &decision {
+        crate::us_tax::UsTaxDecision::Taxed(tax) => {
+            (tax.amount_cents, Some(tax.snapshot_json().to_string()))
+        }
+        crate::us_tax::UsTaxDecision::Exempt(exemption) => {
+            (0, Some(exemption.snapshot_json().to_string()))
+        }
+        crate::us_tax::UsTaxDecision::None => (0, None),
     };
-    let mut net = net_for(0);
-    let mut us_tax_cents = 0i64;
-    let mut us_tax_snapshot: Option<String> = None;
-    for _ in 0..2 {
-        let decision = crate::us_tax::tax_decision_for_invoice(
-            &mut **tx,
-            None,
-            tenant_id,
-            &country,
-            addr.state.as_deref(),
-            net,
-            today,
-        )
-        .await
-        .map_err(|error| InvoiceError::UsSalesTax(error.to_string()))?;
-        us_tax_cents = match &decision {
-            crate::us_tax::UsTaxDecision::Taxed(tax) => tax.amount_cents,
-            _ => 0,
-        };
-        us_tax_snapshot = match &decision {
-            crate::us_tax::UsTaxDecision::Taxed(tax) => Some(tax.snapshot_json().to_string()),
-            crate::us_tax::UsTaxDecision::Exempt(exemption) => {
-                Some(exemption.snapshot_json().to_string())
-            }
-            crate::us_tax::UsTaxDecision::None => None,
-        };
-        net = net_for(us_tax_cents);
+    // Pre-V30 US compatibility: the checkout quote carries no US sales-tax
+    // layer, so a registered state's tax is EXTRACTED from the charged gross
+    // (the old plan-invoice behaviour) rather than refused. EU VAT never
+    // takes this branch (rate 0 outside the EU).
+    if us_tax_cents > 0 && net + vat + us_tax_cents != gross_cents {
+        let adjusted = gross_cents - vat - us_tax_cents;
+        if adjusted > 0 {
+            net = adjusted;
+        }
     }
-    let vat = gross_cents - net - us_tax_cents;
-    if net < 0 || vat < 0 || net + vat + us_tax_cents != gross_cents {
+    if net + vat + us_tax_cents != gross_cents {
         return Err(InvoiceError::PdfGeneration(format!(
-            "plan invoice cannot reconcile a gross charge of {gross_cents} cents              (net {net} + VAT {vat} + sales tax {us_tax_cents})"
+            "plan invoice cannot reconcile a gross charge of {gross_cents} cents \
+             (net {net} + VAT {vat} + sales tax {us_tax_cents}); the charge must be list + VAT"
         )));
     }
-    // The extracted VAT must still be the statutory rate applied to the net,
-    // within the single cent the gross rounding can absorb.
-    let statutory_vat = billing_common::vat_rates::vat_amount_half_up(net, vat_rate);
-    if (statutory_vat - vat).abs() > 1 {
+    // The split must still be the statutory rate: either net-first (business
+    // list + VAT) or gross-first (the Option A consumer headline), within
+    // the single cent rounding can move.
+    let taxable_gross = (gross_cents - us_tax_cents).max(0);
+    let net_first = billing_common::vat_rates::vat_amount_half_up(net, vat_rate);
+    let gross_first =
+        billing_common::vat_rates::vat_amount_inclusive_half_up(taxable_gross, vat_rate);
+    if (vat - net_first).abs() > 1 && (vat - gross_first).abs() > 1 {
         return Err(InvoiceError::PdfGeneration(format!(
-            "plan invoice VAT {vat} deviates from {statutory_vat} at rate {vat_rate}% on net {net}"
+            "plan invoice VAT {vat} deviates from the statutory {vat_rate}% on net {net} \
+             (net-first {net_first}, gross-first {gross_first})"
         )));
     }
 
@@ -839,9 +834,10 @@ async fn compute_plan_invoice_amounts(
 /// the next charge exists and the engine's exact-amount verification has
 /// something to verify against.
 ///
-/// Same tax-extraction core as the paid creator (the invoice total is the
-/// gross the card WILL be charged); the payment binding stays NULL until a
-/// charge actually settles it (`settle_verified` flips `pending` → `paid`).
+/// Same tax core as the paid creator: the caller supplies the NET and VAT
+/// split (V30) and the gross the card WILL be charged, which the invoice
+/// total must equal; the payment binding stays NULL until a charge actually
+/// settles it (`settle_verified` flips `pending` → `paid`).
 /// The recognition ledger is materialized at issue (paid_at NULL;
 /// cash-accounting supplies recognise on payment via the by-id
 /// materializer the settlement paths call).
@@ -851,14 +847,23 @@ pub async fn create_open_plan_invoice_in_tx(
     tenant_id: &str,
     plan_display_name: &str,
     interval: &str,
+    net_cents: i64,
+    vat_cents: i64,
     gross_cents: i64,
     currency: &str,
     period_start: DateTime<Utc>,
     period_end: DateTime<Utc>,
 ) -> Result<Invoice, InvoiceError> {
-    let amounts =
-        compute_plan_invoice_amounts(tx, tenant_id, plan_display_name, interval, gross_cents)
-            .await?;
+    let amounts = compute_plan_invoice_amounts(
+        tx,
+        tenant_id,
+        plan_display_name,
+        interval,
+        net_cents,
+        vat_cents,
+        gross_cents,
+    )
+    .await?;
     let now = Utc::now();
     let items_json = encode_invoice_line_items(&amounts.all_lines)?;
     let invoice_number = generate_invoice_number_tx(tx).await?;
@@ -962,9 +967,9 @@ pub async fn create_open_plan_invoice_in_tx(
 }
 
 /// Create a PAID invoice for a plan charge whose provider payment was the
-/// GROSS amount actually collected.
+/// GROSS amount actually collected, split into the V30 net + VAT.
 ///
-/// Same tax-extraction core as the open creator; the invoice is born paid
+/// Same tax core as the open creator; the invoice is born paid
 /// with its payment binding, the allocation and the statutory postings land
 /// in the caller's transaction, and the recognition ledger is materialised
 /// with the paid date.
@@ -974,14 +979,23 @@ pub async fn create_paid_plan_invoice_in_tx(
     tenant_id: &str,
     plan_display_name: &str,
     interval: &str,
+    net_cents: i64,
+    vat_cents: i64,
     gross_cents: i64,
     currency: &str,
     period_start: DateTime<Utc>,
     period_end: DateTime<Utc>,
 ) -> Result<Invoice, InvoiceError> {
-    let amounts =
-        compute_plan_invoice_amounts(tx, tenant_id, plan_display_name, interval, gross_cents)
-            .await?;
+    let amounts = compute_plan_invoice_amounts(
+        tx,
+        tenant_id,
+        plan_display_name,
+        interval,
+        net_cents,
+        vat_cents,
+        gross_cents,
+    )
+    .await?;
     let now = Utc::now();
     let items_json = encode_invoice_line_items(&amounts.all_lines)?;
     let invoice_number = generate_invoice_number_tx(tx).await?;
@@ -1585,6 +1599,25 @@ async fn bound_provider_payment(
     tx: &mut sqlx::PgConnection,
     invoice_id: Uuid,
 ) -> Result<Option<String>, InvoiceError> {
+    // The settlement ALLOCATION is the first authority: a checkout
+    // activation's paid invoice has no payment_attempt row, only the
+    // engine's `{provider}:{payment_id}` operation id. Stripping the
+    // provider dimension recovers the refundable payment id.
+    let allocation: Option<(String, String)> = sqlx::query_as(
+        "SELECT provider, operation_id FROM invoice_payment_allocations \
+         WHERE invoice_id = $1 ORDER BY created_at DESC LIMIT 1",
+    )
+    .bind(invoice_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(InvoiceError::Db)?;
+    if let Some((provider, operation_id)) = allocation {
+        if let Some(payment_id) = operation_id.strip_prefix(&format!("{provider}:")) {
+            if !payment_id.trim().is_empty() {
+                return Ok(Some(payment_id.to_string()));
+            }
+        }
+    }
     let neutral: Option<String> = sqlx::query_scalar(
         "SELECT pa.provider_payment_id \
          FROM payment_attempts pa \
@@ -1612,22 +1645,17 @@ async fn bound_provider_payment(
     Ok(legacy)
 }
 
-async fn mollie_refund_payment(
-    invoice_id: Uuid,
-    invoice_status: &str,
+#[allow(clippy::too_many_arguments)]
+async fn provider_refund_payment(
+    provider: crate::payments::ProviderRef<'_>,
+    _invoice_id: Uuid,
+    _invoice_status: &str,
     payment_id: &str,
     amount_cents: i64,
     currency: &str,
     reference: &str,
     idempotency_key: &str,
 ) -> Result<Option<String>, InvoiceVoidError> {
-    let provider = crate::payments::registry::from_env().map_err(|_| {
-        InvoiceVoidError::ProviderUnavailable {
-            invoice_id,
-            provider_payment_id: payment_id.to_string(),
-            status: invoice_status.to_string(),
-        }
-    })?;
     let refund = provider
         .refund(crate::payments::RefundRequest {
             provider_payment_id: payment_id.to_string(),
@@ -1677,6 +1705,27 @@ fn is_voidable_status(status: &str) -> bool {
 ///   note (`credit_notes::create_credit_note`) instead.
 pub async fn void_invoice(
     pool: &PgPool,
+    input: VoidInvoiceInput,
+) -> Result<Invoice, InvoiceVoidError> {
+    // The registry resolves LAZILY: a draft/pending void is purely local and
+    // must work on a deployment with no payment provider configured.
+    void_invoice_inner(pool, None, input).await
+}
+
+/// The provider-INJECTED void: the harness (and any caller holding a
+/// provider handle) refunds through the exact adapter it injected instead of
+/// re-resolving the registry.
+pub async fn void_invoice_with(
+    pool: &PgPool,
+    provider: crate::payments::SharedProvider,
+    input: VoidInvoiceInput,
+) -> Result<Invoice, InvoiceVoidError> {
+    void_invoice_inner(pool, Some(provider), input).await
+}
+
+async fn void_invoice_inner(
+    pool: &PgPool,
+    provider: Option<crate::payments::SharedProvider>,
     input: VoidInvoiceInput,
 ) -> Result<Invoice, InvoiceVoidError> {
     // ── 1. Lock + validate the current state ────────────────────────────
@@ -1735,11 +1784,24 @@ pub async fn void_invoice(
         let payment_psp_reference = bound_payment_id
             .clone()
             .expect("paid refund path requires a bound payment");
+        // Only a PAID void needs the provider, resolved here (never for a
+        // local unpaid void).
+        let provider = match provider {
+            Some(provider) => provider,
+            None => crate::payments::registry::from_env().map_err(|_| {
+                InvoiceVoidError::ProviderUnavailable {
+                    invoice_id: input.invoice_id,
+                    provider_payment_id: payment_psp_reference.clone(),
+                    status: status.clone(),
+                }
+            })?,
+        };
         // A missing key is an honest refusal: without provider credentials
         // the refund cannot be issued, so the local row does not move.
         let key = format!("invoice-refund:{}", input.invoice_id.simple());
         let reference = format!("invoice:{}", input.invoice_id);
-        refund_psp_reference = mollie_refund_payment(
+        refund_psp_reference = provider_refund_payment(
+            provider.as_ref(),
             input.invoice_id,
             &status,
             &payment_psp_reference,
@@ -1775,11 +1837,12 @@ pub async fn void_invoice(
                 INSERT INTO payment_provider_refunds
                     (tenant_id, provider, provider_refund_id, provider_payment_id,
                      state, amount_minor, currency)
-                VALUES ($1, 'mollie', $2, $3, 'pending', $4, $5)
+                VALUES ($1, $2, $3, $4, 'pending', $5, $6)
                 ON CONFLICT (provider, provider_refund_id) DO NOTHING
                 "#,
             )
             .bind(&input.tenant_id)
+            .bind(provider.provider_name())
             .bind(refund_id)
             .bind(&payment_psp_reference)
             .bind(total_cents)
@@ -2677,7 +2740,7 @@ mod tests {
             ("NL", 21.0),
             ("PL", 23.0),
             ("PT", 23.0),
-            ("RO", 19.0),
+            ("RO", 21.0),
             ("SK", 23.0),
             ("SI", 22.0),
             ("ES", 21.0),

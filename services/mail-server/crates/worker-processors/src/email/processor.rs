@@ -4158,8 +4158,9 @@ impl EmailProcessor {
         // itself says one-click headers belong on marketing mail). The
         // missing category arm keeps the queue's marketing default
         // (migration 187/272) for legacy rows.
-        let is_marketing =
-            apexmail_lib::email_headers::message_category::is_marketing_class(&job.message_category);
+        let is_marketing = apexmail_lib::email_headers::message_category::is_marketing_class(
+            &job.message_category,
+        );
         if is_marketing && self.config.tracking.enabled {
             let flag = |key: &str| {
                 job.metadata
@@ -11259,14 +11260,17 @@ mod tests {
         })
         .await;
 
-        let declared_html =
-            r#"<html><body><p>declared body</p><a href="https://example.com/x">x</a></body></html>"#;
+        let declared_html = r#"<html><body><p>declared body</p><a href="https://example.com/x">x</a></body></html>"#;
 
         let mut transactional = tracking_gate_job();
         transactional.message_category = "transactional".into();
         transactional.html = Some(declared_html.into());
         let prepared = processor
-            .prepare_email(&transactional, &tracking_gate_domain(), &DeliveryRoute::SesShared)
+            .prepare_email(
+                &transactional,
+                &tracking_gate_domain(),
+                &DeliveryRoute::SesShared,
+            )
             .expect("transactional mail prepared");
         assert_eq!(
             prepared.html.as_deref(),
@@ -11286,7 +11290,11 @@ mod tests {
         marketing.message_category = "marketing".into();
         marketing.html = Some(declared_html.into());
         let prepared = processor
-            .prepare_email(&marketing, &tracking_gate_domain(), &DeliveryRoute::SesShared)
+            .prepare_email(
+                &marketing,
+                &tracking_gate_domain(),
+                &DeliveryRoute::SesShared,
+            )
             .expect("marketing mail prepared");
         assert_ne!(
             prepared.html.as_deref(),
