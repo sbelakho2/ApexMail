@@ -380,46 +380,71 @@ impl PaymentProvider for MollieProvider {
     /// Mollie has no idempotency-key payment lookup. The HONEST
     /// implementation enumerates the account's most recent payments and
     /// matches the `metadata.idempotency_key` this adapter puts on every
-    /// stored-method charge. `None` is returned ONLY when the listing was
-    /// provably complete (a short page): a full page may be truncated, and
-    /// a truncated listing can never prove absence — that is
-    /// [`ProviderError::Config`], never `None` (guessing absence
-    /// double-charges).
+    /// stored-method charge. The window is FIVE PAGES of 100 (500 payments,
+    /// the N-14 widening) walked by `_links.next` cursor. `None` is
+    /// returned ONLY when the listing provably ended (a short page): a
+    /// full page — with or without a continuation cursor — may be
+    /// truncated, and a truncated listing can never prove absence — that
+    /// is [`ProviderError::Config`], never `None` (guessing absence
+    /// double-charges). The FULL resolution is a keyed provider search,
+    /// which the Stripe adapter demonstrates (`stripe_provider.rs`).
     async fn search_payment_by_idempotency_key(
         &self,
         idempotency_key: &str,
     ) -> Result<Option<Payment>, ProviderError> {
-        const PAGE_LIMIT: u32 = 250;
+        // 100 per page x 5 pages: the truncation-honest window.
+        const PAGE_LIMIT: u32 = 100;
+        const MAX_PAGES: usize = 5;
         let key = idempotency_key.trim();
         if key.is_empty() {
             return Err(ProviderError::Config(
                 "mollie: an empty idempotency key cannot be searched".into(),
             ));
         }
-        let payments = self
-            .client
-            .list_payments(PAGE_LIMIT)
-            .await
-            .map_err(map_error)?;
-        for payment in &payments {
-            if payment
-                .metadata
-                .get("idempotency_key")
-                .and_then(|value| value.as_str())
-                == Some(key)
-            {
-                return neutral_payment(payment.clone()).map(Some);
+        let mut from: Option<String> = None;
+        for _page in 0..MAX_PAGES {
+            let (payments, next) = self
+                .client
+                .list_payments_page(PAGE_LIMIT, from.as_deref())
+                .await
+                .map_err(map_error)?;
+            for payment in &payments {
+                if payment
+                    .metadata
+                    .get("idempotency_key")
+                    .and_then(|value| value.as_str())
+                    == Some(key)
+                {
+                    return neutral_payment(payment.clone()).map(Some);
+                }
+            }
+            if (payments.len() as u32) < PAGE_LIMIT {
+                // A short page is the listing's end: the window was
+                // enumerated COMPLETELY, so absence is provable.
+                return Ok(None);
+            }
+            // The page is full: either keep walking (a real continuation
+            // cursor) or refuse — a full window can never prove absence,
+            // with or without a next link.
+            match next {
+                Some(cursor) => from = Some(cursor),
+                None => {
+                    return Err(ProviderError::Config(format!(
+                        "mollie: the recent-payments listing is full ({PAGE_LIMIT} page items) \
+                         without a continuation cursor; absence of the idempotency key cannot \
+                         be proven"
+                    )));
+                }
             }
         }
-        if payments.len() as u32 >= PAGE_LIMIT {
-            // The window is full: older payments (including possibly THE
-            // charge) are cut off, so absence is NOT provable.
-            return Err(ProviderError::Config(format!(
-                "mollie: the recent-payments listing is full ({PAGE_LIMIT}); absence of the \
-                 idempotency key cannot be proven"
-            )));
-        }
-        Ok(None)
+        // Five full pages (500 payments) enumerated and no match: older
+        // payments (including possibly THE charge) are cut off.
+        Err(ProviderError::Config(format!(
+            "mollie: the recent-payments window is exhausted ({pages} pages of {PAGE_LIMIT}, \
+             {total} payments); absence of the idempotency key cannot be proven",
+            pages = MAX_PAGES,
+            total = MAX_PAGES as u32 * PAGE_LIMIT
+        )))
     }
 
     async fn fetch_refund(

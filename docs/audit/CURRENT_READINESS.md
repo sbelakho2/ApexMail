@@ -9,7 +9,7 @@ fails the validate stage when this file drifts from the tree. Dated audit
 records live under `docs/audit/history/` and are never edited after the
 fact.
 
-Last generated: 2026-10-29T22:32:28Z
+Last generated: 2026-10-30T02:51:11Z
 
 ## Owner-gated by design
 
@@ -55,7 +55,7 @@ planned (1):
 
 ## Test-scope evidence
 
-- SQL migrations under `services/mail-server/migrations/`: 256 files, latest `284_local_renewal_authority.sql`.
+- SQL migrations under `services/mail-server/migrations/`: 259 files, latest `287_processor_ledger_vocabulary.sql`.
 - Tool migrations under `tools/migrations/`: 35 files.
 - Packages registered in `ci/test-expectations.toml`: 69.
 - Tools: 80 Python scripts at the top of `tools/`; the CI stages invoke 54 of them; 2 carry a meta-exemption with a reason. The validate.tool-selftest-inventory lane proves every invoked tool keeps a working self-test.
@@ -64,7 +64,7 @@ planned (1):
 
 Each row is the output of a rule in `tools/generate_current_readiness.py` that pins files, content needles and required-lane rows. A pinned file that disappears flips its row to OPEN on the next generation; nothing here is maintained by hand.
 
-5 LANDED, 3 OWNER-GATED, 1 PARTIAL.
+6 LANDED, 3 OWNER-GATED.
 
 | Verdict | Status | Derivation |
 |---|---|---|
@@ -76,4 +76,4 @@ Each row is the output of a rule in `tools/generate_current_readiness.py` that p
 | standby | OWNER-GATED | evidence holds; execution needs STANDBY_PRIMARY_HOST (deploy/docker-compose.standby-remote.yml) |
 | onboarding machine | LANDED | 2 pinned files + 3 needles hold; lanes test.workspace-suite |
 | DT executor | OWNER-GATED | evidence holds; execution needs HETZNER_API_TOKEN (services/mail-server/crates/enterprise/src/dedicated_exec.rs) |
-| billing neutrality | PARTIAL | scaffold evidence holds; services/mail-server/crates/billing-service/src/payments/NEUTRALITY_DEBT.md still carries 6 open row(s) — e.g. | N-03 | `src/subscriptions.rs` (`GET_SUBSCRIPTION_SQL`, `GET_LATEST_SUBSCRIPTIO |
+| billing neutrality | LANDED | 7 pinned files + 4 needles hold; lanes validate.payment-neutrality |

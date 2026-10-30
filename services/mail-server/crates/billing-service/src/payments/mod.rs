@@ -7,9 +7,10 @@
 //! ISO 4217 currency and a provider-assigned opaque id. Nothing in this
 //! module knows any provider's id grammar: the neutral vocabulary never
 //! embeds a provider object prefix, and a unit test pins that property by
-//! scanning this file's own source. The first (and, this round, the only)
-//! adapter is [`mollie_provider::MollieProvider`], selected through
-//! [`registry::from_env`].
+//! scanning this file's own source. The adapters are
+//! [`mollie_provider::MollieProvider`] and [`stripe_provider::StripeProvider`]
+//! (Stripe is PAYMENTS-ONLY: no provider-owned subscription objects —
+//! ApexMail owns scheduling), selected through [`registry::from_env`].
 //!
 //! The trait follows repository patterns: callers hand over neutral request
 //! records and receive neutral facts; every fetch is an AUTHENTICATED
@@ -35,6 +36,8 @@ pub mod conformance;
 pub mod engine;
 pub mod mollie_provider;
 pub mod registry;
+pub mod stripe_events;
+pub mod stripe_provider;
 
 pub use registry::{from_env, kind_from_env, RegistryError, SUPPORTED_PROVIDERS};
 

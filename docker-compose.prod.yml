@@ -525,6 +525,16 @@ services:
       # Deliberate opt-in ONLY for a pre-production stack; the client refuses
       # a test key/test base URL in production without it.
       MOLLIE_ALLOW_TEST_KEY: ${MOLLIE_ALLOW_TEST_KEY:-false}
+      # ── Stripe (PAYMENTS_PROVIDER=stripe; OPTIONAL — unset keeps Mollie).
+      # POST /v1/webhooks/stripe verifies the Stripe-Signature header over the
+      # raw body with STRIPE_WEBHOOK_SECRET; the adapter resolves
+      # STRIPE_SECRET_KEY from the process env (payments::registry). _FILE
+      # bridging keeps the values out of `docker inspect`; the wrapper
+      # exports them when the operator mounts the files.
+      STRIPE_SECRET_KEY: ""
+      STRIPE_SECRET_KEY_FILE: ${PROD_STRIPE_SECRET_KEY_FILE:-}
+      STRIPE_WEBHOOK_SECRET: ""
+      STRIPE_WEBHOOK_SECRET_FILE: ${PROD_STRIPE_WEBHOOK_SECRET_FILE:-}
       WEBHOOK_SIGNING_SECRET_FILE: /run/secrets/webhook_signing_secret
       TRACKING_SECRET_KEY_FILE: /run/secrets/tracking_secret_key
       INTERNAL_SERVICE_TOKEN_FILE: /run/secrets/internal_service_token
@@ -1925,6 +1935,12 @@ services:
       MOLLIE_API_BASE_URL: ${MOLLIE_API_BASE_URL:-https://api.mollie.com/v2}
       MOLLIE_WEBHOOK_URL: ${MOLLIE_WEBHOOK_URL:-}
       MOLLIE_ALLOW_TEST_KEY: ${MOLLIE_ALLOW_TEST_KEY:-false}
+      # ── Stripe (PAYMENTS_PROVIDER=stripe; OPTIONAL — unset keeps Mollie):
+      # the adapter resolves these from the process env (payments::registry).
+      STRIPE_SECRET_KEY: ""
+      STRIPE_SECRET_KEY_FILE: ${PROD_STRIPE_SECRET_KEY_FILE:-}
+      STRIPE_WEBHOOK_SECRET: ""
+      STRIPE_WEBHOOK_SECRET_FILE: ${PROD_STRIPE_WEBHOOK_SECRET_FILE:-}
       # FINANCIALLY SENSITIVE (crates/billing-service/src/maintenance.rs):
       # when true, the maintenance loop retries OPEN invoices through Mollie
       # auto-pay — it can move real money without an operator click. Explicit

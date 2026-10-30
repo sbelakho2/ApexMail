@@ -2,7 +2,7 @@
 //! active-tenant activity, trial conversion, and customer lifecycle metrics.
 //!
 //! All values come from real database queries against tenants, users, messages,
-//! events, subscriptions, and mollie_subscriptions tables.
+//! events, subscriptions, and subscription_state tables.
 //!
 //! Honest labels: the activity counters here measure active TENANTS (distinct
 //! `events.tenant_id`), not users | ApexMail's events carry no user identity,
@@ -547,10 +547,10 @@ async fn engagement_metrics(db: &PgPool) -> Result<EngagementMetrics, ApiError> 
 
 // ─── Trial conversion ──────────────────────────────────────────────────
 
-/// Trials started in the window, a trial is a mollie_subscriptions row
+/// Trials started in the window, a trial is a subscription_state row
 /// with a non-NULL trial_end. Includes trials still running (`trial_end >=
 /// NOW()`): this is the flow counter, NOT the conversion denominator.
-const TRIALS_STARTED_SQL: &str = "SELECT COUNT(*)::bigint FROM mollie_subscriptions
+const TRIALS_STARTED_SQL: &str = "SELECT COUNT(*)::bigint FROM subscription_state
          WHERE trial_end IS NOT NULL
            AND created_at >= NOW() - $1::interval";
 
@@ -558,7 +558,7 @@ const TRIALS_STARTED_SQL: &str = "SELECT COUNT(*)::bigint FROM mollie_subscripti
 /// it has ENDED (`trial_end < NOW()`): only ended trials have had the
 /// opportunity to convert, so an ongoing trial must not right-censor the
 /// rate. The numerator is filtered from this same population.
-const TRIALS_ELIGIBLE_SQL: &str = "SELECT COUNT(*)::bigint FROM mollie_subscriptions
+const TRIALS_ELIGIBLE_SQL: &str = "SELECT COUNT(*)::bigint FROM subscription_state
          WHERE trial_end IS NOT NULL
            AND trial_end < NOW()
            AND created_at >= NOW() - $1::interval";
@@ -568,7 +568,7 @@ const TRIALS_ELIGIBLE_SQL: &str = "SELECT COUNT(*)::bigint FROM mollie_subscript
 /// formulation selected rows that were simultaneously `status = 'active'`
 /// AND `status = 'trialing'` on a single-row-per-subscription table, which
 /// can never match (self-negating).
-const TRIALS_CONVERTED_SQL: &str = "SELECT COUNT(*)::bigint FROM mollie_subscriptions
+const TRIALS_CONVERTED_SQL: &str = "SELECT COUNT(*)::bigint FROM subscription_state
          WHERE trial_end IS NOT NULL
            AND trial_end < NOW()
            AND status IN ('active', 'past_due')
@@ -584,13 +584,13 @@ const TRIAL_PAYMENT_TIME_METHOD: &str = "actual paid-invoice time at/after trial
 
 /// Mean trial-to-paid duration over converted trials. Activation time is
 /// the earliest `invoices.paid_at` at/after `trial_end` for the tenant (one
-/// subscription per tenant, `uq_mollie_subscriptions_tenant`), falling
+/// subscription per tenant, `uq_subscription_state_tenant`), falling
 /// back to `trial_end` only when no paid invoice links one. `Available(None)`
 /// when there are no converted trials; `Unavailable` when the aggregate
 /// cannot be read.
 const AVG_TRIAL_TO_PAID_SQL: &str = r#"
     SELECT AVG(EXTRACT(EPOCH FROM (COALESCE(paid.first_paid_at, s.trial_end) - s.created_at)) / 86400)::double precision
-    FROM mollie_subscriptions s
+    FROM subscription_state s
     LEFT JOIN LATERAL (
         SELECT MIN(i.paid_at) AS first_paid_at
         FROM invoices i
@@ -655,7 +655,7 @@ async fn trial_conversion_stats(
                     WHERE s.trial_end < NOW()
                       AND s.status IN ('active', 'past_due')
                 )::bigint
-         FROM mollie_subscriptions s
+         FROM subscription_state s
          LEFT JOIN tenants t ON t.id = s.tenant_id
          WHERE s.trial_end IS NOT NULL
            AND s.created_at >= NOW() - $1::interval
@@ -691,7 +691,7 @@ async fn trial_conversion_stats(
 /// propagated, so a database failure can never render as "0 customers".
 async fn active_customer_count(db: &PgPool) -> Result<i64, ApiError> {
     Ok(sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(DISTINCT tenant_id)::bigint FROM mollie_subscriptions
+        "SELECT COUNT(DISTINCT tenant_id)::bigint FROM subscription_state
          WHERE status IN ('active', 'trialing', 'past_due')",
     )
     .fetch_one(db)
@@ -707,7 +707,7 @@ async fn active_customer_count(db: &PgPool) -> Result<i64, ApiError> {
 /// Required, a failure propagates.
 async fn new_customer_count_30d(db: &PgPool) -> Result<i64, ApiError> {
     Ok(sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(DISTINCT tenant_id)::bigint FROM mollie_subscriptions
+        "SELECT COUNT(DISTINCT tenant_id)::bigint FROM subscription_state
          WHERE created_at >= NOW() - INTERVAL '30 days'
            AND COALESCE(status, '') NOT IN ('incomplete', 'incomplete_expired')",
     )
@@ -733,7 +733,7 @@ const COHORT_CHURN_SQL: &str = r#"
                    s.status = 'canceled'
                    AND COALESCE(s.canceled_at, s.updated_at) >= p.start_at
                ) AS churned_in_window
-        FROM mollie_subscriptions s
+        FROM subscription_state s
         CROSS JOIN period p
         WHERE s.created_at < p.start_at
           AND COALESCE(
@@ -762,7 +762,7 @@ async fn cohort_churn_counts_30d(db: &PgPool) -> Result<(i64, i64), ApiError> {
 async fn avg_customer_lifetime_days(db: &PgPool) -> MetricState<Option<f64>> {
     match sqlx::query_scalar::<_, Option<f64>>(
         "SELECT AVG(EXTRACT(EPOCH FROM (NOW() - created_at)) / 86400)
-         FROM mollie_subscriptions WHERE status IN ('active', 'past_due')",
+         FROM subscription_state WHERE status IN ('active', 'past_due')",
     )
     .fetch_one(db)
     .await
@@ -1051,16 +1051,16 @@ mod tests {
     }
 
     #[test]
-    fn trial_sql_reads_mollie_subscriptions_with_period_semantics() {
+    fn trial_sql_reads_subscription_state_with_period_semantics() {
         // The legacy table had no writer; all trial SQL must read
-        // mollie_subscriptions and use trial_end period semantics.
+        // subscription_state and use trial_end period semantics.
         for sql in [
             TRIALS_STARTED_SQL,
             TRIALS_ELIGIBLE_SQL,
             TRIALS_CONVERTED_SQL,
             AVG_TRIAL_TO_PAID_SQL,
         ] {
-            assert!(sql.contains("FROM mollie_subscriptions"));
+            assert!(sql.contains("FROM subscription_state"));
             assert!(sql.contains("trial_end IS NOT NULL"));
             assert!(!sql.contains("FROM subscriptions\n"));
         }
@@ -1156,7 +1156,7 @@ mod tests {
         assert!(COHORT_CHURN_SQL.contains("WITH period AS"));
         assert!(COHORT_CHURN_SQL.contains("cohort AS"));
         assert!(
-            COHORT_CHURN_SQL.contains("FROM mollie_subscriptions s")
+            COHORT_CHURN_SQL.contains("FROM subscription_state s")
                 && COHORT_CHURN_SQL.contains("CROSS JOIN period p"),
             "cohort membership must read real subscriptions at period start"
         );
@@ -1297,10 +1297,10 @@ mod tests {
 
         // Throwaway per-test database: renaming the billing relation
         // simulates the outage.
-        sqlx::query("ALTER TABLE mollie_subscriptions RENAME TO mollie_subscriptions_failure_test")
+        sqlx::query("ALTER TABLE subscription_state RENAME TO subscription_state_failure_test")
             .execute(&pool)
             .await
-            .expect("rename mollie_subscriptions (throwaway test database)");
+            .expect("rename subscription_state (throwaway test database)");
 
         let active = active_customer_count(&pool).await;
         assert!(
@@ -1397,8 +1397,8 @@ mod tests {
                     .await
                     .expect("seed tenant");
                 sqlx::query(
-                    "INSERT INTO mollie_subscriptions
-                         (tenant_id, mollie_subscription_id, plan, status, created_at, canceled_at)
+                    "INSERT INTO subscription_state
+                         (tenant_id, provider_contract_id, plan, status, created_at, canceled_at)
                      VALUES ($1, $2, 'starter', $3,
                              NOW() - make_interval(days => $4::int),
                              CASE WHEN $5::int IS NULL THEN NULL
@@ -1495,8 +1495,8 @@ mod tests {
                     .await
                     .expect("seed tenant");
                 sqlx::query(
-                    "INSERT INTO mollie_subscriptions
-                         (tenant_id, mollie_subscription_id, plan, status, created_at, trial_end)
+                    "INSERT INTO subscription_state
+                         (tenant_id, provider_contract_id, plan, status, created_at, trial_end)
                      VALUES ($1, $2, 'starter', $3,
                              NOW() - make_interval(days => $4::int),
                              NOW() - make_interval(days => $5::int))",
@@ -1697,7 +1697,7 @@ mod adversarial_tests {
                 .unwrap_or(0)
                 >= 1
         );
-        // Trials: no mollie subscriptions in a fresh DB, absent rates.
+        // Trials: no subscriptions in a fresh DB, absent rates.
         assert_eq!(
             body["trialConversion"]["conversionRate"],
             serde_json::Value::Null

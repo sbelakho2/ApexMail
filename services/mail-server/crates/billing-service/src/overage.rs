@@ -261,7 +261,7 @@ const EFFECTIVE_PERIOD_PLAN_SQL: &str = r#"
              ELSE ss.plan
         END AS plan_name,
         p.email_limit
-    FROM mollie_subscriptions ss
+    FROM subscription_state ss
     JOIN tenants t ON t.id = ss.tenant_id
     LEFT JOIN plan_overrides po
       ON po.tenant_id = t.id
@@ -273,7 +273,7 @@ const EFFECTIVE_PERIOD_PLAN_SQL: &str = r#"
                        ELSE ss.plan
                   END
     WHERE ss.tenant_id = $1
-      AND ss.mollie_subscription_id = $2
+      AND ss.provider_contract_id = $2
     LIMIT 1
 "#;
 
@@ -292,7 +292,7 @@ async fn ensure_subscription_period_records(db: &PgPool) -> Result<(), String> {
             overage_rate_millicents, pricing_snapshot, pricing_resolved_at
         )
         SELECT
-            ss.tenant_id, ss.mollie_subscription_id, 'subscription',
+            ss.tenant_id, ss.provider_contract_id, 'subscription',
             ss.billing_cycle_start, ss.billing_cycle_end,
             eff.currency, eff.plan_name, p.email_limit,
             rate.rate_millicents,
@@ -305,7 +305,7 @@ async fn ensure_subscription_period_records(db: &PgPool) -> Result<(), String> {
                 'source', 'catchup'
             ),
             NOW()
-        FROM mollie_subscriptions ss
+        FROM subscription_state ss
         JOIN tenants t ON t.id = ss.tenant_id
         LEFT JOIN LATERAL (
             SELECT po.plan AS override_plan
@@ -1618,6 +1618,32 @@ fn format_rate_per_thousand_emails(rate_millicents: i64, currency: &str) -> Stri
     )
 }
 
+/// Whether the attempts ledger already carries ANY attempt row for this
+/// obligation, regardless of the idempotency-key spelling it was claimed
+/// under (the neutral operation key, a shared `payment:{ref}:{n}` dunning
+/// key, or a legacy pre-rename spelling). N-06 (step 10): this
+/// obligation-scoped gate is what lets the key grammar change safely — an
+/// in-flight or resolved legacy-keyed attempt still refuses a second charge,
+/// and a definitively failed one routes to `claim_next_attempt` for the next
+/// immutable row.
+async fn obligation_has_attempt(
+    db: &sqlx::PgPool,
+    provider: &str,
+    obligation_ref: &str,
+) -> Result<bool, String> {
+    sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS( \
+             SELECT 1 FROM payment_attempts \
+             WHERE provider = $1 AND obligation_ref = $2 \
+         )",
+    )
+    .bind(provider)
+    .bind(obligation_ref)
+    .fetch_one(db)
+    .await
+    .map_err(|e| format!("payment attempt obligation probe failed: {e}"))
+}
+
 /// Collection ladder for a freshly created usage invoice (see the module
 /// docs). Resumable: every step commits durably and is idempotent, and the
 /// outbox operation written with the invoice tracks progress under an
@@ -1753,40 +1779,11 @@ pub(crate) async fn collect_usage_invoice(
             "usage invoice collection: charge attempt in flight, settled by webhook or repair sweep"
         );
     }
-    if let Some(mapping) = mollie
-        .as_ref()
-        .filter(|mapping| !mapping.payment_id.trim().is_empty())
-    {
-        let persisted = sqlx::query(
-            r#"
-            UPDATE invoices
-            SET mollie_payment_id = $2,
-                mollie_payment_reference = $3,
-                updated_at = NOW()
-            WHERE id = $1
-              AND (mollie_payment_id IS NULL OR mollie_payment_id = $2)
-            "#,
-        )
-        .bind(invoice.id)
-        .bind(&mapping.payment_id)
-        .bind(&mapping.reference)
-        .execute(&state.db)
-        .await;
-        match persisted {
-            Ok(execution) if execution.rows_affected() > 0 => {}
-            Ok(_) => warn!(
-                invoice_id = %invoice.id,
-                "usage invoice collection: Mollie mapping not stored, invoice already bound to a different Mollie payment"
-            ),
-            Err(error) => {
-                // The external operation exists; the mapping must not be
-                // lost, keep the outbox retryable (audit F34).
-                let error = format!("storing Mollie mapping failed: {error}");
-                record_collection_failure(state, invoice.id, &owner_token, &error).await;
-                return Err(error);
-            }
-        }
-    }
+    // N-05 RESOLVED (step 10): the legacy `invoices.mollie_payment_id`
+    // mapping write is GONE — the provider payment id already landed on the
+    // neutral execution ledger (`payment_attempts` keyed by the obligation
+    // reference, confirmed after the charge above), which is what the
+    // settlement webhook and the repair sweep reconcile through.
 
     // (d) Pending → dunning flow with a TRANSACTIONAL handoff to the
     // durable dunning machinery (audit F33): dunning_records (what the
@@ -2263,13 +2260,13 @@ async fn finalize_collection(
 }
 
 /// The persisted local ↔ provider mapping for a collected usage invoice
-/// (audit F34): the charge's payment id (bound to the local invoice) plus
-/// the reference the settlement webhook matches
-/// (`invoice:{local_invoice_id}`).
+/// (audit F34): the charge's payment id. N-05 (step 10): the binding itself
+/// lives on the neutral execution ledger (`payment_attempts` keyed by the
+/// `invoice:{id}` obligation reference) — this return value only tells the
+/// caller the external operation exists.
 #[derive(Debug, Clone)]
 struct MollieUsageInvoice {
     payment_id: String,
-    reference: String,
 }
 
 /// Immediate provider collection of a usage invoice's remaining amount
@@ -2288,10 +2285,11 @@ struct MollieUsageInvoice {
 /// * Returns `Ok(None)` when the tenant has no stored credential or the
 ///   provider is not configured (the wallet + dunning path covers them).
 ///
-/// NEUTRALITY-DEBT (N-09): the credential lookup still reads the legacy
-/// `mollie_subscriptions` mandate columns and the helper keeps its
-/// Mollie-era name (cosmetic, step 10). The credential lookup, the claim
-/// gate and the charge itself are all neutral (N-09 retired, steps 7-8).
+/// N-03/N-09 (step 10): the credential lookup's transitional fallback reads
+/// the RENAMED subscription-state columns (migration 285: the same mandate
+/// facts under neutral names) and the helper keeps its Mollie-era name
+/// (cosmetic). The credential lookup, the claim gate and the charge itself
+/// are all neutral (N-09 retired, steps 7-8).
 async fn create_and_finalize_mollie_usage_invoice(
     state: &AppState,
     invoice: &Invoice,
@@ -2340,12 +2338,12 @@ async fn create_and_finalize_mollie_usage_invoice(
         Some(found) => Some(found),
         None => sqlx::query_as::<_, (String, String)>(
             r#"
-            SELECT ms.mollie_customer_id, ms.mollie_mandate_id
-            FROM mollie_subscriptions ms
+            SELECT ms.provider_customer_id, ms.provider_method_id
+            FROM subscription_state ms
             WHERE ms.tenant_id = $1
-              AND ms.mollie_mandate_id IS NOT NULL
-              AND ms.mollie_mandate_id <> ''
-              AND ms.mollie_mandate_id LIKE 'mdt\_%'
+              AND ms.provider_method_id IS NOT NULL
+              AND ms.provider_method_id <> ''
+              AND ms.provider_method_id LIKE 'mdt\_%'
               AND ms.status = 'active'
             ORDER BY ms.updated_at DESC NULLS LAST, ms.created_at DESC
             LIMIT 1
@@ -2363,12 +2361,20 @@ async fn create_and_finalize_mollie_usage_invoice(
     // The metadata IS the settlement contract: the webhook reconciles this
     // charge to OUR invoice row.
     let reference = format!("invoice:{}", invoice.id);
-    // Frozen external operation identity: local invoice + FROZEN amount
-    // (audit F34/SM7 F3, a changed remainder can never reuse a previously
-    // issued key; currency is the invoice's immutable currency).
-    // NEUTRALITY-DEBT (N-06): the key grammar is frozen operation identity
-    // and must stay byte-stable across the inversion.
-    let idempotency_key = format!("usageinv_{}_{}c", invoice.id.simple(), amount_cents);
+    // N-06 RESOLVED (step 10): the neutral obligation grammar derives the
+    // frozen external operation identity from the obligation + operation
+    // (`usage:{invoice_id}:{cycle}`, the audit's `payment:{ref}:{n}` shape —
+    // the invoice id is already period-unique, the cycle labels the settled
+    // period). The FROZEN amount no longer rides the key: the attempts
+    // ledger's claim gate (one open attempt per obligation, one immutable
+    // row per key) is the exactly-once authority, and a genuinely new
+    // attempt after a definitive failure gets a fresh `payment:{ref}:{n}`
+    // key from `claim_next_attempt`.
+    let idempotency_key = format!(
+        "usage:{}:{}",
+        invoice.id.simple(),
+        period_start.format("%Y-%m-%d")
+    );
 
     // CLAIM BEFORE CHARGE (audit step 7) with the two-retry distinction
     // (migration 282): the pending attempt row is the cross-tick lock. A
@@ -2379,55 +2385,90 @@ async fn create_and_finalize_mollie_usage_invoice(
     // A definitively closed attempt is never mutated (closed attempts are
     // immutable): the dunning retry opens attempt N+1 under the shared
     // `payment:{ref}:{n}` key scheme instead.
-    let claimed_key = match crate::payments::engine::claim_attempt(
-        &state.db,
-        provider.provider_name(),
-        &idempotency_key,
-        &invoice.tenant_id,
-        &reference,
-        "usage_collection",
-        amount_cents,
-        currency,
-    )
-    .await
+    //
+    // The gate is OBLIGATION-scoped, not key-scoped (N-06, step 10): ANY
+    // attempt row for this obligation — under the neutral key, the shared
+    // dunning keys, or a legacy pre-rename spelling — routes to the
+    // `claim_next_attempt` ladder, which refuses while an attempt is open
+    // and opens the next immutable row only when every attempt closed
+    // failed. A fresh obligation claims under the neutral key alone.
+    let claimed_key = if obligation_has_attempt(&state.db, provider.provider_name(), &reference)
+        .await?
     {
-        Ok(true) => idempotency_key.clone(),
-        Ok(false) => {
-            match crate::payments::engine::claim_next_attempt(
-                &state.db,
-                provider.provider_name(),
-                &invoice.tenant_id,
-                &reference,
-                "usage_collection",
-                amount_cents,
-                currency,
-            )
-            .await
-            .map_err(|e| format!("payment attempt dunning claim failed: {e}"))?
-            {
-                Some((_attempt_no, key)) => key,
-                None => {
-                    warn!(
-                        invoice_id = %invoice.id,
-                        idempotency_key = %idempotency_key,
-                        "usage collection: an attempt is already open for this operation, no second charge"
-                    );
-                    // An in-flight attempt exists (possibly keyless after a
-                    // timeout), or the obligation sits `unresolved` awaiting
-                    // human reconciliation. No second charge is opened — the
-                    // ledger guarantee — but this is NOT a collected
-                    // invoice: the caller gets an error, the outbox stays
-                    // retryable, and the wallet path is never reached from
-                    // here (the caller only tries the wallet when this fn
-                    // reports Ok(None), which an open attempt never is).
-                    return Err(format!(
+        match crate::payments::engine::claim_next_attempt(
+            &state.db,
+            provider.provider_name(),
+            &invoice.tenant_id,
+            &reference,
+            "usage_collection",
+            amount_cents,
+            currency,
+        )
+        .await
+        .map_err(|e| format!("payment attempt dunning claim failed: {e}"))?
+        {
+            Some((_attempt_no, key)) => key,
+            None => {
+                warn!(
+                    invoice_id = %invoice.id,
+                    obligation_ref = %reference,
+                    "usage collection: an attempt is already open for this operation, no second charge"
+                );
+                // An in-flight attempt exists (possibly keyless after a
+                // timeout), or the obligation sits `unresolved` awaiting
+                // human reconciliation. No second charge is opened — the
+                // ledger guarantee — but this is NOT a collected
+                // invoice: the caller gets an error, the outbox stays
+                // retryable, and the wallet path is never reached from
+                // here (the caller only tries the wallet when this fn
+                // reports Ok(None), which an open attempt never is).
+                return Err(format!(
                         "a payment attempt is already open for invoice {}/{} — the webhook or the repair sweep settles it, no second charge",
-                        invoice.id, idempotency_key
+                        invoice.id, reference
                     ));
-                }
             }
         }
-        Err(e) => return Err(format!("payment attempt claim failed: {e}")),
+    } else {
+        match crate::payments::engine::claim_attempt(
+            &state.db,
+            provider.provider_name(),
+            &idempotency_key,
+            &invoice.tenant_id,
+            &reference,
+            "usage_collection",
+            amount_cents,
+            currency,
+        )
+        .await
+        {
+            Ok(true) => idempotency_key.clone(),
+            Ok(false) => {
+                // A concurrent racer claimed the neutral key between the
+                // obligation probe and the insert: the dunning ladder
+                // answers (refuse while open, N+1 when all failed).
+                match crate::payments::engine::claim_next_attempt(
+                    &state.db,
+                    provider.provider_name(),
+                    &invoice.tenant_id,
+                    &reference,
+                    "usage_collection",
+                    amount_cents,
+                    currency,
+                )
+                .await
+                .map_err(|e| format!("payment attempt dunning claim failed: {e}"))?
+                {
+                    Some((_attempt_no, key)) => key,
+                    None => {
+                        return Err(format!(
+                                "a payment attempt is already open for invoice {}/{} — the webhook or the repair sweep settles it, no second charge",
+                                invoice.id, reference
+                            ));
+                    }
+                }
+            }
+            Err(e) => return Err(format!("payment attempt claim failed: {e}")),
+        }
     };
     let idempotency_key = claimed_key;
 
@@ -2541,7 +2582,6 @@ async fn create_and_finalize_mollie_usage_invoice(
 
     Ok(Some(MollieUsageInvoice {
         payment_id: payment.provider_payment_id,
-        reference,
     }))
 }
 
@@ -2749,7 +2789,7 @@ pub async fn tenant_has_active_paid_subscription(
 const PAID_SUBSCRIPTION_EXISTS_SQL: &str = r#"
     SELECT EXISTS(
         SELECT 1
-        FROM mollie_subscriptions ss
+        FROM subscription_state ss
         JOIN plans p ON p.name = ss.plan
         WHERE ss.tenant_id = $1
           AND ss.status = 'active'
@@ -2855,23 +2895,24 @@ mod tests {
         assert_eq!(frozen_collection_amount(Some(&string_payload)), None);
     }
 
-    /// The frozen amount is the idempotency-key seed: the SAME (local
-    /// invoice id, frozen amount) pair must derive the SAME key, which is
-    /// what makes a changed remainder unable to mint a second Mollie charge.
-    /// The seed format itself is pinned here (it is load-bearing across
-    /// attempts; the conversion froze it to `usageinv_{invoice}_{amount}c`
-    ///, usage kind and currency moved out of the key because Mollie binds
-    /// the currency through the body's `amount.currency` instead).
+    /// The neutral idempotency-key grammar (N-06, step 10): the SAME (local
+    /// invoice id, settled cycle) pair must derive the SAME key, which is
+    /// what makes a retry replay the same external operation. The seed
+    /// format is pinned here (it is load-bearing across attempts;
+    /// `usage:{invoice}:{cycle}` replaced the legacy
+    /// `usageinv_{invoice}_{amount}c` grammar, and the exactly-once gate
+    /// itself moved to the obligation-scoped attempts-ledger probe).
     #[test]
-    fn mollie_collection_key_seed_is_stable_per_frozen_amount() {
+    fn usage_collection_key_seed_is_stable_per_invoice_and_cycle() {
         let invoice_id = Uuid::parse_str("0123456789abcdef0123456789abcdef").expect("uuid");
-        let seed =
-            |amount_cents: i64| format!("usageinv_{}_{}c", invoice_id.simple(), amount_cents);
-        let first_attempt = seed(5_000);
-        // Retry after an allocation landed: the frozen amount (5_000), not
-        // the live remainder (3_000), feeds the key.
-        assert_eq!(seed(5_000), first_attempt);
-        assert_ne!(seed(3_000), first_attempt);
+        let seed = |cycle: &str| format!("usage:{}:{}", invoice_id.simple(), cycle);
+        let first_attempt = seed("2026-10-01");
+        // A retry of the same logical operation derives the same key.
+        assert_eq!(seed("2026-10-01"), first_attempt);
+        // A different settled cycle (a different period/month) is a
+        // different operation.
+        assert_ne!(seed("2026-11-01"), first_attempt);
+        assert_ne!(seed("2026-10-02"), first_attempt);
     }
 
     // ------------------------------------------------------------------
@@ -2921,19 +2962,21 @@ mod tests {
     }
 
     #[test]
-    fn mollie_idempotency_key_is_stable_per_invoice_and_frozen_amount() {
+    fn usage_idempotency_key_is_stable_per_invoice_and_cycle() {
         // (Documented contract; the key is built inline in
-        // create_and_finalize_mollie_usage_invoice, pin the shape.) Mollie
-        // has no provider-side invoice objects and the collection is ONE
-        // `POST /payments`, so the key embeds exactly the local invoice id
-        // and the frozen amount (audit F34): a retry with a changed
-        // remainder gets a DIFFERENT key, and a replayed key can never
-        // carry different request parameters.
+        // create_and_finalize_mollie_usage_invoice, pin the shape.) The
+        // collection is ONE charge attempt per (invoice, cycle): the key
+        // embeds exactly the local invoice id and the settled cycle date
+        // (N-06 neutral grammar), and the exactly-once gate is the
+        // obligation-scoped attempts-ledger probe — the key no longer
+        // carries the frozen amount because a NEW attempt after a
+        // definitive failure always gets a fresh `payment:{ref}:{n}` key
+        // from claim_next_attempt.
         let invoice_id = Uuid::new_v4();
-        let key = format!("usageinv_{}_6000c", invoice_id.simple());
-        assert_eq!(key, format!("usageinv_{}_6000c", invoice_id.simple()));
-        // A changed amount changes the key.
-        let changed = format!("usageinv_{}_4000c", invoice_id.simple());
+        let key = format!("usage:{}:2026-10-01", invoice_id.simple());
+        assert_eq!(key, format!("usage:{}:2026-10-01", invoice_id.simple()));
+        // A different cycle is a different operation.
+        let changed = format!("usage:{}:2026-11-01", invoice_id.simple());
         assert_ne!(key, changed);
     }
 
@@ -3820,12 +3863,12 @@ mod coverage_adversarial {
             let tenant = "ovcov_mollie";
             seed_tenant(env, tenant, "growth").await;
             // The recurring charge replays the token minted at signup —
-            // `mollie_subscriptions.mollie_mandate_id`.
+            // `subscription_state.provider_method_id`.
             sqlx::query(
-                "INSERT INTO mollie_subscriptions
-                     (tenant_id, mollie_subscription_id, plan, status, billing_cycle_start,
-                      billing_cycle_end, mollie_customer_id,
-                      mollie_mandate_id)
+                "INSERT INTO subscription_state
+                     (tenant_id, provider_contract_id, plan, status, billing_cycle_start,
+                      billing_cycle_end, provider_customer_id,
+                      provider_method_id)
                  VALUES ($1, 'sub_ov_1', 'growth', 'active', NOW(),
                          NOW() + INTERVAL '30 days', 'cst_ov_1', 'mdt_ov_1')",
             )
@@ -3848,10 +3891,23 @@ mod coverage_adversarial {
                 Some("Bearer mollie-test-key-fixture"),
                 "auth is the secret key as a Bearer token"
             );
+            let (period_start,): (chrono::DateTime<Utc>,) =
+                sqlx::query_as("SELECT period_start FROM invoices WHERE id = $1")
+                    .bind(invoice)
+                    .fetch_one(&env.pool)
+                    .await
+                    .expect("invoice period");
             assert_eq!(
                 call.headers.get("idempotency-key").map(String::as_str),
-                Some(format!("usageinv_{}_1000c", invoice.simple()).as_str()),
-                "the frozen amount feeds the deterministic idempotency key"
+                Some(
+                    format!(
+                        "usage:{}:{}",
+                        invoice.simple(),
+                        period_start.format("%Y-%m-%d")
+                    )
+                    .as_str()
+                ),
+                "the neutral obligation grammar feeds the deterministic idempotency key"
             );
             let body: serde_json::Value =
                 serde_json::from_str(&call.body).expect("payment body JSON");
@@ -3877,25 +3933,34 @@ mod coverage_adversarial {
             assert_eq!(body["mandateId"], serde_json::json!("mdt_ov_1"));
             assert_eq!(body["sequenceType"], serde_json::json!("recurring"));
 
-            let (status, mollie_payment, mollie_item): (String, Option<String>, Option<String>) =
-                sqlx::query_as(
-                    "SELECT status, mollie_payment_id, mollie_payment_reference
-                 FROM invoices WHERE id = $1",
-                )
-                .bind(invoice)
-                .fetch_one(&env.pool)
-                .await
-                .expect("invoice");
+            let (status,): (String,) =
+                sqlx::query_as("SELECT status::text FROM invoices WHERE id = $1")
+                    .bind(invoice)
+                    .fetch_one(&env.pool)
+                    .await
+                    .expect("invoice");
             assert_eq!(status, "pending");
+            // N-05 (step 10): the charge's mapping lives on the NEUTRAL
+            // execution ledger, not on a provider-named invoice column: the
+            // attempt row is confirmed with the provider payment id under
+            // the obligation reference the settlement webhook reconciles.
+            let attempt: Option<(String, String, String)> = sqlx::query_as(
+                "SELECT provider_payment_id, obligation_ref, state \
+                 FROM payment_attempts \
+                 WHERE provider = 'mollie' AND obligation_ref = $1",
+            )
+            .bind(format!("invoice:{invoice}"))
+            .fetch_optional(&env.pool)
+            .await
+            .expect("attempt row");
+            let (payment_id, obligation, attempt_state) =
+                attempt.expect("the confirmed attempt row names the obligation");
+            assert_eq!(payment_id, "tr_ov_1");
+            assert_eq!(attempt_state, "succeeded");
             assert_eq!(
-                mollie_payment.as_deref(),
-                Some("tr_ov_1"),
-                "the charge's Mollie payment id is persisted on the local invoice"
-            );
-            assert_eq!(
-                mollie_item.as_deref(),
-                Some(format!("invoice:{invoice}").as_str()),
-                "the merchant reference is persisted as the settlement binding"
+                obligation,
+                format!("invoice:{invoice}"),
+                "the obligation reference is the settlement binding"
             );
             let (dunning, retry): (String, Option<DateTime<Utc>>) = sqlx::query_as(
                 "SELECT status, next_retry_at FROM dunning_records WHERE tenant_id = $1",
@@ -4624,10 +4689,10 @@ mod coverage_adversarial {
         seed_tenant(env, tenant, "growth").await;
         sqlx::query(
             // The Mollie customer is bound to the tenant through
-            // `mollie_customers.mollie_customer_id`.
-            "INSERT INTO mollie_subscriptions
-                 (tenant_id, mollie_subscription_id, plan, status, billing_cycle_start,
-                  billing_cycle_end, mollie_customer_id)
+            // `payment_provider_customers.provider_customer_id`.
+            "INSERT INTO subscription_state
+                 (tenant_id, provider_contract_id, plan, status, billing_cycle_start,
+                  billing_cycle_end, provider_customer_id)
              VALUES ($1, 'sub_backfill', 'growth', 'active', NOW() - INTERVAL '30 days',
                      NOW(), $1)",
         )
@@ -5365,8 +5430,9 @@ mod coverage_adversarial {
 
     // The persisted local <-> external Mollie mapping can never rebind an
     // invoice that is ALREADY bound to a different provider payment id; the
-    // prior binding wins and the collection still completes.
-    env_test!(mollie_mapping_never_rebinds_a_bound_invoice, |env| {
+    // obligation is refused: an in-flight (or otherwise unresolved) attempt
+    // means the money may already be moving, so the ladder claims nothing.
+    env_test!(mollie_mapping_never_recharges_a_claimed_obligation, |env| {
         let mock = Mock::default();
         mock.route(
             "/payments",
@@ -5388,43 +5454,53 @@ mod coverage_adversarial {
         let tenant = "ovcov_rebind";
         seed_tenant(env, tenant, "growth").await;
         sqlx::query(
-            "INSERT INTO mollie_subscriptions
-                 (tenant_id, mollie_subscription_id, plan, status, billing_cycle_start,
-                  billing_cycle_end, mollie_customer_id,
-                  mollie_mandate_id)
+            "INSERT INTO subscription_state
+                 (tenant_id, provider_contract_id, plan, status, billing_cycle_start,
+                  billing_cycle_end, provider_customer_id,
+                  provider_method_id)
              VALUES ($1, 'psp_rebind_sub', 'growth', 'active', NOW(),
-                     NOW() + INTERVAL '30 days', $1, 'tok_rebind')",
+                     NOW() + INTERVAL '30 days', $1, 'mdt_rebind')",
         )
         .bind(tenant)
         .execute(&env.pool)
         .await
         .expect("subscription");
         let invoice_id = seed_invoice(env, tenant, 1000, "EUR").await;
-        sqlx::query("UPDATE invoices SET mollie_payment_id = 'tr_prior' WHERE id = $1")
-            .bind(invoice_id)
-            .execute(&env.pool)
-            .await
-            .expect("pre-bind");
+        // The obligation is ALREADY claimed (a prior charge in flight): the
+        // open attempt row, not a provider-named invoice column, is the
+        // neutral no-second-charge guarantee (N-05/N-06, step 10).
+        sqlx::query(
+            "INSERT INTO payment_attempts
+                 (tenant_id, provider, provider_payment_id, state, amount_minor,
+                  currency, purpose, obligation_ref, idempotency_key)
+             VALUES ($1, 'mollie', 'tr_prior', 'pending', 1000, 'EUR',
+                     'usage_collection', $2, 'usage:legacy-key')",
+        )
+        .bind(tenant)
+        .bind(format!("invoice:{invoice_id}"))
+        .execute(&env.pool)
+        .await
+        .expect("pre-bind attempt");
         seed_outbox(env, invoice_id, tenant, "pending", 0, None).await;
 
         let stats = resume_pending_collections(&env.state)
             .await
             .expect("resume");
-        assert_eq!(stats.resumed, 1, "{stats:?}");
-        let (mollie_payment, outbox): (Option<String>, String) = sqlx::query_as(
-            "SELECT i.mollie_payment_id, o.status FROM invoices i
-             JOIN invoice_collection_outbox o ON o.invoice_id = i.id WHERE i.id = $1",
+        assert_eq!(stats.resumed, 0, "{stats:?}");
+        // NO second external charge: the open claim refuses the ladder.
+        assert_eq!(
+            mock.call_count("/payments"),
+            0,
+            "an obligation with an in-flight attempt is never charged again"
+        );
+        let outbox: String = sqlx::query_scalar(
+            "SELECT o.status FROM invoice_collection_outbox o WHERE o.invoice_id = $1",
         )
         .bind(invoice_id)
         .fetch_one(&env.pool)
         .await
-        .expect("invoice");
-        assert_eq!(
-            mollie_payment.as_deref(),
-            Some("tr_prior"),
-            "the prior external binding is never overwritten"
-        );
-        assert_eq!(outbox, "done");
+        .expect("outbox");
+        assert_eq!(outbox, "pending", "the operation stays retryable");
 
         match previous {
             (Some(key), Some(url), Some(merchant)) => {
@@ -5463,10 +5539,10 @@ mod coverage_adversarial {
             let tenant = "ovcov_mollie_bad";
             seed_tenant(env, tenant, "growth").await;
             sqlx::query(
-                "INSERT INTO mollie_subscriptions
-                     (tenant_id, mollie_subscription_id, plan, status, billing_cycle_start,
-                      billing_cycle_end, mollie_customer_id,
-                      mollie_mandate_id)
+                "INSERT INTO subscription_state
+                     (tenant_id, provider_contract_id, plan, status, billing_cycle_start,
+                      billing_cycle_end, provider_customer_id,
+                      provider_method_id)
                  VALUES ($1, 'sub_bad_1', 'growth', 'active', NOW(),
                          NOW() + INTERVAL '30 days', 'cst_bad_1', 'mdt_bad_1')",
             )
@@ -5578,9 +5654,9 @@ mod coverage_adversarial {
             seed_tenant(env, tenant, "growth").await;
             // An active subscription WITHOUT a stored token is not chargeable.
             sqlx::query(
-                "INSERT INTO mollie_subscriptions
-                 (tenant_id, mollie_subscription_id, plan, status, billing_cycle_start,
-                  billing_cycle_end, mollie_customer_id)
+                "INSERT INTO subscription_state
+                 (tenant_id, provider_contract_id, plan, status, billing_cycle_start,
+                  billing_cycle_end, provider_customer_id)
              VALUES ($1, 'psp_notoken_sub', 'growth', 'active', NOW(),
                      NOW() + INTERVAL '30 days', $1)",
             )
@@ -5631,8 +5707,8 @@ mod coverage_adversarial {
         seed_plan(env, "growth", 1000, serde_json::json!({})).await;
         seed_tenant(env, tenant, "growth").await;
         sqlx::query(
-            "INSERT INTO mollie_subscriptions
-                 (tenant_id, mollie_subscription_id, plan, status, billing_cycle_start,
+            "INSERT INTO subscription_state
+                 (tenant_id, provider_contract_id, plan, status, billing_cycle_start,
                   billing_cycle_end)
              VALUES ($1, 'sub_gate', 'growth', 'active', NOW(), NOW() + INTERVAL '30 days')",
         )
@@ -5650,7 +5726,7 @@ mod coverage_adversarial {
         );
 
         // Downgrade: the cache still answers true until invalidated.
-        sqlx::query("UPDATE mollie_subscriptions SET status = 'canceled' WHERE tenant_id = $1")
+        sqlx::query("UPDATE subscription_state SET status = 'canceled' WHERE tenant_id = $1")
             .bind(tenant)
             .execute(&env.pool)
             .await
@@ -5673,8 +5749,8 @@ mod coverage_adversarial {
         let ghost = "ovcov_gate_ghost";
         seed_tenant(env, ghost, "ghost_plan").await;
         sqlx::query(
-            "INSERT INTO mollie_subscriptions
-                 (tenant_id, mollie_subscription_id, plan, status, billing_cycle_start,
+            "INSERT INTO subscription_state
+                 (tenant_id, provider_contract_id, plan, status, billing_cycle_start,
                   billing_cycle_end)
              VALUES ($1, 'sub_gate_ghost', 'ghost_plan', 'active', NOW(), NOW())",
         )

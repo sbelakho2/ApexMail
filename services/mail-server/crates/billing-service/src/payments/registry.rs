@@ -1,29 +1,34 @@
 //! The provider registry: ONE configured payment provider, resolved fail
-//! closed (external audit, P0-A, step 3).
+//! closed (external audit, P0-A, step 3; the Stripe adapter joined in the
+//! audit-item-15 wave).
 //!
-//! `PAYMENTS_PROVIDER` selects the adapter. The default and, this round,
-//! the ONLY supported value is `mollie`; an unknown value is a typed
+//! `PAYMENTS_PROVIDER` selects the adapter. The supported values are
+//! `mollie` (the default) and `stripe`; an unknown value is a typed
 //! configuration error, never a silent fallback to a different processor
 //! (money must never move through a provider the operator did not name).
 //! Provider CONSTRUCTION is validated after the kind check: a selected
 //! provider whose credentials are missing still fails closed, visibly.
+//! Stripe is PAYMENTS-ONLY by contract: the adapter executes single
+//! payments and owns no provider-side schedule.
 
 use std::sync::Arc;
 
 use super::mollie_provider::MollieProvider;
+use super::stripe_provider::StripeProvider;
 use super::PaymentProvider;
 
 /// The environment variable that selects the payment provider.
 pub const PROVIDER_ENV_VAR: &str = "PAYMENTS_PROVIDER";
 
-/// The adapters this build can construct. Extending the list (steps 11-18
-/// of the mandated order) is a code change, never a runtime guess.
-pub const SUPPORTED_PROVIDERS: &[&str] = &["mollie"];
+/// The adapters this build can construct. Extending the list is a code
+/// change, never a runtime guess.
+pub const SUPPORTED_PROVIDERS: &[&str] = &["mollie", "stripe"];
 
 /// The configured provider kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProviderKind {
     Mollie,
+    Stripe,
 }
 
 impl ProviderKind {
@@ -31,6 +36,7 @@ impl ProviderKind {
     pub fn name(self) -> &'static str {
         match self {
             ProviderKind::Mollie => "mollie",
+            ProviderKind::Stripe => "stripe",
         }
     }
 }
@@ -64,6 +70,9 @@ pub fn provider_kind_from_value(raw: &str) -> Result<ProviderKind, RegistryError
     if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("mollie") {
         return Ok(ProviderKind::Mollie);
     }
+    if trimmed.eq_ignore_ascii_case("stripe") {
+        return Ok(ProviderKind::Stripe);
+    }
     Err(RegistryError::UnknownProvider {
         value: trimmed.to_string(),
         supported: SUPPORTED_PROVIDERS,
@@ -90,6 +99,9 @@ pub fn from_value(raw: &str) -> Result<Arc<dyn PaymentProvider>, RegistryError> 
         ProviderKind::Mollie => MollieProvider::from_env()
             .map(|provider| Arc::new(provider) as Arc<dyn PaymentProvider>)
             .map_err(|error| RegistryError::ProviderSetup(error.to_string())),
+        ProviderKind::Stripe => StripeProvider::from_env()
+            .map(|provider| Arc::new(provider) as Arc<dyn PaymentProvider>)
+            .map_err(|error| RegistryError::ProviderSetup(error.to_string())),
     }
 }
 
@@ -98,8 +110,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_default_provider_is_the_only_supported_provider() {
-        assert_eq!(SUPPORTED_PROVIDERS, ["mollie"].as_slice());
+    fn the_default_provider_and_the_supported_set() {
+        assert_eq!(SUPPORTED_PROVIDERS, ["mollie", "stripe"].as_slice());
+        // Unset/blank selects the DEFAULT adapter (mollie): an operator who
+        // upgrades without touching config keeps the processor they named.
         assert_eq!(provider_kind_from_value("").unwrap(), ProviderKind::Mollie);
         assert_eq!(
             provider_kind_from_value("   ").unwrap(),
@@ -109,8 +123,6 @@ mod tests {
             provider_kind_from_value("mollie").unwrap(),
             ProviderKind::Mollie
         );
-        // Case-insensitive: operator configuration stays forgiving, the
-        // resolved name is still the canonical lowercase adapter name.
         assert_eq!(
             provider_kind_from_value("MOLLIE").unwrap(),
             ProviderKind::Mollie
@@ -119,12 +131,25 @@ mod tests {
     }
 
     #[test]
+    fn stripe_is_a_supported_kind_case_insensitively() {
+        assert_eq!(
+            provider_kind_from_value("stripe").unwrap(),
+            ProviderKind::Stripe
+        );
+        assert_eq!(
+            provider_kind_from_value("STRIPE").unwrap(),
+            ProviderKind::Stripe
+        );
+        assert_eq!(
+            provider_kind_from_value("  stripe  ").unwrap(),
+            ProviderKind::Stripe
+        );
+        assert_eq!(ProviderKind::Stripe.name(), "stripe");
+    }
+
+    #[test]
     fn unknown_providers_fail_closed_with_a_typed_error() {
-        // Stripe is FORBIDDEN this round (steps 11-18 are owner-gated);
-        // naming it here is exactly the fail-closed case. Surrounding
-        // whitespace is trimmed before matching (the forgiving arm asserted
-        // above), so these values are genuinely unknown processors.
-        for value in ["stripe", "adyen", "paypal", "m ollie", "0", "null"] {
+        for value in ["adyen", "paypal", "m ollie", "stripee", "0", "null"] {
             let error = provider_kind_from_value(value).expect_err("must fail closed");
             match &error {
                 RegistryError::UnknownProvider {
@@ -148,8 +173,8 @@ mod tests {
     fn from_value_rejects_an_unknown_provider_before_anything_is_constructed() {
         // The kind check fails closed BEFORE provider construction, so no
         // provider credential is even consulted.
-        match from_value("stripe") {
-            Err(RegistryError::UnknownProvider { value, .. }) => assert_eq!(value, "stripe"),
+        match from_value("adyen") {
+            Err(RegistryError::UnknownProvider { value, .. }) => assert_eq!(value, "adyen"),
             _ => panic!("expected UnknownProvider, got a provider handle"),
         }
     }
@@ -174,6 +199,23 @@ mod tests {
                 }
                 Err(other) => panic!("unexpected registry error for {value:?}: {other:?}"),
             }
+        }
+    }
+
+    #[test]
+    fn from_value_stripe_resolves_or_names_its_missing_credential() {
+        // Stripe's construction reads STRIPE_SECRET_KEY: either the
+        // credential is present (the adapter resolves) or the typed setup
+        // failure NAMES it — never a silent fallback to another processor.
+        match from_value("stripe") {
+            Ok(provider) => assert_eq!(provider.provider_name(), "stripe"),
+            Err(RegistryError::ProviderSetup(message)) => {
+                assert!(
+                    message.contains("STRIPE_SECRET_KEY"),
+                    "names the missing setup: {message}"
+                );
+            }
+            Err(other) => panic!("unexpected registry error: {other:?}"),
         }
     }
 }

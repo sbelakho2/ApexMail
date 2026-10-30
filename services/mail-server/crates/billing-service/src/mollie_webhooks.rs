@@ -91,18 +91,10 @@ const MOLLIE_WEBHOOK_ACCEPTED: &str = "OK";
 /// processor ApexMail no longer uses).
 const TAX_AUTHORITY_LOCAL: &str = "apexmail_local";
 
-/// The `invoice_payment_allocations.source` value for a settled Mollie
-/// payment. The accounting ledger adapter
-/// (`accounting_core::adapters::post_payment_allocation_in`) branches on
-/// `source = 'mollie'` to post to the Mollie processor clearing account with
-/// the `mollie_settlement` source type, so this is the codebase's truthful
-/// value (migration 140's CHECK still lists the pre-cutover set; see the
-/// migration-gap note in the module tests).
-const PAYMENT_ALLOCATION_SOURCE: &str = "mollie";
-/// The provider dimension on every allocation this module writes (audit
-/// step 5, migration 281): the source value stays the historical one the
-/// statutory ledger reads, the dimension carries the processor identity.
-const PAYMENT_ALLOCATION_PROVIDER: &str = "mollie";
+// N-05/N-10 RESOLVED (step 10): this module no longer writes settlement
+// allocations directly (the engine writes `source = 'processor'` with the
+// provider dimension), so the historical PAYMENT_ALLOCATION_* constants are
+// retired.
 
 static DUNNING_CONFIG_TABLE_ENSURED: OnceLock<()> = OnceLock::new();
 
@@ -976,27 +968,20 @@ fn currencies_match(left: &str, right: &str) -> bool {
     crate::payments::engine::currencies_match(left, right)
 }
 
-/// The payment amount actually recorded as an allocation: the verified charge,
-/// capped against the authoritative remaining obligation, never negative.
-/// DELEGATES to the generic engine (audit step 8): the webhook and the
-/// repair sweep cap identically.
-fn allocation_cents(charged_cents: i64, outstanding_cents: i64) -> i64 {
-    crate::payments::engine::allocation_minor(charged_cents, outstanding_cents)
-}
-
-/// The allocation's unique operation id, the settlement's idempotency key.
-/// DELEGATES to the generic engine's operation id (audit step 8): the
-/// webhook and the repair sweep settle under the SAME identity.
-fn settlement_operation_id(item: &ProviderNotification) -> String {
-    crate::payments::engine::operation_id("mollie", &item.provider_payment_id)
-}
+// N-10 RESOLVED (step 10): the module-local allocation capping and
+// settlement-operation-id helpers are GONE — the settlement routes through
+// `payments::engine` (observe -> verify -> settle), so the capped-allocation
+// writer no longer exists outside the engine core and the operation id is
+// `payments::engine::operation_id` everywhere.
 
 /// Convert the old `handle_invoice_paid`: a successful recurring
 /// `AUTHORISATION` settles the LOCAL invoice named by
 /// `merchantReference = invoice:{uuid}` with `amount.value` (minor units) as
-/// the verified charge. Runs the existing settlement logic (mark paid +
-/// allocation) and the existing tax-truth snapshot gate, whose source is now
-/// ApexMail's own computation validated against the charge.
+/// the verified charge. The settlement itself runs the GENERIC ENGINE CORE
+/// (observe -> verify -> settle, N-10 step 10) — no money-deciding logic
+/// lives in this module — and the tax-truth snapshot gate (ApexMail's own
+/// computation validated against the charge) still records the immutable
+/// evidence before any settlement can run.
 async fn handle_recurring_authorisation(
     state: &AppState,
     item: &ProviderNotification,
@@ -1054,111 +1039,103 @@ async fn handle_recurring_authorisation(
     let tax_snapshot_id =
         validate_and_snapshot_mollie_tax(state, item, &local, charged_cents).await?;
 
-    // Settlement: the pre-Mollie CTE behaviour, now against the locked local
-    // row, mark paid and record the VERIFIED charged amount (amount.value)
-    // as the allocation, capped against the authoritative remaining
-    // obligation in the matching currency. Idempotent through the
-    // allocation's unique operation id.
+    // N-10 RESOLVED (step 10): the money decision lives in the ENGINE CORE —
+    // observe -> verify (EXACT amount, the strict gate) -> settle. This
+    // module is wire glue + normalization only: no invoice paid-flip, no
+    // allocation insert, no remainder capping happen here any more (the
+    // legacy capped settlement writer is retired; an over-/under-charge is
+    // the engine's AmountMismatch reconciliation incident, never a capped
+    // allocation).
     let payment_cents = charged_cents.max(0);
-    let mut tx = state
-        .db
-        .begin()
-        .await
-        .map_err(|error| format!("Failed to begin invoice settlement transaction: {error}"))?;
-
-    let locked: Option<(Uuid, String, String)> = sqlx::query_as(
-        r#"
-        SELECT id, tenant_id, currency
-        FROM invoices
-        WHERE id = $1
-        FOR UPDATE
-        "#,
-    )
-    .bind(local.id)
-    .fetch_optional(&mut *tx)
-    .await
-    .map_err(|error| format!("Failed to lock local invoice {local_invoice_id}: {error}"))?;
-
-    let Some((invoice_row_id, row_tenant, invoice_currency)) = locked else {
-        return Err(format!(
-            "local invoice {local_invoice_id} disappeared before settlement"
-        ));
+    let observed = crate::payments::engine::ObservedPayment {
+        provider: "mollie".to_string(),
+        provider_payment_id: item.provider_payment_id.trim().to_string(),
+        state: crate::payments::PaymentState::Succeeded,
+        amount_minor: Some(payment_cents),
+        // The charge's own currency when the wire carries one; otherwise the
+        // obligation's currency is the truthful attribution (a webhook
+        // without a currency field cannot contradict the invoice).
+        currency: Some(
+            item.amount_currency()
+                .unwrap_or(local.currency.as_str())
+                .to_string(),
+        ),
+        tenant_id: Some(tenant_id.clone()),
+        obligation_ref: Some(item.reference.trim().to_string()),
+        purpose: "webhook",
     };
-
-    let outstanding = crate::invoices::invoice_outstanding_cents_in(&mut *tx, invoice_row_id)
+    crate::payments::engine::observe_payment(&state.db, &observed).await?;
+    let verified = match crate::payments::engine::verify_against_obligation(&state.db, &observed)
         .await
-        .map_err(|error| format!("Failed to derive outstanding for {invoice_row_id}: {error}"))?;
-
-    let allocation = allocation_cents(payment_cents, outstanding);
-    if payment_cents > outstanding {
-        warn!(
-            invoice_id = %invoice_row_id,
-            mollie_payment_id = %item.provider_payment_id,
-            payment_cents,
-            outstanding,
-            "mollie payment exceeds the remaining obligation, allocating only the \
-             authoritative remainder (over-allocation rejected)"
-        );
-    }
-
-    sqlx::query(
-        r#"
-        UPDATE invoices
-        SET status = 'paid',
-            paid_at = COALESCE(paid_at, NOW()),
-            mollie_payment_id = COALESCE(mollie_payment_id, $2),
-            updated_at = NOW()
-        WHERE id = $1
-        "#,
-    )
-    .bind(invoice_row_id)
-    .bind(item.provider_payment_id.trim())
-    .execute(&mut *tx)
-    .await
-    .map_err(|error| format!("Failed to mark invoice {invoice_row_id} paid: {error}"))?;
-
-    if allocation > 0 {
-        let operation_id = settlement_operation_id(item);
-        sqlx::query(
-            r#"
-            INSERT INTO invoice_payment_allocations (
-                id, tenant_id, invoice_id, operation_id, source, amount_cents, currency,
-                provider
+    {
+        Ok(verified) => verified,
+        Err(error @ crate::payments::engine::VerifyError::AmountMismatch { .. }) => {
+            let crate::payments::engine::VerifyError::AmountMismatch {
+                ref payment_id,
+                expected_minor,
+                actual_minor,
+            } = error
+            else {
+                unreachable!("matched arm guarantees AmountMismatch")
+            };
+            error!(
+                invoice_id = %local_invoice_id,
+                payment_id = %payment_id,
+                expected_minor,
+                actual_minor,
+                "RECONCILIATION INCIDENT: the webhook charge amount != the obligation amount; \
+                 no entitlement, no settlement — the attempt stays open for manual reconciliation"
+            );
+            crate::plan_billing::raise_billing_incident(
+                &state.db,
+                "webhook_amount_mismatch",
+                "critical",
+                Some(&tenant_id),
+                Some(payment_id.as_str()),
+                serde_json::json!({
+                    "invoiceId": local_invoice_id,
+                    "paymentId": payment_id,
+                    "expectedMinor": expected_minor,
+                    "actualMinor": actual_minor,
+                }),
             )
-            VALUES (
-                gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7
-            )
-            ON CONFLICT (operation_id) DO NOTHING
-            "#,
-        )
-        .bind(&row_tenant)
-        .bind(invoice_row_id)
-        .bind(&operation_id)
-        .bind(PAYMENT_ALLOCATION_SOURCE)
-        .bind(allocation)
-        .bind(invoice_currency.trim().to_uppercase())
-        .bind(PAYMENT_ALLOCATION_PROVIDER)
-        .execute(&mut *tx)
+            .await;
+            return Err(format!(
+                "AUTHORISATION for {} settled nothing: {}",
+                item.provider_payment_id.trim(),
+                error
+            ));
+        }
+        Err(error) => {
+            // A refused verification (unknown obligation, cross-tenant,
+            // currency mismatch): no settlement, the fact stays ledged on
+            // the neutral tables for reconciliation.
+            warn!(
+                invoice_id = %local_invoice_id,
+                provider_payment_id = %item.provider_payment_id,
+                error = %error,
+                "mollie settlement verification refused; the attempt stays open, no settlement"
+            );
+            return Err(format!(
+                "AUTHORISATION for {} could not be settled: {}",
+                item.provider_payment_id.trim(),
+                error
+            ));
+        }
+    };
+    let settled_now = crate::payments::engine::settle_verified(&state.db, "mollie", &verified)
         .await
-        .map_err(|error| format!("Failed to record Mollie payment allocation: {error}"))?;
-
-        // Statutory ledger: post the settlement (Dr processor clearing, Cr
-        // AR) in the same transaction. Idempotent on the allocation's unique
-        // operation id, so a replayed webhook posts once.
-        crate::accounting_postings::post_payment_allocation_in(&mut tx, &operation_id).await;
-    } else {
+        .map_err(|error| format!("mollie webhook settlement failed: {error}"))?;
+    let invoice_row_id = verified.invoice_id;
+    if !settled_now {
+        // A replay: the obligation was already settled exactly once (the
+        // unique operation id). Acknowledge with no second allocation.
         info!(
             invoice_id = %invoice_row_id,
             mollie_payment_id = %item.provider_payment_id,
-            payment_cents,
-            outstanding,
-            "mollie invoice settled without a positive allocation (zero-value/already covered)"
+            "mollie recurring authorisation was already settled; replay acknowledged"
         );
     }
-
-    tx.commit()
-        .await
-        .map_err(|error| format!("Failed to commit invoice settlement: {error}"))?;
 
     // Statutory ledger: post invoice finalization for the settled invoice
     // (no-op replay when the usage sweep already posted it). Runs AFTER the
@@ -1221,9 +1198,9 @@ async fn handle_recurring_authorisation(
         tenant_id = %tenant_id,
         invoice_id = %invoice_row_id,
         mollie_payment_id = %item.provider_payment_id,
-        payment_cents,
-        allocation,
-        "mollie recurring authorisation settled the local invoice"
+        charged_cents,
+        settled_now,
+        "mollie recurring authorisation settled the local invoice through the engine core"
     );
 
     // Dedicated-IP provisioning: the deleted subscription-change handler used
@@ -1339,10 +1316,12 @@ async fn handle_authorisation_refused(
     Ok(())
 }
 
-/// `RECURRING_CONTRACT`: the first payment minted a mandate. Bind the token (and the processing model when present) to
-/// every `mollie_subscriptions` row of the shopper's tenant, the token is
-/// shopper-scoped, and the dunning auto-pay path reads it per tenant
-/// regardless of the row's status. A missing token or tenant is an Err.
+/// `RECURRING_CONTRACT`: the first payment minted a mandate. Bind the token
+/// (and the processing model when present) to every `subscription_state` row
+/// of the shopper's tenant, the token is shopper-scoped, and the local
+/// renewal worker reads it (through the neutral credentials ledger) per
+/// tenant regardless of the row's status. A missing token or tenant is an
+/// Err.
 async fn handle_token_created(state: &AppState, item: &ProviderNotification) -> Result<(), String> {
     let Some(token) = item.mandate_id() else {
         return Err(format!(
@@ -1394,12 +1373,12 @@ async fn handle_token_created(state: &AppState, item: &ProviderNotification) -> 
 
     let bound: Vec<(String,)> = sqlx::query_as(
         r#"
-        UPDATE mollie_subscriptions
-        SET mollie_mandate_id = $2,
-            mollie_sequence_type = COALESCE($3, mollie_sequence_type),
+        UPDATE subscription_state
+        SET provider_method_id = $2,
+            provider_sequence_type = COALESCE($3, provider_sequence_type),
             updated_at = NOW()
         WHERE tenant_id = $1
-        RETURNING mollie_subscription_id
+        RETURNING provider_contract_id
         "#,
     )
     .bind(&tenant_id)
@@ -3595,7 +3574,7 @@ pub async fn auto_provision_dedicated_ips_background(
     let included_count = sqlx::query_scalar::<_, i32>(
         r#"
         SELECT COALESCE((p.features->>'dedicated_ip_count')::int, 0) AS included_count
-        FROM mollie_subscriptions s
+        FROM subscription_state s
         JOIN plans p ON p.name = (
             SELECT plan FROM tenants WHERE id = s.tenant_id
         )
@@ -4605,46 +4584,42 @@ mod tests {
     // Money: allocation and exact minor units.
     // ------------------------------------------------------------------
 
+    // N-10 (step 10): the module has NO allocation math of its own any
+    // more — the settlement routes through payments::engine, whose strict
+    // exact-amount verify refuses the very shapes the old capped writer
+    // accepted. These pins keep the engine contract visible from here.
     #[test]
-    fn allocation_prefers_the_verified_charge_over_the_invoice_total() {
-        assert_eq!(allocation_cents(6_000, 10_000), 6_000);
-        assert_eq!(allocation_cents(11_300, 11_300), 11_300);
+    fn the_engine_verifies_the_exact_charge_no_remainder_capping() {
+        use crate::payments::engine::{allocation_minor, operation_id};
+        // The engine's allocation floor still cannot exceed the obligation.
+        assert_eq!(allocation_minor(6_000, 10_000), 6_000);
+        assert_eq!(allocation_minor(11_300, 11_300), 11_300);
+        assert_eq!(allocation_minor(12_400, 400), 400);
+        assert_eq!(allocation_minor(-5, 1_000), 0);
+        // The settlement's idempotency identity is the ENGINE's.
+        assert_eq!(operation_id("mollie", "tr_charged"), "mollie:tr_charged");
     }
 
     #[test]
-    fn allocation_is_capped_by_the_authoritative_remainder() {
-        assert_eq!(allocation_cents(12_400, 400), 400);
-        assert_eq!(allocation_cents(12_400, 0), 0);
-        assert_eq!(allocation_cents(0, 0), 0);
-    }
-
-    #[test]
-    fn allocation_never_goes_negative() {
-        assert_eq!(allocation_cents(-5, 1_000), 0);
-        assert_eq!(allocation_cents(1_000, -5), 0);
-        assert_eq!(allocation_cents(-5, -5), 0);
-    }
-
-    #[test]
-    fn zero_value_payments_settle_without_a_positive_allocation() {
-        assert_eq!(allocation_cents(0, 0), 0);
-        assert_eq!(allocation_cents(0, 1_000), 0);
-    }
-
-    #[test]
-    fn the_charged_total_is_the_verified_provider_amount() {
+    fn the_webhook_settlement_routes_through_the_engine_core() {
         let mut item = event("AUTHORISATION", true, 1_130);
         item.provider_payment_id = "tr_charged".into();
         assert_eq!(item.amount_value(), Some(1_130));
         assert_eq!(item.amount_currency(), Some("EUR"));
-        assert_eq!(settlement_operation_id(&item), "mollie:tr_charged");
-        assert_eq!(
-            allocation_cents(item.amount_value().expect("amount"), 1_130),
-            1_130
-        );
+        // The module is wire glue: no local paid-flip/allocation writer may
+        // exist outside payments::engine (N-10). The source pins that (the
+        // needles are assembled so this test's own text cannot match them).
         let source = include_str!("mollie_webhooks.rs");
-        assert!(source.contains("let payment_cents = charged_cents.max(0);"));
-        assert!(source.contains(".bind(allocation)"));
+        assert!(source.contains("verify_against_obligation(&state.db, &observed)"));
+        assert!(source.contains("settle_verified(&state.db, \"mollie\", &verified)"));
+        let legacy_source_const = format!("PAYMENT_{}_SOURCE", "ALLOCATION");
+        assert!(!source.contains(&legacy_source_const));
+        let legacy_paid_flip = format!(
+            "SET status = 'paid',{}paid_at = COALESCE(paid_at, NOW()),{}mollie_payment_id",
+            std::path::MAIN_SEPARATOR_STR,
+            std::path::MAIN_SEPARATOR_STR,
+        );
+        assert!(!source.contains(&legacy_paid_flip));
     }
 
     #[test]
@@ -5802,17 +5777,18 @@ mod coverage_adversarial {
             .create_pool(Some(Runtime::Tokio1))
             .expect("redis pool");
 
-        // MIGRATION-GAP COMPENSATION (private clone only): migration 140
-        // pins `invoice_payment_allocations.source` to the pre-cutover set;
-        // the Mollie settlement writes 'mollie'. Extend THIS CLONE so the
-        // settlement path is exercised. Production needs the same value
-        // added by a new migration.
+        // MIGRATION-GAP COMPENSATION (private clone only): the deployed
+        // migration chain pins `invoice_payment_allocations.source` to a set
+        // that (post-281) already accepts the engine's neutral 'processor'
+        // role the webhook settlement writes through payments::engine. This
+        // clone re-asserts the same production contract so the settlement
+        // path is exercised against the live CHECK.
         for statement in [
             "ALTER TABLE invoice_payment_allocations \
              DROP CONSTRAINT IF EXISTS invoice_payment_allocations_source_check",
             "ALTER TABLE invoice_payment_allocations \
              ADD CONSTRAINT invoice_payment_allocations_source_check \
-             CHECK (source IN ('wallet', 'stripe', 'manual', 'credit_note', 'mollie'))",
+             CHECK (source IN ('wallet', 'stripe', 'mollie', 'processor', 'manual', 'credit_note'))",
         ] {
             sqlx::query(statement)
                 .execute(&pool)
@@ -6434,20 +6410,24 @@ mod coverage_adversarial {
             deliver_payment(&env.state, &item)
                 .await
                 .expect("settlement");
-            let (status, paid_at_is_set, payment_id): (String, bool, Option<String>) = sqlx::query_as(
-                "SELECT status, paid_at IS NOT NULL, mollie_payment_id FROM invoices WHERE id = $1",
-            )
-            .bind(invoice_id)
-            .fetch_one(&env.pool)
-            .await
-            .expect("invoice");
+            let (status, paid_at_is_set): (String, bool) =
+                sqlx::query_as("SELECT status, paid_at IS NOT NULL FROM invoices WHERE id = $1")
+                    .bind(invoice_id)
+                    .fetch_one(&env.pool)
+                    .await
+                    .expect("invoice");
             assert_eq!(status, "paid");
             assert!(paid_at_is_set);
-            assert_eq!(
-                payment_id.as_deref(),
-                Some("tr_settle"),
-                "the settlement binds the Mollie payment id"
-            );
+            // N-05 (step 10): the settlement's payment binding lives on the
+            // NEUTRAL execution ledger, not a provider-named invoice column.
+            let (_payment_id, obligation): (String, String) = sqlx::query_as(
+                "SELECT provider_payment_id, obligation_ref FROM payment_attempts \
+                 WHERE provider = 'mollie' AND provider_payment_id = 'tr_settle'",
+            )
+            .fetch_one(&env.pool)
+            .await
+            .expect("attempt");
+            assert_eq!(obligation, format!("invoice:{invoice_id}"));
             let (amount, source, operation_id): (i64, String, String) = sqlx::query_as(
                 "SELECT amount_cents, source, operation_id FROM invoice_payment_allocations WHERE invoice_id = $1",
             )
@@ -6456,7 +6436,9 @@ mod coverage_adversarial {
             .await
             .expect("allocation");
             assert_eq!(amount, 12_400, "the verified payment is allocated once");
-            assert_eq!(source, PAYMENT_ALLOCATION_SOURCE);
+            // N-05/N-10 (step 10): the engine writes the GENERIC processor
+            // source role with the provider dimension.
+            assert_eq!(source, "processor");
             assert_eq!(operation_id, "mollie:tr_settle");
             let dunning: Option<String> =
                 sqlx::query_scalar("SELECT status FROM dunning_records WHERE tenant_id = $1")
@@ -6620,38 +6602,47 @@ mod coverage_adversarial {
         assert_eq!(snapshots, 0, "the gate never ran for a refused settlement");
     });
 
-    env_test!(
-        recurring_authorisation_zero_value_settles_without_allocation,
-        |env| {
-            let tenant = "swadv_zero";
-            seed_tenant(env, tenant, "growth", "active").await;
-            let invoice_id = Uuid::new_v4();
-            seed_local_invoice(env, tenant, invoice_id, 0, 0, 0, "eur").await;
-            let item = recurring_authorisation("tr_zero_value", invoice_id, 0, true, Some(tenant));
-            deliver_payment(&env.state, &item)
-                .await
-                .expect("zero-value invoices settle");
-            let (status, payment_id): (String, Option<String>) =
-                sqlx::query_as("SELECT status, mollie_payment_id FROM invoices WHERE id = $1")
-                    .bind(invoice_id)
-                    .fetch_one(&env.pool)
-                    .await
-                    .expect("invoice");
-            assert_eq!(status, "paid");
-            assert_eq!(payment_id.as_deref(), Some("tr_zero_value"));
-            let allocations: i64 = sqlx::query_scalar(
-                "SELECT COUNT(*) FROM invoice_payment_allocations WHERE invoice_id = $1",
-            )
+    env_test!(zero_value_payments_settle_nothing_strictly, |env| {
+        let tenant = "swadv_zero";
+        seed_tenant(env, tenant, "growth", "active").await;
+        let invoice_id = Uuid::new_v4();
+        seed_local_invoice(env, tenant, invoice_id, 0, 0, 0, "eur").await;
+        let item = recurring_authorisation("tr_zero_value", invoice_id, 0, true, Some(tenant));
+        deliver_payment(&env.state, &item)
+            .await
+            .expect("zero-value obligations settle nothing, acknowledged");
+        // N-10 (step 10): the engine core settles a VERIFIED positive
+        // allocation; a nothing charge allocates nothing and flips
+        // nothing — the fact stays ledged on the neutral tables (the
+        // legacy writer's free paid-flip for zero-total invoices is
+        // retired with it).
+        let status: String = sqlx::query_scalar("SELECT status::text FROM invoices WHERE id = $1")
             .bind(invoice_id)
             .fetch_one(&env.pool)
             .await
-            .expect("allocations");
-            assert_eq!(
-                allocations, 0,
-                "no positive allocation is invented for zero value"
-            );
-        }
-    );
+            .expect("invoice");
+        assert_eq!(status, "pending", "an empty settlement flips nothing");
+        let (payment_id, state): (Option<String>, String) = sqlx::query_as(
+            "SELECT provider_payment_id, state FROM payment_attempts \
+                 WHERE provider = 'mollie' AND provider_payment_id = 'tr_zero_value'",
+        )
+        .fetch_one(&env.pool)
+        .await
+        .expect("attempt");
+        assert_eq!(payment_id.as_deref(), Some("tr_zero_value"));
+        assert_eq!(state, "succeeded", "the fact is observed");
+        let allocations: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM invoice_payment_allocations WHERE invoice_id = $1",
+        )
+        .bind(invoice_id)
+        .fetch_one(&env.pool)
+        .await
+        .expect("allocations");
+        assert_eq!(
+            allocations, 0,
+            "no positive allocation is invented for zero value"
+        );
+    });
 
     env_test!(
         recurring_authorisation_foreign_tenant_refused_leaves_dunning,
@@ -7323,9 +7314,9 @@ mod coverage_adversarial {
 
     async fn seed_subscription(env: &Env, tenant: &str, subscription_id: &str, status: &str) {
         sqlx::query(
-            "INSERT INTO mollie_subscriptions
-                 (tenant_id, mollie_subscription_id, plan, status, billing_cycle_start,
-                  billing_cycle_end, mollie_customer_id)
+            "INSERT INTO subscription_state
+                 (tenant_id, provider_contract_id, plan, status, billing_cycle_start,
+                  billing_cycle_end, provider_customer_id)
              VALUES ($1, $2, 'free', $3, NOW(), NOW() + INTERVAL '30 days', $1)",
         )
         .bind(tenant)
@@ -7357,8 +7348,8 @@ mod coverage_adversarial {
                 .await
                 .expect("token bound");
             let rows: Vec<(String, Option<String>, Option<String>)> = sqlx::query_as(
-                "SELECT mollie_subscription_id, mollie_mandate_id, mollie_sequence_type
-             FROM mollie_subscriptions WHERE tenant_id = $1 ORDER BY mollie_subscription_id",
+                "SELECT provider_contract_id, provider_method_id, provider_sequence_type
+             FROM subscription_state WHERE tenant_id = $1 ORDER BY provider_contract_id",
             )
             .bind(tenant)
             .fetch_all(&env.pool)
@@ -7370,8 +7361,8 @@ mod coverage_adversarial {
                 assert_eq!(model.as_deref(), Some("first"));
             }
             let untouched: Option<String> = sqlx::query_scalar(
-                "SELECT mollie_mandate_id FROM mollie_subscriptions
-             WHERE mollie_subscription_id = 'sub_swadv_token_other'",
+                "SELECT provider_method_id FROM subscription_state
+             WHERE provider_contract_id = 'sub_swadv_token_other'",
             )
             .fetch_one(&env.pool)
             .await
@@ -7410,7 +7401,7 @@ mod coverage_adversarial {
             .await
             .expect("a mandate without a subscription row is acknowledged");
         let rows: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM mollie_subscriptions WHERE tenant_id = $1")
+            sqlx::query_scalar("SELECT COUNT(*) FROM subscription_state WHERE tenant_id = $1")
                 .bind(tenant)
                 .fetch_one(&env.pool)
                 .await
@@ -7439,7 +7430,7 @@ mod coverage_adversarial {
             .await
             .expect("tenant");
         assert_eq!(status, "suspended", "checkout never bypasses a suspension");
-        let subs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM mollie_subscriptions")
+        let subs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM subscription_state")
             .fetch_one(&env.pool)
             .await
             .expect("subscriptions");
@@ -7458,7 +7449,7 @@ mod coverage_adversarial {
             handle_checkout_authorisation(&env.state, &event)
                 .await
                 .expect("unattributable checkout is acknowledged");
-            let subs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM mollie_subscriptions")
+            let subs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM subscription_state")
                 .fetch_one(&env.pool)
                 .await
                 .expect("subs");
@@ -8732,9 +8723,9 @@ mod coverage_adversarial {
 
     async fn seed_active_subscription(env: &Env, tenant: &str, plan: &str, sub_id: &str) {
         sqlx::query(
-            "INSERT INTO mollie_subscriptions
-                 (tenant_id, mollie_subscription_id, plan, status, billing_cycle_start,
-                  billing_cycle_end, mollie_customer_id)
+            "INSERT INTO subscription_state
+                 (tenant_id, provider_contract_id, plan, status, billing_cycle_start,
+                  billing_cycle_end, provider_customer_id)
              VALUES ($1, $2, $3, 'active', NOW(), NOW() + INTERVAL '30 days', 'cst_ip')",
         )
         .bind(tenant)
@@ -8871,12 +8862,12 @@ mod coverage_adversarial {
             env.restore_table("dedicated_ip_provisioning_requests")
                 .await;
 
-            env.break_table("mollie_subscriptions").await;
+            env.break_table("subscription_state").await;
             let error = auto_provision_dedicated_ips_background(&env.state, tenant)
                 .await
                 .expect_err("broken allowance query");
             assert!(error.contains("Failed to load dedicated IP allowance"));
-            env.restore_table("mollie_subscriptions").await;
+            env.restore_table("subscription_state").await;
 
             env.break_table("dedicated_ips").await;
             let error = auto_provision_dedicated_ips_background(&env.state, tenant)

@@ -1669,12 +1669,17 @@ async fn run_arm(
             // (status `canceled`, flag cleared, tenant downgraded) applies.
             let suffix = Uuid::new_v4().simple().to_string()[..8].to_string();
             let subscription_id = format!("local_conf18_{suffix}");
+            // The period end seeds a second BEHIND the wall clock: the worker's
+            // due-comparison receives the TEST PROCESS's Utc::now() while the
+            // seed reads the DATABASE's NOW() — on a VM whose clock runs even
+            // tens of milliseconds ahead of the host, a bare NOW() boundary
+            // makes the subscription "not yet due" and the arm flakes.
             sqlx::query(
-                "INSERT INTO mollie_subscriptions \
-                     (tenant_id, mollie_subscription_id, plan, status, billing_interval, \
+                "INSERT INTO subscription_state \
+                     (tenant_id, provider_contract_id, plan, status, billing_interval, \
                       billing_cycle_start, billing_cycle_end, cancel_at_period_end) \
                  VALUES ($1, $2, 'growth', 'active', 'monthly', \
-                         NOW() - INTERVAL '1 month', NOW(), true)",
+                         NOW() - INTERVAL '1 month', NOW() - INTERVAL '1 second', true)",
             )
             .bind(ctx.tenant_id)
             .bind(&subscription_id)
@@ -1725,7 +1730,7 @@ async fn run_arm(
                 return Err("cancel-at-period-end must settle nothing".into());
             }
             let (status, cancel_flag): (String, bool) = sqlx::query_as(
-                "SELECT status, cancel_at_period_end FROM mollie_subscriptions \
+                "SELECT status, cancel_at_period_end FROM subscription_state \
                  WHERE tenant_id = $1",
             )
             .bind(ctx.tenant_id)

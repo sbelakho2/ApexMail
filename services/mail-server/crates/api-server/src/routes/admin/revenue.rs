@@ -174,7 +174,7 @@ fn recent_month_starts(now: DateTime<Utc>, count: u32) -> Vec<DateTime<Utc>> {
         .collect()
 }
 
-/// Subscriptions are read from `mollie_subscriptions`, the table the
+/// Subscriptions are read from `subscription_state`, the table the
 /// billing-service webhook writers populate (the legacy `subscriptions`
 /// table has no writer), joined via `tenants.plan` to `plans` pricing,
 /// mirroring billing-service's `get_mrr_report` pattern. `cancel_expr` is
@@ -196,7 +196,7 @@ fn build_subscription_revenue_sql(has_billing_interval: bool, cancel_expr: &str)
                 {cancel_expr} as canceled_at,
                 COALESCE(p.price_monthly, 0) as price_monthly,
                 COALESCE(p.price_yearly, 0) as price_yearly
-         FROM mollie_subscriptions s
+         FROM subscription_state s
          JOIN tenants t ON t.id = s.tenant_id
          LEFT JOIN plans p ON p.name = t.plan"
     )
@@ -370,10 +370,10 @@ async fn get_revenue(
     let mut notes: Vec<String> = Vec::new();
 
     let subscriptions =
-        if table_exists(db, "mollie_subscriptions").await? && table_exists(db, "plans").await? {
+        if table_exists(db, "subscription_state").await? && table_exists(db, "plans").await? {
             let has_billing_interval =
-                column_exists(db, "mollie_subscriptions", "billing_interval").await?;
-            let cancel_expr = if column_exists(db, "mollie_subscriptions", "canceled_at").await? {
+                column_exists(db, "subscription_state", "billing_interval").await?;
+            let cancel_expr = if column_exists(db, "subscription_state", "canceled_at").await? {
                 validated_column("s.canceled_at")?
             } else {
                 // Hardcoded CASE expression - not from user input, safe from injection
@@ -660,13 +660,13 @@ mod tests {
     }
 
     #[test]
-    fn revenue_subscription_sql_reads_mollie_subscriptions() {
+    fn revenue_subscription_sql_reads_subscription_state() {
         let sql = build_subscription_revenue_sql(
             true,
             "CASE WHEN s.status = 'canceled' THEN s.updated_at ELSE NULL END",
         );
 
-        assert!(sql.contains("FROM mollie_subscriptions s"));
+        assert!(sql.contains("FROM subscription_state s"));
         assert!(sql.contains("JOIN tenants t ON t.id = s.tenant_id"));
         assert!(sql.contains("LEFT JOIN plans p ON p.name = t.plan"));
         assert!(sql.contains("COALESCE(NULLIF(s.plan, ''), NULLIF(t.plan, ''), 'free')"));
@@ -852,7 +852,7 @@ mod adversarial_tests {
         // One active yearly subscription created today, one 60-day-old
         // active monthly (previous MRR), one canceled 10 days ago.
         sqlx::query(
-            "INSERT INTO mollie_subscriptions (tenant_id, mollie_subscription_id, plan, status, billing_interval, created_at, updated_at, canceled_at)
+            "INSERT INTO subscription_state (tenant_id, provider_contract_id, plan, status, billing_interval, created_at, updated_at, canceled_at)
              VALUES ($1, $2, $3, 'active', 'yearly', NOW(), NOW(), NULL)",
         )
         .bind(&tenant_new)
@@ -862,7 +862,7 @@ mod adversarial_tests {
         .await
         .expect("seed new sub");
         sqlx::query(
-            "INSERT INTO mollie_subscriptions (tenant_id, mollie_subscription_id, plan, status, billing_interval, created_at, updated_at, canceled_at)
+            "INSERT INTO subscription_state (tenant_id, provider_contract_id, plan, status, billing_interval, created_at, updated_at, canceled_at)
              VALUES ($1, $2, $3, 'active', 'monthly', NOW() - INTERVAL '60 days', NOW(), NULL)",
         )
         .bind(&tenant_old)
@@ -872,7 +872,7 @@ mod adversarial_tests {
         .await
         .expect("seed old sub");
         sqlx::query(
-            "INSERT INTO mollie_subscriptions (tenant_id, mollie_subscription_id, plan, status, billing_interval, created_at, updated_at, canceled_at)
+            "INSERT INTO subscription_state (tenant_id, provider_contract_id, plan, status, billing_interval, created_at, updated_at, canceled_at)
              VALUES ($1, $2, $3, 'canceled', 'monthly', NOW() - INTERVAL '90 days', NOW(), NOW() - INTERVAL '10 days')",
         )
         .bind(apexmail_lib::id::generate_id("", 26))
@@ -970,7 +970,7 @@ mod adversarial_tests {
             Err(ApiError::Forbidden(_))
         ));
 
-        sqlx::query("DELETE FROM mollie_subscriptions WHERE mollie_subscription_id LIKE $1")
+        sqlx::query("DELETE FROM subscription_state WHERE provider_contract_id LIKE $1")
             .bind(format!("sub_%_{tag}"))
             .execute(&pool)
             .await

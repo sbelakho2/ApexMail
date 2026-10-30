@@ -79,6 +79,212 @@ pub fn router() -> Router<AppState> {
         .route("/entitlements", get(get_entitlements))
 }
 
+// ── The Stripe webhook ingest ───────────────────────────────────────────────
+//
+// Mounted on the SAME public rate-limited stack as the Mollie route (the
+// billing-service binary has no container in any deployed topology, so
+// api-server is the live ingest surface). Unlike Mollie, Stripe deliveries
+// are SIGNED: the handler verifies the `Stripe-Signature` header (HMAC-SHA256
+// over "{t}.{raw body}", 300s replay window) with `STRIPE_WEBHOOK_SECRET`
+// BEFORE anything enters the fact pipeline — a tampered, replayed or
+// unparseable delivery is refused with 400 and never reaches the ledger.
+//
+// The verified event is normalized by billing-service's
+// `payments::stripe_events` and each neutral fact is dispatched through the
+// SAME engine paths the Mollie webhook uses (observe → verify → settle /
+// refund / dispute / settlement facts) — never a Stripe-specific writer.
+// Every engine write is idempotent per fact id, so a redelivered event (the
+// delivery's `event.id` is the dedupe identity) is acknowledged without a
+// second effect.
+//
+// Status contract: 200 "OK" once the delivery produced no retryable error
+// (including unknown event types, which normalize to zero facts — an
+// unknown notification must never fail the delivery); 400 for a
+// missing/failed signature or a non-JSON body (fail closed, never enter the
+// pipeline); 503 when `STRIPE_WEBHOOK_SECRET` is not configured (retryable,
+// never a 404 that would silently drop provider events); 500 for a
+// malformed KNOWN event or a failed fact write (Stripe retries both).
+
+/// The success answer Stripe expects (the bare `OK` keeps operator replays
+/// legible, mirroring the Mollie route).
+const STRIPE_WEBHOOK_ACCEPTED: &str = "OK";
+
+/// Mount point of the Stripe webhook ingest (next to the Mollie route on
+/// the public rate-limited stack).
+pub(crate) fn stripe_webhook_router(state: &AppState) -> Router<AppState> {
+    Router::new()
+        .route("/v1/webhooks/stripe", post(handle_stripe_webhook))
+        .with_state(state.clone())
+}
+
+fn stripe_webhook_error(status: StatusCode, message: &str) -> Response {
+    (status, Json(serde_json::json!({ "error": message }))).into_response()
+}
+
+async fn handle_stripe_webhook(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    let secret = std::env::var("STRIPE_WEBHOOK_SECRET").unwrap_or_default();
+    if secret.trim().is_empty() {
+        // Unconfigured deployment: retryable refusal (Stripe retries), the
+        // same "never a 404" discipline as the Mollie route.
+        return stripe_webhook_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "STRIPE_WEBHOOK_SECRET is not configured on this deployment",
+        );
+    }
+    let Some(signature) = headers
+        .get("Stripe-Signature")
+        .and_then(|value| value.to_str().ok())
+    else {
+        return stripe_webhook_error(
+            StatusCode::BAD_REQUEST,
+            "the Stripe-Signature header is missing",
+        );
+    };
+    // Fail closed: an unverifiable delivery never enters the fact pipeline.
+    if let Err(error) =
+        billing_service::payments::stripe_events::verify_signature(&secret, &body, signature)
+    {
+        return stripe_webhook_error(
+            StatusCode::BAD_REQUEST,
+            &format!("Stripe-Signature verification failed: {error}"),
+        );
+    }
+    let event: serde_json::Value = match serde_json::from_slice(&body) {
+        Ok(event) => event,
+        Err(error) => {
+            return stripe_webhook_error(
+                StatusCode::BAD_REQUEST,
+                &format!("the delivery body is not JSON: {error}"),
+            );
+        }
+    };
+    let event_id = billing_service::payments::stripe_events::event_dedup_id(&event);
+    // Unknown event types answer Ok(vec![]) here: accepted and ignored.
+    let facts = match billing_service::payments::stripe_events::normalize_event(
+        billing_service::payments::stripe_events::PROVIDER,
+        &event,
+    ) {
+        Ok(facts) => facts,
+        Err(message) => {
+            // A malformed KNOWN event: dead-letter via 500 so Stripe retries.
+            tracing::error!(
+                event_id = event_id.as_deref().unwrap_or(""),
+                %message,
+                "stripe webhook: malformed known event"
+            );
+            return stripe_webhook_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "the delivery is a malformed known event; it will be retried",
+            );
+        }
+    };
+    for fact in &facts {
+        if let Err(message) = dispatch_stripe_fact(&state.db, fact).await {
+            tracing::error!(
+                event_id = event_id.as_deref().unwrap_or(""),
+                %message,
+                "stripe webhook fact dispatch failed"
+            );
+            return stripe_webhook_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "a fact failed to process; it will be retried",
+            );
+        }
+    }
+    tracing::info!(
+        event_id = event_id.as_deref().unwrap_or(""),
+        facts = facts.len(),
+        "stripe notification accepted"
+    );
+    (StatusCode::OK, STRIPE_WEBHOOK_ACCEPTED).into_response()
+}
+
+/// Dispatch one normalized fact through the shared payments engine — the
+/// SAME verify-then-settle core the Mollie webhook runs, never a
+/// Stripe-specific writer. A refused verification (unknown obligation,
+/// cross-tenant, currency mismatch, non-successful state, amount drift) is
+/// logged and ACKNOWLEDGED without settlement: the attempt row the engine
+/// already wrote stays open for reconciliation, and a retry would refuse
+/// identically. A failed WRITE (DB error) is the only retryable error.
+async fn dispatch_stripe_fact(
+    db: &sqlx::PgPool,
+    fact: &billing_service::payments::stripe_events::NormalizedFact,
+) -> Result<(), String> {
+    use billing_service::payments::engine;
+    use billing_service::payments::engine::VerifyError;
+    use billing_service::payments::stripe_events::NormalizedFact;
+    match fact {
+        NormalizedFact::Payment(observed) => {
+            engine::observe_payment(db, observed).await?;
+            let verified = match engine::verify_against_obligation(db, observed).await {
+                Ok(verified) => verified,
+                Err(VerifyError::AmountMismatch {
+                    ref payment_id,
+                    expected_minor,
+                    actual_minor,
+                }) => {
+                    tracing::error!(
+                        payment_id = %payment_id,
+                        expected_minor,
+                        actual_minor,
+                        "RECONCILIATION INCIDENT: the stripe webhook charge amount != the \
+                         obligation amount; no entitlement, no settlement — the attempt \
+                         stays open for manual reconciliation"
+                    );
+                    return Ok(());
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        provider_payment_id = %observed.provider_payment_id,
+                        error = %error,
+                        "stripe settlement verification refused; the attempt stays open, \
+                         no settlement"
+                    );
+                    return Ok(());
+                }
+            };
+            let settled_now = engine::settle_verified(
+                db,
+                billing_service::payments::stripe_events::PROVIDER,
+                &verified,
+            )
+            .await?;
+            if !settled_now {
+                // A replay: the obligation was already settled exactly once
+                // (the unique operation id). Acknowledge with no second
+                // allocation.
+                tracing::info!(
+                    invoice_id = %verified.invoice_id,
+                    provider_payment_id = %observed.provider_payment_id,
+                    "stripe payment fact was already settled; replay acknowledged"
+                );
+            }
+            Ok(())
+        }
+        NormalizedFact::Refund(refund) => engine::record_refund_fact(db, refund).await,
+        NormalizedFact::Dispute(dispute) => {
+            engine::observe_dispute(
+                db,
+                billing_service::payments::stripe_events::PROVIDER,
+                dispute,
+            )
+            .await
+        }
+        NormalizedFact::Settlement(settlement) => {
+            engine::record_settlement_fact(
+                db,
+                billing_service::payments::stripe_events::PROVIDER,
+                settlement,
+            )
+            .await
+        }
+    }
+}
+
 /// SM3 (audit F3): the platform billing-admin routes. These used to ride the
 /// plain `authenticated` router guarded only by `has_admin_access`, a JWT
 /// tenant-id + scope string check, so a stolen system-tenant session JWT
@@ -805,12 +1011,12 @@ struct AdminBillingAddressRow {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct LegacyMollieSubscriptionDto {
+struct LegacySubscriptionDto {
     id: String,
     tenant_id: String,
-    mollie_subscription_id: String,
-    mollie_customer_id: String,
-    mollie_plan_code: String,
+    provider_contract_id: String,
+    provider_customer_id: String,
+    snapshot_plan_code: String,
     status: String,
     billing_interval: String,
     billing_cycle_start: chrono::DateTime<Utc>,
@@ -823,12 +1029,12 @@ struct LegacyMollieSubscriptionDto {
 }
 
 #[derive(sqlx::FromRow)]
-struct LegacyMollieSubscriptionRow {
+struct LegacySubscriptionRow {
     id: String,
     tenant_id: String,
-    mollie_subscription_id: String,
-    mollie_customer_id: String,
-    mollie_plan_code: String,
+    provider_contract_id: String,
+    provider_customer_id: String,
+    snapshot_plan_code: String,
     status: String,
     billing_interval: String,
     billing_cycle_start: chrono::DateTime<Utc>,
@@ -840,14 +1046,14 @@ struct LegacyMollieSubscriptionRow {
     updated_at: chrono::DateTime<Utc>,
 }
 
-impl From<LegacyMollieSubscriptionRow> for LegacyMollieSubscriptionDto {
-    fn from(row: LegacyMollieSubscriptionRow) -> Self {
+impl From<LegacySubscriptionRow> for LegacySubscriptionDto {
+    fn from(row: LegacySubscriptionRow) -> Self {
         Self {
             id: row.id,
             tenant_id: row.tenant_id,
-            mollie_subscription_id: row.mollie_subscription_id,
-            mollie_customer_id: row.mollie_customer_id,
-            mollie_plan_code: row.mollie_plan_code,
+            provider_contract_id: row.provider_contract_id,
+            provider_customer_id: row.provider_customer_id,
+            snapshot_plan_code: row.snapshot_plan_code,
             status: row.status,
             billing_interval: row.billing_interval,
             billing_cycle_start: row.billing_cycle_start,
@@ -2480,14 +2686,14 @@ async fn get_route_subscription(
     tenant_id: &str,
 ) -> Result<Option<RouteSubscription>, ApiError> {
     // The legacy `subscriptions` table is never populated in production; the
-    // live record is `mollie_subscriptions`. Read the live table first and
+    // live record is `subscription_state`. Read the live table first and
     // fall back to the legacy one only for old deployments.
     let row: Option<RouteSubscriptionRow> = sqlx::query_as(
         r#"
         SELECT plan AS plan_name, billing_interval,
                billing_cycle_start AS current_period_start,
                billing_cycle_end AS current_period_end
-        FROM mollie_subscriptions
+        FROM subscription_state
         WHERE tenant_id = $1
           AND status IN ('active', 'trialing', 'past_due')
         ORDER BY created_at DESC
@@ -3479,14 +3685,14 @@ async fn get_subscription(
     // scope (fail-closed, see get_usage).
     crate::middleware::auth::require_scopes(&auth, &["billing:read"])?;
 
-    let query = sqlx::query_as::<_, LegacyMollieSubscriptionRow>(
+    let query = sqlx::query_as::<_, LegacySubscriptionRow>(
         r#"
         SELECT
             id::text AS id,
             tenant_id,
-            mollie_subscription_id,
-            mollie_customer_id,
-            mollie_plan_code,
+            provider_contract_id,
+            provider_customer_id,
+            snapshot_plan_code,
             status::text AS status,
             billing_interval,
             billing_cycle_start,
@@ -3496,7 +3702,7 @@ async fn get_subscription(
             trial_end,
             created_at,
             updated_at
-        FROM mollie_subscriptions
+        FROM subscription_state
         WHERE tenant_id = $1 AND status != 'canceled'
         ORDER BY created_at DESC
         LIMIT 1
@@ -3512,7 +3718,7 @@ async fn get_subscription(
 
     match subscription {
         Some(subscription) => Ok(billing_success_response(serde_json::json!({
-            "subscription": LegacyMollieSubscriptionDto::from(subscription),
+            "subscription": LegacySubscriptionDto::from(subscription),
         }))),
         None => Ok(billing_success_response(serde_json::json!({
             "subscription": null,
@@ -3699,7 +3905,7 @@ async fn admin_list_tenants(
                     d.status AS dunning_state,
                     w.balance AS wallet_balance
                 FROM tenants t
-                LEFT JOIN mollie_subscriptions s ON t.id = s.tenant_id
+                LEFT JOIN subscription_state s ON t.id = s.tenant_id
                 LEFT JOIN plans p ON p.name = s.plan
                 LEFT JOIN dunning_records d ON t.id = d.tenant_id
                 LEFT JOIN wallets w ON t.id = w.tenant_id
@@ -3729,7 +3935,7 @@ async fn admin_list_tenants(
                     d.status AS dunning_state,
                     w.balance AS wallet_balance
                 FROM tenants t
-                LEFT JOIN mollie_subscriptions s ON t.id = s.tenant_id
+                LEFT JOIN subscription_state s ON t.id = s.tenant_id
                 LEFT JOIN plans p ON p.name = s.plan
                 LEFT JOIN dunning_records d ON t.id = d.tenant_id
                 LEFT JOIN wallets w ON t.id = w.tenant_id
@@ -3760,14 +3966,14 @@ async fn admin_get_tenant_details(
         return Ok(response);
     }
 
-    let subscription = match sqlx::query_as::<_, LegacyMollieSubscriptionRow>(
+    let subscription = match sqlx::query_as::<_, LegacySubscriptionRow>(
         r#"
         SELECT
             id::text AS id,
             tenant_id,
-            mollie_subscription_id,
-            mollie_customer_id,
-            mollie_plan_code,
+            provider_contract_id,
+            provider_customer_id,
+            snapshot_plan_code,
             status::text AS status,
             billing_interval,
             billing_cycle_start,
@@ -3777,7 +3983,7 @@ async fn admin_get_tenant_details(
             trial_end,
             created_at,
             updated_at
-        FROM mollie_subscriptions
+        FROM subscription_state
         WHERE tenant_id = $1 AND status != 'canceled'
         ORDER BY created_at DESC
         LIMIT 1
@@ -3787,7 +3993,7 @@ async fn admin_get_tenant_details(
     .fetch_optional(&state.db)
     .await
     {
-        Ok(subscription) => subscription.map(LegacyMollieSubscriptionDto::from),
+        Ok(subscription) => subscription.map(LegacySubscriptionDto::from),
         Err(error) if is_postgres_error_code(&error, "42P01") => None,
         Err(error) => return Err(ApiError::from(error)),
     };
@@ -4214,7 +4420,7 @@ async fn admin_force_subscription_status(
 
     let update = sqlx::query(
         r#"
-        UPDATE mollie_subscriptions
+        UPDATE subscription_state
         SET status = $2,
             admin_override_at = NOW(),
             admin_override_by = $3,
@@ -5009,7 +5215,7 @@ async fn admin_get_churn_report(
     // Shared with billing-service (audit 2: this local copy priced churn
     // from the tenant's post-cancellation 'free' plan, structurally ~0 —
     // and truncated yearly/12). Single source:
-    // billing_service::routes::CHURN_REPORT_SQL (mollie_plan_code snapshot
+    // billing_service::routes::CHURN_REPORT_SQL (snapshot_plan_code snapshot
     // join + unpriced-churn coverage).
     let report: serde_json::Value = sqlx::query_scalar(billing_service::routes::CHURN_REPORT_SQL)
         .fetch_one(&state.db)
@@ -5161,7 +5367,7 @@ async fn admin_export_billing_data(
                     s.billing_interval,
                     s.billing_cycle_start as current_period_start, s.current_period_end,
                     s.created_at, s.canceled_at
-                FROM mollie_subscriptions s
+                FROM subscription_state s
                 JOIN tenants t ON s.tenant_id = t.id
                 LEFT JOIN plans p ON p.name = s.plan
                 WHERE s.created_at >= $1 AND s.created_at < $2
@@ -7708,7 +7914,7 @@ mod adversarial_tests {
             "{body}"
         );
         let subscriptions: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM mollie_subscriptions WHERE tenant_id = $1")
+            sqlx::query_scalar("SELECT COUNT(*) FROM subscription_state WHERE tenant_id = $1")
                 .bind(&tenant)
                 .fetch_one(&pool)
                 .await
@@ -7718,9 +7924,9 @@ mod adversarial_tests {
         // Seed the provider-confirmed subscription the webhook path writes,
         // then cancel at period end.
         sqlx::query(
-            "INSERT INTO mollie_subscriptions
-                 (tenant_id, mollie_subscription_id, plan, status, billing_cycle_start,
-                  billing_cycle_end, mollie_customer_id)
+            "INSERT INTO subscription_state
+                 (tenant_id, provider_contract_id, plan, status, billing_cycle_start,
+                  billing_cycle_end, provider_customer_id)
              VALUES ($1, 'sub_advgate_cancel', 'advgate', 'active', NOW(),
                      NOW() + INTERVAL '30 days', $1)",
         )
@@ -7742,7 +7948,7 @@ mod adversarial_tests {
         let (sub_status, cancel_at_period_end, canceled_at): (String, bool, Option<String>) =
             sqlx::query_as(
                 "SELECT status, cancel_at_period_end, canceled_at::text
-                   FROM mollie_subscriptions WHERE tenant_id = $1",
+                   FROM subscription_state WHERE tenant_id = $1",
             )
             .bind(&tenant)
             .fetch_one(&pool)
@@ -7763,13 +7969,12 @@ mod adversarial_tests {
         )
         .await;
         assert_eq!(status, StatusCode::OK);
-        let (replay_canceled_at,): (Option<String>,) = sqlx::query_as(
-            "SELECT canceled_at::text FROM mollie_subscriptions WHERE tenant_id = $1",
-        )
-        .bind(&tenant)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+        let (replay_canceled_at,): (Option<String>,) =
+            sqlx::query_as("SELECT canceled_at::text FROM subscription_state WHERE tenant_id = $1")
+                .bind(&tenant)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         assert_eq!(replay_canceled_at, canceled_at, "replay keeps the instant");
 
         // An immediate cancellation ends it now and downgrades the tenant.
@@ -7835,8 +8040,8 @@ mod adversarial_tests {
         // Seed one active + one canceled row: the active one wins.
         for (status, mollie_id) in [("canceled", "sub_old"), ("active", "sub_live")] {
             sqlx::query(
-                "INSERT INTO mollie_subscriptions
-                 (id, tenant_id, mollie_subscription_id, mollie_customer_id, mollie_plan_code,
+                "INSERT INTO subscription_state
+                 (id, tenant_id, provider_contract_id, provider_customer_id, snapshot_plan_code,
                   status, plan, billing_interval, billing_cycle_start, billing_cycle_end,
                   cancel_at_period_end, created_at, updated_at)
                  VALUES (gen_random_uuid(), $1, $2, 'cst_x', 'plan_x', $3, 'advsub', 'monthly',
@@ -7852,7 +8057,7 @@ mod adversarial_tests {
         let (status, body) = get(&env, "/v1/billing/subscription").await;
         assert_eq!(status, StatusCode::OK, "{body}");
         assert_eq!(
-            body["data"]["subscription"]["mollieSubscriptionId"],
+            body["data"]["subscription"]["providerContractId"],
             "sub_live"
         );
         assert_eq!(body["data"]["subscription"]["status"], "active");
@@ -8959,8 +9164,8 @@ mod adversarial_tests {
         status: &str,
     ) {
         sqlx::query(
-            "INSERT INTO mollie_subscriptions
-             (id, tenant_id, mollie_subscription_id, mollie_customer_id, mollie_plan_code,
+            "INSERT INTO subscription_state
+             (id, tenant_id, provider_contract_id, provider_customer_id, snapshot_plan_code,
               status, plan, billing_interval, billing_cycle_start, billing_cycle_end,
               cancel_at_period_end, created_at, updated_at)
              VALUES (gen_random_uuid(), $1, $2, 'cst_x', 'plan_x', $3, $4, $5,
@@ -9129,7 +9334,7 @@ mod adversarial_tests {
         assert_eq!(status, StatusCode::BAD_REQUEST);
 
         // Legacy `subscriptions` table is the documented fallback when the
-        // live mollie_subscriptions row is absent.
+        // live subscription_state row is absent.
         let (legacy_tenant, legacy_key) =
             tenant_with_key(&pool, "advstarter", &["billing:read"]).await;
         sqlx::query(
@@ -9153,8 +9358,8 @@ mod adversarial_tests {
 
     async fn seed_admin_subscription(pool: &PgPool, tenant: &str, plan: &str, status: &str) {
         sqlx::query(
-            "INSERT INTO mollie_subscriptions
-             (id, tenant_id, mollie_subscription_id, mollie_customer_id, mollie_plan_code,
+            "INSERT INTO subscription_state
+             (id, tenant_id, provider_contract_id, provider_customer_id, snapshot_plan_code,
               status, plan, billing_interval, billing_cycle_start, billing_cycle_end,
               cancel_at_period_end, created_at, updated_at)
              VALUES (gen_random_uuid(), $1, $2, 'cus_admin', 'price_admin', $3, $4, 'monthly',
@@ -9901,7 +10106,7 @@ mod adversarial_tests {
             "",
             "ACTIVE",
             "deleted",
-            "suspended'; DROP TABLE mollie_subscriptions;--",
+            "suspended'; DROP TABLE subscription_state;--",
         ] {
             let (status_code, body) = post_json(
                 &env,
@@ -9931,7 +10136,7 @@ mod adversarial_tests {
         let (row_status, override_by, override_reason): (String, Option<String>, Option<String>) =
             sqlx::query_as(
                 "SELECT status, admin_override_by, admin_override_reason
-                 FROM mollie_subscriptions WHERE tenant_id = $1",
+                 FROM subscription_state WHERE tenant_id = $1",
             )
             .bind(&tenant)
             .fetch_one(&pool)
@@ -11346,9 +11551,9 @@ mod adversarial_tests {
         let state = crate::app::test_support::test_state_over(pool.clone()).await;
         let auth = auth_user(&["billing:read"], "ten_sub_none");
 
-        crate::routes::fault::hide_table(&pool, "mollie_subscriptions")
+        crate::routes::fault::hide_table(&pool, "subscription_state")
             .await
-            .expect("hide mollie_subscriptions");
+            .expect("hide subscription_state");
         let response = get_subscription(State(state), auth).await.expect("read");
         assert_eq!(response.status(), StatusCode::OK);
         let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
@@ -11709,6 +11914,252 @@ mod adversarial_tests {
             response.status(),
             StatusCode::BAD_REQUEST,
             "malformed bounds refuse before any query"
+        );
+    }
+
+    // ── Stripe webhook ingest (POST /v1/webhooks/stripe) ────────────────
+
+    /// The Stripe-Signature scheme (mirrors payments::stripe_events
+    /// verify_signature's grammar): HMAC-SHA256 over "{t}.{raw body}",
+    /// keyed with the webhook signing secret.
+    fn stripe_signature_header(secret: &str, timestamp: i64, payload: &[u8]) -> String {
+        use hmac::Mac;
+        let mut mac =
+            hmac::Hmac::<sha2::Sha256>::new_from_slice(secret.as_bytes()).expect("hmac key");
+        mac.update(format!("{timestamp}.").as_bytes());
+        mac.update(payload);
+        format!(
+            "t={timestamp},v1={}",
+            hex::encode(mac.finalize().into_bytes())
+        )
+    }
+
+    async fn post_stripe_webhook(
+        env: &Env,
+        body: &str,
+        signature: Option<&str>,
+    ) -> (StatusCode, String) {
+        let mut request = Request::post("/v1/webhooks/stripe");
+        if let Some(signature) = signature {
+            request = request.header("Stripe-Signature", signature);
+        }
+        let response = env
+            .app
+            .clone()
+            .oneshot(request.body(Body::from(body.to_string())).unwrap())
+            .await
+            .expect("response");
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        (status, String::from_utf8_lossy(&bytes).to_string())
+    }
+
+    #[tokio::test]
+    async fn stripe_webhook_refuses_a_missing_signature() {
+        let Some(pool) = pool_for("stripe_webhook_no_sig").await else {
+            return;
+        };
+        let _env_lock = lock_mollie_env().await;
+        let _secret = EnvRestore::set("STRIPE_WEBHOOK_SECRET", Some("whsec_adv_test_secret01"));
+        let env = env_for(pool, "unused".into()).await;
+
+        let (status, body) = post_stripe_webhook(&env, r#"{"id":"evt_no_sig"}"#, None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(
+            body.contains("Stripe-Signature"),
+            "the refusal must name the missing signature: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn stripe_webhook_refuses_a_tampered_payload() {
+        let Some(pool) = pool_for("stripe_webhook_tampered").await else {
+            return;
+        };
+        let _env_lock = lock_mollie_env().await;
+        let secret = "whsec_adv_test_secret02";
+        let _secret = EnvRestore::set("STRIPE_WEBHOOK_SECRET", Some(secret));
+        let env = env_for(pool, "unused".into()).await;
+
+        // The signature is computed over a DIFFERENT payload than the one
+        // delivered: the body was tampered with in transit.
+        let delivered = r#"{"id":"evt_tampered01","type":"payment_intent.succeeded"}"#;
+        let signature = stripe_signature_header(secret, Utc::now().timestamp(), b"other body");
+        let (status, body) = post_stripe_webhook(&env, delivered, Some(&signature)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(
+            body.contains("verification failed"),
+            "a tampered delivery must fail the signature gate: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn stripe_webhook_refuses_an_expired_timestamp() {
+        let Some(pool) = pool_for("stripe_webhook_expired").await else {
+            return;
+        };
+        let _env_lock = lock_mollie_env().await;
+        let secret = "whsec_adv_test_secret03";
+        let _secret = EnvRestore::set("STRIPE_WEBHOOK_SECRET", Some(secret));
+        let env = env_for(pool, "unused".into()).await;
+
+        // Correctly signed but outside the 300s replay window: a captured
+        // delivery replayed later must never enter the pipeline.
+        let payload = br#"{"id":"evt_replayed01","type":"payment_intent.succeeded"}"#;
+        let stale = Utc::now().timestamp() - 400;
+        let signature = stripe_signature_header(secret, stale, payload);
+        let (status, body) = post_stripe_webhook(
+            &env,
+            std::str::from_utf8(payload).unwrap(),
+            Some(&signature),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(
+            body.contains("replay window"),
+            "an out-of-window timestamp must be refused: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn stripe_webhook_accepts_and_ignores_unknown_event_types() {
+        let Some(pool) = pool_for("stripe_webhook_unknown").await else {
+            return;
+        };
+        let _env_lock = lock_mollie_env().await;
+        let secret = "whsec_adv_test_secret04";
+        let _secret = EnvRestore::set("STRIPE_WEBHOOK_SECRET", Some(secret));
+        let env = env_for(pool, "unused".into()).await;
+
+        // Stripe may deliver event types this integration never asked for:
+        // a verified unknown event is acknowledged without effect.
+        let event = r#"{"id":"evt_unknown01","type":"billing.subscription.updated","data":{"object":{"id":"sub_x"}}}"#;
+        let signature = stripe_signature_header(secret, Utc::now().timestamp(), event.as_bytes());
+        let (status, body) = post_stripe_webhook(&env, event, Some(&signature)).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body, "OK", "the accepted answer mirrors the Mollie route");
+    }
+
+    #[tokio::test]
+    async fn stripe_webhook_without_a_configured_secret_is_retryable_not_a_404() {
+        let Some(pool) = pool_for("stripe_webhook_no_secret").await else {
+            return;
+        };
+        let _env_lock = lock_mollie_env().await;
+        let _secret = EnvRestore::set("STRIPE_WEBHOOK_SECRET", None);
+        let env = env_for(pool, "unused".into()).await;
+
+        let (status, body) =
+            post_stripe_webhook(&env, r#"{"id":"evt_unconfigured"}"#, Some("t=1,v1=ab")).await;
+        assert_eq!(
+            status,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "an unconfigured deployment must be a retryable 503, never a 404: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn stripe_webhook_payment_intent_settles_the_obligation_end_to_end() {
+        let Some(pool) = pool_for("stripe_webhook_settle").await else {
+            return;
+        };
+        let _env_lock = lock_mollie_env().await;
+        let secret = "whsec_adv_test_secret05";
+        let _secret = EnvRestore::set("STRIPE_WEBHOOK_SECRET", Some(secret));
+        let tenant = unique_id();
+        seed_tenant(&pool, &tenant, "pro").await;
+        let invoice_id = seed_invoice(
+            &pool,
+            &tenant,
+            "STRIPE-WH-SETTLE-1",
+            "pending",
+            1500,
+            sample_line_items(),
+            None,
+        )
+        .await;
+        let env = env_for(pool.clone(), "unused".into()).await;
+
+        let payment_id = format!("pi_test_{}", unique_id());
+        let event = json!({
+            "id": format!("evt_{}", unique_id()),
+            "type": "payment_intent.succeeded",
+            "data": {
+                "object": {
+                    "id": payment_id,
+                    "object": "payment_intent",
+                    "status": "succeeded",
+                    "amount": 1500,
+                    "currency": "usd",
+                    "metadata": {
+                        "tenant_id": tenant,
+                        "reference": format!("invoice:{invoice_id}"),
+                    },
+                }
+            }
+        })
+        .to_string();
+        let signature = stripe_signature_header(secret, Utc::now().timestamp(), event.as_bytes());
+        let (status, body) = post_stripe_webhook(&env, &event, Some(&signature)).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+
+        // The obligation flipped to paid through the shared engine pipeline.
+        let (invoice_status,): (String,) =
+            sqlx::query_as("SELECT status FROM invoices WHERE id = $1")
+                .bind(invoice_id)
+                .fetch_one(&pool)
+                .await
+                .expect("invoice");
+        assert_eq!(invoice_status, "paid", "the webhook settled the invoice");
+
+        // Exactly one allocation under the provider-scoped operation id.
+        let allocations: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM invoice_payment_allocations WHERE invoice_id = $1",
+        )
+        .bind(invoice_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(allocations, 1, "settled exactly once: {body}");
+        let (operation_id, amount): (String, i64) = sqlx::query_as(
+            "SELECT operation_id, amount_cents FROM invoice_payment_allocations \
+             WHERE invoice_id = $1",
+        )
+        .bind(invoice_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(operation_id, format!("stripe:{payment_id}"));
+        assert_eq!(amount, 1500);
+
+        // The neutral attempts ledger carries the succeeded stripe fact.
+        let (attempt_state,): (String,) = sqlx::query_as(
+            "SELECT state FROM payment_attempts WHERE provider = 'stripe' \
+             AND provider_payment_id = $1",
+        )
+        .bind(&payment_id)
+        .fetch_one(&pool)
+        .await
+        .expect("attempt row");
+        assert_eq!(attempt_state, "succeeded");
+
+        // A redelivery (Stripe's at-least-once) is acknowledged without a
+        // second allocation — the engine's operation id is the dedupe.
+        let (replay_status, replay_body) =
+            post_stripe_webhook(&env, &event, Some(&signature)).await;
+        assert_eq!(replay_status, StatusCode::OK, "{replay_body}");
+        let allocations_after_replay: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM invoice_payment_allocations WHERE invoice_id = $1",
+        )
+        .bind(invoice_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            allocations_after_replay, 1,
+            "a replay must never allocate twice"
         );
     }
 }

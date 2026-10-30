@@ -453,6 +453,14 @@ pub fn build_app(state: AppState) -> Router {
         // by fetching the named object with the API key and is idempotent per
         // content-addressed event id.
         .merge(mollie_webhook_router(&state))
+        // Stripe webhook ingest (external audit item 15): signed deliveries
+        // (Stripe-Signature HMAC over the raw body, verified against
+        // STRIPE_WEBHOOK_SECRET) normalized by billing-service's
+        // payments::stripe_events and dispatched through the SAME engine
+        // pipeline the Mollie webhook runs. Mounted on the same public
+        // rate-limited stack; the handler 503s (retryable, never a 404)
+        // while no secret is configured.
+        .merge(routes::billing::stripe_webhook_router(&state))
         // Data-backed SSR detail pages (/domains/{id}, /campaigns/{id}).
         // Browser pages: the handlers resolve the session and redirect
         // anonymous visitors to /login?next=… (same contract as the SSR

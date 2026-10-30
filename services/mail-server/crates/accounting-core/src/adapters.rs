@@ -325,6 +325,7 @@ struct PaymentAllocationRow {
     amount_cents: i64,
     currency: String,
     source: String,
+    provider: Option<String>,
     created_at: chrono::DateTime<chrono::Utc>,
 }
 
@@ -344,7 +345,8 @@ pub async fn post_payment_allocation_in(
 ) -> Result<PostOutcome> {
     let allocation: Option<PaymentAllocationRow> = sqlx::query_as(
         r#"
-        SELECT operation_id, tenant_id, invoice_id, amount_cents, currency, source, created_at
+        SELECT operation_id, tenant_id, invoice_id, amount_cents, currency, source,
+               provider, created_at
         FROM invoice_payment_allocations
         WHERE operation_id = $1
         "#,
@@ -378,36 +380,54 @@ pub async fn post_payment_allocation_in(
     let fiscal_period_id =
         crate::provisioning::ensure_open_period_in(conn, legal_entity_id, document_date).await?;
 
-    let clearing = match allocation.source.as_str() {
-        "mollie" => {
-            let processor_account: Option<Uuid> = sqlx::query_scalar(
-                "SELECT clearing_account_id FROM processor_clearing_accounts \
-                 WHERE legal_entity_id = $1 AND processor = 'mollie' AND currency = $2 \
-                   AND is_active LIMIT 1",
-            )
-            .bind(legal_entity_id)
-            .bind(&currency)
-            .fetch_optional(&mut *conn)
-            .await?;
-            match processor_account {
-                Some(account) => account,
-                None => {
-                    crate::chart::resolve_account_role(conn, legal_entity_id, ROLE_PAYMENT_CLEARING)
-                        .await?
-                }
+    // Processor settlements: both the legacy source ('mollie' — historical
+    // rows, migration 281 backfilled their provider dimension) and the
+    // generic source ('processor' — what billing-service writes since the
+    // step-10 vocabulary retirement) clear through the provider-aware
+    // processor clearing account, falling back to the generic chart role.
+    let processor_source = matches!(allocation.source.as_str(), "mollie" | "processor");
+    let clearing = if processor_source {
+        let provider_name = allocation
+            .provider
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("mollie");
+        let processor_account: Option<Uuid> = sqlx::query_scalar(
+            "SELECT clearing_account_id FROM processor_clearing_accounts \
+             WHERE legal_entity_id = $1 AND provider = $2 AND currency = $3 \
+               AND is_active LIMIT 1",
+        )
+        .bind(legal_entity_id)
+        .bind(provider_name)
+        .bind(&currency)
+        .fetch_optional(&mut *conn)
+        .await?;
+        match processor_account {
+            Some(account) => account,
+            None => {
+                crate::chart::resolve_account_role(conn, legal_entity_id, ROLE_PAYMENT_CLEARING)
+                    .await?
             }
         }
-        "wallet" => {
-            crate::chart::resolve_account_role(conn, legal_entity_id, ROLE_WALLET_LIABILITY).await?
+    } else {
+        match allocation.source.as_str() {
+            "wallet" => {
+                crate::chart::resolve_account_role(conn, legal_entity_id, ROLE_WALLET_LIABILITY)
+                    .await?
+            }
+            _ => crate::chart::resolve_account_role(conn, legal_entity_id, ROLE_BANK).await?,
         }
-        _ => crate::chart::resolve_account_role(conn, legal_entity_id, ROLE_BANK).await?,
     };
     let ar = crate::chart::resolve_account_role(conn, legal_entity_id, ROLE_AR).await?;
 
-    let source_type = match allocation.source.as_str() {
-        "mollie" => "mollie_settlement",
-        "wallet" => "wallet_settlement",
-        _ => "manual_settlement",
+    let source_type = if processor_source {
+        "processor_settlement"
+    } else {
+        match allocation.source.as_str() {
+            "wallet" => "wallet_settlement",
+            _ => "manual_settlement",
+        }
     };
 
     let payload = serde_json::json!({

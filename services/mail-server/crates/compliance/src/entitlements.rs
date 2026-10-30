@@ -7,11 +7,11 @@
 //!   069/093/098, producers: api-server billing admin routes);
 //! - contract window: `enterprise_contracts` active period
 //!   (migration 022, producers: enterprise contracts + billing admin);
-//! - subscription state: `mollie_subscriptions` (producer: billing-service
+//! - subscription state: `subscription_state` (producer: billing-service
 //!   mollie webhooks);
 //! - monthly usage: `metering_events` `emails_sent` aggregated over the
 //!   SAME window quota enforcement charges, the tenant's anchored billing
-//!   cycle when a Mollie subscription defines one, the UTC calendar month
+//!   cycle when a subscription defines one, the UTC calendar month
 //!   otherwise (F61: mirroring billing-service `check_quota`'s
 //!   Redis-outage DB fallback exactly, so a tenant whose cycle starts on
 //!   the 15th gets identical usage/remaining from enforcement and here).
@@ -111,7 +111,7 @@ struct TenantEntitlementRow {
     contract_end: Option<NaiveDate>,
     /// `enterprise_contracts.annual_prepay_discount` (percent, 0 = none).
     annual_prepay_discount: Option<i32>,
-    /// Latest mollie subscription status (NULL when never subscribed).
+    /// Latest subscription status (NULL when never subscribed).
     mollie_status: Option<String>,
 }
 
@@ -151,7 +151,7 @@ const TENANT_ENTITLEMENT_SQL: &str = r#"
         ) ec ON true
         LEFT JOIN LATERAL (
             SELECT status
-            FROM mollie_subscriptions
+            FROM subscription_state
             WHERE tenant_id = t.id
             ORDER BY updated_at DESC
             LIMIT 1
@@ -181,7 +181,7 @@ const TENANT_CYCLE_ANCHOR_SQL: &str = r#"
         -- the anchor is consumed as a DATE: without the cast sqlx refuses the
         -- row and every entitlement lookup for a subscribed tenant fails.
         SELECT billing_cycle_start::date
-        FROM mollie_subscriptions
+        FROM subscription_state
         WHERE tenant_id = $1
           AND status IN ('active', 'trialing', 'past_due')
           AND billing_cycle_start IS NOT NULL
@@ -544,7 +544,7 @@ mod tests {
             "plan_overrides po",
             "plans p",
             "enterprise_contracts",
-            "mollie_subscriptions",
+            "subscription_state",
         ] {
             assert!(
                 TENANT_ENTITLEMENT_SQL.contains(table),
@@ -871,8 +871,8 @@ mod db_tests {
         let today = Utc::now().date_naive();
         // Anchor the cycle to today so the window starts today.
         sqlx::query(
-            "INSERT INTO mollie_subscriptions
-               (id, tenant_id, mollie_subscription_id, plan, status, billing_cycle_start,
+            "INSERT INTO subscription_state
+               (id, tenant_id, provider_contract_id, plan, status, billing_cycle_start,
                 created_at, updated_at)
              VALUES (gen_random_uuid(), 'ent-usage', $1, 'pro', 'active', $2, NOW(), NOW())",
         )

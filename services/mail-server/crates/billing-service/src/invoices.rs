@@ -221,6 +221,12 @@ pub(crate) async fn generate_invoice_number_tx(
 
 pub struct CreateInvoiceInput {
     pub tenant_id: String,
+    /// Retired write target (N-05, step 10): the provider payment binding
+    /// lives on the neutral execution ledger (`payment_attempts`) and the
+    /// settlement allocations, NOT on a provider-named invoice column. The
+    /// field stays for API compatibility with existing constructors (which
+    /// all pass `None`) but is NO LONGER PERSISTED.
+    #[allow(dead_code)]
     pub mollie_payment_id: Option<String>,
     pub line_items: Vec<NewLineItem>,
     pub period_start: DateTime<Utc>,
@@ -554,20 +560,28 @@ pub async fn create_invoice_in_tx(
             us_sales_tax_cents, us_sales_tax_snapshot,
             created_at, updated_at
         ) VALUES (
-            $1, $2, $3, $4, 'draft',
-            $5, $8, $6, $7, $8, $9,
-            $10, $11, $12, $13,
-            $14, $15, $16, $17,
-            $18, $19,
-            $20,
-            $21, $22::jsonb,
-            $10, $10
+            -- N-05 (step 10): the provider payment binding is NOT written;
+            -- the column exists only for api-server readers until its
+            -- follow-up, and the neutral binding lives on payment_attempts.
+            -- Bind order (the column was dropped from the bind list):
+            -- 1=id 2=tenant 3=invoice_number 4=currency 5=subtotal 6=vat
+            -- 7=total 8=line_items 9=now 10=due_at 11=period_start
+            -- 12=period_end 13=country 14=vat_rate 15=overage_period
+            -- 16=address_snapshot 17=registry_code 18=vat_evidence_id
+            -- 19=product_lines_period 20=us_tax_cents 21=us_tax_snapshot.
+            $1, $2, NULL, $3, 'draft',
+            $4, $7, $5, $6, $7, $8,
+            $9, $10, $11, $12,
+            $13, $14, $15, $16,
+            $17, $18,
+            $19,
+            $20, $21::jsonb,
+            $9, $9
         )
         "#,
     )
     .bind(id)
     .bind(&input.tenant_id)
-    .bind(&input.mollie_payment_id)
     .bind(&invoice_number)
     .bind(&currency)
     .bind(subtotal)
@@ -962,7 +976,6 @@ pub async fn create_paid_plan_invoice_in_tx(
     interval: &str,
     gross_cents: i64,
     currency: &str,
-    mollie_payment_id: &str,
     period_start: DateTime<Utc>,
     period_end: DateTime<Utc>,
 ) -> Result<Invoice, InvoiceError> {
@@ -998,18 +1011,25 @@ pub async fn create_paid_plan_invoice_in_tx(
             vat_evidence_id, us_sales_tax_cents, us_sales_tax_snapshot,
             created_at, updated_at
         ) VALUES (
-            $1, $2, $3, $4, 'paid',
-            $5, $6, $7, $8, $6, $9,
-            $10, $10, $10, $11, $12,
-            $13, $14, $15, $16,
-            $17, $18, $19::jsonb,
-            $10, $10
+            -- N-05 (step 10): the provider payment binding is NOT written;
+            -- the settlement allocation (same transaction) carries the
+            -- operation id that names the provider payment.
+            -- Bind order (the column was dropped from the bind list):
+            -- 1=id 2=tenant 3=invoice_number 4=currency 5=total 6=net
+            -- 7=vat 8=line_items 9=now 10=period_start 11=period_end
+            -- 12=country 13=vat_rate 14=address_snapshot 15=registry_code
+            -- 16=vat_evidence_id 17=us_tax_cents 18=us_tax_snapshot.
+            $1, $2, NULL, $3, 'paid',
+            $4, $5, $6, $7, $5, $8,
+            $9, $9, $9, $10, $11,
+            $12, $13, $14, $15,
+            $16, $17, $18::jsonb,
+            $9, $9
         )
         "#,
     )
     .bind(id)
     .bind(tenant_id)
-    .bind(mollie_payment_id)
     .bind(&invoice_number)
     .bind(currency.trim().to_ascii_uppercase())
     .bind(gross_cents)
@@ -1554,6 +1574,44 @@ pub enum InvoiceVoidError {
 /// provider-neutral (`ProviderUnavailable` / `ProviderFailed`). The legacy
 /// `invoices.mollie_payment_id` COLUMN still feeds the binding read; its
 /// physical rename is the owner-gated step-10 retirement.
+/// The provider payment a PAID invoice settles from, for the void-as-refund
+/// path. Resolution order (N-05, step 10): the NEUTRAL execution ledger —
+/// the attempt confirmed under `obligation_ref = invoice:{id}` with a known
+/// provider payment id — then the legacy `invoices.mollie_payment_id`
+/// column (historical rows bound before the ledger carried every
+/// settlement; the column is retained only for api-server readers until its
+/// follow-up and is no longer written by this crate).
+async fn bound_provider_payment(
+    tx: &mut sqlx::PgConnection,
+    invoice_id: Uuid,
+) -> Result<Option<String>, InvoiceError> {
+    let neutral: Option<String> = sqlx::query_scalar(
+        "SELECT pa.provider_payment_id \
+         FROM payment_attempts pa \
+         WHERE pa.obligation_ref = $1 \
+           AND pa.provider_payment_id IS NOT NULL \
+           AND pa.provider_payment_id <> '' \
+         ORDER BY pa.updated_at DESC \
+         LIMIT 1",
+    )
+    .bind(format!("invoice:{}", invoice_id))
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(InvoiceError::Db)?;
+    if neutral.is_some() {
+        return Ok(neutral);
+    }
+    let legacy: Option<String> = sqlx::query_scalar(
+        "SELECT mollie_payment_id FROM invoices \
+         WHERE id = $1 AND mollie_payment_id IS NOT NULL AND mollie_payment_id <> ''",
+    )
+    .bind(invoice_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(InvoiceError::Db)?;
+    Ok(legacy)
+}
+
 async fn mollie_refund_payment(
     invoice_id: Uuid,
     invoice_status: &str,
@@ -1622,10 +1680,10 @@ pub async fn void_invoice(
     input: VoidInvoiceInput,
 ) -> Result<Invoice, InvoiceVoidError> {
     // ── 1. Lock + validate the current state ────────────────────────────
-    let (status, mollie_payment_id, total_cents, currency): (String, Option<String>, i64, String) = {
+    let (status, bound_payment_id, total_cents, currency): (String, Option<String>, i64, String) = {
         let mut tx = pool.begin().await.map_err(InvoiceVoidError::Db)?;
-        let row: Option<(String, Option<String>, i64, String)> = sqlx::query_as(
-            "SELECT status::text, mollie_payment_id,
+        let row: Option<(String, i64, String)> = sqlx::query_as(
+            "SELECT status::text,
                     COALESCE(total, amount, 0)::bigint, currency
              FROM invoices
              WHERE id = $1 AND tenant_id = $2 FOR UPDATE",
@@ -1635,7 +1693,7 @@ pub async fn void_invoice(
         .fetch_optional(&mut *tx)
         .await
         .map_err(InvoiceVoidError::Db)?;
-        let Some((status, mollie_payment_id, total_cents, currency)) = row else {
+        let Some((status, total_cents, currency)) = row else {
             return Err(InvoiceVoidError::InvoiceNotFound(input.invoice_id));
         };
         if status == "void" {
@@ -1646,30 +1704,35 @@ pub async fn void_invoice(
                 .await?
                 .ok_or(InvoiceVoidError::InvoiceNotFound(input.invoice_id));
         }
-        // Unpaid (draft/pending) invoices void LOCALLY, Mollie has no
-        // provider-side invoice object to void. A PAID invoice voids as a
-        // provider refund, but only when a payment is BOUND
-        // (`mollie_payment_id`): without one (e.g. wallet settlement)
-        // there is nothing provider-side to return and the void refuses,
-        // exactly like every other non-voidable state.
-        let paid_refund = status == "paid" && mollie_payment_id.is_some();
+        // The provider payment a PAID invoice settles from, resolved from
+        // the NEUTRAL execution ledger first (the attempt confirmed under
+        // the obligation reference; N-05, step 10), then from the legacy
+        // invoice column (historical rows bound before the ledger carried
+        // every settlement). Without a bound payment (e.g. wallet
+        // settlement) there is nothing provider-side to return and a paid
+        // void refuses, exactly like every other non-voidable state.
+        // The bound payment is resolved for ANY status (it records the
+        // audit provenance even on a local unpaid void); the refund itself
+        // only ever fires for a PAID invoice.
+        let bound_payment_id = bound_provider_payment(&mut tx, input.invoice_id).await?;
+        let paid_refund = status == "paid" && bound_payment_id.is_some();
         if !is_voidable_status(&status) && !paid_refund {
             return Err(InvoiceVoidError::NotVoidable {
                 invoice_id: input.invoice_id,
                 status,
             });
         }
-        // The DB lock is released before any Mollie HTTP call: no database
-        // transaction is held across provider I/O. The post-Mollie append
+        // The DB lock is released before any provider HTTP call: no database
+        // transaction is held across provider I/O. The post-refund append
         // re-locks and re-validates below.
         tx.rollback().await.map_err(InvoiceVoidError::Db)?;
-        (status, mollie_payment_id, total_cents, currency)
+        (status, bound_payment_id, total_cents, currency)
     };
 
-    // ── 2. Mollie refund FIRST (only a paid invoice has provider money) ──
+    // ── 2. Provider refund FIRST (only a paid invoice has provider money) ──
     let mut refund_psp_reference: Option<String> = None;
     if status == "paid" {
-        let payment_psp_reference = mollie_payment_id
+        let payment_psp_reference = bound_payment_id
             .clone()
             .expect("paid refund path requires a bound payment");
         // A missing key is an honest refusal: without provider credentials
@@ -1786,7 +1849,7 @@ pub async fn void_invoice(
             // below is step-10 vocabulary).
             "providerRefunded": status == "paid",
             "providerRefundId": refund_psp_reference,
-            "providerPaymentId": mollie_payment_id,
+            "providerPaymentId": bound_payment_id,
         }),
         now,
     )

@@ -6,14 +6,14 @@
 //! [`crate::payments::registry::from_env`], and revocation reads/writes the
 //! NEUTRAL `payment_credentials` ledger (N-04 retired, audit step 7).
 //!
-//! N-01/N-03 RESOLVED (beta authority inversion): entitlement reads come
-//! from the LOCAL subscription state (the billing-cycle row the webhook
-//! writers and the local renewal worker maintain) joined with the tenant's
-//! effective plan; the public DTO carries no provider object ids (a legacy
-//! contract id survives for reconciliation on the neutral
-//! `subscription_payment_bindings` row, keyed by the local subscription id).
-//! The physical table name the state lives in is legacy provider-tagged
-//! vocabulary; its rename is the owner-gated step-10 table retirement.
+//! N-01/N-03 RESOLVED (beta authority inversion + the step-10 retirement):
+//! entitlement reads come from the LOCAL subscription state (the
+//! billing-cycle row the webhook writers and the local renewal worker
+//! maintain) joined with the tenant's effective plan; the public DTO carries
+//! no provider object ids (a legacy contract id survives for reconciliation
+//! on the neutral `subscription_payment_bindings` row, keyed by the local
+//! subscription id). The state lives in `subscription_state` (migration 285:
+//! the physical table and its columns lost the provider tag).
 //!
 //! The payment provider is the payment authority for CHECKOUTS: subscription
 //! persistence and plan activation are driven by verified provider webhooks,
@@ -57,9 +57,8 @@ pub async fn create_subscription(
 /// resolve against the live subscription row (period bounds live in
 /// billing_cycle_start/end) and join tenants for the effective plan name.
 ///
-/// N-03 (beta authority inversion): the LOCAL row is the authority this
-/// reader resolves; only the physical table name is provider-tagged legacy
-/// vocabulary (owner-gated step-10 rename).
+/// N-03 (beta authority inversion + migration 285): the LOCAL row is the
+/// authority this reader resolves, in the neutral `subscription_state` table.
 const GET_SUBSCRIPTION_SQL: &str = r#"
         SELECT
             s.id, s.tenant_id,
@@ -68,7 +67,7 @@ const GET_SUBSCRIPTION_SQL: &str = r#"
             s.billing_cycle_start AS current_period_start,
             s.billing_cycle_end AS current_period_end,
             s.cancel_at_period_end, s.created_at, s.updated_at
-        FROM mollie_subscriptions s
+        FROM subscription_state s
         JOIN tenants t ON t.id = s.tenant_id
         WHERE s.tenant_id = $1
           AND s.status IN ('active', 'trialing', 'past_due')
@@ -204,7 +203,7 @@ pub async fn cancel_subscription(
     let row: Option<(Uuid,)> = sqlx::query_as(
         r#"
         SELECT id
-        FROM mollie_subscriptions
+        FROM subscription_state
         WHERE tenant_id = $1
           AND status IN ('active', 'trialing', 'past_due', 'unpaid')
         ORDER BY created_at DESC
@@ -224,7 +223,7 @@ pub async fn cancel_subscription(
     let now = Utc::now();
     let action = if immediately {
         sqlx::query(
-            "UPDATE mollie_subscriptions
+            "UPDATE subscription_state
                 SET status = 'canceled',
                     cancel_at_period_end = false,
                     canceled_at = COALESCE(canceled_at, $2),
@@ -248,7 +247,7 @@ pub async fn cancel_subscription(
         "billing.subscription_canceled"
     } else {
         sqlx::query(
-            "UPDATE mollie_subscriptions
+            "UPDATE subscription_state
                 SET cancel_at_period_end = true,
                     canceled_at = COALESCE(canceled_at, $2),
                     updated_at = $2
@@ -306,15 +305,15 @@ pub async fn sweep_pending_mandate_revocations(pool: &PgPool) -> Result<u64, Str
     let tenants: Vec<String> = sqlx::query_scalar(
         r#"
         SELECT DISTINCT s.tenant_id
-        FROM mollie_subscriptions s
+        FROM subscription_state s
         JOIN payment_credentials pc
           ON pc.tenant_id = s.tenant_id
-         AND pc.provider_method_id = s.mollie_mandate_id
+         AND pc.provider_method_id = s.provider_method_id
          AND pc.state = 'active'
          AND pc.revoked_at IS NULL
         WHERE s.status = 'canceled'
-          AND s.mollie_mandate_id IS NOT NULL
-          AND s.mollie_mandate_id <> ''
+          AND s.provider_method_id IS NOT NULL
+          AND s.provider_method_id <> ''
         LIMIT 100
         "#,
     )
@@ -347,7 +346,7 @@ const GET_LATEST_SUBSCRIPTION_SQL: &str = r#"
             s.billing_cycle_start AS current_period_start,
             s.billing_cycle_end AS current_period_end,
             s.cancel_at_period_end, s.created_at, s.updated_at
-        FROM mollie_subscriptions s
+        FROM subscription_state s
         JOIN tenants t ON t.id = s.tenant_id
         WHERE s.id = $1
         "#;
@@ -600,13 +599,15 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // Fix C, the subscription reader must target the table the Mollie
-    // webhook writers actually populate.
+    // Fix C, the subscription reader must target the table the webhook
+    // writers actually populate — `subscription_state` (migration 285) —
+    // never the legacy api-era `subscriptions` table.
     // ------------------------------------------------------------------
 
     #[test]
-    fn get_subscription_reads_mollie_subscriptions_not_legacy_table() {
-        assert!(GET_SUBSCRIPTION_SQL.contains("FROM mollie_subscriptions s"));
+    fn get_subscription_reads_subscription_state_not_legacy_table() {
+        assert!(GET_SUBSCRIPTION_SQL.contains("FROM subscription_state s"));
+        assert!(!GET_SUBSCRIPTION_SQL.contains("mollie_subscriptions"));
         assert!(!GET_SUBSCRIPTION_SQL.contains("FROM subscriptions\n"));
         assert!(GET_SUBSCRIPTION_SQL.contains("JOIN tenants t"));
         assert!(GET_SUBSCRIPTION_SQL.contains("s.billing_cycle_start"));
@@ -654,9 +655,9 @@ mod tests {
         let tenant = format!("subcancel-{}", &suffix[..10]);
         crate::test_support::seed_tenant(&env.pool, &tenant, "growth").await;
         sqlx::query(
-            "INSERT INTO mollie_subscriptions
-                 (tenant_id, mollie_subscription_id, plan, status, billing_cycle_start,
-                  billing_cycle_end, mollie_customer_id)
+            "INSERT INTO subscription_state
+                 (tenant_id, provider_contract_id, plan, status, billing_cycle_start,
+                  billing_cycle_end, provider_customer_id)
              VALUES ($1, $2, 'growth', 'active', NOW(), NOW() + INTERVAL '30 days', $1)",
         )
         .bind(&tenant)
@@ -673,7 +674,7 @@ mod tests {
         let (status, cancel_at_period_end, canceled_at): (String, bool, Option<String>) =
             sqlx::query_as(
                 "SELECT status, cancel_at_period_end, canceled_at::text
-                   FROM mollie_subscriptions WHERE tenant_id = $1",
+                   FROM subscription_state WHERE tenant_id = $1",
             )
             .bind(&tenant)
             .fetch_one(&env.pool)
@@ -688,13 +689,12 @@ mod tests {
             .await
             .expect("idempotent replay");
         assert!(again.cancel_at_period_end);
-        let (replay_instant,): (Option<String>,) = sqlx::query_as(
-            "SELECT canceled_at::text FROM mollie_subscriptions WHERE tenant_id = $1",
-        )
-        .bind(&tenant)
-        .fetch_one(&env.pool)
-        .await
-        .unwrap();
+        let (replay_instant,): (Option<String>,) =
+            sqlx::query_as("SELECT canceled_at::text FROM subscription_state WHERE tenant_id = $1")
+                .bind(&tenant)
+                .fetch_one(&env.pool)
+                .await
+                .unwrap();
         assert_eq!(replay_instant, canceled_at);
 
         // Immediate cancellation ends it now and downgrades the tenant.

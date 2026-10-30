@@ -1147,9 +1147,11 @@ pub async fn observe_dispute(
 /// Post the dispute's statutory entry. LOST mirrors the refund writer's
 /// debit (Dr refunds contra-revenue, Dr output VAT, Cr processor clearing
 /// — the provider pulls the money from the clearing balance); WON posts
-/// the restoration (the debit's mirror). Idempotent per dispute outcome;
-/// the entry carries no source document because the source-document
-/// allowlist has no dispute type yet (NEUTRALITY-DEBT, N-13).
+/// the restoration (the debit's mirror). Idempotent per dispute outcome,
+/// and the entry registers a REAL source document: `source_type = 'dispute'`
+/// (migration 286) keyed by the dispute outcome idempotency, with the
+/// dispute fact JSON as the evidence payload (NEUTRALITY-DEBT, N-13
+/// RESOLVED).
 async fn post_dispute_accounting(db: &PgPool, provider: &str, dispute: &super::Dispute) {
     if dispute.amount_minor <= 0 || dispute.state == super::DisputeState::Opened {
         return; // nothing to debit or restore; an opened dispute moves no money
@@ -1209,6 +1211,35 @@ async fn post_dispute_accounting_in(
     )
     .await?;
     let currency = dispute.currency.trim().to_ascii_uppercase();
+
+    // N-13 (step 10): the statutory evidence DOCUMENT — the dispute fact is
+    // the source document's content, registered on
+    // `accounting_source_documents` under the dispute source_type
+    // (migration 286) and anchored (source_type, source_table, source_id) to
+    // the same outcome identity as the journal's idempotency key, so a
+    // replayed dispute fact resolves the existing evidence row and entry
+    // together instead of falling back to the manual-entry hash.
+    let evidence = accounting_core::types::SourceIdentity::new(
+        "dispute",
+        "payment_disputes",
+        &format!(
+            "dispute:{provider}:{}:{outcome_state}",
+            dispute.provider_dispute_id.trim()
+        ),
+        document_date,
+        &currency,
+        dispute.amount_minor,
+        serde_json::json!({
+            "provider": provider,
+            "disputeId": dispute.provider_dispute_id.trim(),
+            "providerPaymentId": dispute.provider_payment_id.trim(),
+            "state": outcome_state,
+            "amountMinor": dispute.amount_minor,
+            "currency": currency,
+            "reason": dispute.reason,
+            "openedAt": dispute.opened_at,
+        }),
+    );
 
     // The invoice's VAT ratio when the disputed payment maps to a local
     // obligation; without one the entry is net-only (no guessed rate). The
@@ -1331,11 +1362,11 @@ async fn post_dispute_accounting_in(
         ),
         posted_by: "engine:dispute-reconciliation".to_string(),
         idempotency_key,
-        // No source document: the accounting_source_documents allowlist has
-        // no dispute source_type yet (debt N-13); the evidence hash is the
-        // manual-entry content hash and the idempotency key is the dispute
-        // identity.
-        source: None,
+        // The registered dispute evidence document (migration 286's
+        // `dispute` source type; debt N-13 RESOLVED): the entry's evidence
+        // hash is the source document's, no longer the manual-entry
+        // fallback.
+        source: Some(evidence),
         reversal_of_entry_id: None,
         lines,
     };

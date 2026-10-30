@@ -435,6 +435,40 @@ impl MollieClient {
         Ok(embedded.iter().map(payment_from_json).collect())
     }
 
+    /// ONE page of the account's recent payments (N-14 widening): the
+    /// page's payments plus the cursor (`from=`) of the NEXT page when the
+    /// listing continues (extracted from `_links.next.href`, the same
+    /// grammar `list_subscriptions` paginates with). The adapter's
+    /// idempotency-key search walks up to five of these pages before it
+    /// refuses to claim absence; `list_payments` stays the single-page
+    /// convenience reader.
+    pub async fn list_payments_page(
+        &self,
+        limit: u32,
+        from: Option<&str>,
+    ) -> Result<(Vec<Payment>, Option<String>), MollieError> {
+        let limit = limit.clamp(1, 250);
+        let mut path = format!("payments?limit={limit}");
+        if let Some(cursor) = from.map(str::trim).filter(|cursor| !cursor.is_empty()) {
+            path.push_str(&format!("&from={cursor}"));
+        }
+        let document = self.send(self.http.get(self.url(&path))).await?;
+        let page: Vec<Payment> = document
+            .get("_embedded")
+            .and_then(|value| value.get("payments"))
+            .and_then(|value| value.as_array())
+            .map(|items| items.iter().map(payment_from_json).collect())
+            .unwrap_or_default();
+        let next = document
+            .get("_links")
+            .and_then(|links| links.get("next"))
+            .and_then(|next| next.get("href"))
+            .and_then(|href| href.as_str())
+            .and_then(|href| href.rsplit("from=").next())
+            .map(str::to_string);
+        Ok((page, next))
+    }
+
     /// Every refund of one payment (Mollie has no top-level refund fetch).
     pub async fn payment_refunds(&self, payment_id: &str) -> Result<Vec<Refund>, MollieError> {
         let document = self

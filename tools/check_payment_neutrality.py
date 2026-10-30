@@ -124,33 +124,16 @@ ALLOWLIST_TOML = """
 # boundary) whose production code still names the processor. Rewriting them
 # is owner-gated follow-up (NEUTRALITY_DEBT.md, step 10+); the grant keeps
 # the census honest and reviewed while pinning nothing in-crate.
-# BETA authority-inversion wave: every grant below was re-verified against
-# the post-cleanup tree — each granted file still names the processor in
-# PRODUCTION code (legacy-table reads, wire-client calls, credential env
-# plumbing); grants whose couplings closed were deleted.
+# Step-10 wave re-verification: the legacy subscription-table reads
+# (mollie_subscriptions → subscription_state, NEUTRALITY-DEBT row N-03)
+# were retired from every api-server/compliance surface, so the grants for
+# cross_tenant, dashboard, growth_analytics, insights, predictive_analytics,
+# revenue, sse and entitlements were DELETED — those files no longer trip
+# any marker. Only the files still naming the processor in PRODUCTION code
+# carry a grant below.
 [[file_grant]]
 path = "services/mail-server/crates/api-server/src/routes/admin/billing_ops.rs"
-reason = "admin ops tooling: wire-client calls + legacy subscription/mandate SQL; retire with N-05/N-10"
-expires = "2027-04-27"
-
-[[file_grant]]
-path = "services/mail-server/crates/api-server/src/routes/admin/cross_tenant.rs"
-reason = "admin cross-tenant audit reads the legacy subscription table; retire with N-03"
-expires = "2027-04-27"
-
-[[file_grant]]
-path = "services/mail-server/crates/api-server/src/routes/admin/dashboard.rs"
-reason = "admin dashboard reads the legacy subscription table; retire with N-03"
-expires = "2027-04-27"
-
-[[file_grant]]
-path = "services/mail-server/crates/api-server/src/routes/admin/growth_analytics.rs"
-reason = "admin growth analytics reads the legacy subscription table; retire with N-03"
-expires = "2027-04-27"
-
-[[file_grant]]
-path = "services/mail-server/crates/api-server/src/routes/admin/insights.rs"
-reason = "admin insights reads the legacy subscription table; retire with N-03"
+reason = "admin ops wire-client liveness checks (webhook health / settlements); retire with N-10"
 expires = "2027-04-27"
 
 [[file_grant]]
@@ -159,33 +142,13 @@ reason = "settlement import drives the wire client directly; retire with N-10/N-
 expires = "2027-04-27"
 
 [[file_grant]]
-path = "services/mail-server/crates/api-server/src/routes/admin/predictive_analytics.rs"
-reason = "admin predictive analytics reads the legacy subscription table; retire with N-03"
-expires = "2027-04-27"
-
-[[file_grant]]
-path = "services/mail-server/crates/api-server/src/routes/admin/revenue.rs"
-reason = "admin revenue analytics reads the legacy subscription table; retire with N-03"
-expires = "2027-04-27"
-
-[[file_grant]]
-path = "services/mail-server/crates/api-server/src/routes/admin/sse.rs"
-reason = "admin SSE stream reads the legacy subscription table; retire with N-03"
-expires = "2027-04-27"
-
-[[file_grant]]
 path = "services/mail-server/crates/api-server/src/routes/billing.rs"
-reason = "checkout quoting + customer mapping on legacy tables (the N-02 price-code consumers); retire with N-02/N-03"
+reason = "checkout customer mapping on the mollie_customers wire ledger + wire-client calls; retire with N-02/N-10"
 expires = "2027-04-27"
 
 [[file_grant]]
 path = "services/mail-server/crates/api-server/src/routes/web.rs"
 reason = "console billing surface drives the wire client; retire with N-10"
-expires = "2027-04-27"
-
-[[file_grant]]
-path = "services/mail-server/crates/compliance/src/entitlements.rs"
-reason = "entitlement reader of the legacy subscription table; retire with N-03"
 expires = "2027-04-27"
 
 [[file_grant]]
@@ -611,6 +574,15 @@ line = 729
 marker = "mollie_subscriptions-sql"
 line_hash = "a7d02c32cd8a6771"
 reason = "billing-period reads on the legacy provider-named table; retire with NEUTRALITY-DEBT row N-03"
+owner = "payments-neutrality"
+expires = "2027-04-27"
+
+[[allow]]
+path = "services/mail-server/crates/billing-service/src/bin/server.rs"
+line = 430
+marker = "STRIPE_SECRET_KEY"
+line_hash = "22afb15f0af07b11"
+reason = "BS-001 provider-aware startup credential gate: the active provider's secret IS the webhook auth (mollie key via authenticated fetch, stripe key + Stripe-Signature secret); config plumbing, not provider coupling"
 owner = "payments-neutrality"
 expires = "2027-04-27"
 """

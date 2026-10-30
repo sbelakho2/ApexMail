@@ -371,9 +371,9 @@ async fn seed_mollie_subscription(
         // Mollie customers are real objects (`cst_…`); the tenant is bound to
         // one through `mollie_customers`
         // id, and the plan code is OUR merchant-defined catalog code.
-        "INSERT INTO mollie_subscriptions
-             (tenant_id, mollie_subscription_id, plan, status, billing_cycle_start,
-              billing_cycle_end, mollie_customer_id, mollie_plan_code)
+        "INSERT INTO subscription_state
+             (tenant_id, provider_contract_id, plan, status, billing_cycle_start,
+              billing_cycle_end, provider_customer_id, snapshot_plan_code)
          VALUES ($1, $2, 'growth', $3, $4, $5, $1, 'apexmail_growth_monthly')",
     )
     .bind(tenant_id)
@@ -1121,7 +1121,7 @@ db_test!(paid_subscription_widens_email_ceiling, |h| {
     let tenant = "cov_quota_paidceil";
     seed_tenant(&h, tenant, "covceil").await;
     seed_plan(&h.pool, "covceil", 100, 100).await;
-    // The paid-subscription gate joins mollie_subscriptions.plan to plans and
+    // The paid-subscription gate joins subscription_state.plan to plans and
     // requires price_monthly > 0, so the subscription's plan needs a price.
     // Fix #10: the features column must carry a valid PlanFeatures document —
     // the '{}' column default now (correctly) fails plan lookups closed.
@@ -3940,7 +3940,7 @@ async fn seed_cov_local_invoice(
     .expect("seed local invoice");
 }
 
-/// The tenant's `mollie_subscriptions` row, optionally already tokenized.
+/// The tenant's `subscription_state` row, optionally already tokenized.
 async fn seed_cov_subscription(
     h: &Harness,
     tenant: &str,
@@ -3948,10 +3948,10 @@ async fn seed_cov_subscription(
     token: Option<&str>,
 ) {
     sqlx::query(
-        "INSERT INTO mollie_subscriptions
-             (tenant_id, mollie_subscription_id, plan, status, billing_cycle_start,
-              billing_cycle_end, mollie_customer_id, mollie_plan_code,
-              mollie_mandate_id)
+        "INSERT INTO subscription_state
+             (tenant_id, provider_contract_id, plan, status, billing_cycle_start,
+              billing_cycle_end, provider_customer_id, snapshot_plan_code,
+              provider_method_id)
          VALUES ($1, $2, 'growth', 'active', NOW(), NOW() + INTERVAL '30 days', $1,
                  'apexmail_growth_monthly', $3)",
     )
@@ -4102,7 +4102,7 @@ db_test!(mollie_webhook_refusals_write_nothing_and_deadletter, |h| {
         .await
         .expect("count invoices");
     assert_eq!(invoices, 0);
-    let subs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM mollie_subscriptions")
+    let subs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM subscription_state")
         .fetch_one(&h.pool)
         .await
         .expect("count subscriptions");
@@ -4250,13 +4250,23 @@ db_test!(mollie_webhook_out_of_order_events_never_rewind_state, |h| {
     ));
     expect_mollie_ok(&app, "tr_cov_order_first").await;
 
-    let (paid_at_after_first, payment_after_first): (DateTime<Utc>, Option<String>) =
-        sqlx::query_as("SELECT paid_at, mollie_payment_id FROM invoices WHERE id = $1")
+    let (paid_at_after_first,): (DateTime<Utc>,) =
+        sqlx::query_as("SELECT paid_at FROM invoices WHERE id = $1")
             .bind(invoice_id)
             .fetch_one(&h.pool)
             .await
             .expect("invoice after settlement");
-    assert_eq!(payment_after_first.as_deref(), Some("tr_cov_order_first"));
+    // N-05/N-10 (step 10): the settlement binding lives on the neutral
+    // execution ledger.
+    let payment_after_first: String = sqlx::query_scalar(
+        "SELECT provider_payment_id FROM payment_attempts \
+         WHERE provider = 'mollie' AND provider_payment_id = 'tr_cov_order_first' \
+           AND state = 'succeeded'",
+    )
+    .fetch_one(&h.pool)
+    .await
+    .expect("settled attempt after the first fact");
+    assert_eq!(payment_after_first, "tr_cov_order_first");
 
     // A LATER, DIFFERENT payment fact for the already-paid invoice is a NEW
     // notification: acknowledged idempotently, never re-settled or rewound.
@@ -4268,15 +4278,21 @@ db_test!(mollie_webhook_out_of_order_events_never_rewind_state, |h| {
     ));
     expect_mollie_ok(&app, "tr_cov_order_second").await;
 
-    let (status_text, allocations, payment_id, paid_at_after_second): (
+    let (status_text, allocations, bound_after_second, paid_at_after_second): (
         String,
         i64,
-        Option<String>,
+        String,
         DateTime<Utc>,
     ) = sqlx::query_as(
         "SELECT status,
                 (SELECT COUNT(*) FROM invoice_payment_allocations WHERE invoice_id = $1),
-                mollie_payment_id,
+                -- The neutral binding (N-05, step 10): the settled
+                -- obligation's confirmed provider payment id.
+                COALESCE((SELECT provider_payment_id FROM payment_attempts
+                          WHERE provider = 'mollie'
+                            AND obligation_ref = 'invoice:' || $1::text
+                            AND state = 'succeeded'
+                          LIMIT 1), ''),
                 paid_at
          FROM invoices WHERE id = $1",
     )
@@ -4287,7 +4303,7 @@ db_test!(mollie_webhook_out_of_order_events_never_rewind_state, |h| {
     assert_eq!(status_text, "paid", "the settled invoice is never rewound");
     assert_eq!(allocations, 1, "a second charge never double-settles");
     assert_eq!(
-        payment_id, payment_after_first,
+        bound_after_second, payment_after_first,
         "the binding is never overwritten"
     );
     assert_eq!(
@@ -4367,13 +4383,8 @@ db_test!(
 
         expect_mollie_ok(&app, "tr_cov_settle").await;
 
-        let (status_text, paid, payment_id, snapshot_id): (
-            String,
-            bool,
-            Option<String>,
-            Option<Uuid>,
-        ) = sqlx::query_as(
-            "SELECT status, paid_at IS NOT NULL, mollie_payment_id, mollie_tax_snapshot_id
+        let (status_text, paid, snapshot_id): (String, bool, Option<Uuid>) = sqlx::query_as(
+            "SELECT status, paid_at IS NOT NULL, mollie_tax_snapshot_id
              FROM invoices WHERE id = $1",
         )
         .bind(invoice_id)
@@ -4382,11 +4393,21 @@ db_test!(
         .expect("local invoice");
         assert_eq!(status_text, "paid");
         assert!(paid, "paid_at is stamped");
+        // N-05/N-10 (step 10): the settlement binds the payment id on the
+        // NEUTRAL execution ledger, not a provider-named invoice column.
+        let (bound_payment, bound_obligation): (String, String) = sqlx::query_as(
+            "SELECT provider_payment_id, obligation_ref FROM payment_attempts \
+             WHERE provider = 'mollie' AND provider_payment_id = 'tr_cov_settle'",
+        )
+        .fetch_one(&h.pool)
+        .await
+        .expect("attempt");
         assert_eq!(
-            payment_id.as_deref(),
-            Some("tr_cov_settle"),
-            "the settlement binds the Mollie payment id"
+            bound_obligation,
+            format!("invoice:{invoice_id}"),
+            "the settlement binds the provider payment id to the obligation"
         );
+        let _ = bound_payment;
 
         let (amount, currency, source, operation): (i64, String, String, String) = sqlx::query_as(
             "SELECT amount_cents, currency, source, operation_id
@@ -4398,7 +4419,10 @@ db_test!(
         .expect("allocation");
         assert_eq!(amount, 12_400, "the decimal charge allocates exactly once");
         assert_eq!(currency, "EUR");
-        assert_eq!(source, "mollie");
+        assert_eq!(
+            source, "processor",
+            "the engine writes the generic source role"
+        );
         assert_eq!(operation, "mollie:tr_cov_settle");
 
         let snapshot_id = snapshot_id.expect("the tax snapshot is linked onto the invoice");
@@ -4445,8 +4469,8 @@ db_test!(
         ));
         expect_mollie_ok(&app, "tr_cov_bind_owner").await;
         let bound: Option<String> = sqlx::query_scalar(
-            "SELECT mollie_mandate_id FROM mollie_subscriptions
-         WHERE mollie_subscription_id = 'sub_cov_bound'",
+            "SELECT provider_method_id FROM subscription_state
+         WHERE provider_contract_id = 'sub_cov_bound'",
         )
         .fetch_one(&h.pool)
         .await
@@ -4504,15 +4528,15 @@ db_test!(
         ));
         expect_mollie_ok(&app, "tr_cov_bind_orphan").await;
         let other_rows: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM mollie_subscriptions WHERE tenant_id = $1")
+            sqlx::query_scalar("SELECT COUNT(*) FROM subscription_state WHERE tenant_id = $1")
                 .bind(other)
                 .fetch_one(&h.pool)
                 .await
                 .expect("other subscriptions");
         assert_eq!(other_rows, 0, "the acknowledgement invents no row");
         let owner_token_after: Option<String> = sqlx::query_scalar(
-            "SELECT mollie_mandate_id FROM mollie_subscriptions
-         WHERE mollie_subscription_id = 'sub_cov_bound'",
+            "SELECT provider_method_id FROM subscription_state
+         WHERE provider_contract_id = 'sub_cov_bound'",
         )
         .fetch_one(&h.pool)
         .await
@@ -4550,7 +4574,7 @@ db_test!(
             .expect("tenant plan");
         assert_eq!(plan, "free", "Mollie-unverified must never equal paid");
         let subs: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM mollie_subscriptions WHERE tenant_id = $1")
+            sqlx::query_scalar("SELECT COUNT(*) FROM subscription_state WHERE tenant_id = $1")
                 .bind(tenant)
                 .fetch_one(&h.pool)
                 .await
@@ -4623,8 +4647,8 @@ db_test!(
         assert_eq!(allocations, 1, "the two deliveries settle exactly once");
 
         let (token_bound, sub_status, sub_rows): (Option<String>, String, i64) = sqlx::query_as(
-            "SELECT MIN(mollie_mandate_id), MIN(status), COUNT(*)
-             FROM mollie_subscriptions WHERE tenant_id = $1",
+            "SELECT MIN(provider_method_id), MIN(status), COUNT(*)
+             FROM subscription_state WHERE tenant_id = $1",
         )
         .bind(tenant)
         .fetch_one(&h.pool)
@@ -5116,8 +5140,8 @@ db_test!(
 
         // A subscription without a billing cycle cannot be prorated.
         sqlx::query(
-            "INSERT INTO mollie_subscriptions
-             (tenant_id, mollie_subscription_id, plan, status, mollie_customer_id)
+            "INSERT INTO subscription_state
+             (tenant_id, provider_contract_id, plan, status, provider_customer_id)
          VALUES ($1, 'sub_cov_proration', 'growth', 'active', $1)",
         )
         .bind(tenant)
@@ -5125,7 +5149,7 @@ db_test!(
         .await
         .expect("subscription without cycle");
         sqlx::query(
-            "UPDATE mollie_subscriptions SET billing_cycle_start = NULL WHERE tenant_id = $1",
+            "UPDATE subscription_state SET billing_cycle_start = NULL WHERE tenant_id = $1",
         )
         .bind(tenant)
         .execute(&h.pool)
@@ -5146,7 +5170,7 @@ db_test!(
         // With a real cycle the preview computes and reconciles internally.
         let now = Utc::now();
         sqlx::query(
-            "UPDATE mollie_subscriptions
+            "UPDATE subscription_state
          SET billing_cycle_start = $2, billing_cycle_end = $3, billing_interval = 'monthly'
          WHERE tenant_id = $1",
         )
@@ -6720,7 +6744,7 @@ db_test!(
         assert_eq!(plan, "starter");
 
         let (status, stored_id): (String, String) = sqlx::query_as(
-            "SELECT status, mollie_subscription_id FROM mollie_subscriptions WHERE tenant_id = $1",
+            "SELECT status, provider_contract_id FROM subscription_state WHERE tenant_id = $1",
         )
         .bind("cov_activate")
         .fetch_one(&h.pool)
@@ -6729,9 +6753,13 @@ db_test!(
         assert_eq!(status, "active");
         assert_eq!(stored_id, subscription_id);
 
+        // N-05 (step 10): the invoice is resolved through the settlement's
+        // neutral allocation operation id, not a provider-named invoice
+        // column.
         let (invoice_status, net, vat, total): (String, i64, i64, i64) = sqlx::query_as(
-            "SELECT status, subtotal, vat_total, total FROM invoices \
-         WHERE mollie_payment_id = 'tr_cov_activate'",
+            "SELECT i.status, i.subtotal, i.vat_total, i.total FROM invoices i \
+         JOIN invoice_payment_allocations a ON a.invoice_id = i.id \
+         WHERE a.operation_id = 'mollie:tr_cov_activate'",
         )
         .fetch_one(&h.pool)
         .await
@@ -6776,8 +6804,12 @@ db_test!(
         .await
         .expect("replay");
         assert!(replay.already_active);
+        // N-05 (step 10): the activated invoice is resolved through its
+        // neutral settlement allocation, not a provider-named column.
         let invoices: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM invoices WHERE mollie_payment_id = 'tr_cov_activate'",
+            "SELECT count(*) FROM invoices i \
+         JOIN invoice_payment_allocations a ON a.invoice_id = i.id \
+         WHERE a.operation_id = 'mollie:tr_cov_activate'",
         )
         .fetch_one(&h.pool)
         .await
@@ -6821,10 +6853,10 @@ async fn seed_due_subscription(
     let suffix = uuid::Uuid::new_v4().simple().to_string()[..8].to_string();
     let subscription_id = format!("local_cov_{suffix}");
     sqlx::query(&format!(
-        "INSERT INTO mollie_subscriptions \
-             (tenant_id, mollie_subscription_id, plan, status, billing_interval, \
-              billing_cycle_start, billing_cycle_end, cancel_at_period_end, mollie_customer_id, \
-              mollie_mandate_id, mollie_sequence_type, renewal_attempts) \
+        "INSERT INTO subscription_state \
+             (tenant_id, provider_contract_id, plan, status, billing_interval, \
+              billing_cycle_start, billing_cycle_end, cancel_at_period_end, provider_customer_id, \
+              provider_method_id, provider_sequence_type, renewal_attempts) \
          VALUES ($1, $2, $3, $5, 'monthly', NOW() - INTERVAL '30 days', {cycle_end_sql}, \
                  $4, $1, 'mdt_renew', 'recurring', 0)"
     ))
@@ -6864,7 +6896,7 @@ db_test!(
         .expect("activation");
 
         let cycle_before: DateTime<Utc> = sqlx::query_scalar(
-            "SELECT billing_cycle_end FROM mollie_subscriptions WHERE tenant_id = $1",
+            "SELECT billing_cycle_end FROM subscription_state WHERE tenant_id = $1",
         )
         .bind("cov_renew")
         .fetch_one(&h.pool)
@@ -6933,7 +6965,7 @@ db_test!(
             Option<DateTime<Utc>>,
         ) = sqlx::query_as(
             "SELECT billing_cycle_end, status, renewal_attempts, renewal_locked_at \
-             FROM mollie_subscriptions WHERE tenant_id = $1",
+             FROM subscription_state WHERE tenant_id = $1",
         )
         .bind("cov_renew")
         .fetch_one(&h.pool)
@@ -7050,7 +7082,7 @@ db_test!(
         );
 
         let cycle_before_dunning: DateTime<Utc> = sqlx::query_scalar(
-            "SELECT billing_cycle_end FROM mollie_subscriptions WHERE tenant_id = $1",
+            "SELECT billing_cycle_end FROM subscription_state WHERE tenant_id = $1",
         )
         .bind("cov_dunning")
         .fetch_one(&h.pool)
@@ -7089,7 +7121,7 @@ db_test!(
             assert_eq!(state, "failed");
         }
         let (status, attempts): (String, i32) = sqlx::query_as(
-            "SELECT status, renewal_attempts FROM mollie_subscriptions WHERE tenant_id = $1",
+            "SELECT status, renewal_attempts FROM subscription_state WHERE tenant_id = $1",
         )
         .bind("cov_dunning")
         .fetch_one(&h.pool)
@@ -7128,7 +7160,7 @@ db_test!(
 
         // The period NEVER advanced on failure.
         let cycle: DateTime<Utc> = sqlx::query_scalar(
-            "SELECT billing_cycle_end FROM mollie_subscriptions WHERE tenant_id = $1",
+            "SELECT billing_cycle_end FROM subscription_state WHERE tenant_id = $1",
         )
         .bind("cov_dunning")
         .fetch_one(&h.pool)
@@ -7169,7 +7201,7 @@ db_test!(
         );
 
         let (status, flag): (String, bool) = sqlx::query_as(
-            "SELECT status, cancel_at_period_end FROM mollie_subscriptions WHERE tenant_id = $1",
+            "SELECT status, cancel_at_period_end FROM subscription_state WHERE tenant_id = $1",
         )
         .bind("cov_cancel")
         .fetch_one(&h.pool)
@@ -7226,7 +7258,7 @@ db_test!(
                                    subtotal, vat_total, total, due_at, period_start, period_end,
                                    created_at, updated_at)
              VALUES ($1, $2, $3, 'pending', 2000, 'EUR', 1613, 387, 2000, NOW(),
-                     (SELECT billing_cycle_end FROM mollie_subscriptions WHERE tenant_id = $2),
+                     (SELECT billing_cycle_end FROM subscription_state WHERE tenant_id = $2),
                      NOW() + INTERVAL '30 days', NOW(), NOW())",
         )
         .bind(invoice_id)
@@ -7236,7 +7268,7 @@ db_test!(
         .await
         .expect("seed the open renewal invoice");
         let cycle_before: DateTime<Utc> = sqlx::query_scalar(
-            "SELECT billing_cycle_end FROM mollie_subscriptions WHERE tenant_id = $1",
+            "SELECT billing_cycle_end FROM subscription_state WHERE tenant_id = $1",
         )
         .bind("cov_nores")
         .fetch_one(&h.pool)
@@ -7268,7 +7300,7 @@ db_test!(
         );
 
         let (status, cycle_after): (String, DateTime<Utc>) = sqlx::query_as(
-            "SELECT status, billing_cycle_end FROM mollie_subscriptions WHERE tenant_id = $1",
+            "SELECT status, billing_cycle_end FROM subscription_state WHERE tenant_id = $1",
         )
         .bind("cov_nores")
         .fetch_one(&h.pool)
@@ -7324,7 +7356,7 @@ db_test!(
         )
         .await;
         let cycle_before: DateTime<Utc> = sqlx::query_scalar(
-            "SELECT billing_cycle_end FROM mollie_subscriptions WHERE tenant_id = $1",
+            "SELECT billing_cycle_end FROM subscription_state WHERE tenant_id = $1",
         )
         .bind("cov_incident")
         .fetch_one(&h.pool)
@@ -7357,7 +7389,7 @@ db_test!(
             "no invoice is created on the provider's authority"
         );
         let cycle_after: DateTime<Utc> = sqlx::query_scalar(
-            "SELECT billing_cycle_end FROM mollie_subscriptions WHERE tenant_id = $1",
+            "SELECT billing_cycle_end FROM subscription_state WHERE tenant_id = $1",
         )
         .bind("cov_incident")
         .fetch_one(&h.pool)
@@ -7365,7 +7397,7 @@ db_test!(
         .expect("cycle after");
         assert_eq!(cycle_after, cycle_before, "the period never advances");
         let (status, attempts): (String, i32) = sqlx::query_as(
-            "SELECT status, renewal_attempts FROM mollie_subscriptions WHERE tenant_id = $1",
+            "SELECT status, renewal_attempts FROM subscription_state WHERE tenant_id = $1",
         )
         .bind("cov_incident")
         .fetch_one(&h.pool)
@@ -7402,14 +7434,19 @@ db_test!(
         a.expect("first activation");
         b.expect("second activation");
 
-        // Both payments are real purchases: each carries exactly one invoice.
+        // Both payments are real purchases: each carries exactly one
+        // invoice, resolved through its neutral settlement allocation
+        // (N-05, step 10 — no provider-named invoice column).
         for payment in ["tr_race_a", "tr_race_b"] {
-            let invoices: i64 =
-                sqlx::query_scalar("SELECT count(*) FROM invoices WHERE mollie_payment_id = $1")
-                    .bind(payment)
-                    .fetch_one(&h.pool)
-                    .await
-                    .expect("invoice count");
+            let invoices: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM invoices i \
+                 JOIN invoice_payment_allocations a ON a.invoice_id = i.id \
+                 WHERE a.operation_id = $1",
+            )
+            .bind(format!("mollie:{payment}"))
+            .fetch_one(&h.pool)
+            .await
+            .expect("invoice count");
             assert_eq!(invoices, 1, "{payment} settled exactly once");
         }
 
@@ -7418,7 +7455,7 @@ db_test!(
         // activations so the loser cannot clobber the winner's row; there
         // are no provider objects at all (renewal is local).
         let rows: i64 =
-            sqlx::query_scalar("SELECT count(*) FROM mollie_subscriptions WHERE tenant_id = $1")
+            sqlx::query_scalar("SELECT count(*) FROM subscription_state WHERE tenant_id = $1")
                 .bind("cov_race")
                 .fetch_one(&h.pool)
                 .await
@@ -7428,7 +7465,7 @@ db_test!(
             "exactly one local subscription row survives the race"
         );
         let active_local: String = sqlx::query_scalar(
-        "SELECT mollie_subscription_id FROM mollie_subscriptions WHERE tenant_id = $1 AND status = 'active'",
+        "SELECT provider_contract_id FROM subscription_state WHERE tenant_id = $1 AND status = 'active'",
     )
     .bind("cov_race")
     .fetch_one(&h.pool)
@@ -7490,7 +7527,7 @@ async fn cleanup_race(h: &Harness) {
         "DELETE FROM payment_attempts WHERE tenant_id = $1",
         "DELETE FROM payment_provider_events WHERE provider = 'mollie'",
         "DELETE FROM payment_credentials WHERE tenant_id = $1",
-        "DELETE FROM mollie_subscriptions WHERE tenant_id = $1",
+        "DELETE FROM subscription_state WHERE tenant_id = $1",
         "DELETE FROM audit_logs WHERE tenant_id = $1",
         "DELETE FROM billing_addresses WHERE tenant_id = $1",
         "DELETE FROM tenants WHERE id = $1",
@@ -7544,6 +7581,34 @@ async fn replay_migration_279(h: &Harness) {
                 .execute(&h.pool)
                 .await
                 .expect("migration 279 replay (guarded, idempotent, 282 rename applied)");
+        }
+        Err(error)
+            if error
+                .as_database_error()
+                .map(|db| {
+                    db.code().as_deref() == Some("42P01")
+                        && db.message().contains("mollie_subscriptions")
+                })
+                .unwrap_or(false) =>
+        {
+            // Migration 285 renamed the LOCAL subscription state table
+            // mollie_subscriptions -> subscription_state (and its
+            // provider-tagged columns with it); the frozen 279 file names
+            // the pre-rename table/columns in its subscription backfill, so
+            // it cannot re-run verbatim on the post-285 schema either. The
+            // failed batch's earlier statements already applied and are
+            // idempotent; replay with the 285 rename applied — every other
+            // 279 guard stays literally proven.
+            let renamed = sql
+                .replace("provider_schedule_id", "provider_contract_id")
+                .replace("FROM mollie_subscriptions", "FROM subscription_state")
+                .replace("ms.mollie_subscription_id", "ms.provider_contract_id")
+                .replace("ms.mollie_mandate_id", "ms.provider_method_id")
+                .replace("ms.mollie_customer_id", "ms.provider_customer_id");
+            sqlx::raw_sql(renamed.as_str())
+                .execute(&h.pool)
+                .await
+                .expect("migration 279 replay (guarded, idempotent, 282+285 renames applied)");
         }
         Err(error) => panic!("migration 279 replay (guarded, idempotent): {error}"),
     }
@@ -7611,9 +7676,9 @@ db_test!(
         .await
         .expect("seed legacy customers");
         sqlx::query(
-            "INSERT INTO mollie_subscriptions \
-                 (tenant_id, mollie_subscription_id, plan, status, billing_cycle_start, \
-                  billing_cycle_end, mollie_customer_id, mollie_mandate_id) \
+            "INSERT INTO subscription_state \
+                 (tenant_id, provider_contract_id, plan, status, billing_cycle_start, \
+                  billing_cycle_end, provider_customer_id, provider_method_id) \
              VALUES ($1, 'sub_cov_279', 'starter', 'active', NOW(), NOW() + INTERVAL '30 days', \
                      'cst_cov_279', 'mdt_cov_279')",
         )

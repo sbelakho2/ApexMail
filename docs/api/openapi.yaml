@@ -11422,9 +11422,9 @@ components:
       required:
         - id
         - tenantId
-        - mollieSubscriptionId
-        - mollieCustomerId
-        - molliePriceId
+        - providerContractId
+        - providerCustomerId
+        - snapshotPlanCode
         - status
         - billingInterval
         - billingCycleStart
@@ -11437,11 +11437,11 @@ components:
           type: string
         tenantId:
           type: string
-        mollieSubscriptionId:
+        providerContractId:
           type: string
-        mollieCustomerId:
+        providerCustomerId:
           type: string
-        molliePriceId:
+        snapshotPlanCode:
           type: string
         status:
           type: string

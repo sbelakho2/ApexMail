@@ -88,6 +88,11 @@ services:
       # authenticate the mock API fetch, not a webhook secret.
       MOLLIE_API_KEY: ${MOLLIE_API_KEY:-}
       MOLLIE_PROFILE_ID: ${MOLLIE_PROFILE_ID:-}
+      # Dev Stripe parity (PAYMENTS_PROVIDER=stripe): the api-server webhook
+      # route POST /v1/webhooks/stripe verifies Stripe-Signature with
+      # STRIPE_WEBHOOK_SECRET; unset keeps Mollie the default.
+      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}
+      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}
       # Same transport selection as the worker: the REST send gate's domain
       # readiness reads EMAIL_TRANSPORT_TYPE (unset = SES, demanding
       # ses_verified on every sender domain — which rejected every REST send

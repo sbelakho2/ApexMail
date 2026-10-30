@@ -1118,8 +1118,8 @@ fn preview_plan_proration(
 // Proration preview (deployed-config aware, audit item 3a)
 // ---------------------------------------------------------------------------
 
-/// Subscription shape loaded from `mollie_subscriptions` (migration 071
-/// columns) for the proration preview.
+/// Subscription shape loaded from `subscription_state` (migration 285; the
+/// billing-cycle columns) for the proration preview.
 #[derive(sqlx::FromRow)]
 struct ProrationSubscriptionRow {
     billing_interval: Option<String>,
@@ -1156,7 +1156,7 @@ async fn preview_proration_for_tenant(
     let subscription = sqlx::query_as::<_, ProrationSubscriptionRow>(
         r#"
         SELECT billing_interval, billing_cycle_start, billing_cycle_end
-        FROM mollie_subscriptions
+        FROM subscription_state
         WHERE tenant_id = $1
           AND status IN ('active', 'trialing', 'past_due')
         ORDER BY created_at DESC
@@ -1699,7 +1699,7 @@ pub const MRR_REPORT_SQL: &str = r#"
                         ELSE p.price_monthly
                     END
                 ) as mrr
-            FROM mollie_subscriptions s
+            FROM subscription_state s
             JOIN tenants t ON t.id = s.tenant_id
             JOIN plans p ON p.name = t.plan
             WHERE s.status = 'active'
@@ -1716,7 +1716,7 @@ async fn get_mrr_report(
     if let Err(response) = require_any_scope(&scope) {
         return Ok(response);
     }
-    // Fix C, MRR is computed from mollie_subscriptions (the table the
+    // Fix C, MRR is computed from subscription_state (the table the
     // webhook writers populate) joined via tenants.plan to plans pricing.
     // Fix I9, yearly prices are normalized with proper rounding and rows
     // are bucketed by the subscription's active month (billing cycle start,
@@ -1730,7 +1730,7 @@ async fn get_mrr_report(
 }
 
 /// Monthly churn report. `churned_mrr` prices each canceled subscription
-/// from its own price snapshot, the subscription's `mollie_plan_code`
+/// from its own price snapshot, the subscription's `snapshot_plan_code`
 /// resolved against `plans.mollie_plan_code_monthly/yearly` (falling back to
 /// the tenant's current plan only while it is still non-free), because
 /// `tenants.plan` is set to `'free'` on cancellation (audit F10): pricing
@@ -1740,7 +1740,7 @@ async fn get_mrr_report(
 /// `churned_mrr_unpriced` so the metric's coverage is explicit.
 /// Shared churn report SQL (Fix C + Fix F10), single source for both the
 /// billing-service route and api-server's twin admin route. Prices churn
-/// from the subscription's own `mollie_plan_code` snapshot (falling back to
+/// from the subscription's own `snapshot_plan_code` snapshot (falling back to
 /// the tenant's plan only while still non-free); rounds yearly/12.
 pub const CHURN_REPORT_SQL: &str = r#"
         SELECT COALESCE(json_agg(row_to_json(report_row) ORDER BY report_row.month DESC), '[]'::json)
@@ -1763,13 +1763,13 @@ pub const CHURN_REPORT_SQL: &str = r#"
                         END
                     ) as churned_mrr,
                     COUNT(*) FILTER (WHERE sp.id IS NULL AND tp.id IS NULL) as churned_mrr_unpriced
-                FROM mollie_subscriptions s
+                FROM subscription_state s
                 JOIN tenants t ON t.id = s.tenant_id
-                LEFT JOIN plans sp ON s.mollie_plan_code IS NOT NULL AND (
+                LEFT JOIN plans sp ON s.snapshot_plan_code IS NOT NULL AND (
                     (s.billing_interval = 'yearly'
-                        AND sp.mollie_plan_code_yearly = s.mollie_plan_code)
+                        AND sp.mollie_plan_code_yearly = s.snapshot_plan_code)
                     OR (COALESCE(s.billing_interval, 'monthly') <> 'yearly'
-                        AND sp.mollie_plan_code_monthly = s.mollie_plan_code)
+                        AND sp.mollie_plan_code_monthly = s.snapshot_plan_code)
                 )
                 LEFT JOIN plans tp ON tp.name = t.plan AND t.plan <> 'free'
                 WHERE s.status = 'canceled'
@@ -1780,7 +1780,7 @@ pub const CHURN_REPORT_SQL: &str = r#"
                     c.month,
                     COUNT(DISTINCT s.tenant_id) as starting_count
                 FROM churned c
-                LEFT JOIN mollie_subscriptions s
+                LEFT JOIN subscription_state s
                   ON s.created_at < c.month
                 GROUP BY c.month
             )
@@ -1804,9 +1804,9 @@ async fn get_churn_report(
     if let Err(response) = require_any_scope(&scope) {
         return Ok(response);
     }
-    // Fix C, churn computed from mollie_subscriptions (join tenants/plans).
+    // Fix C, churn computed from subscription_state (join tenants/plans).
     // Fix F10, churned_mrr prices the CHURNED SUBSCRIPTION via its own
-    // mollie_plan_code snapshot, not the tenant's (post-cancellation, free)
+    // snapshot_plan_code snapshot, not the tenant's (post-cancellation, free)
     // plan; see CHURN_REPORT_SQL above.
     let report: serde_json::Value = sqlx::query_scalar(CHURN_REPORT_SQL)
         .fetch_one(&state.db)

@@ -507,10 +507,10 @@ async fn load_ingest_subscription_contexts(
         r#"
         SELECT DISTINCT ON (tenant_id)
                tenant_id,
-               mollie_subscription_id AS subscription_id,
+               provider_contract_id AS subscription_id,
                billing_cycle_start AS period_start,
                billing_cycle_end AS period_end
-        FROM mollie_subscriptions
+        FROM subscription_state
         WHERE tenant_id = ANY($1)
           AND status IN ('active', 'trialing', 'past_due')
         ORDER BY tenant_id,
@@ -551,7 +551,7 @@ async fn load_ingest_cycle_anchors(
     let rows: Vec<IngestCycleAnchorRow> = sqlx::query_as(
         r#"
         SELECT DISTINCT ON (tenant_id) tenant_id, billing_cycle_start
-        FROM mollie_subscriptions
+        FROM subscription_state
         WHERE tenant_id = ANY($1)
           AND status IN ('active', 'trialing', 'past_due')
           AND billing_cycle_start IS NOT NULL

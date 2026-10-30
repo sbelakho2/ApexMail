@@ -27,8 +27,8 @@ pub const ROLE_VAT_OUTPUT: &str = "vat_output";
 pub const ROLE_VAT_INPUT: &str = "vat_input";
 pub const ROLE_BANK: &str = "bank";
 pub const ROLE_BANK_CLEARING: &str = "bank_clearing";
-pub const ROLE_PAYMENT_CLEARING: &str = "mollie_clearing";
-pub const ROLE_MOLLIE_FEES: &str = "mollie_fees";
+pub const ROLE_PAYMENT_CLEARING: &str = "processor_clearing";
+pub const ROLE_PROCESSOR_FEES: &str = "processor_fees";
 pub const ROLE_WALLET_LIABILITY: &str = "wallet_liability";
 pub const ROLE_EXPENSE_DEFAULT: &str = "expense_default";
 pub const ROLE_PAYROLL_EXPENSE: &str = "payroll_expense";
@@ -56,7 +56,7 @@ pub const ACCOUNT_ROLES: &[&str] = &[
     ROLE_BANK,
     ROLE_BANK_CLEARING,
     ROLE_PAYMENT_CLEARING,
-    ROLE_MOLLIE_FEES,
+    ROLE_PROCESSOR_FEES,
     ROLE_WALLET_LIABILITY,
     ROLE_EXPENSE_DEFAULT,
     ROLE_PAYROLL_EXPENSE,

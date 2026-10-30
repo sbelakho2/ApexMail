@@ -1002,6 +1002,11 @@ services:
       MOLLIE_API_KEY: ${MOLLIE_API_KEY:-}
       MOLLIE_PROFILE_ID: ${MOLLIE_PROFILE_ID:-}
       MOLLIE_API_BASE_URL: ${MOLLIE_API_BASE_URL:-https://api.mollie.com/v2}
+      # ── Stripe (PAYMENTS_PROVIDER=stripe; optional — unset keeps Mollie):
+      # the adapter resolves these from the process env (payments::registry)
+      # and the api-server webhook route verifies with STRIPE_WEBHOOK_SECRET.
+      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}
+      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}
       # Dedicated-IP auto-provisioning calls the api-server internal API.
       API_BASE_URL: ${BILLING_API_BASE_URL:-http://api-server:8080}
       # ── Invoice PDF rendering (pdf-renderer on the shared backend network) ─

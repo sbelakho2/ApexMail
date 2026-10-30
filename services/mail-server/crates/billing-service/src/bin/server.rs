@@ -404,18 +404,47 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    // BS-001: Fail-fast if the Mollie key is not configured.
-    // The /webhooks/mollie endpoint is exempt from service auth: the key IS
-    // the authentication, because every webhook is verified by an
-    // authenticated API fetch. Without it no event can ever be proven, so the
+    // BS-001: Fail-fast if the ACTIVE payment provider's credentials are not
+    // configured. The /webhooks/{provider} endpoint is exempt from service
+    // auth: the provider's secret IS the authentication (Mollie webhooks are
+    // verified by an authenticated API fetch; Stripe webhooks by the
+    // Stripe-Signature HMAC). Without it no event can ever be proven, so the
     // process refuses to start rather than silently drop billing events.
-    if cli.mollie_api_key.trim().is_empty() {
-        tracing::error!(
-            "MOLLIE_API_KEY is not configured. Mollie webhooks are verified by \
-             an authenticated API fetch, which requires this secret. Set the \
-             environment variable or pass --mollie-api-key."
-        );
-        anyhow::bail!("MOLLIE_API_KEY is required");
+    let payments_provider = std::env::var("PAYMENTS_PROVIDER")
+        .ok()
+        .map(|value| value.trim().to_lowercase())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "mollie".to_string());
+    match payments_provider.as_str() {
+        "mollie" => {
+            if cli.mollie_api_key.trim().is_empty() {
+                tracing::error!(
+                    "MOLLIE_API_KEY is not configured. Mollie webhooks are verified by \
+                     an authenticated API fetch, which requires this secret. Set the \
+                     environment variable or pass --mollie-api-key."
+                );
+                anyhow::bail!("MOLLIE_API_KEY is required");
+            }
+        }
+        "stripe" => {
+            for variable in ["STRIPE_SECRET_KEY", "STRIPE_WEBHOOK_SECRET"] {
+                let configured = std::env::var(variable)
+                    .ok()
+                    .map(|value| !value.trim().is_empty())
+                    .unwrap_or(false);
+                if !configured {
+                    tracing::error!(
+                        "{variable} is not configured. PAYMENTS_PROVIDER=stripe needs the \
+                         API key for the authenticated provider calls and the webhook \
+                         secret for Stripe-Signature verification."
+                    );
+                    anyhow::bail!("{variable} is required for PAYMENTS_PROVIDER=stripe");
+                }
+            }
+        }
+        other => {
+            anyhow::bail!("PAYMENTS_PROVIDER={other} is not a supported provider (mollie, stripe)");
+        }
     }
 
     // Migrations are managed externally (apexmail-db crate or deploy tooling).

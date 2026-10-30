@@ -330,10 +330,17 @@ async fn compliance_stale_evidence(
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
     verify_bearer(&headers, &state.config).map_err(|(c, m)| err_json(c, m))?;
     let swept_at = Utc::now();
-    let stale_controls = state.soc2.stale_evidence_controls(swept_at).await.map_err(|e| {
-        error!("soc2 stale_evidence_controls failed: {e}");
-        err_json(StatusCode::INTERNAL_SERVER_ERROR, "stale evidence query failed")
-    })?;
+    let stale_controls = state
+        .soc2
+        .stale_evidence_controls(swept_at)
+        .await
+        .map_err(|e| {
+            error!("soc2 stale_evidence_controls failed: {e}");
+            err_json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "stale evidence query failed",
+            )
+        })?;
     Ok(ok_json(serde_json::json!({
         "swept_at": swept_at,
         "count": stale_controls.len(),
@@ -1476,7 +1483,10 @@ mod db_tests {
         state.soc2.seed_default_controls().await.expect("seed");
 
         let body = json_data(compliance_stale_evidence(State(state.clone()), auth()).await).await;
-        let stale = body["stale_controls"].as_array().expect("stale array").clone();
+        let stale = body["stale_controls"]
+            .as_array()
+            .expect("stale array")
+            .clone();
         assert!(
             stale.len() >= 20,
             "a freshly seeded catalog is entirely unattested: {stale:?}"
@@ -1519,7 +1529,10 @@ mod db_tests {
             .expect("defer");
 
         let body = json_data(compliance_stale_evidence(State(state.clone()), auth()).await).await;
-        let stale = body["stale_controls"].as_array().expect("stale array").clone();
+        let stale = body["stale_controls"]
+            .as_array()
+            .expect("stale array")
+            .clone();
         let ids: Vec<&str> = stale
             .iter()
             .filter_map(|finding| finding["control_id"].as_str())
@@ -2174,9 +2187,7 @@ mod db_tests {
                 )
                 .await,
             ),
-            status(
-                compliance_stale_evidence(State(state.clone()), headers.clone()).await,
-            ),
+            status(compliance_stale_evidence(State(state.clone()), headers.clone()).await),
             status(
                 hipaa_request_baa(
                     State(state.clone()),

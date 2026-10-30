@@ -1157,9 +1157,7 @@ impl Soc2Service {
                 }
             }
 
-            let deadline_passed = control
-                .next_attestation_at
-                .is_some_and(|next| next < now);
+            let deadline_passed = control.next_attestation_at.is_some_and(|next| next < now);
             if !deadline_passed && missing.is_empty() && stale.is_empty() && invalid.is_empty() {
                 continue;
             }
@@ -1167,7 +1165,12 @@ impl Soc2Service {
             let days_overdue = if let Some(next) = control.next_attestation_at {
                 (now - next).num_days().max(0)
             } else {
-                evidence_overdue_days.iter().copied().max().unwrap_or(0).max(0)
+                evidence_overdue_days
+                    .iter()
+                    .copied()
+                    .max()
+                    .unwrap_or(0)
+                    .max(0)
             };
 
             findings.push(StaleControlFinding {
@@ -1256,12 +1259,11 @@ impl Soc2Service {
 
     /// In-scope control count for the sweep summary (the sweep denominator).
     async fn count_in_scope_controls(&self) -> Result<usize, String> {
-        let (count,): (i64,) = sqlx::query_as(
-            "SELECT COUNT(*) FROM soc2_controls WHERE status = 'in_scope'",
-        )
-        .fetch_one(&self.db)
-        .await
-        .map_err(|e| format!("DB error: {e}"))?;
+        let (count,): (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM soc2_controls WHERE status = 'in_scope'")
+                .fetch_one(&self.db)
+                .await
+                .map_err(|e| format!("DB error: {e}"))?;
         Ok(count as usize)
     }
 

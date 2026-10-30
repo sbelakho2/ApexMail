@@ -196,7 +196,9 @@ async fn past_next_attestation_is_flagged_with_days_overdue() {
         "expected ~10 days overdue: {finding:?}"
     );
     assert!(
-        finding.missing.contains(&"quarterly_access_review".to_string()),
+        finding
+            .missing
+            .contains(&"quarterly_access_review".to_string()),
         "the evidence row is gone, so the type is missing: {finding:?}"
     );
 }
@@ -227,7 +229,11 @@ async fn stale_evidence_row_drives_days_overdue_without_attestation_date() {
         .await
         .expect("stale query");
     let finding = finding_for(&findings, "CC6.2").expect("stale control flagged");
-    assert_eq!(finding.stale, vec!["quarterly_access_review"], "{finding:?}");
+    assert_eq!(
+        finding.stale,
+        vec!["quarterly_access_review"],
+        "{finding:?}"
+    );
     assert!(finding.missing.is_empty());
     assert!(
         (25..=35).contains(&finding.days_overdue),
@@ -244,15 +250,10 @@ async fn deferred_and_not_applicable_controls_are_outside_the_sweep() {
     let soc2 = Soc2Service::new(pool.clone());
     soc2.seed_default_controls().await.expect("seed controls");
 
-    soc2
-        .set_status("CC1.1", compliance::soc2::ControlStatus::Deferred)
+    soc2.set_status("CC1.1", compliance::soc2::ControlStatus::Deferred)
         .await
         .expect("defer");
-    soc2
-        .set_status(
-            "CC1.2",
-            compliance::soc2::ControlStatus::NotApplicable,
-        )
+    soc2.set_status("CC1.2", compliance::soc2::ControlStatus::NotApplicable)
         .await
         .expect("mark na");
 
@@ -311,10 +312,7 @@ async fn sweep_persists_run_rows_and_reports_an_honest_summary() {
 
     // Idempotent detection: the second sweep flags the same set (the run
     // trail accumulates exactly like collector run rows do).
-    let again = soc2
-        .sweep_stale_attestations()
-        .await
-        .expect("second sweep");
+    let again = soc2.sweep_stale_attestations().await.expect("second sweep");
     assert_eq!(again.stale_controls, summary.stale_controls);
     let total: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM soc2_evidence_collection_runs
@@ -377,10 +375,12 @@ async fn sweep_fails_loud_on_db_errors() {
 
     // A malformed evidence_required (not an array) is a seed defect: the
     // sweep must refuse to render the control as evidenced-by-nothing.
-    sqlx::query("UPDATE soc2_controls SET evidence_required = '\"oops\"' WHERE control_id = 'CC2.1'")
-        .execute(&pool)
-        .await
-        .expect("corrupt evidence_required");
+    sqlx::query(
+        "UPDATE soc2_controls SET evidence_required = '\"oops\"' WHERE control_id = 'CC2.1'",
+    )
+    .execute(&pool)
+    .await
+    .expect("corrupt evidence_required");
     let error = soc2
         .stale_evidence_controls(Utc::now())
         .await

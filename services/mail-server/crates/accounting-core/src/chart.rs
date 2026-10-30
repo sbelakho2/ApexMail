@@ -190,7 +190,7 @@ pub const STANDARD_CHART: &[AccountSpec] = &[
         name: "Payment processing fees",
         account_type: "expense",
         normal_balance: "debit",
-        role: Some(ROLE_MOLLIE_FEES),
+        role: Some(ROLE_PROCESSOR_FEES),
         vat_code: None,
     },
     AccountSpec {

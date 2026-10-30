@@ -213,6 +213,31 @@ pub(crate) async fn raise_billing_incident(
     }
 }
 
+/// The invoice a settled checkout payment already activated, resolved by the
+/// NEUTRAL settlement operation id on `invoice_payment_allocations`
+/// (`payments::engine::operation_id`). N-05 RESOLVED (step 10): the retired
+/// `invoices.mollie_payment_id` lookup is replaced by the allocation's
+/// unique operation id — activation always commits the invoice and its
+/// allocation in ONE transaction, and the engine's `{provider}:{payment_id}`
+/// grammar is byte-identical to the pre-cutover writer's `mollie:` prefix
+/// for Mollie, so historical activations replay-detect identically.
+async fn activation_invoice_for_payment(
+    conn: &mut sqlx::PgConnection,
+    provider_name: &str,
+    payment_id: &str,
+) -> Result<Option<Uuid>, String> {
+    let operation_id = crate::payments::engine::operation_id(provider_name, payment_id);
+    sqlx::query_scalar::<_, Uuid>(
+        "SELECT i.id FROM invoices i \
+         JOIN invoice_payment_allocations a ON a.invoice_id = i.id \
+         WHERE a.operation_id = $1 LIMIT 1",
+    )
+    .bind(&operation_id)
+    .fetch_optional(conn)
+    .await
+    .map_err(|error| format!("activation idempotency check failed: {error}"))
+}
+
 /// Activate a plan from a paid checkout payment.
 ///
 /// The caller has already verified the payment with the provider (the webhook
@@ -323,15 +348,17 @@ async fn activate_locked(
     end: DateTime<Utc>,
     display_name: String,
 ) -> Result<ActivationOutcome, String> {
-    // Already activated (webhook redelivery): the payment id is the natural
-    // idempotency key. Re-checked inside the transaction below.
-    if let Some(existing) = sqlx::query_scalar::<_, Uuid>(
-        "SELECT id FROM invoices WHERE mollie_payment_id = $1 LIMIT 1",
-    )
-    .bind(payment_id)
-    .fetch_optional(&mut *conn)
-    .await
-    .map_err(|error| format!("activation idempotency check failed: {error}"))?
+    // The provider is resolved FIRST: the neutral settlement vocabulary
+    // (operation id, allocation provider dimension) and the credentials
+    // write all key off its registry name.
+    let provider = crate::payments::registry::from_env().map_err(|error| error.to_string())?;
+    let provider_name = provider.provider_name();
+
+    // Already activated (webhook redelivery): the settlement's unique
+    // allocation operation id is the natural idempotency key. Re-checked
+    // inside the transaction below.
+    if let Some(existing) =
+        activation_invoice_for_payment(&mut *conn, provider_name, payment_id).await?
     {
         return Ok(ActivationOutcome {
             invoice_id: Some(existing),
@@ -345,7 +372,7 @@ async fn activate_locked(
     // provider-side arrangement to retire: renewal is local).
     let previous: Option<(Option<String>, Option<String>)> = sqlx::query_as(
         "SELECT s.plan, s.billing_interval \
-         FROM mollie_subscriptions s \
+         FROM subscription_state s \
          WHERE s.tenant_id = $1 \
            AND s.status IN ('active', 'trialing', 'past_due', 'unpaid') \
            AND s.plan IS NOT NULL \
@@ -364,9 +391,10 @@ async fn activate_locked(
         .unwrap_or(0);
     let new_mrr_cents = catalog_monthly_mrr_cents(plan_name, interval);
 
-    // NEUTRALITY-DEBT (N-05, N-06): the legacy `mollie_*` columns written
-    // below and the frozen allocation vocabulary stay byte-stable this
-    // round; the owner-gated step 10 renames them onto the neutral ledger.
+    // N-03/N-05 RESOLVED (step 10): the writes below target the neutral
+    // `subscription_state` table/columns (migration 285) and the neutral
+    // settlement vocabulary (allocation source `processor`, engine operation
+    // id); historical rows keep their pre-cutover values.
     let db_outcome: Result<ActivationOutcome, String> = async {
         let mut tx = conn
             .begin()
@@ -379,13 +407,8 @@ async fn activate_locked(
             .map_err(|error| format!("activation lock failed: {error}"))?;
 
         // Re-check inside the lock (a concurrent delivery may have won).
-        if let Some(existing) = sqlx::query_scalar::<_, Uuid>(
-            "SELECT id FROM invoices WHERE mollie_payment_id = $1 LIMIT 1",
-        )
-        .bind(payment_id)
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(|error| format!("activation idempotency check failed: {error}"))?
+        if let Some(existing) =
+            activation_invoice_for_payment(&mut tx, provider_name, payment_id).await?
         {
             return Ok(ActivationOutcome {
                 invoice_id: Some(existing),
@@ -401,23 +424,23 @@ async fn activate_locked(
 
         sqlx::query(
             r#"
-        INSERT INTO mollie_subscriptions (
-            id, tenant_id, mollie_subscription_id, plan, status, billing_interval,
-            billing_cycle_start, billing_cycle_end, mollie_customer_id, mollie_mandate_id,
-            mollie_sequence_type, cancel_at_period_end, canceled_at, created_at, updated_at
+        INSERT INTO subscription_state (
+            id, tenant_id, provider_contract_id, plan, status, billing_interval,
+            billing_cycle_start, billing_cycle_end, provider_customer_id, provider_method_id,
+            provider_sequence_type, cancel_at_period_end, canceled_at, created_at, updated_at
         ) VALUES (
             gen_random_uuid(), $1, $2, $3, 'active', $4,
             $5, $6, $7, $8, 'recurring', false, NULL, NOW(), NOW()
         )
         ON CONFLICT (tenant_id) WHERE status = 'active' DO UPDATE SET
-            mollie_subscription_id = EXCLUDED.mollie_subscription_id,
+            provider_contract_id = EXCLUDED.provider_contract_id,
             plan = EXCLUDED.plan,
             billing_interval = EXCLUDED.billing_interval,
             billing_cycle_start = EXCLUDED.billing_cycle_start,
             billing_cycle_end = EXCLUDED.billing_cycle_end,
-            mollie_customer_id = EXCLUDED.mollie_customer_id,
-            mollie_mandate_id = EXCLUDED.mollie_mandate_id,
-            mollie_sequence_type = EXCLUDED.mollie_sequence_type,
+            provider_customer_id = EXCLUDED.provider_customer_id,
+            provider_method_id = EXCLUDED.provider_method_id,
+            provider_sequence_type = EXCLUDED.provider_sequence_type,
             renewal_attempts = 0,
             renewal_locked_at = NULL,
             cancel_at_period_end = false,
@@ -441,7 +464,6 @@ async fn activate_locked(
         // NEUTRAL credentials ledger (the charging authority the renewal
         // worker reads). Same transaction: a committed activation always
         // leaves the credential behind.
-        let provider = crate::payments::registry::from_env().map_err(|error| error.to_string())?;
         sqlx::query(
             r#"
         INSERT INTO payment_credentials
@@ -476,7 +498,6 @@ async fn activate_locked(
             interval,
             gross_cents,
             currency,
-            payment_id,
             start,
             end,
         )
@@ -485,15 +506,17 @@ async fn activate_locked(
 
         // The settlement allocation and the statutory ledger, in the same
         // transaction as the invoice (idempotent on the operation id).
-        // NEUTRALITY-DEBT (N-05): the allocation `source` tag and the
-        // `mollie:` operation-id prefix are frozen ledger vocabulary this
-        // round; renaming would fork accounting history mid-stream.
-        let operation_id = format!("mollie:{payment_id}");
+        // N-05 RESOLVED (step 10): the allocation uses the ENGINE's neutral
+        // vocabulary — source = the generic `processor` role, the provider
+        // name rides the dedicated dimension, and the operation id is the
+        // engine's `{provider}:{payment_id}` (identical strings to the
+        // pre-cutover writer for Mollie, so historical dedup still matches).
+        let operation_id = crate::payments::engine::operation_id(provider_name, payment_id);
         sqlx::query(
             r#"
         INSERT INTO invoice_payment_allocations (
             id, tenant_id, invoice_id, operation_id, source, amount_cents, currency, provider
-        ) VALUES (gen_random_uuid(), $1, $2, $3, 'mollie', $4, $5, 'mollie')
+        ) VALUES (gen_random_uuid(), $1, $2, $3, 'processor', $4, $5, $6)
         ON CONFLICT (operation_id) DO NOTHING
         "#,
         )
@@ -502,6 +525,7 @@ async fn activate_locked(
         .bind(&operation_id)
         .bind(gross_cents)
         .bind(currency.trim().to_ascii_uppercase())
+        .bind(provider_name)
         .execute(&mut *tx)
         .await
         .map_err(|error| format!("plan allocation failed: {error}"))?;
@@ -554,17 +578,50 @@ async fn activate_locked(
 }
 
 /// A paid checkout that produced no mandate cannot recur: refund it in full
-/// and record why. Idempotent on the payment id.
+/// and record why. Idempotent per payment id.
+///
+/// N-06 RESOLVED (step 10): the provider-side idempotency key uses the
+/// neutral obligation grammar (`refund:{obligation_ref}:{n}`; the audit's
+/// `payment:{ref}:{n}` shape — here the obligation is the checkout payment
+/// itself and the refund is single-shot, so the ordinal is 1). The
+/// exactly-once gate is LOCAL, not the key string: the neutral refunds
+/// ledger (and the legacy mapping table for pre-ledger refunds) is probed
+/// FIRST, so an operation already refunded under a historical key spelling
+/// can never be refunded a second time under the neutral one.
 async fn refund_unusable_checkout(
     pool: &PgPool,
     payment_id: &str,
     gross_cents: i64,
     currency: &str,
 ) -> Result<(), String> {
-    // The refund is a neutral provider operation; the legacy refund mapping
-    // row below stays (NEUTRALITY-DEBT N-05, step 10 moves it to
-    // payment_provider_refunds).
     let provider = crate::payments::registry::from_env().map_err(|error| error.to_string())?;
+
+    // Exactly-once probe on the refund FACTS (key-spelling agnostic): a
+    // refund of this payment already exists — either recorded on the neutral
+    // refunds ledger (every writer since audit step 7) or on the legacy
+    // mapping table (pre-ledger refunds and the mapping the refund webhook
+    // resolves) — so the provider must not be asked again.
+    let already_refunded = sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS(
+             SELECT 1 FROM payment_provider_refunds
+             WHERE provider = $1 AND provider_payment_id = $2
+         ) OR EXISTS(
+             SELECT 1 FROM mollie_refunds WHERE payment_id = $2
+         )",
+    )
+    .bind(provider.provider_name())
+    .bind(payment_id.trim())
+    .fetch_one(pool)
+    .await
+    .map_err(|error| format!("refund idempotency probe failed for {payment_id}: {error}"))?;
+    if already_refunded {
+        tracing::info!(
+            payment_id = %payment_id,
+            "checkout payment without a reusable method was already refunded; replay acknowledged"
+        );
+        return Ok(());
+    }
+
     let refund = provider
         .refund(crate::payments::RefundRequest {
             provider_payment_id: payment_id.to_string(),
@@ -572,9 +629,7 @@ async fn refund_unusable_checkout(
             currency: currency.to_string(),
             description: "Plan activation needs a reusable payment method; refunded automatically"
                 .to_string(),
-            // NEUTRALITY-DEBT (N-06): the key grammar is frozen operation
-            // identity; changing it would mint a second refund on retry.
-            idempotency_key: format!("plan_refund_no_mandate_{payment_id}"),
+            idempotency_key: format!("refund:checkout:{}:1", payment_id.trim()),
         })
         .await
         .map_err(|error| format!("automatic refund failed for {payment_id}: {error}"))?;
@@ -661,7 +716,7 @@ pub async fn renew_due_subscriptions_with(
     let due: Vec<(String,)> = sqlx::query_as(&format!(
         r#"
         SELECT s.tenant_id
-        FROM mollie_subscriptions s
+        FROM subscription_state s
         WHERE s.status = 'active'
           AND s.billing_cycle_end IS NOT NULL
           AND s.billing_cycle_end <= $1
@@ -736,7 +791,7 @@ async fn renew_subscription_locked(
         sqlx::query_as::<_, DueRow>(
             "SELECT id, plan, billing_interval, billing_cycle_end, cancel_at_period_end, \
                     renewal_attempts \
-             FROM mollie_subscriptions \
+             FROM subscription_state \
              WHERE tenant_id = $1 AND status = 'active' \
              ORDER BY created_at DESC LIMIT 1 \
              FOR UPDATE",
@@ -897,7 +952,7 @@ async fn renew_subscription_locked(
     // Stamp the in-flight/backoff gate BEFORE claiming: a concurrent tick
     // (and the next dunning retry) skips a stamped row.
     sqlx::query(
-        "UPDATE mollie_subscriptions SET renewal_locked_at = $2, updated_at = NOW() WHERE id = $1",
+        "UPDATE subscription_state SET renewal_locked_at = $2, updated_at = NOW() WHERE id = $1",
     )
     .bind(row_id)
     .bind(now)
@@ -1188,7 +1243,7 @@ async fn advance_period(
         .ok_or_else(|| format!("unknown billing interval {interval:?}"))?;
     type Cycle = (Option<DateTime<Utc>>, Option<DateTime<Utc>>);
     let (cycle_start, cycle_end): Cycle = sqlx::query_as(
-        "SELECT billing_cycle_start, billing_cycle_end FROM mollie_subscriptions WHERE id = $1",
+        "SELECT billing_cycle_start, billing_cycle_end FROM subscription_state WHERE id = $1",
     )
     .bind(row_id)
     .fetch_one(pool)
@@ -1208,7 +1263,7 @@ async fn advance_period(
         .await
         .map_err(|error| format!("renewal advance transaction failed: {error}"))?;
     sqlx::query(
-        "UPDATE mollie_subscriptions SET status = 'active', billing_cycle_start = $2, \
+        "UPDATE subscription_state SET status = 'active', billing_cycle_start = $2, \
                 billing_cycle_end = $3, renewal_attempts = 0, renewal_locked_at = NULL, \
                 updated_at = NOW() \
          WHERE id = $1",
@@ -1264,7 +1319,7 @@ async fn end_subscription_at_period_end(
         .await
         .map_err(|error| format!("period-end transaction failed: {error}"))?;
     sqlx::query(
-        "UPDATE mollie_subscriptions SET status = 'canceled', cancel_at_period_end = false, \
+        "UPDATE subscription_state SET status = 'canceled', cancel_at_period_end = false, \
                 renewal_locked_at = NULL, updated_at = NOW() \
          WHERE id = $1 AND cancel_at_period_end",
     )
@@ -1331,7 +1386,7 @@ async fn dunning_failure(
             .await
             .map_err(|error| format!("dunning transaction failed: {error}"))?;
         sqlx::query(
-            "UPDATE mollie_subscriptions SET status = 'past_due', renewal_attempts = $2, \
+            "UPDATE subscription_state SET status = 'past_due', renewal_attempts = $2, \
                     renewal_locked_at = $3, updated_at = NOW() \
              WHERE id = $1",
         )
@@ -1424,7 +1479,7 @@ async fn stamp_renewal_cooldown(
     amount_cents: Option<i64>,
 ) -> Result<(), String> {
     sqlx::query(
-        "UPDATE mollie_subscriptions SET renewal_attempts = $2, renewal_locked_at = NOW(), \
+        "UPDATE subscription_state SET renewal_attempts = $2, renewal_locked_at = NOW(), \
                 updated_at = NOW() WHERE id = $1",
     )
     .bind(row_id)
@@ -1498,13 +1553,26 @@ pub async fn reconcile_provider_renewal_payment(
     // exactly-once on the operation id: acknowledge the replay with the
     // settled obligation — no contract resolution, no tenant lock, no
     // incident, no second allocation.
-    let operation_id = format!("mollie:{}", payment_id.trim());
+    //
+    // N-05 RESOLVED (step 10): the lookup accepts BOTH allocation
+    // vocabularies for the same provider payment — the legacy `{provider}'
+    // source-era rows and the engine's neutral `{provider}:{payment_id}` rows
+    // — computed from the registry's current provider name (falling back to
+    // the historical Mollie name when no adapter is configured, the only
+    // writer this reconciler can observe).
+    let provider_name = crate::payments::registry::from_env()
+        .map(|provider| provider.provider_name().to_string())
+        .unwrap_or_else(|_| "mollie".to_string());
+    let operation_ids = [
+        format!("mollie:{}", payment_id.trim()),
+        crate::payments::engine::operation_id(&provider_name, payment_id),
+    ];
     if let Some((invoice_id,)) = sqlx::query_as::<_, (Uuid,)>(
         "SELECT i.id FROM invoice_payment_allocations a \
          JOIN invoices i ON i.id = a.invoice_id \
-         WHERE a.operation_id = $1 LIMIT 1",
+         WHERE a.operation_id = ANY($1) LIMIT 1",
     )
-    .bind(&operation_id)
+    .bind(&operation_ids)
     .fetch_optional(pool)
     .await
     .map_err(|error| RenewalReconciliationError::Other(error.to_string()))?
@@ -1513,8 +1581,8 @@ pub async fn reconcile_provider_renewal_payment(
     }
 
     // Resolve the LOCAL subscription: the neutral binding first (the legacy
-    // contract id's surviving purpose), then the legacy column (rows bound
-    // before the binding table existed).
+    // contract id's surviving purpose), then the state row's own contract
+    // reference (rows bound before the binding table existed).
     type LocalRow = (
         Uuid,
         String,
@@ -1525,14 +1593,15 @@ pub async fn reconcile_provider_renewal_payment(
     );
     let row: Option<LocalRow> = sqlx::query_as(
         "SELECT s.id, s.tenant_id, s.plan, s.billing_interval, s.billing_cycle_end, s.status \
-         FROM mollie_subscriptions s \
+         FROM subscription_state s \
          LEFT JOIN subscription_payment_bindings b ON b.local_subscription_id = s.id \
-              AND b.provider = 'mollie' \
-         WHERE b.provider_contract_id = $1 OR s.mollie_subscription_id = $1 \
+              AND b.provider = $2 \
+         WHERE b.provider_contract_id = $1 OR s.provider_contract_id = $1 \
          ORDER BY (b.id IS NOT NULL) DESC, s.created_at DESC \
          LIMIT 1",
     )
     .bind(provider_contract_id)
+    .bind(&provider_name)
     .fetch_optional(pool)
     .await
     .map_err(|error| {
@@ -1578,6 +1647,7 @@ pub async fn reconcile_provider_renewal_payment(
                     conn,
                     &payment_id,
                     &contract_id,
+                    &provider_name,
                     gross_cents,
                     &currency,
                     row_id,
@@ -1605,6 +1675,7 @@ async fn reconcile_locked(
     conn: &mut sqlx::PgConnection,
     payment_id: &str,
     _contract_id: &str,
+    provider_name: &str,
     gross_cents: i64,
     currency: &str,
     row_id: Uuid,
@@ -1623,10 +1694,11 @@ async fn reconcile_locked(
     let obligation_ref: Option<String> = {
         let from_attempt: Option<String> = sqlx::query_scalar(
             "SELECT obligation_ref FROM payment_attempts \
-             WHERE provider = 'mollie' AND provider_payment_id = $1 \
+             WHERE provider = $2 AND provider_payment_id = $1 \
                AND obligation_ref IS NOT NULL LIMIT 1",
         )
         .bind(payment_id.trim())
+        .bind(provider_name)
         .fetch_optional(&mut *conn)
         .await
         .map_err(|error| RenewalReconciliationError::Other(error.to_string()))?;
@@ -1705,7 +1777,7 @@ async fn reconcile_locked(
     // provider's fact is already the authenticated truth the webhook
     // fetched.
     let observed = crate::payments::engine::ObservedPayment {
-        provider: "mollie".to_string(),
+        provider: provider_name.to_string(),
         provider_payment_id: payment_id.trim().to_string(),
         state: crate::payments::PaymentState::Succeeded,
         amount_minor: Some(gross_cents),
@@ -1747,7 +1819,7 @@ async fn reconcile_locked(
         }
         Err(error) => return Err(RenewalReconciliationError::Verify(error)),
     };
-    let settled_now = crate::payments::engine::settle_verified(pool, "mollie", &verified)
+    let settled_now = crate::payments::engine::settle_verified(pool, provider_name, &verified)
         .await
         .map_err(RenewalReconciliationError::Other)?;
 
@@ -1832,7 +1904,7 @@ pub async fn mark_subscription_payment_failed(
     amount_cents: Option<i64>,
 ) -> Result<(), String> {
     let tenant_id: Option<String> = sqlx::query_scalar(
-        "SELECT tenant_id FROM mollie_subscriptions WHERE mollie_subscription_id = $1",
+        "SELECT tenant_id FROM subscription_state WHERE provider_contract_id = $1",
     )
     .bind(provider_subscription_id)
     .fetch_optional(pool)
@@ -1849,8 +1921,8 @@ pub async fn mark_subscription_payment_failed(
         .await
         .map_err(|error| format!("failure transaction failed: {error}"))?;
     sqlx::query(
-        "UPDATE mollie_subscriptions SET status = 'past_due', updated_at = NOW() \
-         WHERE mollie_subscription_id = $1",
+        "UPDATE subscription_state SET status = 'past_due', updated_at = NOW() \
+         WHERE provider_contract_id = $1",
     )
     .bind(provider_subscription_id)
     .execute(&mut *tx)

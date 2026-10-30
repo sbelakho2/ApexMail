@@ -476,8 +476,8 @@ const LIFECYCLE_SQL: &str = r#"
            COALESCE(NULLIF(s.plan, ''), NULLIF(t.plan, ''), 'free') AS plan,
            COALESCE(NULLIF(s.billing_interval, ''), 'monthly') AS interval,
            COALESCE(s.status, '') AS status,
-           s.mollie_subscription_id AS provider_subscription_id,
-           COALESCE(NULLIF(s.mollie_mandate_id, ''), '') <> '' AS mandate_present,
+           s.provider_contract_id AS provider_subscription_id,
+           COALESCE(NULLIF(s.provider_method_id, ''), '') <> '' AS mandate_present,
            s.billing_cycle_start,
            s.billing_cycle_end,
            COALESCE(s.cancel_at_period_end, false) AS cancel_at_period_end,
@@ -485,13 +485,13 @@ const LIFECYCLE_SQL: &str = r#"
            s.created_at,
            COALESCE(p.price_monthly, 0) AS price_monthly,
            COALESCE(p.price_yearly, 0) AS price_yearly
-    FROM mollie_subscriptions s
+    FROM subscription_state s
     JOIN tenants t ON t.id = s.tenant_id
     LEFT JOIN plans p ON p.name = COALESCE(NULLIF(s.plan, ''), NULLIF(t.plan, ''))
 "#;
 
 async fn load_lifecycle_rows(state: &AppState) -> Result<Vec<LifecycleRow>, ApiError> {
-    if !table_exists(&state.db, "mollie_subscriptions").await? {
+    if !table_exists(&state.db, "subscription_state").await? {
         return Ok(Vec::new());
     }
     sqlx::query_as::<_, LifecycleRow>(LIFECYCLE_SQL)
@@ -679,7 +679,7 @@ async fn load_movement(state: &AppState, now: DateTime<Utc>) -> Result<Vec<Movem
                 COALESCE(p.price_monthly, 0)::bigint, \
                 COALESCE(p.price_yearly, 0)::bigint \
            FROM audit_logs a \
-           JOIN mollie_subscriptions s \
+           JOIN subscription_state s \
              ON a.resource_id ~ '^[0-9a-fA-F-]{36}$' AND s.id = a.resource_id::uuid \
            JOIN tenants t ON t.id = s.tenant_id \
            LEFT JOIN plans p ON p.name = COALESCE(NULLIF(s.plan, ''), NULLIF(t.plan, '')) \
@@ -916,10 +916,10 @@ pub async fn load_webhook_health(state: &AppState) -> Result<WebhookHealth, ApiE
         .await
         .map_err(|error| ApiError::Internal(format!("last webhook load failed: {error}")))?;
     }
-    if table_exists(db, "mollie_subscriptions").await? {
+    if table_exists(db, "subscription_state").await? {
         out.reconciliation_pending = sqlx::query_scalar(
-            "SELECT COUNT(*)::bigint FROM mollie_subscriptions \
-              WHERE status = 'canceled' AND left(mollie_subscription_id, 4) = 'sub_'",
+            "SELECT COUNT(*)::bigint FROM subscription_state \
+              WHERE status = 'canceled' AND left(provider_contract_id, 4) = 'sub_'",
         )
         .fetch_one(db)
         .await
@@ -970,7 +970,7 @@ pub async fn load_subscriptions(
     state: &AppState,
     query: &SubscriptionQuery,
 ) -> Result<SubscriptionPage, ApiError> {
-    if !table_exists(&state.db, "mollie_subscriptions").await? {
+    if !table_exists(&state.db, "subscription_state").await? {
         return Ok(SubscriptionPage {
             rows: Vec::new(),
             total: 0,
@@ -1014,7 +1014,7 @@ pub async fn load_subscriptions(
         .await
         .map_err(|error| ApiError::Internal(format!("subscription list failed: {error}")))?;
     let total: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*)::bigint FROM mollie_subscriptions s JOIN tenants t ON t.id = s.tenant_id \
+        "SELECT COUNT(*)::bigint FROM subscription_state s JOIN tenants t ON t.id = s.tenant_id \
           WHERE ($1::text IS NULL OR s.status = $1) \
             AND ($2::text IS NULL OR COALESCE(NULLIF(s.plan, ''), NULLIF(t.plan, '')) = $2) \
             AND ($3::text IS NULL OR lower(s.tenant_id) LIKE $3)",
@@ -1450,9 +1450,9 @@ mod tests {
         .await
         .expect("seed plan");
         sqlx::query(
-            "INSERT INTO mollie_subscriptions (tenant_id, mollie_subscription_id, plan, status, \
-                billing_interval, billing_cycle_start, billing_cycle_end, mollie_customer_id, \
-                mollie_mandate_id, mollie_sequence_type) \
+            "INSERT INTO subscription_state (tenant_id, provider_contract_id, plan, status, \
+                billing_interval, billing_cycle_start, billing_cycle_end, provider_customer_id, \
+                provider_method_id, provider_sequence_type) \
              VALUES ($1, $2, 'starter', 'active', 'monthly', NOW() - INTERVAL '25 days', \
                      NOW() + INTERVAL '5 days', $3, $4, 'recurring')",
         )
@@ -1464,9 +1464,9 @@ mod tests {
         .await
         .expect("seed subscription");
         sqlx::query(
-            "INSERT INTO mollie_subscriptions (tenant_id, mollie_subscription_id, plan, status, \
-                billing_interval, billing_cycle_start, billing_cycle_end, mollie_customer_id, \
-                mollie_mandate_id, mollie_sequence_type) \
+            "INSERT INTO subscription_state (tenant_id, provider_contract_id, plan, status, \
+                billing_interval, billing_cycle_start, billing_cycle_end, provider_customer_id, \
+                provider_method_id, provider_sequence_type) \
              VALUES ($1, $2, 'starter', 'past_due', 'monthly', NOW() - INTERVAL '35 days', \
                      NOW() - INTERVAL '5 days', $3, $4, 'recurring')",
         )
@@ -1526,7 +1526,7 @@ mod tests {
             "DELETE FROM mollie_refunds WHERE payment_id = $1",
             "DELETE FROM invoice_payment_allocations WHERE tenant_id = $1",
             "DELETE FROM invoices WHERE tenant_id = $1",
-            "DELETE FROM mollie_subscriptions WHERE tenant_id = $1",
+            "DELETE FROM subscription_state WHERE tenant_id = $1",
             "DELETE FROM audit_logs WHERE tenant_id = $1",
             "DELETE FROM tenants WHERE id = $1",
         ] {

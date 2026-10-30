@@ -93,6 +93,11 @@ export_from_file DKIM_PRIVATE_KEY_ENCRYPTION_KEY || true
 export_from_file KIWI_SECRET_KEY          || true
 export_from_file MOLLIE_API_KEY           || true
 export_from_file MOLLIE_PROFILE_ID        || true
+# ── Stripe (PAYMENTS_PROVIDER=stripe; optional): the api-server webhook
+# route verifies Stripe-Signature with STRIPE_WEBHOOK_SECRET and the
+# adapter resolves STRIPE_SECRET_KEY from the process env.
+export_from_file STRIPE_SECRET_KEY        || true
+export_from_file STRIPE_WEBHOOK_SECRET    || true
 export_from_file DB_PASSWORD              || true
 export_from_file REDIS_PASSWORD           || true
 export_from_file CLICKHOUSE_PASSWORD      || true

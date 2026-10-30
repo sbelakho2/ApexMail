@@ -724,15 +724,15 @@ async fn load_metering_subscription_context(
     tenant_id: &str,
     recorded_at: DateTime<Utc>,
 ) -> Result<Option<MeteringSubscriptionContext>, UsageError> {
-    // Fix C, subscription state is written exclusively by the Mollie
-    // webhook handlers into mollie_subscriptions; the legacy `subscriptions`
-    // table is never populated, so enrichment must read mollie_subscriptions.
+    // Fix C, subscription state is written exclusively by the webhook
+    // handlers into `subscription_state`; the legacy `subscriptions` table is
+    // never populated, so enrichment must read subscription_state.
     let matched = sqlx::query_as::<_, MeteringSubscriptionContextRow>(
         r#"
-        SELECT mollie_subscription_id AS subscription_id,
+        SELECT provider_contract_id AS subscription_id,
                billing_cycle_start AS period_start,
                billing_cycle_end AS period_end
-        FROM mollie_subscriptions
+        FROM subscription_state
         WHERE tenant_id = $1
           AND status IN ('active', 'trialing', 'past_due')
           AND billing_cycle_start <= $2
@@ -750,10 +750,10 @@ async fn load_metering_subscription_context(
     let fallback = if matched.is_none() {
         sqlx::query_as::<_, MeteringSubscriptionContextRow>(
             r#"
-            SELECT mollie_subscription_id AS subscription_id,
+            SELECT provider_contract_id AS subscription_id,
                    billing_cycle_start AS period_start,
                    billing_cycle_end AS period_end
-            FROM mollie_subscriptions
+            FROM subscription_state
             WHERE tenant_id = $1
               AND status IN ('active', 'trialing', 'past_due')
             ORDER BY created_at DESC
@@ -1311,7 +1311,7 @@ async fn tenant_cycle_anchor(
     let start: Option<chrono::DateTime<Utc>> = sqlx::query_scalar(
         r#"
         SELECT billing_cycle_start
-        FROM mollie_subscriptions
+        FROM subscription_state
         WHERE tenant_id = $1
           AND status IN ('active', 'trialing', 'past_due')
           AND billing_cycle_start IS NOT NULL
@@ -2444,7 +2444,7 @@ mod tests {
         let t_anchor = unique_tenant("usg_anchor");
         crate::test_support::seed_tenant(&env.pool, &t_anchor, "growth").await;
         sqlx::query(
-            "INSERT INTO mollie_subscriptions (tenant_id, mollie_subscription_id, plan, status, billing_cycle_start)
+            "INSERT INTO subscription_state (tenant_id, provider_contract_id, plan, status, billing_cycle_start)
              VALUES ($1, $2, 'growth', 'active', $3)",
         )
         .bind(&t_anchor)

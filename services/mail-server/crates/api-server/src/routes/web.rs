@@ -18747,15 +18747,15 @@ mod coverage_handler_tests {
             .expect("original plan");
         // Rerun-safe: the shared coverage DB may still hold a canceled row
         // from a previous pass.
-        sqlx::query("DELETE FROM mollie_subscriptions WHERE tenant_id = $1 AND mollie_subscription_id = 'sub_web_cancel'")
+        sqlx::query("DELETE FROM subscription_state WHERE tenant_id = $1 AND provider_contract_id = 'sub_web_cancel'")
             .bind(&user.tenant_id)
             .execute(&app.db)
             .await
             .ok();
         sqlx::query(
-            "INSERT INTO mollie_subscriptions
-                 (tenant_id, mollie_subscription_id, plan, status, billing_cycle_start,
-                  billing_cycle_end, mollie_customer_id)
+            "INSERT INTO subscription_state
+                 (tenant_id, provider_contract_id, plan, status, billing_cycle_start,
+                  billing_cycle_end, provider_customer_id)
              VALUES ($1, 'sub_web_cancel', 'growth', 'active', NOW(),
                      NOW() + INTERVAL '30 days', $1)",
         )
@@ -18778,7 +18778,7 @@ mod coverage_handler_tests {
             flash_text(&response, &app.config)
         );
         let (period_end_cancel, sub_status): (bool, String) = sqlx::query_as(
-            "SELECT cancel_at_period_end, status FROM mollie_subscriptions WHERE tenant_id = $1",
+            "SELECT cancel_at_period_end, status FROM subscription_state WHERE tenant_id = $1",
         )
         .bind(&user.tenant_id)
         .fetch_one(&app.db)
@@ -18801,7 +18801,7 @@ mod coverage_handler_tests {
             flash_text(&response, &app.config)
         );
         let (sub_status, tenant_plan): (String, String) = sqlx::query_as(
-            "SELECT s.status, t.plan FROM mollie_subscriptions s
+            "SELECT s.status, t.plan FROM subscription_state s
                JOIN tenants t ON t.id = s.tenant_id WHERE s.tenant_id = $1",
         )
         .bind(&user.tenant_id)
@@ -18813,7 +18813,7 @@ mod coverage_handler_tests {
 
         // Restore the shared fixture tenant: the immediate cancel downgraded
         // its plan and the subscription row must not leak into other tests.
-        sqlx::query("DELETE FROM mollie_subscriptions WHERE tenant_id = $1 AND mollie_subscription_id = 'sub_web_cancel'")
+        sqlx::query("DELETE FROM subscription_state WHERE tenant_id = $1 AND provider_contract_id = 'sub_web_cancel'")
             .bind(&user.tenant_id)
             .execute(&app.db)
             .await

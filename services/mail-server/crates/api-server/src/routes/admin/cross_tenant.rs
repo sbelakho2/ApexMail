@@ -263,7 +263,7 @@ async fn get_cross_tenant_plans(
     let db = &state.db;
 
     let has_tenants = table_exists(db, "tenants").await?;
-    let has_subs = table_exists(db, "mollie_subscriptions").await?;
+    let has_subs = table_exists(db, "subscription_state").await?;
     let has_plans = table_exists(db, "plans").await?;
 
     let plan_tenant_counts: HashMap<String, i64> = if has_tenants {
@@ -290,12 +290,12 @@ async fn get_cross_tenant_plans(
         created_at: DateTime<Utc>,
     }
 
-    // Subscriptions are read from mollie_subscriptions (the table billing
+    // Subscriptions are read from subscription_state (the table billing
     // webhooks write), joined via tenants.plan to plans pricing, mirroring
     // billing-service's get_mrr_report pattern with proper yearly rounding.
     let subscriptions = if has_subs && has_plans {
         let has_billing_interval =
-            column_exists(db, "mollie_subscriptions", "billing_interval").await?;
+            column_exists(db, "subscription_state", "billing_interval").await?;
         let billing_col = if has_billing_interval {
             "COALESCE(NULLIF(s.billing_interval, ''), 'monthly')"
         } else {
@@ -322,7 +322,7 @@ async fn get_cross_tenant_plans(
                     {price_monthly_col} as price_monthly,
                     {price_yearly_col} as price_yearly,
                     s.created_at
-             FROM mollie_subscriptions s
+             FROM subscription_state s
              JOIN tenants t ON t.id = s.tenant_id
              LEFT JOIN plans p ON p.name = t.plan"
         );
@@ -513,7 +513,7 @@ async fn get_cross_tenant_growth(
 
     let has_messages = table_exists(db, "messages").await?;
     let has_tenants = table_exists(db, "tenants").await?;
-    let has_subs = table_exists(db, "mollie_subscriptions").await?;
+    let has_subs = table_exists(db, "subscription_state").await?;
     let has_plans = table_exists(db, "plans").await?;
 
     let total_emails_daily = if has_messages {
@@ -603,7 +603,7 @@ async fn get_cross_tenant_growth(
         .unwrap_or(0)
     } else if has_subs {
         sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*)::bigint FROM mollie_subscriptions
+            "SELECT COUNT(*)::bigint FROM subscription_state
              WHERE status = 'canceled'
                AND COALESCE(canceled_at, updated_at) >= $1",
         )
@@ -622,10 +622,10 @@ async fn get_cross_tenant_growth(
     };
 
     let platform_revenue_growth_rate = if has_subs && has_plans {
-        // MRR growth from mollie_subscriptions (billing's writer table),
+        // MRR growth from subscription_state (billing's writer table),
         // mirroring billing-service's get_mrr_report pattern.
         let has_billing_interval =
-            column_exists(db, "mollie_subscriptions", "billing_interval").await?;
+            column_exists(db, "subscription_state", "billing_interval").await?;
         let billing_expr = if has_billing_interval {
             "COALESCE(NULLIF(s.billing_interval, ''), 'monthly')"
         } else {
@@ -639,7 +639,7 @@ async fn get_cross_tenant_growth(
                         ELSE p.price_monthly
                     END
                 ), 0)::bigint
-             FROM mollie_subscriptions s
+             FROM subscription_state s
              JOIN tenants t ON t.id = s.tenant_id
              JOIN plans p ON p.name = t.plan
              WHERE s.status IN ('active', 'trialing', 'past_due')"
@@ -652,7 +652,7 @@ async fn get_cross_tenant_growth(
                         ELSE p.price_monthly
                     END
                 ), 0)::bigint
-             FROM mollie_subscriptions s
+             FROM subscription_state s
              JOIN tenants t ON t.id = s.tenant_id
              JOIN plans p ON p.name = t.plan
              WHERE s.status IN ('active', 'trialing', 'past_due')
@@ -908,7 +908,7 @@ mod adversarial_tests {
         .await
         .expect("seed plan");
         sqlx::query(
-            "INSERT INTO mollie_subscriptions (tenant_id, mollie_subscription_id, plan, status, billing_interval, created_at, updated_at)
+            "INSERT INTO subscription_state (tenant_id, provider_contract_id, plan, status, billing_interval, created_at, updated_at)
              VALUES ($1, $2, $3, 'active', 'yearly', NOW() - INTERVAL '60 days', NOW())",
         )
         .bind(&tenant)
@@ -988,7 +988,7 @@ mod adversarial_tests {
         // One OLD active subscription (excluded from current-30d previous
         // MRR) and one NEW one created today (drives positive growth).
         sqlx::query(
-            "INSERT INTO mollie_subscriptions (tenant_id, mollie_subscription_id, plan, status, billing_interval, created_at, updated_at)
+            "INSERT INTO subscription_state (tenant_id, provider_contract_id, plan, status, billing_interval, created_at, updated_at)
              VALUES ($1, $2, $3, 'active', 'monthly', NOW() - INTERVAL '90 days', NOW())",
         )
         .bind(&active)
@@ -1057,7 +1057,7 @@ mod adversarial_tests {
             .execute(pool)
             .await
             .expect("cleanup messages");
-        sqlx::query("DELETE FROM mollie_subscriptions WHERE tenant_id = $1")
+        sqlx::query("DELETE FROM subscription_state WHERE tenant_id = $1")
             .bind(tenant)
             .execute(pool)
             .await
