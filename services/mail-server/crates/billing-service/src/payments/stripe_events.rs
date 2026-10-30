@@ -1,5 +1,6 @@
-//! Stripe webhook signature verification and NEUTRAL event normalization —
-//! the follow-up agent's HTTP-route contract (external audit item 15).
+//! Stripe webhook signature verification and the REFETCH-FIRST event
+//! pipeline (external audit item 15, re-audit of 30 Oct: "signed does not
+//! mean current").
 //!
 //! # The HTTP route contract (STABLE — implement the route against exactly this)
 //!
@@ -8,14 +9,17 @@
 //!
 //! 1. `verify_signature(&STRIPE_WEBHOOK_SECRET, &raw_body, header)` — reject
 //!    with 400 on `Err` (a tampered/replayed/unparseable delivery must never
-//!    enter the fact pipeline).
+//!    enter the fact pipeline). The replay window is unchanged.
 //! 2. Parse the body as `serde_json::Value`; the dedupe id is
-//!    [`event_dedup_id`] (`event.id`, Stripe's `evt_…`); a delivery whose id
-//!    was already processed is acknowledged without effect.
-//! 3. `normalize_event("stripe", &event)` — unknown event types answer
-//!    `Ok(vec![])` (accepted and ignored, like the house webhook pattern);
-//!    an `Err` is a malformed KNOWN event (dead-letter / 500 so Stripe
-//!    retries).
+//!    [`event_dedup_id`] (`event.id`, Stripe's `evt_…`). Dedup answers "did
+//!    we process this TRIGGER"; the money facts are idempotent per provider
+//!    object id, so a redelivery is acknowledged without a second effect.
+//! 3. [`normalize_event`] treats the verified delivery as a TRIGGER ONLY:
+//!    it extracts the OBJECT IDS the event names and calls the adapter's
+//!    AUTHENTICATED fetch to obtain the authoritative object, then
+//!    normalizes THAT object into facts. The signed body never supplies a
+//!    state, amount, currency or attribution — a signed event whose body
+//!    lies cannot settle anything.
 //! 4. Dispatch each [`NormalizedFact`] through the SAME engine paths the
 //!    Mollie webhook uses — never a Stripe-specific writer:
 //!    * [`NormalizedFact::Payment`] -> `payments::engine::observe_payment`
@@ -25,19 +29,27 @@
 //!    * [`NormalizedFact::Dispute`] -> `payments::engine::observe_dispute`;
 //!    * [`NormalizedFact::Settlement`] -> `payments::engine::record_settlement_fact`.
 //!
-//! Wire notification BODIES are never trusted as settlement authority by
-//! themselves: the engine re-verifies every fact against the LOCAL invoice,
-//! and the repair sweep re-fetches the intent with provider authentication.
+//! The fetch map per trigger:
+//!
+//! | event family | ids extracted | authenticated fetch |
+//! |--------------|---------------|---------------------|
+//! | `payment_intent.*` | PaymentIntent id | `fetch_payment_details` |
+//! | `checkout.session.completed` | session id, PaymentIntent id | `fetch_payment_details` (the SESSION NEVER decides the money state) |
+//! | `charge.refunded` / `charge.refund.updated` | refund id, payment id | `fetch_refund` |
+//! | `charge.dispute.*` | dispute id, payment id (or charge id) | `resolve_charge_payment_id` (charge→payment) then `list_disputes` |
+//! | `payout.paid` | payout id | `fetch_settlement` |
+//!
+//! Unknown event types stay ACCEPTED AND IGNORED (`Ok(vec![])`).
 
-use chrono::{TimeZone, Utc};
+use chrono::Utc;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 
 use super::engine::ObservedPayment;
-use super::stripe_provider::{
-    map_dispute_status, map_payment_status, map_refund_status, map_session_status, PROVIDER_NAME,
+use super::stripe_provider::PROVIDER_NAME;
+use super::{
+    Dispute, FetchedPayment, PaymentProvider, PaymentState, ProviderError, Refund, Settlement,
 };
-use super::{Dispute, ProviderError, Refund, Settlement};
 
 /// Replay-window tolerance for the `Stripe-Signature` timestamp (Stripe's
 /// own SDK default): a header older (or further in the future) than five
@@ -57,7 +69,9 @@ pub enum NormalizedFact {
     /// carries the provider payment (PaymentIntent), the checkout session,
     /// the provider customer and OUR metadata (tenant/plan/interval), so the
     /// activation can grant the plan and store the reusable card exactly as
-    /// the Mollie completed-checkout path does.
+    /// the Mollie completed-checkout path does. Only a fetched PaymentIntent
+    /// in state `succeeded` produces this fact (the Session lifecycle never
+    /// does).
     CheckoutCompleted(CheckoutCompleted),
 }
 
@@ -76,6 +90,112 @@ pub struct CheckoutCompleted {
     pub amount_minor: Option<i64>,
     pub currency: Option<String>,
     pub provider_customer_id: Option<String>,
+}
+
+/// One verified delivery reduced to the object IDS it names. A trigger is
+/// never a fact: money, state and attribution always come from the adapter's
+/// authenticated fetch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WebhookTrigger {
+    /// A `payment_intent.*` event: fetch the PaymentIntent.
+    Payment { payment_id: String },
+    /// `checkout.session.completed`: fetch the session's PaymentIntent (the
+    /// session's own `status`/`payment_status` are lifecycle hints, never
+    /// settlement evidence).
+    CheckoutSession {
+        session_id: String,
+        payment_intent_id: Option<String>,
+    },
+    /// A refund event: fetch the refund (the payment id is the fetch's
+    /// fallback identity).
+    Refund {
+        refund_id: String,
+        payment_id: Option<String>,
+    },
+    /// A dispute event: the dispute id plus the payment intent it attaches
+    /// to (or the charge, resolved to the payment through an authenticated
+    /// fetch).
+    Dispute {
+        dispute_id: String,
+        payment_intent_id: Option<String>,
+        charge_id: Option<String>,
+    },
+    /// `payout.paid`: fetch the payout.
+    Settlement { payout_id: String },
+}
+
+impl WebhookTrigger {
+    /// Reduce one verified event to the ids it names. `Ok(None)` is an
+    /// unknown (accepted-and-ignored) event type; an `Err` is a KNOWN event
+    /// whose identifiers are unreadable (the route dead-letters it for
+    /// retry). This function NEVER reads a state, amount or currency.
+    pub fn from_event(event: &serde_json::Value) -> Result<Option<Self>, String> {
+        let event_type = event
+            .get("type")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default();
+        let object = event
+            .pointer("/data/object")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        let object_type = object
+            .get("object")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default();
+        match event_type {
+            "payment_intent.succeeded"
+            | "payment_intent.processing"
+            | "payment_intent.payment_failed" => {
+                let payment_id = required_id(&object, "a payment intent event object")?;
+                Ok(Some(WebhookTrigger::Payment { payment_id }))
+            }
+            "checkout.session.completed" => {
+                let session_id = required_id(&object, "a checkout session event object")?;
+                Ok(Some(WebhookTrigger::CheckoutSession {
+                    session_id,
+                    payment_intent_id: expandable_id(&object, "payment_intent"),
+                }))
+            }
+            "charge.refunded" | "charge.refund.updated" => {
+                // `charge.refund.updated` delivers the REFUND object;
+                // `charge.refunded` delivers the CHARGE (its refunds list
+                // names the newest refund). Either way only the id is read.
+                let refund_id = if object_type == "refund" {
+                    required_id(&object, "a refund event object")?
+                } else {
+                    string_at(&object, "/refunds/data/0/id")
+                        .filter(|id| !id.is_empty())
+                        .or_else(|| {
+                            string_at(&object, "/latest_refund/id").filter(|id| !id.is_empty())
+                        })
+                        .ok_or_else(|| {
+                            "a charge refund event carries no refund id; the refund cannot be \
+                             fetched with provider authentication"
+                                .to_string()
+                        })?
+                };
+                Ok(Some(WebhookTrigger::Refund {
+                    refund_id,
+                    payment_id: expandable_id(&object, "payment_intent"),
+                }))
+            }
+            "charge.dispute.created" | "charge.dispute.updated" | "charge.dispute.closed" => {
+                let dispute_id = required_id(&object, "a dispute event object")?;
+                Ok(Some(WebhookTrigger::Dispute {
+                    dispute_id,
+                    payment_intent_id: expandable_id(&object, "payment_intent"),
+                    charge_id: expandable_id(&object, "charge"),
+                }))
+            }
+            "payout.paid" => {
+                let payout_id = required_id(&object, "a payout event object")?;
+                Ok(Some(WebhookTrigger::Settlement { payout_id }))
+            }
+            // Accepted and ignored: Stripe may deliver event types this
+            // integration never asked for (billing, connect, …).
+            _ => Ok(None),
+        }
+    }
 }
 
 /// Verify a `Stripe-Signature` header over the RAW payload bytes.
@@ -171,70 +291,204 @@ pub fn event_dedup_id(event: &serde_json::Value) -> Option<String> {
         .filter(|id| !id.is_empty())
 }
 
-/// Normalize one Stripe event into neutral facts. UNKNOWN event types are
-/// ACCEPTED AND IGNORED (`Ok(vec![])` — the house webhook pattern: an
-/// unknown notification must never fail the delivery); a KNOWN event whose
-/// object is unreadable (no id, unmapped status) is an `Err` so the route
-/// dead-letters it for retry. The provider name is the ADAPTER's stable
-/// name (`"stripe"`), never hardcoded here.
-pub fn normalize_event(
-    provider_name: &str,
+/// REFETCH-FIRST normalization: extract the verified delivery's object ids,
+/// obtain each AUTHORITATIVE object with the adapter's authenticated fetch,
+/// and normalize THAT object into neutral facts.
+///
+/// Unknown event types are ACCEPTED AND IGNORED (`Ok(vec![])`); a KNOWN
+/// event whose ids or fetch are unusable is an `Err` so the route
+/// dead-letters it for retry. A fetch failure is always an `Err` — the
+/// signed body is never a fallback fact source.
+pub async fn normalize_event(
+    provider: &dyn PaymentProvider,
     event: &serde_json::Value,
 ) -> Result<Vec<NormalizedFact>, String> {
-    let event_type = event
-        .get("type")
-        .and_then(|value| value.as_str())
-        .unwrap_or_default();
-    let object = event
-        .pointer("/data/object")
-        .cloned()
-        .unwrap_or(serde_json::Value::Null);
-    match event_type {
-        "checkout.session.completed" => {
-            let payment = observed_from_document(provider_name, &object, "checkout session")?;
-            let mut facts = vec![NormalizedFact::Payment(payment.clone())];
-            if payment.state == super::PaymentState::Succeeded {
+    let Some(trigger) = WebhookTrigger::from_event(event)? else {
+        return Ok(Vec::new());
+    };
+    let provider_name = provider.provider_name();
+    match trigger {
+        WebhookTrigger::Payment { payment_id } => {
+            let fetched = provider
+                .fetch_payment_details(&payment_id)
+                .await
+                .map_err(|error| {
+                    format!("the authenticated refetch of payment {payment_id} failed: {error}")
+                })?;
+            Ok(vec![NormalizedFact::Payment(observed_from_fetched(
+                &fetched,
+            ))])
+        }
+        WebhookTrigger::CheckoutSession {
+            session_id,
+            payment_intent_id,
+        } => {
+            // Item 2: the SESSION lifecycle never means money Succeeded. The
+            // fact's money state is the fetched PaymentIntent's state; with
+            // no PaymentIntent yet the flow is still processing and the fact
+            // is Processing (it can never activate or settle).
+            let Some(payment_intent_id) = payment_intent_id else {
+                return Ok(vec![NormalizedFact::Payment(ObservedPayment {
+                    provider: provider_name.to_string(),
+                    provider_payment_id: session_id,
+                    state: PaymentState::Processing,
+                    amount_minor: None,
+                    currency: None,
+                    // No authenticated object exists to attribute yet.
+                    tenant_id: None,
+                    obligation_ref: None,
+                    purpose: "webhook",
+                })]);
+            };
+            let fetched = provider
+                .fetch_payment_details(&payment_intent_id)
+                .await
+                .map_err(|error| {
+                    format!(
+                        "the authenticated refetch of checkout session {session_id}'s payment \
+                         {payment_intent_id} failed: {error}"
+                    )
+                })?;
+            let mut facts = vec![NormalizedFact::Payment(observed_from_fetched(&fetched))];
+            // The settlement evidence is the PaymentIntent. Only a fetched
+            // `succeeded` intent produces the activation fact; a `processing`
+            // or `requires_action` one stays a Payment fact and activates
+            // nothing.
+            if fetched.payment.state == PaymentState::Succeeded {
                 facts.push(NormalizedFact::CheckoutCompleted(
-                    checkout_completed_from_document(
-                        provider_name,
-                        &object,
-                        &payment.provider_payment_id,
-                    )?,
+                    checkout_completed_from_fetched(&session_id, &fetched),
                 ));
             }
             Ok(facts)
         }
-        "payment_intent.succeeded"
-        | "payment_intent.processing"
-        | "payment_intent.payment_failed" => {
-            let payment = observed_from_document(provider_name, &object, "payment intent")?;
-            Ok(vec![NormalizedFact::Payment(payment)])
-        }
-        "charge.refunded" | "charge.refund.updated" => {
-            let refund = refund_from_document(provider_name, &object)?;
+        WebhookTrigger::Refund {
+            refund_id,
+            payment_id,
+        } => {
+            let Some(payment_id) = payment_id.filter(|id| !id.is_empty()) else {
+                return Err(format!(
+                    "refund event names refund {refund_id} with no payment intent; the refund \
+                     cannot be fetched with provider authentication"
+                ));
+            };
+            let refund = provider
+                .fetch_refund(&payment_id, &refund_id)
+                .await
+                .map_err(|error| {
+                    format!("the authenticated refetch of refund {refund_id} failed: {error}")
+                })?;
             Ok(vec![NormalizedFact::Refund(refund)])
         }
-        "charge.dispute.created" | "charge.dispute.updated" | "charge.dispute.closed" => {
-            let dispute = dispute_from_document(provider_name, &object)?;
+        WebhookTrigger::Dispute {
+            dispute_id,
+            payment_intent_id,
+            charge_id,
+        } => {
+            // Item 1: a dispute event names its charge; the payment intent
+            // the ledger keys on is resolved with an AUTHENTICATED charge
+            // fetch, never assumed from the body.
+            let payment_id = match payment_intent_id.filter(|id| !id.is_empty()) {
+                Some(payment_id) => payment_id,
+                None => match charge_id.filter(|id| !id.is_empty()) {
+                    Some(charge_id) => provider
+                        .resolve_charge_payment_id(&charge_id)
+                        .await
+                        .map_err(|error| {
+                            format!(
+                                "resolving dispute {dispute_id}'s charge {charge_id} to a \
+                                 payment failed: {error}"
+                            )
+                        })?
+                        .ok_or_else(|| {
+                            format!(
+                                "dispute {dispute_id}: charge {charge_id} carries no payment \
+                                 intent; the dispute cannot be attributed"
+                            )
+                        })?,
+                    None => {
+                        return Err(format!(
+                            "dispute {dispute_id} names neither a payment intent nor a charge"
+                        ))
+                    }
+                },
+            };
+            let disputes = provider.list_disputes(&payment_id).await.map_err(|error| {
+                format!("the authenticated dispute fetch for {payment_id} failed: {error}")
+            })?;
+            // The fetched object is the fact source: a dispute the provider
+            // does not return is not recorded (and the delivery retries).
+            let dispute = disputes
+                .into_iter()
+                .find(|dispute| dispute.provider_dispute_id == dispute_id)
+                .ok_or_else(|| {
+                    format!(
+                        "dispute {dispute_id} is not visible on the authenticated payment \
+                         {payment_id}; refusing to record an unverified dispute"
+                    )
+                })?;
             Ok(vec![NormalizedFact::Dispute(dispute)])
         }
-        "payout.paid" => {
-            let settlement = settlement_from_document(provider_name, &object)?;
+        WebhookTrigger::Settlement { payout_id } => {
+            let settlement = provider
+                .fetch_settlement(&payout_id)
+                .await
+                .map_err(|error| {
+                    format!("the authenticated refetch of payout {payout_id} failed: {error}")
+                })?;
             Ok(vec![NormalizedFact::Settlement(settlement)])
         }
-        // Accepted and ignored: Stripe may deliver event types this
-        // integration never asked for (billing, connect, …).
-        _ => Ok(Vec::new()),
     }
 }
 
-/// The neutral `ObservedPayment` for a payment-shaped event object (a
-/// PaymentIntent or a `mode=payment` Checkout Session). The tenant and
-/// obligation attribution ride the SAME metadata keys every ApexMail charge
-/// writes (`metadata.tenant_id`, `metadata.reference` — the Mollie
-/// contract), so the engine's repair-link works provider-blind.
+/// The neutral payment fact for one AUTHENTICATED object. Tenant/obligation
+/// attribution rides the object's own metadata (`metadata.tenant_id`,
+/// `metadata.reference` — the keys every create writes on the session AND
+/// the PaymentIntent).
+fn observed_from_fetched(fetched: &FetchedPayment) -> ObservedPayment {
+    ObservedPayment {
+        provider: fetched.payment.provider.clone(),
+        provider_payment_id: fetched.payment.provider_payment_id.clone(),
+        state: fetched.payment.state,
+        amount_minor: Some(fetched.payment.amount_minor),
+        currency: Some(fetched.payment.currency.clone()),
+        tenant_id: metadata_string(&fetched.metadata, "tenant_id"),
+        obligation_ref: metadata_string(&fetched.metadata, "reference"),
+        purpose: "webhook",
+    }
+}
+
+/// The activation's fact, built from the FETCHED PaymentIntent (money, state,
+/// customer) and the session id the trigger named. The tenant/plan/interval
+/// keys are the same metadata the checkout mirrored onto the PaymentIntent
+/// (item 9); missing ones stay `None` and the dispatch refuses/refunds —
+/// never invented.
+fn checkout_completed_from_fetched(
+    session_id: &str,
+    fetched: &FetchedPayment,
+) -> CheckoutCompleted {
+    CheckoutCompleted {
+        provider: fetched.payment.provider.clone(),
+        provider_payment_id: fetched.payment.provider_payment_id.clone(),
+        provider_checkout_id: session_id.to_string(),
+        tenant_id: metadata_string(&fetched.metadata, "tenant_id"),
+        plan_name: metadata_string(&fetched.metadata, "plan_name"),
+        interval: metadata_string(&fetched.metadata, "interval"),
+        amount_minor: Some(fetched.payment.amount_minor),
+        currency: Some(fetched.payment.currency.clone()),
+        provider_customer_id: fetched.provider_customer_id.clone(),
+    }
+}
+
+/// A required object id: the event's identifier is the ONE thing a trigger
+/// may trust from the body (it is how the authenticated object is named).
+fn required_id(object: &serde_json::Value, kind: &str) -> Result<String, String> {
+    string_at(object, "/id")
+        .filter(|id| !id.is_empty())
+        .ok_or_else(|| format!("{kind} carries no id"))
+}
+
 /// Read an id that Stripe may deliver either as a bare string or as an
-/// expanded object (`/payment_intent/id`, `/customer/id`).
+/// expanded object (`/payment_intent` vs `/payment_intent/id`).
 fn expandable_id(object: &serde_json::Value, field: &str) -> Option<String> {
     let value = object.get(field)?;
     if let Some(id) = value.as_str() {
@@ -247,175 +501,6 @@ fn expandable_id(object: &serde_json::Value, field: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-fn observed_from_document(
-    provider_name: &str,
-    object: &serde_json::Value,
-    kind: &'static str,
-) -> Result<ObservedPayment, String> {
-    let id = string_at(object, "/id").filter(|id| !id.is_empty());
-    let Some(mut id) = id else {
-        return Err(format!("a {kind} event object carries no id"));
-    };
-    // A checkout session is a CONTAINER for the actual payment: the
-    // PaymentIntent id is the money object a refund and the settlement
-    // allocate against, so it is the id the engine must record (a second
-    // `payment_intent.succeeded` event then dedupes on the same operation
-    // id). The session id is only a fallback for an intent-less session.
-    if kind == "checkout session" {
-        if let Some(intent_id) = expandable_id(object, "payment_intent") {
-            id = intent_id;
-        }
-    }
-    let status = string_at(object, "/status").unwrap_or_default();
-    // Checkout sessions (complete/expired/open) and payment intents
-    // (succeeded/…/canceled) have disjoint state vocabularies; each maps
-    // through its own total function and an unmapped status fails the fact.
-    let state = if kind == "checkout session" {
-        map_session_status(&status)
-    } else {
-        map_payment_status(&status)
-    }
-    .map_err(|error| format!("{kind} {id}: {error}"))?;
-    let amount_minor = object.get("amount_total").and_then(|value| value.as_i64());
-    let amount_minor = match amount_minor {
-        Some(amount) => Some(amount),
-        None => object.get("amount").and_then(|value| value.as_i64()),
-    };
-    let currency = string_at(object, "/currency")
-        .map(|text| text.trim().to_ascii_uppercase())
-        .filter(|text| !text.is_empty());
-    Ok(ObservedPayment {
-        provider: provider_name.to_string(),
-        provider_payment_id: id,
-        state,
-        amount_minor,
-        currency,
-        tenant_id: metadata_string(object, "tenant_id"),
-        obligation_ref: metadata_string(object, "reference"),
-        purpose: "webhook",
-    })
-}
-
-/// The activation's fact: the completed checkout session's payment id,
-/// customer and OUR metadata. The tenant/plan/interval keys are the SAME
-/// keys every ApexMail checkout writes (`metadata.tenant_id`,
-/// `metadata.plan_name`, `metadata.interval`), so activation is
-/// provider-blind. Missing payment/customer ids are represented as `None`
-/// and the dispatch refuses/refunds — never invented.
-fn checkout_completed_from_document(
-    provider_name: &str,
-    object: &serde_json::Value,
-    provider_payment_id: &str,
-) -> Result<CheckoutCompleted, String> {
-    let checkout_id = string_at(object, "/id").filter(|id| !id.is_empty());
-    let Some(checkout_id) = checkout_id else {
-        return Err("a checkout session event object carries no id".to_string());
-    };
-    let amount_minor = object
-        .get("amount_total")
-        .and_then(|value| value.as_i64())
-        .or_else(|| object.get("amount").and_then(|value| value.as_i64()));
-    let currency = string_at(object, "/currency")
-        .map(|text| text.trim().to_ascii_uppercase())
-        .filter(|text| !text.is_empty());
-    Ok(CheckoutCompleted {
-        provider: provider_name.to_string(),
-        provider_payment_id: provider_payment_id.to_string(),
-        provider_checkout_id: checkout_id,
-        tenant_id: metadata_string(object, "tenant_id"),
-        plan_name: metadata_string(object, "plan_name"),
-        interval: metadata_string(object, "interval"),
-        amount_minor,
-        currency,
-        provider_customer_id: expandable_id(object, "customer"),
-    })
-}
-
-fn refund_from_document(provider_name: &str, object: &serde_json::Value) -> Result<Refund, String> {
-    let id = string_at(object, "/id").filter(|id| !id.is_empty());
-    let Some(id) = id else {
-        return Err("a refund event object carries no id".to_string());
-    };
-    let state = map_refund_status(&string_at(object, "/status").unwrap_or_default())
-        .map_err(|error| format!("refund {id}: {error}"))?;
-    let amount_minor = object.get("amount").and_then(|value| value.as_i64());
-    let Some(amount_minor) = amount_minor else {
-        return Err(format!("refund {id} carries no amount"));
-    };
-    let currency = string_at(object, "/currency")
-        .map(|text| text.trim().to_ascii_uppercase())
-        .filter(|text| !text.is_empty());
-    Ok(Refund {
-        provider: provider_name.to_string(),
-        provider_refund_id: id,
-        provider_payment_id: string_at(object, "/payment_intent").unwrap_or_default(),
-        state,
-        amount_minor,
-        currency: currency.unwrap_or_default(),
-        created_at: seconds_at(object.get("created")),
-    })
-}
-
-fn dispute_from_document(
-    provider_name: &str,
-    object: &serde_json::Value,
-) -> Result<Dispute, String> {
-    let id = string_at(object, "/id").filter(|id| !id.is_empty());
-    let Some(id) = id else {
-        return Err("a dispute event object carries no id".to_string());
-    };
-    let state = map_dispute_status(&string_at(object, "/status").unwrap_or_default())
-        .map_err(|error| format!("dispute {id}: {error}"))?;
-    let amount_minor = object.get("amount").and_then(|value| value.as_i64());
-    let Some(amount_minor) = amount_minor else {
-        return Err(format!("dispute {id} carries no amount"));
-    };
-    let currency = string_at(object, "/currency")
-        .map(|text| text.trim().to_ascii_uppercase())
-        .filter(|text| !text.is_empty());
-    // The attempts ledger keys payments by the INTENT id; a dispute object
-    // names it directly (`payment_intent`) and only a legacy shape names
-    // the bare charge.
-    let payment_id = string_at(object, "/payment_intent")
-        .filter(|id| !id.is_empty())
-        .or_else(|| string_at(object, "/charge"))
-        .unwrap_or_default();
-    Ok(Dispute {
-        provider: provider_name.to_string(),
-        provider_dispute_id: id,
-        provider_payment_id: payment_id,
-        state,
-        amount_minor,
-        currency: currency.unwrap_or_default(),
-        reason: string_at(object, "/reason").filter(|reason| !reason.is_empty()),
-        opened_at: seconds_at(object.get("created")),
-    })
-}
-
-fn settlement_from_document(
-    provider_name: &str,
-    object: &serde_json::Value,
-) -> Result<Settlement, String> {
-    let id = string_at(object, "/id").filter(|id| !id.is_empty());
-    let Some(id) = id else {
-        return Err("a payout event object carries no id".to_string());
-    };
-    let amount_minor = object.get("amount").and_then(|value| value.as_i64());
-    let Some(amount_minor) = amount_minor else {
-        return Err(format!("payout {id} carries no amount"));
-    };
-    let currency = string_at(object, "/currency")
-        .map(|text| text.trim().to_ascii_uppercase())
-        .filter(|text| !text.is_empty());
-    Ok(Settlement {
-        provider: provider_name.to_string(),
-        provider_settlement_id: id,
-        amount_minor,
-        currency: currency.unwrap_or_default(),
-        settled_at: seconds_at(object.get("arrival_date")),
-    })
-}
-
 fn string_at(document: &serde_json::Value, pointer: &str) -> Option<String> {
     document
         .pointer(pointer)
@@ -423,104 +508,173 @@ fn string_at(document: &serde_json::Value, pointer: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-fn metadata_string(document: &serde_json::Value, key: &str) -> Option<String> {
-    document
-        .pointer("/metadata")
-        .and_then(|metadata| metadata.get(key))
+fn metadata_string(metadata: &serde_json::Value, key: &str) -> Option<String> {
+    metadata
+        .get(key)
         .and_then(|value| value.as_str())
         .map(str::to_string)
         .filter(|text| !text.is_empty())
 }
 
-fn seconds_at(value: Option<&serde_json::Value>) -> Option<chrono::DateTime<Utc>> {
-    value
-        .and_then(|value| value.as_i64())
-        .and_then(|seconds| chrono::Utc.timestamp_opt(seconds, 0).single())
-}
-
-/// The adapter's stable name, re-exported for the route's dispatch call
-/// (`normalize_event(stripe_events::PROVIDER, &event)`).
+/// The adapter's stable name, re-exported for the route's dispatch call.
 pub const PROVIDER: &str = PROVIDER_NAME;
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// A completed checkout yields BOTH the settlement fact (the money) and
-    /// the activation fact (the plan grant). The payment id is the
-    /// PaymentIntent — the object a refund and the settlement allocate
-    /// against — not the container session id.
+    /// Trigger extraction reads ONLY ids: a payment event's amount/status in
+    /// the body never reaches a fact (that is the whole refetch-first
+    /// contract; the fetched object is the only money source).
     #[test]
-    fn checkout_session_completed_yields_the_activation_fact() {
+    fn payment_triggers_extract_only_the_object_id() {
         let event = serde_json::json!({
             "id": "evt_1",
-            "type": "checkout.session.completed",
+            "type": "payment_intent.succeeded",
             "data": { "object": {
-                "id": "cs_test_1",
-                "object": "checkout.session",
-                "status": "complete",
-                "amount_total": 2480,
-                "currency": "eur",
-                "payment_intent": "pi_test_1",
-                "customer": "cus_test_1",
-                "metadata": {
-                    "tenant_id": "tenant_1",
-                    "plan_name": "starter",
-                    "interval": "monthly"
-                }
+                "id": "pi_body",
+                "object": "payment_intent",
+                "status": "succeeded",
+                "amount": 1,
+                "currency": "xxx"
             }}
         });
-        let facts = normalize_event(PROVIDER, &event).expect("normalizes");
-        assert_eq!(facts.len(), 2, "payment + completed-checkout fact");
-        match &facts[0] {
-            NormalizedFact::Payment(payment) => {
-                assert_eq!(payment.provider_payment_id, "pi_test_1");
-                assert_eq!(payment.state, super::super::PaymentState::Succeeded);
-                assert_eq!(payment.tenant_id.as_deref(), Some("tenant_1"));
-                assert_eq!(payment.amount_minor, Some(2_480));
-            }
-            other => panic!("expected a payment fact, got {other:?}"),
-        }
-        match &facts[1] {
-            NormalizedFact::CheckoutCompleted(checkout) => {
-                assert_eq!(checkout.provider_payment_id, "pi_test_1");
-                assert_eq!(checkout.provider_checkout_id, "cs_test_1");
-                assert_eq!(checkout.tenant_id.as_deref(), Some("tenant_1"));
-                assert_eq!(checkout.plan_name.as_deref(), Some("starter"));
-                assert_eq!(checkout.interval.as_deref(), Some("monthly"));
-                assert_eq!(checkout.amount_minor, Some(2_480));
-                assert_eq!(checkout.currency.as_deref(), Some("EUR"));
-                assert_eq!(checkout.provider_customer_id.as_deref(), Some("cus_test_1"));
-            }
-            other => panic!("expected a completed-checkout fact, got {other:?}"),
-        }
+        assert_eq!(
+            WebhookTrigger::from_event(&event).expect("trigger"),
+            Some(WebhookTrigger::Payment {
+                payment_id: "pi_body".to_string()
+            })
+        );
     }
 
-    /// An expanded payment_intent object still resolves to its id (Stripe
-    /// may deliver either shape).
     #[test]
-    fn expanded_payment_intent_and_customer_objects_resolve_to_ids() {
+    fn checkout_trigger_carries_the_session_and_intent_ids() {
         let event = serde_json::json!({
             "id": "evt_2",
             "type": "checkout.session.completed",
             "data": { "object": {
-                "id": "cs_test_2",
+                "id": "cs_1",
+                "object": "checkout.session",
                 "status": "complete",
-                "amount_total": 1000,
-                "currency": "eur",
-                "payment_intent": { "id": "pi_test_2", "object": "payment_intent" },
-                "customer": { "id": "cus_test_2", "object": "customer" },
-                "metadata": { "tenant_id": "t2", "plan_name": "pro" }
+                "payment_status": "unpaid",
+                "amount_total": 1,
+                "payment_intent": { "id": "pi_1", "object": "payment_intent" }
             }}
         });
-        let facts = normalize_event(PROVIDER, &event).expect("normalizes");
-        match &facts[1] {
-            NormalizedFact::CheckoutCompleted(checkout) => {
-                assert_eq!(checkout.provider_payment_id, "pi_test_2");
-                assert_eq!(checkout.provider_customer_id.as_deref(), Some("cus_test_2"));
-                assert_eq!(checkout.interval, None);
-            }
-            other => panic!("expected a completed-checkout fact, got {other:?}"),
+        assert_eq!(
+            WebhookTrigger::from_event(&event).expect("trigger"),
+            Some(WebhookTrigger::CheckoutSession {
+                session_id: "cs_1".to_string(),
+                payment_intent_id: Some("pi_1".to_string()),
+            })
+        );
+    }
+
+    #[test]
+    fn refund_triggers_read_the_refund_id_from_charge_or_refund_shapes() {
+        let charge_event = serde_json::json!({
+            "type": "charge.refunded",
+            "data": { "object": {
+                "id": "ch_1",
+                "object": "charge",
+                "payment_intent": "pi_1",
+                "refunds": { "data": [ { "id": "re_1", "object": "refund" } ] }
+            }}
+        });
+        assert_eq!(
+            WebhookTrigger::from_event(&charge_event).expect("trigger"),
+            Some(WebhookTrigger::Refund {
+                refund_id: "re_1".to_string(),
+                payment_id: Some("pi_1".to_string()),
+            })
+        );
+        let refund_event = serde_json::json!({
+            "type": "charge.refund.updated",
+            "data": { "object": {
+                "id": "re_2",
+                "object": "refund",
+                "payment_intent": "pi_2",
+                "amount": 1
+            }}
+        });
+        assert_eq!(
+            WebhookTrigger::from_event(&refund_event).expect("trigger"),
+            Some(WebhookTrigger::Refund {
+                refund_id: "re_2".to_string(),
+                payment_id: Some("pi_2".to_string()),
+            })
+        );
+    }
+
+    #[test]
+    fn dispute_triggers_carry_the_charge_for_authenticated_resolution() {
+        let event = serde_json::json!({
+            "type": "charge.dispute.created",
+            "data": { "object": {
+                "id": "dp_1",
+                "object": "dispute",
+                "charge": "ch_1",
+                "amount": 1
+            }}
+        });
+        assert_eq!(
+            WebhookTrigger::from_event(&event).expect("trigger"),
+            Some(WebhookTrigger::Dispute {
+                dispute_id: "dp_1".to_string(),
+                payment_intent_id: None,
+                charge_id: Some("ch_1".to_string()),
+            })
+        );
+    }
+
+    #[test]
+    fn payout_and_unknown_events_are_id_only_and_accepted() {
+        let payout = serde_json::json!({
+            "type": "payout.paid",
+            "data": { "object": { "id": "po_1", "object": "payout", "amount": 1 } }
+        });
+        assert_eq!(
+            WebhookTrigger::from_event(&payout).expect("trigger"),
+            Some(WebhookTrigger::Settlement {
+                payout_id: "po_1".to_string()
+            })
+        );
+        for event_type in [
+            "invoice.created",
+            "customer.subscription.created",
+            "charge.succeeded",
+            "totally.unknown.event",
+        ] {
+            let event = serde_json::json!({
+                "type": event_type,
+                "data": { "object": { "id": "x", "amount": 999 } }
+            });
+            assert_eq!(
+                WebhookTrigger::from_event(&event).expect("accepted"),
+                None,
+                "{event_type} must be accepted and ignored"
+            );
         }
+    }
+
+    #[test]
+    fn a_known_event_without_ids_fails_the_trigger() {
+        let no_id = serde_json::json!({
+            "type": "payment_intent.succeeded",
+            "data": { "object": { "status": "succeeded", "amount": 1 } }
+        });
+        assert!(WebhookTrigger::from_event(&no_id).is_err());
+        let no_refund = serde_json::json!({
+            "type": "charge.refunded",
+            "data": { "object": { "id": "ch_1", "object": "charge" } }
+        });
+        assert!(WebhookTrigger::from_event(&no_refund).is_err());
+    }
+
+    #[test]
+    fn the_event_dedup_id_is_the_provider_event_id() {
+        let event = serde_json::json!({ "id": "evt_conf_1", "type": "payout.paid" });
+        assert_eq!(event_dedup_id(&event).as_deref(), Some("evt_conf_1"));
+        assert_eq!(event_dedup_id(&serde_json::json!({ "type": "x" })), None);
     }
 }

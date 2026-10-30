@@ -1363,8 +1363,10 @@ async fn gate_10_reward_projection_moves_the_posterior_once_and_replay_is_a_noop
     let experiment_id = Uuid::new_v4();
     let experiment_key = format!("gate10-exp-{tenant_id}");
     sqlx::query(
-        "INSERT INTO sales_experiments (id, tenant_id, key, name, status) \
-         VALUES ($1, $2, $3, 'Gate 10 experiment', 'running')",
+        // holdout_share = 0: the gate measures the reward loop, and a random
+        // 5% holdout draw would suppress the send instead of choosing an arm.
+        "INSERT INTO sales_experiments (id, tenant_id, key, name, status, holdout_share) \
+         VALUES ($1, $2, $3, 'Gate 10 experiment', 'running', 0)",
     )
     .bind(experiment_id)
     .bind(&tenant_id)

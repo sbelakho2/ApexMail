@@ -378,6 +378,25 @@ async fn stripe_stub_handler(
                 "checkout sessions must carry metadata[idempotency_key] (the search contract)",
             );
         }
+        // Item 9 wire tooth: every session metadata key must also ride the
+        // PaymentIntent (`payment_intent_data[metadata][…]`). The activation
+        // fetches the PaymentIntent, so an identity only on the Session is
+        // invisible to the refetch-first webhook.
+        for (key, _) in fields
+            .iter()
+            .filter(|(key, _)| key.starts_with("metadata["))
+        {
+            let mirrored = format!(
+                "payment_intent_data[metadata][{}",
+                key.trim_start_matches("metadata[")
+            );
+            if !fields.iter().any(|(name, _)| *name == mirrored) {
+                return error(
+                    400,
+                    &format!("checkout metadata {key} is not mirrored onto the PaymentIntent"),
+                );
+            }
+        }
         let session = serde_json::json!({
             "id": format!("cs_{n}"),
             "object": "checkout.session",
@@ -396,12 +415,28 @@ async fn stripe_stub_handler(
         return json_response(200, session.to_string());
     }
 
-    // Refunds: echo the requested amount; mint a DISTINCT refund id per
-    // call (the refunds ledger's unique key made shared ids a fixture lie)
-    // — unless the RefundIdCollision defect is seeded, which is the whole
-    // point of that tooth.
+    // Refunds: a scripted "POST /v1/refunds" route wins (the currency-lie
+    // test); otherwise echo the requested amount and mint a DISTINCT refund
+    // id per call (the refunds ledger's unique key made shared ids a fixture
+    // lie) — unless the RefundIdCollision defect is seeded, which is the
+    // whole point of that tooth.
     if method == axum::http::Method::POST && path == "/v1/refunds" {
         let fields = form_fields(&body_bytes);
+        // Stripe's create-refund API has NO currency parameter: sending one
+        // can 400. The stub enforces the wire contract.
+        if fields.iter().any(|(key, _)| key == "currency") {
+            return error(
+                400,
+                "the Stripe refund API has no currency parameter; the wire request must not carry one",
+            );
+        }
+        let scripted = {
+            let routes = state.routes.lock().expect("stub routes");
+            routes.get(&format!("{method} {path}")).cloned()
+        };
+        if let Some((status, body)) = scripted {
+            return json_response(status, body.replace("{seq}", &n.to_string()));
+        }
         let refund_id = if state.current_defect() == Some(Defect::RefundIdCollision) {
             "re_conf_collision".to_string()
         } else {
@@ -415,7 +450,7 @@ async fn stripe_stub_handler(
             "amount": field(&fields, "amount")
                 .and_then(|amount| amount.parse::<i64>().ok())
                 .unwrap_or(0),
-            "currency": field(&fields, "currency").unwrap_or("eur"),
+            "currency": "eur",
             "created": STUB_TS,
         });
         return json_response(200, refund.to_string());
@@ -916,6 +951,74 @@ async fn charge_saved_method_maps_every_intent_status_over_the_wire() {
     }
 }
 
+/// Item 5: a Succeeded PaymentIntent missing an authoritative amount or
+/// currency is NEVER filled in from the request. One authenticated refetch is
+/// allowed; if the fetched object still lacks the money, it is Malformed.
+#[tokio::test]
+async fn a_charge_never_borrows_request_money() {
+    let (stub, base_url) = stripe_stub_api();
+    let provider = test_provider(&base_url);
+    // The create echo is minimal (no amount); the authenticated refetch
+    // carries the REAL money, which DIFFERS from the requested 1130.
+    stub.route(
+        "POST /v1/payment_intents",
+        200,
+        serde_json::json!({
+            "id": "pi_minimal",
+            "object": "payment_intent",
+            "status": "succeeded",
+            "currency": "eur",
+        })
+        .to_string(),
+    );
+    stub.route(
+        "GET /v1/payment_intents/pi_minimal",
+        200,
+        intent_doc_json("pi_minimal", "succeeded", 990, "eur").to_string(),
+    );
+    let payment = provider
+        .charge_saved_method(charge_request(1130, "charge_money_1"))
+        .await
+        .expect("one refetch is allowed");
+    assert_eq!(
+        payment.amount_minor, 990,
+        "the fetched authoritative amount, never the requested 1130"
+    );
+
+    // A refetch that ALSO lacks the money is Malformed — not a request echo.
+    stub.route(
+        "POST /v1/payment_intents",
+        200,
+        serde_json::json!({
+            "id": "pi_still_minimal",
+            "object": "payment_intent",
+            "status": "succeeded",
+            "currency": "eur",
+        })
+        .to_string(),
+    );
+    stub.route(
+        "GET /v1/payment_intents/pi_still_minimal",
+        200,
+        serde_json::json!({
+            "id": "pi_still_minimal",
+            "object": "payment_intent",
+            "status": "succeeded",
+            "currency": "eur",
+        })
+        .to_string(),
+    );
+    match provider
+        .charge_saved_method(charge_request(1130, "charge_money_2"))
+        .await
+    {
+        Err(ProviderError::Malformed(message)) => {
+            assert!(message.contains("refusing to coerce"), "{message}")
+        }
+        other => panic!("expected Malformed, got {other:?}"),
+    }
+}
+
 /// A lost charge response (5xx) surfaces as `Unavailable` — the arm-8
 /// contract — never as a business refusal.
 #[tokio::test]
@@ -984,10 +1087,10 @@ async fn fetch_payment_object_maps_the_authenticated_truth() {
     }
 }
 
-/// The keyed metadata search answers with the charge the key names; an
-/// empty keyed result is PROVABLE absence (`Ok(None)`).
+/// The keyed metadata search can FIND a charge, but its emptiness is
+/// eventually-consistent evidence — NEVER proof of absence (audit item 3).
 #[tokio::test]
-async fn keyed_search_proves_presence_and_absence() {
+async fn search_finds_presence_but_an_empty_search_proves_nothing() {
     let (stub, base_url) = stripe_stub_api();
     let provider = test_provider(&base_url);
     let key = "payment:invoice:11111111-1111-1111-1111-111111111111:1";
@@ -1020,28 +1123,33 @@ async fn keyed_search_proves_presence_and_absence() {
         .search_payment_by_idempotency_key(key)
         .await
         .expect("keyed search");
-    let found = found.expect("the charge is provably present");
+    let found = found.expect("the charge is present");
     assert_eq!(found.provider_payment_id, "pi_keyed");
     assert_eq!(found.state, PaymentState::Succeeded);
 
-    // An empty keyed enumeration proves absence.
+    // An EMPTY keyed search is NOT absence: without the original request to
+    // replay, the answer is unprovable (the engine parks the attempt).
     stub.route(
         "GET /v1/payment_intents/search",
         200,
         serde_json::json!({ "object": "search_result", "data": [] }).to_string(),
     );
-    let absent = provider
-        .search_payment_by_idempotency_key(key)
-        .await
-        .expect("keyed search");
-    assert_eq!(absent, None, "the keyed enumeration is complete");
+    match provider.search_payment_by_idempotency_key(key).await {
+        Err(ProviderError::Config(message)) => {
+            assert!(
+                message.contains("cannot be proven") && message.contains("unresolved"),
+                "an empty search must refuse as unprovable, not answer None: {message}"
+            )
+        }
+        other => panic!("expected the unprovable refusal, got {other:?}"),
+    }
 }
 
-/// The search API being disabled on the account (a 4xx feature refusal)
-/// falls back to the recent-list window: a short page proves absence, a
-/// FULL page is truncation-honest `Config` — never a guessed `None`.
+/// With the Search API disabled, the recent-list window is investigation
+/// evidence only: a hit is a fact, an empty (or full) window is unprovable —
+/// never `Ok(None)`.
 #[tokio::test]
-async fn search_fallback_window_is_truncation_honest() {
+async fn search_without_the_api_is_investigation_only() {
     let (stub, base_url) = stripe_stub_api();
     let provider = test_provider(&base_url);
     let key = "autopay_conf_9";
@@ -1051,7 +1159,7 @@ async fn search_fallback_window_is_truncation_honest() {
         stripe_error_body("Search is not enabled on this account"),
     );
 
-    // A SHORT fallback page: the listing ended, absence is provable.
+    // A short window without the key: still unprovable.
     stub.route(
         "GET /v1/payment_intents",
         200,
@@ -1069,13 +1177,12 @@ async fn search_fallback_window_is_truncation_honest() {
         })
         .to_string(),
     );
-    let absent = provider
-        .search_payment_by_idempotency_key(key)
-        .await
-        .expect("short-page search");
-    assert_eq!(absent, None);
+    assert!(matches!(
+        provider.search_payment_by_idempotency_key(key).await,
+        Err(ProviderError::Config(_))
+    ));
 
-    // A FULL fallback page: absence is NOT provable.
+    // A FULL window: truncation, still unprovable.
     stub.route(
         "GET /v1/payment_intents",
         200,
@@ -1088,7 +1195,7 @@ async fn search_fallback_window_is_truncation_honest() {
         other => panic!("expected the truncation refusal, got {other:?}"),
     }
 
-    // The fallback can also FIND the charge (the Mollie metadata contract).
+    // The window can also FIND the charge.
     let match_doc = serde_json::json!({
         "id": "pi_fb_match",
         "object": "payment_intent",
@@ -1111,10 +1218,146 @@ async fn search_fallback_window_is_truncation_honest() {
     assert_eq!(found.state, PaymentState::Processing);
 }
 
-/// Refunds map the wire document and carry DISTINCT provider ids; a 404
-/// refund fetch is a typed NotFound-shaped refusal.
+/// Audit item 3: an UNCERTAIN create is recovered by REPLAYING the identical
+/// POST with the same Idempotency-Key. A Search-empty result must not turn
+/// the recovery into `None`: the replay returns the recovered payment.
 #[tokio::test]
-async fn refunds_map_the_wire_documents() {
+async fn a_search_empty_with_a_successful_replay_recovers_the_payment() {
+    let (stub, base_url) = stripe_stub_api();
+    let provider = test_provider(&base_url);
+    let key = "recover_ok_key";
+    // The create's response is lost; the request is journaled.
+    stub.route(
+        "POST /v1/payment_intents",
+        503,
+        stripe_error_body("upstream down"),
+    );
+    match provider
+        .charge_saved_method(charge_request(1130, key))
+        .await
+    {
+        Err(ProviderError::Unavailable(_)) => {}
+        other => panic!("expected the lost response, got {other:?}"),
+    }
+    // Search is eventually consistent and answers NOTHING.
+    stub.route(
+        "GET /v1/payment_intents/search",
+        200,
+        serde_json::json!({ "object": "search_result", "data": [] }).to_string(),
+    );
+    // The replay answers the one intent the key minted.
+    stub.route(
+        "POST /v1/payment_intents",
+        200,
+        intent_doc_json("pi_recovered", "succeeded", 1130, "eur").to_string(),
+    );
+    let recovered = provider
+        .search_payment_by_idempotency_key(key)
+        .await
+        .expect("the idempotent replay must not fail")
+        .expect("the replay recovers the payment; an empty search is never None");
+    assert_eq!(recovered.provider_payment_id, "pi_recovered");
+    assert_eq!(recovered.state, PaymentState::Succeeded);
+    assert_eq!(recovered.amount_minor, 1130);
+}
+
+/// The same recovery through the explicit adapter method, with a supplied
+/// request (no journal entry for this key yet).
+#[tokio::test]
+async fn recover_uncertain_charge_replays_the_identical_request() {
+    let (stub, base_url) = stripe_stub_api();
+    let provider = test_provider(&base_url);
+    let key = "recover_supplied_key";
+    stub.route(
+        "POST /v1/payment_intents",
+        200,
+        intent_doc_json("pi_supplied", "processing", 1130, "eur").to_string(),
+    );
+    let recovered = provider
+        .recover_uncertain_charge(&charge_request(1130, key))
+        .await
+        .expect("replay runs")
+        .expect("the replay minted/replayed the one intent");
+    assert_eq!(recovered.provider_payment_id, "pi_supplied");
+    assert_eq!(recovered.state, PaymentState::Processing);
+}
+
+/// A Search-empty + an UNRECONSTRUCTABLE request (no journaled wire form) is
+/// UNPROVABLE: an error, never `None`.
+#[tokio::test]
+async fn a_search_empty_without_a_replayable_request_is_unprovable() {
+    let (stub, base_url) = stripe_stub_api();
+    let provider = test_provider(&base_url);
+    stub.route(
+        "GET /v1/payment_intents/search",
+        200,
+        serde_json::json!({ "object": "search_result", "data": [] }).to_string(),
+    );
+    match provider
+        .search_payment_by_idempotency_key("never_charged_key")
+        .await
+    {
+        Err(ProviderError::Config(message)) => {
+            assert!(message.contains("cannot be proven"), "{message}")
+        }
+        other => panic!("expected Err (unprovable), never Ok(None), got {other:?}"),
+    }
+}
+
+/// Only a REPLAYED refusal proves absence; a replay transport failure does
+/// not.
+#[tokio::test]
+async fn only_a_replayed_refusal_proves_absence() {
+    let (stub, base_url) = stripe_stub_api();
+    let provider = test_provider(&base_url);
+    // Prime two journals with lost creates.
+    stub.route(
+        "POST /v1/payment_intents",
+        503,
+        stripe_error_body("upstream down"),
+    );
+    for key in ["recover_absent_key", "recover_unknown_key"] {
+        assert!(matches!(
+            provider
+                .charge_saved_method(charge_request(1130, key))
+                .await,
+            Err(ProviderError::Unavailable(_))
+        ));
+    }
+    // The replay of the first is REFUSED (the original create never minted a
+    // payment): that is presence-absence proof -> Ok(None).
+    stub.route(
+        "POST /v1/payment_intents",
+        400,
+        stripe_error_body("this idempotency key was never used successfully"),
+    );
+    assert_eq!(
+        provider
+            .search_payment_by_idempotency_key("recover_absent_key")
+            .await
+            .expect("a replay refusal is a decision"),
+        None,
+        "a replayed 400 proves the create never minted a payment"
+    );
+    // A transport failure during the replay proves NOTHING -> Err.
+    stub.route(
+        "POST /v1/payment_intents",
+        503,
+        stripe_error_body("upstream down"),
+    );
+    assert!(matches!(
+        provider
+            .search_payment_by_idempotency_key("recover_unknown_key")
+            .await,
+        Err(ProviderError::Unavailable(_))
+    ));
+}
+
+/// Refunds map the wire document and carry DISTINCT provider ids. Item 6:
+/// the wire request carries NO `currency` (the stub 400s if it does), while
+/// the returned refund's currency is validated against the requested one.
+#[tokio::test]
+async fn refunds_send_no_currency_and_validate_the_returned_one() {
     let (stub, base_url) = stripe_stub_api();
     let provider = test_provider(&base_url);
     let first = provider
@@ -1150,6 +1393,38 @@ async fn refunds_map_the_wire_documents() {
         first.provider_refund_id, second.provider_refund_id,
         "two refunds are two distinct provider facts"
     );
+
+    // A refund returned in a DIFFERENT currency than requested is Malformed:
+    // the neutral fact never records a currency the request did not name.
+    stub.route(
+        "POST /v1/refunds",
+        200,
+        serde_json::json!({
+            "id": "re_currency_lie",
+            "object": "refund",
+            "status": "succeeded",
+            "payment_intent": "pi_refunded",
+            "amount": 300,
+            "currency": "usd",
+            "created": STUB_TS,
+        })
+        .to_string(),
+    );
+    match provider
+        .refund(RefundRequest {
+            provider_payment_id: "pi_refunded".to_string(),
+            amount_minor: 300,
+            currency: "EUR".to_string(),
+            description: "lying refund".to_string(),
+            idempotency_key: "refund_key_3".to_string(),
+        })
+        .await
+    {
+        Err(ProviderError::Malformed(message)) => {
+            assert!(message.contains("currency"), "{message}")
+        }
+        other => panic!("expected Malformed, got {other:?}"),
+    }
 
     // The single-refund fetch (GET /v1/refunds/{id}).
     stub.route(
@@ -1454,25 +1729,51 @@ fn stripe_event(event_type: &str, object: serde_json::Value) -> serde_json::Valu
     })
 }
 
-#[test]
-fn payment_intent_events_normalize_to_neutral_payment_facts() {
-    let intent = serde_json::json!({
+/// Payment events: the fact's state/amount/currency/metadata come from the
+/// AUTHENTICATED fetched PaymentIntent. The event body here LIES about all
+/// of them; only the fetch is believed.
+#[tokio::test]
+async fn payment_intent_events_normalize_from_the_fetched_object() {
+    let (stub, base_url) = stripe_stub_api();
+    let provider = test_provider(&base_url);
+    stub.route(
+        "GET /v1/payment_intents/pi_evt",
+        200,
+        serde_json::json!({
+            "id": "pi_evt",
+            "object": "payment_intent",
+            "status": "succeeded",
+            "amount": 1130,
+            "currency": "eur",
+            "metadata": { "tenant_id": "t1", "reference": "invoice:abc" },
+        })
+        .to_string(),
+    );
+    let lying_body = serde_json::json!({
         "id": "pi_evt",
         "object": "payment_intent",
         "status": "succeeded",
-        "amount": 1130,
-        "currency": "eur",
-        "metadata": { "tenant_id": "t1", "reference": "invoice:abc" },
+        "amount": 1,
+        "currency": "xxx",
+        "metadata": { "tenant_id": "attacker", "reference": "invoice:evil" },
     });
-    let facts = normalize_event("stripe", &stripe_event("payment_intent.succeeded", intent))
-        .expect("normalizes");
+    let facts = normalize_event(
+        &provider,
+        &stripe_event("payment_intent.succeeded", lying_body),
+    )
+    .await
+    .expect("normalizes");
     assert_eq!(facts.len(), 1);
     match &facts[0] {
         billing_service::payments::stripe_events::NormalizedFact::Payment(payment) => {
             assert_eq!(payment.provider, "stripe");
             assert_eq!(payment.provider_payment_id, "pi_evt");
             assert_eq!(payment.state, PaymentState::Succeeded);
-            assert_eq!(payment.amount_minor, Some(1130));
+            assert_eq!(
+                payment.amount_minor,
+                Some(1130),
+                "fetched, never the body's 1"
+            );
             assert_eq!(payment.currency.as_deref(), Some("EUR"));
             assert_eq!(payment.tenant_id.as_deref(), Some("t1"));
             assert_eq!(payment.obligation_ref.as_deref(), Some("invoice:abc"));
@@ -1481,21 +1782,33 @@ fn payment_intent_events_normalize_to_neutral_payment_facts() {
         other => panic!("expected a Payment fact, got {other:?}"),
     }
 
-    for (event_type, expected) in [
-        ("payment_intent.processing", PaymentState::Processing),
-        ("payment_intent.payment_failed", PaymentState::Failed),
+    // The other payment event types normalize to the fetched state.
+    for (event_type, intent_id, wire_status, expected) in [
+        (
+            "payment_intent.processing",
+            "pi_evt_processing",
+            "processing",
+            PaymentState::Processing,
+        ),
+        (
+            "payment_intent.payment_failed",
+            "pi_evt_failed",
+            "requires_payment_method",
+            PaymentState::Failed,
+        ),
     ] {
-        let object = serde_json::json!({
-            "id": "pi_evt",
-            "status": match expected {
-                PaymentState::Processing => "processing",
-                _ => "requires_payment_method",
-            },
-            "amount": 1130,
-            "currency": "eur",
-        });
-        let facts =
-            normalize_event("stripe", &stripe_event(event_type, object)).expect("normalizes");
+        stub.route(
+            &format!("GET /v1/payment_intents/{intent_id}"),
+            200,
+            intent_doc_json(intent_id, wire_status, 1130, "eur").to_string(),
+        );
+        let event = stripe_event(
+            event_type,
+            serde_json::json!({ "id": intent_id, "object": "payment_intent", "amount": 1 }),
+        );
+        let facts = normalize_event(&provider, &event)
+            .await
+            .unwrap_or_else(|error| panic!("{event_type} must normalize: {error}"));
         match &facts[0] {
             billing_service::payments::stripe_events::NormalizedFact::Payment(payment) => {
                 assert_eq!(payment.state, expected, "{event_type}");
@@ -1505,48 +1818,217 @@ fn payment_intent_events_normalize_to_neutral_payment_facts() {
     }
 }
 
-#[test]
-fn checkout_session_completed_normalizes_to_a_payment_fact() {
-    let session = serde_json::json!({
-        "id": "cs_evt",
-        "object": "checkout.session",
-        "mode": "payment",
-        "status": "complete",
-        "payment_status": "paid",
-        "amount_total": 1234,
-        "currency": "eur",
-        "metadata": { "tenant_id": "t1", "reference": "invoice:abc" },
-    });
-    let facts = normalize_event(
-        "stripe",
-        &stripe_event("checkout.session.completed", session),
-    )
-    .expect("normalizes");
+/// A fetch failure is a retryable Err — the signed body is NEVER a fallback
+/// fact source.
+#[tokio::test]
+async fn a_failed_refetch_never_falls_back_to_the_signed_body() {
+    let (_stub, base_url) = stripe_stub_api();
+    let provider = test_provider(&base_url);
+    let event = stripe_event(
+        "payment_intent.succeeded",
+        serde_json::json!({
+            "id": "pi_unfetchable",
+            "object": "payment_intent",
+            "status": "succeeded",
+            "amount": 1500,
+            "currency": "usd",
+            "metadata": { "tenant_id": "t1", "reference": "invoice:abc" },
+        }),
+    );
+    assert!(normalize_event(&provider, &event).await.is_err());
+}
+
+/// Item 2: a COMPLETE session activates only when the FETCHED PaymentIntent
+/// says `succeeded`. The session metadata is mirrored on the PaymentIntent
+/// (item 9), so the fetched object carries the attribution.
+#[tokio::test]
+async fn a_complete_session_with_a_succeeded_payment_intent_activates() {
+    let (stub, base_url) = stripe_stub_api();
+    let provider = test_provider(&base_url);
+    stub.route(
+        "GET /v1/payment_intents/pi_cs",
+        200,
+        serde_json::json!({
+            "id": "pi_cs",
+            "object": "payment_intent",
+            "status": "succeeded",
+            "amount": 2480,
+            "currency": "eur",
+            "customer": "cus_cs",
+            "metadata": {
+                "tenant_id": "tenant_1",
+                "plan_name": "starter",
+                "interval": "monthly",
+                "reference": "invoice:abc",
+                "checkout_id": "co_42",
+            },
+        })
+        .to_string(),
+    );
+    let event = stripe_event(
+        "checkout.session.completed",
+        serde_json::json!({
+            "id": "cs_evt",
+            "object": "checkout.session",
+            "status": "complete",
+            "payment_status": "paid",
+            "amount_total": 1,
+            "currency": "xxx",
+            "payment_intent": "pi_cs",
+            "customer": "cus_body",
+            "metadata": { "tenant_id": "attacker", "plan_name": "scale" },
+        }),
+    );
+    let facts = normalize_event(&provider, &event)
+        .await
+        .expect("normalizes");
+    assert_eq!(facts.len(), 2, "payment + completed-checkout fact");
     match &facts[0] {
         billing_service::payments::stripe_events::NormalizedFact::Payment(payment) => {
-            assert_eq!(payment.provider_payment_id, "cs_evt");
+            assert_eq!(payment.provider_payment_id, "pi_cs");
             assert_eq!(payment.state, PaymentState::Succeeded);
-            assert_eq!(payment.amount_minor, Some(1234));
-            assert_eq!(payment.currency.as_deref(), Some("EUR"));
-            assert_eq!(payment.obligation_ref.as_deref(), Some("invoice:abc"));
+            assert_eq!(payment.amount_minor, Some(2_480));
+            assert_eq!(payment.tenant_id.as_deref(), Some("tenant_1"));
         }
-        other => panic!("expected a Payment fact, got {other:?}"),
+        other => panic!("expected a payment fact, got {other:?}"),
+    }
+    match &facts[1] {
+        billing_service::payments::stripe_events::NormalizedFact::CheckoutCompleted(checkout) => {
+            assert_eq!(checkout.provider_payment_id, "pi_cs");
+            assert_eq!(checkout.provider_checkout_id, "cs_evt");
+            assert_eq!(checkout.tenant_id.as_deref(), Some("tenant_1"));
+            assert_eq!(checkout.plan_name.as_deref(), Some("starter"));
+            assert_eq!(checkout.interval.as_deref(), Some("monthly"));
+            assert_eq!(checkout.amount_minor, Some(2_480));
+            assert_eq!(checkout.currency.as_deref(), Some("EUR"));
+            assert_eq!(checkout.provider_customer_id.as_deref(), Some("cus_cs"));
+        }
+        other => panic!("expected a completed-checkout fact, got {other:?}"),
     }
 }
 
-#[test]
-fn refund_events_normalize_to_neutral_refund_facts() {
-    let refund = serde_json::json!({
-        "id": "re_evt",
-        "object": "refund",
-        "status": "pending",
-        "payment_intent": "pi_evt",
-        "amount": 300,
-        "currency": "eur",
-        "created": STUB_TS,
-    });
+/// Item 2 (the defect this audit found): Session `complete` is NOT money
+/// `Succeeded`. A complete session whose fetched PaymentIntent is still
+/// PROCESSING produces no activation fact at all.
+#[tokio::test]
+async fn a_complete_session_with_a_processing_intent_activates_nothing() {
+    let (stub, base_url) = stripe_stub_api();
+    let provider = test_provider(&base_url);
+    stub.route(
+        "GET /v1/payment_intents/pi_cs_pending",
+        200,
+        serde_json::json!({
+            "id": "pi_cs_pending",
+            "object": "payment_intent",
+            "status": "processing",
+            "amount": 2480,
+            "currency": "eur",
+            "metadata": { "tenant_id": "tenant_1", "plan_name": "starter" },
+        })
+        .to_string(),
+    );
+    let event = stripe_event(
+        "checkout.session.completed",
+        serde_json::json!({
+            "id": "cs_evt_pending",
+            "object": "checkout.session",
+            "status": "complete",
+            "payment_status": "unpaid",
+            "amount_total": 2480,
+            "currency": "eur",
+            "payment_intent": "pi_cs_pending",
+            "metadata": { "tenant_id": "tenant_1", "plan_name": "starter" },
+        }),
+    );
+    let facts = normalize_event(&provider, &event)
+        .await
+        .expect("normalizes");
+    assert_eq!(
+        facts.len(),
+        1,
+        "a processing intent produces NO activation fact"
+    );
+    match &facts[0] {
+        billing_service::payments::stripe_events::NormalizedFact::Payment(payment) => {
+            assert_eq!(payment.state, PaymentState::Processing);
+            assert_ne!(payment.state, PaymentState::Succeeded);
+        }
+        other => panic!("expected a processing payment fact, got {other:?}"),
+    }
+}
+
+/// Item 2: a complete session with NO PaymentIntent yet is still processing —
+/// never Succeeded, no activation (there is no money object to fetch).
+#[tokio::test]
+async fn a_complete_session_without_an_intent_is_processing_never_succeeded() {
+    let (_stub, base_url) = stripe_stub_api();
+    let provider = test_provider(&base_url);
+    let event = stripe_event(
+        "checkout.session.completed",
+        serde_json::json!({
+            "id": "cs_evt_no_pi",
+            "object": "checkout.session",
+            "status": "complete",
+            "payment_status": "paid",
+            "amount_total": 2480,
+            "currency": "eur",
+            "metadata": { "tenant_id": "tenant_1", "plan_name": "starter" },
+        }),
+    );
+    let facts = normalize_event(&provider, &event)
+        .await
+        .expect("normalizes");
+    assert_eq!(facts.len(), 1);
+    match &facts[0] {
+        billing_service::payments::stripe_events::NormalizedFact::Payment(payment) => {
+            assert_eq!(payment.state, PaymentState::Processing);
+            assert_eq!(payment.amount_minor, None, "no fetched money exists");
+        }
+        other => panic!("expected a processing payment fact, got {other:?}"),
+    }
+}
+
+/// Refund events fetch the authoritative refund; the body's amount is
+/// ignored.
+#[tokio::test]
+async fn refund_events_normalize_from_the_fetched_refund() {
+    let (stub, base_url) = stripe_stub_api();
+    let provider = test_provider(&base_url);
+    stub.route(
+        "GET /v1/refunds/re_evt",
+        200,
+        serde_json::json!({
+            "id": "re_evt",
+            "object": "refund",
+            "status": "pending",
+            "payment_intent": "pi_evt",
+            "amount": 300,
+            "currency": "eur",
+            "created": STUB_TS,
+        })
+        .to_string(),
+    );
     for event_type in ["charge.refunded", "charge.refund.updated"] {
-        let facts = normalize_event("stripe", &stripe_event(event_type, refund.clone()))
+        // `charge.refund.updated` carries the refund object;
+        // `charge.refunded` carries the charge whose refunds list names it.
+        let object = if event_type == "charge.refund.updated" {
+            serde_json::json!({
+                "id": "re_evt",
+                "object": "refund",
+                "payment_intent": "pi_evt",
+                "amount": 1,
+                "status": "succeeded",
+            })
+        } else {
+            serde_json::json!({
+                "id": "ch_evt",
+                "object": "charge",
+                "payment_intent": "pi_evt",
+                "refunds": { "data": [ { "id": "re_evt", "object": "refund" } ] },
+            })
+        };
+        let facts = normalize_event(&provider, &stripe_event(event_type, object))
+            .await
             .expect("normalizes");
         match &facts[0] {
             billing_service::payments::stripe_events::NormalizedFact::Refund(refund) => {
@@ -1557,7 +2039,7 @@ fn refund_events_normalize_to_neutral_refund_facts() {
                     refund.state,
                     billing_service::payments::RefundState::Pending
                 );
-                assert_eq!(refund.amount_minor, 300);
+                assert_eq!(refund.amount_minor, 300, "the fetched amount wins");
                 assert_eq!(refund.currency, "EUR");
                 assert!(refund.created_at.is_some());
             }
@@ -1566,19 +2048,29 @@ fn refund_events_normalize_to_neutral_refund_facts() {
     }
 }
 
-#[test]
-fn dispute_events_normalize_to_neutral_dispute_facts() {
-    let dispute = serde_json::json!({
-        "id": "dp_evt",
-        "object": "dispute",
-        "status": "under_review",
-        "payment_intent": "pi_evt",
-        "amount": 1130,
-        "currency": "eur",
-        "reason": "fraudulent",
-        "created": STUB_TS,
-    });
-    let facts = normalize_event("stripe", &stripe_event("charge.dispute.created", dispute))
+/// Dispute events fetch the authoritative dispute. The payment id may arrive
+/// directly or as a CHARGE that is resolved with an authenticated fetch.
+#[tokio::test]
+async fn dispute_events_normalize_from_the_fetched_dispute() {
+    let (stub, base_url) = stripe_stub_api();
+    let provider = test_provider(&base_url);
+    stub.route(
+        "GET /v1/payment_intents/pi_evt",
+        200,
+        dispute_intent_doc_json("pi_evt", "dp_evt", "under_review", 1130, "eur").to_string(),
+    );
+    let event = stripe_event(
+        "charge.dispute.created",
+        serde_json::json!({
+            "id": "dp_evt",
+            "object": "dispute",
+            "status": "won",
+            "payment_intent": "pi_evt",
+            "amount": 1,
+        }),
+    );
+    let facts = normalize_event(&provider, &event)
+        .await
         .expect("normalizes");
     match &facts[0] {
         billing_service::payments::stripe_events::NormalizedFact::Dispute(dispute) => {
@@ -1586,46 +2078,69 @@ fn dispute_events_normalize_to_neutral_dispute_facts() {
             assert_eq!(dispute.provider_payment_id, "pi_evt");
             assert_eq!(
                 dispute.state,
-                billing_service::payments::DisputeState::Opened
+                billing_service::payments::DisputeState::Opened,
+                "the fetched dispute state wins over the body's 'won'"
             );
-            assert_eq!(dispute.reason.as_deref(), Some("fraudulent"));
             assert!(dispute.opened_at.is_some());
         }
         other => panic!("expected a Dispute fact, got {other:?}"),
     }
 
-    let closed_lost = serde_json::json!({
-        "id": "dp_evt",
-        "status": "lost",
-        "payment_intent": "pi_evt",
-        "amount": 1130,
-        "currency": "eur",
-    });
-    let facts = normalize_event(
-        "stripe",
-        &stripe_event("charge.dispute.closed", closed_lost),
-    )
-    .expect("normalizes");
+    // Charge-only dispute: the charge→payment resolution is authenticated.
+    stub.route(
+        "GET /v1/charges/ch_only",
+        200,
+        serde_json::json!({
+            "id": "ch_only",
+            "object": "charge",
+            "payment_intent": "pi_from_charge",
+        })
+        .to_string(),
+    );
+    stub.route(
+        "GET /v1/payment_intents/pi_from_charge",
+        200,
+        dispute_intent_doc_json("pi_from_charge", "dp_closed", "lost", 1130, "eur").to_string(),
+    );
+    let event = stripe_event(
+        "charge.dispute.closed",
+        serde_json::json!({
+            "id": "dp_closed",
+            "object": "dispute",
+            "charge": "ch_only",
+            "status": "won",
+            "amount": 1,
+        }),
+    );
+    let facts = normalize_event(&provider, &event)
+        .await
+        .expect("normalizes");
     match &facts[0] {
         billing_service::payments::stripe_events::NormalizedFact::Dispute(dispute) => {
+            assert_eq!(dispute.provider_payment_id, "pi_from_charge");
             assert_eq!(dispute.state, billing_service::payments::DisputeState::Lost);
         }
         other => panic!("expected a Dispute fact, got {other:?}"),
     }
 }
 
-#[test]
-fn payout_events_normalize_to_neutral_settlement_facts() {
-    let payout = serde_json::json!({
-        "id": "po_evt",
-        "object": "payout",
-        "status": "paid",
-        "amount": 113_000,
-        "currency": "eur",
-        "arrival_date": STUB_TS,
-    });
-    let facts =
-        normalize_event("stripe", &stripe_event("payout.paid", payout)).expect("normalizes");
+/// Payout events fetch the authoritative payout.
+#[tokio::test]
+async fn payout_events_normalize_from_the_fetched_payout() {
+    let (stub, base_url) = stripe_stub_api();
+    let provider = test_provider(&base_url);
+    stub.route(
+        "GET /v1/payouts/po_evt",
+        200,
+        payout_doc_json("po_evt", 113_000, "eur").to_string(),
+    );
+    let event = stripe_event(
+        "payout.paid",
+        serde_json::json!({ "id": "po_evt", "object": "payout", "status": "paid", "amount": 1 }),
+    );
+    let facts = normalize_event(&provider, &event)
+        .await
+        .expect("normalizes");
     match &facts[0] {
         billing_service::payments::stripe_events::NormalizedFact::Settlement(settlement) => {
             assert_eq!(settlement.provider, "stripe");
@@ -1638,8 +2153,10 @@ fn payout_events_normalize_to_neutral_settlement_facts() {
     }
 }
 
-#[test]
-fn unknown_event_types_are_accepted_and_ignored() {
+#[tokio::test]
+async fn unknown_event_types_are_accepted_and_ignored() {
+    let (_stub, base_url) = stripe_stub_api();
+    let provider = test_provider(&base_url);
     for event_type in [
         "invoice.created",
         "customer.subscription.created",
@@ -1649,33 +2166,38 @@ fn unknown_event_types_are_accepted_and_ignored() {
         "totally.unknown.event",
     ] {
         let facts = normalize_event(
-            "stripe",
-            &stripe_event(event_type, serde_json::json!({ "id": "x" })),
+            &provider,
+            &stripe_event(event_type, serde_json::json!({ "id": "x", "amount": 999 })),
         )
+        .await
         .unwrap_or_else(|error| panic!("{event_type} must be accepted: {error}"));
         assert!(facts.is_empty(), "{event_type} must produce no facts");
     }
 }
 
-#[test]
-fn a_known_event_with_an_unreadable_object_fails_the_fact() {
+#[tokio::test]
+async fn a_known_event_with_an_unreadable_object_fails_the_delivery() {
+    let (_stub, base_url) = stripe_stub_api();
+    let provider = test_provider(&base_url);
     // No id: the delivery must be dead-lettered (Err), not silently dropped.
     let facts = normalize_event(
-        "stripe",
+        &provider,
         &stripe_event(
             "payment_intent.succeeded",
             serde_json::json!({ "status": "succeeded", "amount": 1, "currency": "eur" }),
         ),
-    );
+    )
+    .await;
     assert!(facts.is_err());
-    // An unmapped status in a KNOWN event is an Err too.
+    // A refund event with no refund id cannot be fetched: Err too.
     let facts = normalize_event(
-        "stripe",
+        &provider,
         &stripe_event(
-            "payment_intent.succeeded",
-            serde_json::json!({ "id": "pi_x", "status": "brand-new", "amount": 1, "currency": "eur" }),
+            "charge.refunded",
+            serde_json::json!({ "id": "ch_x", "object": "charge", "payment_intent": "pi_x" }),
         ),
-    );
+    )
+    .await;
     assert!(facts.is_err());
 }
 

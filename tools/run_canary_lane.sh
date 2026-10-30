@@ -265,7 +265,7 @@ trap stack_down EXIT INT TERM
 log "applying the canonical schema (one-shot migrator, empty canary DB)"
 (cd "$ROOT" && docker compose -p "$PROJECT" -f docker-compose.yml \
    -f docker-compose.override.yml -f deploy/docker-compose.canary.yml \
-   --env-file .env --profile migrate run --rm migrator) \
+   --env-file .env --profile migrate run --rm --build migrator) \
   || die "the canary database could not be migrated"
 
 log "booting the canary stack (isolated project $PROJECT)"

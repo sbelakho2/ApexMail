@@ -127,6 +127,14 @@ pub const REQUIRED_COLUMNS: &[(&str, &str)] = &[
     ("sales_experiment_outcomes", "value_eur"),
     ("sales_step_executions", "arm_propensity"),
     ("sales_enrollments", "arm_propensity"),
+    // Migration 293: cohort provenance for reconstructed trials, immutable
+    // randomized membership branches and Monte-Carlo propensity diagnostics.
+    ("sales_experiment_contact_trials", "cohort_source"),
+    ("sales_experiment_holdout_accounts", "assignment"),
+    ("sales_experiment_assignments", "propensity_wins"),
+    ("sales_experiment_assignments", "propensity_draws"),
+    ("sales_experiment_assignments", "propensity_standard_error"),
+    ("sales_experiment_assignments", "propensity_undersampled"),
 ];
 
 /// Tables that must NOT exist any more.

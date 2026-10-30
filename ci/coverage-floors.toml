@@ -22,12 +22,10 @@
 # The workspace-wide ratchet remains authoritative for the number in
 # ci/coverage-baseline.txt; this table records how the run was measured.
 measured = "2026-10-30"
-# Seed scope: billing-service and enterprise were measured by the
-# instrumented run of the two crates this change's property tests live in
-# (cargo llvm-cov nextest -p billing-service -p enterprise: 1470 tests,
-# lcov + llvm-cov JSON). Every other crate stays at 0.00 because a FULL
-# workspace instrumented run is outside this change's gate budget; the first
-# full-workspace CI run MUST run --seed and commit the raised values.
+# NOTE: this commit ships every crate at 0.00. A full workspace
+# instrumented run was deliberately not performed in this change (the
+# plan's gate budget forbids a full workspace test run), so there is no
+# honest per-crate measurement to seed; the first CI run seeds it.
 
 [floor."accounting-core"]
 line = 0.00
@@ -43,15 +41,15 @@ region = 0.00
 
 [floor."analytics"]
 line = 0.00
-region = 0.00
+region = 15.98
 
 [floor."apexmail-db"]
 line = 0.00
 region = 0.00
 
 [floor."apexmail-lib"]
-line = 0.00
-region = 0.00
+line = 69.13
+region = 41.28
 
 [floor."api-server"]
 line = 0.00
@@ -79,7 +77,7 @@ region = 89.08
 
 [floor."compliance"]
 line = 0.00
-region = 0.00
+region = 0.21
 
 [floor."ddos-protection"]
 line = 0.00
@@ -90,12 +88,12 @@ line = 0.00
 region = 0.00
 
 [floor."dlp-engine"]
-line = 0.00
-region = 0.00
+line = 14.31
+region = 46.70
 
 [floor."dns-resolver"]
-line = 0.00
-region = 0.00
+line = 19.51
+region = 10.49
 
 [floor."edge-cases"]
 line = 0.00
@@ -123,11 +121,11 @@ region = 0.00
 
 [floor."ha"]
 line = 0.00
-region = 0.00
+region = 0.71
 
 [floor."ids-engine"]
-line = 0.00
-region = 0.00
+line = 100.00
+region = 64.92
 
 [floor."imap-proto-patched"]
 line = 0.00
@@ -155,31 +153,31 @@ region = 0.00
 
 [floor."mail-common"]
 line = 0.00
-region = 0.00
+region = 26.52
 
 [floor."mail-proto"]
-line = 0.00
-region = 0.00
+line = 23.37
+region = 20.00
 
 [floor."mailstore-core"]
 line = 0.00
-region = 0.00
+region = 1.16
 
 [floor."migrator"]
-line = 0.00
-region = 0.00
+line = 42.88
+region = 39.61
 
 [floor."mta"]
-line = 0.00
-region = 0.00
+line = 96.67
+region = 95.87
 
 [floor."observability-service"]
 line = 0.00
-region = 0.00
+region = 0.17
 
 [floor."outbound-mta"]
-line = 0.00
-region = 0.00
+line = 3.28
+region = 34.92
 
 [floor."pattern-matcher"]
 line = 0.00
@@ -194,8 +192,8 @@ line = 0.00
 region = 0.00
 
 [floor."platform-catalog"]
-line = 0.00
-region = 0.00
+line = 66.66
+region = 66.66
 
 [floor."queue-provider"]
 line = 0.00
@@ -206,24 +204,24 @@ line = 0.00
 region = 0.00
 
 [floor."sales-autopilot"]
-line = 0.00
-region = 0.00
+line = 94.58
+region = 92.38
 
 [floor."sales-knowledge"]
-line = 0.00
-region = 0.00
+line = 81.10
+region = 76.01
 
 [floor."sandbox"]
-line = 0.00
-region = 0.00
+line = 20.72
+region = 25.05
 
 [floor."smoke-tests"]
 line = 0.00
 region = 0.00
 
 [floor."spam-filter"]
-line = 0.00
-region = 0.00
+line = 8.80
+region = 50.35
 
 [floor."template-renderer"]
 line = 0.00
@@ -235,7 +233,7 @@ region = 0.00
 
 [floor."tracking-service"]
 line = 0.00
-region = 0.00
+region = 7.62
 
 [floor."ui-foundation"]
 line = 0.00
@@ -246,5 +244,5 @@ line = 0.00
 region = 0.00
 
 [floor."worker-processors"]
-line = 0.00
-region = 0.00
+line = 96.99
+region = 95.63

@@ -104,10 +104,10 @@ gates = ["S10"]
 
 [[invariant]]
 id = "I13"
-statement = "Posterior counts equal exposures, holdout accounts are never contacted, and sequential tests hold alpha"
-code = ["sales-autopilot experiments.rs"]
+statement = "Posterior counts equal exposures, randomized holdout membership is persisted and immutable across segment changes, and the sequential monitor is an APPROXIMATE diagnostic (not anytime-valid) that never gates promotion"
+code = ["sales-autopilot experiments.rs (HoldoutAssignment, load_or_assign_holdout_membership)", "sales-autopilot scoreboard.rs (cohort_provenance, SequentialDiagnosticMonitor)"]
 test_anchors = ["sales-autopilot"]
-plan_test_today = "Unit tests"
+plan_test_today = "Unit tests: holdout_membership_is_persisted_and_never_re_randomized, holdout_lift_counts_only_persisted_holdout_members, sequential_diagnostic_names_its_limits_in_every_verdict, approximate_sequential_diagnostic_is_calibrated_on_a_peeking_grid, cohort_provenance_separates_reconstructed_from_native_trials"
 gates = ["T15"]
 
 [[invariant]]

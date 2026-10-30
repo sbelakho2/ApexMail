@@ -426,6 +426,17 @@ validate_repo_gates() {
             || return "$CI_EXIT_FAIL"
         ci_check "provider fixtures self-test" \
             python3 tools/check_provider_fixtures.py --self-test
+        # Stripe boundary contract (30 Oct re-audit of 562a7c20, audit item
+        # 32): the Session lifecycle is never money `Succeeded` (the fetched
+        # PaymentIntent is), the refund wire carries no `currency` parameter,
+        # and a Search-empty is never absence (only the idempotent replay of
+        # the original request proves it). The --self-test injects each
+        # defect into a temp copy of the REAL adapter and proves the gate
+        # fails. REQUIRED and fail-closed.
+        ci_check "stripe contract" python3 tools/check_stripe_contract.py \
+            || return "$CI_EXIT_FAIL"
+        ci_check "stripe contract self-test" \
+            python3 tools/check_stripe_contract.py --self-test
         ci_check "ARK design law" python3 tools/check_ark_law.py
         ci_check "ARK authority mirror" python3 tools/check_ark_mirror.py
         ci_check "tool selftest inventory" \

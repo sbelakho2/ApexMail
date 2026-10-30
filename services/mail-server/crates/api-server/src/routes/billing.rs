@@ -89,21 +89,26 @@ pub fn router() -> Router<AppState> {
 // BEFORE anything enters the fact pipeline — a tampered, replayed or
 // unparseable delivery is refused with 400 and never reaches the ledger.
 //
-// The verified event is normalized by billing-service's
-// `payments::stripe_events` and each neutral fact is dispatched through the
-// SAME engine paths the Mollie webhook uses (observe → verify → settle /
-// refund / dispute / settlement facts) — never a Stripe-specific writer.
-// Every engine write is idempotent per fact id, so a redelivered event (the
-// delivery's `event.id` is the dedupe identity) is acknowledged without a
-// second effect.
+// SIGNED DOES NOT MEAN CURRENT. A verified delivery is a TRIGGER ONLY:
+// `payments::stripe_events` extracts the object ids it names and calls the
+// adapter's AUTHENTICATED fetch (PaymentIntent / refund / charge→payment /
+// payout); the money, state and attribution facts come from those fetched
+// objects, never from the signed body. A signed event whose body lies cannot
+// settle anything. Each neutral fact is then dispatched through the SAME
+// engine paths the Mollie webhook uses (observe → verify → settle / refund /
+// dispute / settlement facts) — never a Stripe-specific writer. Every engine
+// write is idempotent per fact id, so a redelivered event (the delivery's
+// `event.id` is the dedupe identity) is acknowledged without a second effect.
 //
 // Status contract: 200 "OK" once the delivery produced no retryable error
 // (including unknown event types, which normalize to zero facts — an
 // unknown notification must never fail the delivery); 400 for a
 // missing/failed signature or a non-JSON body (fail closed, never enter the
-// pipeline); 503 when `STRIPE_WEBHOOK_SECRET` is not configured (retryable,
-// never a 404 that would silently drop provider events); 500 for a
-// malformed KNOWN event or a failed fact write (Stripe retries both).
+// pipeline); 503 when `STRIPE_WEBHOOK_SECRET` is not configured, when the
+// deployment is not configured for Stripe, or when the provider cannot be
+// resolved (all retryable, never a 404 that would silently drop provider
+// events); 500 for a malformed KNOWN event, a failed authenticated refetch or
+// a failed fact write (Stripe retries all three).
 
 /// The success answer Stripe expects (the bare `OK` keeps operator replays
 /// legible, mirroring the Mollie route).
@@ -163,12 +168,19 @@ async fn handle_stripe_webhook(
         }
     };
     let event_id = billing_service::payments::stripe_events::event_dedup_id(&event);
-    // Unknown event types answer Ok(vec![]) here: accepted and ignored.
-    let facts = match billing_service::payments::stripe_events::normalize_event(
-        billing_service::payments::stripe_events::PROVIDER,
-        &event,
-    ) {
-        Ok(facts) => facts,
+    use billing_service::payments::stripe_events::WebhookTrigger;
+    // Unknown event types are accepted and ignored BEFORE any provider is
+    // touched: an unknown notification must never fail the delivery, even on
+    // a deployment configured for another processor.
+    match WebhookTrigger::from_event(&event) {
+        Ok(None) => {
+            tracing::info!(
+                event_id = event_id.as_deref().unwrap_or(""),
+                "stripe notification accepted (unknown event type, no facts)"
+            );
+            return (StatusCode::OK, STRIPE_WEBHOOK_ACCEPTED).into_response();
+        }
+        Ok(Some(_)) => {}
         Err(message) => {
             // A malformed KNOWN event: dead-letter via 500 so Stripe retries.
             tracing::error!(
@@ -182,6 +194,52 @@ async fn handle_stripe_webhook(
             );
         }
     };
+    // The verified event is a TRIGGER: every fact below comes from the
+    // adapter's authenticated fetch, never the signed body.
+    let provider = match state.payments.resolve() {
+        Ok(provider) => provider,
+        Err(error) => {
+            tracing::error!(
+                event_id = event_id.as_deref().unwrap_or(""),
+                error = %error,
+                "stripe webhook: the payment provider cannot be resolved"
+            );
+            return stripe_webhook_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "the payment provider is not configured on this deployment; the delivery will be retried",
+            );
+        }
+    };
+    if provider.provider_name() != billing_service::payments::stripe_events::PROVIDER {
+        tracing::error!(
+            event_id = event_id.as_deref().unwrap_or(""),
+            provider = provider.provider_name(),
+            "stripe webhook: this deployment is not configured for Stripe"
+        );
+        return stripe_webhook_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "this deployment is not configured for Stripe; the delivery will be retried",
+        );
+    }
+    let facts =
+        match billing_service::payments::stripe_events::normalize_event(provider.as_ref(), &event)
+            .await
+        {
+            Ok(facts) => facts,
+            Err(message) => {
+                // A malformed KNOWN event or a failed authenticated refetch:
+                // dead-letter via 500 so Stripe retries the delivery.
+                tracing::error!(
+                    event_id = event_id.as_deref().unwrap_or(""),
+                    %message,
+                    "stripe webhook: the delivery could not be turned into verified facts"
+                );
+                return stripe_webhook_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "the delivery could not be verified against the provider; it will be retried",
+                );
+            }
+        };
     for fact in &facts {
         if let Err(message) = dispatch_stripe_fact(&state, fact).await {
             tracing::error!(
@@ -337,9 +395,15 @@ async fn dispatch_stripe_fact(
             let method_id = saved
                 .as_ref()
                 .map(|method| method.provider_method_id.clone());
-            let outcome = billing_service::plan_billing::activate_from_paid_checkout_with(
+            // Local checkout authority (30 Oct re-audit #8/#9): the session
+            // pointer resolves the immutable local quote the customer was
+            // shown, and activation settles THAT — the provider metadata is
+            // only the pointer. A session with no local row falls back to the
+            // legacy metadata quote inside this wrapper (warned, never silent).
+            let outcome = billing_service::plan_billing::activate_from_completed_checkout(
                 db,
                 provider,
+                &checkout.provider_checkout_id,
                 &checkout.provider_payment_id,
                 tenant_id,
                 plan_name,
@@ -1600,7 +1664,44 @@ pub(crate) async fn start_self_serve_checkout(
     })?;
     let customer_id = ensure_provider_customer(state, provider.as_ref(), tenant_id).await?;
 
-    let checkout = provider
+    // THE LOCAL CHECKOUT AUTHORITY (audit item 8): mint the local
+    // checkout_id and FREEZE the quote BEFORE the provider session exists.
+    // The provider idempotency key is `checkout:{checkout_id}`, so a
+    // transport retry of THIS operation reuses the same provider session,
+    // while a new user-intended checkout gets a new row and a new key (the
+    // old coarse tenant+plan+amount dedupe that merged two intentional
+    // attempts is gone). The completed-checkout activation settles this
+    // stored quote — provider metadata carries the checkout_id POINTER only.
+    let checkout_id = billing_service::plan_billing::begin_local_checkout(
+        &state.db,
+        billing_service::plan_billing::NewLocalCheckout {
+            tenant_id: tenant_id.to_string(),
+            plan: plan_name.to_string(),
+            interval: if yearly { "yearly" } else { "monthly" }.to_string(),
+            net_minor: quote.net_cents,
+            tax_minor: quote.vat_cents,
+            gross_minor: quote.gross_cents,
+            currency: currency.clone(),
+            provider: provider.provider_name().to_string(),
+            business: declaration.business,
+            country: declaration.country.clone(),
+            vat_number: declaration.vat_number.clone(),
+            reverse_charge: quote.reverse_charge,
+            vat_rate: quote.vat_rate,
+            source: Some(source.to_string()),
+        },
+    )
+    .await
+    .map_err(|error| {
+        tracing::error!(
+            tenant_id = %tenant_id,
+            error = %error,
+            "checkout: persisting the local quote failed"
+        );
+        CheckoutStartError::Failed
+    })?;
+
+    let checkout = match provider
         .create_checkout(billing_service::payments::CheckoutRequest {
             amount_minor: quote.gross_cents,
             currency: currency.clone(),
@@ -1615,6 +1716,9 @@ pub(crate) async fn start_self_serve_checkout(
                 "business": declaration.business,
                 "country": declaration.country,
                 "vat_number": declaration.vat_number,
+                // The completed fact's ONLY trusted pointer back to the
+                // local authority row.
+                "checkout_id": checkout_id.to_string(),
                 // The money facts the activation re-verifies against the
                 // persisted declaration (never trusted on its own).
                 "net_cents": quote.net_cents,
@@ -1625,35 +1729,85 @@ pub(crate) async fn start_self_serve_checkout(
             method_hint: None,
             provider_customer_id: Some(customer_id),
             provider_method_id: None,
-            // V34: capture a reusable method for the local renewal worker.
+            // V34: capture a reusable method for the local renewal wizard.
             save_method: true,
-            // Deterministic per (tenant, plan, interval, currency, amount,
-            // source): a retried request replays the same provider session,
-            // while a changed VAT amount or currency mints a new one.
-            idempotency_key: format!(
-                "checkout_{tenant_id}_{plan_name}_{}_{}_{}_{}",
-                if yearly { "yearly" } else { "monthly" },
-                currency.to_ascii_uppercase(),
-                quote.gross_cents,
-                source
-            ),
+            // Per LOCAL checkout operation: a transport retry of this call
+            // replays the same provider session; a new checkout is a new id
+            // and therefore a new key.
+            idempotency_key: format!("checkout:{checkout_id}"),
         })
         .await
-        .map_err(|error| {
+    {
+        Ok(checkout) => checkout,
+        Err(error) => {
             tracing::error!(
                 tenant_id = %tenant_id,
                 provider = %provider.provider_name(),
+                checkout_id = %checkout_id,
                 error = %error,
                 "checkout: provider create_checkout failed"
             );
-            CheckoutStartError::Failed
-        })?;
+            // A definitive refusal means this local operation produced no
+            // session; a transport-uncertain one may have, so the row stays
+            // open for a later completed fact to resolve.
+            if !matches!(
+                error,
+                billing_service::payments::ProviderError::Unavailable(_)
+            ) {
+                if let Err(stamp) = billing_service::plan_billing::mark_local_checkout_failed(
+                    &state.db,
+                    checkout_id,
+                )
+                .await
+                {
+                    tracing::error!(
+                        checkout_id = %checkout_id,
+                        error = %stamp,
+                        "checkout: failed to stamp the local checkout failed"
+                    );
+                }
+            }
+            return Err(CheckoutStartError::Failed);
+        }
+    };
+    // Attach the provider's session id to the local row: this is the pointer
+    // a completed-checkout fact resolves (provider_checkout_id -> local
+    // quote). The provider payment id is stored too, so providers whose
+    // checkout and payment ids coincide resolve at completion.
+    if let Err(error) = billing_service::plan_billing::attach_provider_checkout(
+        &state.db,
+        checkout_id,
+        provider.provider_name(),
+        &checkout.provider_payment_id,
+        Some(&checkout.provider_payment_id),
+    )
+    .await
+    {
+        tracing::error!(
+            tenant_id = %tenant_id,
+            checkout_id = %checkout_id,
+            provider_checkout_id = %checkout.provider_payment_id,
+            error = %error,
+            "checkout: attaching the provider session to the local quote failed"
+        );
+        return Err(CheckoutStartError::Failed);
+    }
     let Some(url) = checkout.redirect_url.clone() else {
         tracing::error!(
             tenant_id = %tenant_id,
+            checkout_id = %checkout_id,
             provider_payment_id = %checkout.provider_payment_id,
             "checkout: the provider returned no checkout URL"
         );
+        if let Err(error) =
+            billing_service::plan_billing::mark_local_checkout_failed(&state.db, checkout_id).await
+        {
+            tracing::error!(
+                checkout_id = %checkout_id,
+                error = %error,
+                "checkout: failed to stamp the URL-less local checkout failed"
+            );
+        }
         return Err(CheckoutStartError::Failed);
     };
 
@@ -8813,6 +8967,7 @@ mod adversarial_tests {
         record_call(&state, "payment", &headers, &body);
         let mut guard = state.lock().unwrap();
         guard.payment_calls += 1;
+        let payment_id = format!("tr_mock_{}", guard.payment_calls);
         let fail = guard.fail_payment;
         let no_url = guard.payment_without_checkout;
         drop(guard);
@@ -8833,9 +8988,10 @@ mod adversarial_tests {
             .get("amount")
             .cloned()
             .unwrap_or_else(|| json!({ "currency": "EUR", "value": "0.00" }));
+        let checkout_url = format!("https://www.mollie.com/checkout/{payment_id}");
         axum::Json(json!({
             "resource": "payment",
-            "id": "tr_mock_1",
+            "id": payment_id,
             "status": "open",
             "amount": amount,
             "description": parsed.get("description").cloned().unwrap_or(serde_json::Value::Null),
@@ -8844,7 +9000,7 @@ mod adversarial_tests {
             "metadata": parsed.get("metadata").cloned().unwrap_or(serde_json::Value::Null),
             "_links": {
                 "checkout": {
-                    "href": "https://www.mollie.com/checkout/tr_mock_1",
+                    "href": checkout_url,
                     "type": "text/html"
                 }
             }
@@ -9190,10 +9346,21 @@ mod adversarial_tests {
                 checkout["authorization"], "Bearer test_mock_key",
                 "Mollie authenticates with a bearer secret key"
             );
+            // Audit item 8: the provider key is the LOCAL checkout operation
+            // key (`checkout:{checkout_id}`), not a coarse deterministic
+            // dedupe over tenant+plan+amount, and metadata carries the same
+            // local id as the only trusted pointer back.
+            let idempotency_key = checkout["idempotencyKey"]
+                .as_str()
+                .expect("checkout idempotency key");
+            assert!(
+                idempotency_key.starts_with("checkout:"),
+                "the provider key is checkout:{{checkout_id}}, got {idempotency_key}"
+            );
             assert_eq!(
-                checkout["idempotencyKey"],
-                format!("checkout_{tenant}_pro_monthly_EUR_8900_api_checkout"),
-                "deterministic dedupe key (provider, plan, interval, amount, source)"
+                checkout["body"]["metadata"]["checkout_id"].as_str(),
+                idempotency_key.strip_prefix("checkout:"),
+                "metadata.checkout_id is the same local authority id as the key"
             );
             assert!(
                 checkout.get("mollieVersion").is_none(),
@@ -12383,6 +12550,12 @@ mod adversarial_tests {
 
     #[tokio::test]
     async fn stripe_webhook_payment_intent_settles_the_obligation_end_to_end() {
+        use billing_service::payments::conformance::ConformanceProvider;
+        use billing_service::payments::{
+            FetchedPayment, Payment, PaymentState as NeutralPaymentState,
+        };
+        use std::sync::Arc;
+
         let Some(pool) = pool_for("stripe_webhook_settle").await else {
             return;
         };
@@ -12401,9 +12574,33 @@ mod adversarial_tests {
             None,
         )
         .await;
-        let env = env_for(pool.clone(), "unused".into()).await;
-
         let payment_id = format!("pi_test_{}", unique_id());
+        // The AUTHENTICATED provider object is the fact source: install a
+        // provider double (named "stripe") whose fetch answers the paid
+        // PaymentIntent with OUR attribution metadata.
+        let state = crate::app::test_support::test_state_over(pool.clone()).await;
+        let provider = Arc::new(ConformanceProvider::new("stripe"));
+        provider.publish_payment_details(FetchedPayment {
+            payment: Payment {
+                provider: "stripe".to_string(),
+                provider_payment_id: payment_id.clone(),
+                state: NeutralPaymentState::Succeeded,
+                amount_minor: 1500,
+                currency: "USD".to_string(),
+                created_at: None,
+            },
+            metadata: json!({
+                "tenant_id": tenant,
+                "reference": format!("invoice:{invoice_id}"),
+            }),
+            provider_customer_id: None,
+        });
+        state.payments.install(provider.clone());
+        let env = Env {
+            app: build_app(state.clone()),
+            key: "unused".to_string(),
+        };
+
         let event = json!({
             "id": format!("evt_{}", unique_id()),
             "type": "payment_intent.succeeded",
@@ -12481,6 +12678,120 @@ mod adversarial_tests {
         assert_eq!(
             allocations_after_replay, 1,
             "a replay must never allocate twice"
+        );
+    }
+
+    /// THE ADVERSARIAL REFETCH TEST (audit item 1): a SIGNED event whose body
+    /// LIES (`payment_intent.succeeded`, amount 1) must NOT settle anything
+    /// unless the AUTHENTICATED fetched object says so. The fetched payment
+    /// is `processing`, so the delivery is acknowledged and no money moves.
+    #[tokio::test]
+    async fn stripe_webhook_signed_body_that_lies_settles_nothing() {
+        use billing_service::payments::conformance::ConformanceProvider;
+        use billing_service::payments::{
+            FetchedPayment, Payment, PaymentState as NeutralPaymentState,
+        };
+        use std::sync::Arc;
+
+        let Some(pool) = pool_for("stripe_webhook_body_lies").await else {
+            return;
+        };
+        let _env_lock = lock_mollie_env().await;
+        let secret = "whsec_adv_test_secret06";
+        let _secret = EnvRestore::set("STRIPE_WEBHOOK_SECRET", Some(secret));
+        let tenant = unique_id();
+        seed_tenant(&pool, &tenant, "pro").await;
+        let invoice_id = seed_invoice(
+            &pool,
+            &tenant,
+            "STRIPE-WH-LIES-1",
+            "pending",
+            1500,
+            sample_line_items(),
+            None,
+        )
+        .await;
+        let payment_id = format!("pi_lie_{}", unique_id());
+        let state = crate::app::test_support::test_state_over(pool.clone()).await;
+        let provider = Arc::new(ConformanceProvider::new("stripe"));
+        // The authenticated truth: the money has NOT arrived yet.
+        provider.publish_payment_details(FetchedPayment {
+            payment: Payment {
+                provider: "stripe".to_string(),
+                provider_payment_id: payment_id.clone(),
+                state: NeutralPaymentState::Processing,
+                amount_minor: 1500,
+                currency: "USD".to_string(),
+                created_at: None,
+            },
+            metadata: json!({
+                "tenant_id": tenant,
+                "reference": format!("invoice:{invoice_id}"),
+            }),
+            provider_customer_id: None,
+        });
+        state.payments.install(provider.clone());
+        let env = Env {
+            app: build_app(state.clone()),
+            key: "unused".to_string(),
+        };
+
+        // The signed body claims a succeeded 1-cent payment. Signed, yes;
+        // current, no.
+        let event = json!({
+            "id": format!("evt_{}", unique_id()),
+            "type": "payment_intent.succeeded",
+            "data": {
+                "object": {
+                    "id": payment_id,
+                    "object": "payment_intent",
+                    "status": "succeeded",
+                    "amount": 1,
+                    "currency": "usd",
+                    "metadata": {
+                        "tenant_id": tenant,
+                        "reference": format!("invoice:{invoice_id}"),
+                    },
+                }
+            }
+        })
+        .to_string();
+        let signature = stripe_signature_header(secret, Utc::now().timestamp(), event.as_bytes());
+        let (status, body) = post_stripe_webhook(&env, &event, Some(&signature)).await;
+        // A verified delivery is processed (200) and the honest fact is
+        // recorded — but nothing settles.
+        assert_eq!(status, StatusCode::OK, "{body}");
+
+        let (invoice_status,): (String,) =
+            sqlx::query_as("SELECT status FROM invoices WHERE id = $1")
+                .bind(invoice_id)
+                .fetch_one(&pool)
+                .await
+                .expect("invoice");
+        assert_eq!(
+            invoice_status, "pending",
+            "the lying body must not settle the invoice"
+        );
+        let allocations: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM invoice_payment_allocations WHERE invoice_id = $1",
+        )
+        .bind(invoice_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(allocations, 0, "no money moved: no allocation");
+        let (attempt_state, amount_minor): (String, i64) = sqlx::query_as(
+            "SELECT state, amount_minor FROM payment_attempts WHERE provider = 'stripe' \
+             AND provider_payment_id = $1",
+        )
+        .bind(&payment_id)
+        .fetch_one(&pool)
+        .await
+        .expect("attempt row");
+        assert_eq!(attempt_state, "processing", "the fetched state is the fact");
+        assert_eq!(
+            amount_minor, 1500,
+            "the fetched amount is the fact, never the body's 1"
         );
     }
     // ------------------------------------------------------------------

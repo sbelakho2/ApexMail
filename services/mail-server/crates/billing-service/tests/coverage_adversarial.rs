@@ -7003,6 +7003,209 @@ async fn renewal_provider() -> std::sync::Arc<dyn billing_service::payments::Pay
     billing_service::payments::registry::from_env().expect("the mock provider registry")
 }
 
+/// A scripted payment provider for the renewal-FACT tests (audit items 4 and
+/// 7). Only the methods the renewal worker drives are meaningful; every other
+/// arm refuses VISIBLY, so a test cannot silently pass through a path it did
+/// not script.
+struct ScriptedRenewalProvider {
+    name: &'static str,
+    charges: std::sync::Mutex<
+        std::collections::VecDeque<
+            Result<billing_service::payments::Payment, billing_service::payments::ProviderError>,
+        >,
+    >,
+    fetched:
+        std::sync::Mutex<std::collections::HashMap<String, billing_service::payments::Payment>>,
+    /// `(provider_customer_id, provider_method_id)` of every charge call.
+    charged_methods: std::sync::Mutex<Vec<(String, String)>>,
+    charge_calls: std::sync::atomic::AtomicU64,
+    fetch_calls: std::sync::atomic::AtomicU64,
+}
+
+impl ScriptedRenewalProvider {
+    fn new(name: &'static str) -> Self {
+        Self {
+            name,
+            charges: std::sync::Mutex::new(std::collections::VecDeque::new()),
+            fetched: std::sync::Mutex::new(std::collections::HashMap::new()),
+            charged_methods: std::sync::Mutex::new(Vec::new()),
+            charge_calls: std::sync::atomic::AtomicU64::new(0),
+            fetch_calls: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
+
+    fn script_charge(&self, payment: billing_service::payments::Payment) {
+        self.charges
+            .lock()
+            .expect("charge script lock")
+            .push_back(Ok(payment));
+    }
+
+    fn script_fetch(&self, payment: billing_service::payments::Payment) {
+        self.fetched
+            .lock()
+            .expect("fetch script lock")
+            .insert(payment.provider_payment_id.clone(), payment);
+    }
+
+    fn charged_methods(&self) -> Vec<(String, String)> {
+        self.charged_methods
+            .lock()
+            .expect("method log lock")
+            .clone()
+    }
+
+    fn charge_calls(&self) -> u64 {
+        self.charge_calls.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn fetch_calls(&self) -> u64 {
+        self.fetch_calls.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+#[async_trait::async_trait]
+impl billing_service::payments::PaymentProvider for ScriptedRenewalProvider {
+    fn provider_name(&self) -> &'static str {
+        self.name
+    }
+
+    fn capabilities(&self) -> billing_service::payments::ProviderCapabilities {
+        billing_service::payments::ProviderCapabilities {
+            hosted_checkout: true,
+            saved_method_charging: true,
+            refunds: true,
+            disputes: false,
+            payouts: false,
+            idempotency_keys: true,
+        }
+    }
+
+    async fn create_checkout(
+        &self,
+        request: billing_service::payments::CheckoutRequest,
+    ) -> Result<billing_service::payments::Checkout, billing_service::payments::ProviderError> {
+        Ok(billing_service::payments::Checkout {
+            provider: self.name.to_string(),
+            provider_payment_id: format!("checkout_{}", Uuid::new_v4().simple()),
+            state: billing_service::payments::PaymentState::Pending,
+            redirect_url: Some("https://scripted.invalid/checkout".to_string()),
+            amount_minor: request.amount_minor,
+            currency: request.currency.to_ascii_uppercase(),
+            created_at: None,
+        })
+    }
+
+    async fn charge_saved_method(
+        &self,
+        request: billing_service::payments::SavedMethodCharge,
+    ) -> Result<billing_service::payments::Payment, billing_service::payments::ProviderError> {
+        self.charged_methods.lock().expect("method log lock").push((
+            request.provider_customer_id.clone(),
+            request.provider_method_id.clone(),
+        ));
+        let call = self
+            .charge_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1;
+        let scripted = self.charges.lock().expect("charge script lock").pop_front();
+        match scripted {
+            Some(result) => result,
+            // Unscripted: an honest echo of the request (the amount the
+            // engine asked for), so the default is a successful charge.
+            None => Ok(billing_service::payments::Payment {
+                provider: self.name.to_string(),
+                provider_payment_id: format!("provider_renewal_{call}"),
+                state: billing_service::payments::PaymentState::Succeeded,
+                amount_minor: request.amount_minor,
+                currency: request.currency.to_ascii_uppercase(),
+                created_at: None,
+            }),
+        }
+    }
+
+    async fn refund(
+        &self,
+        _request: billing_service::payments::RefundRequest,
+    ) -> Result<billing_service::payments::Refund, billing_service::payments::ProviderError> {
+        Err(billing_service::payments::ProviderError::Config(
+            "the scripted renewal provider does not refund".to_string(),
+        ))
+    }
+
+    async fn fetch_payment_object(
+        &self,
+        provider_payment_id: &str,
+    ) -> Result<billing_service::payments::Payment, billing_service::payments::ProviderError> {
+        self.fetch_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.fetched
+            .lock()
+            .expect("fetch script lock")
+            .get(provider_payment_id)
+            .cloned()
+            .ok_or_else(|| billing_service::payments::ProviderError::NotFound {
+                kind: "payment",
+                id: provider_payment_id.to_string(),
+            })
+    }
+
+    async fn search_payment_by_idempotency_key(
+        &self,
+        _idempotency_key: &str,
+    ) -> Result<Option<billing_service::payments::Payment>, billing_service::payments::ProviderError>
+    {
+        // Absence is never guessed by the double either.
+        Err(billing_service::payments::ProviderError::Config(
+            "the scripted renewal provider offers no charge search".to_string(),
+        ))
+    }
+
+    async fn fetch_refund(
+        &self,
+        _provider_payment_id: &str,
+        _provider_refund_id: &str,
+    ) -> Result<billing_service::payments::Refund, billing_service::payments::ProviderError> {
+        Err(billing_service::payments::ProviderError::Config(
+            "the scripted renewal provider does not fetch refunds".to_string(),
+        ))
+    }
+
+    async fn revoke_saved_method(
+        &self,
+        _provider_customer_id: &str,
+        _provider_method_id: &str,
+    ) -> Result<(), billing_service::payments::ProviderError> {
+        Ok(())
+    }
+
+    async fn fetch_settlement(
+        &self,
+        provider_settlement_id: &str,
+    ) -> Result<billing_service::payments::Settlement, billing_service::payments::ProviderError>
+    {
+        Err(billing_service::payments::ProviderError::NotFound {
+            kind: "settlement",
+            id: provider_settlement_id.to_string(),
+        })
+    }
+
+    async fn list_settlements(
+        &self,
+    ) -> Result<Vec<billing_service::payments::Settlement>, billing_service::payments::ProviderError>
+    {
+        Ok(Vec::new())
+    }
+
+    async fn list_disputes(
+        &self,
+        _provider_payment_id: &str,
+    ) -> Result<Vec<billing_service::payments::Dispute>, billing_service::payments::ProviderError>
+    {
+        Ok(Vec::new())
+    }
+}
+
 db_test!(
     renewal_worker_invoices_the_next_period_before_the_charge,
     |h| {
@@ -7221,11 +7424,13 @@ db_test!(
             let tenant = format!("cov_i28_{index}");
             seed_tenant(&h, &tenant, "free").await;
             seed_reverse_charge_business(&h, &tenant).await;
-            // The tenant's reverse-charge evidence predates the renewal tax
-            // point (the seeded row is "valid since yesterday", which would
-            // not cover the fixed 2026-10-15 tick).
+            // The tenant's reverse-charge evidence must cover the renewal
+            // tax point AND stay inside the formal freshness bound (30 Oct
+            // re-audit #22: NULL valid_until is a bounded grace period, not
+            // "valid forever"). 2026-09-01 is fresh at both the fixed
+            // 2026-10-15 tick and the activation tax point.
             sqlx::query(
-                "UPDATE vat_validation_evidence SET valid_from = DATE '2026-01-01' \
+                "UPDATE vat_validation_evidence SET valid_from = DATE '2026-09-01' \
                  WHERE tenant_id = $1",
             )
             .bind(&tenant)
@@ -7688,6 +7893,788 @@ db_test!(
                 .await
                 .expect("attempts");
         assert_eq!(attempts, 0, "no charge attempt is claimed");
+    }
+);
+
+// ---------------------------------------------------------------------------
+// The 30 Oct re-audit's renewal items (4, 7, 8, 11): the settlement fact is
+// the PROVIDER'S payment object, credentials are provider-scoped, the
+// checkout has a LOCAL authority, and the subscription's currency is local
+// state.
+// ---------------------------------------------------------------------------
+
+db_test!(
+    renewal_never_settles_the_expected_gross_when_the_provider_returned_another_amount,
+    |h| {
+        let _mock = mock_mollie_api();
+        seed_tenant(&h, "cov_fact_amount", "free").await;
+        seed_reverse_charge_business(&h, "cov_fact_amount").await;
+        billing_service::plan_billing::activate_from_paid_checkout(
+            &h.pool,
+            "tr_fact_first",
+            "cov_fact_amount",
+            "starter",
+            "monthly",
+            "EUR",
+            2_000,
+            Some("cst_fact_amount"),
+            Some("mdt_fact_amount"),
+        )
+        .await
+        .expect("activation");
+        let cycle_before: DateTime<Utc> = sqlx::query_scalar(
+            "SELECT billing_cycle_end FROM subscription_state WHERE tenant_id = $1",
+        )
+        .bind("cov_fact_amount")
+        .fetch_one(&h.pool)
+        .await
+        .expect("cycle before");
+
+        // The provider reports SUCCEEDED with €200 for the €20 renewal
+        // invoice. The settlement fact must be THIS amount; the expected
+        // gross (€20) must never be substituted, or exact-amount
+        // verification becomes self-fulfilling.
+        let provider = Arc::new(ScriptedRenewalProvider::new("mollie"));
+        provider.script_charge(billing_service::payments::Payment {
+            provider: "mollie".to_string(),
+            provider_payment_id: "tr_fact_overcharge".to_string(),
+            state: billing_service::payments::PaymentState::Succeeded,
+            amount_minor: 20_000,
+            currency: "EUR".to_string(),
+            created_at: None,
+        });
+        let later = Utc::now() + chrono::Duration::days(40);
+        let renewed = billing_service::plan_billing::renew_due_subscriptions_with(
+            &h.state,
+            provider.clone(),
+            later,
+        )
+        .await
+        .expect("renewal tick");
+        assert_eq!(
+            renewed, 0,
+            "an over-charge settles nothing and renews nothing"
+        );
+
+        // No settlement: the invoice stays open, no allocation, the period
+        // did not advance and no renewal audit claims success.
+        let (status, total, currency): (String, i64, String) = sqlx::query_as(
+            "SELECT status::text, COALESCE(total, amount)::bigint, currency FROM invoices \
+             WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT 1",
+        )
+        .bind("cov_fact_amount")
+        .fetch_one(&h.pool)
+        .await
+        .expect("renewal invoice");
+        assert_ne!(status, "paid", "the over-charged invoice is NOT paid");
+        assert_eq!((total, currency.as_str()), (2_000, "EUR"));
+        let allocations: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM invoice_payment_allocations WHERE tenant_id = $1",
+        )
+        .bind("cov_fact_amount")
+        .fetch_one(&h.pool)
+        .await
+        .expect("allocations");
+        assert_eq!(allocations, 1, "only the activation payment is allocated");
+        let cycle_after: DateTime<Utc> = sqlx::query_scalar(
+            "SELECT billing_cycle_end FROM subscription_state WHERE tenant_id = $1",
+        )
+        .bind("cov_fact_amount")
+        .fetch_one(&h.pool)
+        .await
+        .expect("cycle after");
+        assert_eq!(
+            cycle_after, cycle_before,
+            "the period never advances on a mismatch"
+        );
+        let renewed_audits: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM audit_logs \
+             WHERE tenant_id = $1 AND action = 'billing.subscription_renewed'",
+        )
+        .bind("cov_fact_amount")
+        .fetch_one(&h.pool)
+        .await
+        .expect("renewal audits");
+        assert_eq!(renewed_audits, 0);
+
+        // The exact-amount reconciliation incident carries BOTH numbers.
+        let incident: (i64, serde_json::Value) = sqlx::query_as(
+            "SELECT count(*)::bigint, COALESCE(jsonb_agg(detail), '[]'::jsonb) \
+             FROM finance_incidents \
+             WHERE kind = 'renewal_amount_mismatch' AND mollie_payment_id = 'tr_fact_overcharge' \
+               AND status = 'open'",
+        )
+        .fetch_one(&h.pool)
+        .await
+        .expect("finance incident");
+        assert_eq!(incident.0, 1, "exactly one AmountMismatch incident");
+        let detail = &incident.1[0];
+        assert_eq!(detail["expectedMinor"], 2_000);
+        assert_eq!(detail["actualMinor"], 20_000);
+
+        // The attempt keeps the provider's real outcome; it is never closed
+        // failed (the money may exist) and never auto-retried.
+        let attempt_state: String = sqlx::query_scalar(
+            "SELECT state FROM payment_attempts \
+             WHERE tenant_id = $1 AND purpose = 'renewal'",
+        )
+        .bind("cov_fact_amount")
+        .fetch_one(&h.pool)
+        .await
+        .expect("renewal attempt");
+        assert_eq!(attempt_state, "succeeded");
+        assert_eq!(
+            provider.fetch_calls(),
+            0,
+            "a complete provider fact is used verbatim, no refetch"
+        );
+    }
+);
+
+db_test!(
+    renewal_refetches_an_unusable_success_and_settles_the_fetched_amount,
+    |h| {
+        let _mock = mock_mollie_api();
+        seed_tenant(&h, "cov_fact_refetch", "free").await;
+        seed_reverse_charge_business(&h, "cov_fact_refetch").await;
+        billing_service::plan_billing::activate_from_paid_checkout(
+            &h.pool,
+            "tr_refetch_first",
+            "cov_fact_refetch",
+            "starter",
+            "monthly",
+            "EUR",
+            2_000,
+            Some("cst_refetch"),
+            Some("mdt_refetch"),
+        )
+        .await
+        .expect("activation");
+
+        let provider = Arc::new(ScriptedRenewalProvider::new("mollie"));
+        // The charge response is a success with NO money facts (the neutral
+        // sentinels: amount 0 / empty currency).
+        provider.script_charge(billing_service::payments::Payment {
+            provider: "mollie".to_string(),
+            provider_payment_id: "tr_fact_refetch".to_string(),
+            state: billing_service::payments::PaymentState::Succeeded,
+            amount_minor: 0,
+            currency: String::new(),
+            created_at: None,
+        });
+        // The authenticated refetch carries the authoritative facts.
+        provider.script_fetch(billing_service::payments::Payment {
+            provider: "mollie".to_string(),
+            provider_payment_id: "tr_fact_refetch".to_string(),
+            state: billing_service::payments::PaymentState::Succeeded,
+            amount_minor: 2_000,
+            currency: "EUR".to_string(),
+            created_at: None,
+        });
+
+        let later = Utc::now() + chrono::Duration::days(40);
+        let renewed = billing_service::plan_billing::renew_due_subscriptions_with(
+            &h.state,
+            provider.clone(),
+            later,
+        )
+        .await
+        .expect("renewal tick");
+        assert_eq!(renewed, 1, "the refetched provider facts settle");
+        assert_eq!(provider.fetch_calls(), 1, "the unusable fact is refetched");
+        let paid: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM invoices WHERE tenant_id = $1 AND status = 'paid'",
+        )
+        .bind("cov_fact_refetch")
+        .fetch_one(&h.pool)
+        .await
+        .expect("paid invoices");
+        assert_eq!(paid, 2, "activation + renewal are both paid");
+        let incidents: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM finance_incidents \
+             WHERE kind = 'renewal_payment_fact_unusable' AND status = 'open'",
+        )
+        .fetch_one(&h.pool)
+        .await
+        .expect("incidents");
+        assert_eq!(incidents, 0);
+    }
+);
+
+db_test!(
+    renewal_refuses_when_the_provider_success_carries_no_amount_after_refetch,
+    |h| {
+        let _mock = mock_mollie_api();
+        seed_tenant(&h, "cov_fact_blank", "free").await;
+        seed_reverse_charge_business(&h, "cov_fact_blank").await;
+        billing_service::plan_billing::activate_from_paid_checkout(
+            &h.pool,
+            "tr_blank_first",
+            "cov_fact_blank",
+            "starter",
+            "monthly",
+            "EUR",
+            2_000,
+            Some("cst_blank"),
+            Some("mdt_blank"),
+        )
+        .await
+        .expect("activation");
+
+        let provider = Arc::new(ScriptedRenewalProvider::new("mollie"));
+        provider.script_charge(billing_service::payments::Payment {
+            provider: "mollie".to_string(),
+            provider_payment_id: "tr_fact_blank".to_string(),
+            state: billing_service::payments::PaymentState::Succeeded,
+            amount_minor: 0,
+            currency: String::new(),
+            created_at: None,
+        });
+        provider.script_fetch(billing_service::payments::Payment {
+            provider: "mollie".to_string(),
+            provider_payment_id: "tr_fact_blank".to_string(),
+            state: billing_service::payments::PaymentState::Succeeded,
+            amount_minor: 0,
+            currency: String::new(),
+            created_at: None,
+        });
+
+        let later = Utc::now() + chrono::Duration::days(40);
+        let renewed = billing_service::plan_billing::renew_due_subscriptions_with(
+            &h.state,
+            provider.clone(),
+            later,
+        )
+        .await
+        .expect("renewal tick");
+        assert_eq!(renewed, 0, "nothing is inferred and nothing settles");
+        assert_eq!(provider.fetch_calls(), 1);
+        let unpaid: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM invoices WHERE tenant_id = $1 AND status <> 'paid'",
+        )
+        .bind("cov_fact_blank")
+        .fetch_one(&h.pool)
+        .await
+        .expect("unpaid invoices");
+        assert_eq!(unpaid, 1, "the renewal invoice stays open");
+        let incidents: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM finance_incidents \
+             WHERE kind = 'renewal_payment_fact_unusable' \
+               AND mollie_payment_id = 'tr_fact_blank' AND status = 'open'",
+        )
+        .fetch_one(&h.pool)
+        .await
+        .expect("incidents");
+        assert_eq!(incidents, 1, "the unusable provider fact is an incident");
+    }
+);
+
+db_test!(
+    renewal_charges_only_the_configured_providers_credential,
+    |h| {
+        seed_tenant(&h, "cov_provider_scope", "free").await;
+        seed_reverse_charge_business(&h, "cov_provider_scope").await;
+        // The configured adapter is Stripe; the activation stores ITS
+        // credential (provider = stripe).
+        let provider = Arc::new(ScriptedRenewalProvider::new("stripe"));
+        billing_service::plan_billing::activate_from_paid_checkout_with(
+            &h.pool,
+            provider.clone(),
+            "pi_scope_first",
+            "cov_provider_scope",
+            "starter",
+            "monthly",
+            "EUR",
+            2_000,
+            Some("cus_scope_stripe"),
+            Some("pm_scope_stripe"),
+        )
+        .await
+        .expect("activation");
+        // Provider coexistence: a NEWER Mollie credential and a newer
+        // REVOKED Stripe credential. Neither may be selected by the renewal
+        // worker.
+        sqlx::query(
+            "INSERT INTO payment_credentials \
+                 (tenant_id, provider, provider_customer_id, provider_method_id, state, created_at) \
+             VALUES ($1, 'mollie', 'cst_scope_mollie', 'mdt_scope_mollie', 'active', \
+                     NOW() + INTERVAL '1 hour')",
+        )
+        .bind("cov_provider_scope")
+        .execute(&h.pool)
+        .await
+        .expect("newer mollie credential");
+        sqlx::query(
+            "INSERT INTO payment_credentials \
+                 (tenant_id, provider, provider_customer_id, provider_method_id, state, \
+                  revoked_at, created_at) \
+             VALUES ($1, 'stripe', 'cus_scope_revoked', 'pm_scope_revoked', 'active', NOW(), \
+                     NOW() + INTERVAL '2 hours')",
+        )
+        .bind("cov_provider_scope")
+        .execute(&h.pool)
+        .await
+        .expect("newer revoked stripe credential");
+
+        let later = Utc::now() + chrono::Duration::days(40);
+        let renewed = billing_service::plan_billing::renew_due_subscriptions_with(
+            &h.state,
+            provider.clone(),
+            later,
+        )
+        .await
+        .expect("renewal tick");
+        assert_eq!(renewed, 1, "the provider-scoped credential renews");
+        assert_eq!(
+            provider.charged_methods(),
+            vec![(
+                "cus_scope_stripe".to_string(),
+                "pm_scope_stripe".to_string()
+            )],
+            "the adapter received the CONFIGURED provider's credential, never the newer \
+             Mollie/revoked ones"
+        );
+        assert_eq!(provider.charge_calls(), 1);
+        let attempt_provider: String = sqlx::query_scalar(
+            "SELECT provider FROM payment_attempts \
+             WHERE tenant_id = $1 AND purpose = 'renewal'",
+        )
+        .bind("cov_provider_scope")
+        .fetch_one(&h.pool)
+        .await
+        .expect("renewal attempt");
+        assert_eq!(attempt_provider, "stripe");
+    }
+);
+
+db_test!(
+    renewal_bills_in_the_subscriptions_currency_not_the_newest_invoice,
+    |h| {
+        let mock = mock_mollie_api();
+        seed_tenant(&h, "cov_currency", "free").await;
+        seed_reverse_charge_business(&h, "cov_currency").await;
+        billing_service::plan_billing::activate_from_paid_checkout(
+            &h.pool,
+            "tr_currency_first",
+            "cov_currency",
+            "starter",
+            "monthly",
+            "EUR",
+            2_000,
+            Some("cst_currency"),
+            Some("mdt_currency"),
+        )
+        .await
+        .expect("activation");
+        let stored_currency: String = sqlx::query_scalar(
+            "SELECT billing_currency FROM subscription_state WHERE tenant_id = $1",
+        )
+        .bind("cov_currency")
+        .fetch_one(&h.pool)
+        .await
+        .expect("stored currency");
+        assert_eq!(
+            stored_currency, "EUR",
+            "the activation froze the paid currency"
+        );
+
+        // A NEWER, unrelated USD support invoice: the old inference rule
+        // would have re-denominated the next renewal in USD.
+        sqlx::query(
+            "INSERT INTO invoices \
+                 (id, tenant_id, invoice_number, status, amount, currency, subtotal, vat_total, \
+                  total, due_at, created_at, updated_at) \
+             VALUES ($1, $2, $3, 'paid', 5000, 'USD', 5000, 0, 5000, NOW(), \
+                     NOW() + INTERVAL '1 hour', NOW() + INTERVAL '1 hour')",
+        )
+        .bind(Uuid::new_v4())
+        .bind("cov_currency")
+        .bind(format!("SUP-{}", Uuid::new_v4().simple()))
+        .execute(&h.pool)
+        .await
+        .expect("newer USD support invoice");
+
+        mock.route(
+            "/v2/payments",
+            200,
+            r#"{"id": "tr_currency_{seq}", "status": "paid"}"#.to_string(),
+        );
+        let later = Utc::now() + chrono::Duration::days(40);
+        let renewed = billing_service::plan_billing::renew_due_subscriptions_with(
+            &h.state,
+            renewal_provider().await,
+            later,
+        )
+        .await
+        .expect("renewal tick");
+        assert_eq!(renewed, 1);
+
+        let (currency, total): (String, i64) = sqlx::query_as(
+            "SELECT currency, COALESCE(total, amount)::bigint FROM invoices \
+             WHERE tenant_id = $1 AND period_start = ( \
+                 SELECT billing_cycle_start FROM subscription_state WHERE tenant_id = $1) \
+             ORDER BY created_at DESC LIMIT 1",
+        )
+        .bind("cov_currency")
+        .fetch_one(&h.pool)
+        .await
+        .expect("renewal invoice");
+        assert_eq!(
+            (currency.as_str(), total),
+            ("EUR", 2_000),
+            "the renewal is billed in the SUBSCRIPTION's currency, not the newest invoice's"
+        );
+        let attempt_currency: String = sqlx::query_scalar(
+            "SELECT currency FROM payment_attempts \
+             WHERE tenant_id = $1 AND purpose = 'renewal'",
+        )
+        .bind("cov_currency")
+        .fetch_one(&h.pool)
+        .await
+        .expect("renewal attempt");
+        assert_eq!(attempt_currency, "EUR");
+        let currency_after: String = sqlx::query_scalar(
+            "SELECT billing_currency FROM subscription_state WHERE tenant_id = $1",
+        )
+        .bind("cov_currency")
+        .fetch_one(&h.pool)
+        .await
+        .expect("currency after");
+        assert_eq!(currency_after, "EUR");
+    }
+);
+
+db_test!(
+    local_checkout_authority_mints_per_intent_and_completes_from_the_provider_pointer,
+    |h| {
+        seed_tenant(&h, "cov_checkout_authority", "free").await;
+        let new_checkout = || billing_service::plan_billing::NewLocalCheckout {
+            tenant_id: "cov_checkout_authority".to_string(),
+            plan: "starter".to_string(),
+            interval: "monthly".to_string(),
+            net_minor: 2_000,
+            tax_minor: 0,
+            gross_minor: 2_000,
+            currency: "EUR".to_string(),
+            provider: "mollie".to_string(),
+            business: true,
+            country: "DE".to_string(),
+            vat_number: Some("DE123456789".to_string()),
+            reverse_charge: true,
+            vat_rate: 0.0,
+            source: Some("api_checkout".to_string()),
+        };
+        let first = billing_service::plan_billing::begin_local_checkout(&h.pool, new_checkout())
+            .await
+            .expect("first local checkout");
+        let second = billing_service::plan_billing::begin_local_checkout(&h.pool, new_checkout())
+            .await
+            .expect("second local checkout");
+        assert_ne!(
+            first, second,
+            "two intentional checkouts are two local identities (and two provider keys)"
+        );
+        let rows: Vec<(Uuid, String)> = sqlx::query_as(
+            "SELECT id, status FROM payment_checkouts WHERE tenant_id = $1 ORDER BY created_at",
+        )
+        .bind("cov_checkout_authority")
+        .fetch_all(&h.pool)
+        .await
+        .expect("local checkouts");
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|(_, status)| status == "open"));
+
+        billing_service::plan_billing::attach_provider_checkout(
+            &h.pool,
+            first,
+            "mollie",
+            "tr_checkout_session_1",
+            Some("tr_checkout_session_1"),
+        )
+        .await
+        .expect("attach");
+        let open = billing_service::plan_billing::local_checkout_for_payment(
+            &h.pool,
+            "mollie",
+            "tr_checkout_session_1",
+        )
+        .await
+        .expect("lookup")
+        .expect("the session resolves to its local checkout");
+        assert_eq!(open.id, first);
+        assert_eq!(open.status, "open");
+        assert_eq!(
+            (open.net_minor, open.tax_minor, open.gross_minor),
+            (2_000, 0, 2_000)
+        );
+        assert_eq!(open.currency, "EUR");
+
+        // The completed-checkout fact's pointer marks the row completed and
+        // records the provider payment id.
+        let completed = billing_service::plan_billing::complete_local_checkout(
+            &h.pool,
+            "mollie",
+            "tr_checkout_session_1",
+            "tr_checkout_paid_1",
+        )
+        .await
+        .expect("complete")
+        .expect("the provider checkout id resolves");
+        assert_eq!(completed.id, first);
+        assert_eq!(completed.status, "completed");
+        assert_eq!(
+            completed.provider_payment_id.as_deref(),
+            Some("tr_checkout_paid_1")
+        );
+        // ... and the paid payment id resolves the same local quote.
+        let by_payment = billing_service::plan_billing::local_checkout_for_payment(
+            &h.pool,
+            "mollie",
+            "tr_checkout_paid_1",
+        )
+        .await
+        .expect("lookup by payment")
+        .expect("the payment resolves to its local checkout");
+        assert_eq!(by_payment.id, first);
+        // An unknown pointer is None, never invented.
+        assert!(billing_service::plan_billing::complete_local_checkout(
+            &h.pool,
+            "mollie",
+            "tr_unknown_session",
+            "tr_unknown_paid",
+        )
+        .await
+        .expect("unknown complete")
+        .is_none());
+
+        billing_service::plan_billing::mark_local_checkout_failed(&h.pool, second)
+            .await
+            .expect("mark failed");
+        let statuses: Vec<(Uuid, String)> = sqlx::query_as(
+            "SELECT id, status FROM payment_checkouts WHERE tenant_id = $1 ORDER BY created_at",
+        )
+        .bind("cov_checkout_authority")
+        .fetch_all(&h.pool)
+        .await
+        .expect("statuses");
+        assert_eq!(statuses[0], (first, "completed".to_string()));
+        assert_eq!(statuses[1], (second, "failed".to_string()));
+    }
+);
+
+db_test!(
+    activation_settles_the_locally_frozen_checkout_quote_not_provider_metadata,
+    |h| {
+        let _mock = mock_mollie_api();
+        seed_tenant(&h, "cov_local_quote", "free").await;
+        seed_reverse_charge_business(&h, "cov_local_quote").await;
+        let checkout_id = billing_service::plan_billing::begin_local_checkout(
+            &h.pool,
+            billing_service::plan_billing::NewLocalCheckout {
+                tenant_id: "cov_local_quote".to_string(),
+                plan: "starter".to_string(),
+                interval: "monthly".to_string(),
+                net_minor: 2_000,
+                tax_minor: 0,
+                gross_minor: 2_000,
+                currency: "EUR".to_string(),
+                provider: "mollie".to_string(),
+                business: true,
+                country: "DE".to_string(),
+                vat_number: Some("DE123456789".to_string()),
+                reverse_charge: true,
+                vat_rate: 0.0,
+                source: Some("api_checkout".to_string()),
+            },
+        )
+        .await
+        .expect("local checkout");
+        billing_service::plan_billing::attach_provider_checkout(
+            &h.pool,
+            checkout_id,
+            "mollie",
+            "tr_metadata_session",
+            Some("tr_metadata_session"),
+        )
+        .await
+        .expect("attach");
+
+        // The completed-checkout fact: the provider's hosted-session id and
+        // the payment id (which DIFFERS from the session id) resolve the
+        // local row, mark it completed, and the activation settles the
+        // stored quote. The provider metadata LIES (growth / yearly); the
+        // frozen quote (starter / monthly / EUR / 2000) is the only
+        // authority.
+        let outcome = billing_service::plan_billing::activate_from_completed_checkout(
+            &h.pool,
+            renewal_provider().await,
+            "tr_metadata_session",
+            "tr_metadata_paid",
+            "cov_local_quote",
+            "growth",
+            "yearly",
+            "EUR",
+            2_000,
+            Some("cst_local_quote"),
+            Some("mdt_local_quote"),
+        )
+        .await
+        .expect("activation");
+        assert!(!outcome.already_active);
+        assert!(outcome.invoice_id.is_some());
+
+        let (plan, interval, currency, method): (
+            Option<String>,
+            Option<String>,
+            String,
+            Option<String>,
+        ) = sqlx::query_as(
+            "SELECT plan, billing_interval, billing_currency, provider_method_id \
+             FROM subscription_state WHERE tenant_id = $1",
+        )
+        .bind("cov_local_quote")
+        .fetch_one(&h.pool)
+        .await
+        .expect("subscription");
+        assert_eq!(
+            plan.as_deref(),
+            Some("starter"),
+            "the stored plan wins over the metadata"
+        );
+        assert_eq!(interval.as_deref(), Some("monthly"));
+        assert_eq!(currency, "EUR");
+        assert_eq!(method.as_deref(), Some("mdt_local_quote"));
+        let tenant_plan: String = sqlx::query_scalar("SELECT plan FROM tenants WHERE id = $1")
+            .bind("cov_local_quote")
+            .fetch_one(&h.pool)
+            .await
+            .expect("tenant plan");
+        assert_eq!(tenant_plan, "starter");
+        let (net, vat, total, invoice_currency): (i64, i64, i64, String) = sqlx::query_as(
+            "SELECT subtotal::bigint, vat_total::bigint, total::bigint, currency FROM invoices \
+             WHERE tenant_id = $1",
+        )
+        .bind("cov_local_quote")
+        .fetch_one(&h.pool)
+        .await
+        .expect("activation invoice");
+        assert_eq!((net, vat, total), (2_000, 0, 2_000));
+        assert_eq!(invoice_currency, "EUR");
+        let (status, provider_payment_id): (String, Option<String>) = sqlx::query_as(
+            "SELECT status, provider_payment_id FROM payment_checkouts WHERE id = $1",
+        )
+        .bind(checkout_id)
+        .fetch_one(&h.pool)
+        .await
+        .expect("local checkout row");
+        assert_eq!(status, "completed");
+        assert_eq!(provider_payment_id.as_deref(), Some("tr_metadata_paid"));
+        let audit_checkout: Option<String> = sqlx::query_scalar(
+            "SELECT details->>'checkoutId' FROM audit_logs \
+             WHERE tenant_id = $1 AND action = 'billing.subscription_activated'",
+        )
+        .bind("cov_local_quote")
+        .fetch_one(&h.pool)
+        .await
+        .expect("activation audit");
+        assert_eq!(
+            audit_checkout,
+            Some(checkout_id.to_string()),
+            "the activation audit names the local checkout"
+        );
+    }
+);
+
+db_test!(
+    activation_refuses_a_charge_that_differs_from_the_locally_frozen_quote,
+    |h| {
+        let _mock = mock_mollie_api();
+        seed_tenant(&h, "cov_local_mismatch", "free").await;
+        seed_reverse_charge_business(&h, "cov_local_mismatch").await;
+        let checkout_id = billing_service::plan_billing::begin_local_checkout(
+            &h.pool,
+            billing_service::plan_billing::NewLocalCheckout {
+                tenant_id: "cov_local_mismatch".to_string(),
+                plan: "starter".to_string(),
+                interval: "monthly".to_string(),
+                net_minor: 2_000,
+                tax_minor: 0,
+                gross_minor: 2_000,
+                currency: "EUR".to_string(),
+                provider: "mollie".to_string(),
+                business: true,
+                country: "DE".to_string(),
+                vat_number: Some("DE123456789".to_string()),
+                reverse_charge: true,
+                vat_rate: 0.0,
+                source: Some("api_checkout".to_string()),
+            },
+        )
+        .await
+        .expect("local checkout");
+        billing_service::plan_billing::attach_provider_checkout(
+            &h.pool,
+            checkout_id,
+            "mollie",
+            "tr_quote_mismatch_session",
+            Some("tr_quote_mismatch_session"),
+        )
+        .await
+        .expect("attach");
+        billing_service::plan_billing::complete_local_checkout(
+            &h.pool,
+            "mollie",
+            "tr_quote_mismatch_session",
+            "tr_quote_mismatch_paid",
+        )
+        .await
+        .expect("complete")
+        .expect("resolved");
+
+        let error = billing_service::plan_billing::activate_from_paid_checkout_with(
+            &h.pool,
+            renewal_provider().await,
+            "tr_quote_mismatch_paid",
+            "cov_local_mismatch",
+            "starter",
+            "monthly",
+            "EUR",
+            8_900,
+            Some("cst_local_mismatch"),
+            Some("mdt_local_mismatch"),
+        )
+        .await
+        .expect_err("a charge above the frozen quote must not activate");
+        assert!(
+            error.to_string().contains("froze"),
+            "the refusal names the local quote: {error}"
+        );
+        let invoices: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM invoices WHERE tenant_id = $1")
+                .bind("cov_local_mismatch")
+                .fetch_one(&h.pool)
+                .await
+                .expect("invoices");
+        assert_eq!(invoices, 0, "nothing is issued");
+        let subscriptions: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM subscription_state WHERE tenant_id = $1")
+                .bind("cov_local_mismatch")
+                .fetch_one(&h.pool)
+                .await
+                .expect("subscriptions");
+        assert_eq!(subscriptions, 0, "no entitlement is granted");
+        let (incidents, detail): (i64, serde_json::Value) = sqlx::query_as(
+            "SELECT count(*)::bigint, COALESCE(jsonb_agg(detail), '[]'::jsonb) \
+             FROM finance_incidents \
+             WHERE kind = 'checkout_amount_mismatch' AND status = 'open'",
+        )
+        .fetch_one(&h.pool)
+        .await
+        .expect("incident");
+        assert_eq!(incidents, 1);
+        assert_eq!(detail[0]["checkoutId"], checkout_id.to_string());
+        assert_eq!(detail[0]["chargedMinor"], 8_900);
+        assert_eq!(detail[0]["quotedMinor"], 2_000);
     }
 );
 

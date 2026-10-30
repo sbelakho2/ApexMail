@@ -2489,7 +2489,9 @@ mod tests {
             country: "DE".into(),
             source: vat_rates::VatValidationSource::Vies,
             outcome: vat_rates::VatValidationOutcome::Valid,
-            valid_from: chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+            // Inside the formal freshness bound at the tax point (30 Oct
+            // re-audit #22: NULL valid_until is a bounded grace period).
+            valid_from: chrono::NaiveDate::from_ymd_opt(2026, 5, 1).unwrap(),
             valid_until: None,
             outage_state: None,
         };

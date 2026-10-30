@@ -279,6 +279,30 @@ VERDICT_RULES: list[dict] = [
                            "payments/NEUTRALITY_DEBT.md",
                            "open neutrality-debt row"),
     },
+    {
+        # 30 Oct re-audit #19: "payment-provider-neutral architecture LANDED"
+        # and "Stripe adapter production parity OPEN" are DIFFERENT verdicts,
+        # driven by different evidence. This row is the second one: the
+        # adapter's boundary contract is the gate, and a real Stripe test-mode
+        # run is the owner gate.
+        "id": "Stripe adapter parity",
+        "files": [
+            "services/mail-server/crates/billing-service/src/payments/stripe_provider.rs",
+            "services/mail-server/crates/billing-service/src/payments/stripe_events.rs",
+            "services/mail-server/crates/billing-service/src/payments/registry.rs",
+            "services/mail-server/crates/billing-service/tests/stripe_conformance.rs",
+            "tools/check_stripe_contract.py",
+        ],
+        "needles": [
+            ("services/mail-server/crates/billing-service/src/payments/stripe_events.rs",
+             "fetch"),
+            ("services/mail-server/crates/billing-service/src/payments/stripe_provider.rs",
+             "Idempotency-Key"),
+            ("tools/check_stripe_contract.py", "def main"),
+        ],
+        "lanes": ["validate.stripe-contract"],
+        "owner_gate": (".env.production.example", "STRIPE_SECRET_KEY"),
+    },
 ]
 
 

@@ -1,7 +1,7 @@
 //! §S2–S5, experiment science: the ONE metric registry, frozen windows,
 //! guardrail pauses, the randomized holdout, logged propensities with
-//! off-policy evaluation, the experiment registry, power and sequential
-//! monitoring.
+//! off-policy evaluation, the experiment registry, power and an APPROXIMATE
+//! sequential diagnostic.
 //!
 //! # The primary metric and the north star (S2)
 //!
@@ -32,39 +32,70 @@
 //!
 //! # Randomized holdout (S3)
 //!
-//! [`is_holdout`] assigns by a stable SHA-256 hash of
-//! `account id | segment | registry version`, so the same account always
-//! lands on the same side across runs and processes. The holdout receives no
-//! sending; [`holdout_lift`] reports treatment-vs-holdout lift per segment
-//! using matured windows only.
+//! The stable SHA-256 hash of `account id | segment | registry version`
+//! ([`holdout_bucket`]) decides the **initial** randomized membership only.
+//! [`crate::experiments::ExperimentEngine::select_variant`] first reads the
+//! persisted membership row for `(experiment_id, account_id)`; when one
+//! exists it is authoritative forever, so a later enrichment that changes
+//! the segment (or the registry version) cannot flip treatment into holdout
+//! or the reverse. The segment stays an analysis stratum, never a
+//! re-randomization. The holdout branch receives no sending;
+//! [`holdout_lift`] reports treatment-vs-holdout lift per segment using
+//! matured windows only and counts only persisted `assignment = 'holdout'`
+//! members.
+//!
+//! # Cohort provenance (item 29)
+//!
+//! `sales_experiment_contact_trials.cohort_source` separates trials whose
+//! first touch was OBSERVED by the live send path (`native`) from trials
+//! migration 290 rebuilt out of historical outcomes
+//! (`reconstructed_legacy`, where `first_touch_at` is the earliest
+//! recoverable outcome time and is therefore INFERRED). [`cohort_provenance`]
+//! summarizes the split and [`Scoreboard::cohort`] ships it to every API
+//! consumer; a mixed experiment is labeled as such rather than passing a
+//! reconstructed cohort off as a native one.
 //!
 //! # Propensities and off-policy evaluation (S4)
 //!
 //! Every selection records the actual Thompson win probability of each arm
 //! (`sales_experiment_assignments.propensities`, plus the chosen arm's
-//! `propensity` on the step execution and enrollment). [`ips`] and
-//! [`snips`] are the honest off-policy estimators over those logs:
+//! `propensity` on the step execution and enrollment). The estimate is a
+//! finite Monte-Carlo mean over 2,000 draws: a rare arm can win 0 draws, so
+//! the RAW estimate would be an exact zero even though the true selection
+//! probability is positive. The engine therefore logs the win count, draw
+//! count, Monte-Carlo standard error `sqrt(p(1-p)/n)` and an under-sampled
+//! flag, and bounds the logged propensity below by
+//! `PROPENSITY_FLOOR_EPSILON`. [`ips`] and [`snips`] are then computed over
+//! those bounded logs:
 //!
 //! ```text
 //! IPS  = (1/n) Σ 1{a_i = x} r_i / p_i
 //! SNIPS = Σ 1{a_i = x} r_i / p_i  /  Σ 1{a_i = x} / p_i
 //! ```
 //!
-//! There is no smoothing and no clipping: a logged propensity must be
-//! strictly positive (the deterministic exploit path logs 1.0), and an
-//! invalid row is dropped rather than silently reweighted.
+//! A logged propensity must be strictly positive (the deterministic exploit
+//! path logs 1.0), and an invalid row is dropped rather than silently
+//! reweighted. [`OpeDiagnostics`] accompanies every estimate with the
+//! maximum inverse weight, the weight p95, the effective sample size
+//! `(Σw)² / Σw²`, and IPS at two clipping levels (`IPS_CLIP_WEIGHT` and half
+//! of it) so a conclusion that only survives one clipping is visibly
+//! fragile.
 //!
-//! # Power and sequential monitoring (S5)
+//! # Power and the sequential diagnostic (S5)
 //!
 //! [`minimum_detectable_effect`] reports the absolute MDE for the primary
-//! metric at the current per-arm sample. [`SequentialMonitor`] implements a
-//! **mixture sequential probability ratio test (mSPRT)** with a normal
-//! mixing prior `δ ~ N(0, τ²)` on the risk difference. The statistic is a
-//! likelihood ratio evaluated at the current information time; rejecting at
-//! `Λ ≥ 1/α` is always-valid under the null, so an operator may look at the
-//! scoreboard after every contact without inflating the false-positive rate.
-//! The simulation test `early_peeking_does_not_inflate_false_positives`
-//! proves the property empirically.
+//! metric at the current per-arm sample. [`SequentialDiagnosticMonitor`] is
+//! an **APPROXIMATE normal-approximation sequential diagnostic** with
+//! plug-in variance, mixing the risk difference over `δ ~ N(0, τ²)`. It is
+//! deliberately **not** called an mSPRT: the implementation provides NO
+//! anytime-valid false-positive guarantee (the variance is estimated from
+//! the same data and the statistic is not a calibrated test supermartingale),
+//! and the `1/α` boundary is NOT a promotion warrant. Promotion goes
+//! through the registered sample and credible-interval gate in
+//! `crate::experiments::may_promote_arm`, never through this diagnostic. The
+//! simulation test
+//! `approximate_sequential_diagnostic_is_calibrated_on_a_peeking_grid` is a
+//! calibration CHECK on one simulated grid; it is not a validity proof.
 
 use std::collections::BTreeMap;
 
@@ -293,9 +324,9 @@ pub async fn guardrails_for_experiment(
     let rows = sqlx::query(
         "SELECT t.variant, t.segment, \
                 COUNT(DISTINCT t.contact_id)::bigint AS contacts, \
-                COUNT(o.id) FILTER (WHERE o.kind = 'complaint')::bigint AS complaints, \
-                COUNT(o.id) FILTER (WHERE o.kind = 'unsubscribe')::bigint AS unsubscribes, \
-                COUNT(o.id) FILTER (WHERE o.kind = 'bounce')::bigint AS bounces \
+                COUNT(o.outcome_key) FILTER (WHERE o.kind = 'complaint')::bigint AS complaints, \
+                COUNT(o.outcome_key) FILTER (WHERE o.kind = 'unsubscribe')::bigint AS unsubscribes, \
+                COUNT(o.outcome_key) FILTER (WHERE o.kind = 'bounce')::bigint AS bounces \
          FROM sales_experiment_contact_trials t \
          LEFT JOIN sales_experiment_outcomes o \
            ON o.tenant_id = t.tenant_id AND o.experiment_id = t.experiment_id \
@@ -416,6 +447,11 @@ pub async fn clear_arm_pause(
 /// Stable holdout bucket `0..10_000` from the SHA-256 of
 /// `account id | segment | registry version`. Case/whitespace normalised so
 /// the same account+segment always hashes identically.
+///
+/// This is the INITIAL randomization draw only. Membership is persisted by
+/// `ExperimentEngine::select_variant` and never recomputed for an account
+/// that already has a row; the bucket must not be used as a live membership
+/// test by any other caller.
 pub fn holdout_bucket(account_id: Uuid, segment: &str, registry_version: i32) -> u64 {
     let normalized = segment.trim().to_ascii_lowercase();
     let mut hasher = Sha256::new();
@@ -430,9 +466,15 @@ pub fn holdout_bucket(account_id: Uuid, segment: &str, registry_version: i32) ->
     u64::from_be_bytes(bytes) % 10_000
 }
 
-/// Is this account in the holdout? `share` is sanitised to `0.0..=0.5`; a
-/// zero share never holds anyone out, and a hostile share cannot exceed half
-/// the segment.
+/// Would a NEVER-SEEN account land in the holdout at its first decision?
+/// `share` is sanitised to `0.0..=0.5`; a zero share never holds anyone out,
+/// and a hostile share cannot exceed half the segment.
+///
+/// This must only be used for the INITIAL assignment. The selection path
+/// checks the persisted `sales_experiment_holdout_accounts` row FIRST and
+/// treats an existing row as authoritative, so a segment change cannot flip
+/// membership. Calling this as a live predicate would reintroduce the
+/// randomization defect it is documented against.
 pub fn is_holdout(account_id: Uuid, segment: &str, registry_version: i32, share: f64) -> bool {
     let share = experiments::sanitize_holdout_share(share);
     if share <= 0.0 {
@@ -461,6 +503,10 @@ pub struct SegmentLift {
 /// sending, so their successes are organic outcomes recorded for the account
 /// inside the frozen primary window after assignment; an account is only
 /// counted once its window closed.
+///
+/// Only persisted `assignment = 'holdout'` members are counted. The ledger
+/// also stores `treatment` members (so their membership is immutable too);
+/// those are not held out and must not enter this lift.
 pub async fn holdout_lift(
     db: &PgPool,
     tenant_id: &str,
@@ -499,6 +545,7 @@ pub async fn holdout_lift(
                       ))::bigint AS successes \
          FROM sales_experiment_holdout_accounts h \
          WHERE h.tenant_id = $1 AND h.experiment_id = $2 \
+           AND h.assignment = 'holdout' \
          GROUP BY h.segment",
     )
     .bind(tenant_id)
@@ -572,6 +619,89 @@ fn ratio(numerator: i64, denominator: i64) -> Option<f64> {
 }
 
 // ---------------------------------------------------------------------------
+// Cohort provenance (item 29)
+// ---------------------------------------------------------------------------
+
+/// The trial was created by the live send/outcome path, which observed the
+/// first touch.
+pub const COHORT_SOURCE_NATIVE: &str = "native";
+/// Migration 290 rebuilt the trial from historical outcome rows; its
+/// `first_touch_at` is the earliest recoverable outcome, not an observed
+/// first touch.
+pub const COHORT_SOURCE_RECONSTRUCTED_LEGACY: &str = "reconstructed_legacy";
+
+/// How much of an experiment's trial ledger is native versus reconstructed.
+/// Shipped on every [`Scoreboard`] so a dashboard or API consumer can label
+/// (or filter out) the reconstructed cohort instead of silently comparing it
+/// with natively randomized trials.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CohortProvenance {
+    /// Trials whose first touch the live path observed.
+    pub native_trials: i64,
+    /// Trials rebuilt by migration 290 (INFERRED first touch).
+    pub reconstructed_legacy_trials: i64,
+    /// True when the experiment mixes both sources: rates computed over the
+    /// pooled ledger then compare two different kinds of cohort.
+    pub mixed: bool,
+    /// Dashboard/API label: `none`, `native`, `reconstructed_legacy` or
+    /// `mixed`.
+    pub label: String,
+    /// Human-readable caveat, present whenever reconstructed trials exist.
+    pub caveat: Option<String>,
+}
+
+/// Count the trial ledger by provenance. Any value other than the literal
+/// `native` counts as reconstructed: an unknown provenance must never pass
+/// as an observed first touch.
+pub async fn cohort_provenance(
+    db: &PgPool,
+    tenant_id: &str,
+    experiment_id: Uuid,
+) -> Result<CohortProvenance, SalesError> {
+    let row = sqlx::query(
+        "SELECT \
+             COUNT(*) FILTER (WHERE cohort_source = 'native')::bigint AS native_trials, \
+             COUNT(*) FILTER (WHERE cohort_source <> 'native')::bigint AS reconstructed_trials \
+         FROM sales_experiment_contact_trials \
+         WHERE tenant_id = $1 AND experiment_id = $2",
+    )
+    .bind(tenant_id)
+    .bind(experiment_id)
+    .fetch_one(db)
+    .await
+    .map_err(|error| SalesError::Database(error.to_string()))?;
+    let native_trials: i64 = row
+        .try_get("native_trials")
+        .map_err(|error| SalesError::Database(error.to_string()))?;
+    let reconstructed_legacy_trials: i64 = row
+        .try_get("reconstructed_trials")
+        .map_err(|error| SalesError::Database(error.to_string()))?;
+    let mixed = native_trials > 0 && reconstructed_legacy_trials > 0;
+    let label = match (native_trials > 0, reconstructed_legacy_trials > 0) {
+        (false, false) => "none",
+        (true, false) => COHORT_SOURCE_NATIVE,
+        (false, true) => COHORT_SOURCE_RECONSTRUCTED_LEGACY,
+        (true, true) => "mixed",
+    }
+    .to_string();
+    let caveat = (reconstructed_legacy_trials > 0).then(|| {
+        format!(
+            "{reconstructed_legacy_trials} trial(s) were reconstructed by migration 290 from \
+             historical outcomes: first_touch_at is the EARLIEST RECOVERABLE outcome, not an \
+             observed first touch. Rates that pool reconstructed and native trials are not a \
+             clean randomized comparison; report or filter the provenance."
+        )
+    });
+    Ok(CohortProvenance {
+        native_trials,
+        reconstructed_legacy_trials,
+        mixed,
+        label,
+        caveat,
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Logged propensities and off-policy evaluation (S4)
 // ---------------------------------------------------------------------------
 
@@ -580,10 +710,64 @@ fn ratio(numerator: i64, denominator: i64) -> Option<f64> {
 pub struct LoggedDecision {
     pub arm: String,
     /// The ACTUAL probability the arm was chosen under, as logged by the
-    /// sampler.
+    /// sampler. The selection path bounds it below by
+    /// `crate::experiments::PROPENSITY_FLOOR_EPSILON`, so IPS/SNIPS never
+    /// divide by a false exact zero.
     pub propensity: f64,
     /// The observed primary-outcome reward (1.0 success, 0.0 failure).
     pub reward: f64,
+    /// Monte-Carlo wins behind the logged propensity (the estimate's
+    /// effective sample size). `None` for rows written before migration 293.
+    #[serde(default)]
+    pub propensity_wins: Option<i64>,
+    /// Monte-Carlo draws behind the logged propensity.
+    #[serde(default)]
+    pub propensity_draws: Option<i64>,
+    /// TRUE when the Monte-Carlo estimate had 0 wins, i.e. the raw estimate
+    /// was a false exact zero and the logged value is the epsilon floor.
+    #[serde(default)]
+    pub propensity_undersampled: bool,
+}
+
+/// Default inverse-weight clip used for the clipped-IPS sensitivity check.
+pub const IPS_CLIP_WEIGHT: f64 = 10.0;
+/// Relative change between the two clipping levels above which a conclusion
+/// is reported as clipping-sensitive.
+pub const IPS_CLIP_SENSITIVITY_TOLERANCE: f64 = 0.10;
+
+/// Uncertainty diagnostics for one arm's IPS/SNIPS estimate.
+///
+/// The weights are `w_i = 1{a_i = x} / p_i` over the valid logged decisions.
+/// `effective_sample_size = (Σw)² / Σw²` is the usual importance-weight ESS:
+/// it collapses toward 1 when a few huge weights dominate, which is exactly
+/// when IPS is unreliable even though `n` looks large.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OpeDiagnostics {
+    /// Valid logged decisions (the IPS denominator `n`).
+    pub valid_decisions: usize,
+    /// Decisions that selected `target_arm`.
+    pub arm_decisions: usize,
+    /// Largest `1/p` among decisions that selected `target_arm`.
+    pub max_inverse_weight: f64,
+    /// 95th percentile of the target-arm inverse weights (nearest rank).
+    pub p95_inverse_weight: Option<f64>,
+    /// `(Σw)² / Σw²` over the target-arm weights.
+    pub effective_sample_size: f64,
+    /// Weight clip `c` used by [`OpeDiagnostics::ips_clipped`].
+    pub clip_weight: f64,
+    /// IPS with weights clipped at `clip_weight`.
+    pub ips_clipped: Option<f64>,
+    /// IPS with weights clipped at half the clip (a second, stricter view).
+    pub ips_clipped_half: Option<f64>,
+    /// TRUE when the two clipping levels disagree by more than
+    /// [`IPS_CLIP_SENSITIVITY_TOLERANCE`] relative (or change sign): the
+    /// conclusion does not survive the clipping choice.
+    pub clipping_sensitive: bool,
+    /// Decisions whose logged propensity came from a 0-win Monte-Carlo
+    /// estimate (bounded to the epsilon floor).
+    pub undersampled_decisions: usize,
+    /// Smallest recorded Monte-Carlo win count, `None` when no row carries one.
+    pub min_propensity_wins: Option<i64>,
 }
 
 /// Inverse propensity scoring: `(1/n) Σ 1{a=x} r / p`.
@@ -637,6 +821,112 @@ fn valid_propensity(propensity: f64) -> bool {
     propensity.is_finite() && propensity > 0.0 && propensity <= 1.0
 }
 
+/// Clipped IPS: `(1/n) Σ 1{a=x} r · min(1/p, c)`.
+///
+/// `c` bounds how much one under-sampled decision can move the estimate.
+/// The same denominator contract as [`ips`] applies, so the clipped and
+/// unclipped values are directly comparable. A non-finite or non-positive
+/// clip yields `None` rather than a silent fallback.
+pub fn ips_clipped(decisions: &[LoggedDecision], target_arm: &str, clip: f64) -> Option<f64> {
+    if !clip.is_finite() || clip <= 0.0 {
+        return None;
+    }
+    let mut total = 0.0;
+    let mut count = 0usize;
+    for decision in decisions {
+        if !valid_propensity(decision.propensity) {
+            continue;
+        }
+        count += 1;
+        if decision.arm == target_arm {
+            total += decision.reward * (1.0 / decision.propensity).min(clip);
+        }
+    }
+    if count == 0 {
+        return None;
+    }
+    Some(total / count as f64)
+}
+
+/// Weight-distribution and clipping diagnostics for one arm.
+///
+/// A conclusion that only survives one clipping level is visibly fragile:
+/// `clipping_sensitive` compares IPS at [`IPS_CLIP_WEIGHT`] with IPS at half
+/// that clip and flags a relative change above
+/// [`IPS_CLIP_SENSITIVITY_TOLERANCE`] (or a sign change).
+pub fn ope_diagnostics(decisions: &[LoggedDecision], target_arm: &str) -> OpeDiagnostics {
+    let mut valid_decisions = 0usize;
+    let mut arm_decisions = 0usize;
+    let mut weights: Vec<f64> = Vec::new();
+    let mut undersampled_decisions = 0usize;
+    let mut min_propensity_wins: Option<i64> = None;
+
+    for decision in decisions {
+        if !valid_propensity(decision.propensity) {
+            continue;
+        }
+        valid_decisions += 1;
+        if decision.propensity_undersampled {
+            undersampled_decisions += 1;
+        }
+        if let Some(wins) = decision.propensity_wins {
+            min_propensity_wins =
+                Some(min_propensity_wins.map_or(wins, |current| current.min(wins)));
+        }
+        if decision.arm == target_arm {
+            arm_decisions += 1;
+            weights.push(1.0 / decision.propensity);
+        }
+    }
+
+    let sum_weights: f64 = weights.iter().sum();
+    let sum_squared_weights: f64 = weights.iter().map(|weight| weight * weight).sum();
+    let effective_sample_size = if sum_squared_weights > 0.0
+        && sum_weights.is_finite()
+        && sum_squared_weights.is_finite()
+    {
+        sum_weights * sum_weights / sum_squared_weights
+    } else {
+        0.0
+    };
+    let max_inverse_weight = weights.iter().copied().fold(0.0_f64, f64::max);
+    let p95_inverse_weight = if weights.is_empty() {
+        None
+    } else {
+        let mut sorted = weights.clone();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let rank = ((0.95 * sorted.len() as f64).ceil() as usize)
+            .max(1)
+            .min(sorted.len());
+        Some(sorted[rank - 1])
+    };
+
+    let ips_clipped_value = ips_clipped(decisions, target_arm, IPS_CLIP_WEIGHT);
+    let ips_clipped_half_value = ips_clipped(decisions, target_arm, IPS_CLIP_WEIGHT / 2.0);
+    let clipping_sensitive = match (ips_clipped_value, ips_clipped_half_value) {
+        (Some(clipped), Some(half)) => {
+            let scale = clipped.abs().max(half.abs()).max(f64::MIN_POSITIVE);
+            clipped.signum() != half.signum()
+                || (clipped - half).abs() > IPS_CLIP_SENSITIVITY_TOLERANCE * scale
+        }
+        _ => false,
+    };
+
+    OpeDiagnostics {
+        valid_decisions,
+        arm_decisions,
+        max_inverse_weight,
+        p95_inverse_weight,
+        effective_sample_size,
+        clip_weight: IPS_CLIP_WEIGHT,
+        ips_clipped: ips_clipped_value,
+        ips_clipped_half: ips_clipped_half_value,
+        clipping_sensitive,
+        undersampled_decisions,
+        min_propensity_wins,
+    }
+}
+
 /// An OPE estimate for one arm.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OpeEstimate {
@@ -644,6 +934,9 @@ pub struct OpeEstimate {
     pub decisions: usize,
     pub ips: Option<f64>,
     pub snips: Option<f64>,
+    /// Weight distribution, effective sample size, clipping sensitivity and
+    /// propensity Monte-Carlo quality for this estimate.
+    pub diagnostics: OpeDiagnostics,
 }
 
 /// Load the logged decisions for one experiment. One decision per contact
@@ -656,6 +949,7 @@ pub async fn load_logged_decisions(
 ) -> Result<Vec<LoggedDecision>, SalesError> {
     let rows = sqlx::query(
         "SELECT DISTINCT ON (a.contact_id) a.variant, a.propensity, \
+                a.propensity_wins, a.propensity_draws, a.propensity_undersampled, \
                 CASE WHEN t.matured_at IS NOT NULL AND t.success THEN 1.0 ELSE 0.0 END AS reward \
          FROM sales_experiment_assignments a \
          JOIN sales_experiment_contact_trials t \
@@ -682,6 +976,15 @@ pub async fn load_logged_decisions(
                 reward: row
                     .try_get("reward")
                     .map_err(|error| SalesError::Database(error.to_string()))?,
+                propensity_wins: row
+                    .try_get("propensity_wins")
+                    .map_err(|error| SalesError::Database(error.to_string()))?,
+                propensity_draws: row
+                    .try_get("propensity_draws")
+                    .map_err(|error| SalesError::Database(error.to_string()))?,
+                propensity_undersampled: row
+                    .try_get("propensity_undersampled")
+                    .map_err(|error| SalesError::Database(error.to_string()))?,
             })
         })
         .collect()
@@ -701,6 +1004,7 @@ pub fn off_policy_estimates(
                 .count(),
             ips: ips(decisions, &arm.variant),
             snips: snips(decisions, &arm.variant),
+            diagnostics: ope_diagnostics(decisions, &arm.variant),
         })
         .collect()
 }
@@ -822,19 +1126,39 @@ pub fn power_report(baseline_rate: f64, n_per_arm: i64, alpha: f64, power: f64) 
 }
 
 // ---------------------------------------------------------------------------
-// Sequential monitoring (S5): mSPRT
+// Sequential diagnostic (S5): an APPROXIMATE normal diagnostic, not a test
+// with an anytime-valid guarantee.
 // ---------------------------------------------------------------------------
 
-/// Default mixing prior standard deviation on the risk difference (5
-/// percentage points). A larger τ is more sensitive to large effects and
-/// less to small ones; this is the documented, fixed choice.
-pub const SEQUENTIAL_TAU: f64 = 0.05;
-/// Default always-valid false-positive level.
-pub const SEQUENTIAL_ALPHA: f64 = 0.05;
+/// Fixed method label stored on `sales_experiments.sequential_method` and
+/// carried by every verdict. Deliberately descriptive: it names the
+/// approximation instead of borrowing the authority of a sequential test.
+pub const SEQUENTIAL_DIAGNOSTIC_METHOD: &str = "approximate_normal_sequential_diagnostic";
 
-/// The always-valid sequential verdict at the current information time.
+/// Doc-comment / API disclaimer that ships with the verdict. It says what
+/// the number is and, more importantly, what it is not.
+pub const SEQUENTIAL_DIAGNOSTIC_INTERPRETATION: &str =
+    "Approximate normal-approximation sequential diagnostic: NOT anytime-valid, NOT an mSPRT \
+     and NOT a promotion warrant. Repeated peeking at this statistic does not control the \
+     false-positive rate; promotion requires the registered sample and credible-interval gate.";
+
+/// Mixing prior standard deviation on the risk difference (5 percentage
+/// points) for the approximation. A larger τ is more sensitive to large
+/// effects and less to small ones; this is the documented, fixed choice.
+pub const SEQUENTIAL_DIAGNOSTIC_TAU: f64 = 0.05;
+
+/// Nominal false-positive level used to place the diagnostic boundary. It is
+/// the nominal level of the approximation, NOT a guaranteed Type-I rate.
+pub const SEQUENTIAL_DIAGNOSTIC_ALPHA: f64 = 0.05;
+
+/// The boundary `1 / alpha` on the diagnostic statistic. Crossing it is a
+/// signal to look more closely, never a decision to promote or stop.
+pub const SEQUENTIAL_DIAGNOSTIC_BOUNDARY: f64 = 20.0;
+
+/// The approximate sequential diagnostic at the current information time.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct SequentialVerdict {
+pub struct SequentialDiagnosticVerdict {
+    /// Always [`SEQUENTIAL_DIAGNOSTIC_METHOD`]; never a test name.
     pub method: String,
     pub looks: u64,
     pub control_n: i64,
@@ -842,22 +1166,43 @@ pub struct SequentialVerdict {
     pub treatment_n: i64,
     pub treatment_successes: i64,
     pub statistic: f64,
-    pub threshold: f64,
-    pub reject: bool,
+    /// The boundary `1 / alpha`; a descriptive threshold, not a critical
+    /// value with a Type-I guarantee.
+    pub diagnostic_boundary: f64,
+    /// `statistic >= diagnostic_boundary`. DELIBERATELY not called
+    /// "reject": crossing the line does not reject a null hypothesis with a
+    /// controlled error rate.
+    pub crosses_boundary: bool,
+    /// [`SEQUENTIAL_DIAGNOSTIC_INTERPRETATION`], shipped with the JSON.
+    pub interpretation: String,
 }
 
-/// The mSPRT statistic for a difference of two Bernoulli means, mixing the
-/// risk difference over `N(0, tau²)`:
+/// The APPROXIMATE normal sequential diagnostic for a difference of two
+/// Bernoulli means, mixing the risk difference over `N(0, τ²)`:
 ///
 /// ```text
-/// v = p_c(1-p_c)/n_c + p_t(1-p_t)/n_t
-/// Λ = sqrt(v / (v + tau²)) * exp(tau² * Δ² / (2 v (v + tau²)))
+/// v = p_c(1-p_c)/n_c + p_t(1-p_t)/n_t      (plug-in variance)
+/// Λ = sqrt(v / (v + τ²)) * exp(τ² Δ² / (2 v (v + τ²)))
 /// ```
 ///
-/// Reject at `Λ >= 1/alpha`. Under the null the mixture likelihood ratio is
-/// a non-negative supermartingale with expectation <= 1, so the rejection
-/// probability at ANY stopping time is <= alpha (always-valid).
-pub fn msprt_statistic(
+/// `Λ >= 1/α` is reported by [`SequentialDiagnosticMonitor`] as
+/// `crosses_boundary`.
+///
+/// # What this is NOT
+///
+/// This function does **not** implement an mSPRT and provides **no
+/// anytime-valid guarantee**. The variance is estimated from the same data
+/// (plug-in), the Bernoulli/normal approximation is not exact, and the
+/// resulting statistic has not been shown to be a test supermartingale with
+/// expectation ≤ 1 under the null. Continuous peeking therefore has no
+/// proven false-positive control. The compatibility-calibration test
+/// `approximate_sequential_diagnostic_is_calibrated_on_a_peeking_grid`
+/// checks ONE simulated grid; it is evidence about that grid, not a proof.
+///
+/// It is also NOT a promotion warrant: promotion goes through the registered
+/// sample/credible-interval gate (`crate::experiments::may_promote_arm`),
+/// which never reads this statistic.
+pub fn sequential_diagnostic_statistic(
     control_successes: i64,
     control_n: i64,
     treatment_successes: i64,
@@ -888,33 +1233,34 @@ pub fn msprt_statistic(
         * ((tau2 * delta * delta) / (2.0 * variance * (variance + tau2))).exp()
 }
 
-/// A stateful mSPRT monitor: every call is one "look" at the cumulative
-/// data, and the always-valid threshold means the caller may peek after
-/// every contact.
+/// A stateful APPROXIMATE sequential diagnostic: every call is one "look" at
+/// the cumulative data. The boundary lets a human decide when to inspect the
+/// evidence; it carries no anytime-valid false-positive guarantee and must
+/// never be wired to promotion, stopping or a winner announcement.
 #[derive(Debug, Clone)]
-pub struct SequentialMonitor {
+pub struct SequentialDiagnosticMonitor {
     alpha: f64,
     tau: f64,
     looks: u64,
 }
 
-impl Default for SequentialMonitor {
+impl Default for SequentialDiagnosticMonitor {
     fn default() -> Self {
-        Self::new(SEQUENTIAL_ALPHA, SEQUENTIAL_TAU)
+        Self::new(SEQUENTIAL_DIAGNOSTIC_ALPHA, SEQUENTIAL_DIAGNOSTIC_TAU)
     }
 }
 
-impl SequentialMonitor {
+impl SequentialDiagnosticMonitor {
     pub fn new(alpha: f64, tau: f64) -> Self {
         let alpha = if alpha.is_finite() && alpha > 0.0 && alpha < 1.0 {
             alpha
         } else {
-            SEQUENTIAL_ALPHA
+            SEQUENTIAL_DIAGNOSTIC_ALPHA
         };
         let tau = if tau.is_finite() && tau > 0.0 {
             tau
         } else {
-            SEQUENTIAL_TAU
+            SEQUENTIAL_DIAGNOSTIC_TAU
         };
         Self {
             alpha,
@@ -927,32 +1273,38 @@ impl SequentialMonitor {
         self.looks
     }
 
+    /// The nominal boundary `1 / alpha` (not an anytime-valid critical value).
+    pub fn diagnostic_boundary(&self) -> f64 {
+        1.0 / self.alpha
+    }
+
     pub fn observe(
         &mut self,
         control_successes: i64,
         control_n: i64,
         treatment_successes: i64,
         treatment_n: i64,
-    ) -> SequentialVerdict {
+    ) -> SequentialDiagnosticVerdict {
         self.looks += 1;
-        let statistic = msprt_statistic(
+        let statistic = sequential_diagnostic_statistic(
             control_successes,
             control_n,
             treatment_successes,
             treatment_n,
             self.tau,
         );
-        let threshold = 1.0 / self.alpha;
-        SequentialVerdict {
-            method: "msprt".to_string(),
+        let diagnostic_boundary = self.diagnostic_boundary();
+        SequentialDiagnosticVerdict {
+            method: SEQUENTIAL_DIAGNOSTIC_METHOD.to_string(),
             looks: self.looks,
             control_n,
             control_successes,
             treatment_n,
             treatment_successes,
             statistic,
-            threshold,
-            reject: statistic >= threshold,
+            diagnostic_boundary,
+            crosses_boundary: statistic >= diagnostic_boundary,
+            interpretation: SEQUENTIAL_DIAGNOSTIC_INTERPRETATION.to_string(),
         }
     }
 }
@@ -966,9 +1318,18 @@ impl SequentialMonitor {
 pub struct ArmScoreboard {
     pub variant: String,
     pub is_control: bool,
+    /// Matured trials pooled over BOTH cohort sources. `primary_rate` uses
+    /// this denominator; the two split counters below expose how much of it
+    /// is reconstructed.
     pub matured: i64,
     pub successes: i64,
     pub primary_rate: Option<f64>,
+    /// Matured trials whose first touch the live path observed.
+    pub native_matured: i64,
+    pub native_successes: i64,
+    /// Matured trials rebuilt by migration 290 (INFERRED first touch).
+    pub reconstructed_legacy_matured: i64,
+    pub reconstructed_legacy_successes: i64,
     pub alpha: f64,
     pub beta: f64,
     pub posterior_mean: f64,
@@ -994,9 +1355,15 @@ pub struct Scoreboard {
     pub arms: Vec<ArmScoreboard>,
     pub total_matured: i64,
     pub power: PowerReport,
-    pub sequential: SequentialVerdict,
+    /// APPROXIMATE sequential diagnostic (NOT anytime-valid, NOT a promotion
+    /// warrant); see [`SequentialDiagnosticVerdict`].
+    pub sequential_diagnostic: SequentialDiagnosticVerdict,
     pub holdout: Vec<SegmentLift>,
     pub ope: Vec<OpeEstimate>,
+    /// Native-versus-reconstructed split of the trial ledger. Dashboards and
+    /// API consumers MUST surface or filter this: a reconstructed first touch
+    /// is inferred, not observed.
+    pub cohort: CohortProvenance,
     pub guardrails: Vec<ArmGuardrailReport>,
 }
 
@@ -1044,13 +1411,13 @@ pub async fn compute_scoreboard(
     let arms = engine.load_arms(tenant_id, experiment.id).await?;
 
     let trial_rows = sqlx::query(
-        "SELECT variant, \
+        "SELECT variant, cohort_source, \
                 COUNT(*) FILTER (WHERE matured_at IS NOT NULL)::bigint AS matured, \
                 COUNT(*) FILTER (WHERE matured_at IS NOT NULL AND success)::bigint AS successes \
          FROM sales_experiment_contact_trials \
          WHERE tenant_id = $1 AND experiment_id = $2 \
            AND primary_metric = $3 AND primary_metric_version = $4 \
-         GROUP BY variant",
+         GROUP BY variant, cohort_source",
     )
     .bind(tenant_id)
     .bind(experiment.id)
@@ -1059,10 +1426,27 @@ pub async fn compute_scoreboard(
     .fetch_all(db)
     .await
     .map_err(|error| SalesError::Database(error.to_string()))?;
-    let mut trial_counts: BTreeMap<String, (i64, i64)> = BTreeMap::new();
+
+    /// Per-arm trial counts, split by provenance. Any provenance other than
+    /// the literal `native` is counted as reconstructed (fail-safe: an
+    /// unknown source never reads as an observed first touch).
+    #[derive(Debug, Clone, Copy, Default)]
+    struct TrialCounts {
+        matured: i64,
+        successes: i64,
+        native_matured: i64,
+        native_successes: i64,
+        reconstructed_legacy_matured: i64,
+        reconstructed_legacy_successes: i64,
+    }
+
+    let mut trial_counts: BTreeMap<String, TrialCounts> = BTreeMap::new();
     for row in trial_rows {
         let variant: String = row
             .try_get("variant")
+            .map_err(|error| SalesError::Database(error.to_string()))?;
+        let cohort_source: String = row
+            .try_get("cohort_source")
             .map_err(|error| SalesError::Database(error.to_string()))?;
         let matured: i64 = row
             .try_get("matured")
@@ -1070,7 +1454,16 @@ pub async fn compute_scoreboard(
         let successes: i64 = row
             .try_get("successes")
             .map_err(|error| SalesError::Database(error.to_string()))?;
-        trial_counts.insert(variant, (matured, successes));
+        let counts = trial_counts.entry(variant).or_default();
+        counts.matured += matured;
+        counts.successes += successes;
+        if cohort_source == COHORT_SOURCE_NATIVE {
+            counts.native_matured += matured;
+            counts.native_successes += successes;
+        } else {
+            counts.reconstructed_legacy_matured += matured;
+            counts.reconstructed_legacy_successes += successes;
+        }
     }
 
     let revenue_rows = sqlx::query(
@@ -1111,7 +1504,7 @@ pub async fn compute_scoreboard(
 
     let mut arms_out = Vec::with_capacity(arms.len());
     for arm in &arms {
-        let (matured, successes) = trial_counts.get(&arm.variant).copied().unwrap_or((0, 0));
+        let counts = trial_counts.get(&arm.variant).copied().unwrap_or_default();
         let (north_star_matured, revenue) = revenue_by_variant
             .get(&arm.variant)
             .copied()
@@ -1119,9 +1512,13 @@ pub async fn compute_scoreboard(
         arms_out.push(ArmScoreboard {
             variant: arm.variant.clone(),
             is_control: arm.is_control,
-            matured,
-            successes,
-            primary_rate: ratio(successes, matured),
+            matured: counts.matured,
+            successes: counts.successes,
+            primary_rate: ratio(counts.successes, counts.matured),
+            native_matured: counts.native_matured,
+            native_successes: counts.native_successes,
+            reconstructed_legacy_matured: counts.reconstructed_legacy_matured,
+            reconstructed_legacy_successes: counts.reconstructed_legacy_successes,
             alpha: arm.alpha,
             beta: arm.beta,
             posterior_mean: arm.mean(),
@@ -1154,9 +1551,11 @@ pub async fn compute_scoreboard(
     };
     let power = power_report(baseline_rate, n_per_arm, 0.05, 0.8);
 
-    // Sequential: control vs the best challenger by observed primary rate.
-    let mut monitor = SequentialMonitor::default();
-    let sequential = match control {
+    // APPROXIMATE sequential diagnostic: control vs the best challenger by
+    // observed primary rate. The verdict is an inspection aid, never a
+    // promotion gate.
+    let mut monitor = SequentialDiagnosticMonitor::default();
+    let sequential_diagnostic = match control {
         Some(control) => {
             let challenger = arms_out
                 .iter()
@@ -1181,6 +1580,7 @@ pub async fn compute_scoreboard(
     };
 
     let holdout = holdout_lift(db, tenant_id, experiment.id, now).await?;
+    let cohort = cohort_provenance(db, tenant_id, experiment.id).await?;
     let decisions = load_logged_decisions(db, tenant_id, experiment.id).await?;
     let ope = off_policy_estimates(&decisions, &arms);
     let guardrails = guardrails_for_experiment(
@@ -1207,9 +1607,10 @@ pub async fn compute_scoreboard(
         arms: arms_out,
         total_matured,
         power,
-        sequential,
+        sequential_diagnostic,
         holdout,
         ope,
+        cohort,
         guardrails,
     })
 }
@@ -1299,6 +1700,17 @@ mod tests {
         }
     }
 
+    fn logged(arm: &str, propensity: f64, reward: f64) -> LoggedDecision {
+        LoggedDecision {
+            arm: arm.to_string(),
+            propensity,
+            reward,
+            propensity_wins: None,
+            propensity_draws: None,
+            propensity_undersampled: false,
+        }
+    }
+
     #[test]
     fn ips_and_snips_recover_a_planted_effect_from_synthetic_logs() {
         // Synthetic log: 4,000 decisions from a 50/50 logger, true success
@@ -1319,11 +1731,7 @@ mod tests {
             } else {
                 0.0
             };
-            decisions.push(LoggedDecision {
-                arm: arm.to_string(),
-                propensity: 0.5,
-                reward,
-            });
+            decisions.push(logged(arm, 0.5, reward));
         }
         let ips_a = ips(&decisions, "a").expect("a logged");
         let ips_b = ips(&decisions, "b").expect("b logged");
@@ -1336,37 +1744,94 @@ mod tests {
         // The planted effect survives.
         assert!(snips_b - snips_a > 0.15);
 
+        // The diagnostics are populated for each arm.
+        let diagnostics = ope_diagnostics(&decisions, "a");
+        assert_eq!(diagnostics.valid_decisions, 4_000);
+        assert!(diagnostics.arm_decisions > 0);
+        assert_eq!(diagnostics.max_inverse_weight, 2.0);
+        assert_eq!(diagnostics.p95_inverse_weight, Some(2.0));
+        assert_eq!(
+            diagnostics.effective_sample_size,
+            diagnostics.arm_decisions as f64
+        );
+        assert!(!diagnostics.clipping_sensitive);
+
         // A deterministic log: propensity 1.0, reward 2.0 → both estimators
         // return 2.0 exactly.
-        let logged = vec![LoggedDecision {
-            arm: "b".into(),
-            propensity: 1.0,
-            reward: 2.0,
-        }];
-        assert_eq!(ips(&logged, "b"), Some(2.0));
-        assert_eq!(snips(&logged, "b"), Some(2.0));
+        let deterministic = vec![logged("b", 1.0, 2.0)];
+        assert_eq!(ips(&deterministic, "b"), Some(2.0));
+        assert_eq!(snips(&deterministic, "b"), Some(2.0));
 
         // Honesty: an invalid propensity is dropped, and an arm with no valid
         // decision has NO estimate (not zero).
-        let invalid = vec![
-            LoggedDecision {
-                arm: "a".into(),
-                propensity: 0.0,
-                reward: 1.0,
-            },
-            LoggedDecision {
-                arm: "a".into(),
-                propensity: f64::NAN,
-                reward: 1.0,
-            },
-        ];
+        let invalid = vec![logged("a", 0.0, 1.0), logged("a", f64::NAN, 1.0)];
         assert_eq!(ips(&invalid, "a"), None);
         assert_eq!(snips(&invalid, "a"), None);
         // IPS averages over every valid decision, so a target arm that was
         // never logged has an honest 0.0; SNIPS has no weight and returns
         // None (no self-normalised estimate exists).
-        assert_eq!(ips(&logged, "missing"), Some(0.0));
-        assert_eq!(snips(&logged, "missing"), None);
+        assert_eq!(ips(&deterministic, "missing"), Some(0.0));
+        assert_eq!(snips(&deterministic, "missing"), None);
+    }
+
+    #[test]
+    fn ope_diagnostics_expose_weight_distribution_ess_and_clipping_sensitivity() {
+        // A well-behaved log: 100 decisions, 50 for the target arm at p=0.5.
+        // Every inverse weight is 2, so ESS = 50 and clipping never bites.
+        let stable: Vec<LoggedDecision> = (0..100)
+            .map(|index| {
+                if index % 2 == 0 {
+                    logged("a", 0.5, if index % 10 == 0 { 1.0 } else { 0.0 })
+                } else {
+                    logged("b", 0.5, 0.0)
+                }
+            })
+            .collect();
+        let diagnostics = ope_diagnostics(&stable, "a");
+        assert_eq!(diagnostics.valid_decisions, 100);
+        assert_eq!(diagnostics.arm_decisions, 50);
+        assert_eq!(diagnostics.max_inverse_weight, 2.0);
+        assert_eq!(diagnostics.p95_inverse_weight, Some(2.0));
+        assert_eq!(diagnostics.effective_sample_size, 50.0);
+        assert_eq!(diagnostics.ips_clipped, ips(&stable, "a"));
+        assert_eq!(diagnostics.ips_clipped_half, ips(&stable, "a"));
+        assert!(!diagnostics.clipping_sensitive);
+        assert_eq!(diagnostics.min_propensity_wins, None);
+
+        // One rare-arm decision at p=0.001 dominates unclipped IPS but is
+        // bounded by the clip, and the conclusion changes with the clip: the
+        // diagnostics must say so.
+        let mut skewed: Vec<LoggedDecision> = (0..99).map(|_| logged("b", 0.5, 0.0)).collect();
+        skewed.push(logged("a", 0.001, 1.0));
+        let unclipped = ips(&skewed, "a").expect("estimate");
+        assert!((unclipped - 10.0).abs() < 1e-9, "{unclipped}");
+        let diagnostics = ope_diagnostics(&skewed, "a");
+        assert_eq!(diagnostics.max_inverse_weight, 1_000.0);
+        assert_eq!(diagnostics.p95_inverse_weight, Some(1_000.0));
+        assert_eq!(diagnostics.effective_sample_size, 1.0);
+        assert!((diagnostics.ips_clipped.unwrap() - 0.1).abs() < 1e-9);
+        assert!((diagnostics.ips_clipped_half.unwrap() - 0.05).abs() < 1e-9);
+        assert!(diagnostics.clipping_sensitive);
+
+        // A 0-win Monte-Carlo propensity arrives at the epsilon floor and
+        // carries the under-sampled flag into the diagnostics.
+        let floored = vec![LoggedDecision {
+            arm: "a".into(),
+            propensity: crate::experiments::PROPENSITY_FLOOR_EPSILON,
+            reward: 1.0,
+            propensity_wins: Some(0),
+            propensity_draws: Some(2_000),
+            propensity_undersampled: true,
+        }];
+        let diagnostics = ope_diagnostics(&floored, "a");
+        assert_eq!(diagnostics.undersampled_decisions, 1);
+        assert_eq!(diagnostics.min_propensity_wins, Some(0));
+        assert!(diagnostics.max_inverse_weight.is_finite());
+        assert_eq!(diagnostics.max_inverse_weight, 10_000.0);
+        // The floored propensity is usable: IPS returns a finite estimate
+        // instead of dividing by zero.
+        let estimate = ips(&floored, "a").expect("a valid bounded estimate");
+        assert!(estimate.is_finite() && estimate > 0.0);
     }
 
     #[test]
@@ -1397,48 +1862,97 @@ mod tests {
     }
 
     #[test]
-    fn msprt_rejects_a_large_effect_and_is_quiet_under_the_null() {
-        // A large effect (10% vs 30% over 1,000 per arm) crosses 1/alpha.
-        let stat = msprt_statistic(100, 1_000, 300, 1_000, SEQUENTIAL_TAU);
-        assert!(stat >= 1.0 / SEQUENTIAL_ALPHA, "statistic {stat}");
-        let mut monitor = SequentialMonitor::default();
+    fn sequential_diagnostic_flags_a_large_effect_and_is_quiet_under_the_null() {
+        // A large effect (10% vs 30% over 1,000 per arm) crosses the nominal
+        // boundary. The verdict says "crosses", never "reject": there is no
+        // Type-I guarantee behind the line.
+        let stat =
+            sequential_diagnostic_statistic(100, 1_000, 300, 1_000, SEQUENTIAL_DIAGNOSTIC_TAU);
+        assert!(stat >= SEQUENTIAL_DIAGNOSTIC_BOUNDARY, "statistic {stat}");
+        let mut monitor = SequentialDiagnosticMonitor::default();
         let verdict = monitor.observe(100, 1_000, 300, 1_000);
-        assert!(verdict.reject, "{verdict:?}");
-        assert_eq!(verdict.threshold, 20.0);
+        assert!(verdict.crosses_boundary, "{verdict:?}");
+        assert_eq!(verdict.diagnostic_boundary, 20.0);
         assert_eq!(verdict.looks, 1);
 
-        // No difference: Λ is the mixture normalisation
-        // sqrt(v / (v + tau²)) < 1, i.e. a null result never rejects.
-        let null = msprt_statistic(100, 1_000, 100, 1_000, SEQUENTIAL_TAU);
-        let variance = 0.1 * 0.9 / 1_000.0 + 0.1 * 0.9 / 1_000.0;
-        let expected = (variance / (variance + SEQUENTIAL_TAU * SEQUENTIAL_TAU)).sqrt();
+        // No difference: the statistic is the mixture normalisation
+        // sqrt(v / (v + tau²)) < 1, far below the boundary.
+        let null =
+            sequential_diagnostic_statistic(100, 1_000, 100, 1_000, SEQUENTIAL_DIAGNOSTIC_TAU);
+        let variance: f64 = 0.1 * 0.9 / 1_000.0 + 0.1 * 0.9 / 1_000.0;
+        let expected =
+            (variance / (variance + SEQUENTIAL_DIAGNOSTIC_TAU * SEQUENTIAL_DIAGNOSTIC_TAU)).sqrt();
         assert!((null - expected).abs() < 1e-9, "{null} vs {expected}");
-        assert!(null < 1.0 / SEQUENTIAL_ALPHA);
+        assert!(null < SEQUENTIAL_DIAGNOSTIC_BOUNDARY);
         // Hostile inputs are quiet, never NaN/infinite.
-        assert_eq!(msprt_statistic(1, 0, 1, 0, SEQUENTIAL_TAU), 0.0);
-        assert_eq!(msprt_statistic(2, 1, 1, 1, SEQUENTIAL_TAU), 0.0);
-        assert_eq!(msprt_statistic(1, 10, 2, 10, f64::NAN), 0.0);
+        assert_eq!(
+            sequential_diagnostic_statistic(1, 0, 1, 0, SEQUENTIAL_DIAGNOSTIC_TAU),
+            0.0
+        );
+        assert_eq!(
+            sequential_diagnostic_statistic(2, 1, 1, 1, SEQUENTIAL_DIAGNOSTIC_TAU),
+            0.0
+        );
+        assert_eq!(sequential_diagnostic_statistic(1, 10, 2, 10, f64::NAN), 0.0);
     }
 
-    /// S5 done-when: early peeking does not inflate the false-positive rate.
-    ///
-    /// 1,000 null experiments (both arms Bernoulli(0.1)) are peeked after
-    /// every 10 contacts per arm. The mSPRT is always-valid, so the fraction
-    /// of runs that ever cross `1/alpha` must stay at/near the nominal 5%,
-    /// never the ~40-60% an uncorrected fixed-horizon z-test would produce
-    /// under continuous peeking.
+    /// The public label and the shipped disclaimer must never claim
+    /// anytime validity or promotion authority.
     #[test]
-    fn early_peeking_does_not_inflate_false_positives() {
+    fn sequential_diagnostic_names_its_limits_in_every_verdict() {
+        assert_eq!(
+            SEQUENTIAL_DIAGNOSTIC_METHOD,
+            "approximate_normal_sequential_diagnostic"
+        );
+        // The documented boundary is exactly 1/alpha; the monitor computes it
+        // the same way, so the constant can never drift from the level.
+        assert_eq!(
+            SEQUENTIAL_DIAGNOSTIC_BOUNDARY,
+            1.0 / SEQUENTIAL_DIAGNOSTIC_ALPHA
+        );
+        let verdict = SequentialDiagnosticMonitor::default().observe(100, 1_000, 300, 1_000);
+        assert_eq!(verdict.method, SEQUENTIAL_DIAGNOSTIC_METHOD);
+        let interpretation = verdict.interpretation.to_lowercase();
+        assert!(
+            interpretation.contains("not anytime-valid"),
+            "{interpretation}"
+        );
+        assert!(
+            interpretation.contains("not an msprt"),
+            "the disclaimer must explicitly disown the mSPRT name: {interpretation}"
+        );
+        assert!(
+            interpretation.contains("not a promotion warrant"),
+            "{interpretation}"
+        );
+    }
+
+    /// CALIBRATION CHECK of the approximation, NOT a validity proof.
+    ///
+    /// What it does: simulates 500 null experiments (both arms Bernoulli
+    /// 0.1), peeks after every 10 contacts per arm up to 200 per arm, and
+    /// reports the fraction of runs that ever cross the nominal boundary on
+    /// THIS one grid.
+    ///
+    /// What it does NOT do: it does not establish anytime validity or an
+    /// mSPRT property. The variance is plug-in, the normal approximation is
+    /// inexact, and no test-supermartingale argument backs the boundary. A
+    /// pass here shows the approximation is roughly calibrated for this
+    /// effect size, sample grid and peeking cadence, nothing more. Other
+    /// regimes (tiny n, rates near 0/1, continuous peeking) can behave
+    /// differently, so the diagnostic is never a promotion warrant.
+    #[test]
+    fn approximate_sequential_diagnostic_is_calibrated_on_a_peeking_grid() {
         let mut rng = StdRng::seed_from_u64(7);
         let runs = 500usize;
         let look_every = 10usize;
         let max_per_arm = 200usize;
-        let mut false_positives = 0usize;
+        let mut crossings = 0usize;
         for _ in 0..runs {
-            let mut monitor = SequentialMonitor::default();
+            let mut monitor = SequentialDiagnosticMonitor::default();
             let mut control_successes = 0i64;
             let mut treatment_successes = 0i64;
-            let mut rejected = false;
+            let mut crossed = false;
             let mut n = 0usize;
             while n < max_per_arm {
                 for _ in 0..look_every {
@@ -1452,30 +1966,32 @@ mod tests {
                 n += look_every;
                 let verdict =
                     monitor.observe(control_successes, n as i64, treatment_successes, n as i64);
-                if verdict.reject {
-                    rejected = true;
+                if verdict.crosses_boundary {
+                    crossed = true;
                     break;
                 }
             }
-            if rejected {
-                false_positives += 1;
+            if crossed {
+                crossings += 1;
             }
         }
-        let rate = false_positives as f64 / runs as f64;
+        let rate = crossings as f64 / runs as f64;
         assert!(
-            rate <= SEQUENTIAL_ALPHA + 0.02,
-            "always-valid peeking must not exceed the nominal alpha: {rate}"
+            rate <= SEQUENTIAL_DIAGNOSTIC_ALPHA + 0.02,
+            "on this peeking grid the approximation should not flag more than ~alpha of null \
+             runs; observed {rate}"
         );
     }
 
-    /// A true effect still reaches significance early under the same peeking.
+    /// A true effect still flags early under the same peeking: the
+    /// diagnostic is not vacuous (sensitivity, not validity).
     #[test]
-    fn msprt_retains_power_against_a_real_effect() {
+    fn sequential_diagnostic_is_sensitive_to_a_planted_effect() {
         let mut rng = StdRng::seed_from_u64(11);
         let runs = 200usize;
-        let mut rejected = 0usize;
+        let mut flagged = 0usize;
         for _ in 0..runs {
-            let mut monitor = SequentialMonitor::default();
+            let mut monitor = SequentialDiagnosticMonitor::default();
             let mut control_successes = 0i64;
             let mut treatment_successes = 0i64;
             let mut n = 0usize;
@@ -1492,17 +2008,266 @@ mod tests {
                 n += 10;
                 if monitor
                     .observe(control_successes, n as i64, treatment_successes, n as i64)
-                    .reject
+                    .crosses_boundary
                 {
                     hit = true;
                     break;
                 }
             }
             if hit {
-                rejected += 1;
+                flagged += 1;
             }
         }
-        let power = rejected as f64 / runs as f64;
-        assert!(power > 0.8, "mSPRT must retain power: {power}");
+        let sensitivity = flagged as f64 / runs as f64;
+        assert!(
+            sensitivity > 0.8,
+            "the diagnostic must remain sensitive to a real effect: {sensitivity}"
+        );
+    }
+
+    // -- Live DB: cohort provenance and holdout membership -----------------
+
+    async fn live_pool(test_name: &str) -> Option<PgPool> {
+        crate::test_db::canonical_test_pool(test_name).await
+    }
+
+    async fn experiment_with_two_arms(pool: &PgPool, label: &str) -> (String, String, Uuid) {
+        let tenant = crate::test_db::unique_test_tenant(label);
+        let key = format!("{label}-{}", Uuid::new_v4().simple());
+        let engine = ExperimentEngine::new(pool.clone());
+        let experiment_id = engine
+            .ensure_experiment(
+                &tenant,
+                &key,
+                "Scoreboard fixture",
+                &serde_json::json!({ "dimensions": ["icp_segment"] }),
+                &serde_json::json!({}),
+            )
+            .await
+            .expect("ensure experiment");
+        engine
+            .ensure_arms(
+                &tenant,
+                experiment_id,
+                &[
+                    crate::experiments::ArmSpec::control("control"),
+                    crate::experiments::ArmSpec::new("challenger"),
+                ],
+            )
+            .await
+            .expect("ensure arms");
+        engine
+            .set_status(
+                &tenant,
+                experiment_id,
+                crate::experiments::ExperimentStatus::Running,
+            )
+            .await
+            .expect("running");
+        (tenant, key, experiment_id)
+    }
+
+    /// Item 29: a new trial defaults to `native`, a migration-290-shaped row
+    /// is labeled `reconstructed_legacy`, the scoreboard query SEPARATES the
+    /// two (per arm and in the top-level provenance), and an unknown source
+    /// is rejected by the CHECK.
+    #[tokio::test]
+    async fn cohort_provenance_separates_reconstructed_from_native_trials() {
+        let Some(pool) = live_pool("scoreboard_cohort").await else {
+            return;
+        };
+        let (tenant, key, experiment_id) = experiment_with_two_arms(&pool, "sb-cohort").await;
+        let now = Utc::now();
+        let first_touch = now - ChronoDuration::days(20);
+        let matured = now - ChronoDuration::days(6);
+
+        // A new trial written WITHOUT cohort_source: the column default must
+        // make it native.
+        let default_source: String = sqlx::query_scalar(
+            "INSERT INTO sales_experiment_contact_trials \
+                 (tenant_id, experiment_id, variant, contact_id, segment, primary_metric, \
+                  primary_metric_version, first_touch_at, matures_at, success, matured_at) \
+             VALUES ($1, $2, 'control', $3, 'saas', 'positive_reply_or_meeting_14d', 1, $4, $5, \
+                     FALSE, $5) \
+             RETURNING cohort_source",
+        )
+        .bind(&tenant)
+        .bind(experiment_id)
+        .bind(Uuid::new_v4())
+        .bind(first_touch)
+        .bind(matured)
+        .fetch_one(&pool)
+        .await
+        .expect("insert native trial");
+        assert_eq!(default_source, COHORT_SOURCE_NATIVE);
+
+        // A reconstructed row, exactly what migration 290 produced: the
+        // inferred first touch, success already frozen.
+        let reconstructed_source: String = sqlx::query_scalar(
+            "INSERT INTO sales_experiment_contact_trials \
+                 (tenant_id, experiment_id, variant, contact_id, segment, primary_metric, \
+                  primary_metric_version, first_touch_at, matures_at, success, matured_at, \
+                  cohort_source) \
+             VALUES ($1, $2, 'challenger', $3, 'saas', 'positive_reply_or_meeting_14d', 1, $4, \
+                     $5, TRUE, $5, 'reconstructed_legacy') \
+             RETURNING cohort_source",
+        )
+        .bind(&tenant)
+        .bind(experiment_id)
+        .bind(Uuid::new_v4())
+        .bind(first_touch)
+        .bind(matured)
+        .fetch_one(&pool)
+        .await
+        .expect("insert reconstructed trial");
+        assert_eq!(reconstructed_source, COHORT_SOURCE_RECONSTRUCTED_LEGACY);
+
+        // The CHECK refuses an invented provenance instead of letting it
+        // pass as native.
+        let invalid = sqlx::query(
+            "INSERT INTO sales_experiment_contact_trials \
+                 (tenant_id, experiment_id, variant, contact_id, segment, primary_metric, \
+                  primary_metric_version, first_touch_at, matures_at, cohort_source) \
+             VALUES ($1, $2, 'control', $3, 'saas', 'positive_reply_or_meeting_14d', 1, $4, $5, \
+                     'invented')",
+        )
+        .bind(&tenant)
+        .bind(experiment_id)
+        .bind(Uuid::new_v4())
+        .bind(first_touch)
+        .bind(matured)
+        .execute(&pool)
+        .await;
+        assert!(invalid.is_err(), "the cohort_source CHECK must reject it");
+
+        let provenance = cohort_provenance(&pool, &tenant, experiment_id)
+            .await
+            .expect("provenance");
+        assert_eq!(provenance.native_trials, 1);
+        assert_eq!(provenance.reconstructed_legacy_trials, 1);
+        assert!(provenance.mixed);
+        assert_eq!(provenance.label, "mixed");
+        assert!(provenance.caveat.is_some(), "the caveat must be shipped");
+
+        // The full scoreboard carries the split, both top-level and per arm.
+        let scoreboard = compute_scoreboard(&pool, &tenant, &key, now)
+            .await
+            .expect("scoreboard");
+        assert_eq!(scoreboard.cohort.native_trials, 1);
+        assert_eq!(scoreboard.cohort.reconstructed_legacy_trials, 1);
+        assert!(scoreboard.cohort.mixed);
+        let control = scoreboard
+            .arms
+            .iter()
+            .find(|arm| arm.variant == "control")
+            .expect("control arm");
+        assert_eq!(control.matured, 1);
+        assert_eq!(control.native_matured, 1);
+        assert_eq!(control.reconstructed_legacy_matured, 0);
+        let challenger = scoreboard
+            .arms
+            .iter()
+            .find(|arm| arm.variant == "challenger")
+            .expect("challenger arm");
+        assert_eq!(challenger.matured, 1);
+        assert_eq!(challenger.native_matured, 0);
+        assert_eq!(challenger.reconstructed_legacy_matured, 1);
+        assert_eq!(challenger.reconstructed_legacy_successes, 1);
+
+        sqlx::query("DELETE FROM sales_experiments WHERE tenant_id = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .expect("cleanup experiments");
+    }
+
+    /// Item 14: the persisted membership ledger stores BOTH branches, and the
+    /// holdout lift counts only `assignment = 'holdout'` rows (a persisted
+    /// treatment row is not held out and must not inflate the holdout arm).
+    #[tokio::test]
+    async fn holdout_lift_counts_only_persisted_holdout_members() {
+        let Some(pool) = live_pool("scoreboard_holdout_lift").await else {
+            return;
+        };
+        let (tenant, _key, experiment_id) = experiment_with_two_arms(&pool, "sb-holdout").await;
+        let now = Utc::now();
+        let assigned_at = now - ChronoDuration::days(20);
+        let occurred_at = now - ChronoDuration::days(10);
+        let holdout_account = Uuid::new_v4();
+        let treatment_account = Uuid::new_v4();
+        for (account, company) in [
+            (holdout_account, "Holdout Co"),
+            (treatment_account, "Treatment Co"),
+        ] {
+            sqlx::query(
+                "INSERT INTO sales_accounts (id, tenant_id, company, domain) \
+                 VALUES ($1, $2, $3, $4)",
+            )
+            .bind(account)
+            .bind(&tenant)
+            .bind(company)
+            .bind(format!("{}.example.com", Uuid::new_v4().simple()))
+            .execute(&pool)
+            .await
+            .expect("insert account");
+        }
+        for (account, assignment) in [
+            (holdout_account, "holdout"),
+            (treatment_account, "treatment"),
+        ] {
+            sqlx::query(
+                "INSERT INTO sales_experiment_holdout_accounts \
+                     (experiment_id, tenant_id, account_id, segment, registry_version, \
+                      assignment, assigned_at) \
+                 VALUES ($1, $2, $3, 'saas', 1, $4, $5)",
+            )
+            .bind(experiment_id)
+            .bind(&tenant)
+            .bind(account)
+            .bind(assignment)
+            .bind(assigned_at)
+            .execute(&pool)
+            .await
+            .expect("insert membership");
+        }
+        // Both accounts produce an organic success; only the holdout one is
+        // held out, so only it belongs in the holdout lift.
+        for account in [holdout_account, treatment_account] {
+            sqlx::query(
+                "INSERT INTO sales_outcomes (id, tenant_id, account_id, outcome, occurred_at) \
+                 VALUES (gen_random_uuid(), $1, $2, 'positive_reply', $3)",
+            )
+            .bind(&tenant)
+            .bind(account)
+            .bind(occurred_at)
+            .execute(&pool)
+            .await
+            .expect("insert outcome");
+        }
+
+        let lift = holdout_lift(&pool, &tenant, experiment_id, now)
+            .await
+            .expect("holdout lift");
+        let saas = lift
+            .iter()
+            .find(|row| row.segment == "saas")
+            .expect("saas segment");
+        assert_eq!(
+            saas.holdout_matured, 1,
+            "only the persisted holdout member is counted, got {saas:?}"
+        );
+        assert_eq!(saas.holdout_successes, 1);
+        assert_eq!(saas.holdout_rate, Some(1.0));
+
+        sqlx::query("DELETE FROM sales_experiments WHERE tenant_id = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .expect("cleanup experiments");
+        sqlx::query("DELETE FROM sales_accounts WHERE tenant_id = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .expect("cleanup accounts");
     }
 }

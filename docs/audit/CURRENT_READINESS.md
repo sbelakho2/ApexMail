@@ -9,7 +9,7 @@ fails the validate stage when this file drifts from the tree. Dated audit
 records live under `docs/audit/history/` and are never edited after the
 fact.
 
-Last generated: 2026-10-30T16:11:22Z
+Last generated: 2026-10-30T20:24:25Z
 
 ## Owner-gated by design
 
@@ -30,7 +30,7 @@ that no CI run can supply. Each names its gate:
 
 ## Release gates
 
-`ci/required-lanes.txt` holds 140 rows and every row resolves to a lane a stage actually runs (the `tools/check_waivers.py --check-lanes` parse).
+`ci/required-lanes.txt` holds 142 rows and every row resolves to a lane a stage actually runs (the `tools/check_waivers.py --check-lanes` parse).
 
 Stage lanes (one row each): fetch, validate, docs, ui, test, security.
 
@@ -40,7 +40,7 @@ Stage lanes (one row each): fetch, validate, docs, ui, test, security.
 | security | 9: cargo-audit-daily, cargo-vet, migrator-apply-clean-db, migrator-apply-idempotency, migrator-dry-run, semgrep-sast, sqlx-migrate-clean-db, sqlx-migrate-idempotency, trivy-fs |
 | test | 30: canary-lane-real-mail-qualification, coverage-floors, coverage-ratchet, fuzz-smoke, real-model-eval-lane, cargo-deny, cargo-machete, contrast-gate, dogfood-harness-self-test, dogfood-ledger, feature-entitlement-classification, i18n-gate, journey-lane-live-stack, layout-gate, pre-commit-parity, satellite-kiwicaptcha-wasm, satellite-smtp-auth-proxy, sdk-go, sdk-java, sdk-php, sdk-python, sdk-ruby, sdk-typescript, security-feature-flags, static-lint-hadolint, static-lint-py-compile, static-lint-shellcheck, tag-balance-gate, workspace-dependency-cycles, workspace-suite |
 | ui | 7: ui-accessibility-gate-e, ui-dead-links-gate-i, ui-flash-copy-gate-c, ui-form-hygiene-gate-d, ui-marketing-token-contrast-gate-m, ui-strings-catalog-drift-gate-k, ui-terminology-gate-j |
-| validate | 85: alerting-rules, ark-authority-mirror, ark-console-artifact, ark-design-law, ark-marketing-artifact, ark-pdf-design-authority, ark-pdf-design-authority-self-test, asset-budget, asset-budget-self-test, capability-claims-vs-production-wiring, customer-dto-boundary, customer-dto-boundary-self-test, current-readiness-generated, deliverability-report-backed-by-its-artifact, docs-lint-integrity, docs-lint-ratchet, eval-corpora-vs-canonical-facts, external-route-census, forbidden-patterns, homepage-metrics-backed-by-their-artifact, hosting-locations, hosting-locations-self-test, image-pinning-checker-committed-fixtures, invariant-and-expectations-registry, invariant-registry-self-test, kiwi-marketing-isolation, kiwi-mirror-parity, knowledge-consistency-canonical-catalog, lane-waivers, legacy-processor, legacy-processor-self-test, legal-identity, marketing-broken-links, marketing-content-voice, marketing-font-optimization, marketing-html-validation, marketing-image-optimization, marketing-nginx-serving, marketing-page-content, marketing-pricing-freshness, marketing-seo-validation, marketing-serving-whitelist, marketing-wcag-contrast-heuristic, migration-sql-lint, no-generated-artifacts-tracked, no-scraping-bypass, no-scraping-bypass-self-test, outbound-delivery-contract, pg-pitr-restore-self-test, pg-wal-archive-self-test, postgres-backup-retention-self-test, postgres-restore-drill-self-test, postgres-wal-base-backup-self-test, payment-neutrality, pricing-drift, processor-legal-facts, production-env-contract, production-env-contract-values, production-env-forwarding, production-mollie-payment-wiring, provider-fixtures, provider-fixtures-self-test, public-artifacts-allowlist, public-artifacts-gate-self-test, public-hosting-locations, public-hosting-locations-self-test, repo-map-up-to-date, risk-lua-parity, rollback-plan-present, route-census-self-test, rust-panic-paths, sdk-version-lockstep, security-posture-baseline, soc-evidence-cadence, standby-contract, stub-ban, stub-ban-self-test, subprocessor-register-derived-from-deployment-config, template-leaks, tool-selftest-detector-self-test, tool-selftest-inventory, topology-contracts, waiver-gate-self-test, web-error-honesty, web-error-honesty-self-test |
+| validate | 87: alerting-rules, ark-authority-mirror, ark-console-artifact, ark-design-law, ark-marketing-artifact, ark-pdf-design-authority, ark-pdf-design-authority-self-test, asset-budget, asset-budget-self-test, capability-claims-vs-production-wiring, customer-dto-boundary, customer-dto-boundary-self-test, current-readiness-generated, deliverability-report-backed-by-its-artifact, docs-lint-integrity, docs-lint-ratchet, eval-corpora-vs-canonical-facts, external-route-census, forbidden-patterns, homepage-metrics-backed-by-their-artifact, hosting-locations, hosting-locations-self-test, image-pinning-checker-committed-fixtures, invariant-and-expectations-registry, invariant-registry-self-test, kiwi-marketing-isolation, kiwi-mirror-parity, knowledge-consistency-canonical-catalog, lane-waivers, legacy-processor, legacy-processor-self-test, legal-identity, marketing-broken-links, marketing-content-voice, marketing-font-optimization, marketing-html-validation, marketing-image-optimization, marketing-nginx-serving, marketing-page-content, marketing-pricing-freshness, marketing-seo-validation, marketing-serving-whitelist, marketing-wcag-contrast-heuristic, migration-sql-lint, no-generated-artifacts-tracked, no-scraping-bypass, no-scraping-bypass-self-test, outbound-delivery-contract, pg-pitr-restore-self-test, pg-wal-archive-self-test, postgres-backup-retention-self-test, postgres-restore-drill-self-test, postgres-wal-base-backup-self-test, payment-neutrality, pricing-drift, processor-legal-facts, production-env-contract, production-env-contract-values, production-env-forwarding, production-mollie-payment-wiring, provider-fixtures, provider-fixtures-self-test, public-artifacts-allowlist, public-artifacts-gate-self-test, public-hosting-locations, public-hosting-locations-self-test, repo-map-up-to-date, risk-lua-parity, rollback-plan-present, route-census-self-test, rust-panic-paths, sdk-version-lockstep, security-posture-baseline, soc-evidence-cadence, standby-contract, stripe-contract, stripe-contract-self-test, stub-ban, stub-ban-self-test, subprocessor-register-derived-from-deployment-config, template-leaks, tool-selftest-detector-self-test, tool-selftest-inventory, topology-contracts, waiver-gate-self-test, web-error-honesty, web-error-honesty-self-test |
 
 ## Invariants
 
@@ -55,16 +55,16 @@ planned (1):
 
 ## Test-scope evidence
 
-- SQL migrations under `services/mail-server/migrations/`: 262 files, latest `290_experiment_science.sql`.
+- SQL migrations under `services/mail-server/migrations/`: 265 files, latest `293_cohort_provenance.sql`.
 - Tool migrations under `tools/migrations/`: 35 files.
 - Packages registered in `ci/test-expectations.toml`: 69.
-- Tools: 86 Python scripts at the top of `tools/`; the CI stages invoke 58 of them; 2 carry a meta-exemption with a reason. The validate.tool-selftest-inventory lane proves every invoked tool keeps a working self-test.
+- Tools: 87 Python scripts at the top of `tools/`; the CI stages invoke 59 of them; 2 carry a meta-exemption with a reason. The validate.tool-selftest-inventory lane proves every invoked tool keeps a working self-test.
 
 ## Audit verdicts (code-derived)
 
 Each row is the output of a rule in `tools/generate_current_readiness.py` that pins files, content needles and required-lane rows. A pinned file that disappears flips its row to OPEN on the next generation; nothing here is maintained by hand.
 
-6 LANDED, 3 OWNER-GATED.
+6 LANDED, 4 OWNER-GATED.
 
 | Verdict | Status | Derivation |
 |---|---|---|
@@ -77,3 +77,4 @@ Each row is the output of a rule in `tools/generate_current_readiness.py` that p
 | onboarding machine | LANDED | 2 pinned files + 3 needles hold; lanes test.workspace-suite |
 | DT executor | OWNER-GATED | evidence holds; execution needs HETZNER_API_TOKEN (services/mail-server/crates/enterprise/src/dedicated_exec.rs) |
 | billing neutrality | LANDED | 7 pinned files + 4 needles hold; lanes validate.payment-neutrality |
+| Stripe adapter parity | OWNER-GATED | evidence holds; execution needs STRIPE_SECRET_KEY (.env.production.example) |

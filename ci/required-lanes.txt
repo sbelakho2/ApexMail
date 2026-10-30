@@ -118,6 +118,8 @@ validate.sdk-version-lockstep
 validate.security-posture-baseline
 validate.soc-evidence-cadence
 validate.standby-contract
+validate.stripe-contract
+validate.stripe-contract-self-test
 validate.stub-ban
 validate.stub-ban-self-test
 validate.subprocessor-register-derived-from-deployment-config

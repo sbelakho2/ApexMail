@@ -16,7 +16,8 @@
 //! | [`PaymentProvider::charge_saved_method`] | `POST /v1/payment_intents` (`confirm=true`, `off_session=true`, `Idempotency-Key`) |
 //! | [`PaymentProvider::refund`] | `POST /v1/refunds` (`payment_intent=…`, `Idempotency-Key`) |
 //! | [`PaymentProvider::fetch_payment_object`] | `GET /v1/payment_intents/{id}` |
-//! | [`PaymentProvider::search_payment_by_idempotency_key`] | `GET /v1/payment_intents/search?query=metadata['idempotency_key']:'…'`, falling back to the recent-list window when search is not enabled on the account |
+//! | [`PaymentProvider::fetch_payment_details`] | `GET /v1/payment_intents/{id}` (plus the object's metadata + customer) |
+//! | [`PaymentProvider::search_payment_by_idempotency_key`] | identical `POST /v1/payment_intents` replay when the original request was journaled; the keyed metadata search is INVESTIGATION only, never absence proof |
 //! | [`PaymentProvider::fetch_refund`] | `GET /v1/refunds/{id}` |
 //! | [`PaymentProvider::revoke_saved_method`] | `POST /v1/payment_methods/{id}/detach` |
 //! | [`PaymentProvider::fetch_settlement`] | `GET /v1/payouts/{id}` |
@@ -27,10 +28,33 @@
 //! (`metadata.idempotency_key`, `metadata.reference` = the obligation ref,
 //! `metadata.tenant_id`) so the engine's stale-claim search and the webhook
 //! normalizer's tenant/obligation attribution work identically across
-//! providers. The keyed metadata search is what makes absence PROVABLE here
-//! (the complete keyed index was enumerated); the recent-list fallback
-//! inherits the Mollie truncation contract (a full window is
-//! [`ProviderError::Config`], never a guessed `None`).
+//! providers.
+//!
+//! # Absence is PROVEN by replay, never by an empty search
+//!
+//! Stripe's Search API is eventually consistent: an empty result does NOT
+//! prove that a charge does not exist, and treating it as absence is a
+//! duplicate-charge path. An UNCERTAIN create (a lost response) is instead
+//! recovered by REPLAYING the identical `POST /v1/payment_intents` with the
+//! SAME `Idempotency-Key` (Stripe stores and replays the first result for 24
+//! hours). This adapter journals the exact wire form of every saved-method
+//! charge per idempotency key, so
+//! [`PaymentProvider::search_payment_by_idempotency_key`] can perform that
+//! replay. The contract is deliberately narrow:
+//!
+//! * `Ok(Some(payment))` — the replay (or the investigation search) found the
+//!   one provider object for this key.
+//! * `Ok(None)` — the REPLAY was refused by the provider (400/409): the
+//!   original create never minted a payment. This is the only absence proof
+//!   this adapter accepts; an empty search is NEVER `None`.
+//! * `Err(..)` — the original request is not replayable (another process,
+//!   a restart, the 24 h retention elapsed) and the search is empty or
+//!   unavailable: absence is UNPROVABLE, the engine parks the attempt
+//!   `unresolved`.
+//!
+//! The charge request journal is in-process and bounded; an entry evicted or
+//! lost across a restart simply makes the recovery unprovable (`Err`), never
+//! a blind second charge.
 //!
 //! All HTTP goes through [`StripeClient`] with the same discipline as
 //! `MollieClient`: one bearer client, strict timeouts, 5xx/429 map to
@@ -40,14 +64,16 @@
 //! typed [`ProviderError::UnmappedStatus`] (fail closed), unit-tested for
 //! totality over the documented vocabulary.
 
-use std::time::Duration;
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use chrono::{DateTime, TimeZone, Utc};
 
 use super::{
-    Checkout, CheckoutRequest, CustomerRequest, Dispute, DisputeState, Payment, PaymentProvider,
-    PaymentState, ProviderCapabilities, ProviderCustomer, ProviderError, Refund, RefundRequest,
-    RefundState, SavedMethodCharge, SavedMethodRef, Settlement,
+    Checkout, CheckoutRequest, CustomerRequest, Dispute, DisputeState, FetchedPayment, Payment,
+    PaymentProvider, PaymentState, ProviderCapabilities, ProviderCustomer, ProviderError, Refund,
+    RefundRequest, RefundState, SavedMethodCharge, SavedMethodRef, Settlement,
 };
 
 /// The adapter's stable name (the registry's `stripe` value).
@@ -60,6 +86,79 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// no-keyed-search path of the stale-claim reconcile). Mirrors the Mollie
 /// adapter's truncation-honest window size.
 const FALLBACK_LIST_LIMIT: u32 = 100;
+
+/// Stripe stores an idempotency key's first result for 24 hours. A replay
+/// after that window could create a SECOND object for the same operation, so
+/// the adapter never replays older requests (their absence stays unprovable:
+/// `Err`, never `Ok(None)`).
+const IDEMPOTENCY_RETENTION: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// The in-process journal's capacity. An evicted request only makes a later
+/// recovery unprovable (fail closed); it can never cause a second charge.
+const CHARGE_JOURNAL_CAPACITY: usize = 4_096;
+
+/// The exact wire form of one saved-method charge, journaled per idempotency
+/// key so an uncertain create can be recovered by replaying the identical
+/// POST with the same `Idempotency-Key`.
+#[derive(Clone)]
+struct ChargeReplay {
+    pairs: Vec<(String, String)>,
+    issued: Instant,
+}
+
+type ChargeJournal = Mutex<HashMap<String, ChargeReplay>>;
+
+/// The process-wide charge request journal. Stripe constructs a fresh
+/// adapter per registry resolution, so the journal must outlive one adapter
+/// instance to make the sweep's recovery replay possible.
+fn charge_journal() -> &'static ChargeJournal {
+    static JOURNAL: OnceLock<ChargeJournal> = OnceLock::new();
+    JOURNAL.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Journal one charge's exact wire form under its idempotency key. Expired
+/// entries are pruned first; at capacity the oldest entry is evicted (an
+/// evicted request is simply no longer replayable: fail closed).
+fn journal_charge(key: &str, pairs: Vec<(String, String)>) {
+    let mut journal = charge_journal().lock().expect("charge replay journal");
+    journal.retain(|_, entry| entry.issued.elapsed() < IDEMPOTENCY_RETENTION);
+    if journal.len() >= CHARGE_JOURNAL_CAPACITY && !journal.contains_key(key) {
+        if let Some(oldest) = journal
+            .iter()
+            .min_by_key(|(_, entry)| entry.issued)
+            .map(|(key, _)| key.clone())
+        {
+            journal.remove(&oldest);
+        }
+    }
+    journal.insert(
+        key.to_string(),
+        ChargeReplay {
+            pairs,
+            issued: Instant::now(),
+        },
+    );
+}
+
+/// The journaled request for one key, when it is still inside Stripe's
+/// idempotency retention window.
+fn journaled_charge(key: &str) -> Option<Vec<(String, String)>> {
+    let journal = charge_journal().lock().expect("charge replay journal");
+    journal
+        .get(key)
+        .filter(|entry| entry.issued.elapsed() < IDEMPOTENCY_RETENTION)
+        .map(|entry| entry.pairs.clone())
+}
+
+/// Whether the journal remembers the key AT ALL (an expired entry included):
+/// an expired journaled request is never replaced by a fresh replay, which
+/// could mint a second charge.
+fn journal_holds(key: &str) -> bool {
+    charge_journal()
+        .lock()
+        .expect("charge replay journal")
+        .contains_key(key)
+}
 
 // ---------------------------------------------------------------------------
 // The wire client
@@ -432,14 +531,22 @@ pub(crate) fn map_dispute_status(status: &str) -> Result<DisputeState, ProviderE
     }
 }
 
-/// Map one Stripe Checkout Session status to the neutral machine. Sessions
-/// are created with `mode=payment` ONLY (the adapter's contract), so
-/// `complete` means the payment succeeded — there is no subscription
-/// lifecycle to translate.
+/// Map one Stripe Checkout Session status to the neutral CONTROLLER lifecycle
+/// (whether the hosted page flow finished), never the money state.
+///
+/// Stripe distinguishes Session completion from PAYMENT completion: a
+/// `mode=payment` Session can be `complete` while its PaymentIntent is still
+/// `processing` (or `requires_action`). Mapping `complete` to
+/// [`PaymentState::Succeeded`] would settle money that has not arrived, so
+/// the session vocabulary deliberately tops out at
+/// [`PaymentState::Processing`]: the settlement evidence is ALWAYS the
+/// PaymentIntent the caller fetches with provider authentication.
 pub(crate) fn map_session_status(status: &str) -> Result<PaymentState, ProviderError> {
     match status.trim() {
         "open" => Ok(PaymentState::Pending),
-        "complete" => Ok(PaymentState::Succeeded),
+        // The flow finished; the money is not confirmed by this fact. Only a
+        // fetched PaymentIntent.status == "succeeded" may say Succeeded.
+        "complete" => Ok(PaymentState::Processing),
         "expired" => Ok(PaymentState::Canceled),
         other => Err(ProviderError::UnmappedStatus {
             kind: "checkout session",
@@ -655,6 +762,72 @@ fn metadata_string(document: &serde_json::Value, key: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+/// Read an id that Stripe may deliver either as a bare string or as an
+/// expanded object (`"customer": "cus_…"` or `{"id": "cus_…"}`).
+fn expandable_id(document: &serde_json::Value, field: &str) -> Option<String> {
+    let value = document.get(field)?;
+    if let Some(id) = value.as_str() {
+        return Some(id).filter(|id| !id.is_empty()).map(str::to_string);
+    }
+    value
+        .get("id")
+        .and_then(|id| id.as_str())
+        .filter(|id| !id.is_empty())
+        .map(str::to_string)
+}
+
+/// Case-insensitive ISO 4217 comparison (never parses, never converts).
+fn currencies_equal(left: &str, right: &str) -> bool {
+    left.trim().eq_ignore_ascii_case(right.trim())
+}
+
+/// The one refusal shape for "the search could not prove absence": a typed
+/// [`ProviderError::Config`] whose message says absence is unprovable (the
+/// engine parks the attempt `unresolved`). Never `Ok(None)`.
+fn absence_unprovable(detail: &str) -> ProviderError {
+    ProviderError::Config(format!(
+        "stripe: absence of the charge cannot be proven — {detail}; the original request is \
+         not available for an idempotent replay, so the attempt stays unresolved"
+    ))
+}
+
+/// The form body of a `POST /v1/payment_intents` saved-method charge: the
+/// card pair, the money, `confirm=true`/`off_session=true`, and OUR metadata
+/// (including `idempotency_key`). Pure, so the EXACT wire form can be
+/// journaled for the idempotent replay and pinned by a test.
+pub(crate) fn charge_form_pairs(request: &SavedMethodCharge) -> Vec<(String, String)> {
+    let mut metadata = request.metadata.clone();
+    if let Some(object) = metadata.as_object_mut() {
+        object.insert(
+            "idempotency_key".to_string(),
+            // The SAME trimmed key the `Idempotency-Key` header carries and
+            // the search looks up: a replay must be byte-identical, and the
+            // keyed search must find the object by this exact value.
+            serde_json::Value::String(request.idempotency_key.trim().to_string()),
+        );
+    }
+    let mut pairs = vec![
+        (
+            "payment_method".to_string(),
+            request.provider_method_id.trim().to_string(),
+        ),
+        (
+            "customer".to_string(),
+            request.provider_customer_id.trim().to_string(),
+        ),
+        ("amount".to_string(), request.amount_minor.to_string()),
+        (
+            "currency".to_string(),
+            request.currency.trim().to_ascii_lowercase(),
+        ),
+        ("confirm".to_string(), "true".to_string()),
+        ("off_session".to_string(), "true".to_string()),
+        ("description".to_string(), request.description.clone()),
+    ];
+    pairs.extend(metadata_form_pairs(&metadata));
+    pairs
+}
+
 /// The form body of a `POST /v1/checkout/sessions` request. Pure (and
 /// unit-tested) so the V34 wire shape is pinned without HTTP:
 ///
@@ -665,7 +838,14 @@ fn metadata_string(document: &serde_json::Value, key: &str) -> Option<String> {
 ///   card the renewal worker can charge with no browser;
 /// * a pre-created customer rides `customer=<id>`; otherwise
 ///   `customer_creation=always` makes Stripe create one (the two fields are
-///   mutually exclusive on Stripe's wire).
+///   mutually exclusive on Stripe's wire);
+/// * the SAME metadata rides the Session AND its PaymentIntent
+///   (`metadata[...]` and `payment_intent_data[metadata][...]`). The
+///   authenticated POST-CHECKOUT object the activation fetches is the
+///   PaymentIntent, so the tenant/plan/interval attribution (and the
+///   `checkout_id` identity, once the local checkout authority lands) must
+///   already be on it — propagating the keys here is what makes the
+///   refetch-first webhook attributable without trusting the event body.
 pub(crate) fn checkout_form_pairs(
     request: &CheckoutRequest,
 ) -> Result<Vec<(String, String)>, ProviderError> {
@@ -730,6 +910,20 @@ pub(crate) fn checkout_form_pairs(
         None => pairs.push(("customer_creation".to_string(), "always".to_string())),
     }
     pairs.extend(metadata_form_pairs(&metadata));
+    // Item 9: the PaymentIntent must carry the SAME identity as the Session.
+    // The refetch-first webhook normalizes the fetched PaymentIntent, so the
+    // tenant/plan/interval/reference — and a `checkout_id` when the caller
+    // supplies one — have to be on that object, not only on the container.
+    pairs.extend(
+        metadata_form_pairs(&metadata)
+            .into_iter()
+            .map(|(key, value)| {
+                (
+                    key.replacen("metadata[", "payment_intent_data[metadata][", 1),
+                    value,
+                )
+            }),
+    );
     Ok(pairs)
 }
 
@@ -776,6 +970,102 @@ impl StripeProvider {
     /// The client (the webhook route reads the advertised webhook URL).
     pub fn client(&self) -> &StripeClient {
         &self.client
+    }
+
+    /// Resolve a create/replay response to the AUTHORITATIVE neutral
+    /// [`Payment`]. Amount and currency are never borrowed from the request:
+    /// a minimal response (a proxy that omits them) gets ONE authenticated
+    /// refetch by id; if the fetched object still lacks them, the answer is
+    /// [`ProviderError::Malformed`].
+    async fn authoritative_payment(
+        &self,
+        document: &serde_json::Value,
+    ) -> Result<Payment, ProviderError> {
+        match neutral_payment(document) {
+            Ok(payment) => Ok(payment),
+            Err(ProviderError::Malformed(first)) => {
+                let Some(id) = string_at(document, "/id").filter(|id| !id.is_empty()) else {
+                    return Err(ProviderError::Malformed(first));
+                };
+                let fetched = self.client.get_payment_intent(id.trim(), false).await?;
+                neutral_payment(&fetched).map_err(|error| match error {
+                    ProviderError::Malformed(second) => ProviderError::Malformed(format!(
+                        "{second} (the create response was also unreadable: {first})"
+                    )),
+                    other => other,
+                })
+            }
+            Err(other) => Err(other),
+        }
+    }
+
+    /// Recover an UNCERTAIN create (a lost response) by replaying the
+    /// identical `POST /v1/payment_intents` with the SAME
+    /// `Idempotency-Key`: Stripe stores and replays the first result, so the
+    /// replay returns the original PaymentIntent (never a second charge).
+    ///
+    /// Contract:
+    /// * `Ok(Some(payment))` — the one provider object for this key (the
+    ///   replayed original, or the single intent a replay minted because the
+    ///   original never executed).
+    /// * `Ok(None)` — the replay was REFUSED (400/409), which proves the
+    ///   original create never minted a payment. The ONLY legal absence
+    ///   answer.
+    /// * `Err(..)` — no replayable request (unknown key, retention elapsed,
+    ///   transport/provider failure): absence is UNPROVABLE.
+    pub async fn recover_uncertain_charge(
+        &self,
+        request: &SavedMethodCharge,
+    ) -> Result<Option<Payment>, ProviderError> {
+        let key = request.idempotency_key.trim();
+        if key.is_empty() {
+            return Err(ProviderError::Config(
+                "stripe: an empty idempotency key cannot be replayed".to_string(),
+            ));
+        }
+        // Replay the ORIGINAL wire form when it was journaled; a re-supplied
+        // request is used only when no journal entry survives (a different
+        // body under the same key is an idempotency conflict, never what we
+        // want to send). A journaled-but-EXPIRED entry is never replaced: a
+        // replay after Stripe's retention could mint a second object.
+        let pairs = match journaled_charge(key) {
+            Some(pairs) => pairs,
+            None if journal_holds(key) => {
+                return Err(ProviderError::Config(format!(
+                    "stripe: the journaled request for {key} is outside Stripe's 24h \
+                     idempotency retention; replaying it could mint a second charge and \
+                     absence cannot be proven"
+                )));
+            }
+            None => {
+                let pairs = charge_form_pairs(request);
+                journal_charge(key, pairs.clone());
+                pairs
+            }
+        };
+        self.replay_charge(key, pairs).await
+    }
+
+    /// The idempotent replay itself: the identical POST with the identical
+    /// key. `Ok(None)` only when Stripe REFUSES the replay (400/409) — the
+    /// replay-proven absence. Everything else that is not a readable payment
+    /// is an error (unprovable).
+    async fn replay_charge(
+        &self,
+        key: &str,
+        pairs: Vec<(String, String)>,
+    ) -> Result<Option<Payment>, ProviderError> {
+        match self.client.create_payment_intent(pairs, key).await {
+            Ok(document) => self.authoritative_payment(&document).await.map(Some),
+            // Stripe replays the stored first result, INCLUDING an error
+            // response: a replayed 400/409 is the provider saying the create
+            // never minted a PaymentIntent. This is the ONLY absence proof
+            // the adapter accepts.
+            Err(ProviderError::Refused {
+                status: 400 | 409, ..
+            }) => Ok(None),
+            Err(error) => Err(error),
+        }
     }
 }
 
@@ -878,57 +1168,33 @@ impl PaymentProvider for StripeProvider {
     /// metadata (mirroring the Mollie adapter) so the stale-claim
     /// reconciliation can find the charge provider-side even when the
     /// search API is not enabled on the account.
+    ///
+    /// The EXACT wire form is journaled under the idempotency key BEFORE the
+    /// request is sent: a lost response can then be recovered by replaying
+    /// the identical POST (Stripe replays its stored first result), which is
+    /// the only absence proof this adapter accepts.
     async fn charge_saved_method(
         &self,
         request: SavedMethodCharge,
     ) -> Result<Payment, ProviderError> {
-        let mut metadata = request.metadata.clone();
-        if let Some(object) = metadata.as_object_mut() {
-            object.insert(
-                "idempotency_key".to_string(),
-                serde_json::Value::String(request.idempotency_key.clone()),
-            );
-        }
-        let mut pairs = vec![
-            (
-                "payment_method".to_string(),
-                request.provider_method_id.trim().to_string(),
-            ),
-            (
-                "customer".to_string(),
-                request.provider_customer_id.trim().to_string(),
-            ),
-            ("amount".to_string(), request.amount_minor.to_string()),
-            (
-                "currency".to_string(),
-                request.currency.trim().to_ascii_lowercase(),
-            ),
-            ("confirm".to_string(), "true".to_string()),
-            ("off_session".to_string(), "true".to_string()),
-            ("description".to_string(), request.description.clone()),
-        ];
-        pairs.extend(metadata_form_pairs(&metadata));
-        let intent = self
+        let pairs = charge_form_pairs(&request);
+        journal_charge(request.idempotency_key.trim(), pairs.clone());
+        let document = self
             .client
-            .create_payment_intent(pairs, &request.idempotency_key)
+            .create_payment_intent(pairs, request.idempotency_key.trim())
             .await?;
-        let state = map_payment_status(&string_at(&intent, "/status").unwrap_or_default())?;
-        // The create response echoes amount/currency; a minimal proxy that
-        // omits them leaves the AUTHORITATIVE REQUESTED amount standing
-        // (the request echo, exactly like the Mollie adapter's create).
-        Ok(Payment {
-            provider: PROVIDER_NAME.to_string(),
-            provider_payment_id: string_at(&intent, "/id").unwrap_or_default(),
-            state,
-            amount_minor: amount_at(&intent).unwrap_or(request.amount_minor),
-            currency: currency_at(&intent).unwrap_or_else(|| request.currency.to_ascii_uppercase()),
-            created_at: seconds_at(intent.get("created")),
-        })
+        // Item 5: a Succeeded PaymentIntent missing an authoritative amount
+        // or currency is Malformed — the adapter NEVER borrows the request's
+        // amount/currency as if it were settlement evidence. One authenticated
+        // refetch is allowed (a minimal create echo), then it is an error.
+        self.authoritative_payment(&document).await
     }
 
     /// `POST /v1/refunds` (`payment_intent=…`, `amount=…`,
-    /// `Idempotency-Key`). Stripe's refund status may be asynchronous; the
-    /// returned [`Refund`] carries the provider id the reconciliation names.
+    /// `Idempotency-Key`). Stripe's create-refund API has NO `currency`
+    /// parameter (sending one can 400), so it never rides the wire; the
+    /// returned refund's currency is nevertheless validated against the
+    /// expected one (a mismatched fact is Malformed, never recorded).
     async fn refund(&self, request: RefundRequest) -> Result<Refund, ProviderError> {
         let pairs = vec![
             (
@@ -936,16 +1202,20 @@ impl PaymentProvider for StripeProvider {
                 request.provider_payment_id.trim().to_string(),
             ),
             ("amount".to_string(), request.amount_minor.to_string()),
-            (
-                "currency".to_string(),
-                request.currency.trim().to_ascii_lowercase(),
-            ),
         ];
         let document = self
             .client
             .create_refund(pairs, &request.idempotency_key)
             .await?;
-        neutral_refund(&document, request.provider_payment_id.trim())
+        let refund = neutral_refund(&document, request.provider_payment_id.trim())?;
+        if !currencies_equal(&refund.currency, &request.currency) {
+            return Err(ProviderError::Malformed(format!(
+                "refund {} returned currency {} but the refund was requested in {}; \
+                 refusing to record a currency the request never named",
+                refund.provider_refund_id, refund.currency, request.currency
+            )));
+        }
+        Ok(refund)
     }
 
     async fn fetch_payment_object(
@@ -959,15 +1229,56 @@ impl PaymentProvider for StripeProvider {
         neutral_payment(&intent)
     }
 
-    /// The stale-claim reconciliation's fact source. Stripe HAS a keyed
-    /// search: `metadata['idempotency_key']:'{key}'` enumerates the account's
-    /// intents by OUR key (the key `charge_saved_method` writes), so an
-    /// empty result is a PROVABLE absence (`Ok(None)`). When the search API
-    /// is not enabled on the account (a 4xx feature refusal), the adapter
-    /// falls back to the recent-list + metadata-match window
-    /// ([`FALLBACK_LIST_LIMIT`] items): a FULL page there is truncation —
-    /// absence unprovable, [`ProviderError::Config`], never a guessed
-    /// `None` (guessing absence double-charges).
+    /// The webhook refetch's fact source: the authenticated PaymentIntent
+    /// PLUS the attribution metadata our create wrote on it (item 9 puts the
+    /// same identity on the Session and the PaymentIntent) and the provider
+    /// customer. A signed event body never supplies any of this.
+    async fn fetch_payment_details(
+        &self,
+        provider_payment_id: &str,
+    ) -> Result<FetchedPayment, ProviderError> {
+        let intent = self
+            .client
+            .get_payment_intent(provider_payment_id.trim(), false)
+            .await?;
+        Ok(FetchedPayment {
+            payment: neutral_payment(&intent)?,
+            metadata: intent
+                .get("metadata")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null),
+            provider_customer_id: expandable_id(&intent, "customer"),
+        })
+    }
+
+    /// A dispute event may name only the CHARGE: resolve it to the payment
+    /// id (the neutral ledger keys disputes by the payment) with the
+    /// authenticated charge fetch, never from the event body.
+    async fn resolve_charge_payment_id(
+        &self,
+        charge_id: &str,
+    ) -> Result<Option<String>, ProviderError> {
+        let charge = self.client.get_charge(charge_id.trim()).await?;
+        Ok(expandable_id(&charge, "payment_intent"))
+    }
+
+    /// The stale-claim reconciliation's fact source.
+    ///
+    /// The ONLY absence proof is the IDEMPOTENT REPLAY of the original
+    /// create (the adapter journals every charge's exact wire form, so a
+    /// lost response is recovered by re-sending the identical POST with the
+    /// same `Idempotency-Key`). Stripe's Search API is EVENTUALLY
+    /// CONSISTENT: an empty keyed search is investigation evidence only and
+    /// must never permit a second charge, so this method never answers
+    /// `Ok(None)` on an empty search.
+    ///
+    /// * journaled key -> [`Self::replay_charge`] decides
+    ///   (`Ok(Some)` recovered, `Ok(None)` replay-refused proven absence,
+    ///   `Err` unprovable);
+    /// * no journaled key -> the keyed search (or the recent-list window
+    ///   when the account has no Search API) may FIND the charge, never
+    ///   prove it absent: a hit is `Ok(Some)`, an empty/truncated/unavailable
+    ///   investigation is `Err` (the engine parks the attempt `unresolved`).
     async fn search_payment_by_idempotency_key(
         &self,
         idempotency_key: &str,
@@ -986,6 +1297,12 @@ impl PaymentProvider for StripeProvider {
                     .to_string(),
             ));
         }
+        // The replay path is the ONLY thing allowed to answer `Ok(None)`.
+        if let Some(pairs) = journaled_charge(key) {
+            return self.replay_charge(key, pairs).await;
+        }
+        // No replayable request survives: the search may FIND a charge, but
+        // its emptiness proves nothing.
         let query = format!("metadata['idempotency_key']:'{key}'");
         match self.client.search_payment_intents(&query).await {
             Ok(document) => {
@@ -994,14 +1311,15 @@ impl PaymentProvider for StripeProvider {
                         return neutral_payment(&intent).map(Some);
                     }
                 }
-                // The keyed search IS the complete enumeration for this
-                // identity: not in it means provably absent.
-                Ok(None)
+                Err(absence_unprovable(
+                    "the keyed search returned no payment, but Stripe Search is eventually \
+                     consistent and its emptiness is not evidence",
+                ))
             }
             Err(ProviderError::Refused { status, .. }) if (400..500).contains(&status) => {
-                // The search API is not enabled on this account: fall back
-                // to the recent-list window (the Mollie contract — a full
-                // page refuses to claim absence).
+                // The search API is not enabled on this account: the recent
+                // list can still FIND the charge (presence), never prove
+                // absence.
                 let listing = self
                     .client
                     .list_payment_intents(FALLBACK_LIST_LIMIT)
@@ -1012,13 +1330,15 @@ impl PaymentProvider for StripeProvider {
                     }
                 }
                 if data_of(&listing).len() as u32 >= FALLBACK_LIST_LIMIT {
-                    return Err(ProviderError::Config(format!(
-                        "stripe: the recent-payment-intents listing is full \
-                         ({FALLBACK_LIST_LIMIT}) and search is unavailable; absence of the \
-                         idempotency key cannot be proven"
+                    return Err(absence_unprovable(&format!(
+                        "the recent-payment-intents listing is full ({FALLBACK_LIST_LIMIT}) \
+                         and the search API is unavailable"
                     )));
                 }
-                Ok(None)
+                Err(absence_unprovable(
+                    "the recent-payment-intents listing does not carry the key, but the \
+                     search API is unavailable",
+                ))
             }
             Err(error) => Err(error),
         }
@@ -1185,17 +1505,23 @@ mod tests {
     }
 
     #[test]
-    fn session_status_mapping_is_exhaustive_and_fail_closed() {
+    fn session_status_mapping_never_means_money_succeeded() {
         assert_eq!(map_session_status("open").unwrap(), PaymentState::Pending);
+        // A COMPLETE session is a finished flow, not arrived money: the
+        // fetched PaymentIntent is the only settlement evidence.
         assert_eq!(
             map_session_status("complete").unwrap(),
-            PaymentState::Succeeded
+            PaymentState::Processing
         );
         assert_eq!(
             map_session_status("expired").unwrap(),
             PaymentState::Canceled
         );
         assert!(map_session_status("who-knows").is_err());
+        // The forbidden mapping: no session status may say Succeeded.
+        for status in ["open", "complete", "expired"] {
+            assert_ne!(map_session_status(status).unwrap(), PaymentState::Succeeded);
+        }
     }
 
     fn checkout_request(save_method: bool, customer: Option<&str>) -> CheckoutRequest {
@@ -1254,6 +1580,47 @@ mod tests {
         assert!(!pairs
             .iter()
             .any(|(k, _)| k == "payment_intent_data[setup_future_usage][0]"));
+    }
+
+    /// Item 9: the checkout identity rides the PaymentIntent too. The
+    /// refetch-first webhook reads the authenticated PaymentIntent, so every
+    /// session metadata key (including `checkout_id` when the caller
+    /// supplies one) must be mirrored under
+    /// `payment_intent_data[metadata][…]`.
+    #[test]
+    fn checkout_identity_reaches_the_payment_intent_metadata() {
+        let mut request = checkout_request(true, None);
+        request.metadata = serde_json::json!({
+            "tenant_id": "t1",
+            "reference": "invoice:abc",
+            "plan_name": "starter",
+            "interval": "monthly",
+            "checkout_id": "local_checkout_42",
+        });
+        let pairs = checkout_form_pairs(&request).expect("pairs");
+        let has = |key: &str, value: &str| pairs.iter().any(|(k, v)| k == key && v == value);
+        // The session metadata still rides `metadata[…]: idempotency_key is
+        // injected by the adapter.
+        assert!(has("metadata[tenant_id]", "t1"));
+        assert!(has("metadata[idempotency_key]", "checkout_t1_starter"));
+        assert!(has("metadata[checkout_id]", "local_checkout_42"));
+        // The SAME identity is mirrored onto the PaymentIntent.
+        assert!(has("payment_intent_data[metadata][tenant_id]", "t1"));
+        assert!(has(
+            "payment_intent_data[metadata][reference]",
+            "invoice:abc"
+        ));
+        assert!(has("payment_intent_data[metadata][plan_name]", "starter"));
+        assert!(has("payment_intent_data[metadata][interval]", "monthly"));
+        // The key name `checkout_id` passes through unchanged.
+        assert!(has(
+            "payment_intent_data[metadata][checkout_id]",
+            "local_checkout_42"
+        ));
+        assert!(has(
+            "payment_intent_data[metadata][idempotency_key]",
+            "checkout_t1_starter"
+        ));
     }
 
     #[test]

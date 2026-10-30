@@ -53,7 +53,7 @@ use sqlx::Connection as _;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::payments::{PaymentProvider, ProviderError};
+use crate::payments::{Payment, PaymentProvider, ProviderError};
 use crate::routes::append_audit_log;
 use crate::AppState;
 
@@ -294,6 +294,230 @@ async fn activation_invoice_for_payment(
     .map_err(|error| format!("activation idempotency check failed: {error}"))
 }
 
+// ---------------------------------------------------------------------------
+// The LOCAL checkout authority (migration 291; audit item 8)
+// ---------------------------------------------------------------------------
+//
+// A checkout is an ApexMail obligation BEFORE it is a provider session:
+//
+//     mint checkout_id -> freeze the quote -> persist payment_checkouts
+//         -> provider.create_checkout(idempotency_key = checkout:{checkout_id},
+//                                    metadata.checkout_id = {checkout_id})
+//         -> attach the provider's session/payment ids to the row
+//         -> completed fact: resolve provider_checkout_id -> row, mark
+//            completed + provider_payment_id, activation settles the STORED
+//            quote.
+//
+// The provider is trusted to carry back the checkout_id POINTER only; the
+// plan, interval, currency and money amounts are read from this local row,
+// never from provider metadata business fields, and never re-derived from
+// invoice history.
+
+/// The locally frozen checkout quote (one `payment_checkouts` row).
+#[derive(Debug, Clone, PartialEq, sqlx::FromRow)]
+pub struct LocalCheckoutQuote {
+    pub id: Uuid,
+    pub tenant_id: String,
+    pub plan: String,
+    pub interval: String,
+    pub net_minor: i64,
+    pub tax_minor: i64,
+    pub gross_minor: i64,
+    pub currency: String,
+    pub status: String,
+    pub provider: String,
+    pub provider_checkout_id: Option<String>,
+    pub provider_payment_id: Option<String>,
+    pub business: bool,
+    pub country: String,
+    pub vat_number: Option<String>,
+    pub reverse_charge: bool,
+    pub vat_rate: f64,
+}
+
+/// The quote `begin_local_checkout` freezes. Every money field is ApexMail's
+/// resolved quote; the buyer declaration fields are the evidence snapshot it
+/// was computed from.
+#[derive(Debug, Clone)]
+pub struct NewLocalCheckout {
+    pub tenant_id: String,
+    pub plan: String,
+    /// `monthly` or `yearly` (the checkout grammar).
+    pub interval: String,
+    pub net_minor: i64,
+    pub tax_minor: i64,
+    pub gross_minor: i64,
+    pub currency: String,
+    /// The provider adapter that will execute the session (registry name).
+    pub provider: String,
+    pub business: bool,
+    pub country: String,
+    pub vat_number: Option<String>,
+    pub reverse_charge: bool,
+    pub vat_rate: f64,
+    pub source: Option<String>,
+}
+
+const LOCAL_CHECKOUT_COLUMNS: &str = "id, tenant_id, plan, interval, net_minor, tax_minor, \
+     gross_minor, currency, status, provider, provider_checkout_id, provider_payment_id, \
+     business, country, vat_number, reverse_charge, vat_rate";
+
+/// Mint + persist the local checkout authority row. Called BEFORE the
+/// provider is asked to create the session: a new user-intended checkout
+/// always gets a NEW `checkout_id` (and therefore a new
+/// `checkout:{checkout_id}` idempotency key), while a transport retry of the
+/// same local operation reuses both.
+pub async fn begin_local_checkout(
+    pool: &PgPool,
+    checkout: NewLocalCheckout,
+) -> Result<Uuid, String> {
+    let checkout_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO payment_checkouts \
+             (id, tenant_id, plan, interval, net_minor, tax_minor, gross_minor, currency, \
+              status, provider, business, country, vat_number, reverse_charge, vat_rate, source) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'open', $9, $10, $11, $12, $13, $14, $15)",
+    )
+    .bind(checkout_id)
+    .bind(&checkout.tenant_id)
+    .bind(&checkout.plan)
+    .bind(&checkout.interval)
+    .bind(checkout.net_minor)
+    .bind(checkout.tax_minor)
+    .bind(checkout.gross_minor)
+    .bind(checkout.currency.trim().to_ascii_uppercase())
+    .bind(&checkout.provider)
+    .bind(checkout.business)
+    .bind(checkout.country.trim().to_ascii_uppercase())
+    .bind(&checkout.vat_number)
+    .bind(checkout.reverse_charge)
+    .bind(checkout.vat_rate)
+    .bind(&checkout.source)
+    .execute(pool)
+    .await
+    .map_err(|error| format!("local checkout persist failed: {error}"))?;
+    Ok(checkout_id)
+}
+
+/// Attach the provider's hosted-session id (and, when the provider reports
+/// one, the payment object id) to the local checkout row. Only the provider
+/// that owns the row may attach.
+pub async fn attach_provider_checkout(
+    pool: &PgPool,
+    checkout_id: Uuid,
+    provider: &str,
+    provider_checkout_id: &str,
+    provider_payment_id: Option<&str>,
+) -> Result<(), String> {
+    if provider_checkout_id.trim().is_empty() {
+        return Err(format!(
+            "local checkout {checkout_id} got an EMPTY provider checkout id from {provider}; \
+             refusing to attach an unusable pointer"
+        ));
+    }
+    let updated = sqlx::query(
+        "UPDATE payment_checkouts \
+         SET provider_checkout_id = $3, \
+             provider_payment_id = COALESCE($4, provider_payment_id), \
+             updated_at = NOW() \
+         WHERE id = $1 AND provider = $2 AND status = 'open'",
+    )
+    .bind(checkout_id)
+    .bind(provider)
+    .bind(provider_checkout_id.trim())
+    .bind(
+        provider_payment_id
+            .map(str::trim)
+            .filter(|value| !value.is_empty()),
+    )
+    .execute(pool)
+    .await
+    .map_err(|error| format!("local checkout provider attach failed: {error}"))?;
+    if updated.rows_affected() != 1 {
+        return Err(format!(
+            "local checkout {checkout_id} could not be attached to provider {provider} \
+             session {provider_checkout_id:?} (unknown row, wrong provider or not open)"
+        ));
+    }
+    Ok(())
+}
+
+/// Mark a checkout that the provider definitively refused as `failed` (a
+/// transport-uncertain creation stays `open`: the session may exist and a
+/// later completed fact can still resolve it).
+pub async fn mark_local_checkout_failed(pool: &PgPool, checkout_id: Uuid) -> Result<(), String> {
+    sqlx::query(
+        "UPDATE payment_checkouts SET status = 'failed', updated_at = NOW() \
+         WHERE id = $1 AND status = 'open'",
+    )
+    .bind(checkout_id)
+    .execute(pool)
+    .await
+    .map_err(|error| format!("local checkout failure stamp failed: {error}"))?;
+    Ok(())
+}
+
+/// The completed-checkout fact -> local row resolution. The fact carries the
+/// provider's hosted-session id as its only trusted pointer; the row is
+/// marked `completed` and the provider payment id recorded. Returns the
+/// FROZEN quote the activation must settle (`None` = no local checkout, e.g.
+/// a session created before migration 291 — the caller falls back to its
+/// legacy path).
+pub async fn complete_local_checkout(
+    pool: &PgPool,
+    provider: &str,
+    provider_checkout_id: &str,
+    provider_payment_id: &str,
+) -> Result<Option<LocalCheckoutQuote>, String> {
+    let payment_id = provider_payment_id.trim();
+    if provider_checkout_id.trim().is_empty() || payment_id.is_empty() {
+        return Err(
+            "a completed checkout needs both the provider checkout id and the payment id"
+                .to_string(),
+        );
+    }
+    let row = sqlx::query_as::<_, LocalCheckoutQuote>(&format!(
+        "UPDATE payment_checkouts \
+         SET status = 'completed', provider_payment_id = $3, updated_at = NOW() \
+         WHERE provider = $1 AND provider_checkout_id = $2 \
+           AND (status = 'open' OR provider_payment_id IS NULL OR provider_payment_id = $3) \
+         RETURNING {LOCAL_CHECKOUT_COLUMNS}"
+    ))
+    .bind(provider)
+    .bind(provider_checkout_id.trim())
+    .bind(payment_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| format!("local checkout completion failed: {error}"))?;
+    Ok(row)
+}
+
+/// Resolve the local checkout authority for a provider payment id — matching
+/// the recorded payment id OR the provider session id (providers whose
+/// checkout and payment ids coincide). No mutation: activation marks the row
+/// completed in the SAME transaction that grants the entitlement.
+pub async fn local_checkout_for_payment(
+    pool: &PgPool,
+    provider: &str,
+    provider_payment_id: &str,
+) -> Result<Option<LocalCheckoutQuote>, String> {
+    let payment_id = provider_payment_id.trim();
+    if payment_id.is_empty() {
+        return Ok(None);
+    }
+    sqlx::query_as::<_, LocalCheckoutQuote>(&format!(
+        "SELECT {LOCAL_CHECKOUT_COLUMNS} FROM payment_checkouts \
+         WHERE provider = $1 AND (provider_payment_id = $2 OR provider_checkout_id = $2) \
+         ORDER BY (provider_payment_id = $2) DESC, created_at DESC \
+         LIMIT 1"
+    ))
+    .bind(provider)
+    .bind(payment_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| format!("local checkout lookup failed: {error}"))
+}
+
 /// Activate a plan from a paid checkout payment.
 ///
 /// The caller has already verified the payment with the provider (the webhook
@@ -353,38 +577,143 @@ pub async fn activate_from_paid_checkout_with(
     customer_id: Option<&str>,
     mandate_id: Option<&str>,
 ) -> Result<ActivationOutcome, ActivationError> {
-    let months = interval_months(interval)
+    // ── The LOCAL checkout authority (audit item 8) ───────────────────────
+    // When ApexMail minted this checkout (`payment_checkouts`), the row froze
+    // the quote BEFORE the provider session existed: that stored quote is the
+    // ONLY authority for plan, interval, currency, net, VAT and gross. The
+    // arguments are provider-metadata facts — used ONLY as the legacy
+    // fallback when no local row exists, and when a row does exist they are
+    // cross-checked against it (never substituted for it).
+    let local_checkout =
+        local_checkout_for_payment(pool, provider.provider_name(), payment_id).await?;
+    let (plan_name, interval, currency, expected_net, vat_cents) = match &local_checkout {
+        Some(local) => {
+            if local.tenant_id != tenant_id {
+                raise_billing_incident(
+                    pool,
+                    "checkout_tenant_mismatch",
+                    "critical",
+                    Some(tenant_id),
+                    Some(payment_id.trim()),
+                    serde_json::json!({
+                        "paymentId": payment_id.trim(),
+                        "checkoutId": local.id,
+                        "checkoutTenantId": local.tenant_id,
+                        "factTenantId": tenant_id,
+                        "action": "the payment resolves to another tenant's local checkout; activation was refused",
+                    }),
+                )
+                .await;
+                return Err(format!(
+                    "checkout payment {payment_id} resolves to local checkout {} owned by \
+                     another tenant; refusing activation",
+                    local.id
+                )
+                .into());
+            }
+            if !crate::payments::engine::currencies_match(currency, &local.currency) {
+                raise_billing_incident(
+                    pool,
+                    "checkout_currency_mismatch",
+                    "critical",
+                    Some(tenant_id),
+                    Some(payment_id.trim()),
+                    serde_json::json!({
+                        "paymentId": payment_id.trim(),
+                        "checkoutId": local.id,
+                        "chargedCurrency": currency.trim(),
+                        "quotedCurrency": local.currency,
+                        "action": "the provider charged in a currency other than the locally frozen quote; activation was refused",
+                    }),
+                )
+                .await;
+                return Err(format!(
+                    "checkout payment {payment_id} charged in {currency} but the local checkout \
+                     {} froze {}; refusing to grant a mismatched entitlement",
+                    local.id, local.currency
+                )
+                .into());
+            }
+            if gross_cents != local.gross_minor {
+                raise_billing_incident(
+                    pool,
+                    "checkout_amount_mismatch",
+                    "critical",
+                    Some(tenant_id),
+                    Some(payment_id.trim()),
+                    serde_json::json!({
+                        "paymentId": payment_id.trim(),
+                        "checkoutId": local.id,
+                        "chargedMinor": gross_cents,
+                        "quotedMinor": local.gross_minor,
+                        "action": "the provider charged an amount other than the locally frozen quote; activation was refused",
+                    }),
+                )
+                .await;
+                return Err(format!(
+                    "checkout payment {payment_id} charged {gross_cents} but the local checkout \
+                     {} froze {} {}; refusing to grant a mismatched entitlement",
+                    local.id, local.gross_minor, local.currency
+                )
+                .into());
+            }
+            (
+                local.plan.clone(),
+                local.interval.clone(),
+                local.currency.clone(),
+                local.net_minor,
+                local.tax_minor,
+            )
+        }
+        None => {
+            // Legacy path (a checkout created before the local authority, or
+            // by a surface that does not mint one): re-derive the quote from
+            // the catalog for the buyer's declaration. The interval grammar is
+            // validated once after this match, for both arms.
+            let expected_net =
+                catalog_amount_cents(plan_name, interval, currency).ok_or_else(|| {
+                    format!(
+                        "plan {plan_name:?} is not self-serve billable for {interval} in {currency}"
+                    )
+                })?;
+            // V30/MON-10: the catalog amount is the NET list price. The charge
+            // must equal list + VAT for the buyer's declaration at the tax
+            // point; only a verified intra-EU reverse charge (or a non-EU
+            // sale) charges the list price itself.
+            let consumer_gross = consumer_gross_amount_cents(plan_name, interval, currency);
+            let quote = crate::tax::quote_for_tenant(
+                pool,
+                tenant_id,
+                expected_net,
+                consumer_gross,
+                Utc::now().date_naive(),
+            )
+            .await?;
+            if gross_cents != quote.gross_cents {
+                return Err(format!(
+                    "checkout payment {payment_id} charged {gross_cents} {currency} but the list \
+                     price for {plan_name} ({interval}) is {expected_net} net + {} VAT = {} \
+                     gross, refusing to grant a mismatched entitlement",
+                    quote.vat_cents, quote.gross_cents
+                )
+                .into());
+            }
+            (
+                plan_name.to_string(),
+                interval.to_string(),
+                currency.to_string(),
+                expected_net,
+                quote.vat_cents,
+            )
+        }
+    };
+    let months = interval_months(&interval)
         .ok_or_else(|| format!("unknown billing interval {interval:?}"))?;
-    let expected_net = catalog_amount_cents(plan_name, interval, currency).ok_or_else(|| {
-        format!("plan {plan_name:?} is not self-serve billable for {interval} in {currency}")
-    })?;
-    // V30/MON-10: the catalog amount is the NET list price. The charge must
-    // equal list + VAT for the buyer's declaration at the tax point; only a
-    // verified intra-EU reverse charge (or a non-EU sale) charges the list
-    // price itself.
-    let consumer_gross = consumer_gross_amount_cents(plan_name, interval, currency);
-    let quote = crate::tax::quote_for_tenant(
-        pool,
-        tenant_id,
-        expected_net,
-        consumer_gross,
-        Utc::now().date_naive(),
-    )
-    .await?;
-    if gross_cents != quote.gross_cents {
-        return Err(format!(
-            "checkout payment {payment_id} charged {gross_cents} {currency} but the list price for \
-             {plan_name} ({interval}) is {expected_net} net + {} VAT = {} gross, refusing to grant \
-             a mismatched entitlement",
-            quote.vat_cents, quote.gross_cents
-        )
-        .into());
-    }
     let (Some(customer_id), Some(mandate_id)) = (customer_id, mandate_id) else {
         // The money moved but no reusable method exists: refund and report.
         // Idempotent on the refund's idempotency key; no local state changes,
         // so it needs no tenant serialization.
-        refund_unusable_checkout_with(provider.as_ref(), pool, payment_id, gross_cents, currency)
+        refund_unusable_checkout_with(provider.as_ref(), pool, payment_id, gross_cents, &currency)
             .await?;
         return Ok(ActivationOutcome {
             invoice_id: None,
@@ -396,9 +725,10 @@ pub async fn activate_from_paid_checkout_with(
     let now = Utc::now();
     let start = now;
     let end = period_end(start, months)?;
-    let display_name = platform_catalog::plan_by_name(plan_name)
+    let display_name = platform_catalog::plan_by_name(&plan_name)
         .map(|plan| plan.display_name.to_string())
-        .unwrap_or_else(|| plan_name.to_string());
+        .unwrap_or_else(|| plan_name.clone());
+    let local_checkout_id = local_checkout.as_ref().map(|local| local.id);
 
     // The locked closure owns its inputs (PgPool is an Arc clone; the small
     // strings are cheap) so the boxed future borrows only the connection and
@@ -406,9 +736,6 @@ pub async fn activate_from_paid_checkout_with(
     let inner_pool = pool.clone();
     let payment_id = payment_id.to_string();
     let tenant_id = tenant_id.to_string();
-    let plan_name = plan_name.to_string();
-    let interval = interval.to_string();
-    let currency = currency.to_string();
     let customer_id = customer_id.to_string();
     let mandate_id = mandate_id.to_string();
     run_under_tenant_billing_lock(
@@ -427,17 +754,71 @@ pub async fn activate_from_paid_checkout_with(
                     &interval,
                     &currency,
                     expected_net,
-                    quote.vat_cents,
+                    vat_cents,
                     gross_cents,
                     &customer_id,
                     &mandate_id,
                     start,
                     end,
                     display_name,
+                    local_checkout_id,
                 )
                 .await
             })
         },
+    )
+    .await
+}
+
+/// The completed-checkout fact's entry point (audit item 8): resolve the
+/// provider's hosted-session id to the LOCAL checkout row, mark it completed
+/// with the provider payment id, then run the activation — which settles the
+/// FROZEN quote the row carries (plan, interval, currency, net, VAT, gross)
+/// rather than any provider metadata business field.
+///
+/// A fact with no local row (a session created before migration 291, or by a
+/// surface that does not mint one) falls through to the legacy activation
+/// unchanged; the caller is never told a legacy fact was "completed" locally.
+#[allow(clippy::too_many_arguments)]
+pub async fn activate_from_completed_checkout(
+    pool: &PgPool,
+    provider: std::sync::Arc<dyn PaymentProvider>,
+    provider_checkout_id: &str,
+    payment_id: &str,
+    tenant_id: &str,
+    plan_name: &str,
+    interval: &str,
+    currency: &str,
+    gross_cents: i64,
+    customer_id: Option<&str>,
+    mandate_id: Option<&str>,
+) -> Result<ActivationOutcome, ActivationError> {
+    let completed = complete_local_checkout(
+        pool,
+        provider.provider_name(),
+        provider_checkout_id,
+        payment_id,
+    )
+    .await?;
+    if completed.is_none() {
+        tracing::warn!(
+            provider = %provider.provider_name(),
+            provider_checkout_id = %provider_checkout_id,
+            payment_id = %payment_id,
+            "a completed checkout has no local authority row; the legacy activation path applies"
+        );
+    }
+    activate_from_paid_checkout_with(
+        pool,
+        provider,
+        payment_id,
+        tenant_id,
+        plan_name,
+        interval,
+        currency,
+        gross_cents,
+        customer_id,
+        mandate_id,
     )
     .await
 }
@@ -460,6 +841,7 @@ async fn activate_locked(
     start: DateTime<Utc>,
     end: DateTime<Utc>,
     display_name: String,
+    local_checkout_id: Option<Uuid>,
 ) -> Result<ActivationOutcome, ActivationError> {
     // The provider's name keys the neutral settlement vocabulary (operation
     // id, allocation provider dimension) and the credentials write. The
@@ -577,10 +959,11 @@ async fn activate_locked(
         INSERT INTO subscription_state (
             id, tenant_id, provider_contract_id, plan, status, billing_interval,
             billing_cycle_start, billing_cycle_end, provider_customer_id, provider_method_id,
-            provider_sequence_type, cancel_at_period_end, canceled_at, created_at, updated_at
+            provider_sequence_type, billing_currency, cancel_at_period_end, canceled_at,
+            created_at, updated_at
         ) VALUES (
             gen_random_uuid(), $1, $2, $3, 'active', $4,
-            $5, $6, $7, $8, 'recurring', false, NULL, NOW(), NOW()
+            $5, $6, $7, $8, 'recurring', $9, false, NULL, NOW(), NOW()
         )
         ON CONFLICT (tenant_id) WHERE status = 'active' DO UPDATE SET
             provider_contract_id = EXCLUDED.provider_contract_id,
@@ -591,6 +974,11 @@ async fn activate_locked(
             provider_customer_id = EXCLUDED.provider_customer_id,
             provider_method_id = EXCLUDED.provider_method_id,
             provider_sequence_type = EXCLUDED.provider_sequence_type,
+            -- An activated checkout is the EXPLICIT billing transition
+            -- (audit item 11): the currency the customer was quoted and paid
+            -- becomes the subscription's billing currency. Renewals read
+            -- this column and never re-derive it from invoice history.
+            billing_currency = EXCLUDED.billing_currency,
             renewal_attempts = 0,
             renewal_locked_at = NULL,
             cancel_at_period_end = false,
@@ -606,6 +994,7 @@ async fn activate_locked(
         .bind(end)
         .bind(customer_id)
         .bind(mandate_id)
+        .bind(currency.trim().to_ascii_uppercase())
         .execute(&mut *tx)
         .await
         .map_err(|error| format!("subscription upsert failed: {error}"))?;
@@ -702,6 +1091,25 @@ async fn activate_locked(
         crate::accounting_postings::post_invoice_issued_in(&mut tx, invoice.id).await;
         crate::accounting_postings::post_payment_allocation_in(&mut tx, &operation_id).await;
 
+        // The local checkout authority is COMPLETED in the SAME transaction
+        // that grants the entitlement (audit item 8): the row flips from
+        // `open` to `completed` and records the provider payment id, so a
+        // later replay resolves it by payment id and the quote can never be
+        // reused for a second activation.
+        if let Some(checkout_id) = local_checkout_id {
+            sqlx::query(
+                "UPDATE payment_checkouts \
+                 SET status = 'completed', provider_payment_id = $2, updated_at = NOW() \
+                 WHERE id = $1 AND tenant_id = $3 AND status IN ('open', 'completed')",
+            )
+            .bind(checkout_id)
+            .bind(payment_id.trim())
+            .bind(tenant_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| format!("payment checkout completion failed: {error}"))?;
+        }
+
         append_audit_log(
             &mut tx,
             tenant_id,
@@ -710,6 +1118,7 @@ async fn activate_locked(
             Some(&local_subscription_id),
             serde_json::json!({
                 "paymentId": payment_id,
+                "checkoutId": local_checkout_id,
                 "plan": plan_name,
                 "interval": interval,
                 "grossCents": gross_cents,
@@ -985,17 +1394,18 @@ async fn renew_subscription_locked(
         Option<DateTime<Utc>>,
         bool,
         i32,
+        String,
     );
     // Re-read under the row lock: the cancel flag may have flipped since the
     // due-set snapshot, and only one writer may advance the cycle.
-    let Some((row_id, plan, interval, cycle_end, cancel_at_period_end, attempts_i32)) =
+    let Some((row_id, plan, interval, cycle_end, cancel_at_period_end, attempts_i32, currency)) =
         sqlx::query_as::<_, DueRow>(
             "SELECT id, plan, billing_interval, billing_cycle_end, cancel_at_period_end, \
-                    renewal_attempts \
-             FROM subscription_state \
-             WHERE tenant_id = $1 AND status = 'active' \
-             ORDER BY created_at DESC LIMIT 1 \
-             FOR UPDATE",
+                renewal_attempts, billing_currency \
+         FROM subscription_state \
+         WHERE tenant_id = $1 AND status = 'active' \
+         ORDER BY created_at DESC LIMIT 1 \
+         FOR UPDATE",
         )
         .bind(tenant_id)
         .fetch_optional(&mut *conn)
@@ -1038,18 +1448,13 @@ async fn renew_subscription_locked(
         .map(|p| p.display_name.to_string())
         .unwrap_or_else(|| plan.clone());
 
-    // The tenant's billing currency is the currency it is actually being
-    // invoiced in (the most recent invoice wins); EUR is the catalog
-    // default.
-    let currency: String = sqlx::query_scalar(
-        "SELECT currency FROM invoices WHERE tenant_id = $1 \
-         ORDER BY created_at DESC LIMIT 1",
-    )
-    .bind(tenant_id)
-    .fetch_optional(&mut *conn)
-    .await
-    .map_err(|error| format!("renewal currency lookup failed: {error}"))?
-    .unwrap_or_else(|| "EUR".to_string());
+    // V30/MON-10 + audit item 11: the subscription's billing currency is
+    // LOCAL authoritative state (migration 292), read from the subscription
+    // row itself — NEVER inferred from the tenant's invoice history. An
+    // unrelated USD support invoice must not re-denominate an EUR
+    // subscription. The column is frozen at activation and changes only
+    // through an explicit billing transition (today: a new checkout
+    // activation); there is deliberately no inference path.
     let Some(net_cents) = catalog_amount_cents(&plan, &interval, &currency) else {
         raise_billing_incident(
             pool,
@@ -1194,15 +1599,23 @@ async fn renew_subscription_locked(
     };
     let obligation_ref = format!("invoice:{invoice_id}");
 
-    // The charging credential comes from the NEUTRAL credentials ledger.
-    // Without one there is nothing to charge: raise the incident and stamp
-    // the cooldown — no attempt is claimed, so no provider call happens.
+    // The charging credential comes from the NEUTRAL credentials ledger and
+    // is PROVIDER-SCOPED (audit item 7): the row must belong to the
+    // configured adapter that will execute the charge. Without the provider
+    // predicate a Stripe adapter could be handed a Mollie method id during
+    // provider coexistence — the charge would be refused or, worse, the
+    // wrong processor's credential would be probed. Tenant + provider +
+    // active + not revoked is the whole predicate.
+    // Without a credential there is nothing to charge: raise the incident
+    // and stamp the cooldown — no attempt is claimed, so no provider call
+    // happens.
     let Some((customer_id, method_id)) = sqlx::query_as::<_, (String, String)>(
         "SELECT provider_customer_id, provider_method_id FROM payment_credentials \
-         WHERE tenant_id = $1 AND state = 'active' AND revoked_at IS NULL \
-         ORDER BY created_at DESC LIMIT 1",
+         WHERE tenant_id = $1 AND provider = $2 AND state = 'active' AND revoked_at IS NULL \
+         ORDER BY created_at DESC, provider_method_id DESC LIMIT 1",
     )
     .bind(tenant_id)
+    .bind(provider.provider_name())
     .fetch_optional(pool)
     .await
     .map_err(|error| format!("renewal credential lookup failed: {error}"))?
@@ -1294,15 +1707,14 @@ async fn renew_subscription_locked(
                 crate::payments::PaymentState::Succeeded => {
                     settle_renewal_and_advance(
                         pool,
-                        provider.provider_name(),
+                        provider,
                         tenant_id,
                         &plan,
                         &interval,
                         row_id,
                         invoice_id,
-                        &payment.provider_payment_id,
+                        &payment,
                         gross_cents,
-                        &currency,
                         attempt_no,
                         now,
                     )
@@ -1378,30 +1790,104 @@ async fn renew_subscription_locked(
     }
 }
 
+/// The provider's AUTHORITATIVE success fact for a renewal charge.
+///
+/// Audit item 4: the settlement fact must never be built from ApexMail's
+/// expected gross/currency. Some adapters answer a charge with a request echo
+/// and the neutral [`Payment`] represents an unknown amount/currency as the
+/// sentinels `0` / empty (the struct carries `i64`/`String`, not options). A
+/// success object that lacks authoritative money facts is therefore
+/// RE-FETCHED with provider authentication; if the refetch still lacks them,
+/// nothing is inferred and the caller refuses to settle (`Err`, raised as a
+/// finance incident).
+async fn authoritative_success_payment(
+    provider: &dyn PaymentProvider,
+    payment: &Payment,
+) -> Result<Payment, String> {
+    let authoritative =
+        |candidate: &Payment| candidate.amount_minor > 0 && !candidate.currency.trim().is_empty();
+    if authoritative(payment) {
+        return Ok(payment.clone());
+    }
+    let fetched = provider
+        .fetch_payment_object(&payment.provider_payment_id)
+        .await
+        .map_err(|error| {
+            format!(
+                "the provider payment {} came back successful without an authoritative \
+                 amount/currency and the authenticated refetch failed: {error}",
+                payment.provider_payment_id
+            )
+        })?;
+    if authoritative(&fetched) {
+        return Ok(fetched);
+    }
+    Err(format!(
+        "the provider payment {} carries no authoritative amount/currency (amount {}, \
+         currency {:?}) even after an authenticated refetch; refusing to infer either",
+        fetched.provider_payment_id, fetched.amount_minor, fetched.currency
+    ))
+}
+
 /// Settle a SUCCESSFUL renewal charge through the engine's
 /// observe -> verify -> settle core, then advance the local period.
+///
+/// The settlement fact is the PROVIDER's payment object, verbatim (audit item
+/// 4): its payment id, state, amount and currency are what the exact-amount
+/// verifier compares against the local obligation. A charge that differs from
+/// the invoice is an `AmountMismatch` reconciliation incident — nothing is
+/// settled and no period advances.
+///
 /// The advance happens ONLY after the obligation is actually paid.
 #[allow(clippy::too_many_arguments)]
 async fn settle_renewal_and_advance(
     pool: &PgPool,
-    provider_name: &str,
+    provider: &dyn PaymentProvider,
     tenant_id: &str,
     plan: &str,
     interval: &str,
     row_id: Uuid,
     invoice_id: Uuid,
-    provider_payment_id: &str,
+    charge: &Payment,
     gross_cents: i64,
-    currency: &str,
     attempt_no: i64,
     now: DateTime<Utc>,
 ) -> Result<bool, String> {
+    let payment = match authoritative_success_payment(provider, charge).await {
+        Ok(payment) => payment,
+        Err(error) => {
+            tracing::error!(
+                tenant_id = %tenant_id,
+                invoice_id = %invoice_id,
+                payment_id = %charge.provider_payment_id,
+                error = %error,
+                "RECONCILIATION INCIDENT: the renewal charge has no usable provider fact; \
+                 no settlement, the attempt stays open for manual reconciliation"
+            );
+            raise_billing_incident(
+                pool,
+                "renewal_payment_fact_unusable",
+                "critical",
+                Some(tenant_id),
+                Some(charge.provider_payment_id.trim()),
+                serde_json::json!({
+                    "tenantId": tenant_id,
+                    "invoiceId": invoice_id,
+                    "paymentId": charge.provider_payment_id.trim(),
+                    "error": error,
+                    "action": "the provider succeeded without an authoritative amount/currency; nothing was settled, reconcile manually",
+                }),
+            )
+            .await;
+            return Ok(false);
+        }
+    };
     let observed = crate::payments::engine::ObservedPayment {
-        provider: provider_name.to_string(),
-        provider_payment_id: provider_payment_id.to_string(),
-        state: crate::payments::PaymentState::Succeeded,
-        amount_minor: Some(gross_cents),
-        currency: Some(currency.to_string()),
+        provider: provider.provider_name().to_string(),
+        provider_payment_id: payment.provider_payment_id.clone(),
+        state: payment.state,
+        amount_minor: Some(payment.amount_minor),
+        currency: Some(payment.currency.clone()),
         tenant_id: Some(tenant_id.to_string()),
         obligation_ref: Some(format!("invoice:{invoice_id}")),
         purpose: "renewal",
@@ -1409,9 +1895,10 @@ async fn settle_renewal_and_advance(
     crate::payments::engine::observe_payment(pool, &observed).await?;
     match crate::payments::engine::verify_against_obligation(pool, &observed).await {
         Ok(verified) => {
-            let settled = crate::payments::engine::settle_verified(pool, provider_name, &verified)
-                .await
-                .map_err(|error| format!("renewal settlement failed: {error}"))?;
+            let settled =
+                crate::payments::engine::settle_verified(pool, provider.provider_name(), &verified)
+                    .await
+                    .map_err(|error| format!("renewal settlement failed: {error}"))?;
             let paid: bool =
                 sqlx::query_scalar("SELECT status::text = 'paid' FROM invoices WHERE id = $1")
                     .bind(invoice_id)

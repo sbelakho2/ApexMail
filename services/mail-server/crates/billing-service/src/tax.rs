@@ -265,8 +265,16 @@ pub async fn load_tenant_tax_subject(
 /// The quote itself always re-reads the persisted evidence, so an expired,
 /// invalid or missing row already fails closed to VAT. The live consultation
 /// here keeps the evidence fresh at each renewal; a VIES outage or transport
-/// failure is logged and leaves the previous evidence in place (and if that
-/// is not valid, VAT is charged).
+/// failure is logged and leaves the previous evidence in place.
+///
+/// FRESHNESS POLICY (30 Oct re-audit #22, formalized): persisted evidence
+/// earns reverse charge only inside the documented grace bound
+/// (`VAT_EVIDENCE_MAX_AGE_DAYS` in billing-common — 90 days) AND before any
+/// explicit `valid_until`. `valid_until = NULL` means "no explicit
+/// invalidation", never "valid forever". So a prolonged VIES outage runs the
+/// last-known-valid answer out of the grace period and the quote then charges
+/// VAT — the conservative policy the research memo documents. There is no
+/// configuration switch that extends validity indefinitely.
 pub async fn revalidate_for_tenant(
     pool: &PgPool,
     tenant_id: &str,
@@ -387,7 +395,9 @@ mod tests {
             country: country.to_string(),
             source: VatValidationSource::Vies,
             outcome: VatValidationOutcome::Valid,
-            valid_from: NaiveDate::from_ymd_opt(2026, 1, 1).expect("date"),
+            // Inside the formal freshness bound at `at` (30 Oct re-audit #22:
+            // NULL valid_until is a bounded grace period, not "valid forever").
+            valid_from: NaiveDate::from_ymd_opt(2026, 9, 1).expect("date"),
             valid_until: None,
             outage_state: None,
         };

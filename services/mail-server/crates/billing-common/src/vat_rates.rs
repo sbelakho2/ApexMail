@@ -605,7 +605,31 @@ impl VatValidationEvidence {
             && countries_match(country, &self.country)
             && at >= self.valid_from
             && self.valid_until.is_none_or(|until| at <= until)
+            // Bounded last-known-valid grace: NULL valid_until is not
+            // "valid forever" (30 Oct re-audit #22).
+            && evidence_within_freshness_bound(self.valid_from, at)
     }
+}
+
+/// Formal freshness bound for reverse-charge evidence (the policy the 30 Oct
+/// re-audit asked to be explicit, per this module's own research memo):
+///
+/// * A VIES consultation is authoritative until it ages out of this bound.
+/// * `valid_until = NULL` means "no explicit invalidation" — it never means
+///   "valid forever": the age bound below still applies.
+/// * If a renewal's revalidation hits a VIES outage, the last-known-valid
+///   answer is a BOUNDED grace period of this many days; past it the supply
+///   is charged VAT (the conservative policy). The memo's rule "no current
+///   evidence ⇒ VAT charged" is therefore implemented as "evidence older than
+///   the grace bound ⇒ VAT charged".
+///
+/// 90 days is deliberately shorter than a quarterly OSS cycle and roughly
+/// matches the cadence at which member states re-check registration data.
+pub const VAT_EVIDENCE_MAX_AGE_DAYS: i64 = 90;
+
+/// Whether the evidence is still within the formal freshness bound at `at`.
+fn evidence_within_freshness_bound(valid_from: NaiveDate, at: NaiveDate) -> bool {
+    at.signed_duration_since(valid_from).num_days() <= VAT_EVIDENCE_MAX_AGE_DAYS
 }
 
 /// Normalise a VAT number for comparison: uppercase, no internal whitespace.
@@ -1125,7 +1149,8 @@ mod tests {
         assert_eq!(rate, 19.0, "reverse charge requires authoritative evidence");
         assert_eq!(amount, 190);
 
-        // With valid VIES evidence the same sale is reverse-charged.
+        // With valid VIES evidence (inside the 90-day grace bound) the same
+        // sale is reverse-charged.
         let evidence = valid_vies_evidence("DE123456789", "DE", d(2026, 1, 1), None);
         let (rate, amount) = calculate_vat_with_evidence(
             subtotal,
@@ -1243,14 +1268,16 @@ mod tests {
     #[test]
     fn calculate_vat_valid_vies_evidence_authorises_reverse_charge() {
         let at = d(2026, 6, 15);
-        let evidence = valid_vies_evidence("DE123456789", "DE", d(2026, 1, 10), None);
+        // Evidence inside the formal 90-day grace bound (30 Oct re-audit
+        // #22: NULL valid_until is not "valid forever").
+        let evidence = valid_vies_evidence("DE123456789", "DE", d(2026, 6, 1), None);
         let (rate, amount) =
             calculate_vat_with_evidence(10_000, "DE", Some("DE123456789"), Some(&evidence), at);
         assert_eq!(rate, 0.0);
         assert_eq!(amount, 0);
 
         // A Greek number verified under EL is accepted for country GR.
-        let evidence = valid_vies_evidence("EL123456789", "EL", d(2026, 1, 10), None);
+        let evidence = valid_vies_evidence("EL123456789", "EL", d(2026, 6, 1), None);
         let (rate, _) =
             calculate_vat_with_evidence(10_000, "GR", Some("EL123456789"), Some(&evidence), at);
         assert_eq!(rate, 0.0);
@@ -1390,7 +1417,7 @@ mod tests {
     #[test]
     fn reverse_charge_authorised_rejects_non_eu_and_local() {
         let at = d(2026, 6, 15);
-        let evidence = valid_vies_evidence("DE123456789", "DE", d(2026, 1, 1), None);
+        let evidence = valid_vies_evidence("DE123456789", "DE", d(2026, 6, 1), None);
         assert!(!reverse_charge_authorised(
             "US",
             "DE123456789",
@@ -1558,8 +1585,10 @@ mod tests {
         assert_eq!(estonian.vat_cents, 2_400);
         assert_eq!(estonian.gross_cents, 12_400);
         assert!(!estonian.reverse_charge);
-        // German business with VIES evidence: €100 charged, 0 VAT.
-        let evidence = valid_vies_evidence("DE123456789", "DE", d(2026, 1, 1), None);
+        // German business with VIES evidence inside the grace bound: €100
+        // charged, 0 VAT. (January evidence against an October tax point is
+        // now correctly STALE — see the freshness-policy test.)
+        let evidence = valid_vies_evidence("DE123456789", "DE", d(2026, 10, 1), None);
         let german = quote_list_price(10_000, "DE", true, Some("DE123456789"), Some(&evidence), at);
         assert_eq!(german.net_cents, 10_000);
         assert_eq!(german.vat_cents, 0);
@@ -1649,7 +1678,7 @@ mod tests {
             (2_000, 400, 2_400)
         );
         // A business is NEVER put on the consumer gross card.
-        let evidence = valid_vies_evidence("DE123456789", "DE", d(2026, 1, 1), None);
+        let evidence = valid_vies_evidence("DE123456789", "DE", d(2026, 9, 1), None);
         let business = quote_purchase(
             2_000,
             Some(2_480),
@@ -1664,6 +1693,66 @@ mod tests {
             (2_000, 0, 2_000),
             "a verified business pays net under reverse charge"
         );
+    }
+
+    // 30 Oct re-audit #22: the VAT evidence freshness policy, proved at the
+    // boundaries. `valid_until = NULL` means "no explicit invalidation" —
+    // never "valid forever".
+    #[test]
+    fn vat_evidence_freshness_is_a_formal_bounded_grace_period() {
+        let at = d(2026, 10, 29);
+
+        // Exactly at the bound: reverse charge still holds.
+        let at_bound = valid_vies_evidence(
+            "DE123456789",
+            "DE",
+            at - chrono::Duration::days(VAT_EVIDENCE_MAX_AGE_DAYS),
+            None,
+        );
+        let (rate, _) =
+            calculate_vat_with_evidence(10_000, "DE", Some("DE123456789"), Some(&at_bound), at);
+        assert_eq!(
+            rate, 0.0,
+            "the last day of the grace period still reverse-charges"
+        );
+
+        // One day past the bound: the supply is charged VAT.
+        let past_bound = valid_vies_evidence(
+            "DE123456789",
+            "DE",
+            at - chrono::Duration::days(VAT_EVIDENCE_MAX_AGE_DAYS + 1),
+            None,
+        );
+        let (rate, amount) =
+            calculate_vat_with_evidence(10_000, "DE", Some("DE123456789"), Some(&past_bound), at);
+        assert_eq!(rate, 19.0, "NULL valid_until must not mean valid forever");
+        assert_eq!(amount, 1_900);
+
+        // Outage + fresh last-known-valid evidence: the bounded grace holds.
+        let mut outage = at_bound.clone();
+        outage.outcome = VatValidationOutcome::Outage;
+        outage.outage_state = Some("MS_UNAVAILABLE".into());
+        assert!(!reverse_charge_authorised(
+            "DE",
+            "DE123456789",
+            Some(&outage),
+            at
+        ));
+
+        // A VIES outage answer itself never authorises (the outage_state
+        // guard); the grace only applies to the last POSITIVE answer that is
+        // still inside the bound.
+        let mut valid_but_stale = past_bound.clone();
+        valid_but_stale.outcome = VatValidationOutcome::Outage;
+        valid_but_stale.outage_state = Some("MS_UNAVAILABLE".into());
+        let (rate, _) = calculate_vat_with_evidence(
+            10_000,
+            "DE",
+            Some("DE123456789"),
+            Some(&valid_but_stale),
+            at,
+        );
+        assert_eq!(rate, 19.0, "outage + stale evidence charges VAT");
     }
 
     #[test]

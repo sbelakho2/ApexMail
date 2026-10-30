@@ -66,6 +66,41 @@ GENERATED_REGISTER_SURFACES = [
 ]
 
 
+def env_selectors(root: Path = ROOT) -> dict[str, str]:
+    """The two processor selectors as configured in the production example
+    under `root`, lowercased, empty when unset."""
+    values: dict[str, str] = {}
+    example = root / ENV_EXAMPLE.relative_to(ROOT)
+    if example.is_file():
+        for raw in example.read_text(encoding="utf-8").splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            values[key.strip()] = value.split(" #", 1)[0].strip().strip('"').strip("'")
+    return {key: values.get(key, "").strip().lower()
+            for key in ("PAYMENTS_PROVIDER", "PAYMENT_PROCESSOR_PUBLIC")}
+
+
+def check_selector_agreement(root: Path = ROOT) -> list[str]:
+    """The ADAPTER provider and the PUBLIC register processor must be the
+    same choice, switched together (30 Oct re-audit #23: a deployment with
+    PAYMENTS_PROVIDER=stripe while the published privacy/subprocessor pages
+    name Mollie is a release-management defect — deployment truth and legal
+    truth disagree). Switching therefore requires setting BOTH variables and
+    re-running tools/generate_subprocessors.py."""
+    selectors = env_selectors(root)
+    adapter = selectors["PAYMENTS_PROVIDER"]
+    public = selectors["PAYMENT_PROCESSOR_PUBLIC"]
+    if adapter and public and adapter != public:
+        return [
+            f"PAYMENTS_PROVIDER={adapter!r} but PAYMENT_PROCESSOR_PUBLIC={public!r}: the "
+            "adapter and the public processor must be switched together — set both, run "
+            "tools/generate_subprocessors.py, and re-run this gate"
+        ]
+    return []
+
+
 def configured_processor() -> str:
     """The processor the public register names (PAYMENT_PROCESSOR_PUBLIC,
     else PAYMENTS_PROVIDER, else mollie)."""
@@ -377,6 +412,11 @@ def run(check_root: Path) -> int:
                     f"processor-facts: {path.relative_to(check_root)}: {violation}",
                     file=sys.stderr,
                 )
+    agreement_violations = check_selector_agreement(check_root)
+    if agreement_violations:
+        failures += len(agreement_violations)
+        for violation in agreement_violations:
+            print(f"processor-facts: {violation}", file=sys.stderr)
     register_violations = check_configured_register(check_root)
     if register_violations:
         failures += len(register_violations)
@@ -416,10 +456,10 @@ def self_test() -> int:
         )
         # 1. The corrected tree passes.
         if run(copy) != 0:
-            print("self-test 1/5: FAIL — corrected tree rejected", file=sys.stderr)
+            print("self-test 1/6: FAIL — corrected tree rejected", file=sys.stderr)
             failures += 1
         else:
-            print("self-test 1/5: corrected tree accepted")
+            print("self-test 1/6: corrected tree accepted")
 
         # 2. Reintroduce an old-processor row.
         regressed = copy / "apps/marketing-zola/content/dpa/index.de.md"
@@ -428,10 +468,10 @@ def self_test() -> int:
             text.replace("Mollie B.V.", f"{FORMER_PROCESSOR.title()} N.V.", 1), encoding="utf-8"
         )
         if run(copy) == 0:
-            print("self-test 2/5: FAIL — an old-processor row was accepted", file=sys.stderr)
+            print("self-test 2/6: FAIL — an old-processor row was accepted", file=sys.stderr)
             failures += 1
         else:
-            print("self-test 2/5: old-processor row rejected")
+            print("self-test 2/6: old-processor row rejected")
         regressed.write_text(text, encoding="utf-8")
 
         # 3. A missing EU fact is rejected too.
@@ -439,10 +479,10 @@ def self_test() -> int:
         stripped_text = stripped.read_text(encoding="utf-8")
         stripped.write_text(stripped_text.replace("Países Bajos", "otro lugar"), encoding="utf-8")
         if run(copy) == 0:
-            print("self-test 3/5: FAIL — a missing EU fact was accepted", file=sys.stderr)
+            print("self-test 3/6: FAIL — a missing EU fact was accepted", file=sys.stderr)
             failures += 1
         else:
-            print("self-test 3/5: missing EU fact rejected")
+            print("self-test 3/6: missing EU fact rejected")
         stripped.write_text(stripped_text, encoding="utf-8")
 
         # 4. A stale registered office is rejected.
@@ -453,11 +493,30 @@ def self_test() -> int:
             encoding="utf-8",
         )
         if run(copy) == 0:
-            print("self-test 4/5: FAIL — a stale registered office was accepted", file=sys.stderr)
+            print("self-test 4/6: FAIL — a stale registered office was accepted", file=sys.stderr)
             failures += 1
         else:
-            print("self-test 4/5: stale registered office rejected")
+            print("self-test 4/6: stale registered office rejected")
         stale.write_text(stale_text, encoding="utf-8")
+
+        # 6. Switched-together selectors: a partial switch (adapter changed,
+        #    public register not) must be rejected (30 Oct audit #23).
+        env_example = copy / ".env.production.example"
+        env_text = env_example.read_text(encoding="utf-8")
+        env_example.write_text(
+            env_text.replace("PAYMENTS_PROVIDER=mollie", "PAYMENTS_PROVIDER=stripe"),
+            encoding="utf-8",
+        )
+        if run(copy) == 0:
+            print(
+                "self-test 6/6: FAIL — a partial processor switch (adapter stripe, public "
+                "mollie) was accepted",
+                file=sys.stderr,
+            )
+            failures += 1
+        else:
+            print("self-test 6/6: partial processor switch rejected")
+        env_example.write_text(env_text, encoding="utf-8")
 
         # 5. The supervisor fact is required on full-fact surfaces.
         no_dnb = copy / "templates/compliance/trust-center.md"
@@ -467,10 +526,10 @@ def self_test() -> int:
             encoding="utf-8",
         )
         if run(copy) == 0:
-            print("self-test 5/5: FAIL — a missing supervisor fact was accepted", file=sys.stderr)
+            print("self-test 5/6: FAIL — a missing supervisor fact was accepted", file=sys.stderr)
             failures += 1
         else:
-            print("self-test 5/5: missing supervisor fact rejected")
+            print("self-test 5/6: missing supervisor fact rejected")
 
     return 1 if failures else 0
 

@@ -5333,6 +5333,14 @@ mod tests {
             )
             .await
             .expect("ensure arms");
+        // This test is about arm persistence, not the S3 holdout: a random
+        // 5% holdout draw would suppress the selection and leave the step
+        // without a variant. The holdout lifecycle has its own tests.
+        sqlx::query("UPDATE sales_experiments SET holdout_share = 0 WHERE id = $1")
+            .bind(experiment_id)
+            .execute(&fx.db)
+            .await
+            .expect("disable the holdout for this fixture");
 
         let selection =
             select_and_persist_variant(&fx.db, &fx.tenant, fx.step_execution, "outreach-angle")

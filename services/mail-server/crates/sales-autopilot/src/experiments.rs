@@ -166,6 +166,17 @@ pub const MAX_HOLDOUT_SHARE: f64 = 0.5;
 /// probability (the S4 propensity). Logged with every decision.
 pub const PROPENSITY_DRAWS: usize = 2_000;
 
+/// Documented lower bound for a logged propensity estimate.
+///
+/// The estimator is a finite Monte-Carlo mean: a rare-but-selectable arm can
+/// win 0 of `PROPENSITY_DRAWS` draws, so the RAW estimate is 0 although the
+/// true selection probability is strictly positive. Logging that exact zero
+/// makes IPS/SNIPS divide by zero (or drop the row), so the logged
+/// propensity is bounded below by this epsilon whenever the arm is
+/// selectable. The raw win count is recorded separately, together with an
+/// `under_sampled` flag, so the bound is visible rather than hidden.
+pub const PROPENSITY_FLOOR_EPSILON: f64 = 0.0001;
+
 /// Maximum length of the sanitized context bucket key.
 pub const MAX_CONTEXT_KEY_LEN: usize = 200;
 
@@ -613,15 +624,58 @@ pub fn best_arm_index(arms: &[ArmPosterior]) -> Option<usize> {
         .map(|(index, _)| index)
 }
 
+/// One arm's Monte-Carlo propensity estimate, with the uncertainty
+/// diagnostics the S4 log records.
+///
+/// `wins` is the effective sample size of the estimate (how many of the
+/// `draws` Bernoulli trials the arm won); `standard_error` is
+/// `sqrt(p(1-p)/draws)` computed from the BOUNDED probability, so a 0-win
+/// arm never advertises zero uncertainty. `raw_probability = wins / draws`
+/// exposes the un-bounded estimate; `probability` is what gets logged and is
+/// never below [`PROPENSITY_FLOOR_EPSILON`] for a selectable arm.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PropensityEstimate {
+    pub variant: String,
+    pub wins: u64,
+    pub draws: u64,
+    pub raw_probability: f64,
+    pub probability: f64,
+    pub standard_error: f64,
+    /// TRUE when `wins == 0`: the raw estimate is a false exact zero.
+    pub under_sampled: bool,
+}
+
+/// Build the bounded estimate from a win count. `draws` must be positive
+/// (the public estimator clamps it); a zero-win arm is floored at
+/// [`PROPENSITY_FLOOR_EPSILON`] and flagged `under_sampled`.
+fn propensity_estimate(variant: &str, wins: u64, draws: u64) -> PropensityEstimate {
+    debug_assert!(draws > 0, "propensity estimates need at least one draw");
+    let draws = draws.max(1);
+    let wins = wins.min(draws);
+    let raw_probability = wins as f64 / draws as f64;
+    let probability = raw_probability.clamp(PROPENSITY_FLOOR_EPSILON, 1.0);
+    PropensityEstimate {
+        variant: variant.to_string(),
+        wins,
+        draws,
+        raw_probability,
+        probability,
+        standard_error: (probability * (1.0 - probability) / draws as f64).sqrt(),
+        under_sampled: wins == 0,
+    }
+}
+
 /// Monte-Carlo selection probabilities over a set of posteriors, re-using the
-/// single Beta sampler. Each sample is multiplied by the arm's value
-/// multiplier: the sampler explores probability of success, revenue only
-/// ranks the outcome (S1.5). This is the estimator the S4 propensity log
-/// records; deterministic given the OS RNG, tests use wide tolerances.
-pub fn selection_win_probabilities(
+/// single Beta sampler, WITH the per-arm uncertainty diagnostics.
+///
+/// Each sample is multiplied by the arm's value multiplier: the sampler
+/// explores probability of success, revenue only ranks the outcome (S1.5).
+/// This is the estimator the S4 propensity log records; deterministic given
+/// the OS RNG, tests use wide tolerances.
+pub fn selection_propensity_estimates(
     arms: &[ArmPosterior],
     draws: usize,
-) -> Result<Vec<f64>, SalesError> {
+) -> Result<Vec<PropensityEstimate>, SalesError> {
     if arms.is_empty() {
         return Ok(Vec::new());
     }
@@ -650,9 +704,23 @@ pub fn selection_win_probabilities(
         }
         wins[best] += 1;
     }
-    Ok(wins
+    Ok(arms
         .iter()
-        .map(|wins| *wins as f64 / draws as f64)
+        .zip(wins.iter())
+        .map(|(arm, wins)| propensity_estimate(&arm.variant, *wins, draws as u64))
+        .collect())
+}
+
+/// The logged selection probabilities only. Kept as the simple projection;
+/// callers that need the diagnostics use
+/// [`selection_propensity_estimates`].
+pub fn selection_win_probabilities(
+    arms: &[ArmPosterior],
+    draws: usize,
+) -> Result<Vec<f64>, SalesError> {
+    Ok(selection_propensity_estimates(arms, draws)?
+        .into_iter()
+        .map(|estimate| estimate.probability)
         .collect())
 }
 
@@ -1315,7 +1383,10 @@ pub struct Experiment {
     pub planned_sample: Option<i64>,
     pub started_at: Option<DateTime<Utc>>,
     pub ended_at: Option<DateTime<Utc>>,
-    /// S5 documented sequential method (`msprt`).
+    /// S5 documented sequential method label. The implementation is an
+    /// APPROXIMATE normal sequential diagnostic
+    /// (`approximate_normal_sequential_diagnostic`): NOT anytime-valid, NOT
+    /// an mSPRT and NOT a promotion warrant.
     pub sequential_method: String,
     /// S3 per-segment randomized holdout share, `0.0..=0.5`.
     pub holdout_share: f64,
@@ -1331,15 +1402,86 @@ pub struct VariantContext {
     pub explicit_exploration_override: bool,
     /// Account being decided, when known. Required for the S3 holdout (the
     /// holdout is assigned by a stable hash of account + segment + registry
-    /// version).
+    /// version on the FIRST decision, then persisted).
     pub account_id: Option<Uuid>,
 }
 
-/// One arm's logged selection probability (S4).
+/// The persisted randomized membership branch (migration 293).
+///
+/// The stable hash decides the INITIAL branch only. Once a row exists for
+/// `(experiment_id, account_id)`, it is authoritative for the life of the
+/// experiment: a segment (or registry-version) change never re-randomizes
+/// the account, so treatment cannot flip into the holdout or the reverse.
+///
+/// Before migration 293 only holdout rows were persisted. A pre-existing
+/// treatment account therefore has no row; its branch is drawn from the hash
+/// at its first decision after 293 and frozen from then on. That one draw is
+/// the earliest point at which the historical branch can be recorded, and it
+/// is documented rather than silently assumed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HoldoutAssignment {
+    /// No sending for the life of the experiment.
+    Holdout,
+    /// The ordinary arm-selection path.
+    Treatment,
+}
+
+impl HoldoutAssignment {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Holdout => "holdout",
+            Self::Treatment => "treatment",
+        }
+    }
+
+    /// Fail closed: an unrecognised persisted value must never read as
+    /// `treatment` and start sending to a possibly held-out account.
+    pub fn from_persisted(value: &str) -> Self {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "treatment" => Self::Treatment,
+            _ => Self::Holdout,
+        }
+    }
+}
+
+/// The persisted membership row `(experiment_id, account_id)`: the branch,
+/// plus the segment and registry version recorded at the first decision.
+/// Those recorded values explain why the account was randomized that way;
+/// they are never re-evaluated.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HoldoutMembership {
+    pub assignment: HoldoutAssignment,
+    /// Segment observed when the branch was first assigned.
+    pub segment: String,
+    /// Registry version observed when the branch was first assigned.
+    pub registry_version: i32,
+}
+
+/// One arm's logged selection probability (S4), with the Monte-Carlo
+/// diagnostics needed to bound IPS/SNIPS honestly.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ArmPropensity {
     pub variant: String,
+    /// The logged probability. Bounded below by
+    /// [`PROPENSITY_FLOOR_EPSILON`] for every selectable arm, so an
+    /// under-sampled estimate is never an exact zero.
     pub probability: f64,
+    /// Monte-Carlo wins behind `probability` (the estimate's effective
+    /// sample size). `1` on the deterministic exploit path.
+    #[serde(default)]
+    pub wins: u64,
+    /// Monte-Carlo draws behind `probability`. `1` on the deterministic
+    /// exploit path.
+    #[serde(default)]
+    pub draws: u64,
+    /// `sqrt(p(1-p)/draws)` of the bounded estimate; `0` when deterministic.
+    #[serde(default)]
+    pub standard_error: f64,
+    /// TRUE when the raw estimate had 0 wins and `probability` is the
+    /// documented epsilon floor.
+    #[serde(default)]
+    pub under_sampled: bool,
 }
 
 /// The selected arm, with the reason it was selected (becomes a Decision
@@ -1771,8 +1913,13 @@ impl ExperimentEngine {
     /// Order of decisions (each documented in [`VariantSelection::reason`]):
     ///
     /// 1. a draft experiment is a configuration error, never send against it;
-    /// 2. S3: an account in the stable per-segment holdout receives NO arm and
-    ///    no sending (`suppressed` names the holdout reason);
+    /// 2. S3: the PERSISTED randomized membership row for
+    ///    `(experiment_id, account_id)` is authoritative. A holdout member
+    ///    receives NO arm and no sending for the life of the experiment,
+    ///    regardless of any hash recomputed after a segment change
+    ///    (`suppressed` names the holdout reason). Only an account with NO
+    ///    row gets its initial branch from the stable hash, and that branch
+    ///    is persisted;
     /// 3. S2: arms paused by a guardrail for this segment are excluded; all
     ///    arms paused suppresses the send rather than falling back;
     /// 4. a paused/stopped/promoted experiment is exploit-only (best arm);
@@ -1824,31 +1971,38 @@ impl ExperimentEngine {
             .trim()
             .to_ascii_lowercase();
 
-        // S3: randomized account-level holdout, stable hash of account +
-        // segment + registry version. A holdout account never receives an arm
-        // and never receives sending while the experiment runs.
+        // S3: randomized account-level membership. The PERSISTED row is read
+        // FIRST: it is the assignment made at the account's first decision
+        // and is authoritative forever. The stable hash of account + segment
+        // + registry version is used ONLY when no row exists, and the branch
+        // it decides is persisted (holdout AND treatment), so a later
+        // enrichment that changes the segment cannot flip membership in
+        // either direction. The segment remains an analysis stratum.
         if let Some(account_id) = context.account_id {
-            if crate::scoreboard::is_holdout(
-                account_id,
-                &segment,
-                experiment.primary_metric_version,
-                experiment.holdout_share,
-            ) {
-                self.record_holdout(tenant_id, experiment.id, account_id, &segment)
-                    .await?;
+            let membership = self
+                .load_or_assign_holdout_membership(tenant_id, experiment, account_id, &segment)
+                .await?;
+            if membership.assignment == HoldoutAssignment::Holdout {
                 return Ok(suppressed_selection(
                     experiment,
                     &arms,
                     format!(
-                        "S3 holdout: account {account_id} (segment '{}') is in the stable {}% \
-                         holdout for registry version {}; no sending",
+                        "S3 holdout: account {account_id} was randomized into the holdout at its \
+                         first decision for experiment '{}' (segment '{}', registry version {}); \
+                         membership is immutable, so the current segment '{}' does not \
+                         re-randomize and no sending occurs for the life of the experiment",
+                        experiment.key,
+                        if membership.segment.is_empty() {
+                            "unknown"
+                        } else {
+                            &membership.segment
+                        },
+                        membership.registry_version,
                         if segment.is_empty() {
                             "unknown"
                         } else {
                             &segment
-                        },
-                        (experiment.holdout_share * 100.0).round(),
-                        experiment.primary_metric_version
+                        }
                     ),
                 ));
             }
@@ -2043,14 +2197,20 @@ impl ExperimentEngine {
 
         // S4: the ACTUAL ex-ante probability each arm is drawn. The same
         // single Beta sampler and the same value multiplier are used for the
-        // estimate and for the draw.
-        let probabilities = selection_win_probabilities(&authoritative, PROPENSITY_DRAWS)?;
-        let propensities: Vec<ArmPropensity> = authoritative
+        // estimate and for the draw. Each logged probability carries its
+        // Monte-Carlo wins/draws/standard error, and an arm that won 0 of
+        // PROPENSITY_DRAWS draws logs the documented epsilon floor plus the
+        // under_sampled flag instead of a false exact zero.
+        let estimates = selection_propensity_estimates(&authoritative, PROPENSITY_DRAWS)?;
+        let propensities: Vec<ArmPropensity> = estimates
             .iter()
-            .zip(probabilities.iter())
-            .map(|(arm, probability)| ArmPropensity {
-                variant: arm.variant.clone(),
-                probability: *probability,
+            .map(|estimate| ArmPropensity {
+                variant: estimate.variant.clone(),
+                probability: estimate.probability,
+                wins: estimate.wins,
+                draws: estimate.draws,
+                standard_error: estimate.standard_error,
+                under_sampled: estimate.under_sampled,
             })
             .collect();
 
@@ -2072,10 +2232,23 @@ impl ExperimentEngine {
             }
         }
         let arm = &authoritative[best];
-        let chosen_propensity = probabilities.get(best).copied().unwrap_or(0.0);
+        let chosen_estimate = estimates.get(best);
+        let chosen_propensity = chosen_estimate
+            .map(|estimate| estimate.probability)
+            .unwrap_or(PROPENSITY_FLOOR_EPSILON);
+        let propensity_note = chosen_estimate
+            .filter(|estimate| estimate.under_sampled)
+            .map(|estimate| {
+                format!(
+                    " (Monte-Carlo 0-win estimate over {} draws; propensity floored at the \
+                     documented epsilon {PROPENSITY_FLOOR_EPSILON})",
+                    estimate.draws
+                )
+            })
+            .unwrap_or_default();
         let reason = format!(
             "Thompson sampling selected '{}' (P(success) {:.4}, value multiplier {:.2}, \
-             propensity {:.4}, sampled score {:.4}); {bucket_note}",
+             propensity {:.4}{propensity_note}, sampled score {:.4}); {bucket_note}",
             arm.variant,
             arm.mean(),
             arm.value_multiplier,
@@ -2097,29 +2270,104 @@ impl ExperimentEngine {
         })
     }
 
-    /// Persist the S3 holdout assignment (idempotent by experiment+account).
-    async fn record_holdout(
+    /// Read the persisted S3 membership, assigning and persisting it on the
+    /// account's FIRST decision.
+    ///
+    /// The persisted row is authoritative: it is returned untouched even
+    /// when the current segment (or registry version) would hash to the
+    /// other branch. Only when no row exists is the stable hash consulted,
+    /// and the branch it decides is inserted for BOTH holdout and treatment.
+    /// The insert is race-safe: on a concurrent insert the persisted row
+    /// wins, so two selectors can never disagree about membership.
+    async fn load_or_assign_holdout_membership(
+        &self,
+        tenant_id: &str,
+        experiment: &Experiment,
+        account_id: Uuid,
+        segment: &str,
+    ) -> Result<HoldoutMembership, SalesError> {
+        if let Some(persisted) = self
+            .load_persisted_membership(tenant_id, experiment.id, account_id)
+            .await?
+        {
+            return Ok(persisted);
+        }
+
+        let assignment = if crate::scoreboard::is_holdout(
+            account_id,
+            segment,
+            experiment.primary_metric_version,
+            experiment.holdout_share,
+        ) {
+            HoldoutAssignment::Holdout
+        } else {
+            HoldoutAssignment::Treatment
+        };
+
+        let inserted: Option<(String, String, i32)> = sqlx::query_as(
+            "INSERT INTO sales_experiment_holdout_accounts \
+                 (experiment_id, tenant_id, account_id, segment, registry_version, assignment) \
+             SELECT $1, $2, $3, $4, primary_metric_version, $5 \
+             FROM sales_experiments WHERE id = $1 AND tenant_id = $2 \
+             ON CONFLICT (experiment_id, account_id) DO NOTHING \
+             RETURNING assignment, segment, registry_version",
+        )
+        .bind(experiment.id)
+        .bind(tenant_id)
+        .bind(account_id)
+        .bind(segment)
+        .bind(assignment.as_str())
+        .fetch_optional(&self.db)
+        .await
+        .map_err(|error| SalesError::Database(error.to_string()))?;
+
+        if let Some((assignment, segment, registry_version)) = inserted {
+            return Ok(HoldoutMembership {
+                assignment: HoldoutAssignment::from_persisted(&assignment),
+                segment,
+                registry_version,
+            });
+        }
+
+        // The experiment row vanished (selection loaded it microseconds
+        // ago) or a concurrent selector inserted first. Re-read: the
+        // persisted row, if any, is the winner. With no row at all fall back
+        // to the branch this decision computed so the caller still has a
+        // total answer.
+        Ok(self
+            .load_persisted_membership(tenant_id, experiment.id, account_id)
+            .await?
+            .unwrap_or(HoldoutMembership {
+                assignment,
+                segment: segment.to_string(),
+                registry_version: experiment.primary_metric_version,
+            }))
+    }
+
+    async fn load_persisted_membership(
         &self,
         tenant_id: &str,
         experiment_id: Uuid,
         account_id: Uuid,
-        segment: &str,
-    ) -> Result<(), SalesError> {
-        sqlx::query(
-            "INSERT INTO sales_experiment_holdout_accounts \
-                 (experiment_id, tenant_id, account_id, segment, registry_version) \
-             SELECT $1, $2, $3, $4, primary_metric_version \
-             FROM sales_experiments WHERE id = $1 AND tenant_id = $2 \
-             ON CONFLICT (experiment_id, account_id) DO NOTHING",
+    ) -> Result<Option<HoldoutMembership>, SalesError> {
+        let row: Option<(String, String, i32)> = sqlx::query_as(
+            "SELECT assignment, segment, registry_version \
+             FROM sales_experiment_holdout_accounts \
+             WHERE tenant_id = $1 AND experiment_id = $2 AND account_id = $3",
         )
-        .bind(experiment_id)
         .bind(tenant_id)
+        .bind(experiment_id)
         .bind(account_id)
-        .bind(segment)
-        .execute(&self.db)
+        .fetch_optional(&self.db)
         .await
         .map_err(|error| SalesError::Database(error.to_string()))?;
-        Ok(())
+        Ok(row.map(
+            |(assignment, segment, registry_version)| HoldoutMembership {
+                assignment: HoldoutAssignment::from_persisted(&assignment),
+                segment,
+                registry_version,
+            },
+        ))
     }
 
     /// Load the guardrail pauses that apply to `segment` (exact segment or a
@@ -2166,21 +2414,36 @@ impl ExperimentEngine {
         contact_id: Option<Uuid>,
         segment: Option<&str>,
     ) -> Result<(), SalesError> {
-        let propensity = selection
+        let chosen = selection
             .propensities
             .iter()
-            .find(|propensity| propensity.variant == selection.variant)
+            .find(|propensity| propensity.variant == selection.variant);
+        // A missing entry is the deterministic path: the chosen arm was
+        // certain. Keep a strict-positive propensity (the DB CHECK forbids
+        // 0) and record the degenerate Monte-Carlo diagnostics honestly.
+        let propensity = chosen
             .map(|propensity| propensity.probability)
             .filter(|probability| *probability > 0.0 && probability.is_finite())
             .unwrap_or(1.0);
+        let propensity_wins = chosen.map(|propensity| propensity.wins as i64).or(Some(1));
+        let propensity_draws = chosen.map(|propensity| propensity.draws as i64).or(Some(1));
+        let propensity_standard_error = chosen
+            .map(|propensity| propensity.standard_error)
+            .filter(|error| error.is_finite() && *error >= 0.0)
+            .or(Some(0.0));
+        let propensity_undersampled = chosen
+            .map(|propensity| propensity.under_sampled)
+            .unwrap_or(false);
         let propensities = serde_json::to_value(&selection.propensities).map_err(|error| {
             SalesError::Internal(anyhow::anyhow!("serialize propensities: {error}"))
         })?;
         sqlx::query(
             "INSERT INTO sales_experiment_assignments \
                  (tenant_id, experiment_id, step_execution_id, variant, account_id, contact_id, \
-                  segment, context_bucket, propensity, propensities, explore) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) \
+                  segment, context_bucket, propensity, propensities, explore, \
+                  propensity_wins, propensity_draws, propensity_standard_error, \
+                  propensity_undersampled) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15) \
              ON CONFLICT (step_execution_id) WHERE step_execution_id IS NOT NULL DO NOTHING",
         )
         .bind(tenant_id)
@@ -2194,6 +2457,10 @@ impl ExperimentEngine {
         .bind(propensity)
         .bind(propensities)
         .bind(selection.explore)
+        .bind(propensity_wins)
+        .bind(propensity_draws)
+        .bind(propensity_standard_error)
+        .bind(propensity_undersampled)
         .execute(&self.db)
         .await
         .map_err(|error| SalesError::Database(error.to_string()))?;
@@ -2372,13 +2639,19 @@ fn suppressed_selection(
 
 /// Deterministic selection is certain: the chosen arm has propensity 1.0 and
 /// every other arm 0.0. (The assignment row stores 1.0; IPS never divides by
-/// zero.)
+/// zero.) This is not a Monte-Carlo estimate, so the chosen arm records one
+/// draw / one win and zero standard error; the unselected arms' zero is a
+/// true structural zero, not an under-sampled estimate.
 fn exploit_propensities(arms: &[ArmPosterior], chosen: usize) -> Vec<ArmPropensity> {
     arms.iter()
         .enumerate()
         .map(|(index, arm)| ArmPropensity {
             variant: arm.variant.clone(),
             probability: if index == chosen { 1.0 } else { 0.0 },
+            wins: u64::from(index == chosen),
+            draws: 1,
+            standard_error: 0.0,
+            under_sampled: false,
         })
         .collect()
 }
@@ -4842,6 +5115,344 @@ mod tests {
             )
             .await
             .is_err());
+    }
+
+    /// Item 14: membership is persisted for BOTH branches at the first
+    /// decision and is never re-randomized.
+    ///
+    /// The holdout account was randomized into the holdout in segment
+    /// `alpha`; segment `beta` hashes to treatment, yet it stays suppressed.
+    /// The treatment account is the mirror image: segment `beta` hashes to
+    /// the holdout, yet it keeps sending. That reverse case is why treatment
+    /// membership has to be persisted too, not just holdout membership.
+    #[tokio::test]
+    async fn holdout_membership_is_persisted_and_never_re_randomized() {
+        let Some(pool) = live_pool("experiments_holdout_immutable").await else {
+            return;
+        };
+        let tenant = crate::test_db::unique_test_tenant("exp-hold");
+        let engine = ExperimentEngine::new(pool.clone());
+        let key = format!("lib-hold-{}", Uuid::new_v4().simple());
+        let id = engine
+            .ensure_experiment(
+                &tenant,
+                &key,
+                "Holdout immutability",
+                &serde_json::json!({ "dimensions": ["icp_segment"] }),
+                &serde_json::json!({}),
+            )
+            .await
+            .unwrap();
+        engine
+            .ensure_arms(
+                &tenant,
+                id,
+                &[ArmSpec::control("control"), ArmSpec::new("variant_b")],
+            )
+            .await
+            .unwrap();
+        engine
+            .set_status(&tenant, id, ExperimentStatus::Running)
+            .await
+            .unwrap();
+        // The maximum share makes both bucket patterns equally likely; the
+        // membership rule is independent of the share.
+        sqlx::query("UPDATE sales_experiments SET holdout_share = 0.5 WHERE id = $1")
+            .bind(id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let experiment = engine
+            .load_experiment(&tenant, &key)
+            .await
+            .unwrap()
+            .unwrap();
+
+        fn account_with_buckets(alpha_holdout: bool, beta_holdout: bool) -> Uuid {
+            for _ in 0..10_000 {
+                let candidate = Uuid::new_v4();
+                let alpha = crate::scoreboard::holdout_bucket(candidate, "alpha", 1) < 5_000;
+                let beta = crate::scoreboard::holdout_bucket(candidate, "beta", 1) < 5_000;
+                if alpha == alpha_holdout && beta == beta_holdout {
+                    return candidate;
+                }
+            }
+            panic!("no account with the requested bucket pattern");
+        }
+        let context = |account: Uuid, segment: &str| VariantContext {
+            dimensions: ExperimentContext {
+                icp_segment: Some(segment.to_string()),
+                ..ExperimentContext::default()
+            },
+            sender_domain_exposure: 0,
+            daily_exploration_pct: 0.0,
+            account_expected_value_eur: 0.0,
+            explicit_exploration_override: false,
+            account_id: Some(account),
+        };
+        async fn membership(
+            pool: &PgPool,
+            tenant: &str,
+            experiment_id: Uuid,
+            account: Uuid,
+        ) -> Option<(String, String, i32)> {
+            sqlx::query_as(
+                "SELECT assignment, segment, registry_version \
+                 FROM sales_experiment_holdout_accounts \
+                 WHERE tenant_id = $1 AND experiment_id = $2 AND account_id = $3",
+            )
+            .bind(tenant)
+            .bind(experiment_id)
+            .bind(account)
+            .fetch_optional(pool)
+            .await
+            .unwrap()
+        }
+
+        // Holdout in alpha, treatment by hash in beta.
+        let holdout_account = account_with_buckets(true, false);
+        let first = engine
+            .select_variant(&tenant, &experiment, &context(holdout_account, "alpha"))
+            .await
+            .expect("selection");
+        assert!(
+            first
+                .suppressed
+                .as_deref()
+                .unwrap_or("")
+                .contains("S3 holdout"),
+            "{first:?}"
+        );
+        assert_eq!(
+            membership(&pool, &tenant, id, holdout_account).await,
+            Some(("holdout".to_string(), "alpha".to_string(), 1)),
+            "the first decision persists the holdout branch"
+        );
+        // Enriched to beta (hash would be treatment): still suppressed, and
+        // the persisted row is untouched.
+        for segment in ["beta", "alpha", "beta", "beta", "alpha"] {
+            let selection = engine
+                .select_variant(&tenant, &experiment, &context(holdout_account, segment))
+                .await
+                .expect("selection");
+            assert!(
+                selection.suppressed.is_some(),
+                "a persisted holdout must never resume sending (segment {segment}): {selection:?}"
+            );
+            assert_eq!(
+                membership(&pool, &tenant, id, holdout_account).await,
+                Some(("holdout".to_string(), "alpha".to_string(), 1)),
+                "membership never flips"
+            );
+        }
+
+        // Treatment in alpha, holdout by hash in beta.
+        let treatment_account = account_with_buckets(false, true);
+        assert!(
+            crate::scoreboard::holdout_bucket(treatment_account, "alpha", 1) >= 5_000
+                && crate::scoreboard::holdout_bucket(treatment_account, "beta", 1) < 5_000,
+            "fixture precondition: alpha treatment, beta holdout by hash"
+        );
+        let first = engine
+            .select_variant(&tenant, &experiment, &context(treatment_account, "alpha"))
+            .await
+            .expect("selection");
+        assert!(first.suppressed.is_none(), "{first:?}");
+        assert_eq!(
+            membership(&pool, &tenant, id, treatment_account).await,
+            Some(("treatment".to_string(), "alpha".to_string(), 1)),
+            "treatment membership is persisted too"
+        );
+        // Enriched to beta (hash would be holdout): still sends, and the
+        // persisted row is untouched.
+        for segment in ["beta", "alpha", "beta", "beta", "alpha"] {
+            let selection = engine
+                .select_variant(&tenant, &experiment, &context(treatment_account, segment))
+                .await
+                .expect("selection");
+            assert!(
+                selection.suppressed.is_none(),
+                "a persisted treatment must keep sending (segment {segment}): {selection:?}"
+            );
+            assert_eq!(
+                membership(&pool, &tenant, id, treatment_account).await,
+                Some(("treatment".to_string(), "alpha".to_string(), 1)),
+                "membership never flips"
+            );
+        }
+
+        sqlx::query("DELETE FROM sales_experiments WHERE tenant_id = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+
+    /// Item 28: a 0-win Monte-Carlo estimate is bounded at the documented
+    /// epsilon and flagged, never logged as a false exact zero.
+    #[test]
+    fn zero_win_monte_carlo_propensity_is_floored_and_flagged() {
+        let estimate = propensity_estimate("rare", 0, PROPENSITY_DRAWS as u64);
+        assert_eq!(estimate.wins, 0);
+        assert_eq!(estimate.draws, PROPENSITY_DRAWS as u64);
+        assert_eq!(estimate.raw_probability, 0.0);
+        assert_eq!(estimate.probability, PROPENSITY_FLOOR_EPSILON);
+        assert_eq!(estimate.probability, 0.0001, "the documented epsilon");
+        assert!(estimate.under_sampled);
+        let expected_standard_error = (PROPENSITY_FLOOR_EPSILON * (1.0 - PROPENSITY_FLOOR_EPSILON)
+            / PROPENSITY_DRAWS as f64)
+            .sqrt();
+        assert!(
+            (estimate.standard_error - expected_standard_error).abs() < 1e-15,
+            "a 0-win estimate must not advertise zero uncertainty: {}",
+            estimate.standard_error
+        );
+
+        let normal = propensity_estimate("normal", 500, 2_000);
+        assert_eq!(normal.probability, 0.25);
+        assert!(!normal.under_sampled);
+        assert!((normal.standard_error - (0.25_f64 * 0.75 / 2_000.0).sqrt()).abs() < 1e-15);
+
+        // Wins are clamped to the draw count; a draw count of 0 is clamped
+        // to one draw (the public estimator does this before it is called).
+        let clamped = propensity_estimate("clamped", 10, 5);
+        assert_eq!((clamped.wins, clamped.draws), (5, 5));
+        assert_eq!(clamped.probability, 1.0);
+    }
+
+    /// Item 28 end to end: an arm that is essentially never sampled by the
+    /// real Thompson draws wins 0 of its draws, and the estimate the engine
+    /// logs carries the epsilon floor, the win count and the flag.
+    #[test]
+    fn selection_estimates_flag_an_effectively_never_sampled_arm() {
+        // The dominant arm's Beta(1e9, 1) mass sits within ~1e-9 of 1.0, so
+        // the uniform arm's chance of ever winning a draw is ~1e-9.
+        let dominant = ArmPosterior::new("dominant", 1_000_000_000.0, 1.0, true);
+        let rare = ArmPosterior::new("rare", 1.0, 1.0, false);
+        let estimates =
+            selection_propensity_estimates(&[dominant, rare], 500).expect("propensity estimates");
+        let rare_estimate = estimates
+            .iter()
+            .find(|estimate| estimate.variant == "rare")
+            .expect("rare arm");
+        assert_eq!(rare_estimate.wins, 0, "{rare_estimate:?}");
+        assert!(rare_estimate.under_sampled);
+        assert_eq!(rare_estimate.probability, PROPENSITY_FLOOR_EPSILON);
+        assert!(rare_estimate.standard_error > 0.0);
+        let dominant_estimate = estimates
+            .iter()
+            .find(|estimate| estimate.variant == "dominant")
+            .expect("dominant arm");
+        assert_eq!(dominant_estimate.wins, 500);
+        assert_eq!(dominant_estimate.probability, 1.0);
+        assert!(!dominant_estimate.under_sampled);
+        // The full logged vector uses the bounded probability, and the sum
+        // of the logged probabilities is >= 1 (epsilon floor).
+        let logged = selection_win_probabilities(
+            &[
+                ArmPosterior::new("dominant", 1e9, 1.0, true),
+                ArmPosterior::new("rare", 1.0, 1.0, false),
+            ],
+            500,
+        )
+        .expect("probabilities");
+        assert!(logged.iter().all(|probability| *probability > 0.0));
+        assert!((logged.iter().sum::<f64>() - 1.0).abs() < 0.01);
+    }
+
+    /// Item 28: the assignment ledger persists the propensity diagnostics
+    /// alongside the bounded propensity.
+    #[tokio::test]
+    async fn record_assignment_persists_propensity_diagnostics() {
+        let Some(pool) = live_pool("experiments_assignment_diag").await else {
+            return;
+        };
+        let tenant = crate::test_db::unique_test_tenant("exp-diag");
+        let engine = ExperimentEngine::new(pool.clone());
+        let key = format!("lib-diag-{}", Uuid::new_v4().simple());
+        let id = engine
+            .ensure_experiment(
+                &tenant,
+                &key,
+                "Assignment diagnostics",
+                &serde_json::json!({}),
+                &serde_json::json!({}),
+            )
+            .await
+            .unwrap();
+        engine
+            .ensure_arms(
+                &tenant,
+                id,
+                &[ArmSpec::control("control"), ArmSpec::new("variant_b")],
+            )
+            .await
+            .unwrap();
+        let standard_error = (PROPENSITY_FLOOR_EPSILON * (1.0 - PROPENSITY_FLOOR_EPSILON)
+            / PROPENSITY_DRAWS as f64)
+            .sqrt();
+        let selection = VariantSelection {
+            variant: "control".to_string(),
+            experiment_id: id,
+            is_control: true,
+            explore: true,
+            used_context_bucket: false,
+            context_bucket: None,
+            posterior_mean: 0.5,
+            reason: "fixture: 0-win estimate".to_string(),
+            propensities: vec![
+                ArmPropensity {
+                    variant: "control".to_string(),
+                    probability: PROPENSITY_FLOOR_EPSILON,
+                    wins: 0,
+                    draws: PROPENSITY_DRAWS as u64,
+                    standard_error,
+                    under_sampled: true,
+                },
+                ArmPropensity {
+                    variant: "variant_b".to_string(),
+                    probability: 1.0 - PROPENSITY_FLOOR_EPSILON,
+                    wins: PROPENSITY_DRAWS as u64,
+                    draws: PROPENSITY_DRAWS as u64,
+                    standard_error,
+                    under_sampled: false,
+                },
+            ],
+            suppressed: None,
+        };
+        engine
+            .record_assignment(&tenant, id, None, &selection, None, None, Some("saas"))
+            .await
+            .expect("record assignment");
+
+        let (propensity, wins, draws, standard_error, undersampled): (
+            f64,
+            Option<i64>,
+            Option<i64>,
+            Option<f64>,
+            bool,
+        ) = sqlx::query_as(
+            "SELECT propensity, propensity_wins, propensity_draws, \
+                    propensity_standard_error, propensity_undersampled \
+             FROM sales_experiment_assignments \
+             WHERE tenant_id = $1 AND experiment_id = $2",
+        )
+        .bind(&tenant)
+        .bind(id)
+        .fetch_one(&pool)
+        .await
+        .expect("assignment row");
+        assert_eq!(propensity, PROPENSITY_FLOOR_EPSILON);
+        assert_eq!(wins, Some(0));
+        assert_eq!(draws, Some(PROPENSITY_DRAWS as i64));
+        assert!(standard_error.unwrap() > 0.0);
+        assert!(undersampled);
+
+        sqlx::query("DELETE FROM sales_experiments WHERE tenant_id = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .unwrap();
     }
 
     /// S1 write path: the event ledger is exactly-once per `outcome_key`,

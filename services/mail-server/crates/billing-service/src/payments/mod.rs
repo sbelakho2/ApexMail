@@ -133,6 +133,25 @@ pub struct Payment {
     pub created_at: Option<DateTime<Utc>>,
 }
 
+/// One payment object as an AUTHENTICATED provider fetch returns it: the
+/// neutral money facts plus the attribution the provider object itself
+/// carries. Verified webhook deliveries are TRIGGERS only — the facts they
+/// dispatch are normalized from this fetched object, never from the signed
+/// event body (signed does not mean current).
+#[derive(Debug, Clone, PartialEq)]
+pub struct FetchedPayment {
+    pub payment: Payment,
+    /// The provider object's metadata map. OUR attribution rides it (the
+    /// keys every create writes: `tenant_id`, `reference`, `plan_name`,
+    /// `interval`, `idempotency_key`, `checkout_id`); an object without
+    /// metadata answers `Value::Null` and the fact stays unattributed
+    /// (observed, never settled).
+    pub metadata: serde_json::Value,
+    /// The provider customer object the payment belongs to, when the wire
+    /// carries one (the completed-checkout activation stores it).
+    pub provider_customer_id: Option<String>,
+}
+
 /// One recorded charge attempt against an obligation. Persisted by the
 /// neutral ledger (migration 279); produced by adapters as facts arrive.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -458,6 +477,38 @@ pub trait PaymentProvider: Send + Sync {
         &self,
         provider_payment_id: &str,
     ) -> Result<Payment, ProviderError>;
+
+    /// Fetch one payment object WITH PROVIDER AUTHENTICATION, including the
+    /// attribution metadata the provider object itself carries. The webhook
+    /// refetch's fact source: a verified delivery only names object ids,
+    /// and the facts (tenant, obligation, money) come from this fetch.
+    ///
+    /// The default derives from [`Self::fetch_payment_object`] and answers
+    /// no metadata: an adapter whose fetch cannot read attribution leaves
+    /// the fact unattributed (the engine observes, never settles). Adapters
+    /// MUST override it when their wire carries the metadata.
+    async fn fetch_payment_details(
+        &self,
+        provider_payment_id: &str,
+    ) -> Result<FetchedPayment, ProviderError> {
+        Ok(FetchedPayment {
+            payment: self.fetch_payment_object(provider_payment_id).await?,
+            metadata: serde_json::Value::Null,
+            provider_customer_id: None,
+        })
+    }
+
+    /// Resolve a provider CHARGE object id (a dispute event names the
+    /// charge, not always the payment) to the payment id the ledger keys
+    /// on, using an AUTHENTICATED fetch. `Ok(None)` means this adapter
+    /// cannot resolve it; the caller must then fail closed.
+    async fn resolve_charge_payment_id(
+        &self,
+        charge_id: &str,
+    ) -> Result<Option<String>, ProviderError> {
+        let _ = charge_id;
+        Ok(None)
+    }
 
     /// AUTHENTICATED provider-side search for a charge by the idempotency
     /// key the caller sent with it. The stale-claim reconciliation's fact

@@ -556,7 +556,7 @@ struct HetznerServerResponse {
     server: HetznerServer,
 }
 
-/// GET /servers?label_selector=apexmail-dt:<deployment id> — the label
+/// GET /servers?label_selector=apexmail-dt=<deployment id> — the label
 /// reconciliation LIST (eighth audit, P0-DT). The provider filters by the
 /// deterministic create label; this executor only needs the server array.
 #[derive(Debug, Deserialize)]
@@ -980,7 +980,7 @@ impl PrivateDeployService {
         } = transport;
         let response = client
             .get(format!("{base}/servers"))
-            .query(&[("label_selector", format!("apexmail-dt:{deployment_id}"))])
+            .query(&[("label_selector", format!("apexmail-dt={deployment_id}"))])
             .bearer_auth(api_token)
             .send()
             .await
@@ -1489,6 +1489,11 @@ mod tests {
         post_servers_count: usize,
         action_polls: usize,
         servers: Vec<serde_json::Value>,
+        /// Every request line the provider actually received, in order. The
+        /// label-selector contract test asserts on THESE bytes — the audit
+        /// requirement is to inspect the real query string, not the logical
+        /// records the client returns.
+        request_lines: Vec<String>,
     }
 
     struct ContractStubOptions<'a> {
@@ -1632,6 +1637,13 @@ mod tests {
         }
         recorded.lock().unwrap().extend_from_slice(&raw);
         let head = String::from_utf8_lossy(&raw).to_string();
+        if let Some(first_line) = head.lines().next() {
+            state
+                .lock()
+                .unwrap()
+                .request_lines
+                .push(first_line.to_string());
+        }
         let (status, body) = if head.starts_with("POST") && head.contains(" /servers") {
             // The create. Counted on receipt; the server lands in provider
             // state only when the create is ANSWERED (a held create has not
@@ -1650,19 +1662,25 @@ mod tests {
             state.lock().unwrap().servers.push(created);
             (201u16, fixtures["create_server_response"].clone())
         } else if head.starts_with("GET") && head.contains("/servers?") {
-            // LIST with label_selector: the provider filters by the label;
-            // the deterministic create label is apexmail-dt:<deployment id>
-            // (reqwest form-encodes ':' as %3A — normalize).
-            let label_value = head
+            // LIST with label_selector. Hetzner's label-selector grammar is
+            // key=value equality (reqwest form-encodes '=' as %3D — decode).
+            // The stub is STRICT like the provider: a selector in any other
+            // shape (e.g. the old colon form) matches nothing, which is what
+            // the live API would do.
+            let selector = head
                 .split("label_selector=")
                 .nth(1)
                 .map(|rest| {
                     rest.split(['&', ' '])
                         .next()
                         .unwrap_or("")
-                        .replace("%3A", ":")
+                        .replace("%3D", "=")
                 })
-                .and_then(|value| value.rsplit(':').next().map(str::to_string))
+                .unwrap_or_default();
+            let label_value = selector
+                .split_once('=')
+                .filter(|(key, value)| *key == "apexmail-dt" && !value.is_empty())
+                .map(|(_, value)| value.to_string())
                 .unwrap_or_default();
             let matches: Vec<serde_json::Value> = state
                 .lock()
@@ -2420,6 +2438,25 @@ mod tests {
                     assert_eq!(provider_host_id, "5150", "the ADOPTED host, not a new one");
                     assert_eq!(host_ips, vec!["203.0.113.50", "2a01:4f8:c17:2e8c::1"]);
                     assert_eq!(status, "provisioned");
+                    // Wire contract (audit: inspect the ACTUAL received query
+                    // string, not the logical records): Hetzner's selector
+                    // grammar is key=value. reqwest form-encodes '=' as %3D;
+                    // the colon form must never be sent.
+                    let lines = state.lock().unwrap().request_lines.clone();
+                    let list_line = lines
+                        .iter()
+                        .find(|line| line.starts_with("GET /servers?label_selector="))
+                        .expect("the reconciliation LIST reached the provider");
+                    assert!(
+                        list_line.contains(&format!("apexmail-dt%3D{}", deployment_id))
+                            || list_line.contains(&format!("apexmail-dt={deployment_id}")),
+                        "label_selector must use the documented equality grammar: {list_line}"
+                    );
+                    assert!(
+                        !list_line.contains("apexmail-dt%3A")
+                            && !list_line.contains("apexmail-dt:"),
+                        "the colon form is not a valid Hetzner selector: {list_line}"
+                    );
                 }
                 other => panic!("expected Provisioned (adopted), got {other:?}"),
             }

@@ -143,6 +143,15 @@ async fn insert_experiment(
         )
         .await
         .expect("ensure arms");
+    // These tests exercise the send path, not the S3 holdout. The default 5%
+    // randomized holdout would suppress a random ~1-in-20 fixture account and
+    // leave the step without a variant; the holdout lifecycle (persistence,
+    // immutability, lift) has dedicated tests.
+    sqlx::query("UPDATE sales_experiments SET holdout_share = 0 WHERE id = $1")
+        .bind(id)
+        .execute(pool)
+        .await
+        .expect("disable the holdout for this fixture");
     id
 }
 

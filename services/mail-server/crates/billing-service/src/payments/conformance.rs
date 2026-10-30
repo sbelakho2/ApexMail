@@ -156,6 +156,13 @@ struct Script {
     charge_calls: u64,
     refunds: VecDeque<Result<Refund, ProviderError>>,
     payments: HashMap<String, Payment>,
+    /// The answers [`ConformanceProvider::fetch_payment_details`] serves: the
+    /// authenticated object INCLUDING the attribution metadata the webhook
+    /// refetch reads (tenant/plan/interval). Scripted via
+    /// [`ConformanceProvider::publish_payment_details`]; a payment published
+    /// only through [`ConformanceProvider::publish_payment`] still answers
+    /// the plain fetch.
+    fetched: HashMap<String, super::FetchedPayment>,
     settlements: VecDeque<Settlement>,
     /// The idempotency-key search answers, keyed by the searched key. The
     /// outer `Option` distinguishes "scripted" from "unscripted"; the inner
@@ -215,6 +222,16 @@ impl ConformanceProvider {
             .expect("script lock")
             .payments
             .insert(payment.provider_payment_id.clone(), payment);
+    }
+
+    /// Publish the ATTRIBUTED payment object the webhook refetch reads (the
+    /// neutral money facts plus the metadata the provider object carries).
+    pub fn publish_payment_details(&self, fetched: super::FetchedPayment) {
+        self.script
+            .lock()
+            .expect("script lock")
+            .fetched
+            .insert(fetched.payment.provider_payment_id.clone(), fetched);
     }
 
     /// Queue one refund outcome.
@@ -408,6 +425,39 @@ impl PaymentProvider for ConformanceProvider {
             _ => {}
         }
         Ok(payment)
+    }
+
+    /// The attributed object the webhook refetch reads. A scripted
+    /// [`ConformanceProvider::publish_payment_details`] answer wins; a plain
+    /// published payment answers without metadata (the default contract).
+    async fn fetch_payment_details(
+        &self,
+        provider_payment_id: &str,
+    ) -> Result<super::FetchedPayment, ProviderError> {
+        if let Some(fetched) = self
+            .script
+            .lock()
+            .expect("script lock")
+            .fetched
+            .get(provider_payment_id)
+            .cloned()
+        {
+            return Ok(fetched);
+        }
+        Ok(super::FetchedPayment {
+            payment: self.fetch_payment_object(provider_payment_id).await?,
+            metadata: serde_json::Value::Null,
+            provider_customer_id: None,
+        })
+    }
+
+    /// The double resolves no charge id (fail closed); dispute-event tests
+    /// script the payment id directly.
+    async fn resolve_charge_payment_id(
+        &self,
+        _charge_id: &str,
+    ) -> Result<Option<String>, ProviderError> {
+        Ok(None)
     }
 
     /// The scripted idempotency-key search: a key with no scripted answer
