@@ -408,7 +408,7 @@
       "recommended_label": "Für Produktion empfohlen",
       "vat_basis_business": "Geschäftspreise verstehen sich ohne Umsatzsteuer.",
       "vat_basis_consumer": "Verbraucher sehen vor der Zahlung den Gesamtpreis inklusive Umsatzsteuer.",
-      "vat_basis_note": "Der angezeigte Verbraucherpreis enthält die gesetzliche Umsatzsteuer; der Satz richtet sich nach dem Land des Käufers und steht auf der Rechnung. Jahrespreise werden als Gesamtbetrag pro Abrechnungszeitraum angezeigt.",
+      "vat_basis_note": "Die in der Tabelle genannten Beträge sind Geschäftspreise ohne Umsatzsteuer. Verbraucher sehen vor der Zahlung den Gesamtpreis inklusive der Umsatzsteuer ihres Landes; der Satz steht auf der Rechnung. Jahrespreise werden als Gesamtbetrag pro Abrechnungszeitraum angezeigt.",
       "vat_included_label": "inkl. MwSt.",
       "contract_label": "Vertrag",
       "latency_row_de": null
@@ -1192,7 +1192,7 @@
       "recommended_label": "Recommandé pour la production",
       "vat_basis_business": "Les prix professionnels sont hors TVA.",
       "vat_basis_consumer": "Les particuliers voient le total TVA comprise avant de payer.",
-      "vat_basis_note": "Le prix affiché aux particuliers inclut la TVA ; le taux applicable dépend du pays de l'acheteur et figure sur la facture. Les prix annuels sont indiqués comme le total par période de facturation.",
+      "vat_basis_note": "Les montants indiqués dans le tableau sont des prix professionnels hors TVA. Les particuliers voient, avant de payer, le total TVA comprise de leur pays ; le taux figure sur la facture. Les prix annuels sont indiqués comme le total par période de facturation.",
       "vat_included_label": "TTC",
       "contract_label": "Contrat"
     },
@@ -1975,7 +1975,7 @@
       "recommended_label": "Recomendado para producción",
       "vat_basis_business": "Los precios para empresas no incluyen IVA.",
       "vat_basis_consumer": "Los consumidores ven el total con IVA incluido antes de pagar.",
-      "vat_basis_note": "El precio mostrado a los consumidores incluye el IVA; el tipo aplicable depende del país del comprador y figura en la factura. Los precios anuales se muestran como el total por periodo de facturación.",
+      "vat_basis_note": "Los importes de la tabla son precios profesionales sin IVA. Los consumidores ven, antes de pagar, el total con el IVA de su país incluido; el tipo figura en la factura. Los precios anuales se muestran como el total por periodo de facturación.",
       "vat_included_label": "IVA incluido",
       "contract_label": "Contrato"
     },

@@ -134,7 +134,7 @@
       <p class="apex-meta">
         <strong>{% if i18n_data and i18n_data[l] and i18n_data[l]["pricing"] and i18n_data[l]["pricing"]["vat_basis_business"] %}{{ i18n_data[l]["pricing"]["vat_basis_business"] }}{% else %}Business prices exclude VAT.{% endif %}</strong>
         {% if i18n_data and i18n_data[l] and i18n_data[l]["pricing"] and i18n_data[l]["pricing"]["vat_basis_consumer"] %}{{ i18n_data[l]["pricing"]["vat_basis_consumer"] }}{% else %}Consumers see the total including VAT before paying.{% endif %}
-        {% if i18n_data and i18n_data[l] and i18n_data[l]["pricing"] and i18n_data[l]["pricing"]["vat_basis_note"] %}{{ i18n_data[l]["pricing"]["vat_basis_note"] }}{% else %}The price shown to consumers includes VAT; the applicable rate depends on the buyer's country and appears on the invoice. Annual prices are shown as the total per billing period.{% endif %}
+        {% if i18n_data and i18n_data[l] and i18n_data[l]["pricing"] and i18n_data[l]["pricing"]["vat_basis_note"] %}{{ i18n_data[l]["pricing"]["vat_basis_note"] }}{% else %}The amounts in the table are business prices excluding VAT. A consumer sees the VAT-inclusive total for their country before paying; the rate appears on the invoice. Annual prices are shown as the total per billing period.{% endif %}
       </p>
       {# The owner-set consumer gross card, when published. Absent until the
          owner sets a price; the rule above still applies (net + destination

@@ -41,7 +41,18 @@ const DEFAULT_EU_COUNTRIES: &[&str] = &[
 /// * Estonia: 20 % until 2023-12-31, 22 % in 2024, **24 % from 2025-07-01**.
 /// * Finland: 24 % until 2024-08-31, **25.5 % from 2024-09-01**.
 /// * Slovakia: 20 % until 2024-12-31, **23 % from 2025-01-01**.
-/// * Czechia: 21 % is the standard rate since 2024-01-01 (20 % before).
+/// * Czechia: 21 % standard rate since **2013-01-01** (Act 500/2012; the
+///   2024 consolidation lowered only the reduced rate to 12 %).
+/// * COVID/temporary windows now modelled: DE 16 % (2020-07-01..2020-12-31),
+///   IE 21 % (2020-09-01..2021-02-28), LU 16 % (calendar 2023).
+///
+/// Triple-source verification (30 Oct 2026 legal re-review): the European
+/// Commission TEDB `retrieveVatRates` (situationOn=2026-10-30 and 2014-2026
+/// range queries), PwC Worldwide Tax Summaries and the Tax Foundation 2026
+/// table agree on all 27 current standard rates; every 2024-2026 change was
+/// confirmed against the national instrument (EMTA, Vero, Law 141/2025,
+/// Act 349/2023). Bulgaria's 2026-01-01 euro adoption leaves the 20 % rate
+/// unchanged (EUR invoices; dual BGN/EUR display until 2026-08-08).
 /// * Every other baseline is the rate in force on 2020-01-01; the exact
 ///   historical effective dates for those rows were NOT re-verified in this
 ///   wave (flagged UNVERIFIED) and only matter for back-dated invoices.
@@ -55,8 +66,11 @@ const DEFAULT_VAT_RATE_PERIODS: &[(&str, f64, (i32, u32, u32))] = &[
     ("BG", 20.0, (2020, 1, 1)),
     ("HR", 25.0, (2020, 1, 1)),
     ("CY", 19.0, (2020, 1, 1)),
-    ("CZ", 20.0, (2020, 1, 1)),
-    ("CZ", 21.0, (2024, 1, 1)),
+    // CZ standard rate is 21 % since 2013-01-01 (Act 500/2012 Coll., §47(1)(a)):
+    // the 2024 consolidation (Act 349/2023 Coll.) changed only the REDUCED
+    // rate 15 -> 12 %, so a 2024-dated 21 % row would misdate the standard
+    // rate and back-dated 2020-2023 invoices would under-charge 1 pp.
+    ("CZ", 21.0, (2013, 1, 1)),
     ("DK", 25.0, (2020, 1, 1)),
     ("EE", 20.0, (2020, 1, 1)),
     ("EE", 22.0, (2024, 1, 1)),
@@ -65,13 +79,26 @@ const DEFAULT_VAT_RATE_PERIODS: &[(&str, f64, (i32, u32, u32))] = &[
     ("FI", 25.5, (2024, 9, 1)),
     ("FR", 20.0, (2020, 1, 1)),
     ("DE", 19.0, (2020, 1, 1)),
+    // Germany's COVID standard-rate cut: 16 % for H2 2020 only (Gesetz zur
+    // Umsetzung steuerlicher Hilfsmaßnahmen zur Bewältigung der
+    // Corona-Krise); 19 % resumes 2021-01-01.
+    ("DE", 16.0, (2020, 7, 1)),
+    ("DE", 19.0, (2021, 1, 1)),
     ("GR", 24.0, (2020, 1, 1)),
     ("HU", 27.0, (2020, 1, 1)),
     ("IE", 23.0, (2020, 1, 1)),
+    // Ireland's temporary COVID standard-rate cut: 21 % 2020-09-01 through
+    // 2021-02-28 (Revenue eBrief 109/2020), 23 % resumes 2021-03-01.
+    ("IE", 21.0, (2020, 9, 1)),
+    ("IE", 23.0, (2021, 3, 1)),
     ("IT", 22.0, (2020, 1, 1)),
     ("LV", 21.0, (2020, 1, 1)),
     ("LT", 21.0, (2020, 1, 1)),
     ("LU", 17.0, (2020, 1, 1)),
+    // Luxembourg's one-year standard-rate cut to 16 % for calendar 2023
+    // (Law of 23 December 2022); 17 % resumes 2024-01-01.
+    ("LU", 16.0, (2023, 1, 1)),
+    ("LU", 17.0, (2024, 1, 1)),
     ("MT", 18.0, (2020, 1, 1)),
     ("NL", 21.0, (2020, 1, 1)),
     ("PL", 23.0, (2020, 1, 1)),
@@ -242,6 +269,61 @@ pub fn get_eu_vat_rate_on(country: &str, at: NaiveDate) -> Option<f64> {
         }
     }
     applicable.or(earliest).map(|(rate, _)| rate)
+}
+
+/// The cross-border B2C TBE threshold (VAT Directive Art. 59c): EUR 10,000
+/// per calendar year, VAT-exclusive, EU-wide. Below it the seller may tax in
+/// its own member state; above it destination VAT is mandatory and the OSS
+/// Union scheme (Arts. 369a-369k) is the practical filing mechanism. The
+/// threshold is documented here because the repo quotes destination rates
+/// unconditionally: that is correct for ApexMail at its scale, and
+/// [`destination_rate_required`] makes the assumption testable so a
+/// below-threshold deployment cannot silently inherit destination pricing.
+pub const OSS_B2C_THRESHOLD_EUR: i64 = 10_000;
+
+/// Whether a sale of electronically supplied services to a non-taxable
+/// person must use destination VAT, given the seller's EU-wide cross-border
+/// B2C TBE turnover (current or preceding year, VAT-exclusive) and whether
+/// the seller has opted into the OSS scheme (Art 59c(3) opt-in makes
+/// destination mandatory for every B2C TBE supply).
+pub fn destination_rate_required(
+    annual_cross_border_b2c_tbe_eur: i64,
+    oss_registered: bool,
+) -> bool {
+    oss_registered || annual_cross_border_b2c_tbe_eur > OSS_B2C_THRESHOLD_EUR
+}
+
+/// The tax class of a supply (30 Oct 2026 legal re-review, angle 1 finding
+/// F10). Place-of-supply differs:
+///
+/// * [`ServiceClass::Electronic`] — TBE services (hosted email, API sending,
+///   automatic storage): B2C place = customer location (Art 58); B2B place =
+///   customer establishment (Art 44, reverse charge).
+/// * [`ServiceClass::General`] — e.g. one-off setup, onboarding or consulting
+///   services that are not electronically supplied: B2C place = the
+///   supplier's establishment (Art 45 → Estonia 24 %), whatever the
+///   customer's country.
+///
+/// The plan catalogue currently sells only electronic services; the explicit
+/// class exists so a manually quoted setup/consulting line can never inherit
+/// the TBE destination logic by accident.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ServiceClass {
+    Electronic,
+    General,
+}
+
+/// B2C place-of-supply country for a supply class (Art 45 vs Art 58).
+pub fn b2c_place_of_supply(
+    class: ServiceClass,
+    supplier_country: &str,
+    customer_country: &str,
+) -> String {
+    match class {
+        ServiceClass::Electronic => customer_country.trim().to_uppercase(),
+        ServiceClass::General => supplier_country.trim().to_uppercase(),
+    }
 }
 
 /// Round-half-up VAT in integer cents for a rate in percent (possibly
@@ -538,9 +620,72 @@ pub struct VatValidationEvidence {
     /// `TIMEOUT`, `GLOBAL_MAX_CONCURRENT_REQ`, ...) when the outcome is
     /// [`VatValidationOutcome::Outage`].
     pub outage_state: Option<String>,
+    /// When the authority was consulted (the row's `requested_at`). The
+    /// Art. 25 of Reg 282/2011 rule — status judged on the circumstances at
+    /// the chargeable event — is evidenced by comparing this consultation
+    /// time with the tax point, so the data model must carry it.
+    pub requested_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// The name the authority returned with the confirmation (VIES answers
+    /// include it when the member state publishes it). Art. 18(1)(a) of
+    /// Reg 282/2011 requires confirmation of the number AND the associated
+    /// name and address, so the model carries them even where a national
+    /// answer omits them (`None`).
+    pub returned_name: Option<String>,
+    /// The address the authority returned (see `returned_name`).
+    pub returned_address: Option<String>,
+    /// The authority's request id, when provided (audit trail).
+    pub authority_request_id: Option<String>,
+    /// Hash of the raw authority response (tamper-evidence for the audit
+    /// trail; the table requires it).
+    pub response_hash: Option<String>,
 }
 
 impl VatValidationEvidence {
+    /// The FULL constructor: the same mapping as [`Self::from_authority_row`]
+    /// plus the consultation report the row stores (Art. 18(1)(a) name and
+    /// address confirmation, request id, response hash, consultation time).
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_authority_row_full(
+        id: Option<Uuid>,
+        vat_number: impl Into<String>,
+        country: impl Into<String>,
+        source: &str,
+        valid: bool,
+        valid_from: Option<NaiveDate>,
+        valid_until: Option<NaiveDate>,
+        outage_state: Option<String>,
+        requested_at: Option<chrono::DateTime<chrono::Utc>>,
+        returned_name: Option<String>,
+        returned_address: Option<String>,
+        authority_request_id: Option<String>,
+        response_hash: Option<String>,
+    ) -> Option<Self> {
+        Self::from_authority_row(
+            id,
+            vat_number,
+            country,
+            source,
+            valid,
+            valid_from,
+            valid_until,
+            outage_state,
+        )
+        .map(|mut evidence| {
+            evidence.requested_at = requested_at;
+            evidence.returned_name = returned_name
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty());
+            evidence.returned_address = returned_address
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty());
+            evidence.authority_request_id = authority_request_id
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty());
+            evidence.response_hash = response_hash;
+            evidence
+        })
+    }
+
     /// Build evidence from a `vat_validation_evidence` row.
     ///
     /// Returns `None` only for an unknown/non-authoritative `source`; an
@@ -571,6 +716,11 @@ impl VatValidationEvidence {
             (false, false) => VatValidationOutcome::Invalid,
         };
         Some(Self {
+            requested_at: None,
+            returned_name: None,
+            returned_address: None,
+            authority_request_id: None,
+            response_hash: None,
             id,
             vat_number: vat_number.into(),
             country: country.into(),
@@ -1068,8 +1218,25 @@ mod tests {
         // Slovakia 23 % from 2025-01-01.
         assert_eq!(get_eu_vat_rate_on("SK", d(2024, 12, 31)), Some(20.0));
         assert_eq!(get_eu_vat_rate_on("SK", d(2025, 1, 1)), Some(23.0));
-        // A country with a single baseline row resolves for every date.
+        // The dated table carries NO pre-2020 history: a date before every
+        // row resolves to the EARLIEST row (the documented 2020 floor). This
+        // asserts the FLOOR semantic — it is not a historical claim (Germany's
+        // 1999 standard rate was 16 %, which the table does not model).
         assert_eq!(get_eu_vat_rate_on("DE", d(1999, 1, 1)), Some(19.0));
+        // Temporary windows now modelled (30 Oct 2026 triple-source review:
+        // TEDB range queries + PwC + Tax Foundation + the national acts).
+        assert_eq!(get_eu_vat_rate_on("DE", d(2020, 6, 30)), Some(19.0));
+        assert_eq!(get_eu_vat_rate_on("DE", d(2020, 7, 1)), Some(16.0));
+        assert_eq!(get_eu_vat_rate_on("DE", d(2020, 12, 31)), Some(16.0));
+        assert_eq!(get_eu_vat_rate_on("DE", d(2021, 1, 1)), Some(19.0));
+        assert_eq!(get_eu_vat_rate_on("IE", d(2020, 8, 31)), Some(23.0));
+        assert_eq!(get_eu_vat_rate_on("IE", d(2020, 9, 1)), Some(21.0));
+        assert_eq!(get_eu_vat_rate_on("IE", d(2021, 3, 1)), Some(23.0));
+        assert_eq!(get_eu_vat_rate_on("LU", d(2022, 12, 31)), Some(17.0));
+        assert_eq!(get_eu_vat_rate_on("LU", d(2023, 1, 1)), Some(16.0));
+        assert_eq!(get_eu_vat_rate_on("LU", d(2024, 1, 1)), Some(17.0));
+        // Czechia: 21 % since 2013 (Act 500/2012), NOT since 2024.
+        assert_eq!(get_eu_vat_rate_on("CZ", d(2018, 1, 1)), Some(21.0));
         assert_eq!(get_eu_vat_rate_on("US", d(2026, 1, 1)), None);
     }
 
@@ -1289,6 +1456,11 @@ mod tests {
 
         // Authority answered "not valid".
         let evidence = VatValidationEvidence {
+            requested_at: None,
+            returned_name: None,
+            returned_address: None,
+            authority_request_id: None,
+            response_hash: None,
             id: Some(Uuid::new_v4()),
             vat_number: "DE123456789".into(),
             country: "DE".into(),
@@ -1336,6 +1508,11 @@ mod tests {
         // validity, the sale fails to normal destination VAT.
         let at = d(2026, 6, 15);
         let evidence = VatValidationEvidence {
+            requested_at: None,
+            returned_name: None,
+            returned_address: None,
+            authority_request_id: None,
+            response_hash: None,
             id: Some(Uuid::new_v4()),
             vat_number: "DE123456789".into(),
             country: "DE".into(),
@@ -1447,6 +1624,11 @@ mod tests {
         until: Option<NaiveDate>,
     ) -> VatValidationEvidence {
         VatValidationEvidence {
+            requested_at: None,
+            returned_name: None,
+            returned_address: None,
+            authority_request_id: None,
+            response_hash: None,
             id: Some(Uuid::new_v4()),
             vat_number: vat_number.to_string(),
             country: country.to_string(),
@@ -1698,6 +1880,26 @@ mod tests {
     // 30 Oct re-audit #22: the VAT evidence freshness policy, proved at the
     // boundaries. `valid_until = NULL` means "no explicit invalidation" —
     // never "valid forever".
+    // 30 Oct 2026 legal re-review (angle 1): the OSS threshold and the
+    // TBE/general service-class distinction are policy inputs the code must
+    // be ABLE to express, even though the platform's current catalogue sells
+    // only electronic services at destination.
+    #[test]
+    fn oss_threshold_and_service_class_match_the_directive() {
+        // Art 59c: above EUR 10,000 destination VAT is mandatory; an OSS
+        // registration makes destination mandatory at any turnover.
+        assert!(!destination_rate_required(5_000, false));
+        assert!(destination_rate_required(10_001, false));
+        assert!(destination_rate_required(0, true));
+        // Art 45 vs Art 58: a GENERAL service to a German consumer is taxed
+        // where the supplier is established (Estonia), not at destination.
+        assert_eq!(b2c_place_of_supply(ServiceClass::General, "EE", "DE"), "EE");
+        assert_eq!(
+            b2c_place_of_supply(ServiceClass::Electronic, "EE", "DE"),
+            "DE"
+        );
+    }
+
     #[test]
     fn vat_evidence_freshness_is_a_formal_bounded_grace_period() {
         let at = d(2026, 10, 29);

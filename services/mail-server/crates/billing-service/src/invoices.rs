@@ -20,6 +20,11 @@ struct VatEvidenceRow {
     valid_from: Option<chrono::NaiveDate>,
     valid_until: Option<chrono::NaiveDate>,
     outage_state: Option<String>,
+    requested_at: Option<chrono::DateTime<chrono::Utc>>,
+    returned_name: Option<String>,
+    returned_address: Option<String>,
+    authority_request_id: Option<String>,
+    response_hash: Option<String>,
 }
 
 type HmacSha256 = Hmac<Sha256>;
@@ -125,11 +130,19 @@ where
 {
     let row: Result<Option<VatEvidenceRow>, sqlx::Error> = sqlx::query_as(
         r#"
-        SELECT id, vat_number, country, source, valid, valid_from, valid_until, outage_state
+        SELECT id, vat_number, country, source, valid, valid_from, valid_until,
+               outage_state, requested_at, returned_name, returned_address,
+               authority_request_id, response_hash
         FROM vat_validation_evidence
         WHERE (tenant_id = $1 OR customer_id = $1)
           AND UPPER(REPLACE(vat_number, ' ', '')) = UPPER(REPLACE($2, ' ', ''))
-        ORDER BY requested_at DESC
+        -- The last-known-VALID determination wins over a later outage row: an
+        -- outage answer is not a status determination (Reg 282/2011 Art 25
+        -- judges status on the circumstances at the chargeable event), so a
+        -- VIES fault must not shadow the valid answer it failed to refresh.
+        -- When no valid row exists the newest row (e.g. an outage) is used,
+        -- and it never authorises reverse charge.
+        ORDER BY valid DESC, requested_at DESC
         LIMIT 1
         "#,
     )
@@ -148,7 +161,12 @@ where
             valid_from,
             valid_until,
             outage_state,
-        })) => VatValidationEvidence::from_authority_row(
+            requested_at,
+            returned_name,
+            returned_address,
+            authority_request_id,
+            response_hash,
+        })) => VatValidationEvidence::from_authority_row_full(
             Some(id),
             vat_number,
             country,
@@ -157,6 +175,11 @@ where
             valid_from,
             valid_until,
             outage_state,
+            requested_at,
+            returned_name,
+            returned_address,
+            authority_request_id,
+            response_hash,
         ),
         Ok(None) => None,
         Err(error) => {
@@ -632,6 +655,7 @@ pub async fn create_invoice_in_tx(
     .map_err(InvoiceError::Recognition)?;
 
     Ok(Invoice {
+        vat_evidence_id: None,
         id,
         tenant_id: input.tenant_id,
         invoice_number,
@@ -943,6 +967,7 @@ pub async fn create_open_plan_invoice_in_tx(
     .map_err(InvoiceError::Recognition)?;
 
     Ok(Invoice {
+        vat_evidence_id: None,
         id,
         tenant_id: tenant_id.to_string(),
         invoice_number,
@@ -1083,6 +1108,7 @@ pub async fn create_paid_plan_invoice_in_tx(
     .map_err(InvoiceError::Recognition)?;
 
     Ok(Invoice {
+        vat_evidence_id: None,
         id,
         tenant_id: tenant_id.to_string(),
         invoice_number,
@@ -1343,6 +1369,50 @@ pub async fn generate_invoice_pdf(
         "registry_code": "16588745",
     });
 
+    // Art 226(8): per-rate taxable amount and VAT, grouped from the items.
+    let mut by_rate: std::collections::BTreeMap<String, (i64, i64)> =
+        std::collections::BTreeMap::new();
+    for item in &invoice.line_items {
+        let entry = by_rate
+            .entry(billing_common::vat_rates::format_vat_rate(item.vat_rate))
+            .or_insert((0, 0));
+        entry.0 += item.amount;
+        entry.1 += item.vat_amount;
+    }
+    let vat_summary: Vec<serde_json::Value> = by_rate
+        .into_iter()
+        .map(|(rate, (taxable, vat))| {
+            serde_json::json!({
+                "rate": rate,
+                "taxable_amount": taxable,
+                "vat_amount": vat,
+            })
+        })
+        .collect();
+    // Art 226(11a): the statutory reference appears only on an
+    // evidence-backed, EU-scope, non-Estonian, zero-VAT invoice. The buyer
+    // country comes from the same bill_to snapshot the document prints
+    // (the billing-service Invoice DTO intentionally carries no address).
+    let buyer_country = bill_to
+        .as_ref()
+        .and_then(|value| value.get("country"))
+        .and_then(|value| value.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_uppercase();
+    let reverse_charge_note: Option<&str> = if invoice.vat_total == 0
+        && invoice.vat_evidence_id.is_some()
+        && billing_common::vat_rates::is_eu_country(&buyer_country)
+        && buyer_country != "EE"
+    {
+        Some(
+            "Reverse charge: VAT to be paid by the recipient per Article 196, \
+             EU VAT Directive 2006/112/EC",
+        )
+    } else {
+        None
+    };
+
     // Build the JSON payload expected by the invoice.typ template
     let pdf_data = serde_json::json!({
         "invoice_number": escape_html(&invoice.invoice_number),
@@ -1355,6 +1425,16 @@ pub async fn generate_invoice_pdf(
         "period_end": invoice.period_end.format("%Y-%m-%d").to_string(),
         "subtotal": invoice.subtotal,
         "vat_total": invoice.vat_total,
+        // Art 226(8): the taxable amount and VAT for each rate, grouped from
+        // the line items (the per-item rows carry the same numbers).
+        "vat_summary": vat_summary,
+        // Art 64(2)/226(7): a continuously supplied monthly service is
+        // deemed effected when the period it relates to expires.
+        "supply_date": invoice.period_end.format("%Y-%m-%d").to_string(),
+        // Art 226(11a): the reference to the reverse-charge provision appears
+        // only when reverse charge was actually applied — evidence-backed
+        // (the vat_validation_evidence row), EU-scope, non-Estonian, zero VAT.
+        "reverse_charge_note": reverse_charge_note,
         // US state sales tax (plan WP C2) rides in its own totals row so the
         // customer-facing invoice adds up: subtotal + vat + US tax = total.
         // An EXEMPT sale renders the same row labelled "exempt" with the
@@ -1456,7 +1536,7 @@ pub async fn list_invoices(
             us_sales_tax_snapshot, total,
             line_items,
             issued_at, due_at, paid_at,
-            period_start, period_end,
+            period_start, period_end, vat_evidence_id,
             created_at, updated_at
         FROM invoices
         WHERE tenant_id = $1
@@ -1493,7 +1573,7 @@ pub async fn get_invoice_by_id(
             us_sales_tax_snapshot, total,
             line_items,
             issued_at, due_at, paid_at,
-            period_start, period_end,
+            period_start, period_end, vat_evidence_id,
             created_at, updated_at
         FROM invoices
         WHERE id = $1
@@ -1933,6 +2013,7 @@ async fn void_invoice_inner(
 #[derive(sqlx::FromRow)]
 struct InvoiceRow {
     id: Uuid,
+    vat_evidence_id: Option<Uuid>,
     tenant_id: String,
     invoice_number: String,
     status: String,
@@ -2022,6 +2103,7 @@ impl InvoiceRow {
         };
 
         Ok(Invoice {
+            vat_evidence_id: self.vat_evidence_id,
             id: self.id,
             tenant_id: self.tenant_id,
             invoice_number: self.invoice_number,
@@ -2323,6 +2405,7 @@ mod tests {
         // `into_invoice` below.
         let invoice_id = Uuid::new_v4();
         let row = InvoiceRow {
+            vat_evidence_id: None,
             id: invoice_id,
             tenant_id: "tenant_01HZY2Q4YQ0L8QW8Q7Q28WKSFJ".into(),
             invoice_number: "2026-000002".into(),
@@ -2484,6 +2567,11 @@ mod tests {
         // With valid, in-force evidence the same invoice reverse-charges,
         // and the writer returns the evidence id to snapshot.
         let evidence = VatValidationEvidence {
+            requested_at: None,
+            returned_name: None,
+            returned_address: None,
+            authority_request_id: None,
+            response_hash: None,
             id: Some(Uuid::new_v4()),
             vat_number: "DE123456789".into(),
             country: "DE".into(),
@@ -2525,6 +2613,7 @@ mod tests {
     #[test]
     fn invoice_row_status_mapping() {
         let row = InvoiceRow {
+            vat_evidence_id: None,
             id: Uuid::new_v4(),
             tenant_id: "tenant_01HZY2Q4YQ0L8QW8Q7Q28WKSFJ".into(),
             invoice_number: "2026-000001".into(),

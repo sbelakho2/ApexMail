@@ -1276,6 +1276,11 @@ struct LegacyInvoiceDto {
     subtotal: i64,
     vat_total: i64,
     total: i64,
+    /// The `vat_validation_evidence` row the VAT decision rested on (NULL
+    /// for consumer/non-EU sales). Internal: gates the statutory
+    /// reverse-charge reference on the rendered invoice (30 Oct re-audit
+    /// angle 2) and is not serialized into the public JSON below.
+    vat_evidence_id: Option<Uuid>,
     line_items: Vec<LegacyInvoiceLineItemDto>,
     billing_address: LegacyBillingAddressDto,
     issued_at: chrono::DateTime<Utc>,
@@ -1309,6 +1314,7 @@ struct LegacyInvoiceRow {
     subtotal: i64,
     vat_total: i64,
     total: i64,
+    vat_evidence_id: Option<Uuid>,
     line_items: String,
     /// Nullable on the table (rows written by the Mollie invoice.paid
     /// persistence predate address snapshotting), decoded as an empty
@@ -1700,6 +1706,63 @@ pub(crate) async fn start_self_serve_checkout(
         );
         CheckoutStartError::Failed
     })?;
+
+    // Place-of-supply evidence (30 Oct 2026 legal re-review, angle 1):
+    // Reg 282/2011 Art 24b(d) presumes the customer's location from two
+    // non-contradictory items (one below the EUR 100,000 turnover). Record
+    // what this checkout actually knows — the declaration and the stored
+    // billing address — so the OSS place-of-supply decision has an evidence
+    // trail, and say loudly when the presumption is NOT established (the
+    // destination rate still applies; the supplier must verify by other
+    // commercial means, Art 23(2)).
+    for (kind, country) in [
+        (
+            compliance::vat_oss::LocationEvidenceKind::Declaration,
+            declaration.country.as_str(),
+        ),
+        (
+            compliance::vat_oss::LocationEvidenceKind::BillingAddress,
+            declaration.country.as_str(),
+        ),
+    ] {
+        let _ = sqlx::query(
+            "INSERT INTO customer_location_evidence \
+                 (tenant_id, country, evidence_type, evidence_at, source_reference, evidence_weight, raw) \
+             VALUES ($1, $2, $3, NOW(), $4, $5, $6::jsonb)",
+        )
+        .bind(tenant_id)
+        .bind(country.trim().to_uppercase())
+        .bind(kind.as_db())
+        .bind(format!("checkout:{checkout_id}"))
+        .bind(if kind.is_third_party() { 20 } else { 10 })
+        .bind(serde_json::json!({ "checkout_id": checkout_id }))
+        .execute(&state.db)
+        .await;
+    }
+    let presumption = compliance::vat_oss::adjudicate_location_evidence(
+        &[
+            (
+                compliance::vat_oss::LocationEvidenceKind::Declaration,
+                declaration.country.as_str(),
+            ),
+            (
+                compliance::vat_oss::LocationEvidenceKind::BillingAddress,
+                declaration.country.as_str(),
+            ),
+        ],
+        0, // turnover input: the owner records the cross-border B2C turnover
+    );
+    if !presumption.presumed {
+        tracing::warn!(
+            tenant_id = %tenant_id,
+            checkout_id = %checkout_id,
+            declared = %declaration.country,
+            billing = %declaration.country,
+            "checkout: the Art 24b(d) location presumption is NOT established from the \
+             available evidence; the destination rate is applied and the evidence rows \
+             are recorded for review"
+        );
+    }
 
     let checkout = match provider
         .create_checkout(billing_service::payments::CheckoutRequest {
@@ -2440,18 +2503,13 @@ fn render_invoice_html(invoice: &LegacyInvoiceDto, style_nonce: &str) -> String 
     // charged VAT (e.g. malformed VAT number) produces a self-contradicting
     // tax document.
     let reverse_charge_applied = invoice.vat_total == 0
-        && invoice.billing_address.country != "EE"
-        && invoice
-            .billing_address
-            .vat_number
-            .as_deref()
-            .map(|vat| {
-                billing_common::vat_rates::is_valid_vat_number(
-                    vat,
-                    Some(&invoice.billing_address.country),
-                )
-            })
-            .unwrap_or(false);
+        // Evidence-backed, not format-checked: the invoice carries the
+        // vat_validation_evidence row its VAT decision rested on (30 Oct
+        // re-audit angle 2). A syntactically valid number that was never
+        // verified must not produce the statutory reference.
+        && invoice.vat_evidence_id.is_some()
+        && billing_common::vat_rates::is_eu_country(&invoice.billing_address.country)
+        && invoice.billing_address.country != "EE";
     let reverse_charge_note = if reverse_charge_applied {
         "\n  <div class=\"apex-meta\">\n      Reverse charge: VAT to be paid by the recipient per Article 196, EU VAT Directive 2006/112/EC\n    </div>\n".to_string()
     } else {
@@ -2799,6 +2857,7 @@ fn map_invoice_row(row: LegacyInvoiceRow) -> LegacyInvoiceDto {
         subtotal: row.subtotal,
         vat_total: row.vat_total,
         total: row.total,
+        vat_evidence_id: row.vat_evidence_id,
         line_items: parse_json_or_default(&row.line_items, Vec::new()),
         billing_address: parse_json_or_default(
             row.billing_address.as_deref().unwrap_or("{}"),
@@ -2823,8 +2882,16 @@ fn map_invoice_row(row: LegacyInvoiceRow) -> LegacyInvoiceDto {
 /// the fallback NULL-adapts exactly this set and keeps the canonical
 /// totals/due_at (audit F05: an arbitrary missing-column error must never
 /// be treated as permission to run an incompatible fallback query).
-const INVOICE_FALLBACK_OPTIONAL_COLUMNS: [&str; 4] =
-    ["xml_url", "purchase_order_number", "notes", "pdf_url"];
+const INVOICE_FALLBACK_OPTIONAL_COLUMNS: [&str; 5] = [
+    "xml_url",
+    "purchase_order_number",
+    "notes",
+    "pdf_url",
+    // Added by the 30 Oct 2026 VAT legal re-review: the fallback projects
+    // NULL when the column is absent, exactly like the other optional
+    // metadata columns.
+    "vat_evidence_id",
+];
 
 /// Extract the missing column name from a Postgres 42703 error
 /// (`column "x" does not exist`).
@@ -2870,6 +2937,7 @@ async fn query_invoice_list_rows_with_legacy_fallback(
             subtotal,
             vat_total,
             total,
+            vat_evidence_id,
             line_items::text AS line_items,
             billing_address::text AS billing_address,
             issued_at,
@@ -2915,6 +2983,7 @@ async fn query_invoice_list_rows_with_legacy_fallback(
                     subtotal,
                     vat_total,
                     total,
+                    NULL::uuid AS vat_evidence_id,
                     line_items::text AS line_items,
                     billing_address::text AS billing_address,
                     issued_at,
@@ -2961,6 +3030,7 @@ async fn query_invoice_detail_rows_with_legacy_fallback(
             subtotal,
             vat_total,
             total,
+            vat_evidence_id,
             line_items::text AS line_items,
             billing_address::text AS billing_address,
             issued_at,
@@ -2998,6 +3068,7 @@ async fn query_invoice_detail_rows_with_legacy_fallback(
                     subtotal,
                     vat_total,
                     total,
+                    NULL::uuid AS vat_evidence_id,
                     line_items::text AS line_items,
                     billing_address::text AS billing_address,
                     issued_at,
@@ -5313,6 +5384,7 @@ async fn admin_create_invoice(
             subtotal,
             vat_total,
             total,
+            vat_evidence_id: None,
             line_items,
             billing_address,
             issued_at: now,
@@ -6309,6 +6381,7 @@ mod tests {
             subtotal: 10_000,
             vat_total: 2_200,
             total: 12_200,
+            vat_evidence_id: None,
             line_items: vec![LegacyInvoiceLineItemDto {
                 description: "Migration <Support> & Setup".into(),
                 quantity: 2,
@@ -6519,28 +6592,45 @@ mod tests {
     fn billing_routes_invoice_reverse_charge_note_only_when_actually_applied() {
         initialize_billing_test_env();
 
-        // Reverse charge genuinely applied: valid FI VAT number, zero VAT.
+        // Reverse charge genuinely applied: the invoice carries the
+        // vat_validation_evidence row its VAT decision rested on (30 Oct
+        // 2026 legal re-review, angle 2: the note follows EVIDENCE).
         let mut invoice = sample_invoice();
         invoice.billing_address.country = "FI".into();
         invoice.billing_address.vat_number = Some("FI12345678".into());
+        invoice.vat_evidence_id = Some(Uuid::new_v4());
         invoice.vat_total = 0;
         invoice.total = invoice.subtotal;
         let html = render_invoice_html(&invoice, "testnonce0123456789");
         assert!(html.contains("Reverse charge: VAT to be paid by the recipient"));
 
-        // Invalid VAT number → destination VAT charged → no note, even at 0.
+        // A structurally valid VAT number with NO evidence-backed decision gets
+        // NO statutory reference: a format check is not verification.
         let mut invoice = sample_invoice();
         invoice.billing_address.country = "FI".into();
-        invoice.billing_address.vat_number = Some("1".into());
+        invoice.billing_address.vat_number = Some("FI12345678".into());
+        invoice.vat_evidence_id = None;
         invoice.vat_total = 0;
         invoice.total = invoice.subtotal;
         let html = render_invoice_html(&invoice, "testnonce0123456789");
         assert!(!html.contains("Reverse charge"));
 
-        // Estonian buyers are never reverse-charged.
+        // Estonian buyers are never reverse-charged, evidence or not.
         let mut invoice = sample_invoice();
         invoice.billing_address.country = "EE".into();
         invoice.billing_address.vat_number = Some("EE100591102".into());
+        invoice.vat_evidence_id = Some(Uuid::new_v4());
+        invoice.vat_total = 0;
+        invoice.total = invoice.subtotal;
+        let html = render_invoice_html(&invoice, "testnonce0123456789");
+        assert!(!html.contains("Reverse charge"));
+
+        // An out-of-scope (non-EU) zero-VAT sale is an export, not a reverse
+        // charge: the Art 196 reference must never print there.
+        let mut invoice = sample_invoice();
+        invoice.billing_address.country = "US".into();
+        invoice.billing_address.vat_number = None;
+        invoice.vat_evidence_id = Some(Uuid::new_v4());
         invoice.vat_total = 0;
         invoice.total = invoice.subtotal;
         let html = render_invoice_html(&invoice, "testnonce0123456789");
@@ -11134,6 +11224,7 @@ mod adversarial_tests {
             subtotal: 1000,
             vat_total: 220,
             total: 1220,
+            vat_evidence_id: None,
             line_items: vec![LegacyInvoiceLineItemDto {
                 description: "One".into(),
                 quantity: 1,

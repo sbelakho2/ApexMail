@@ -9299,7 +9299,14 @@ mod coverage_adversarial {
                                    subtotal, vat_total, total, issued_at, due_at,
                                    period_start, period_end)
              VALUES (gen_random_uuid(), 'mtcov_close', 'MTCOV-3', 'paid', 12400, 'eur',
-                     10000, 2400, 12400, NOW() - INTERVAL '1 month', NOW(), NOW(), NOW())",
+                     10000, 2400, 12400,
+                     -- TEN days before the current UTC month start: safely inside
+                     -- the previous KMD month. `NOW() - INTERVAL '1 month'`
+                     -- preserved the time of day, so after 21:00 UTC on the 30th it
+                     -- landed in the CURRENT month (the KMD window ends at 21:00
+                     -- UTC on the last Tallinn day) and the closing found nothing.
+                     date_trunc('month', NOW()) - INTERVAL '10 days',
+                     NOW(), NOW(), NOW())",
         )
         .execute(&env.pool)
         .await

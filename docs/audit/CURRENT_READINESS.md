@@ -9,7 +9,7 @@ fails the validate stage when this file drifts from the tree. Dated audit
 records live under `docs/audit/history/` and are never edited after the
 fact.
 
-Last generated: 2026-10-30T20:24:25Z
+Last generated: 2026-10-30T22:01:01Z
 
 ## Owner-gated by design
 

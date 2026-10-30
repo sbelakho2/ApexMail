@@ -66,6 +66,8 @@
 #let line-items = data.at("line_items", default: ())
 #let subtotal = data.at("subtotal", default: 0)
 #let vat-total = data.at("vat_total", default: 0)
+#let vat-summary = data.at("vat_summary", default: ())
+#let reverse-charge-note = data.at("reverse_charge_note", default: none)
 // US state sales tax (billing-service `us_tax`), when the invoice carries it.
 #let us-sales-tax = data.at("us_sales_tax", default: none)
 #let total = data.at("total", default: 0)
@@ -229,8 +231,15 @@
       inset: 6pt,
       align: (left, right),
       [Subtotal], [#money(subtotal)],
-      [VAT (#{ let seen = (); for item in line-items { let rate = str(item.vat_rate) + "%"; if not seen.contains(rate) { seen.push(rate) } }; seen.join(", ") })],
-      [#money(vat-total)],
+      ..if vat-summary.len() == 0 { (
+        [VAT (#{ let seen = (); for item in line-items { let rate = str(item.vat_rate) + "%"; if not seen.contains(rate) { seen.push(rate) } }; seen.join(", ") })],
+        [#money(vat-total)],
+      ) } else { (
+        ..vat-summary.map(group => (
+          [VAT #group.rate #meta-sep taxable #money(group.taxable_amount)],
+          [#money(group.vat_amount)],
+        )).flatten()
+      ) },
       // US state sales tax (billing-service `us_tax`, plan WP C2): rendered
       // only when the invoice carries it, so subtotal + VAT + US tax = total.
       // An exempt sale (customer certificate) says so — a silent $0.00 row
@@ -255,6 +264,13 @@
       [*Total (#currency)*], [*#money(total)*],
     )
   ]
+]
+
+#if reverse-charge-note != none [
+  #block[
+    #text(size: 9pt, fill: rgb("#333333"))[#reverse-charge-note]
+  ]
+  #v(8pt)
 ]
 
 #v(24pt)

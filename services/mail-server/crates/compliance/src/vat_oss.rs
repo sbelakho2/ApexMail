@@ -73,6 +73,119 @@ pub fn vd_submission_is_implemented() -> bool {
     true
 }
 
+// ---------------------------------------------------------------------------
+// Place-of-supply adjudication (30 Oct 2026 legal re-review, angle 1)
+// ---------------------------------------------------------------------------
+
+/// One piece of customer-location evidence as the law counts it
+/// (Reg (EU) 282/2011 Art. 24b(d) / 24f): the KIND matters because two items
+/// only rebut each other when consistent, and below the EUR 100,000
+/// threshold a single item suffices only if it comes from someone other than
+/// the supplier or the customer (e.g. a payment-network answer).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LocationEvidenceKind {
+    /// The customer's own declaration at checkout (self-declared).
+    Declaration,
+    /// The billing address on the account (self-declared).
+    BillingAddress,
+    /// Where the payment instrument is issued (payment network / PSP) —
+    /// independent of the customer.
+    PaymentMethod,
+    /// Geo-IP at the edge — independent of the customer.
+    IpAddress,
+    Other,
+}
+
+impl LocationEvidenceKind {
+    pub fn as_db(self) -> &'static str {
+        match self {
+            LocationEvidenceKind::Declaration => "declaration",
+            LocationEvidenceKind::BillingAddress => "billing_address",
+            LocationEvidenceKind::PaymentMethod => "payment_method",
+            LocationEvidenceKind::IpAddress => "ip_address",
+            LocationEvidenceKind::Other => "other",
+        }
+    }
+
+    /// Whether the item originates OUTSIDE the customer's assertions (the
+    /// "someone other than the supplier or the customer" limb of Art 24b(d)).
+    pub fn is_third_party(self) -> bool {
+        matches!(
+            self,
+            LocationEvidenceKind::PaymentMethod | LocationEvidenceKind::IpAddress
+        )
+    }
+}
+
+/// The adjudicated location presumption and whether it stands under the law.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocationPresumption {
+    /// The country the evidence points at (None when there is nothing to
+    /// adjudicate or the items contradict each other).
+    pub country: Option<String>,
+    /// How many non-contradictory items support `country`.
+    pub supporting_items: usize,
+    /// Whether the Art. 24b(d) presumption is established (see
+    /// [`adjudicate_location_evidence`]).
+    pub presumed: bool,
+}
+
+/// Adjudicate customer-location evidence per Reg 282/2011 Art. 24b(d):
+///
+/// * TWO items of evidence that are not contradictory, or
+/// * ONE item when the seller's cross-border TBE B2C turnover does not
+///   exceed EUR 100,000 in the current or preceding calendar year (the
+///   explicit Art. 24b(d) relaxation for smaller sellers).
+///
+/// `annual_tbe_b2c_eur` is that turnover figure; the repo documents it
+/// nowhere else, so it is a required input here. Contradictory items
+/// (different countries) establish NOTHING — the supplier must then verify
+/// by other commercial means (Art 23(2)); this function reports that
+/// honestly instead of picking a winner. An item independent of the
+/// customer is stronger evidence (`is_third_party`, kept for the audit
+/// trail) but the TBE two-item rule does not exempt it.
+pub fn adjudicate_location_evidence(
+    items: &[(LocationEvidenceKind, &str)],
+    annual_tbe_b2c_eur: i64,
+) -> LocationPresumption {
+    let mut by_country: std::collections::BTreeMap<String, (usize, bool)> =
+        std::collections::BTreeMap::new();
+    for (kind, country) in items {
+        let code = country.trim().to_uppercase();
+        if code.len() != 2 {
+            continue;
+        }
+        let entry = by_country.entry(code).or_insert((0, false));
+        entry.0 += 1;
+        entry.1 |= kind.is_third_party();
+    }
+    match by_country.len() {
+        0 => LocationPresumption {
+            country: None,
+            supporting_items: 0,
+            presumed: false,
+        },
+        1 => {
+            let (country, (count, has_third_party)) =
+                by_country.into_iter().next().expect("one entry");
+            let presumed = count >= 2 || annual_tbe_b2c_eur <= 100_000;
+            let _ = has_third_party;
+            LocationPresumption {
+                country: Some(country),
+                supporting_items: count,
+                presumed,
+            }
+        }
+        // Contradictory evidence: no presumption, whichever country has more
+        // items. The caller must resolve by commercial means (Art 23(2)).
+        _ => LocationPresumption {
+            country: None,
+            supporting_items: 0,
+            presumed: false,
+        },
+    }
+}
+
 /// Filing lifecycle shared by OSS returns and VD returns.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -687,6 +800,66 @@ pub async fn record_oss_payment(
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod location_evidence_tests {
+    use super::*;
+
+    #[test]
+    fn two_non_contradictory_items_establish_the_presumption() {
+        let p = adjudicate_location_evidence(
+            &[
+                (LocationEvidenceKind::Declaration, "DE"),
+                (LocationEvidenceKind::BillingAddress, "DE"),
+            ],
+            0,
+        );
+        assert_eq!(p.country.as_deref(), Some("DE"));
+        assert_eq!(p.supporting_items, 2);
+        assert!(p.presumed);
+    }
+
+    #[test]
+    fn a_single_item_is_not_enough_above_the_threshold() {
+        let p = adjudicate_location_evidence(&[(LocationEvidenceKind::Declaration, "FR")], 500_000);
+        assert_eq!(p.country.as_deref(), Some("FR"));
+        assert!(!p.presumed, "one item never suffices above EUR 100,000");
+        // Even a third-party item is one item; the TBE rule is two.
+        let p =
+            adjudicate_location_evidence(&[(LocationEvidenceKind::PaymentMethod, "NL")], 500_000);
+        assert!(!p.presumed, "a single independent item is still one item");
+    }
+
+    #[test]
+    fn a_single_item_suffices_below_the_threshold() {
+        // Art 24b(d): the one-item relaxation applies at or below EUR 100,000.
+        let p = adjudicate_location_evidence(&[(LocationEvidenceKind::Declaration, "FR")], 100_000);
+        assert!(p.presumed);
+        let p = adjudicate_location_evidence(&[], 0);
+        assert!(!p.presumed);
+    }
+
+    #[test]
+    fn contradictory_items_establish_nothing() {
+        let p = adjudicate_location_evidence(
+            &[
+                (LocationEvidenceKind::Declaration, "DE"),
+                (LocationEvidenceKind::BillingAddress, "DE"),
+                (LocationEvidenceKind::IpAddress, "AT"),
+            ],
+            500_000,
+        );
+        assert_eq!(p.country, None, "contradiction: no winner is picked");
+        assert!(!p.presumed);
+    }
+
+    #[test]
+    fn no_items_is_not_a_presumption() {
+        let p = adjudicate_location_evidence(&[], 500_000);
+        assert_eq!(p.country, None);
+        assert!(!p.presumed);
+    }
+}
 
 #[cfg(test)]
 mod tests {

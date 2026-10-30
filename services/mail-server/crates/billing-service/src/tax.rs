@@ -390,6 +390,11 @@ mod tests {
         );
 
         let evidence_for = |country: &str, vat: &str| VatValidationEvidence {
+            requested_at: None,
+            returned_name: None,
+            returned_address: None,
+            authority_request_id: None,
+            response_hash: None,
             id: Some(Uuid::new_v4()),
             vat_number: vat.to_string(),
             country: country.to_string(),

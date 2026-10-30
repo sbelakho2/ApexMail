@@ -415,6 +415,13 @@ pub struct Invoice {
     #[serde(default)]
     pub us_sales_tax_snapshot: Option<serde_json::Value>,
     pub total: i64,
+    /// The `vat_validation_evidence` row this invoice's VAT decision rests on
+    /// (NULL for consumer/non-EU/zero-rated sales). Internal: the public DTO
+    /// shape is unchanged (`serde(skip)`), but the rendered invoice and the
+    /// reverse-charge notation are gated on it (30 Oct re-audit angle 2: the
+    /// note must follow EVIDENCE, never a structural number check).
+    #[serde(skip)]
+    pub vat_evidence_id: Option<Uuid>,
     pub line_items: Vec<InvoiceLineItem>,
     pub issued_at: DateTime<Utc>,
     pub due_at: DateTime<Utc>,
