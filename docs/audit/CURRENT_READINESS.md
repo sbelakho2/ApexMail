@@ -9,7 +9,7 @@ fails the validate stage when this file drifts from the tree. Dated audit
 records live under `docs/audit/history/` and are never edited after the
 fact.
 
-Last generated: 2026-10-30T22:01:01Z
+Last generated: 2026-10-31T02:26:14Z
 
 ## Owner-gated by design
 
@@ -55,7 +55,7 @@ planned (1):
 
 ## Test-scope evidence
 
-- SQL migrations under `services/mail-server/migrations/`: 265 files, latest `293_cohort_provenance.sql`.
+- SQL migrations under `services/mail-server/migrations/`: 266 files, latest `294_fixed_establishment.sql`.
 - Tool migrations under `tools/migrations/`: 35 files.
 - Packages registered in `ci/test-expectations.toml`: 69.
 - Tools: 87 Python scripts at the top of `tools/`; the CI stages invoke 59 of them; 2 carry a meta-exemption with a reason. The validate.tool-selftest-inventory lane proves every invoked tool keeps a working self-test.

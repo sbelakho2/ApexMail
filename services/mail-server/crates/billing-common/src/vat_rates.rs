@@ -326,6 +326,33 @@ pub fn b2c_place_of_supply(
     }
 }
 
+/// The TAX POINT of a supply of services (30 Oct 2026 deep legal review,
+/// VATDEEP-A — settled from the consolidated Directive Arts 62-71/93 and
+/// Estonian KMS Section 11):
+///
+/// * Art 65 + Art 93(2)(a): the chargeable event occurs when PAYMENT is
+///   RECEIVED (before the supply is complete). So when funds have arrived,
+///   the tax point is the payment-receipt date — NOT the invoice date.
+/// * Art 64(1) + KMS Section 11(1)/(4): otherwise (successive monthly
+///   supply with no payment received) the supply is deemed effected when
+///   the period it covers expires.
+/// * Art 66's invoice-date option expressly does not apply to Art 196
+///   services, and EMTA's guidance states plainly that issuing an invoice
+///   alone creates no supply.
+///
+/// Returns `(date, basis)` where basis is `"payment_receipt"` or
+/// `"period_expiry"`. `None` means undeterminable (no payment and no
+/// period) — the caller falls back to the issue date and says so.
+pub fn tax_point(
+    paid_at: Option<chrono::DateTime<chrono::Utc>>,
+    period_end: Option<chrono::DateTime<chrono::Utc>>,
+) -> Option<(chrono::NaiveDate, &'static str)> {
+    if let Some(paid) = paid_at {
+        return Some((paid.date_naive(), "payment_receipt"));
+    }
+    period_end.map(|end| (end.date_naive(), "period_expiry"))
+}
+
 /// Round-half-up VAT in integer cents for a rate in percent (possibly
 /// fractional, e.g. Finland's 25.5 %). All VAT money math goes through here —
 /// never floating point.
@@ -761,25 +788,101 @@ impl VatValidationEvidence {
     }
 }
 
-/// Formal freshness bound for reverse-charge evidence (the policy the 30 Oct
-/// re-audit asked to be explicit, per this module's own research memo):
+/// The freshness policy for reverse-charge evidence (VATDEEP-C, 2026-10-31 —
+/// researched across the full 328-page VAT Committee guideline compilation,
+/// the Commission's VIES FAQ and the only re-check case law in the EU):
 ///
-/// * A VIES consultation is authoritative until it ages out of this bound.
-/// * `valid_until = NULL` means "no explicit invalidation" — it never means
-///   "valid forever": the age bound below still applies.
-/// * If a renewal's revalidation hits a VIES outage, the last-known-valid
-///   answer is a BOUNDED grace period of this many days; past it the supply
-///   is charged VAT (the conservative policy). The memo's rule "no current
-///   evidence ⇒ VAT charged" is therefore implemented as "evidence older than
-///   the grace bound ⇒ VAT charged".
-///
-/// 90 days is deliberately shorter than a quarterly OSS cycle and roughly
-/// matches the cadence at which member states re-check registration data.
-pub const VAT_EVIDENCE_MAX_AGE_DAYS: i64 = 90;
+/// * NO freshness rule exists anywhere in EU law or guidance. Reg 282/2011
+///   Art 18 + Reg 904/2010 Art 31 are present-tense; VIES FAQ Q6 states a
+///   confirmation is valid "only for the current day"; no guideline states a
+///   re-check interval. What the law DOES say (VAT Committee 609 guidelines
+///   043-045; 947 guideline 058, asked by Estonia): good faith = "collect
+///   evidence and perform appropriate checks within the range of his
+///   possibilities", and where evidence cannot be had "the supplier must
+///   charge the tax".
+/// * POLICY, therefore, and documented as such: re-validate at EVERY tax
+///   point (the chargeable-event date — see [`tax_point`]); a
+///   last-known-VALID answer is honoured during a documented VIES outage
+///   for at most this many days; past it the supply is charged VAT and the
+///   case escalates to review.
+/// * 60 DAYS is derived, not arbitrary: it is the outer edge of the only
+///   re-check case law in the EU (Germany: BFH XI R 38/18 "at least every
+///   two months presumed sufficient"; FG Nürnberg 2 K 482/17), and sits
+///   inside the only published vendor cadence (Chargebee: every 3 months).
+/// * The VALID state also requires a NAME match (Art 18(1)(a) association
+///   check — see [`customer_name_matches`]) and no "information to the
+///   contrary" (see the evidence loader in billing-service: a VIES-returned
+///   name that disagrees with the declared identity defeats the
+///   presumption and fails closed to VAT).
+/// * `valid_until = NULL` still means only "no explicit invalidation".
+pub const VAT_EVIDENCE_MAX_AGE_DAYS: i64 = 60;
 
 /// Whether the evidence is still within the formal freshness bound at `at`.
 fn evidence_within_freshness_bound(valid_from: NaiveDate, at: NaiveDate) -> bool {
     at.signed_duration_since(valid_from).num_days() <= VAT_EVIDENCE_MAX_AGE_DAYS
+}
+
+/// Compare a declared customer name with the name the authority returned
+/// (VATDEEP-A: Reg 282/2011 Art 18(1)(a) is an ASSOCIATION check — when the
+/// answer carries a name, the supplier must compare it; a clear mismatch is
+/// "information to the contrary" that defeats the presumption until
+/// resolved, while a BLANK return is not contrary — the member state simply
+/// does not publish names).
+///
+/// Normalisation: lowercase alphanumeric only, common legal-form suffixes
+/// stripped (OÜ, OU, GmbH, Ltd, Limited, AS, Inc, Corp, LLC, PLC, AB, Oy,
+/// Srl, SARL, S.R.L., B.V., N.V., AG, SE, GmbH & Co KG). The verdict is
+/// CONSERVATIVE: `true` on exact/containment matches after normalisation
+/// ("Acme OÜ" vs "ACME OÜ" match), `false` only when the names clearly
+/// differ ("Acme OÜ" vs "Bee GmbH") — an uncertain comparison returns
+/// `true` (we do not block on a fuzzy guess; a real mismatch is obvious).
+pub fn customer_name_matches(declared: &str, returned: &str) -> bool {
+    fn normalise(value: &str) -> String {
+        // Diacritics fold first ("OÜ" == "OU" == "Ou"); then tokens:
+        // legal-form suffixes drop only as whole words ("as" must never
+        // eat the "as" inside "Basel").
+        let folded: String = value
+            .to_lowercase()
+            .chars()
+            .map(|c| match c {
+                'ü' => 'u',
+                'ö' => 'o',
+                'ä' => 'a',
+                'é' | 'è' | 'ê' => 'e',
+                'á' => 'a',
+                'í' => 'i',
+                'ó' => 'o',
+                'ú' => 'u',
+                'ñ' => 'n',
+                'ç' => 'c',
+                'ß' => 's', // "ss" would need two chars; "s" keeps containment sane
+                _ => c,
+            })
+            .collect();
+        let tokens: Vec<String> = folded
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|token| !token.is_empty())
+            .map(str::to_lowercase)
+            .collect();
+        let legal_forms = [
+            "gmbh", "co", "kg", "sarl", "srl", "bv", "nv", "ou", "oy", "ab", "as", "inc", "corp",
+            "llc", "plc", "ag", "se", "sas", "kft", "zrt", "oyj", "ltd", "limited",
+        ];
+        tokens
+            .into_iter()
+            .filter(|token| !legal_forms.contains(&token.as_str()))
+            .collect()
+    }
+    let declared_norm = normalise(declared);
+    let returned_norm = normalise(returned);
+    if declared_norm.is_empty() || returned_norm.is_empty() {
+        // A blank side is not "information to the contrary" (the member
+        // state simply does not publish names).
+        return true;
+    }
+    declared_norm == returned_norm
+        || declared_norm.contains(&returned_norm)
+        || returned_norm.contains(&declared_norm)
 }
 
 /// Normalise a VAT number for comparison: uppercase, no internal whitespace.
@@ -1898,6 +2001,51 @@ mod tests {
             b2c_place_of_supply(ServiceClass::Electronic, "EE", "DE"),
             "DE"
         );
+    }
+
+    // VATDEEP-A: the settled tax-point rule — Art 65 payment receipt when
+    // funds arrived, else the Art 64(1) period completion; never the
+    // invoice date.
+    #[test]
+    fn tax_point_is_payment_receipt_then_period_expiry() {
+        use chrono::TimeZone;
+        let paid = chrono::Utc
+            .with_ymd_and_hms(2026, 10, 20, 12, 0, 0)
+            .single()
+            .unwrap();
+        let period_end = chrono::Utc
+            .with_ymd_and_hms(2026, 10, 31, 23, 0, 0)
+            .single()
+            .unwrap();
+        // Payment received: the receipt date IS the tax point (a SEPA
+        // payment settling on day 20 keeps the rate of day 20).
+        assert_eq!(
+            tax_point(Some(paid), Some(period_end)),
+            Some((d(2026, 10, 20), "payment_receipt"))
+        );
+        // No payment yet: the period completion stands.
+        assert_eq!(
+            tax_point(None, Some(period_end)),
+            Some((d(2026, 10, 31), "period_expiry"))
+        );
+        // Nothing determinable: None, and callers fall back to the issue
+        // date saying so.
+        assert_eq!(tax_point(None, None), None);
+    }
+
+    // VATDEEP-A: the Art 18(1)(a) association check.
+    #[test]
+    fn customer_name_comparison_is_conservative() {
+        // Legal-form and casing noise never produces a false mismatch.
+        assert!(customer_name_matches("Acme OÜ", "ACME OÜ"));
+        assert!(customer_name_matches("Acme GmbH & Co KG", "Acme"));
+        assert!(customer_name_matches("Basel Trading As", "Basel Trading"));
+        // A BLANK side is not "information to the contrary".
+        assert!(customer_name_matches("", "Acme OÜ"));
+        assert!(customer_name_matches("Acme OÜ", ""));
+        // Clear mismatches block.
+        assert!(!customer_name_matches("Acme OÜ", "Bee GmbH"));
+        assert!(!customer_name_matches("Acme OÜ", "Totally Different Ltd"));
     }
 
     #[test]

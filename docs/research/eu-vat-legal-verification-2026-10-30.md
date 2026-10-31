@@ -19,6 +19,25 @@ cross-check every proposition against two further source classes.
   table (EC TEDB + PwC + Tax Foundation, national instruments for every
   2024-2026 change), and the consumer-display verdict.
 
+The DEEP RESEARCH follow-up (2026-10-31, the five accountant-open items
+closed from the laws):
+
+- [`eu-vat-law-tax-point-and-identity.md`](eu-vat-law-tax-point-and-identity.md)
+  — the renewal tax point (Art 65 payment receipt, else the Art 64(1)
+  period completion; the invoice date is never the tax point) and the
+  VIES name/address association check (Reg 282/2011 Art 18(1)(a) +
+  Reg 904/2010 Art 31(2)): a returned-name mismatch IS "information to the
+  contrary" and defeats the presumption.
+- [`eu-vat-law-earve-and-fixed-establishment.md`](eu-vat-law-earve-and-fixed-establishment.md)
+  — the official e-arve 1.2 XSD (ITL package; snippets xmllint-validated)
+  and the fixed-establishment rules (Reg 282/2011 Art 11(1), Dong Yang,
+  Berlin Chemie, the DE-HQ/EE-FE risk scenario worked explicitly).
+- [`eu-vat-law-evidence-freshness.md`](eu-vat-law-evidence-freshness.md)
+  — the freshness question exhausted: NO rule exists anywhere in EU law or
+  guidance (VAT Committee 609/947 good-faith guidelines; VIES FAQ Q6/Q20;
+  the German two-month case law — BFH XI R 38/18); the implemented policy is
+  re-validate at every tax point with a DERIVED 60-day outage cap.
+
 ## What the verification changed in the code
 
 Rates (angle 3): every CURRENT standard rate was numerically correct; the
@@ -49,18 +68,72 @@ and warns when the presumption is not established. The library also models the
 Art. 59c EUR 10,000 threat and the TBE-vs-general service class (B2C general
 services are taxed at the supplier's establishment, not destination).
 
-## What remains for the accountant (documented, not silently assumed)
+## The fixed-establishment policy (VATDEEP-B, 2026-10-31)
 
-- The bounded 90-day VIES grace period is a POLICY choice: the law has no
-  grace period, and the code comment now says so. Bounded last-known-valid is
-  defensible; the accountant should confirm the policy and the period.
-- Invoice tax point for monthly renewals: the code quotes at the charge date;
-  the alternative reading (Art 64(2) period expiry) should be confirmed.
-- The e-arve XML export has no reverse-charge element and no supply date; the
-  element names could not be verified against the published schema offline, so
-  none were invented. Confirm the correct e-arve 1.2 field for the statutory
-  reference.
-- Fixed establishments: no customer fixed-establishment field exists (Art. 44
-  second limb); the accountant should confirm no customer has one.
-- A VIES name/address mismatch is not yet treated as "information to the
-  contrary" (Art. 18); confirm the desired policy.
+The customer-declaration policy, as implemented (migration 294):
+
+> We treat the supply as made to the customer's business establishment
+> unless the customer declares a fixed establishment. A business that
+> declares a fixed establishment is invoiced THERE: an Estonian
+> establishment makes the supply domestic and the invoice carries 24 %
+> Estonian VAT (the supplier is established where the tax is due, so the
+> reverse-charge rule does not apply); an establishment in another member
+> state is reverse-charged only against a VERIFIED VAT number of that same
+> state — an unmatched or missing number fails closed to destination VAT.
+
+Supporting rules: the declaration is one written checkout question
+(`fixed_establishment_country`), stored with a timestamp and the terms
+version on the billing record (Art. 23(2) due diligence), and kept as its
+own `customer_location_evidence` row. The supplier does not audit the
+customer's subsidiaries (Dong Yang) — red flags (billing/VAT country
+mismatch, third-country payer) raise a review question, never an automatic
+reclassification (Reg 282/2011 Art. 22; VEG 108). The one direction that
+costs the supplier real money — a foreign-HQ customer receiving the service
+at its Estonian establishment — is prevented by the EE branch.
+
+## The freshness policy (VATDEEP-C, 2026-10-31)
+
+No freshness rule exists anywhere in EU law or guidance — verified across the
+Reg 282/2011 Art 18 recitals, Reg 904/2010 Arts 17/31, the full VAT Committee
+guideline compilation and the Commission's VIES FAQ (Q6: a confirmation is
+valid "only for the current day"; no question on re-check frequency exists).
+The law's actual demand (VAT Committee 609 guidelines 043-045; 947 guideline
+058, raised by Estonia): collect evidence and perform appropriate checks;
+where evidence cannot be had, the supplier must charge the tax.
+
+Implemented policy (a state machine, not a wish):
+
+- VALID state = a VIES-confirmed number whose returned NAME matches the
+  declared identity (Art 18(1)(a) association check — a mismatch is
+  "information to the contrary" and fails closed to VAT until reconciled)
+  and no other contrary information.
+- Re-validate at EVERY tax point (the chargeable-event date).
+- During a documented VIES outage, the last-known-VALID answer is honoured
+  for at most **60 days** — derived as the outer edge of the only re-check
+  case law in the EU (Germany: BFH XI R 38/18 "at least every two months
+  presumed sufficient"), inside the only published vendor cadence
+  (Chargebee: every 3 months). Past the cap: charge VAT and escalate.
+- INVALID/OUTAGE with no valid history: charge VAT. Blank name returns are
+  not contrary (member states need not publish names).
+
+## The tax point (VATDEEP-A, 2026-10-31)
+
+Settled: the tax point is **payment receipt** when funds arrive before the
+supply completes (Art 65 + Art 93(2)(a); KMS Section 11), otherwise the
+**period completion** (Art 64(1)). The invoice date is never the tax point
+(EMTA: "No supply is created from issuing an invoice alone"). A card renewal
+settling on day 20 keeps the rate of day 20; the invoice carries the
+tax-point date per Art 226(7). A rate drift between quote and settlement
+becomes a recorded finance incident (`tax_point_rate_changed`) carrying both
+corrected splits — never a silent re-split of a charged amount.
+
+## What remains for the accountant
+
+- The 60-day outage cap is a POLICY derived from German case law (the only
+  EU law on the question); confirm it suits the Estonian practice.
+- The VIES name/address mismatch policy FAILS CLOSED to VAT pending
+  reconciliation; the documented override path (an operator clearing a
+  resolved mismatch) is the one remaining build item.
+- The e-arve 1.2 reverse-charge mark ("Pöördmaksustamine") is implemented per
+  EMTA; which banks' importers render `AdditionalInformation` blocks is
+  UNVERIFIED (the mark is also mirrored in `InvoiceContentText`).

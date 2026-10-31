@@ -25,6 +25,10 @@ struct VatEvidenceRow {
     returned_address: Option<String>,
     authority_request_id: Option<String>,
     response_hash: Option<String>,
+    /// The declared customer identity (billing_addresses.company_name), read
+    /// in the same statement so the Art 18(1)(a) association check has both
+    /// sides without a second round trip.
+    declared_name: Option<String>,
 }
 
 type HmacSha256 = Hmac<Sha256>;
@@ -132,7 +136,9 @@ where
         r#"
         SELECT id, vat_number, country, source, valid, valid_from, valid_until,
                outage_state, requested_at, returned_name, returned_address,
-               authority_request_id, response_hash
+               authority_request_id, response_hash,
+               (SELECT company_name FROM billing_addresses b
+                 WHERE b.tenant_id = $1 LIMIT 1) AS declared_name
         FROM vat_validation_evidence
         WHERE (tenant_id = $1 OR customer_id = $1)
           AND UPPER(REPLACE(vat_number, ' ', '')) = UPPER(REPLACE($2, ' ', ''))
@@ -151,7 +157,7 @@ where
     .fetch_optional(executor)
     .await;
 
-    match row {
+    let result = match row {
         Ok(Some(VatEvidenceRow {
             id,
             vat_number,
@@ -166,21 +172,46 @@ where
             returned_address,
             authority_request_id,
             response_hash,
-        })) => VatValidationEvidence::from_authority_row_full(
-            Some(id),
-            vat_number,
-            country,
-            &source,
-            valid,
-            valid_from,
-            valid_until,
-            outage_state,
-            requested_at,
-            returned_name,
-            returned_address,
-            authority_request_id,
-            response_hash,
-        ),
+            declared_name,
+        })) => {
+            // VATDEEP-A policy: a VIES-returned NAME that disagrees with
+            // the declared identity is "information to the contrary" (Reg
+            // 282/2011 Art 18(1)(a) is an association check) — the
+            // presumption is defeated and the quote fails closed to VAT
+            // until a human reconciles it with the customer. A BLANK return
+            // is not contrary (the member state does not publish names).
+            if let (Some(returned), Some(declared)) =
+                (returned_name.as_deref(), declared_name.as_deref())
+            {
+                if !billing_common::vat_rates::customer_name_matches(declared, returned) {
+                    tracing::warn!(
+                        tenant_id = %tenant_id,
+                        vat_number = %vat_number,
+                        declared = %declared,
+                        returned = %returned,
+                        "RECONCILIATION REQUIRED: the VIES-returned name disagrees with \
+                         the declared customer identity (information to the contrary); \
+                         the presumption is defeated and VAT is charged until resolved"
+                    );
+                    return None;
+                }
+            }
+            VatValidationEvidence::from_authority_row_full(
+                Some(id),
+                vat_number,
+                country,
+                &source,
+                valid,
+                valid_from,
+                valid_until,
+                outage_state,
+                requested_at,
+                returned_name,
+                returned_address,
+                authority_request_id,
+                response_hash,
+            )
+        }
         Ok(None) => None,
         Err(error) => {
             tracing::warn!(
@@ -190,7 +221,8 @@ where
             );
             None
         }
-    }
+    };
+    result
 }
 
 /// The invoice writer's VAT computation: reverse charge only against
@@ -1389,6 +1421,12 @@ pub async fn generate_invoice_pdf(
             })
         })
         .collect();
+    // VATDEEP-A tax point: Art 65 payment receipt when funds arrived, else
+    // the Art 64(1) period completion; the issue date is only a last resort.
+    let supply_date =
+        billing_common::vat_rates::tax_point(invoice.paid_at, Some(invoice.period_end))
+            .map(|(date, _basis)| date.format("%Y-%m-%d").to_string())
+            .unwrap_or_else(|| invoice.issued_at.format("%Y-%m-%d").to_string());
     // Art 226(11a): the statutory reference appears only on an
     // evidence-backed, EU-scope, non-Estonian, zero-VAT invoice. The buyer
     // country comes from the same bill_to snapshot the document prints
@@ -1428,9 +1466,11 @@ pub async fn generate_invoice_pdf(
         // Art 226(8): the taxable amount and VAT for each rate, grouped from
         // the line items (the per-item rows carry the same numbers).
         "vat_summary": vat_summary,
-        // Art 64(2)/226(7): a continuously supplied monthly service is
-        // deemed effected when the period it relates to expires.
-        "supply_date": invoice.period_end.format("%Y-%m-%d").to_string(),
+        // Art 226(7)/220(1)(5) + the VATDEEP-A tax-point rule: the supply
+        // date shown is the TAX POINT — payment receipt (Art 65) when funds
+        // have arrived, else the period completion (Art 64(1)). The invoice
+        // date is never the tax point.
+        "supply_date": supply_date,
         // Art 226(11a): the reference to the reverse-charge provision appears
         // only when reverse charge was actually applied — evidence-backed
         // (the vat_validation_evidence row), EU-scope, non-Estonian, zero VAT.

@@ -40,6 +40,9 @@ pub struct TaxSubject {
     pub business: bool,
     pub country: String,
     pub vat_number: Option<String>,
+    /// The customer's fixed-establishment declaration (VAT Directive
+    /// Art. 44 second limb; see [`resolve_supply_country`]).
+    pub fixed_establishment_country: Option<String>,
 }
 
 impl TaxSubject {
@@ -51,6 +54,7 @@ impl TaxSubject {
             business: false,
             country: country.trim().to_ascii_uppercase(),
             vat_number: None,
+            fixed_establishment_country: None,
         }
     }
 }
@@ -63,6 +67,13 @@ pub struct CheckoutTaxDeclaration {
     /// destination country, so it cannot be guessed.
     pub country: String,
     pub vat_number: Option<String>,
+    /// The written declaration that the service is received at a FIXED
+    /// ESTABLISHMENT in this country rather than the business establishment
+    /// above (VAT Directive Art. 44 second limb; Reg 282/2011 Art. 11(1)).
+    /// `None` = the business establishment stands (the Art. 22(3) safe
+    /// harbour for supplies used in an unidentifiable, non-quantifiable
+    /// manner — the normal case for a subscription).
+    pub fixed_establishment_country: Option<String>,
 }
 
 impl CheckoutTaxDeclaration {
@@ -81,10 +92,23 @@ impl CheckoutTaxDeclaration {
             .as_deref()
             .map(|value| value.trim().replace(' ', "").to_ascii_uppercase())
             .filter(|value| !value.is_empty());
+        // An FE country is honoured only when it is a well-formed ISO-2
+        // code; a malformed declaration falls back to the business
+        // establishment rather than guessing a place of supply.
+        let fixed_establishment_country = self
+            .fixed_establishment_country
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_ascii_uppercase)
+            .filter(|value| {
+                value.len() == 2 && value.bytes().all(|byte| byte.is_ascii_alphabetic())
+            });
         Ok(Self {
             business: self.business,
             country,
             vat_number,
+            fixed_establishment_country,
         })
     }
 }
@@ -188,6 +212,40 @@ pub fn requires_vies_consultation(declaration: &CheckoutTaxDeclaration) -> bool 
 ///
 /// A consultation failure is logged and the quote proceeds on persisted
 /// evidence (none ⇒ VAT added), so a VIES outage can never zero-rate a sale.
+/// Resolve the country the supply is made to (VAT Directive Art. 44 second
+/// limb). This is the single place the fixed-establishment question is
+/// decided:
+///
+/// * a CONSUMER is supplied at the declared country (Art. 58); a consumer
+///   cannot have a fixed establishment receiving business services;
+/// * a BUSINESS with no declaration is supplied at its business
+///   establishment (Art. 22(3) safe harbour: a subscription used in an
+///   unidentifiable, non-quantifiable manner attaches to the headquarters);
+/// * a BUSINESS that DECLARED a fixed establishment is supplied there.
+///
+/// The downstream evidence rules then do the right thing and fail closed:
+/// a declared FE in Estonia makes the supply Estonian (the EE branch of the
+/// rate engine charges 24 % — the supplier is established where the tax is
+/// due, so Art. 196 never applies); a declared FE in another member state
+/// routes the supply there, and reverse charge only fires when the
+/// customer's VERIFIED VAT number matches THAT state (`countries_match` —
+/// a mismatched or missing number charges destination VAT instead, which is
+/// the safe default while the FE-country VAT number is not yet collected).
+pub fn resolve_supply_country(
+    business: bool,
+    declared_country: &str,
+    fixed_establishment_country: Option<&str>,
+) -> String {
+    if business {
+        if let Some(fe) = fixed_establishment_country.map(str::trim) {
+            if fe.len() == 2 {
+                return fe.to_ascii_uppercase();
+            }
+        }
+    }
+    declared_country.trim().to_ascii_uppercase()
+}
+
 pub async fn resolve_checkout_quote(
     pool: &PgPool,
     tenant_id: &str,
@@ -222,10 +280,15 @@ pub async fn resolve_checkout_quote(
         }
         _ => None,
     };
+    let supply_country = resolve_supply_country(
+        declaration.business,
+        &declaration.country,
+        declaration.fixed_establishment_country.as_deref(),
+    );
     Ok(quote_purchase(
         net_cents,
         consumer_gross_cents,
-        &declaration.country,
+        &supply_country,
         declaration.business,
         declaration.vat_number.as_deref(),
         evidence.as_ref(),
@@ -238,14 +301,16 @@ pub async fn load_tenant_tax_subject(
     pool: &PgPool,
     tenant_id: &str,
 ) -> Result<Option<TaxSubject>, String> {
-    let row: Option<(Option<String>, Option<String>, bool)> = sqlx::query_as(
-        "SELECT country, vat_number, is_business FROM billing_addresses WHERE tenant_id = $1",
+    type TaxSubjectRow = (Option<String>, Option<String>, bool, Option<String>);
+    let row: Option<TaxSubjectRow> = sqlx::query_as(
+        "SELECT country, vat_number, is_business, fixed_establishment_country \
+         FROM billing_addresses WHERE tenant_id = $1",
     )
     .bind(tenant_id)
     .fetch_optional(pool)
     .await
     .map_err(|error| format!("billing tax subject lookup failed: {error}"))?;
-    Ok(row.and_then(|(country, vat_number, business)| {
+    Ok(row.and_then(|(country, vat_number, business, fe_country)| {
         let country = country
             .map(|value| value.trim().to_ascii_uppercase())
             .filter(|value| value.len() == 2)?;
@@ -255,6 +320,9 @@ pub async fn load_tenant_tax_subject(
             vat_number: vat_number
                 .map(|value| value.trim().replace(' ', "").to_ascii_uppercase())
                 .filter(|value| !value.is_empty()),
+            fixed_establishment_country: fe_country
+                .map(|value| value.trim().to_ascii_uppercase())
+                .filter(|value| value.len() == 2),
         })
     }))
 }
@@ -321,10 +389,15 @@ pub async fn quote_for_tenant(
         }
         _ => None,
     };
+    let supply_country = resolve_supply_country(
+        subject.business,
+        &subject.country,
+        subject.fixed_establishment_country.as_deref(),
+    );
     Ok(quote_purchase(
         net_cents,
         consumer_gross_cents,
-        &subject.country,
+        &supply_country,
         subject.business,
         subject.vat_number.as_deref(),
         evidence.as_ref(),
@@ -342,7 +415,81 @@ mod tests {
             business,
             country: country.to_string(),
             vat_number: vat.map(str::to_string),
+            fixed_establishment_country: None,
         }
+    }
+
+    // VATDEEP-B: the fixed-establishment decision matrix (Art. 44 second
+    // limb), proved at the quote level. The one direction that costs the
+    // SUPPLIER money — a DE-headquarters customer receiving the service at
+    // its Estonian establishment — must charge 24 % EE VAT, never reverse
+    // charge.
+    #[test]
+    fn fixed_establishment_decides_the_place_of_supply() {
+        let at = NaiveDate::from_ymd_opt(2026, 10, 31).expect("date");
+
+        // No declaration: the business establishment stands (Art. 22(3)).
+        assert_eq!(resolve_supply_country(true, "DE", None), "DE");
+        // A declared FE wins over the business establishment.
+        assert_eq!(resolve_supply_country(true, "DE", Some("EE")), "EE");
+        assert_eq!(resolve_supply_country(true, "DE", Some("fr")), "FR");
+        // Consumers are located at the declared country; an FE field on a
+        // consumer checkout is ignored (a consumer has none receiving
+        // business services).
+        assert_eq!(resolve_supply_country(false, "DE", Some("EE")), "DE");
+        // A malformed declaration falls back to the establishment.
+        assert_eq!(resolve_supply_country(true, "DE", Some("E")), "DE");
+        assert_eq!(resolve_supply_country(true, "DE", Some("")), "DE");
+
+        // Quote level: FE in Estonia flips a German business to an
+        // Estonian domestic supply — 24 % charged by the supplier.
+        let supply = resolve_supply_country(true, "DE", Some("EE"));
+        let quote = quote_list_price(10_000, &supply, true, Some("DE123456789"), None, at);
+        assert_eq!(quote.vat_cents, 2_400, "an EE FE is a domestic supply");
+        assert!(!quote.reverse_charge);
+
+        // FE in France with a VERIFIED French number: reverse charge at the
+        // FE country.
+        use billing_common::vat_rates::{
+            VatValidationEvidence, VatValidationOutcome, VatValidationSource,
+        };
+        let evidence = VatValidationEvidence {
+            requested_at: None,
+            returned_name: None,
+            returned_address: None,
+            authority_request_id: None,
+            response_hash: None,
+            id: Some(uuid::Uuid::new_v4()),
+            vat_number: "FR40303265045".into(),
+            country: "FR".into(),
+            source: VatValidationSource::Vies,
+            outcome: VatValidationOutcome::Valid,
+            valid_from: at - chrono::Duration::days(30),
+            valid_until: None,
+            outage_state: None,
+        };
+        let supply = resolve_supply_country(true, "DE", Some("FR"));
+        let quote = quote_list_price(
+            10_000,
+            &supply,
+            true,
+            Some("FR40303265045"),
+            Some(&evidence),
+            at,
+        );
+        assert_eq!(quote.vat_cents, 0);
+        assert!(quote.reverse_charge);
+
+        // FE in France with NO French number (only a DE number): the
+        // countries-mismatch guard fails closed to French destination VAT —
+        // never reverse charge on a number for a different establishment.
+        let supply = resolve_supply_country(true, "DE", Some("FR"));
+        let quote = quote_list_price(10_000, &supply, true, Some("DE123456789"), None, at);
+        assert_eq!(
+            quote.vat_cents, 2_000,
+            "no matching-number evidence: VAT charged"
+        );
+        assert!(!quote.reverse_charge);
     }
 
     #[test]

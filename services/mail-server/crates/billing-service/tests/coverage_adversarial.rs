@@ -3050,6 +3050,127 @@ async fn seed_reverse_charge_business(h: &Harness, tenant: &str) {
     .expect("seed VIES evidence");
 }
 
+// ---------------------------------------------------------------------------
+// VATDEEP (2026-10-31 deep legal review): the association check and the
+// tax-point rate rule.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn vat_evidence_name_mismatch_defeats_the_reverse_charge_presumption() {
+    let Some(h) = provision("vat_name_mismatch").await else {
+        return;
+    };
+    let tenant = format!("cov_name_mis_{}", &Uuid::new_v4().simple().to_string()[..8]);
+    seed_tenant(&h, &tenant, "growth").await;
+    seed_reverse_charge_business(&h, &tenant).await;
+    // The newest authoritative answer carries a DIFFERENT company name —
+    // information to the contrary (Reg 282/2011 Art 18(1)(a) association
+    // check): the presumption is defeated and the loader fails closed.
+    sqlx::query(
+        "INSERT INTO vat_validation_evidence \
+            (tenant_id, vat_number, country, source, requested_at, valid, \
+             response_hash, valid_from, returned_name) \
+         VALUES ($1, 'DE123456789', 'DE', 'VIES', NOW(), TRUE, 'name-mismatch', \
+             CURRENT_DATE, 'Bee GmbH')",
+    )
+    .bind(&tenant)
+    .execute(&h.pool)
+    .await
+    .expect("seed mismatched-name evidence");
+    let evidence =
+        billing_service::invoices::load_vat_evidence_for_tenant(&h.pool, &tenant, "DE123456789")
+            .await;
+    assert!(
+        evidence.is_none(),
+        "a VIES name that disagrees with the declared identity must defeat the presumption"
+    );
+
+    // A name that MATCHES the declared identity (case + legal-form noise
+    // included) is NOT contrary: the evidence stands again. The declared
+    // name is "Coverage {tenant} GmbH" (the seeding helper); the authority
+    // answers with the same identity in different casing and form.
+    sqlx::query("UPDATE vat_validation_evidence SET returned_name = $2 WHERE tenant_id = $1")
+        .bind(&tenant)
+        .bind(format!("COVERAGE {} OU", tenant))
+        .execute(&h.pool)
+        .await
+        .expect("fix the returned name");
+    let evidence =
+        billing_service::invoices::load_vat_evidence_for_tenant(&h.pool, &tenant, "DE123456789")
+            .await;
+    assert!(
+        evidence.is_some(),
+        "a matching authority name keeps the presumption"
+    );
+}
+
+#[tokio::test]
+async fn tax_point_rate_change_is_a_recorded_incident() {
+    let Some(h) = provision("tax_point_drift").await else {
+        return;
+    };
+    let tenant = format!("cov_tax_pt_{}", &Uuid::new_v4().simple().to_string()[..8]);
+    seed_tenant(&h, &tenant, "growth").await;
+    // An invoice quoted at the German 19 % rate, settled across the H2-2020
+    // cut (16 % 2020-07-01..2020-12-31): the tax point's rate governs the
+    // attribution, and the drift becomes a finance incident carrying both
+    // splits — never a silent re-split of a charged amount.
+    let invoice_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO invoices (id, tenant_id, invoice_number, status, amount, currency, \
+            subtotal, vat_total, total, issued_at, due_at, period_start, period_end, \
+            billing_country, vat_rate, billing_address) \
+         VALUES (gen_random_uuid(), $1, 'TAXPT-1', 'paid', 11900, 'EUR', 10000, 1900, 11900, \
+             '2020-06-28T12:00:00Z', '2020-07-28T12:00:00Z', '2020-06-01', '2020-06-30', \
+             'DE', 19.0, '{}'::jsonb) \
+         RETURNING id",
+    )
+    .bind(&tenant)
+    .fetch_one(&h.pool)
+    .await
+    .expect("seed drifted invoice");
+
+    let changed = billing_service::plan_billing::reconcile_invoice_tax_point(
+        &h.pool,
+        invoice_id,
+        chrono::NaiveDate::from_ymd_opt(2020, 8, 1).expect("date"),
+    )
+    .await
+    .expect("reconcile");
+    assert!(changed, "a 19->16 rate drift must be recorded");
+    let incidents: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*)::bigint FROM finance_incidents \
+         WHERE kind = 'tax_point_rate_changed' AND detail->>'invoiceId' = $1",
+    )
+    .bind(invoice_id.to_string())
+    .fetch_one(&h.pool)
+    .await
+    .expect("count incidents");
+    assert_eq!(incidents, 1, "exactly one drift incident per invoice");
+
+    // No drift at a date with the same rate: nothing is recorded.
+    let invoice_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO invoices (id, tenant_id, invoice_number, status, amount, currency, \
+            subtotal, vat_total, total, issued_at, due_at, period_start, period_end, \
+            billing_country, vat_rate, billing_address) \
+         VALUES (gen_random_uuid(), $1, 'TAXPT-2', 'paid', 11900, 'EUR', 10000, 1900, 11900, \
+             '2026-01-01T12:00:00Z', '2026-01-31T12:00:00Z', '2025-12-01', '2025-12-31', \
+             'DE', 19.0, '{}'::jsonb) \
+         RETURNING id",
+    )
+    .bind(&tenant)
+    .fetch_one(&h.pool)
+    .await
+    .expect("seed steady invoice");
+    let changed = billing_service::plan_billing::reconcile_invoice_tax_point(
+        &h.pool,
+        invoice_id,
+        chrono::NaiveDate::from_ymd_opt(2026, 1, 15).expect("date"),
+    )
+    .await
+    .expect("reconcile");
+    assert!(!changed, "matching rates record nothing");
+}
+
 async fn seed_billing_period(
     h: &Harness,
     tenant: &str,

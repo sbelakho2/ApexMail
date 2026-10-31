@@ -5342,6 +5342,12 @@ async fn form_billing_checkout(
         .get("vat_number")
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
+    // V30/VATDEEP-B: the fixed-establishment declaration (Art. 44 second
+    // limb) — business checkouts only.
+    let fixed_establishment_country = form
+        .get("fixed_establishment_country")
+        .map(|value| value.trim().to_ascii_uppercase())
+        .filter(|value| !value.is_empty());
     let base = state.config.base_url.trim_end_matches('/');
     let success_url = format!("{base}/settings/billing?checkout=success");
     match crate::routes::billing::start_self_serve_checkout(
@@ -5355,6 +5361,7 @@ async fn form_billing_checkout(
             business,
             country,
             vat_number,
+            fixed_establishment_country,
         },
     )
     .await

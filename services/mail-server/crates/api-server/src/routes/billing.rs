@@ -975,6 +975,12 @@ struct CheckoutSessionBody {
     country: Option<String>,
     #[serde(default)]
     vat_number: Option<String>,
+    /// V30/VATDEEP-B: the fixed-establishment declaration (Art. 44 second
+    /// limb). Business checkouts only; `ee` means the service is received
+    /// at a fixed establishment in Estonia — the supply is then Estonian
+    /// and the supplier charges 24 % VAT instead of reverse-charging.
+    #[serde(default)]
+    fixed_establishment_country: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1415,6 +1421,12 @@ pub(crate) struct CheckoutTaxDeclarationInput {
     pub business: Option<bool>,
     pub country: Option<String>,
     pub vat_number: Option<String>,
+    /// Written declaration that the service is received at a fixed
+    /// establishment in this country rather than the business establishment
+    /// (VAT Directive Art. 44 second limb). Business checkouts only; an
+    /// `ee` value flips the supply domestic — the supplier charges 24 %
+    /// Estonian VAT instead of reverse-charging.
+    pub fixed_establishment_country: Option<String>,
 }
 
 /// A started checkout: the provider session and the money the customer was
@@ -1637,11 +1649,43 @@ pub(crate) async fn start_self_serve_checkout(
     } else {
         None
     };
+    let fixed_establishment_country = if business {
+        input
+            .fixed_establishment_country
+            .map(|value| value.trim().to_ascii_uppercase())
+            .filter(|value| !value.is_empty())
+    } else {
+        None
+    };
     let declaration = billing_service::tax::CheckoutTaxDeclaration {
         business,
         country,
         vat_number,
+        fixed_establishment_country: fixed_establishment_country.clone(),
     };
+    // The FE declaration is a stored customer fact (VATDEEP-B): recorded
+    // with its timestamp and the terms version so the supply decision at a
+    // later tax point can be reconstructed. Absent = no statement; the
+    // stored declaration is left alone.
+    if let Some(fe) = fixed_establishment_country.as_deref() {
+        if let Err(error) = sqlx::query(
+            "UPDATE billing_addresses \
+             SET fixed_establishment_country = $2, fe_declared_at = NOW(),
+                 fe_declaration_terms_version = '2026-10-31-v1', updated_at = NOW() \
+             WHERE tenant_id = $1",
+        )
+        .bind(tenant_id)
+        .bind(fe)
+        .execute(&state.db)
+        .await
+        {
+            tracing::warn!(
+                tenant_id = %tenant_id,
+                error = %error,
+                "checkout: recording the fixed-establishment declaration failed"
+            );
+        }
+    }
     let validator =
         billing_service::tax::ViesValidator::new(state.db.clone(), state.http_client.clone());
     let quote = billing_service::tax::resolve_checkout_quote(
@@ -1715,7 +1759,7 @@ pub(crate) async fn start_self_serve_checkout(
     // trail, and say loudly when the presumption is NOT established (the
     // destination rate still applies; the supplier must verify by other
     // commercial means, Art 23(2)).
-    for (kind, country) in [
+    let mut evidence_items: Vec<(compliance::vat_oss::LocationEvidenceKind, &str)> = vec![
         (
             compliance::vat_oss::LocationEvidenceKind::Declaration,
             declaration.country.as_str(),
@@ -1724,7 +1768,25 @@ pub(crate) async fn start_self_serve_checkout(
             compliance::vat_oss::LocationEvidenceKind::BillingAddress,
             declaration.country.as_str(),
         ),
-    ] {
+    ];
+    // A fixed-establishment declaration is its own evidence row (the
+    // Art. 44 second limb decides the place of supply for businesses; the
+    // row is the written declaration kept for review).
+    let fe_declared = declaration
+        .fixed_establishment_country
+        .as_deref()
+        .unwrap_or("");
+    if !fe_declared.is_empty() {
+        evidence_items.push((
+            compliance::vat_oss::LocationEvidenceKind::Declaration,
+            fe_declared,
+        ));
+    }
+    for (kind, country) in evidence_items {
+        let mut raw = serde_json::json!({ "checkout_id": checkout_id });
+        if country.trim().to_uppercase() != declaration.country.to_uppercase() {
+            raw["fixed_establishment"] = serde_json::json!(true);
+        }
         let _ = sqlx::query(
             "INSERT INTO customer_location_evidence \
                  (tenant_id, country, evidence_type, evidence_at, source_reference, evidence_weight, raw) \
@@ -1735,7 +1797,7 @@ pub(crate) async fn start_self_serve_checkout(
         .bind(kind.as_db())
         .bind(format!("checkout:{checkout_id}"))
         .bind(if kind.is_third_party() { 20 } else { 10 })
-        .bind(serde_json::json!({ "checkout_id": checkout_id }))
+        .bind(raw)
         .execute(&state.db)
         .await;
     }
@@ -2673,16 +2735,26 @@ fn render_invoice_html(invoice: &LegacyInvoiceDto, style_nonce: &str) -> String 
 }
 
 fn render_invoice_xml(invoice: &LegacyInvoiceDto, outstanding_cents: Option<i64>) -> String {
-    let reference_number = invoice
-        .purchase_order_number
-        .as_ref()
-        .map(|value| {
-            format!(
-                "      <ReferenceNumber>{}</ReferenceNumber>\n",
-                escape_xml(value)
-            )
-        })
-        .unwrap_or_default();
+    // e-arve 1.2 conformance (30 Oct 2026 legal re-review, angle B): this
+    // export was rewritten against the OFFICIAL ITL schema
+    // (e-invoice_ver1.2.xsd, the package EMTA links to) — every element
+    // order and shape below was validated with xmllint against that XSD.
+    // Corrections the rewrite carries: the format is NO-NAMESPACE (the old
+    // xmlns="pangaliit.ee/e-arve/e-arve" root is rejected by the official
+    // schema), `Type` takes a lowercase `type` attribute, `DocumentName` and
+    // the Invoice attributes are mandatory, `ContactData` orders
+    // E-mailAddress BEFORE LegalAddress, `PaidAmount`/`PayableAmount` are
+    // NOT schema elements (replaced by `TotalToPay`, which carries the
+    // settlement state: what the recipient still owes), `ItemEntry` must sit
+    // inside `InvoiceItemGroup` with a decimal `ItemSum` and its own
+    // `VAT` block, and `PaymentInfo` takes `PayDueDate`. The Art 226(11a)
+    // reverse-charge mark lives in `AdditionalInformation` (the schema's
+    // designed free-text slot) and is gated on the same EVIDENCE-backed
+    // predicate as the HTML/PDF renderers — never a structural number check.
+    let currency = invoice.currency.to_uppercase();
+    let issued_at = invoice.issued_at.format("%Y-%m-%d").to_string();
+    let due_at = invoice.due_at.format("%Y-%m-%d").to_string();
+
     let buyer_vat_number = invoice
         .billing_address
         .vat_number
@@ -2706,22 +2778,64 @@ fn render_invoice_xml(invoice: &LegacyInvoiceDto, outstanding_cents: Option<i64>
         })
         .unwrap_or_default();
 
-    let currency = invoice.currency.to_uppercase();
+    let buyer_country = invoice.billing_address.country.to_uppercase();
+    let reverse_charge = invoice.vat_total == 0
+        && invoice.vat_evidence_id.is_some()
+        && billing_common::vat_rates::is_eu_country(&buyer_country)
+        && buyer_country != "EE";
+
+    // The statutory mark (EMTA: the word "pöördmaksustamine") and the
+    // supply statement (no dedicated supply-date element exists in 1.2).
+    let content_text = if reverse_charge {
+        "Pöördmaksustamine — käibemaksu tasub saaja".to_string()
+    } else {
+        "ApexMail teenused / ApexMail services".to_string()
+    };
+    let content_text = match invoice.purchase_order_number.as_deref() {
+        Some(po) if !po.trim().is_empty() => {
+            format!("{} — Customer PO: {}", content_text, po.trim())
+        }
+        _ => content_text,
+    };
+
+    // Per-rate VAT summary (Art 226(8); the schema demands one VAT block
+    // per distinct VATRate).
+    let mut by_rate: std::collections::BTreeMap<String, (i64, i64)> =
+        std::collections::BTreeMap::new();
+    for item in &invoice.line_items {
+        let entry = by_rate
+            .entry(billing_common::vat_rates::format_vat_rate(item.vat_rate))
+            .or_insert((0, 0));
+        entry.0 += item.amount;
+        entry.1 += item.vat_amount;
+    }
+    let mut vat_blocks = String::new();
+    for (rate, (taxable, vat)) in &by_rate {
+        vat_blocks.push_str(&format!(
+            "      <VAT vatId=\"TAX\">\n        <SumBeforeVAT>{}</SumBeforeVAT>\n        <VATRate>{}</VATRate>\n        <VATSum>{}</VATSum>\n        <Currency>{currency}</Currency>\n        <SumAfterVAT>{}</SumAfterVAT>\n      </VAT>\n",
+            cents_to_decimal_string(*taxable),
+            rate,
+            cents_to_decimal_string(*vat),
+            cents_to_decimal_string(taxable + vat),
+            currency = escape_xml(&currency),
+        ));
+    }
+
     let mut item_entries = String::new();
     for (index, item) in invoice.line_items.iter().enumerate() {
         item_entries.push_str(&format!(
-            "      <ItemEntry>\n        <RowNo>{}</RowNo>\n        <Description>{}</Description>\n        <ItemDetailInfo>\n          <ItemUnit>PCS</ItemUnit>\n          <ItemAmount>{}</ItemAmount>\n          <ItemPrice>{}</ItemPrice>\n        </ItemDetailInfo>\n        <ItemSum>\n          <Amount>{}</Amount>\n          <VAT>\n            <VATRate>{}</VATRate>\n            <VATSum>{}</VATSum>\n            <SumBeforeVAT>{}</SumBeforeVAT>\n            <SumAfterVAT>{}</SumAfterVAT>\n            <Currency>{}</Currency>\n          </VAT>\n          <TotalSum>{}</TotalSum>\n        </ItemSum>\n      </ItemEntry>\n",
+            "        <ItemEntry>\n          <RowNo>{}</RowNo>\n          <Description>{}</Description>\n          <ItemDetailInfo>\n            <ItemUnit>PCS</ItemUnit>\n            <ItemAmount>{}</ItemAmount>\n            <ItemPrice>{}</ItemPrice>\n          </ItemDetailInfo>\n          <ItemSum>{}</ItemSum>\n          <VAT vatId=\"TAX\">\n            <SumBeforeVAT>{}</SumBeforeVAT>\n            <VATRate>{}</VATRate>\n            <VATSum>{}</VATSum>\n            <Currency>{currency}</Currency>\n            <SumAfterVAT>{}</SumAfterVAT>\n          </VAT>\n          <ItemTotal>{}</ItemTotal>\n        </ItemEntry>\n",
             index + 1,
             escape_xml(&item.description),
             item.quantity,
             cents_to_decimal_string(item.unit_price),
             cents_to_decimal_string(item.amount),
+            cents_to_decimal_string(item.amount),
             billing_common::vat_rates::format_vat_rate(item.vat_rate),
             cents_to_decimal_string(item.vat_amount),
-            cents_to_decimal_string(item.amount),
             cents_to_decimal_string(item.amount + item.vat_amount),
             cents_to_decimal_string(item.amount + item.vat_amount),
-            escape_xml(&currency),
+            currency = escape_xml(&currency),
         ));
     }
 
@@ -2758,53 +2872,88 @@ fn render_invoice_xml(invoice: &LegacyInvoiceDto, outstanding_cents: Option<i64>
     };
     let payto_block = {
         let iban = billing_company_iban();
-        let bic = billing_company_bic();
-        let mut block = String::new();
-        if !iban.is_empty() {
-            block.push_str(&format!(
-                "      <PayToAccount>{}</PayToAccount>\n",
-                escape_xml(&iban)
-            ));
+        if iban.is_empty() {
+            String::new()
+        } else {
+            format!("      <PayToAccount>{}</PayToAccount>\n", escape_xml(&iban))
         }
-        if !bic.is_empty() {
-            block.push_str(&format!(
-                "      <PayToBIC>{}</PayToBIC>\n",
-                escape_xml(&bic)
-            ));
-        }
-        block
     };
 
-    // <PaidAmount>/<PayableAmount> must reflect the invoice's settlement
-    // state: a paid invoice carries its full total as paid (and nothing
-    // payable); an open one shows the DURABLY settled amount, confirmed
-    // payment allocations plus credit notes (audit F35), falling back to
-    // the binary 0/total view when no allocation data exists (legacy
-    // invoices). The hardcoded 0.00 told every recipient's accounting
-    // package that settled invoices were still outstanding.
+    // Settlement state (audit F35, carried over): the recipient's accounting
+    // package must never see a settled invoice as still outstanding.
+    // `TotalToPay` is what remains to be paid; `Balance` appears only on a
+    // partially settled invoice.
     let is_paid = invoice.paid_at.is_some() || invoice.status.eq_ignore_ascii_case("paid");
-    let paid_amount = if is_paid {
-        cents_to_decimal_string(invoice.total)
-    } else if let Some(outstanding) = outstanding_cents {
-        cents_to_decimal_string(invoice.total.saturating_sub(outstanding))
-    } else {
-        cents_to_decimal_string(0)
-    };
     let payable_amount = if is_paid {
-        cents_to_decimal_string(0)
+        0_i64
     } else if let Some(outstanding) = outstanding_cents {
-        cents_to_decimal_string(outstanding)
+        outstanding
     } else {
-        cents_to_decimal_string(invoice.total)
+        invoice.total
+    };
+    let balance_block = if payable_amount > 0 && payable_amount < invoice.total {
+        format!(
+            "      <Balance>{}</Balance>\n",
+            cents_to_decimal_string(payable_amount)
+        )
+    } else {
+        String::new()
+    };
+
+    // Period + supply date (Art 226(7) / Art 64(2)): a continuously supplied
+    // monthly service is deemed effected when the period expires.
+    let period_start_iso = invoice
+        .period_start
+        .map(|value| value.format("%Y-%m-%d").to_string());
+    let period_end_iso = invoice
+        .period_end
+        .map(|value| value.format("%Y-%m-%d").to_string());
+    // VATDEEP-A tax point: Art 65 payment receipt when funds have arrived,
+    // else the Art 64(1) period completion. The invoice date is never the
+    // tax point (EMTA: "No supply is created from issuing an invoice alone").
+    let (supply_date, supply_basis) =
+        billing_common::vat_rates::tax_point(invoice.paid_at, invoice.period_end)
+            .map(|(date, basis)| {
+                (
+                    date.format("%Y-%m-%d").to_string(),
+                    match basis {
+                        "payment_receipt" => {
+                            "maksu laekumise kuupäev (direktiivi 2006/112/EÜ art 65)"
+                        }
+                        _ => "perioodi lõpp (direktiivi 2006/112/EÜ art 64 lg 1)",
+                    },
+                )
+            })
+            .unwrap_or_else(|| {
+                (
+                    invoice.issued_at.format("%Y-%m-%d").to_string(),
+                    "arve kuupäev (alguskuupäev teadmata)",
+                )
+            });
+    let period_block = match (&period_start_iso, &period_end_iso) {
+        (Some(start), Some(end)) => format!(
+            "      <Period>\n        <PeriodName>Teenuse osutamise periood</PeriodName>\n        <StartDate>{start}</StartDate>\n        <EndDate>{end}</EndDate>\n      </Period>\n      <Extension extensionId=\"SupplyDate\">\n        <InformationName>Teenuse osutamise kuupäev</InformationName>\n        <InformationContent>{supply_date} — {supply_basis}</InformationContent>\n      </Extension>\n",
+            start = escape_xml(start),
+            end = escape_xml(end),
+            supply_date = escape_xml(&supply_date),
+            supply_basis = escape_xml(supply_basis),
+        ),
+        _ => String::new(),
+    };
+    let reverse_charge_block = if reverse_charge {
+        "    <AdditionalInformation extensionId=\"ReverseCharge\">\n      <InformationName>Pöördmaksustamine</InformationName>\n      <InformationContent>Reverse charge — VAT is payable by the recipient. Käibemaksu tasub saaja (KMS § 37 lg 8 p 2; direktiivi 2006/112/EÜ art 226 lg 11a).</InformationContent>\n    </AdditionalInformation>\n"
+            .to_string()
+    } else {
+        String::new()
     };
 
     format!(
-        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<E_Invoice xmlns=\"http://www.pangaliit.ee/e-arve/e-arve\">\n  <Header>\n    <Date>{issued_at}</Date>\n    <FileId>{file_id}</FileId>\n    <Version>1.2</Version>\n  </Header>\n  <Invoice>\n    <InvoiceParties>\n      <SellerParty>\n        <Name>{company_name}</Name>\n        <RegNumber>{registry_code}</RegNumber>\n        <VATRegNumber>{company_vat}</VATRegNumber>\n        <ContactData>\n          <LegalAddress>\n            <PostalAddress1>{company_street}</PostalAddress1>\n            <City>{company_city}</City>\n            <PostalCode>{company_postal_code}</PostalCode>\n            <Country>EE</Country>\n          </LegalAddress>\n          {phone_xml_block}<E-mailAddress>{billing_email}</E-mailAddress>\n        </ContactData>\n{account_info}      </SellerParty>\n      <BuyerParty>\n        <Name>{buyer_name}</Name>\n{buyer_vat_number}        <ContactData>\n          <LegalAddress>\n            <PostalAddress1>{buyer_line1}</PostalAddress1>\n{buyer_address_line_2}            <City>{buyer_city}</City>\n            <PostalCode>{buyer_postal_code}</PostalCode>\n            <Country>{buyer_country}</Country>\n          </LegalAddress>\n          <E-mailAddress>{buyer_email}</E-mailAddress>\n        </ContactData>\n      </BuyerParty>\n    </InvoiceParties>\n    <InvoiceInformation>\n      <Type Type=\"DEB\"/>\n      <InvoiceNumber>{invoice_number}</InvoiceNumber>\n      <InvoiceDate>{issued_at}</InvoiceDate>\n      <DueDate>{due_at}</DueDate>\n      <InvoiceContentCode>SERVICES</InvoiceContentCode>\n      <Currency>{currency}</Currency>\n{reference_number}    </InvoiceInformation>\n    <InvoiceSumGroup>\n      <InvoiceSum>{total}</InvoiceSum>\n      <PaidAmount>{paid_amount}</PaidAmount>\n      <PayableAmount>{payable_amount}</PayableAmount>\n      <Currency>{currency}</Currency>\n    </InvoiceSumGroup>\n    <InvoiceItem>\n{item_entries}    </InvoiceItem>\n    <PaymentInfo>\n      <Currency>{currency}</Currency>\n      <PaymentDescription>Invoice {invoice_number}</PaymentDescription>\n      <Payable>YES</Payable>\n      <DueDate>{due_at}</DueDate>\n      <PaymentId>{invoice_number}</PaymentId>\n      <PaymentTotalSum>{total}</PaymentTotalSum>\n      <PayerName>{buyer_name}</PayerName>\n{payto_block}      <PayToName>{company_name}</PayToName>\n    </PaymentInfo>\n  </Invoice>\n</E_Invoice>",
-        issued_at = format_invoice_date(invoice.issued_at),
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<E_Invoice xsi:noNamespaceSchemaLocation=\"e-invoice_ver1.2.xsd\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\">\n  <Header>\n    <Date>{issued_at}</Date>\n    <FileId>{file_id}</FileId>\n    <Version>1.2</Version>\n  </Header>\n  <Invoice invoiceId=\"{invoice_number}\" regNumber=\"\" sellerRegnumber=\"{registry_code}\">\n    <InvoiceParties>\n      <SellerParty>\n        <Name>{company_name}</Name>\n        <RegNumber>{registry_code}</RegNumber>\n        <VATRegNumber>{company_vat}</VATRegNumber>\n        <ContactData>\n          {phone_xml_block}<E-mailAddress>{billing_email}</E-mailAddress>\n          <LegalAddress>\n            <PostalAddress1>{company_street}</PostalAddress1>\n            <City>{company_city}</City>\n            <PostalCode>{company_postal_code}</PostalCode>\n            <Country>EE</Country>\n          </LegalAddress>\n        </ContactData>\n{account_info}      </SellerParty>\n      <BuyerParty>\n        <Name>{buyer_name}</Name>\n{buyer_vat_number}        <ContactData>\n          <E-mailAddress>{buyer_email}</E-mailAddress>\n          <LegalAddress>\n            <PostalAddress1>{buyer_line1}</PostalAddress1>\n{buyer_address_line_2}            <City>{buyer_city}</City>\n            <PostalCode>{buyer_postal_code}</PostalCode>\n            <Country>{buyer_country}</Country>\n          </LegalAddress>\n        </ContactData>\n      </BuyerParty>\n    </InvoiceParties>\n    <InvoiceInformation>\n      <Type type=\"DEB\"/>\n      <DocumentName>Arve</DocumentName>\n      <InvoiceNumber>{invoice_number}</InvoiceNumber>\n      <InvoiceContentCode>SERVICES</InvoiceContentCode>\n      <InvoiceContentText>{content_text}</InvoiceContentText>\n      <InvoiceDate>{issued_at}</InvoiceDate>\n      <DueDate>{due_at}</DueDate>\n{period_block}    </InvoiceInformation>\n    <InvoiceSumGroup>\n      <InvoiceSum>{total}</InvoiceSum>\n{vat_blocks}      <TotalVATSum>{vat_total}</TotalVATSum>\n      <TotalSum>{total}</TotalSum>\n      <TotalToPay>{payable}</TotalToPay>\n{balance_block}      <Currency>{currency}</Currency>\n    </InvoiceSumGroup>\n    <InvoiceItem>\n      <InvoiceItemGroup>\n{item_entries}      </InvoiceItemGroup>\n    </InvoiceItem>\n{reverse_charge_block}    <PaymentInfo>\n      <Currency>{currency}</Currency>\n      <PaymentDescription>Invoice {invoice_number}</PaymentDescription>\n      <Payable>YES</Payable>\n      <PayDueDate>{due_at}</PayDueDate>\n      <PaymentId>{invoice_number}</PaymentId>\n      <PaymentTotalSum>{payable}</PaymentTotalSum>\n      <PayerName>{buyer_name}</PayerName>\n{payto_block}      <PayToName>{company_name}</PayToName>\n    </PaymentInfo>\n  </Invoice>\n  <Footer>\n    <TotalNumberInvoices>1</TotalNumberInvoices>\n    <TotalAmount>{total}</TotalAmount>\n  </Footer>\n</E_Invoice>",
+        issued_at = issued_at,
         file_id = escape_xml(&invoice.id),
         company_name = escape_xml(BILLING_COMPANY_NAME),
-        registry_code = BILLING_COMPANY_REGISTRY_CODE,
-        company_vat = BILLING_COMPANY_VAT_NUMBER,
+        registry_code = escape_xml(BILLING_COMPANY_REGISTRY_CODE),
+        company_vat = escape_xml(BILLING_COMPANY_VAT_NUMBER),
         company_street = escape_xml(BILLING_COMPANY_STREET),
         company_city = escape_xml(BILLING_COMPANY_CITY),
         company_postal_code = BILLING_COMPANY_POSTAL_CODE,
@@ -2822,12 +2971,16 @@ fn render_invoice_xml(invoice: &LegacyInvoiceDto, outstanding_cents: Option<i64>
         buyer_country = escape_xml(&invoice.billing_address.country),
         buyer_email = escape_xml(invoice.billing_address.email.as_deref().unwrap_or("")),
         invoice_number = escape_xml(&invoice.invoice_number),
-        due_at = format_invoice_date(invoice.due_at),
-        reference_number = reference_number,
+        content_text = escape_xml(&content_text),
+        due_at = due_at,
+        period_block = period_block,
+        vat_blocks = vat_blocks,
         total = cents_to_decimal_string(invoice.total),
-        paid_amount = paid_amount,
-        payable_amount = payable_amount,
+        vat_total = cents_to_decimal_string(invoice.vat_total),
+        payable = cents_to_decimal_string(payable_amount),
+        balance_block = balance_block,
         item_entries = item_entries,
+        reverse_charge_block = reverse_charge_block,
     )
 }
 
@@ -3914,6 +4067,7 @@ async fn create_checkout_session(
             business: body.business,
             country: body.country.clone(),
             vat_number: body.vat_number.clone(),
+            fixed_establishment_country: body.fixed_establishment_country.clone(),
         },
     )
     .await
@@ -6811,8 +6965,10 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // Audit F35, the XML paid/payable split honors the durable
-    // outstanding balance for open invoices.
+    // Audit F35 (carried over): the settlement state rides in the schema's
+    // `TotalToPay` (what the recipient still owes) + `Balance` on partial
+    // settlement. `PaidAmount`/`PayableAmount` are NOT e-arve 1.2 elements
+    // and must never come back.
     // ------------------------------------------------------------------
 
     #[test]
@@ -6824,20 +6980,124 @@ mod tests {
         invoice.paid_at = None;
         invoice.total = 10_000;
 
-        // Partially settled: 4 000 confirmed -> 6 000 outstanding.
+        // Partially settled: 4 000 confirmed -> 6 000 outstanding, and the
+        // partial state is visible as a Balance.
         let xml = render_invoice_xml(&invoice, Some(6_000));
-        assert!(xml.contains("<PaidAmount>40.00</PaidAmount>"));
-        assert!(xml.contains("<PayableAmount>60.00</PayableAmount>"));
+        assert!(xml.contains("<TotalToPay>60.00</TotalToPay>"));
+        assert!(xml.contains("<Balance>60.00</Balance>"));
+        assert!(!xml.contains("<PaidAmount>"), "PaidAmount is not schema");
 
-        // No allocation data (legacy invoice): binary 0 / total.
+        // No allocation data (legacy invoice): the full total is due, no
+        // Balance block (nothing partial to report).
         let xml = render_invoice_xml(&invoice, None);
-        assert!(xml.contains("<PaidAmount>0.00</PaidAmount>"));
-        assert!(xml.contains("<PayableAmount>100.00</PayableAmount>"));
+        assert!(xml.contains("<TotalToPay>100.00</TotalToPay>"));
+        assert!(!xml.contains("<Balance>"));
 
-        // Fully settled but not yet flipped to paid: 0 outstanding.
+        // Fully settled but not yet flipped to paid: nothing due.
         let xml = render_invoice_xml(&invoice, Some(0));
-        assert!(xml.contains("<PaidAmount>100.00</PaidAmount>"));
-        assert!(xml.contains("<PayableAmount>0.00</PayableAmount>"));
+        assert!(xml.contains("<TotalToPay>0.00</TotalToPay>"));
+        assert!(!xml.contains("<Balance>"));
+    }
+
+    // ------------------------------------------------------------------
+    // e-arve 1.2 conformance (30 Oct 2026 legal re-review, angle B): the
+    // export must stay a document the official ITL schema accepts. These
+    // pins are the structural invariants the xmllint-validated rewrite
+    // promises; the full schema lives in the ITL package (Estonian
+    // e-invoice 1.2).
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn billing_routes_invoice_xml_is_e_arve_1_2_conformant() {
+        initialize_billing_test_env();
+
+        let xml = render_invoice_xml(&sample_invoice(), None);
+
+        // The format is no-namespace; the old pangaliit xmlns root is
+        // rejected by the official XSD.
+        assert!(
+            xml.contains("xsi:noNamespaceSchemaLocation=\"e-invoice_ver1.2.xsd\""),
+            "root carries the schema location"
+        );
+        assert!(
+            !xml.contains("xmlns=\"http://www.pangaliit.ee"),
+            "the no-namespace form must stay"
+        );
+        // Mandatory Invoice attributes and DocumentName.
+        assert!(xml.contains("<Invoice invoiceId="));
+        assert!(xml.contains("sellerRegnumber="));
+        assert!(xml.contains("<DocumentName>Arve</DocumentName>"));
+        // Type takes a lowercase attribute.
+        assert!(xml.contains("<Type type=\"DEB\"/>"));
+        // ContactData order: E-mailAddress BEFORE LegalAddress (both sides).
+        let seller = xml
+            .split("<SellerParty>")
+            .nth(1)
+            .expect("seller block")
+            .split("</SellerParty>")
+            .next()
+            .expect("seller end");
+        assert!(
+            seller.find("<E-mailAddress>").expect("seller email")
+                < seller.find("<LegalAddress>").expect("seller address"),
+            "ContactData orders E-mailAddress before LegalAddress"
+        );
+        // ItemEntry sits inside InvoiceItemGroup with a decimal ItemSum and
+        // its own VAT block; the nested Amount/TotalSum shape is gone.
+        assert!(xml.contains("<InvoiceItemGroup>"));
+        assert!(!xml.contains("<ItemSum>\n"));
+        // PaymentInfo uses PayDueDate, never DueDate.
+        let payment = xml
+            .split("<PaymentInfo>")
+            .nth(1)
+            .expect("payment block")
+            .split("</PaymentInfo>")
+            .next()
+            .expect("payment end");
+        assert!(payment.contains("<PayDueDate>"));
+        assert!(!payment.contains("<DueDate>"));
+        // The mandatory footer exists.
+        assert!(xml.contains("<TotalNumberInvoices>1</TotalNumberInvoices>"));
+    }
+
+    #[test]
+    fn billing_routes_invoice_xml_reverse_charge_mark_is_evidence_gated() {
+        initialize_billing_test_env();
+
+        // Evidence-backed EU reverse charge: the EMTA mark and the Art 226(11a)
+        // sentence are present exactly once, in AdditionalInformation.
+        let mut invoice = sample_invoice();
+        invoice.billing_address.country = "FI".into();
+        invoice.billing_address.vat_number = Some("FI12345678".into());
+        invoice.vat_evidence_id = Some(Uuid::new_v4());
+        invoice.vat_total = 0;
+        invoice.total = invoice.subtotal;
+        let xml = render_invoice_xml(&invoice, None);
+        assert!(xml.contains("Pöördmaksustamine"));
+        assert!(xml.contains("2006/112/EÜ art 226 lg 11a"));
+        assert!(xml.contains("<AdditionalInformation extensionId=\"ReverseCharge\">"));
+
+        // No evidence row: no statutory reference at all, whatever the
+        // number looks like.
+        let mut invoice = sample_invoice();
+        invoice.billing_address.country = "FI".into();
+        invoice.billing_address.vat_number = Some("FI12345678".into());
+        invoice.vat_evidence_id = None;
+        invoice.vat_total = 0;
+        invoice.total = invoice.subtotal;
+        let xml = render_invoice_xml(&invoice, None);
+        assert!(!xml.contains("Pöördmaksustamine"));
+        assert!(!xml.contains("<AdditionalInformation extensionId=\"ReverseCharge\">"));
+
+        // Out-of-scope non-EU sale: an export is not a reverse charge.
+        let mut invoice = sample_invoice();
+        invoice.billing_address.country = "US".into();
+        invoice.billing_address.vat_number = None;
+        invoice.vat_evidence_id = Some(Uuid::new_v4());
+        invoice.vat_total = 0;
+        invoice.total = invoice.subtotal;
+        let xml = render_invoice_xml(&invoice, None);
+        assert!(!xml.contains("Pöördmaksustamine"));
     }
 
     #[test]
@@ -8840,8 +9100,11 @@ mod adversarial_tests {
         );
         let xml = String::from_utf8_lossy(&bytes);
         assert!(xml.contains("<Name>Acme &lt;script&gt;alert(1)&lt;/script&gt; &amp; Co</Name>"));
-        assert!(xml.contains("<PaidAmount>122.00</PaidAmount>"));
-        assert!(xml.contains("<PayableAmount>0.00</PayableAmount>"));
+        // e-arve 1.2: the settlement state rides in TotalToPay (paid =
+        // nothing due); PaidAmount/PayableAmount are not schema elements.
+        assert!(xml.contains("<TotalToPay>0.00</TotalToPay>"));
+        assert!(xml.contains("<TotalSum>122.00</TotalSum>"));
+        assert!(!xml.contains("<PaidAmount>"));
 
         // A hostile invoice number cannot break out of the filename header
         // (safe_invoice_filename strips everything but [A-Za-z0-9._-]).

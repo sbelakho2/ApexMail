@@ -246,6 +246,74 @@ async fn run_under_tenant_billing_lock<T, E: From<String>>(
 
 /// Raise a finance incident, deduplicated per (kind, provider id) while it is
 /// still open: an hourly sweep must not file the same finding twice.
+/// VATDEEP-A tax-point reconciliation: the VAT RATE of a supply is the one
+/// in force at the tax point (Art 65 payment receipt, else the Art 64(1)
+/// period completion) — never the invoice date. A renewal quoted days
+/// earlier (SEPA Direct Debit settles late) can cross a rate change; when
+/// it does, the charged amount is what it is, and the honest response is a
+/// recorded finance incident carrying the corrected attribution, not a
+/// silent re-split of money that already moved. Returns Ok(false) when the
+/// rates agree (the common case).
+pub async fn reconcile_invoice_tax_point(
+    pool: &PgPool,
+    invoice_id: Uuid,
+    tax_point: chrono::NaiveDate,
+) -> Result<bool, String> {
+    let row: Option<(String, f64, i64, i64, i64)> = sqlx::query_as(
+        "SELECT billing_country, vat_rate, subtotal, vat_total, total \
+         FROM invoices WHERE id = $1",
+    )
+    .bind(invoice_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| format!("tax-point rate read failed: {error}"))?;
+    let Some((country, quote_rate, subtotal, vat_total, total)) = row else {
+        return Ok(false);
+    };
+    let Some(tax_point_rate) = billing_common::vat_rates::get_eu_vat_rate_on(&country, tax_point)
+    else {
+        // Non-EU or unknown country: no rate change can affect this supply.
+        return Ok(false);
+    };
+    if (tax_point_rate - quote_rate).abs() < f64::EPSILON {
+        return Ok(false);
+    }
+    // The corrected attribution for the operator: on a FIXED gross (the
+    // consumer extraction, the common drifted case) the split changes; on a
+    // net+VAT invoice the gross itself would have been different. All money
+    // math goes through the integer helpers (money_invariants forbids
+    // float-to-int conversions outside display code).
+    let fixed_gross_vat =
+        billing_common::vat_rates::vat_amount_inclusive_half_up(total, tax_point_rate);
+    let fixed_gross_net = total - fixed_gross_vat;
+    let gross_if_net_fixed =
+        subtotal + billing_common::vat_rates::vat_amount_half_up(subtotal, tax_point_rate);
+    raise_billing_incident(
+        pool,
+        "tax_point_rate_changed",
+        "high",
+        None,
+        None,
+        serde_json::json!({
+            "invoiceId": invoice_id,
+            "taxPoint": tax_point,
+            "quoteRate": quote_rate,
+            "taxPointRate": tax_point_rate,
+            "storedSplit": { "net": subtotal, "vat": vat_total, "total": total },
+            "fixedGrossSplitAtTaxPoint": {
+                "net": fixed_gross_net,
+                "vat": fixed_gross_vat,
+            },
+            "grossIfNetFixed": gross_if_net_fixed,
+            "action": "the VAT rate changed between quote and the tax point; the invoice \
+                       shows the tax point; review and correct the attribution (credit note) \
+                       per the two splits computed here",
+        }),
+    )
+    .await;
+    Ok(true)
+}
+
 pub(crate) async fn raise_billing_incident(
     db: &sqlx::PgPool,
     kind: &'static str,
@@ -1882,6 +1950,22 @@ async fn settle_renewal_and_advance(
             return Ok(false);
         }
     };
+    // VATDEEP-A tax-point rule: the VAT RATE of the supply is the one in
+    // force at the TAX POINT (Art 65 payment receipt / Art 64(1) period
+    // expiry), which for a settlement landing NOW is today's date. The
+    // invoice was quoted earlier (SEPA settles days later; a rate change in
+    // between shifts the correct attribution). Never silently re-split a
+    // CHARGED amount: the money moved at the quoted total, so a rate drift
+    // becomes a recorded finance incident with the corrected split for the
+    // operator (credit-note machinery), not silent munging.
+    if let Err(error) = reconcile_invoice_tax_point(pool, invoice_id, now.date_naive()).await {
+        tracing::warn!(
+            invoice_id = %invoice_id,
+            error = %error,
+            "tax-point reconciliation failed; settlement continues with the quote-date attribution"
+        );
+    }
+
     let observed = crate::payments::engine::ObservedPayment {
         provider: provider.provider_name().to_string(),
         provider_payment_id: payment.provider_payment_id.clone(),
